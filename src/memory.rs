@@ -770,6 +770,28 @@ impl std::str::FromStr for MemoryCategory {
     }
 }
 
+impl MemoryCategory {
+    /// Parse a category string from LLM extraction output.
+    /// Maps legacy/incorrect category names to the correct variant and avoids
+    /// blindly defaulting to Fact.
+    pub fn from_extracted(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "fact" | "facts" => MemoryCategory::Fact,
+            "preference" | "preferences" | "pref" => MemoryCategory::Preference,
+            "correction" | "corrections" | "fix" | "bug" => MemoryCategory::Correction,
+            "entity" | "entities" => MemoryCategory::Entity,
+            "observation" | "lesson" | "learning" => MemoryCategory::Fact,
+            other => {
+                crate::logging::info(&format!(
+                    "Unknown memory category from extraction: '{}', defaulting to fact",
+                    other
+                ));
+                MemoryCategory::Fact
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MemoryStore {
     pub entries: Vec<MemoryEntry>,

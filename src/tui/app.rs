@@ -7630,12 +7630,7 @@ impl App {
                         let mut stored_count = 0;
 
                         for mem in extracted {
-                            let category = match mem.category.as_str() {
-                                "fact" => crate::memory::MemoryCategory::Fact,
-                                "preference" => crate::memory::MemoryCategory::Preference,
-                                "correction" => crate::memory::MemoryCategory::Correction,
-                                _ => crate::memory::MemoryCategory::Fact,
-                            };
+                            let category = crate::memory::MemoryCategory::from_extracted(&mem.category);
 
                             let trust = match mem.trust.as_str() {
                                 "high" => crate::memory::TrustLevel::High,
@@ -13401,13 +13396,7 @@ impl App {
                 let mut stored_count = 0;
 
                 for memory in extracted {
-                    // Map category string to enum
-                    let category = match memory.category.as_str() {
-                        "fact" => crate::memory::MemoryCategory::Fact,
-                        "preference" => crate::memory::MemoryCategory::Preference,
-                        "correction" => crate::memory::MemoryCategory::Correction,
-                        _ => crate::memory::MemoryCategory::Fact, // Default to fact
-                    };
+                    let category = crate::memory::MemoryCategory::from_extracted(&memory.category);
 
                     // Map trust string to enum
                     let trust = match memory.trust.as_str() {

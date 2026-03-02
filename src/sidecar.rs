@@ -302,17 +302,23 @@ Be conservative - only say "yes" if the memory would actually be useful for the 
         let mut system = String::from(
             r#"You are a memory extraction assistant. Extract important NEW learnings from the conversation that should be remembered for future sessions.
 
-Focus on:
-1. Facts about the codebase (architecture, patterns, dependencies)
-2. User preferences (coding style, conventions, tool preferences)
-3. Corrections made by the user (things that were wrong)
-4. Lessons learned from debugging or mistakes
+Categories (use EXACTLY one of these):
+- fact: Technical facts about the codebase, architecture, patterns, dependencies, tools, environment
+- preference: User preferences, workflow habits, UX expectations, coding style, conventions, how they want the assistant to behave
+- correction: Mistakes that were corrected, bugs found and fixed, wrong assumptions, things the user corrected
+- entity: Named entities worth tracking - people, projects, services, repos, teams
+
+Categorization rules:
+- If it describes what the USER WANTS or HOW THEY LIKE THINGS, it is "preference", not "fact"
+- If it describes a BUG FIX or MISTAKE, it is "correction", not "fact"
+- "fact" is for objective technical information about code/systems, not user behavior
+- Do NOT extract transient debugging details, compile errors, or intermediate steps
 
 For each memory, output in this format (one per line):
 CATEGORY|CONTENT|TRUST
 
 Where:
-- CATEGORY is one of: fact, preference, correction, observation
+- CATEGORY is one of: fact, preference, correction, entity
 - CONTENT is a concise statement (1-2 sentences max)
 - TRUST is one of: high (user stated), medium (observed), low (inferred)
 
