@@ -5,6 +5,8 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 const MAX_RESULTS: usize = 100;
 const MAX_LINE_LEN: usize = 2000;
@@ -26,6 +28,7 @@ struct GrepInput {
     include: Option<String>,
 }
 
+#[derive(Clone)]
 struct GrepResult {
     file: String,
     line_num: usize,
@@ -67,88 +70,20 @@ impl Tool for GrepTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: GrepInput = serde_json::from_value(input)?;
 
-        let regex = Regex::new(&params.pattern)?;
-        let base_path = params.path.as_deref().unwrap_or(".");
-        let base = ctx.resolve_path(Path::new(base_path));
+        let regex_pattern = params.pattern.clone();
+        let base_path_str = params.path.clone().unwrap_or_else(|| ".".to_string());
+        let base = ctx.resolve_path(Path::new(&base_path_str));
+        let include = params.include.clone();
 
         if !base.exists() {
-            return Err(anyhow::anyhow!("Directory not found: {}", base_path));
+            return Err(anyhow::anyhow!("Directory not found: {}", base_path_str));
         }
 
-        let include_pattern = params
-            .include
-            .as_ref()
-            .map(|p| glob::Pattern::new(p))
-            .transpose()?;
+        let results = tokio::task::spawn_blocking(move || {
+            grep_blocking(&base, &regex_pattern, include.as_deref())
+        })
+        .await??;
 
-        let mut results: Vec<GrepResult> = Vec::new();
-
-        let walker = ignore::WalkBuilder::new(&base)
-            .hidden(false)
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true)
-            .build();
-
-        for entry in walker.filter_map(|e| e.ok()) {
-            let path = entry.path();
-
-            // Skip directories
-            if path.is_dir() {
-                continue;
-            }
-
-            // Check include pattern
-            if let Some(ref pattern) = include_pattern {
-                let filename = path
-                    .file_name()
-                    .map(|s| s.to_string_lossy())
-                    .unwrap_or_default();
-                if !pattern.matches(&filename) {
-                    continue;
-                }
-            }
-
-            // Skip binary files
-            if is_binary_extension(path) {
-                continue;
-            }
-
-            // Read and search file
-            if let Ok(content) = std::fs::read_to_string(path) {
-                for (line_num, line) in content.lines().enumerate() {
-                    if regex.is_match(line) {
-                        let relative = path
-                            .strip_prefix(&base)
-                            .unwrap_or(path)
-                            .display()
-                            .to_string();
-
-                        let truncated = if line.len() > MAX_LINE_LEN {
-                            format!("{}...", &line[..MAX_LINE_LEN])
-                        } else {
-                            line.to_string()
-                        };
-
-                        results.push(GrepResult {
-                            file: relative,
-                            line_num: line_num + 1,
-                            line: truncated,
-                        });
-
-                        if results.len() >= MAX_RESULTS {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if results.len() >= MAX_RESULTS {
-                break;
-            }
-        }
-
-        // Format output grouped by file
         let mut output = String::new();
         output.push_str(&format!(
             "Found {} matches for '{}'\n\n",
@@ -177,6 +112,120 @@ impl Tool for GrepTool {
 
         Ok(ToolOutput::new(output))
     }
+}
+
+fn grep_blocking(
+    base: &Path,
+    pattern: &str,
+    include: Option<&str>,
+) -> Result<Vec<GrepResult>> {
+    let regex = Regex::new(pattern)?;
+    let include_pattern = include.map(|p| glob::Pattern::new(p)).transpose()?;
+
+    let hit_count = Arc::new(AtomicUsize::new(0));
+    let results = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let walker = ignore::WalkBuilder::new(base)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8))
+        .build_parallel();
+
+    let base_owned = base.to_path_buf();
+
+    walker.run(|| {
+        let regex = regex.clone();
+        let include_pattern = include_pattern.clone();
+        let hit_count = hit_count.clone();
+        let results = results.clone();
+        let base = base_owned.clone();
+
+        Box::new(move |entry| {
+            if hit_count.load(Ordering::Relaxed) >= MAX_RESULTS {
+                return ignore::WalkState::Quit;
+            }
+
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => return ignore::WalkState::Continue,
+            };
+
+            let path = entry.path();
+
+            // Use entry.file_type() (cached from readdir, no extra stat)
+            let ft = match entry.file_type() {
+                Some(ft) => ft,
+                None => return ignore::WalkState::Continue,
+            };
+            if ft.is_dir() {
+                return ignore::WalkState::Continue;
+            }
+
+            if let Some(ref pattern) = include_pattern {
+                let filename = path
+                    .file_name()
+                    .map(|s| s.to_string_lossy())
+                    .unwrap_or_default();
+                if !pattern.matches(&filename) {
+                    return ignore::WalkState::Continue;
+                }
+            }
+
+            if is_binary_extension(path) {
+                return ignore::WalkState::Continue;
+            }
+
+            if let Ok(content) = std::fs::read_to_string(path) {
+                let mut local_results = Vec::new();
+                for (line_num, line) in content.lines().enumerate() {
+                    if regex.is_match(line) {
+                        let relative = path
+                            .strip_prefix(&base)
+                            .unwrap_or(path)
+                            .display()
+                            .to_string();
+
+                        let truncated = if line.len() > MAX_LINE_LEN {
+                            format!("{}...", &line[..MAX_LINE_LEN])
+                        } else {
+                            line.to_string()
+                        };
+
+                        local_results.push(GrepResult {
+                            file: relative,
+                            line_num: line_num + 1,
+                            line: truncated,
+                        });
+
+                        if hit_count.load(Ordering::Relaxed) + local_results.len() >= MAX_RESULTS {
+                            break;
+                        }
+                    }
+                }
+
+                if !local_results.is_empty() {
+                    let count = local_results.len();
+                    hit_count.fetch_add(count, Ordering::Relaxed);
+                    results.lock().unwrap().extend(local_results);
+                }
+            }
+
+            ignore::WalkState::Continue
+        })
+    });
+
+    let mut final_results = match Arc::try_unwrap(results) {
+        Ok(mutex) => mutex.into_inner().unwrap(),
+        Err(arc) => arc.lock().unwrap().clone(),
+    };
+
+    // Sort by file then line number for deterministic output
+    final_results.sort_by(|a, b| a.file.cmp(&b.file).then(a.line_num.cmp(&b.line_num)));
+    final_results.truncate(MAX_RESULTS);
+
+    Ok(final_results)
 }
 
 fn is_binary_extension(path: &Path) -> bool {
