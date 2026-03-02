@@ -3670,7 +3670,13 @@ async fn run_canary_wrapper(
         tui::disable_keyboard_enhancement();
     }
 
-    let run_result = result?;
+    let run_result = match result {
+        Ok(r) => r,
+        Err(e) => {
+            ratatui::restore();
+            return Err(e);
+        }
+    };
 
     // Determine if we're about to exec into a new binary.
     // If so, skip ratatui::restore() to avoid a visible flash -
