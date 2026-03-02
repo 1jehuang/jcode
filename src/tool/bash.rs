@@ -166,120 +166,100 @@ impl BashTool {
         let stderr_handle = child.stderr.take();
 
         let result = timeout(timeout_duration, async {
-            // Collect stdout/stderr in shared buffers
-            let stdout_buf = std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));
-            let stderr_buf = std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));
-
-            let stdout_buf2 = stdout_buf.clone();
             let stdout_task = tokio::spawn(async move {
-                if let Some(out) = stdout_handle {
-                    let mut reader = BufReader::new(out);
-                    let mut line = String::new();
-                    loop {
-                        line.clear();
-                        match reader.read_line(&mut line).await {
-                            Ok(0) => break,
-                            Ok(_) => {
-                                stdout_buf2.lock().await.push_str(&line);
-                            }
-                            Err(_) => break,
-                        }
-                    }
+                let mut buf = String::new();
+                if let Some(mut out) = stdout_handle {
+                    let _ = out.read_to_string(&mut buf).await;
                 }
+                buf
             });
 
-            let stderr_buf2 = stderr_buf.clone();
             let stderr_task = tokio::spawn(async move {
-                if let Some(err) = stderr_handle {
-                    let mut reader = BufReader::new(err);
-                    let mut line = String::new();
-                    loop {
-                        line.clear();
-                        match reader.read_line(&mut line).await {
-                            Ok(0) => break,
-                            Ok(_) => {
-                                stderr_buf2.lock().await.push_str(&line);
-                            }
-                            Err(_) => break,
-                        }
-                    }
+                let mut buf = String::new();
+                if let Some(mut err) = stderr_handle {
+                    let _ = err.read_to_string(&mut buf).await;
                 }
+                buf
             });
 
-            // Stdin forwarding with detection polling
-            let stdin_task = tokio::spawn({
-                let stdin_tx = ctx.stdin_request_tx.clone();
-                let tool_call_id = ctx.tool_call_id.clone();
-                async move {
-                    if let (Some(mut stdin_pipe), Some(stdin_tx)) = (stdin_handle, stdin_tx) {
-                        // Wait for the process to start and potentially block
-                        tokio::time::sleep(Duration::from_millis(STDIN_INITIAL_DELAY_MS)).await;
+            let stdin_task = if has_stdin_channel {
+                Some(tokio::spawn({
+                    let stdin_tx = ctx.stdin_request_tx.clone();
+                    let tool_call_id = ctx.tool_call_id.clone();
+                    async move {
+                        if let (Some(mut stdin_pipe), Some(stdin_tx)) = (stdin_handle, stdin_tx) {
+                            tokio::time::sleep(Duration::from_millis(STDIN_INITIAL_DELAY_MS)).await;
 
-                        let mut request_counter = 0u32;
-                        loop {
-                            // Check if the process (or its children) is waiting for stdin
-                            #[cfg(target_os = "linux")]
-                            let state = stdin_detect::linux::check_process_tree(child_pid);
-                            #[cfg(not(target_os = "linux"))]
-                            let state = stdin_detect::is_waiting_for_stdin(child_pid);
+                            let mut request_counter = 0u32;
+                            loop {
+                                #[cfg(target_os = "linux")]
+                                let state = stdin_detect::linux::check_process_tree(child_pid);
+                                #[cfg(not(target_os = "linux"))]
+                                let state = stdin_detect::is_waiting_for_stdin(child_pid);
 
-                            if state == StdinState::Reading {
-                                request_counter += 1;
-                                let request_id =
-                                    format!("stdin-{}-{}", tool_call_id, request_counter);
-                                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                                if state == StdinState::Reading {
+                                    request_counter += 1;
+                                    let request_id =
+                                        format!("stdin-{}-{}", tool_call_id, request_counter);
+                                    let (response_tx, response_rx) =
+                                        tokio::sync::oneshot::channel();
 
-                                let request = StdinInputRequest {
-                                    request_id,
-                                    prompt: String::new(),
-                                    is_password: false,
-                                    response_tx,
-                                };
+                                    let request = StdinInputRequest {
+                                        request_id,
+                                        prompt: String::new(),
+                                        is_password: false,
+                                        response_tx,
+                                    };
 
-                                if stdin_tx.send(request).is_err() {
-                                    break;
-                                }
-
-                                match response_rx.await {
-                                    Ok(input) => {
-                                        let line = if input.ends_with('\n') {
-                                            input
-                                        } else {
-                                            format!("{}\n", input)
-                                        };
-                                        if stdin_pipe.write_all(line.as_bytes()).await.is_err() {
-                                            break;
-                                        }
-                                        if stdin_pipe.flush().await.is_err() {
-                                            break;
-                                        }
+                                    if stdin_tx.send(request).is_err() {
+                                        break;
                                     }
-                                    Err(_) => break,
-                                }
 
-                                // Small delay before checking again
-                                tokio::time::sleep(Duration::from_millis(100)).await;
-                            } else {
-                                tokio::time::sleep(Duration::from_millis(STDIN_POLL_INTERVAL_MS))
+                                    match response_rx.await {
+                                        Ok(input) => {
+                                            let line = if input.ends_with('\n') {
+                                                input
+                                            } else {
+                                                format!("{}\n", input)
+                                            };
+                                            if stdin_pipe
+                                                .write_all(line.as_bytes())
+                                                .await
+                                                .is_err()
+                                            {
+                                                break;
+                                            }
+                                            if stdin_pipe.flush().await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                        Err(_) => break,
+                                    }
+
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                } else {
+                                    tokio::time::sleep(Duration::from_millis(
+                                        STDIN_POLL_INTERVAL_MS,
+                                    ))
                                     .await;
+                                }
                             }
                         }
                     }
-                }
-            });
+                }))
+            } else {
+                drop(stdin_handle);
+                None
+            };
 
-            // Wait for process exit
             let status = child.wait().await?;
 
-            // Cancel stdin polling
-            stdin_task.abort();
+            if let Some(task) = stdin_task {
+                task.abort();
+            }
 
-            // Wait for output readers to finish
-            let _ = stdout_task.await;
-            let _ = stderr_task.await;
-
-            let stdout = stdout_buf.lock().await.clone();
-            let stderr = stderr_buf.lock().await.clone();
+            let stdout = stdout_task.await.unwrap_or_default();
+            let stderr = stderr_task.await.unwrap_or_default();
 
             Ok::<_, anyhow::Error>((status, stdout, stderr))
         })

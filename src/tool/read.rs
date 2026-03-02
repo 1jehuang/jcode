@@ -101,13 +101,35 @@ impl Tool for ReadTool {
 
         // Read file
         let content = tokio::fs::read_to_string(&path).await?;
-        let lines: Vec<&str> = content.lines().collect();
 
         let offset = params.offset.unwrap_or(0);
         let limit = params.limit.unwrap_or(DEFAULT_LIMIT);
 
-        let total_lines = lines.len();
-        let end = (offset + limit).min(total_lines);
+        // Single-pass: count lines while building output
+        let mut output = String::with_capacity(limit.min(2000) * 80);
+        let mut total_lines = 0usize;
+        let end_exclusive = offset + limit;
+        {
+            use std::fmt::Write;
+            for (i, line) in content.lines().enumerate() {
+                total_lines = i + 1;
+                if i < offset {
+                    continue;
+                }
+                if i >= end_exclusive {
+                    // Still need to count remaining lines
+                    continue;
+                }
+                let line_num = i + 1;
+                if line.len() > MAX_LINE_LEN {
+                    let _ = write!(output, "{:>5}\t{}...\n", line_num, &line[..MAX_LINE_LEN]);
+                } else {
+                    let _ = write!(output, "{:>5}\t{}\n", line_num, line);
+                }
+            }
+        }
+
+        let end = end_exclusive.min(total_lines);
 
         // Publish file touch event for swarm coordination
         Bus::global().publish(BusEvent::FileTouch(FileTouch {
@@ -121,19 +143,6 @@ impl Tool for ReadTool {
                 total_lines
             )),
         }));
-
-        let mut output = String::with_capacity((end - offset) * 80);
-
-        for (i, line) in lines.iter().enumerate().skip(offset).take(limit) {
-            let line_num = i + 1;
-            if line.len() > MAX_LINE_LEN {
-                use std::fmt::Write;
-                let _ = write!(output, "{:>5}\t{}...\n", line_num, &line[..MAX_LINE_LEN]);
-            } else {
-                use std::fmt::Write;
-                let _ = write!(output, "{:>5}\t{}\n", line_num, line);
-            }
-        }
 
         // Add metadata
         if end < total_lines {
