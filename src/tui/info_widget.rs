@@ -2112,7 +2112,7 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
 
         if !info.by_category.is_empty() {
             let mut categories: Vec<(&String, &usize)> = info.by_category.iter().collect();
-            categories.sort_by(|a, b| b.1.cmp(a.1));
+            categories.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
             let cat_text = categories
                 .into_iter()
                 .take(4)
@@ -4163,7 +4163,7 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
     // Category breakdown - readable names
     if !info.by_category.is_empty() {
         let mut cats: Vec<(&String, &usize)> = info.by_category.iter().collect();
-        cats.sort_by(|a, b| b.1.cmp(a.1));
+        cats.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
         let cat_str = cats
             .iter()
             .take(4)
