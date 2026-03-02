@@ -14221,7 +14221,7 @@ impl App {
         self.follow_chat_bottom();
     }
 
-    /// Scroll to Nth most-recent user prompt (1 = most recent prior prompt).
+    /// Scroll to Nth most-recent user prompt (1 = most recent, 2 = second most recent, etc.).
     fn scroll_to_recent_prompt_rank(&mut self, rank: usize) {
         let rank = rank.max(1);
         let positions = self.message_line_positions(100);
@@ -14234,24 +14234,7 @@ impl App {
             return;
         }
 
-        // If we're at bottom/following, rank 1 is the newest user prompt.
-        // If we're already scrolled, rank 1 means the nearest prompt at/above current view.
-        let current = if self.auto_scroll_paused {
-            self.scroll_offset
-        } else {
-            0
-        };
-
-        let start_idx = if current == 0 {
-            0
-        } else {
-            user_positions
-                .iter()
-                .position(|&pos| pos >= current)
-                .unwrap_or(user_positions.len().saturating_sub(1))
-        };
-
-        let target_idx = (start_idx + rank - 1).min(user_positions.len().saturating_sub(1));
+        let target_idx = (rank - 1).min(user_positions.len().saturating_sub(1));
         self.scroll_offset = user_positions[target_idx];
         self.auto_scroll_paused = true;
     }
