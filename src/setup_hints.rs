@@ -8,6 +8,7 @@
 //! State is persisted in `~/.jcode/setup_hints.json`.
 
 use crate::storage;
+#[allow(unused_imports)]
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{self, IsTerminal, Write};
@@ -812,56 +813,9 @@ pub fn maybe_show_setup_hints() -> Option<String> {
 
 /// Create a desktop shortcut/launcher for jcode.
 ///
-/// - Linux: creates a .desktop file in ~/.local/share/applications/
 /// - Windows: creates a .lnk shortcut on the Desktop
+/// - macOS: creates a jcode.app bundle in ~/Applications/
 fn create_desktop_shortcut(state: &mut SetupHintsState) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        let apps_dir = dirs::home_dir()
-            .context("Could not find home directory")?
-            .join(".local")
-            .join("share")
-            .join("applications");
-        std::fs::create_dir_all(&apps_dir)?;
-
-        let exe = std::env::current_exe()?;
-        let exe_path = exe.to_string_lossy();
-
-        let terminal = if is_alacritty_installed() {
-            format!("alacritty -e {}", exe_path)
-        } else {
-            exe_path.to_string()
-        };
-
-        let desktop_content = format!(
-            "[Desktop Entry]\n\
-             Type=Application\n\
-             Name=jcode\n\
-             Comment=AI coding agent\n\
-             Exec={}\n\
-             Terminal={}\n\
-             Categories=Development;Utility;\n\
-             Keywords=code;ai;agent;terminal;\n",
-            terminal,
-            if is_alacritty_installed() { "false" } else { "true" },
-        );
-
-        let desktop_path = apps_dir.join("jcode.desktop");
-        std::fs::write(&desktop_path, &desktop_content)?;
-
-        let _ = std::process::Command::new("chmod")
-            .args(["+x", &desktop_path.to_string_lossy()])
-            .output();
-
-        state.desktop_shortcut_created = true;
-        let _ = state.save();
-
-        crate::logging::info(&format!(
-            "Created desktop launcher: {}",
-            desktop_path.display()
-        ));
-    }
-
     #[cfg(windows)]
     {
         let exe = std::env::current_exe()?;
@@ -912,7 +866,76 @@ Write-Output "OK"
 
     #[cfg(target_os = "macos")]
     {
-        let _ = state;
+        let home = dirs::home_dir().context("Could not find home directory")?;
+        let apps_dir = home.join("Applications");
+        std::fs::create_dir_all(&apps_dir)?;
+
+        let app_dir = apps_dir.join("jcode.app");
+        let contents_dir = app_dir.join("Contents");
+        let macos_dir = contents_dir.join("MacOS");
+        std::fs::create_dir_all(&macos_dir)?;
+
+        let exe = std::env::current_exe()?;
+        let exe_path = exe.to_string_lossy();
+
+        let terminal = detect_macos_terminal();
+        let launch_script = match terminal {
+            MacTerminalKind::Ghostty => format!(
+                "#!/bin/bash\nopen -a Ghostty --args -e \"{}\"\n",
+                exe_path
+            ),
+            MacTerminalKind::Alacritty => format!(
+                "#!/bin/bash\nalacritty -e \"{}\"\n",
+                exe_path
+            ),
+            _ => format!(
+                "#!/bin/bash\nopen -a Terminal \"{}\"\n",
+                exe_path
+            ),
+        };
+
+        let launcher_path = macos_dir.join("jcode");
+        std::fs::write(&launcher_path, &launch_script)?;
+
+        let _ = std::process::Command::new("chmod")
+            .args(["+x", &launcher_path.to_string_lossy()])
+            .output();
+
+        let info_plist = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>jcode</string>
+    <key>CFBundleDisplayName</key>
+    <string>jcode</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.jcode.app</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleExecutable</key>
+    <string>jcode</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+</dict>
+</plist>
+"#;
+
+        std::fs::write(contents_dir.join("Info.plist"), info_plist)?;
+
+        state.desktop_shortcut_created = true;
+        let _ = state.save();
+
+        crate::logging::info(&format!(
+            "Created macOS app bundle: {}",
+            app_dir.display()
+        ));
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        state.desktop_shortcut_created = true;
+        let _ = state.save();
     }
 
     Ok(())
