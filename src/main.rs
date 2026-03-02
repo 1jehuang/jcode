@@ -764,9 +764,8 @@ async fn run_main(mut args: Args) -> Result<()> {
             setup_hints::run_setup_hotkey()?;
         }
         Some(Command::Browser { action }) => {
-            let rt = tokio::runtime::Runtime::new()?;
             match action.as_str() {
-                "setup" => rt.block_on(browser::run_setup_command())?,
+                "setup" => browser::run_setup_command().await?,
                 "status" => {
                     if browser::is_setup_complete() {
                         println!("Browser bridge: installed and ready");

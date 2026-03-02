@@ -488,3 +488,56 @@ pub async fn run_setup_command() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_browser_command() {
+        assert!(is_browser_command("browser ping"));
+        assert!(is_browser_command("browser navigate '{\"url\": \"https://example.com\"}'"));
+        assert!(is_browser_command("browser"));
+        assert!(is_browser_command("  browser ping"));
+        assert!(is_browser_command("browser\tping"));
+
+        assert!(!is_browser_command("echo browser"));
+        assert!(!is_browser_command("browsers"));
+        assert!(!is_browser_command("my-browser ping"));
+        assert!(!is_browser_command(""));
+        assert!(!is_browser_command("browserify install"));
+    }
+
+    #[test]
+    fn test_rewrite_command_with_full_path() {
+        let cmd = "browser ping";
+        let result = rewrite_command_with_full_path(cmd);
+        // If binary exists, it rewrites; if not, returns unchanged
+        if browser_binary_path().exists() {
+            assert!(result.contains("ping"));
+            assert!(result.contains(".jcode/browser"));
+        } else {
+            assert_eq!(result, cmd);
+        }
+    }
+
+    #[test]
+    fn test_paths() {
+        let bdir = browser_dir();
+        assert!(bdir.to_string_lossy().contains(".jcode"));
+        assert!(bdir.to_string_lossy().ends_with("browser"));
+
+        let bin = browser_binary_path();
+        assert!(bin.to_string_lossy().contains("browser"));
+
+        let xpi = xpi_path();
+        assert!(xpi.to_string_lossy().ends_with(".xpi"));
+    }
+
+    #[test]
+    fn test_platform_asset_name() {
+        let name = get_platform_asset_name();
+        assert!(name.starts_with("browser-"));
+        assert!(!name.is_empty());
+    }
+}
