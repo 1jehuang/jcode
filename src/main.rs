@@ -2943,7 +2943,7 @@ fn spawn_resume_in_new_terminal(
     #[cfg(target_os = "macos")]
     {
         candidates.extend(
-            ["kitty", "wezterm", "alacritty", "iterm2", "terminal"]
+            ["alacritty", "kitty", "wezterm", "iterm2", "terminal"]
                 .iter()
                 .map(|s| s.to_string()),
         );
@@ -2953,9 +2953,9 @@ fn spawn_resume_in_new_terminal(
     {
         candidates.extend(
             [
+                "alacritty",
                 "kitty",
                 "wezterm",
-                "alacritty",
                 "gnome-terminal",
                 "konsole",
                 "xterm",
@@ -3105,7 +3105,32 @@ fn spawn_resume_in_new_terminal(
 ) -> Result<bool> {
     use std::process::{Command, Stdio};
 
-    // Try WezTerm first (prefer wezterm-gui to avoid console window), then Windows Terminal
+    // Try Alacritty first (fastest terminal), then WezTerm, then Windows Terminal
+    let alacritty_available = Command::new("where")
+        .arg("alacritty")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if alacritty_available {
+        let status = Command::new("alacritty")
+            .args(["-e"])
+            .arg(exe)
+            .arg("--resume")
+            .arg(session_id)
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if status.is_ok() {
+            return Ok(true);
+        }
+    }
+
+    // Fallback: WezTerm (prefer wezterm-gui to avoid console window)
     let wezterm_gui = find_wezterm_gui_binary();
 
     if let Some(ref wezterm_bin) = wezterm_gui {

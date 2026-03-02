@@ -1,13 +1,14 @@
 //! Platform setup hints shown on startup.
 //!
-//! - Windows: suggest Alt+; hotkey setup and WezTerm install.
+//! - Windows: suggest Alt+; hotkey setup and Alacritty install.
 //! - macOS: detect suboptimal terminal and offer guided Ghostty setup via jcode.
+//! - Linux: create a .desktop launcher file.
 //!
 //! Each nudge can be dismissed permanently with "Don't ask again".
 //! State is persisted in `~/.jcode/setup_hints.json`.
 
 use crate::storage;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
@@ -17,8 +18,12 @@ pub struct SetupHintsState {
     pub launch_count: u64,
     pub hotkey_configured: bool,
     pub hotkey_dismissed: bool,
-    pub wezterm_configured: bool,
-    pub wezterm_dismissed: bool,
+    #[serde(alias = "wezterm_configured")]
+    pub alacritty_configured: bool,
+    #[serde(alias = "wezterm_dismissed")]
+    pub alacritty_dismissed: bool,
+    #[serde(default)]
+    pub desktop_shortcut_created: bool,
     pub mac_ghostty_guided: bool,
     pub mac_ghostty_dismissed: bool,
 }
@@ -150,11 +155,11 @@ fn detect_terminal() -> &'static str {
     "non-windows"
 }
 
-/// Check if WezTerm is installed (Windows).
+/// Check if Alacritty is installed.
 #[cfg(windows)]
-fn is_wezterm_installed() -> bool {
+fn is_alacritty_installed() -> bool {
     std::process::Command::new("where")
-        .arg("wezterm")
+        .arg("alacritty")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -163,8 +168,14 @@ fn is_wezterm_installed() -> bool {
 }
 
 #[cfg(not(windows))]
-fn is_wezterm_installed() -> bool {
-    false
+fn is_alacritty_installed() -> bool {
+    std::process::Command::new("which")
+        .arg("alacritty")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Check if winget is available (Windows).
@@ -184,64 +195,26 @@ fn is_winget_available() -> bool {
     false
 }
 
-/// Find the full path to WezTerm GUI binary on Windows.
-///
-/// Uses `wezterm-gui.exe` instead of `wezterm.exe` because the latter is a
-/// console application that creates a visible cmd window when launched via
-/// `Start-Process` or `CreateProcess`.  `wezterm-gui.exe` is a native GUI
-/// binary that opens cleanly without a console flash.
+/// Find the full path to Alacritty binary.
 #[cfg(windows)]
-fn find_wezterm_path() -> Option<String> {
-    let gui_candidates = [
-        r"C:\Program Files\WezTerm\wezterm-gui.exe",
-        r"C:\Program Files (x86)\WezTerm\wezterm-gui.exe",
+fn find_alacritty_path() -> Option<String> {
+    let candidates = [
+        r"C:\Program Files\Alacritty\alacritty.exe",
+        r"C:\Program Files (x86)\Alacritty\alacritty.exe",
     ];
-    for c in &gui_candidates {
+    for c in &candidates {
         if std::path::Path::new(c).exists() {
             return Some(c.to_string());
         }
     }
-    let console_candidates = [
-        r"C:\Program Files\WezTerm\wezterm.exe",
-        r"C:\Program Files (x86)\WezTerm\wezterm.exe",
-    ];
-    for c in &console_candidates {
-        let p = std::path::Path::new(c);
-        if p.exists() {
-            let gui = p.with_file_name("wezterm-gui.exe");
-            if gui.exists() {
-                return Some(gui.to_string_lossy().into_owned());
-            }
-            return Some(c.to_string());
-        }
-    }
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        let p = format!(r"{}\Microsoft\WinGet\Links\wezterm.exe", local);
+        let p = format!(r"{}\Microsoft\WinGet\Links\alacritty.exe", local);
         if std::path::Path::new(&p).exists() {
-            let gui = std::path::Path::new(&p).with_file_name("wezterm-gui.exe");
-            if gui.exists() {
-                return Some(gui.to_string_lossy().into_owned());
-            }
             return Some(p);
         }
     }
     let output = std::process::Command::new("where")
-        .arg("wezterm-gui")
-        .output()
-        .ok();
-    if let Some(ref o) = output {
-        if o.status.success() {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            if let Some(line) = stdout.lines().next() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_string());
-                }
-            }
-        }
-    }
-    let output = std::process::Command::new("where")
-        .arg("wezterm")
+        .arg("alacritty")
         .output()
         .ok()?;
     if output.status.success() {
@@ -249,11 +222,6 @@ fn find_wezterm_path() -> Option<String> {
         if let Some(line) = stdout.lines().next() {
             let trimmed = line.trim();
             if !trimmed.is_empty() {
-                let p = std::path::Path::new(trimmed);
-                let gui = p.with_file_name("wezterm-gui.exe");
-                if gui.exists() {
-                    return Some(gui.to_string_lossy().into_owned());
-                }
                 return Some(trimmed.to_string());
             }
         }
@@ -262,7 +230,20 @@ fn find_wezterm_path() -> Option<String> {
 }
 
 #[cfg(not(windows))]
-fn find_wezterm_path() -> Option<String> {
+fn find_alacritty_path() -> Option<String> {
+    let output = std::process::Command::new("which")
+        .arg("alacritty")
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(line) = stdout.lines().next() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
     None
 }
 
@@ -275,13 +256,13 @@ fn find_wezterm_path() -> Option<String> {
 /// The script is placed in ~/.jcode/hotkey/ and a startup shortcut is created
 /// so it runs automatically on login.
 #[cfg(windows)]
-fn create_hotkey_shortcut(use_wezterm: bool) -> Result<()> {
+fn create_hotkey_shortcut(use_alacritty: bool) -> Result<()> {
     let exe = std::env::current_exe()?;
     let exe_path = exe.to_string_lossy();
 
-    let (launch_exe, launch_args) = if use_wezterm {
-        let wezterm_path = find_wezterm_path().unwrap_or_else(|| "wezterm-gui".to_string());
-        (wezterm_path, format!("start -- \"{}\"", exe_path))
+    let (launch_exe, launch_args) = if use_alacritty {
+        let alacritty_path = find_alacritty_path().unwrap_or_else(|| "alacritty".to_string());
+        (alacritty_path, format!("-e \"{}\"", exe_path))
     } else {
         (
             "wt.exe".to_string(),
@@ -425,14 +406,14 @@ Write-Output "OK"
 }
 
 #[cfg(not(windows))]
-fn create_hotkey_shortcut(_use_wezterm: bool) -> Result<()> {
+fn create_hotkey_shortcut(_use_alacritty: bool) -> Result<()> {
     anyhow::bail!("Hotkey setup is only supported on Windows")
 }
 
-/// Install WezTerm via winget.
+/// Install Alacritty via winget.
 #[cfg(windows)]
-fn install_wezterm() -> Result<()> {
-    eprintln!("  Installing WezTerm via winget...");
+fn install_alacritty() -> Result<()> {
+    eprintln!("  Installing Alacritty via winget...");
     eprintln!("  (Windows may ask for permission to install)\n");
 
     let status = std::process::Command::new("winget")
@@ -440,7 +421,7 @@ fn install_wezterm() -> Result<()> {
             "install",
             "-e",
             "--id",
-            "wez.wezterm",
+            "Alacritty.Alacritty",
             "--accept-source-agreements",
         ])
         .status()?;
@@ -453,8 +434,8 @@ fn install_wezterm() -> Result<()> {
 }
 
 #[cfg(not(windows))]
-fn install_wezterm() -> Result<()> {
-    anyhow::bail!("WezTerm install is only supported on Windows via winget")
+fn install_alacritty() -> Result<()> {
+    anyhow::bail!("Alacritty install via winget is only supported on Windows")
 }
 
 /// Read a single-character choice from the user.
@@ -467,10 +448,10 @@ fn read_choice() -> String {
 /// Show the hotkey setup nudge. Returns true if something was set up.
 fn nudge_hotkey(state: &mut SetupHintsState) -> bool {
     let terminal = detect_terminal();
-    let using_wezterm = terminal == "wezterm" || is_wezterm_installed();
+    let using_alacritty = terminal == "alacritty" || is_alacritty_installed();
 
-    let terminal_name = if using_wezterm {
-        "WezTerm"
+    let terminal_name = if using_alacritty {
+        "Alacritty"
     } else {
         "Windows Terminal"
     };
@@ -494,7 +475,7 @@ fn nudge_hotkey(state: &mut SetupHintsState) -> bool {
     match choice.as_str() {
         "y" | "yes" => {
             eprint!("\n");
-            match create_hotkey_shortcut(using_wezterm) {
+            match create_hotkey_shortcut(using_alacritty) {
                 Ok(()) => {
                     state.hotkey_configured = true;
                     let _ = state.save();
@@ -522,24 +503,24 @@ fn nudge_hotkey(state: &mut SetupHintsState) -> bool {
     }
 }
 
-/// Show the WezTerm install nudge. Returns true if WezTerm was installed.
-fn nudge_wezterm(state: &mut SetupHintsState) -> bool {
+/// Show the Alacritty install nudge. Returns true if Alacritty was installed.
+fn nudge_alacritty(state: &mut SetupHintsState) -> bool {
     let terminal = detect_terminal();
 
     let current_terminal = match terminal {
         "windows-terminal" => "Windows Terminal",
-        "alacritty" => "Alacritty",
+        "wezterm" => "WezTerm",
         _ => "your current terminal",
     };
 
     eprintln!("\x1b[36m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
-    eprintln!("\x1b[36m│\x1b[0m \x1b[1m💡 WezTerm gives jcode superpowers\x1b[0m                         \x1b[36m│\x1b[0m");
+    eprintln!("\x1b[36m│\x1b[0m \x1b[1m💡 Alacritty: the fastest terminal for jcode\x1b[0m               \x1b[36m│\x1b[0m");
     eprintln!("\x1b[36m│\x1b[0m                                                             \x1b[36m│\x1b[0m");
     eprintln!(
-        "\x1b[36m│\x1b[0m    {} can't render inline images.          \x1b[36m│\x1b[0m",
-        format!("{:<30}", current_terminal)
+        "\x1b[36m│\x1b[0m    {:<55} \x1b[36m│\x1b[0m",
+        format!("You're using {}.", current_terminal)
     );
-    eprintln!("\x1b[36m│\x1b[0m    WezTerm supports graphics, diagrams, and more.           \x1b[36m│\x1b[0m");
+    eprintln!("\x1b[36m│\x1b[0m    Alacritty is GPU-accelerated with the lowest latency.    \x1b[36m│\x1b[0m");
     eprintln!("\x1b[36m│\x1b[0m                                                             \x1b[36m│\x1b[0m");
     eprintln!("\x1b[36m│\x1b[0m    \x1b[32m[y]\x1b[0m Install   \x1b[90m[n]\x1b[0m Not now   \x1b[90m[d]\x1b[0m Don't ask again       \x1b[36m│\x1b[0m");
     eprintln!("\x1b[36m└─────────────────────────────────────────────────────────────┘\x1b[0m");
@@ -552,25 +533,25 @@ fn nudge_wezterm(state: &mut SetupHintsState) -> bool {
         "y" | "yes" => {
             eprint!("\n");
             if !is_winget_available() {
-                eprintln!("  \x1b[33m⚠\x1b[0m  winget not found. Install WezTerm manually:");
-                eprintln!("     https://wezfurlong.org/wezterm/install/windows.html");
+                eprintln!("  \x1b[33m⚠\x1b[0m  winget not found. Install Alacritty manually:");
+                eprintln!("     https://alacritty.org/");
                 eprintln!();
                 eprintln!("     Or install winget first: https://aka.ms/getwinget");
                 eprintln!();
                 return false;
             }
 
-            match install_wezterm() {
+            match install_alacritty() {
                 Ok(()) => {
-                    state.wezterm_configured = true;
+                    state.alacritty_configured = true;
                     let _ = state.save();
-                    eprintln!("  \x1b[32m✓\x1b[0m WezTerm installed!");
+                    eprintln!("  \x1b[32m✓\x1b[0m Alacritty installed!");
 
                     if state.hotkey_configured {
-                        eprintln!("  Updating hotkey to use WezTerm...");
+                        eprintln!("  Updating hotkey to use Alacritty...");
                         match create_hotkey_shortcut(true) {
                             Ok(()) => {
-                                eprintln!("  \x1b[32m✓\x1b[0m Hotkey updated: \x1b[1mAlt+;\x1b[0m → WezTerm + jcode");
+                                eprintln!("  \x1b[32m✓\x1b[0m Hotkey updated: \x1b[1mAlt+;\x1b[0m → Alacritty + jcode");
                             }
                             Err(e) => {
                                 eprintln!("  \x1b[33m⚠\x1b[0m  Could not update hotkey: {}", e);
@@ -581,9 +562,9 @@ fn nudge_wezterm(state: &mut SetupHintsState) -> bool {
                     true
                 }
                 Err(e) => {
-                    eprintln!("  \x1b[31m✗\x1b[0m Failed to install WezTerm: {}", e);
+                    eprintln!("  \x1b[31m✗\x1b[0m Failed to install Alacritty: {}", e);
                     eprintln!(
-                        "    Install manually: https://wezfurlong.org/wezterm/install/windows.html"
+                        "    Install manually: https://alacritty.org/"
                     );
                     eprintln!();
                     false
@@ -591,7 +572,7 @@ fn nudge_wezterm(state: &mut SetupHintsState) -> bool {
             }
         }
         "d" | "dont" => {
-            state.wezterm_dismissed = true;
+            state.alacritty_dismissed = true;
             let _ = state.save();
             false
         }
@@ -600,13 +581,13 @@ fn nudge_wezterm(state: &mut SetupHintsState) -> bool {
 }
 
 /// Prompt the user to try out their new hotkey.
-fn prompt_try_it_out(installed_wezterm: bool) {
+fn prompt_try_it_out(installed_alacritty: bool) {
     eprintln!("\x1b[32m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
     eprintln!("\x1b[32m│\x1b[0m \x1b[1m✨ All set! Try it out:\x1b[0m                                     \x1b[32m│\x1b[0m");
     eprintln!("\x1b[32m│\x1b[0m                                                             \x1b[32m│\x1b[0m");
     eprintln!("\x1b[32m│\x1b[0m    Press \x1b[1mAlt+;\x1b[0m from anywhere to launch jcode.                \x1b[32m│\x1b[0m");
-    if installed_wezterm {
-        eprintln!("\x1b[32m│\x1b[0m    It will open in \x1b[1mWezTerm\x1b[0m with full graphics support.      \x1b[32m│\x1b[0m");
+    if installed_alacritty {
+        eprintln!("\x1b[32m│\x1b[0m    It will open in \x1b[1mAlacritty\x1b[0m for maximum performance.    \x1b[32m│\x1b[0m");
     }
     eprintln!("\x1b[32m│\x1b[0m                                                             \x1b[32m│\x1b[0m");
     eprintln!("\x1b[32m│\x1b[0m    \x1b[90m(Starting jcode normally in 3 seconds...)\x1b[0m                 \x1b[32m│\x1b[0m");
@@ -688,7 +669,7 @@ pub fn run_setup_hotkey() -> Result<()> {
 
     let mut state = SetupHintsState::load();
     let terminal = detect_terminal();
-    let already_using_wezterm = terminal == "wezterm";
+    let already_using_alacritty = terminal == "alacritty";
 
     eprintln!("\x1b[1mjcode setup-hotkey\x1b[0m");
     eprintln!();
@@ -703,32 +684,31 @@ pub fn run_setup_hotkey() -> Result<()> {
         }
     );
 
-    if is_wezterm_installed() && !already_using_wezterm {
-        eprintln!("  WezTerm: \x1b[32minstalled\x1b[0m");
-    } else if already_using_wezterm {
-        eprintln!("  WezTerm: \x1b[32mactive\x1b[0m");
+    if is_alacritty_installed() && !already_using_alacritty {
+        eprintln!("  Alacritty: \x1b[32minstalled\x1b[0m");
+    } else if already_using_alacritty {
+        eprintln!("  Alacritty: \x1b[32mactive\x1b[0m");
     } else {
-        eprintln!("  WezTerm: \x1b[90mnot installed\x1b[0m");
+        eprintln!("  Alacritty: \x1b[90mnot installed\x1b[0m");
     }
     eprintln!();
 
-    // Step 1: WezTerm
-    let mut installed_wezterm = false;
-    if !already_using_wezterm && !is_wezterm_installed() {
-        eprintln!("  WezTerm provides the best jcode experience (inline images, graphics).");
-        eprint!("  Install WezTerm? \x1b[32m[y]\x1b[0m/\x1b[90m[n]\x1b[0m: ");
+    let mut installed_alacritty = false;
+    if !already_using_alacritty && !is_alacritty_installed() {
+        eprintln!("  Alacritty is the fastest terminal emulator (GPU-accelerated, lowest latency).");
+        eprint!("  Install Alacritty? \x1b[32m[y]\x1b[0m/\x1b[90m[n]\x1b[0m: ");
         let _ = io::stderr().flush();
         let choice = read_choice();
         if choice == "y" || choice == "yes" {
             if !is_winget_available() {
-                eprintln!("\n  \x1b[33m⚠\x1b[0m  winget not found. Install WezTerm manually:");
-                eprintln!("     https://wezfurlong.org/wezterm/install/windows.html\n");
+                eprintln!("\n  \x1b[33m⚠\x1b[0m  winget not found. Install Alacritty manually:");
+                eprintln!("     https://alacritty.org/\n");
             } else {
-                match install_wezterm() {
+                match install_alacritty() {
                     Ok(()) => {
-                        state.wezterm_configured = true;
-                        installed_wezterm = true;
-                        eprintln!("  \x1b[32m✓\x1b[0m WezTerm installed!\n");
+                        state.alacritty_configured = true;
+                        installed_alacritty = true;
+                        eprintln!("  \x1b[32m✓\x1b[0m Alacritty installed!\n");
                     }
                     Err(e) => {
                         eprintln!("  \x1b[31m✗\x1b[0m Install failed: {}\n", e);
@@ -739,10 +719,9 @@ pub fn run_setup_hotkey() -> Result<()> {
         eprintln!();
     }
 
-    // Step 2: Hotkey
-    let use_wezterm = already_using_wezterm || is_wezterm_installed();
-    let terminal_name = if use_wezterm {
-        "WezTerm"
+    let use_alacritty = already_using_alacritty || is_alacritty_installed();
+    let terminal_name = if use_alacritty {
+        "Alacritty"
     } else {
         "Windows Terminal"
     };
@@ -752,13 +731,13 @@ pub fn run_setup_hotkey() -> Result<()> {
         terminal_name
     );
 
-    match create_hotkey_shortcut(use_wezterm) {
+    match create_hotkey_shortcut(use_alacritty) {
         Ok(()) => {
             state.hotkey_configured = true;
             let _ = state.save();
             eprintln!("  \x1b[32m✓\x1b[0m Created hotkey (\x1b[1mAlt+;\x1b[0m)");
             eprintln!();
-            prompt_try_it_out(installed_wezterm);
+            prompt_try_it_out(installed_alacritty);
         }
         Err(e) => {
             eprintln!("  \x1b[31m✗\x1b[0m Failed: {}", e);
@@ -773,14 +752,10 @@ pub fn run_setup_hotkey() -> Result<()> {
 /// Called early in startup, before the TUI is initialized.
 /// Returns an optional startup user message to auto-send in jcode.
 ///
-/// - Windows: On every 3rd launch, can show hotkey + WezTerm nudges.
+/// - Windows: On every 3rd launch, can show hotkey + Alacritty nudges.
 /// - macOS: On every 3rd launch, can suggest Ghostty and optionally hand off
 ///   to AI-guided setup by returning a prebuilt prompt.
 pub fn maybe_show_setup_hints() -> Option<String> {
-    if !cfg!(windows) && !cfg!(target_os = "macos") {
-        return None;
-    }
-
     if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
         return None;
     }
@@ -788,6 +763,14 @@ pub fn maybe_show_setup_hints() -> Option<String> {
     let mut state = SetupHintsState::load();
     state.launch_count += 1;
     let _ = state.save();
+
+    if !state.desktop_shortcut_created {
+        let _ = create_desktop_shortcut(&mut state);
+    }
+
+    if !cfg!(windows) && !cfg!(target_os = "macos") {
+        return None;
+    }
 
     if state.launch_count % 3 != 0 {
         return None;
@@ -801,31 +784,136 @@ pub fn maybe_show_setup_hints() -> Option<String> {
     }
 
     let terminal = detect_terminal();
-    let already_using_wezterm = terminal == "wezterm";
+    let already_using_alacritty = terminal == "alacritty";
 
-    if already_using_wezterm {
-        state.wezterm_configured = true;
-        state.wezterm_dismissed = true;
+    if already_using_alacritty {
+        state.alacritty_configured = true;
+        state.alacritty_dismissed = true;
         let _ = state.save();
     }
 
     let mut did_setup_hotkey = false;
-    let mut did_install_wezterm = false;
+    let mut did_install_alacritty = false;
 
-    // Show hotkey nudge first (if still relevant).
     if !state.hotkey_configured && !state.hotkey_dismissed {
         did_setup_hotkey = nudge_hotkey(&mut state);
     }
 
-    // Then show WezTerm nudge in the same launch (if still relevant).
-    if !state.wezterm_configured && !state.wezterm_dismissed && !already_using_wezterm {
-        did_install_wezterm = nudge_wezterm(&mut state);
+    if !state.alacritty_configured && !state.alacritty_dismissed && !already_using_alacritty {
+        did_install_alacritty = nudge_alacritty(&mut state);
     }
 
-    // End-of-setup nudge to validate Alt+; if we created or updated the hotkey path.
-    if did_setup_hotkey || (did_install_wezterm && state.hotkey_configured) {
-        prompt_try_it_out(did_install_wezterm);
+    if did_setup_hotkey || (did_install_alacritty && state.hotkey_configured) {
+        prompt_try_it_out(did_install_alacritty);
     }
 
     None
+}
+
+/// Create a desktop shortcut/launcher for jcode.
+///
+/// - Linux: creates a .desktop file in ~/.local/share/applications/
+/// - Windows: creates a .lnk shortcut on the Desktop
+fn create_desktop_shortcut(state: &mut SetupHintsState) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let apps_dir = dirs::home_dir()
+            .context("Could not find home directory")?
+            .join(".local")
+            .join("share")
+            .join("applications");
+        std::fs::create_dir_all(&apps_dir)?;
+
+        let exe = std::env::current_exe()?;
+        let exe_path = exe.to_string_lossy();
+
+        let terminal = if is_alacritty_installed() {
+            format!("alacritty -e {}", exe_path)
+        } else {
+            exe_path.to_string()
+        };
+
+        let desktop_content = format!(
+            "[Desktop Entry]\n\
+             Type=Application\n\
+             Name=jcode\n\
+             Comment=AI coding agent\n\
+             Exec={}\n\
+             Terminal={}\n\
+             Categories=Development;Utility;\n\
+             Keywords=code;ai;agent;terminal;\n",
+            terminal,
+            if is_alacritty_installed() { "false" } else { "true" },
+        );
+
+        let desktop_path = apps_dir.join("jcode.desktop");
+        std::fs::write(&desktop_path, &desktop_content)?;
+
+        let _ = std::process::Command::new("chmod")
+            .args(["+x", &desktop_path.to_string_lossy()])
+            .output();
+
+        state.desktop_shortcut_created = true;
+        let _ = state.save();
+
+        crate::logging::info(&format!(
+            "Created desktop launcher: {}",
+            desktop_path.display()
+        ));
+    }
+
+    #[cfg(windows)]
+    {
+        let exe = std::env::current_exe()?;
+        let exe_path = exe.to_string_lossy();
+
+        let (target, args) = if is_alacritty_installed() {
+            let alacritty = find_alacritty_path().unwrap_or_else(|| "alacritty".to_string());
+            (alacritty, format!("-e \"{}\"", exe_path))
+        } else {
+            (exe_path.to_string(), String::new())
+        };
+
+        let desktop_dir = std::env::var("USERPROFILE")
+            .unwrap_or_else(|_| "C:\\Users\\Default".into());
+        let shortcut_path = format!("{}\\Desktop\\jcode.lnk", desktop_dir);
+
+        let ps_script = format!(
+            r#"
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut("{shortcut_path}")
+$shortcut.TargetPath = "{target}"
+$shortcut.Arguments = '{args}'
+$shortcut.Description = "jcode - AI coding agent"
+$shortcut.Save()
+Write-Output "OK"
+"#,
+            shortcut_path = shortcut_path,
+            target = target,
+            args = args,
+        );
+
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &ps_script])
+            .output()?;
+
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains("OK") {
+                state.desktop_shortcut_created = true;
+                let _ = state.save();
+                crate::logging::info(&format!(
+                    "Created desktop shortcut: {}",
+                    shortcut_path
+                ));
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = state;
+    }
+
+    Ok(())
 }

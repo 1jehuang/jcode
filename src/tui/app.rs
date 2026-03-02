@@ -6379,6 +6379,113 @@ impl App {
                         return Ok(());
                     }
 
+                    if trimmed == "/resume" || trimmed.starts_with("/resume ") {
+                        let arg = trimmed.strip_prefix("/resume").unwrap_or("").trim();
+                        if arg.is_empty() {
+                            match super::session_picker::load_sessions() {
+                                Ok(sessions) => {
+                                    if sessions.is_empty() {
+                                        self.push_display_message(DisplayMessage::system(
+                                            "No sessions found.".to_string(),
+                                        ));
+                                    } else {
+                                        let current_id = self.remote_session_id.as_deref().unwrap_or("");
+                                        let lines: Vec<String> = sessions
+                                            .iter()
+                                            .filter(|s| s.id != current_id)
+                                            .take(20)
+                                            .map(|s| {
+                                                let age = {
+                                                    let dur = chrono::Utc::now() - s.last_message_time;
+                                                    if dur.num_days() > 0 {
+                                                        format!("{}d ago", dur.num_days())
+                                                    } else if dur.num_hours() > 0 {
+                                                        format!("{}h ago", dur.num_hours())
+                                                    } else {
+                                                        format!("{}m ago", dur.num_minutes().max(1))
+                                                    }
+                                                };
+                                                let status_icon = match s.status {
+                                                    crate::session::SessionStatus::Active => "🟢",
+                                                    crate::session::SessionStatus::Crashed { .. } => "💥",
+                                                    _ => "⏸",
+                                                };
+                                                let dir = s.working_dir.as_deref().unwrap_or("");
+                                                let dir_short = dir
+                                                    .strip_prefix(&std::env::var("HOME").unwrap_or_default())
+                                                    .map(|p| format!("~{}", p))
+                                                    .unwrap_or_else(|| dir.to_string());
+                                                format!(
+                                                    "{} {} **{}** - {} ({}, {})",
+                                                    status_icon, s.icon, s.short_name, s.title, age, dir_short,
+                                                )
+                                            })
+                                            .collect();
+                                        if lines.is_empty() {
+                                            self.push_display_message(DisplayMessage::system(
+                                                "No other sessions found.".to_string(),
+                                            ));
+                                        } else {
+                                            self.push_display_message(DisplayMessage::system(format!(
+                                                "**Recent sessions** (use `/resume <name>` to open in new window):\n\n{}",
+                                                lines.join("\n")
+                                            )));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    self.push_display_message(DisplayMessage::error(format!(
+                                        "Failed to load sessions: {}", e
+                                    )));
+                                }
+                            }
+                        } else {
+                            match crate::session::find_session_by_name_or_id(arg) {
+                                Ok(full_id) => {
+                                    let exe = std::env::current_exe().unwrap_or_default();
+                                    let mut cwd = std::env::current_dir().unwrap_or_default();
+                                    if let Ok(session) = crate::session::Session::load(&full_id) {
+                                        if let Some(dir) = session.working_dir.as_deref() {
+                                            if std::path::Path::new(dir).is_dir() {
+                                                cwd = std::path::PathBuf::from(dir);
+                                            }
+                                        }
+                                    }
+                                    let socket = std::env::var("JCODE_SOCKET").ok();
+                                    match spawn_in_new_terminal(&exe, &full_id, &cwd, socket.as_deref()) {
+                                        Ok(true) => {
+                                            let name = crate::id::extract_session_name(&full_id)
+                                                .unwrap_or(arg)
+                                                .to_string();
+                                            self.push_display_message(DisplayMessage::system(format!(
+                                                "Resumed **{}** in new window.", name,
+                                            )));
+                                            self.set_status_notice(format!("Resumed {}", name));
+                                        }
+                                        Ok(false) => {
+                                            self.push_display_message(DisplayMessage::system(format!(
+                                                "No terminal found. Resume manually:\n```\njcode --resume {}\n```",
+                                                arg,
+                                            )));
+                                        }
+                                        Err(e) => {
+                                            self.push_display_message(DisplayMessage::error(format!(
+                                                "Failed to open window: {}\n\nResume manually: `jcode --resume {}`",
+                                                e, arg,
+                                            )));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    self.push_display_message(DisplayMessage::error(format!(
+                                        "{}\n\nUse `/resume` to list available sessions.", e
+                                    )));
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
+
                     if trimmed == "/split" {
                         if self.is_processing {
                             self.push_display_message(DisplayMessage::error(
@@ -7284,6 +7391,7 @@ impl App {
             "reload" => "`/reload`\nReload to a newer binary if one is available.",
             "rebuild" => "`/rebuild`\nRun full update flow (git pull + cargo build + tests).",
             "split" => "`/split`\nSplit the current session into a new window. Clones the full conversation history so both sessions continue from the same point.",
+            "resume" => "`/resume`\nList recent sessions.\n\n`/resume <name>`\nOpen a previous session in a new terminal window.",
             "info" => "`/info`\nShow session metadata and token usage.",
             "usage" => "`/usage`\nFetch and display subscription usage limits for all connected OAuth providers (Anthropic, OpenAI/ChatGPT).\nShows 5-hour and 7-day windows, reset times, and extra usage status.",
             "version" => "`/version`\nShow jcode version/build details.",
@@ -7385,6 +7493,7 @@ impl App {
                      • `/reload` - Smart reload (client/server if newer binary exists)\n\
                      • `/rebuild` - Full rebuild (git pull + cargo build + tests){}\n\
                      • `/changelog` - Show recent changes in this build\n\
+                     • `/resume` - List recent sessions, `/resume <name>` to open in new window\n\
                      • `/split` - Split session into a new window (clones conversation)\n\
                      • `/clear` - Clear conversation\n\
                      • `/rewind` - Show history with numbers, `/rewind N` to rewind\n\
@@ -13545,6 +13654,24 @@ impl App {
                 .collect();
         }
 
+        if prefix.starts_with("/resume ") {
+            if let Ok(sessions) = super::session_picker::load_sessions() {
+                let current_id = self.remote_session_id.as_deref().unwrap_or("");
+                return sessions
+                    .iter()
+                    .filter(|s| s.id != current_id)
+                    .take(15)
+                    .map(|s| {
+                        (
+                            format!("/resume {}", s.short_name),
+                            "Resume session in new window",
+                        )
+                    })
+                    .collect();
+            }
+            return vec![];
+        }
+
         if prefix.starts_with("/login ") || prefix.starts_with("/auth ") {
             return vec![
                 ("/login anthropic".into(), "Login to Anthropic (OAuth)"),
@@ -13604,6 +13731,7 @@ impl App {
             ("/reload".into(), "Smart reload (if newer binary exists)"),
             ("/rebuild".into(), "Full rebuild (git pull + build + tests)"),
             ("/update".into(), "Check for and install latest release"),
+            ("/resume".into(), "List or resume a previous session"),
             ("/split".into(), "Split session into a new window"),
             ("/quit".into(), "Exit jcode"),
             ("/auth".into(), "Show authentication status"),
