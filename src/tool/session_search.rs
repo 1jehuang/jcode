@@ -2,9 +2,9 @@
 //!
 //! Performance notes:
 //! - Phase 1: collect file paths, sort by mtime (newest first)
-//! - Phase 2: raw-text pre-filter (case-insensitive grep on file bytes, no JSON parse)
+//! - Phase 2: parallel raw-text pre-filter (case-insensitive grep on file bytes, no JSON parse)
 //! - Phase 3: only deserialize files that passed the pre-filter
-//! - Parallel I/O via tokio spawn_blocking tasks
+//! - Parallel I/O via std::thread::scope for file scanning
 //! - Single .to_lowercase() per text block, early termination
 
 use super::{Tool, ToolContext, ToolOutput};
@@ -18,11 +18,13 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 /// Max files to deserialize even if more pass the raw-text filter.
-/// Prevents unbounded work when the query is very common (e.g. "the").
 const MAX_DESERIALIZE: usize = 200;
 
 /// Max candidate results to collect before we stop scanning files.
 const MAX_CANDIDATES: usize = 500;
+
+/// Number of parallel threads for file scanning.
+const SCAN_THREADS: usize = 8;
 
 #[derive(Debug, Deserialize)]
 struct SearchInput {
@@ -140,7 +142,7 @@ impl Tool for SessionSearchTool {
     }
 }
 
-/// Synchronous search across session files.
+/// Synchronous search across session files with parallel I/O.
 fn search_sessions_blocking(
     sessions_dir: &std::path::Path,
     query_lower: &str,
@@ -161,94 +163,111 @@ fn search_sessions_blocking(
     }
     files.sort_unstable_by(|a, b| b.1.cmp(&a.1));
 
-    // Phase 2 + 3: Raw-text pre-filter then selective deserialization
-    let mut results: Vec<SearchResult> = Vec::new();
-    let mut deserialized = 0usize;
-
-    // Pre-compute: if there's a working_dir filter, we can also check that in raw text
+    // Phase 2: Parallel scan - split files across threads for raw-text pre-filter + deserialization
     let wd_lower = wd_filter.map(|w| w.to_lowercase());
+    let thread_count = SCAN_THREADS.min(files.len().max(1));
+    let chunk_size = (files.len() + thread_count - 1) / thread_count.max(1);
 
-    for (path, _mtime) in &files {
-        if results.len() >= MAX_CANDIDATES {
-            break;
-        }
+    let all_results: Vec<Vec<SearchResult>> = std::thread::scope(|s| {
+        let mut handles = Vec::new();
 
-        // Read raw bytes
-        let raw = match std::fs::read(path) {
-            Ok(data) => data,
-            Err(_) => continue,
-        };
+        for chunk in files.chunks(chunk_size) {
+            let wd_lower = &wd_lower;
+            let wd_filter = wd_filter;
 
-        // Fast pre-filter: case-insensitive search on raw bytes
-        if !contains_case_insensitive_bytes(&raw, query_lower.as_bytes()) {
-            continue;
-        }
+            handles.push(s.spawn(move || {
+                let mut results: Vec<SearchResult> = Vec::new();
+                let mut deserialized = 0usize;
 
-        // If working_dir filter, also check it appears in the raw text
-        if let Some(ref wd) = wd_lower {
-            if !contains_case_insensitive_bytes(&raw, wd.as_bytes()) {
-                continue;
-            }
-        }
+                for (path, _mtime) in chunk {
+                    if results.len() >= MAX_CANDIDATES / thread_count {
+                        break;
+                    }
 
-        // This file contains the query — deserialize it
-        deserialized += 1;
-        if deserialized > MAX_DESERIALIZE {
-            break;
-        }
+                    let raw = match std::fs::read(path) {
+                        Ok(data) => data,
+                        Err(_) => continue,
+                    };
 
-        let raw_str = match std::str::from_utf8(&raw) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
+                    if !contains_case_insensitive_bytes(&raw, query_lower.as_bytes()) {
+                        continue;
+                    }
 
-        let session: Session = match serde_json::from_str(raw_str) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
+                    if let Some(ref wd) = wd_lower {
+                        if !contains_case_insensitive_bytes(&raw, wd.as_bytes()) {
+                            continue;
+                        }
+                    }
 
-        // Check working_dir filter at the structured level
-        if let Some(wd_filter) = wd_filter {
-            match &session.working_dir {
-                Some(session_wd) if session_wd.contains(wd_filter) => {}
-                _ => continue,
-            }
-        }
+                    deserialized += 1;
+                    if deserialized > MAX_DESERIALIZE / thread_count {
+                        break;
+                    }
 
-        // Search through messages
-        for msg in &session.messages {
-            for block in &msg.content {
-                let text = match block {
-                    crate::message::ContentBlock::Text { text, .. } => text,
-                    crate::message::ContentBlock::ToolResult { content, .. } => content,
-                    _ => continue,
-                };
+                    let raw_str = match std::str::from_utf8(&raw) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
 
-                let text_lower = text.to_lowercase();
-                if !text_lower.contains(query_lower) {
-                    continue;
+                    let session: Session = match serde_json::from_str(raw_str) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+
+                    if let Some(wd_filter) = wd_filter {
+                        match &session.working_dir {
+                            Some(session_wd) if session_wd.contains(wd_filter) => {}
+                            _ => continue,
+                        }
+                    }
+
+                    for msg in &session.messages {
+                        for block in &msg.content {
+                            let text = match block {
+                                crate::message::ContentBlock::Text { text, .. } => text,
+                                crate::message::ContentBlock::ToolResult { content, .. } => {
+                                    content
+                                }
+                                _ => continue,
+                            };
+
+                            let text_lower = text.to_lowercase();
+                            if !text_lower.contains(query_lower) {
+                                continue;
+                            }
+
+                            let snippet =
+                                extract_snippet(text, &text_lower, query_lower, 200);
+                            let role = match msg.role {
+                                crate::message::Role::User => "user",
+                                crate::message::Role::Assistant => "assistant",
+                            };
+
+                            let match_count = text_lower.matches(query_lower).count();
+                            let score = match_count as f64 / (text.len() as f64 + 1.0);
+
+                            results.push(SearchResult {
+                                session_id: session.id.clone(),
+                                short_name: session.short_name.clone(),
+                                working_dir: session.working_dir.clone(),
+                                role: role.to_string(),
+                                snippet,
+                                score,
+                            });
+                        }
+                    }
                 }
 
-                let snippet = extract_snippet(text, &text_lower, query_lower, 200);
-                let role = match msg.role {
-                    crate::message::Role::User => "user",
-                    crate::message::Role::Assistant => "assistant",
-                };
-
-                let match_count = text_lower.matches(query_lower).count();
-                let score = match_count as f64 / (text.len() as f64 + 1.0);
-
-                results.push(SearchResult {
-                    session_id: session.id.clone(),
-                    short_name: session.short_name.clone(),
-                    working_dir: session.working_dir.clone(),
-                    role: role.to_string(),
-                    snippet,
-                    score,
-                });
-            }
+                results
+            }));
         }
-    }
+
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    // Merge results from all threads
+    let mut results: Vec<SearchResult> =
+        all_results.into_iter().flatten().collect();
 
     // Sort by score descending, take top `limit`
     results.sort_unstable_by(|a, b| {
@@ -275,7 +294,6 @@ fn contains_case_insensitive_bytes(haystack: &[u8], needle_lower: &[u8]) -> bool
     'outer: for i in 0..=end {
         for (j, &nb) in needle_lower.iter().enumerate() {
             let hb = haystack[i + j];
-            // ASCII lowercase comparison
             let hb_lower = if hb.is_ascii_uppercase() {
                 hb | 0x20
             } else {
@@ -297,11 +315,9 @@ fn extract_snippet(text: &str, text_lower: &str, query: &str, max_len: usize) ->
         let start = pos.saturating_sub(max_len / 2);
         let end = (pos + query.len() + max_len / 2).min(text.len());
 
-        // Clamp to char boundaries
         let start = floor_char_boundary(text, start);
         let end = ceil_char_boundary(text, end);
 
-        // Find word boundaries
         let start = text[..start]
             .rfind(char::is_whitespace)
             .map(|p| p + 1)
@@ -324,7 +340,6 @@ fn extract_snippet(text: &str, text_lower: &str, query: &str, max_len: usize) ->
     }
 }
 
-/// Find the largest byte index <= `i` that is a char boundary.
 fn floor_char_boundary(s: &str, i: usize) -> usize {
     if i >= s.len() {
         return s.len();
@@ -336,7 +351,6 @@ fn floor_char_boundary(s: &str, i: usize) -> usize {
     idx
 }
 
-/// Find the smallest byte index >= `i` that is a char boundary.
 fn ceil_char_boundary(s: &str, i: usize) -> usize {
     if i >= s.len() {
         return s.len();

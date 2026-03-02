@@ -972,6 +972,25 @@ impl Server {
             }
         });
 
+        // Preload embedding model in background so first memory recall is fast
+        tokio::task::spawn_blocking(|| {
+            let start = std::time::Instant::now();
+            match crate::embedding::get_embedder() {
+                Ok(_) => {
+                    crate::logging::info(&format!(
+                        "Embedding model preloaded in {}ms",
+                        start.elapsed().as_millis()
+                    ));
+                }
+                Err(e) => {
+                    crate::logging::info(&format!(
+                        "Embedding model preload failed (non-fatal): {}",
+                        e
+                    ));
+                }
+            }
+        });
+
         // Spawn selfdev signal monitor (checks for reload signal)
         // Only run on selfdev servers to avoid non-selfdev servers picking up
         // rebuild-signal and exec'ing, which would kill all their client connections

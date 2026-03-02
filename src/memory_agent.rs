@@ -283,7 +283,7 @@ impl MemoryAgent {
                             ));
                             ss.turns_since_extraction = 0;
                             drop(ss);
-                            self.extract_from_context(&prev_context).await;
+                            self.extract_from_context(&prev_context, "topic change").await;
                             let ss = self.session_state(session_id);
                             ss.surfaced_memories.clear();
                             memory::clear_injected_memories(session_id);
@@ -310,14 +310,15 @@ impl MemoryAgent {
         {
             let ss = self.session_state(session_id);
             if ss.turns_since_extraction >= PERIODIC_EXTRACTION_INTERVAL {
-                if let Some(ctx) = ss.last_context_string.clone() {
+                let extraction_ctx = memory::format_context_for_extraction(&messages);
+                if extraction_ctx.len() >= 200 {
                     crate::logging::info(&format!(
-                        "[{}] Triggering periodic extraction ({} turns since last)",
-                        session_id, ss.turns_since_extraction
+                        "[{}] Triggering periodic extraction ({} turns since last, {} chars context)",
+                        session_id, ss.turns_since_extraction, extraction_ctx.len()
                     ));
                     ss.turns_since_extraction = 0;
                     drop(ss);
-                    self.extract_from_context(&ctx).await;
+                    self.extract_from_context(&extraction_ctx, "periodic").await;
                 }
             }
         }
@@ -513,11 +514,11 @@ impl MemoryAgent {
         }
     }
 
-    /// Extract memories from a context string (called on topic change)
+    /// Extract memories from a context string
     ///
     /// This is an incremental extraction - we extract from a portion of the
-    /// conversation when the topic changes, rather than waiting for session end.
-    async fn extract_from_context(&self, context: &str) {
+    /// conversation (on topic change or periodically) rather than waiting for session end.
+    async fn extract_from_context(&self, context: &str, reason: &str) {
         // Don't extract from very short contexts
         if context.len() < 200 {
             return;
@@ -525,10 +526,10 @@ impl MemoryAgent {
 
         // Update UI state
         memory::set_state(MemoryState::Extracting {
-            reason: "topic change".to_string(),
+            reason: reason.to_string(),
         });
         memory::add_event(MemoryEventKind::ExtractionStarted {
-            reason: "topic change".to_string(),
+            reason: reason.to_string(),
         });
 
         let sidecar = self.sidecar.clone();
@@ -1255,7 +1256,7 @@ pub fn reset() {
 /// Trigger a final memory extraction when a session ends.
 ///
 /// This is fire-and-forget: spawns a tokio task that runs extraction
-/// with a 5-second timeout, then logs the result. Does not block the caller.
+/// and logs the result. Does not block the caller.
 pub fn trigger_final_extraction(transcript: String, session_id: String) {
     if transcript.len() < 200 {
         return;
@@ -1269,14 +1270,10 @@ pub fn trigger_final_extraction(transcript: String, session_id: String) {
         ));
 
         let sidecar = crate::sidecar::Sidecar::new();
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            sidecar.extract_memories(&transcript),
-        )
-        .await;
+        let result = sidecar.extract_memories(&transcript).await;
 
         match result {
-            Ok(Ok(extracted)) if !extracted.is_empty() => {
+            Ok(extracted) if !extracted.is_empty() => {
                 let manager = crate::memory::MemoryManager::new();
                 let mut stored_count = 0;
 
@@ -1310,22 +1307,16 @@ pub fn trigger_final_extraction(transcript: String, session_id: String) {
                     ));
                 }
             }
-            Ok(Ok(_)) => {
+            Ok(_) => {
                 crate::logging::info(&format!(
                     "Final extraction for session {}: no memories extracted",
                     session_id
                 ));
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 crate::logging::info(&format!(
                     "Final extraction for session {} failed: {}",
                     session_id, e
-                ));
-            }
-            Err(_) => {
-                crate::logging::info(&format!(
-                    "Final extraction for session {} timed out (30s)",
-                    session_id
                 ));
             }
         }

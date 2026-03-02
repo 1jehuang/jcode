@@ -3669,10 +3669,22 @@ async fn run_canary_wrapper(
     if keyboard_enhanced {
         tui::disable_keyboard_enhancement();
     }
-    ratatui::restore();
-    crate::tui::mermaid::clear_image_state();
 
     let run_result = result?;
+
+    // Determine if we're about to exec into a new binary.
+    // If so, skip ratatui::restore() to avoid a visible flash -
+    // the exec'd process inherits the terminal in alternate screen
+    // mode and re-enters it seamlessly via ratatui::init().
+    let will_exec = run_result.reload_session.is_some()
+        || run_result.rebuild_session.is_some()
+        || run_result.update_session.is_some()
+        || run_result.exit_code == Some(EXIT_RELOAD_REQUESTED);
+
+    if !will_exec {
+        ratatui::restore();
+    }
+    crate::tui::mermaid::clear_image_state();
 
     // Check for hot-reload request (no rebuild)
     if let Some(ref reload_session_id) = run_result.reload_session {
@@ -3692,10 +3704,8 @@ async fn run_canary_wrapper(
     // Check if reload was requested - exec into new binary
     if let Some(code) = run_result.exit_code {
         if code == EXIT_RELOAD_REQUESTED {
-            eprintln!("\n🔄 Client reload requested, restarting with new binary...");
 
-            // Small delay for filesystem sync
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            // No delay needed - the binary was already written before we got here
 
             // Get canary binary path for reload
             let binary_path = build::canary_binary_path().ok();

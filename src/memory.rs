@@ -936,6 +936,36 @@ pub fn format_context_for_relevance(messages: &[crate::message::Message]) -> Str
     chunks.join("\n").trim().to_string()
 }
 
+/// Format messages into a wider context string for extraction.
+/// Uses a larger window than relevance checking since extraction needs to
+/// capture learnings from a broader portion of the conversation.
+const EXTRACTION_CONTEXT_MAX_MESSAGES: usize = 40;
+const EXTRACTION_CONTEXT_MAX_CHARS: usize = 24_000;
+
+pub fn format_context_for_extraction(messages: &[crate::message::Message]) -> String {
+    let mut chunks: Vec<String> = Vec::new();
+    let mut total_chars = 0usize;
+
+    for message in messages.iter().rev().take(EXTRACTION_CONTEXT_MAX_MESSAGES) {
+        let chunk = format_message_context(message);
+        if chunk.is_empty() {
+            continue;
+        }
+        let chunk_len = chunk.chars().count();
+        if total_chars + chunk_len > EXTRACTION_CONTEXT_MAX_CHARS {
+            if total_chars == 0 {
+                chunks.push(truncate_chars(&chunk, EXTRACTION_CONTEXT_MAX_CHARS));
+            }
+            break;
+        }
+        total_chars += chunk_len;
+        chunks.push(chunk);
+    }
+
+    chunks.reverse();
+    chunks.join("\n").trim().to_string()
+}
+
 fn format_entries_for_prompt(entries: &[MemoryEntry], limit: usize) -> Option<String> {
     let mut sections: HashMap<MemoryCategory, Vec<&MemoryEntry>> = HashMap::new();
     let mut seen_content = HashSet::new();
