@@ -4938,13 +4938,11 @@ fn draw_messages(
 
     // Previous prompt preview at top when the last user prompt has scrolled out of view
     if crate::config::config().display.prompt_preview && scroll > 0 {
-        // Find the last user prompt that started before the viewport
         let last_offscreen_prompt_idx = wrapped_user_prompt_starts
             .iter()
             .rposition(|&start| start < scroll);
 
         if let Some(prompt_order) = last_offscreen_prompt_idx {
-            // Get the original prompt text from display messages
             let user_messages: Vec<&str> = app
                 .display_messages()
                 .iter()
@@ -4955,37 +4953,63 @@ fn draw_messages(
             if let Some(prompt_text) = user_messages.get(prompt_order) {
                 let prompt_text = prompt_text.trim();
                 if !prompt_text.is_empty() {
-                    let avail_width = area.width.saturating_sub(4) as usize; // 2 for "> ", 2 for margin
-                    let preview = truncate_middle(prompt_text, avail_width);
-                    let preview_line = Line::from(vec![
-                        Span::styled("› ", Style::default().fg(USER_COLOR).dim()),
-                        Span::styled(preview, Style::default().fg(USER_TEXT).dim()),
-                    ]);
+                    let prompt_num = prompt_order + 1;
+                    let num_str = format!("{}", prompt_num);
+                    let prefix_len = num_str.len() + 2; // "N› "
+                    let content_width = area.width.saturating_sub(prefix_len as u16 + 2) as usize;
+                    let dim_style = Style::default().dim();
+                    let centered = app.centered_mode();
+                    let align = if centered {
+                        ratatui::layout::Alignment::Center
+                    } else {
+                        ratatui::layout::Alignment::Left
+                    };
+
+                    let text_flat = prompt_text.replace('\n', " ");
+                    let text_chars: Vec<char> = text_flat.chars().collect();
+                    let is_long = text_chars.len() > content_width;
+
+                    let preview_lines: Vec<Line<'static>> = if !is_long {
+                        vec![Line::from(vec![
+                            Span::styled(num_str.clone(), dim_style.fg(DIM_COLOR)),
+                            Span::styled("› ", dim_style.fg(USER_COLOR)),
+                            Span::styled(text_flat, dim_style.fg(USER_TEXT)),
+                        ])
+                        .alignment(align)]
+                    } else {
+                        let half = content_width.max(4);
+                        let head: String = text_chars[..half.min(text_chars.len())].iter().collect();
+                        let tail_start = text_chars.len().saturating_sub(half);
+                        let tail: String = text_chars[tail_start..].iter().collect();
+
+                        let first = Line::from(vec![
+                            Span::styled(num_str.clone(), dim_style.fg(DIM_COLOR)),
+                            Span::styled("› ", dim_style.fg(USER_COLOR)),
+                            Span::styled(format!("{} ...", head.trim_end()), dim_style.fg(USER_TEXT)),
+                        ])
+                        .alignment(align);
+
+                        let padding: String = " ".repeat(prefix_len);
+                        let second = Line::from(vec![
+                            Span::styled(padding, dim_style),
+                            Span::styled(format!("... {}", tail.trim_start()), dim_style.fg(USER_TEXT)),
+                        ])
+                        .alignment(align);
+
+                        vec![first, second]
+                    };
+
+                    let line_count = preview_lines.len() as u16;
                     let preview_area = Rect {
                         x: area.x,
                         y: area.y,
                         width: area.width.saturating_sub(1),
-                        height: 1,
+                        height: line_count,
                     };
                     frame.render_widget(Clear, preview_area);
                     frame.render_widget(
-                        Paragraph::new(preview_line),
+                        Paragraph::new(preview_lines),
                         preview_area,
-                    );
-                    // Dim separator dots below the preview
-                    let sep_area = Rect {
-                        x: area.x,
-                        y: area.y + 1,
-                        width: area.width.saturating_sub(1),
-                        height: 1,
-                    };
-                    frame.render_widget(Clear, sep_area);
-                    frame.render_widget(
-                        Paragraph::new(Line::from(Span::styled(
-                            "╌╌╌",
-                            Style::default().fg(DIM_COLOR),
-                        ))),
-                        sep_area,
                     );
                 }
             }
