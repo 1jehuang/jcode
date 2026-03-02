@@ -51,6 +51,7 @@ mod server;
 mod session;
 mod setup_hints;
 mod sidecar;
+mod startup_profile;
 mod skill;
 mod stdin_detect;
 mod storage;
@@ -571,18 +572,25 @@ enum MemoryCommand {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    startup_profile::init();
+
     // Install panic hook for session recovery
     install_panic_hook();
+    startup_profile::mark("panic_hook");
 
     // Initialize logging
     logging::init();
+    startup_profile::mark("logging_init");
     logging::cleanup_old_logs();
+    startup_profile::mark("log_cleanup");
     logging::info("jcode starting");
 
     // Profile system performance on background thread (result ready before first frame)
     perf::init_background();
+    startup_profile::mark("perf_init");
 
     let args = Args::parse();
+    startup_profile::mark("args_parse");
 
     // Change working directory if specified
     if let Some(cwd) = &args.cwd {
@@ -803,19 +811,24 @@ async fn run_main(mut args: Args) -> Result<()> {
             .await?;
         }
         None => {
+            startup_profile::mark("run_main_none_branch");
+
             // Show platform setup hints every 3rd launch and optionally
             // return a startup message to auto-send in the next TUI session.
             let startup_message = setup_hints::maybe_show_setup_hints();
+            startup_profile::mark("setup_hints");
 
             // If not resuming a session, check for recently crashed sessions
             // and show a hint so users know they can resume.
             if args.resume.is_none() {
                 show_crash_resume_hint();
             }
+            startup_profile::mark("crash_resume_hint");
 
             // Auto-detect jcode repo and enable self-dev mode
             let cwd = std::env::current_dir()?;
             let in_jcode_repo = build::is_jcode_repo(&cwd);
+            startup_profile::mark("is_jcode_repo");
             let already_in_selfdev = std::env::var("JCODE_SELFDEV_MODE").is_ok();
 
             if in_jcode_repo && !already_in_selfdev && !args.standalone && !args.no_selfdev {
@@ -851,6 +864,7 @@ async fn run_main(mut args: Args) -> Result<()> {
                 .await?;
             } else {
                 // Default: TUI client mode - start server if needed
+                startup_profile::mark("client_mode_start");
                 let server_running = if crate::transport::is_socket_path(&server::socket_path()) {
                     // Test if server is actually responding
                     crate::transport::Stream::connect(server::socket_path())
@@ -859,6 +873,7 @@ async fn run_main(mut args: Args) -> Result<()> {
                 } else {
                     false
                 };
+                startup_profile::mark("server_check");
 
                 if server_running && (args.provider != ProviderChoice::Auto || args.model.is_some())
                 {
@@ -877,6 +892,7 @@ async fn run_main(mut args: Args) -> Result<()> {
 
                 if !server_running {
                     // Check for credentials before spawning the server (which can't prompt interactively)
+                    startup_profile::mark("cred_check_start");
                     let (has_claude, has_openai) = tokio::join!(
                         tokio::task::spawn_blocking(|| auth::claude::load_credentials().is_ok()),
                         tokio::task::spawn_blocking(|| auth::codex::load_credentials().is_ok()),
@@ -888,6 +904,7 @@ async fn run_main(mut args: Args) -> Result<()> {
 
                     let has_copilot = auth::copilot::has_copilot_credentials();
                     let has_api_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
+                    startup_profile::mark("cred_check_done");
 
                     if !has_claude
                         && !has_openai
@@ -925,6 +942,7 @@ async fn run_main(mut args: Args) -> Result<()> {
                     let _ = std::fs::remove_file(server::debug_socket_path());
 
                     // Start server in background
+                    startup_profile::mark("server_spawn_start");
                     eprintln!("Starting server...");
                     let exe = std::env::current_exe()?;
                     let mut cmd = std::process::Command::new(&exe);
@@ -1004,6 +1022,7 @@ async fn run_main(mut args: Args) -> Result<()> {
                                 .await
                                 .is_ok()
                             {
+                                startup_profile::mark("server_ready");
                                 break;
                             }
                         }
@@ -1011,6 +1030,7 @@ async fn run_main(mut args: Args) -> Result<()> {
                     }
                 }
 
+                startup_profile::mark("pre_tui_client");
                 eprintln!("Connecting to server...");
                 run_tui_client(args.resume, startup_message).await?;
             }
@@ -2665,15 +2685,21 @@ async fn run_tui_client(
     resume_session: Option<String>,
     startup_message: Option<String>,
 ) -> Result<()> {
+    startup_profile::mark("tui_client_enter");
     let terminal = init_tui_terminal()?;
+    startup_profile::mark("tui_terminal_init");
     // Initialize mermaid image picker (fast default, optional probe via env)
     crate::tui::mermaid::init_picker();
+    startup_profile::mark("mermaid_picker");
     let mouse_capture = crate::config::config().display.mouse_capture;
+    startup_profile::mark("config_load");
     let keyboard_enhanced = tui::enable_keyboard_enhancement();
+    startup_profile::mark("keyboard_enhancement");
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
     if mouse_capture {
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
     }
+    startup_profile::mark("terminal_modes");
 
     if let Some(ref session_id) = resume_session {
         set_current_session(session_id);
@@ -2693,14 +2719,21 @@ async fn run_tui_client(
     } else {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle("jcode"));
     }
+    startup_profile::mark("terminal_title");
 
     // Use App in remote mode - same UI, connects to server
     let mut app = tui::App::new_for_remote(resume_session.clone());
+    startup_profile::mark("app_new_for_remote");
     if resume_session.is_none() {
         if let Some(msg) = startup_message {
             app.queue_startup_message(msg);
         }
     }
+
+    // Report startup profile before entering main loop
+    startup_profile::mark("pre_run_remote");
+    startup_profile::report_to_log();
+
     let result = app.run_remote(terminal).await;
 
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
@@ -3328,6 +3361,7 @@ fn list_sessions() -> Result<()> {
 
 /// Self-development mode: run as canary with crash recovery wrapper
 async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Result<()> {
+    startup_profile::mark("run_self_dev_enter");
     // Ensure self-dev env is set for subprocesses (server, agent, tools)
     std::env::set_var("JCODE_SELFDEV_MODE", "1");
 
@@ -3335,6 +3369,7 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
         get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
 
     // Get or create session and mark as canary
+    startup_profile::mark("selfdev_session_create");
     let session_id = if let Some(id) = resume_session {
         // Load existing session and ensure it's marked as canary
         if let Ok(mut session) = session::Session::load(&id) {
@@ -3382,6 +3417,7 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
     }
 
     let hash = build::current_git_hash(&repo_dir)?;
+    startup_profile::mark("selfdev_git_hash");
     let binary_path = target_binary.clone();
 
     // Launch wrapper process
@@ -3461,9 +3497,11 @@ async fn run_canary_wrapper(
     let socket_path = SELFDEV_SOCKET.to_string();
 
     server::set_socket_path(&socket_path);
+    startup_profile::mark("canary_wrapper_enter");
 
     // Check if server is already running
     let server_alive = is_server_alive(&socket_path).await;
+    startup_profile::mark("canary_server_alive_check");
 
     if !server_alive {
         // Server not running - spawn it as a detached daemon
@@ -3521,6 +3559,7 @@ async fn run_canary_wrapper(
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+        startup_profile::mark("canary_server_ready");
         eprintln!("Self-dev server ready on {}", socket_path);
     } else {
         // Server is already running - just connect to it.
@@ -3549,27 +3588,34 @@ async fn run_canary_wrapper(
             );
         }
     }
+    startup_profile::mark("canary_server_resolved");
 
     let session_name = id::extract_session_name(session_id)
         .map(|s| s.to_string())
         .unwrap_or_else(|| session_id.to_string());
 
     eprintln!("Starting TUI client...");
+    startup_profile::mark("canary_tui_start");
     set_current_session(session_id);
     spawn_session_signal_watchers();
 
     // Run client TUI
     let terminal = init_tui_terminal()?;
+    startup_profile::mark("canary_terminal_init");
     // Initialize mermaid image picker (fast default, optional probe via env)
     crate::tui::mermaid::init_picker();
+    startup_profile::mark("canary_mermaid_picker");
     let mouse_capture = crate::config::config().display.mouse_capture;
+    startup_profile::mark("canary_config_load");
     let keyboard_enhanced = tui::enable_keyboard_enhancement();
+    startup_profile::mark("canary_keyboard_enhance");
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
     if mouse_capture {
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
     }
 
     let app = tui::App::new_for_remote(Some(session_id.to_string()));
+    startup_profile::mark("canary_app_new");
 
     // Set terminal title
     let icon = id::session_icon(&session_name);
@@ -3577,6 +3623,10 @@ async fn run_canary_wrapper(
         std::io::stdout(),
         crossterm::terminal::SetTitle(format!("{} jcode {} [self-dev]", icon, session_name))
     );
+
+    // Report startup profile before entering main loop
+    startup_profile::mark("canary_pre_run_remote");
+    startup_profile::report_to_log();
 
     let result = app.run_remote(terminal).await;
 
