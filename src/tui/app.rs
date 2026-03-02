@@ -931,7 +931,7 @@ impl App {
             t_prompt.as_secs_f64() * 1000.0,
         ));
 
-        Self {
+        let mut app = Self {
             provider,
             registry,
             skills,
@@ -1067,7 +1067,13 @@ impl App {
             ambient_system_prompt: None,
             pending_login: None,
             changelog_scroll: None,
+        };
+
+        for notice in app.provider.drain_startup_notices() {
+            app.status_notice = Some((notice, Instant::now()));
         }
+
+        app
     }
 
     /// Configure ambient mode: override system prompt and queue an initial message.
@@ -9331,15 +9337,17 @@ impl App {
                 match action {
                     crate::compaction::CompactionAction::BackgroundStarted => {
                         self.push_display_message(DisplayMessage::system(
-                            "📦 Context above 80% — summarizing older messages in background..."
+                            "📦 **Compaction started** — context above 80%, summarizing older messages in background..."
                                 .to_string(),
                         ));
+                        self.set_status_notice("Compacting context...");
                     }
                     crate::compaction::CompactionAction::HardCompacted(dropped) => {
                         self.push_display_message(DisplayMessage::system(format!(
-                            "📦 Context critically full — dropped {} old messages to fit.",
+                            "📦 **Emergency compaction** — context critically full, dropped {} old messages to fit.",
                             dropped,
                         )));
+                        self.set_status_notice(format!("Emergency compaction: {} msgs dropped", dropped));
                     }
                     crate::compaction::CompactionAction::None => {}
                 }
@@ -9370,12 +9378,13 @@ impl App {
         self.context_warning_shown = false;
         let tokens_str = event
             .pre_tokens
-            .map(|t| format!(" ({} tokens)", t))
+            .map(|t| format!(" (was {} tokens)", t))
             .unwrap_or_default();
         self.push_display_message(DisplayMessage::system(format!(
-            "📦 Context compacted ({}){}",
+            "📦 **Compaction complete** — context summarized ({}){}",
             event.trigger, tokens_str
         )));
+        self.set_status_notice("Context compacted");
     }
 
     fn set_status_notice(&mut self, text: impl Into<String>) {
@@ -11670,6 +11679,9 @@ impl App {
                 // Track activity for status display
                 self.last_stream_activity = Some(Instant::now());
 
+                // Poll for background compaction completion during streaming
+                self.poll_compaction_completion();
+
                 if first_event {
                     self.status = ProcessingStatus::Streaming;
                     first_event = false;
@@ -11883,10 +11895,10 @@ impl App {
                             self.streaming_text.push_str(&chunk);
                         }
                         let tokens_str = pre_tokens
-                            .map(|t| format!(" ({} tokens)", t))
+                            .map(|t| format!(" (was {} tokens)", t))
                             .unwrap_or_default();
                         let compact_msg =
-                            format!("📦 Context compacted ({}){}\n\n", trigger, tokens_str);
+                            format!("📦 **Compaction complete** — context summarized ({}){}\n\n", trigger, tokens_str);
                         self.streaming_text.push_str(&compact_msg);
                         // Reset warning so it can appear again
                         self.context_warning_shown = false;
@@ -12268,6 +12280,8 @@ impl App {
                                 self.streaming_text.push_str(&chunk);
                             }
                         }
+                        // Poll for background compaction completion during streaming
+                        self.poll_compaction_completion();
                         terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
                     }
                     // Handle keyboard input
@@ -12632,10 +12646,10 @@ impl App {
                                             self.streaming_text.push_str(&chunk);
                                         }
                                         let tokens_str = pre_tokens
-                                            .map(|t| format!(" ({} tokens)", t))
+                                            .map(|t| format!(" (was {} tokens)", t))
                                             .unwrap_or_default();
                                         let compact_msg = format!(
-                                            "📦 Context compacted ({}){}\n\n",
+                                            "📦 **Compaction complete** — context summarized ({}){}\n\n",
                                             trigger, tokens_str
                                         );
                                         self.streaming_text.push_str(&compact_msg);
