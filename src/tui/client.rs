@@ -428,7 +428,11 @@ impl ClientApp {
                     }
                     terminal.draw(|frame| super::ui::draw(frame, &self))?;
 
-                    let backoff = Duration::from_secs((1u64 << reconnect_attempts.min(5)).min(30));
+                    let backoff = if reconnect_attempts <= 2 {
+                        Duration::from_millis(100)
+                    } else {
+                        Duration::from_secs((1u64 << (reconnect_attempts - 2).min(5)).min(30))
+                    };
                     let sleep = tokio::time::sleep(backoff);
                     tokio::pin!(sleep);
                     loop {
@@ -583,13 +587,57 @@ impl ClientApp {
 
                 tokio::select! {
                     _ = redraw_interval.tick() => {
-                        // Just redraw
+                        // Process queued messages (e.g. reload continuation)
+                        if !self.is_processing && !self.queued_messages.is_empty() {
+                            let messages = std::mem::take(&mut self.queued_messages);
+                            let combined = messages.join("\n\n");
+                            crate::logging::info(&format!(
+                                "Client: sending queued continuation message ({} chars)",
+                                combined.len()
+                            ));
+                            for msg in &messages {
+                                self.push_display_message(DisplayMessage {
+                                    role: "user".to_string(),
+                                    content: msg.clone(),
+                                    tool_calls: Vec::new(),
+                                    duration_secs: None,
+                                    title: None,
+                                    tool_data: None,
+                                });
+                            }
+                            let request = Request::Message {
+                                id: self.next_request_id,
+                                content: combined,
+                                images: vec![],
+                            };
+                            self.next_request_id += 1;
+                            let json = serde_json::to_string(&request)? + "\n";
+                            let mut w = writer.lock().await;
+                            w.write_all(json.as_bytes()).await?;
+                            self.is_processing = true;
+                            self.processing_started = Some(Instant::now());
+                            self.streaming_tps_start = None;
+                            self.streaming_tps_elapsed = Duration::ZERO;
+                            self.streaming_total_output_tokens = 0;
+                            self.call_output_tokens_seen = 0;
+                        }
                     }
                     // Read from server
                     result = reader.read_line(&mut server_line) => {
                         match result {
                             Ok(0) | Err(_) => {
                                 self.server_disconnected = true;
+                                if !self.streaming_text.is_empty() {
+                                    let content = std::mem::take(&mut self.streaming_text);
+                                    self.push_display_message(DisplayMessage {
+                                        role: "assistant".to_string(),
+                                        content,
+                                        tool_calls: Vec::new(),
+                                        duration_secs: None,
+                                        title: None,
+                                        tool_data: None,
+                                    });
+                                }
                                 self.is_processing = false;
                                 disconnect_start = Some(std::time::Instant::now());
                                 self.push_display_message(DisplayMessage {
@@ -603,7 +651,6 @@ impl ClientApp {
                                 disconnect_msg_idx = Some(self.display_messages.len() - 1);
                                 terminal.draw(|frame| super::ui::draw(frame, &self))?;
                                 reconnect_attempts = 1;
-                                tokio::time::sleep(Duration::from_millis(500)).await;
                                 continue 'outer;
                             }
                             Ok(_) => {
@@ -917,6 +964,7 @@ impl ClientApp {
                 session_id,
                 provider_name,
                 provider_model,
+                was_interrupted,
                 ..
             } => {
                 if let Some(name) = provider_name {
@@ -970,6 +1018,23 @@ impl ClientApp {
                             tool_data: None,
                         });
                     }
+                }
+
+                if was_interrupted == Some(true) && !self.display_messages.is_empty() {
+                    crate::logging::info(
+                        "Session was interrupted mid-generation, queuing continuation",
+                    );
+                    self.push_display_message(DisplayMessage::system(
+                        "⚡ Session was interrupted mid-generation. Continuing...".to_string(),
+                    ));
+                    self.queued_messages.push(
+                        "[SYSTEM: Your session was interrupted by a server reload while you were working. \
+                         The session has been restored. Any tool that was running was aborted and its results \
+                         may be incomplete. Please continue exactly where you left off. \
+                         Look at the conversation history to understand what you were doing and resume immediately. \
+                         Do NOT ask the user what to do - just continue your work.]"
+                            .to_string(),
+                    );
                 }
             }
             ServerEvent::ModelChanged {

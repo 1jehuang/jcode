@@ -4546,9 +4546,23 @@ impl App {
                         match event {
                             None => {
                                 self.rate_limit_pending_message = None;
-                                self.is_processing = false;
                                 self.current_message_id = None;
                                 self.last_stream_activity = None;
+                                if let Some(chunk) = self.stream_buffer.flush() {
+                                    self.streaming_text.push_str(&chunk);
+                                }
+                                if !self.streaming_text.is_empty() {
+                                    let content = self.take_streaming_text();
+                                    self.push_display_message(DisplayMessage {
+                                        role: "assistant".to_string(),
+                                        content,
+                                        tool_calls: vec![],
+                                        duration_secs: None,
+                                        title: None,
+                                        tool_data: None,
+                                    });
+                                }
+                                self.is_processing = false;
                                 disconnect_start = Some(std::time::Instant::now());
                                 self.push_display_message(DisplayMessage {
                                     role: "system".to_string(),
@@ -4561,10 +4575,6 @@ impl App {
                                 disconnect_msg_idx = Some(self.display_messages.len() - 1);
                                 terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
                                 reconnect_attempts = 1;
-                                // Try reconnecting immediately - the new server
-                                // may already be listening (exec + bind takes ~90ms,
-                                // and there's inherent delay from EOF detection).
-                                // If it's not ready yet, the fast retry (100ms) handles it.
                                 continue 'outer;
                             }
                             Some(server_event) => {
