@@ -145,6 +145,11 @@ pub enum Request {
     #[serde(rename = "notify_auth_changed")]
     NotifyAuthChanged { id: u64 },
 
+    /// Switch active Anthropic account label on the server session.
+    /// This keeps account overrides and provider credential caches in sync.
+    #[serde(rename = "switch_anthropic_account")]
+    SwitchAnthropicAccount { id: u64, label: String },
+
     /// Send stdin input to a running command that requested it
     #[serde(rename = "stdin_response")]
     StdinResponse {
@@ -787,6 +792,7 @@ impl Request {
             Request::Split { id } => *id,
             Request::Compact { id } => *id,
             Request::NotifyAuthChanged { id } => *id,
+            Request::SwitchAnthropicAccount { id, .. } => *id,
             Request::StdinResponse { id, .. } => *id,
             Request::AgentRegister { id, .. } => *id,
             Request::AgentTask { id, .. } => *id,

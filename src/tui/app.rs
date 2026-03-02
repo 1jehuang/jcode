@@ -6201,6 +6201,52 @@ impl App {
                         return Ok(());
                     }
 
+                    if trimmed == "/account" || trimmed == "/accounts" {
+                        self.input = trimmed.to_string();
+                        self.cursor_pos = self.input.len();
+                        self.submit_input();
+                        return Ok(());
+                    }
+
+                    if let Some(sub) = trimmed.strip_prefix("/account ") {
+                        let parts: Vec<&str> = sub.trim().splitn(2, ' ').collect();
+                        if matches!(parts[0], "switch" | "use") {
+                            if let Some(label) = parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                                // Validate and persist locally first.
+                                if let Err(e) = crate::auth::claude::set_active_account(label) {
+                                    self.push_display_message(DisplayMessage::error(format!(
+                                        "Failed to switch account: {}",
+                                        e
+                                    )));
+                                    return Ok(());
+                                }
+                                // Keep account-sensitive UI state in sync immediately.
+                                crate::auth::AuthStatus::invalidate_cache();
+                                self.context_limit = self.provider.context_window() as u64;
+                                self.context_warning_shown = false;
+                                // Then tell the remote server to switch the Anthropic account used
+                                // by provider requests in that process.
+                                remote.switch_anthropic_account(label).await?;
+                                self.push_display_message(DisplayMessage::system(format!(
+                                    "Switched to Anthropic account `{}`.",
+                                    label
+                                )));
+                                self.set_status_notice(&format!("Account: switched to {}", label));
+                                return Ok(());
+                            }
+                            self.push_display_message(DisplayMessage::error(
+                                "Usage: `/account switch <label>`".to_string(),
+                            ));
+                            return Ok(());
+                        }
+
+                        // Other account subcommands remain local UI/auth helpers.
+                        self.input = trimmed.to_string();
+                        self.cursor_pos = self.input.len();
+                        self.submit_input();
+                        return Ok(());
+                    }
+
                     if trimmed == "/memory status" {
                         let default_enabled = crate::config::config().features.memory;
                         self.push_display_message(DisplayMessage::system(format!(
@@ -9362,7 +9408,10 @@ impl App {
                             "📦 **Emergency compaction** — context critically full, dropped {} old messages to fit.",
                             dropped,
                         )));
-                        self.set_status_notice(format!("Emergency compaction: {} msgs dropped", dropped));
+                        self.set_status_notice(format!(
+                            "Emergency compaction: {} msgs dropped",
+                            dropped
+                        ));
                     }
                     crate::compaction::CompactionAction::None => {}
                 }
@@ -9807,6 +9856,10 @@ impl App {
                     "Switched to Anthropic account `{}`.",
                     label
                 )));
+                // Keep account-sensitive UI state in sync immediately.
+                crate::auth::AuthStatus::invalidate_cache();
+                self.context_limit = self.provider.context_window() as u64;
+                self.context_warning_shown = false;
             }
             Err(e) => {
                 self.push_display_message(DisplayMessage::error(format!(
@@ -11912,8 +11965,10 @@ impl App {
                         let tokens_str = pre_tokens
                             .map(|t| format!(" (was {} tokens)", t))
                             .unwrap_or_default();
-                        let compact_msg =
-                            format!("📦 **Compaction complete** — context summarized ({}){}\n\n", trigger, tokens_str);
+                        let compact_msg = format!(
+                            "📦 **Compaction complete** — context summarized ({}){}\n\n",
+                            trigger, tokens_str
+                        );
                         self.streaming_text.push_str(&compact_msg);
                         // Reset warning so it can appear again
                         self.context_warning_shown = false;

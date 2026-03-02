@@ -632,6 +632,20 @@ pub fn clear_provider_unavailable_for_account(provider: &str) {
     }
 }
 
+/// Clear all runtime model unavailability markers.
+pub fn clear_all_model_unavailability_for_account() {
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_MODELS.write() {
+        unavailable.clear();
+    }
+}
+
+/// Clear all runtime provider unavailability markers.
+pub fn clear_all_provider_unavailability_for_account() {
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
+        unavailable.clear();
+    }
+}
+
 pub fn provider_unavailability_detail_for_account(provider: &str) -> Option<String> {
     let entry = runtime_provider_unavailability(provider)?;
 
@@ -1420,8 +1434,8 @@ impl MultiProvider {
             return;
         }
 
-        let current_label = crate::auth::claude::active_account_label()
-            .unwrap_or_else(|| "default".to_string());
+        let current_label =
+            crate::auth::claude::active_account_label().unwrap_or_else(|| "default".to_string());
 
         crate::logging::info(&format!(
             "Anthropic account '{}' is exhausted (5h: {:.0}%, 7d: {:.0}%), checking other accounts...",
@@ -1435,9 +1449,11 @@ impl MultiProvider {
                 continue;
             }
 
-            if let Ok(other_usage) =
-                crate::usage::fetch_usage_for_account_sync(&account.access, &account.refresh, account.expires)
-            {
+            if let Ok(other_usage) = crate::usage::fetch_usage_for_account_sync(
+                &account.access,
+                &account.refresh,
+                account.expires,
+            ) {
                 let other_exhausted =
                     other_usage.five_hour >= 0.99 && other_usage.seven_day >= 0.99;
                 if !other_exhausted {
@@ -1447,9 +1463,7 @@ impl MultiProvider {
                         other_usage.five_hour * 100.0,
                         other_usage.seven_day * 100.0,
                     ));
-                    crate::auth::claude::set_active_account_override(Some(
-                        account.label.clone(),
-                    ));
+                    crate::auth::claude::set_active_account_override(Some(account.label.clone()));
                     if let Some(ref anthropic) = self.anthropic {
                         let _ = tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current()
@@ -2104,6 +2118,12 @@ impl Provider for MultiProvider {
                     }
                 }
             }
+        }
+    }
+
+    async fn invalidate_credentials(&self) {
+        if let Some(ref anthropic) = self.anthropic {
+            anthropic.invalidate_credentials().await;
         }
     }
 

@@ -2728,6 +2728,48 @@ async fn handle_client(
                 let _ = client_event_tx.send(ServerEvent::Done { id });
             }
 
+            Request::SwitchAnthropicAccount { id, label } => {
+                // Apply account selection in server process so Anthropic provider
+                // resolves credentials from the intended account.
+                match crate::auth::claude::set_active_account(&label) {
+                    Ok(()) => {
+                        crate::auth::AuthStatus::invalidate_cache();
+
+                        // Clear cached Anthropic credentials in this session's provider.
+                        {
+                            let agent_guard = agent.lock().await;
+                            let provider = agent_guard.provider_handle();
+                            drop(agent_guard);
+                            provider.invalidate_credentials().await;
+                        }
+
+                        // Clear provider-side account/runtime availability caches.
+                        crate::provider::clear_all_provider_unavailability_for_account();
+                        crate::provider::clear_all_model_unavailability_for_account();
+
+                        // Reset provider resume id so next turn starts clean on new account.
+                        {
+                            let mut agent_guard = agent.lock().await;
+                            agent_guard.reset_provider_session();
+                        }
+
+                        // Refresh local usage snapshot asynchronously for the new active account.
+                        tokio::spawn(async {
+                            let _ = crate::usage::get().await;
+                        });
+
+                        let _ = client_event_tx.send(ServerEvent::Done { id });
+                    }
+                    Err(e) => {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: format!("Failed to switch Anthropic account: {}", e),
+                            retry_after_secs: None,
+                        });
+                    }
+                }
+            }
+
             Request::SetFeature {
                 id,
                 feature,

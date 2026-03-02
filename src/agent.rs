@@ -1010,6 +1010,10 @@ impl Agent {
         self.provider.fork()
     }
 
+    pub fn provider_handle(&self) -> Arc<dyn Provider> {
+        Arc::clone(&self.provider)
+    }
+
     pub fn available_models(&self) -> Vec<&'static str> {
         self.provider.available_models()
     }

@@ -1080,8 +1080,7 @@ impl ClientApp {
                     "📦 **Compaction complete** — context summarized ({}){}{}",
                     trigger, tokens_str, dropped_str
                 )));
-                self.status_notice =
-                    Some(("📦 Context compacted".to_string(), Instant::now()));
+                self.status_notice = Some(("📦 Context compacted".to_string(), Instant::now()));
             }
             _ => {}
         }

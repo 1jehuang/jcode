@@ -467,6 +467,17 @@ impl RemoteConnection {
         self.send_request(Request::NotifyAuthChanged { id }).await
     }
 
+    /// Ask server to switch active Anthropic account for this process/session.
+    pub async fn switch_anthropic_account(&mut self, label: &str) -> Result<()> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::SwitchAnthropicAccount {
+            id,
+            label: label.to_string(),
+        })
+        .await
+    }
+
     /// Send a response for a client debug request
     pub async fn send_client_debug_response(&mut self, id: u64, output: String) -> Result<()> {
         self.send_request(Request::ClientDebugResponse { id, output })

@@ -91,8 +91,7 @@ fn install_panic_hook() {
 
         // Print recovery command if we have a session
         if let Some(session_id) = get_current_session() {
-            let session_name =
-                id::extract_session_name(&session_id).unwrap_or(session_id.as_str());
+            let session_name = id::extract_session_name(&session_id).unwrap_or(session_id.as_str());
             eprintln!();
             eprintln!(
                 "\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m",
