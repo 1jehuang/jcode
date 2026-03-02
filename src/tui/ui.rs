@@ -4936,6 +4936,62 @@ fn draw_messages(
         frame.render_widget(indicator_widget, indicator_area);
     }
 
+    // Previous prompt preview at top when the last user prompt has scrolled out of view
+    if crate::config::config().display.prompt_preview && scroll > 0 {
+        // Find the last user prompt that started before the viewport
+        let last_offscreen_prompt_idx = wrapped_user_prompt_starts
+            .iter()
+            .rposition(|&start| start < scroll);
+
+        if let Some(prompt_order) = last_offscreen_prompt_idx {
+            // Get the original prompt text from display messages
+            let user_messages: Vec<&str> = app
+                .display_messages()
+                .iter()
+                .filter(|m| m.role == "user")
+                .map(|m| m.content.as_str())
+                .collect();
+
+            if let Some(prompt_text) = user_messages.get(prompt_order) {
+                let prompt_text = prompt_text.trim();
+                if !prompt_text.is_empty() {
+                    let avail_width = area.width.saturating_sub(4) as usize; // 2 for "> ", 2 for margin
+                    let preview = truncate_middle(prompt_text, avail_width);
+                    let preview_line = Line::from(vec![
+                        Span::styled("› ", Style::default().fg(USER_COLOR).dim()),
+                        Span::styled(preview, Style::default().fg(USER_TEXT).dim()),
+                    ]);
+                    let preview_area = Rect {
+                        x: area.x,
+                        y: area.y,
+                        width: area.width.saturating_sub(1),
+                        height: 1,
+                    };
+                    frame.render_widget(Clear, preview_area);
+                    frame.render_widget(
+                        Paragraph::new(preview_line),
+                        preview_area,
+                    );
+                    // Dim separator dots below the preview
+                    let sep_area = Rect {
+                        x: area.x,
+                        y: area.y + 1,
+                        width: area.width.saturating_sub(1),
+                        height: 1,
+                    };
+                    frame.render_widget(Clear, sep_area);
+                    frame.render_widget(
+                        Paragraph::new(Line::from(Span::styled(
+                            "╌╌╌",
+                            Style::default().fg(DIM_COLOR),
+                        ))),
+                        sep_area,
+                    );
+                }
+            }
+        }
+    }
+
     // Content below indicator (bottom-right) when user has scrolled up
     if app.auto_scroll_paused() && scroll < max_scroll {
         let indicator = format!("↓{}", max_scroll - scroll);
@@ -4953,6 +5009,27 @@ fn draw_messages(
     }
 
     margins
+}
+
+/// Truncate text to `max_width`, showing the beginning and end with "..." in the middle.
+/// If the text fits, returns it unchanged.
+fn truncate_middle(text: &str, max_width: usize) -> String {
+    let text = text.replace('\n', " ");
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_width {
+        return text;
+    }
+    if max_width <= 5 {
+        return chars[..max_width].iter().collect();
+    }
+    let ellipsis = " ... ";
+    let ellipsis_len = ellipsis.len();
+    let remaining = max_width.saturating_sub(ellipsis_len);
+    let head = remaining * 2 / 3;
+    let tail = remaining - head;
+    let head_str: String = chars[..head].iter().collect();
+    let tail_str: String = chars[chars.len() - tail..].iter().collect();
+    format!("{}{}{}", head_str, ellipsis, tail_str)
 }
 
 /// Format elapsed time in a human-readable way
