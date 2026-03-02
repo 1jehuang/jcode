@@ -194,6 +194,12 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Drain any startup notices (e.g., account auto-switch messages).
+    /// Returns an empty vec by default. MultiProvider overrides this.
+    fn drain_startup_notices(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Simple completion that returns text directly (no streaming).
     /// Useful for internal tasks like compaction summaries.
     /// Default implementation uses complete() and collects the response.
@@ -896,6 +902,9 @@ pub struct MultiProvider {
     has_openrouter_creds: bool,
     /// Use Claude CLI instead of direct API (legacy mode)
     use_claude_cli: bool,
+    /// Notifications generated during provider/account auto-selection.
+    /// The TUI should drain and display these on session start.
+    startup_notices: RwLock<Vec<String>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -941,6 +950,9 @@ impl MultiProvider {
     fn provider_precheck_unavailable_reason(&self, provider: ActiveProvider) -> Option<String> {
         match provider {
             ActiveProvider::Claude if self.is_claude_usage_exhausted() => {
+                Some("OAuth usage exhausted".to_string())
+            }
+            ActiveProvider::OpenAI if self.is_openai_usage_exhausted() => {
                 Some("OAuth usage exhausted".to_string())
             }
             _ => None,
@@ -1272,7 +1284,18 @@ impl MultiProvider {
         };
 
         // Default to OAuth/CLI providers first. Keep direct API (OpenRouter) lowest.
-        let mut active = if claude.is_some() || anthropic.is_some() {
+        // When Copilot premium mode is Zero (free requests), prefer Copilot over
+        // paid OAuth providers so we don't spend money unnecessarily.
+        let copilot_premium_zero = matches!(
+            std::env::var("JCODE_COPILOT_PREMIUM").ok().as_deref(),
+            Some("0")
+        );
+        let mut active = if copilot_premium_zero && copilot_api.is_some() {
+            crate::logging::info(
+                "Copilot premium mode is Zero (free requests) - defaulting to Copilot provider",
+            );
+            ActiveProvider::Copilot
+        } else if claude.is_some() || anthropic.is_some() {
             ActiveProvider::Claude
         } else if openai.is_some() {
             ActiveProvider::OpenAI
@@ -1334,6 +1357,7 @@ impl MultiProvider {
             has_openai_creds,
             has_openrouter_creds,
             use_claude_cli,
+            startup_notices: RwLock::new(Vec::new()),
         };
 
         // Apply configured default_model from config/env
@@ -1351,6 +1375,9 @@ impl MultiProvider {
         // Prime OpenAI model/account availability in the background.
         result.spawn_openai_catalog_refresh_if_needed();
 
+        // Try to auto-rotate Anthropic accounts if current one is exhausted.
+        result.auto_select_anthropic_account();
+
         result
     }
 
@@ -1365,6 +1392,92 @@ impl MultiProvider {
 
     fn active_provider(&self) -> ActiveProvider {
         *self.active.read().unwrap()
+    }
+
+    /// Try to select a non-exhausted Anthropic account for this session.
+    /// Called at session start. Uses cached usage data - if no data is available yet,
+    /// does nothing (the per-request fallback handles it later).
+    /// Only rotates between Anthropic OAuth accounts, never switches to API billing.
+    pub fn auto_select_anthropic_account(&self) {
+        if self.active_provider() != ActiveProvider::Claude {
+            return;
+        }
+        if self.anthropic.is_none() && self.claude.is_none() {
+            return;
+        }
+
+        let accounts = match crate::auth::claude::list_accounts() {
+            Ok(a) if a.len() > 1 => a,
+            _ => return,
+        };
+
+        let usage = crate::usage::get_sync();
+        let is_exhausted = usage.five_hour >= 0.99 && usage.seven_day >= 0.99;
+        if !is_exhausted {
+            return;
+        }
+        if usage.fetched_at.is_none() {
+            return;
+        }
+
+        let current_label = crate::auth::claude::active_account_label()
+            .unwrap_or_else(|| "default".to_string());
+
+        crate::logging::info(&format!(
+            "Anthropic account '{}' is exhausted (5h: {:.0}%, 7d: {:.0}%), checking other accounts...",
+            current_label,
+            usage.five_hour * 100.0,
+            usage.seven_day * 100.0,
+        ));
+
+        for account in &accounts {
+            if account.label == current_label {
+                continue;
+            }
+
+            if let Ok(other_usage) =
+                crate::usage::fetch_usage_for_account_sync(&account.access, &account.refresh, account.expires)
+            {
+                let other_exhausted =
+                    other_usage.five_hour >= 0.99 && other_usage.seven_day >= 0.99;
+                if !other_exhausted {
+                    crate::logging::info(&format!(
+                        "Switching to Anthropic account '{}' (5h: {:.0}%, 7d: {:.0}%)",
+                        account.label,
+                        other_usage.five_hour * 100.0,
+                        other_usage.seven_day * 100.0,
+                    ));
+                    crate::auth::claude::set_active_account_override(Some(
+                        account.label.clone(),
+                    ));
+                    if let Some(ref anthropic) = self.anthropic {
+                        let _ = tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current()
+                                .block_on(anthropic.invalidate_credentials())
+                        });
+                    }
+                    let notice = format!(
+                        "⚡ Auto-switched Anthropic account: **{}** -> **{}** (previous account exhausted)",
+                        current_label, account.label
+                    );
+                    self.startup_notices.write().unwrap().push(notice);
+                    return;
+                } else {
+                    crate::logging::info(&format!(
+                        "Anthropic account '{}' also exhausted (5h: {:.0}%, 7d: {:.0}%)",
+                        account.label,
+                        other_usage.five_hour * 100.0,
+                        other_usage.seven_day * 100.0,
+                    ));
+                }
+            }
+        }
+
+        crate::logging::info("All Anthropic accounts are exhausted");
+        let notice =
+            "⚠ All Anthropic accounts exhausted - will fall back to other providers if available"
+                .to_string();
+        self.startup_notices.write().unwrap().push(notice);
     }
 }
 
@@ -1386,6 +1499,30 @@ impl MultiProvider {
         // Consider exhausted if both windows are at 99% or higher
         // (give a small buffer for rounding/display issues)
         usage.five_hour >= 0.99 && usage.seven_day >= 0.99
+    }
+
+    fn is_openai_usage_exhausted(&self) -> bool {
+        if self.openai.is_none() {
+            return false;
+        }
+
+        let usage = crate::usage::get_openai_usage_sync();
+        if !usage.has_limits() {
+            return false;
+        }
+
+        let five_hour_exhausted = usage
+            .five_hour
+            .as_ref()
+            .map(|w| w.usage_ratio >= 0.99)
+            .unwrap_or(false);
+        let seven_day_exhausted = usage
+            .seven_day
+            .as_ref()
+            .map(|w| w.usage_ratio >= 0.99)
+            .unwrap_or(false);
+
+        five_hour_exhausted || seven_day_exhausted
     }
 }
 
@@ -2079,6 +2216,10 @@ impl Provider for MultiProvider {
         }
     }
 
+    fn drain_startup_notices(&self) -> Vec<String> {
+        std::mem::take(&mut *self.startup_notices.write().unwrap())
+    }
+
     fn context_window(&self) -> usize {
         match self.active_provider() {
             ActiveProvider::Claude => {
@@ -2149,6 +2290,7 @@ impl Provider for MultiProvider {
             has_openai_creds: self.has_openai_creds,
             has_openrouter_creds: self.has_openrouter_creds,
             use_claude_cli: self.use_claude_cli,
+            startup_notices: RwLock::new(Vec::new()),
         };
 
         provider.spawn_openai_catalog_refresh_if_needed();

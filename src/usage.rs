@@ -1317,6 +1317,86 @@ pub fn has_extra_usage() -> bool {
     false
 }
 
+/// Fetch usage data for a specific Anthropic account token (blocking).
+/// Used for account rotation - checks if a particular account is exhausted.
+/// Returns an error if the fetch fails (network, auth, etc.).
+pub fn fetch_usage_for_account_sync(
+    access_token: &str,
+    refresh_token: &str,
+    expires_at: i64,
+) -> Result<UsageData> {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(fetch_usage_for_account(
+            access_token.to_string(),
+            refresh_token.to_string(),
+            expires_at,
+        ))
+    })
+}
+
+async fn fetch_usage_for_account(
+    access_token: String,
+    _refresh_token: String,
+    expires_at: i64,
+) -> Result<UsageData> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if expires_at < now_ms {
+        anyhow::bail!("OAuth token expired");
+    }
+
+    let client = crate::provider::shared_http_client();
+    let response = client
+        .get(USAGE_URL)
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .header("User-Agent", "claude-cli/1.0.0")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("anthropic-beta", "oauth-2025-04-20,claude-code-20250219")
+        .send()
+        .await
+        .context("Failed to fetch usage data")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_default();
+        anyhow::bail!("Usage API error ({}): {}", status, error_text);
+    }
+
+    let data: UsageResponse = response
+        .json()
+        .await
+        .context("Failed to parse usage response")?;
+
+    Ok(UsageData {
+        five_hour: data
+            .five_hour
+            .as_ref()
+            .and_then(|w| w.utilization)
+            .map(|u| u / 100.0)
+            .unwrap_or(0.0),
+        five_hour_resets_at: data.five_hour.as_ref().and_then(|w| w.resets_at.clone()),
+        seven_day: data
+            .seven_day
+            .as_ref()
+            .and_then(|w| w.utilization)
+            .map(|u| u / 100.0)
+            .unwrap_or(0.0),
+        seven_day_resets_at: data.seven_day.as_ref().and_then(|w| w.resets_at.clone()),
+        seven_day_opus: data
+            .seven_day_opus
+            .as_ref()
+            .and_then(|w| w.utilization)
+            .map(|u| u / 100.0),
+        extra_usage_enabled: data
+            .extra_usage
+            .as_ref()
+            .and_then(|e| e.is_enabled)
+            .unwrap_or(false),
+        fetched_at: Some(std::time::Instant::now()),
+        last_error: None,
+    })
+}
+
 /// Get usage data synchronously (returns cached data, triggers refresh if stale)
 pub fn get_sync() -> UsageData {
     // Try to get cached data
