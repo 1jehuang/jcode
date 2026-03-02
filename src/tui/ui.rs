@@ -3872,6 +3872,80 @@ pub(crate) fn render_tool_message(
         return lines;
     }
 
+    // Special rendering for memory recall actions
+    if is_memory_recall_tool(tc) && !msg.content.starts_with("Error:") {
+        let query = tc
+            .input
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("recent");
+        let border_style = Style::default().fg(Color::Rgb(150, 180, 255));
+        let text_style = Style::default().fg(DIM_COLOR);
+        let max_box = (width.saturating_sub(4) as usize).min(72);
+        let inner_width = max_box.saturating_sub(4);
+
+        // Parse recall output into memory entries
+        let mut box_content: Vec<Line<'static>> = Vec::new();
+        let mut count = 0usize;
+        for line in msg.content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("- [") {
+                count += 1;
+                // Extract category and content: "- [fact] some content [tags]"
+                if let Some(rest) = trimmed.strip_prefix("- [") {
+                    if let Some(bracket_end) = rest.find(']') {
+                        let cat = &rest[..bracket_end];
+                        let content = rest[bracket_end + 1..].trim();
+                        // Strip trailing tag brackets if present
+                        let content = if let Some(tag_start) = content.rfind(" [") {
+                            content[..tag_start].trim()
+                        } else {
+                            content
+                        };
+                        let cat_style = Style::default().fg(Color::Rgb(150, 180, 255));
+                        let chars: Vec<char> = content.chars().collect();
+                        let cat_prefix = format!("[{}] ", cat);
+                        let available = inner_width.saturating_sub(cat_prefix.len());
+                        if chars.len() <= available {
+                            box_content.push(Line::from(vec![
+                                Span::styled(cat_prefix, cat_style),
+                                Span::styled(content.to_string(), text_style),
+                            ]));
+                        } else {
+                            // First line with category prefix
+                            let first_chunk: String = chars[..available].iter().collect();
+                            box_content.push(Line::from(vec![
+                                Span::styled(cat_prefix.clone(), cat_style),
+                                Span::styled(first_chunk, text_style),
+                            ]));
+                            // Continuation lines
+                            let indent = cat_prefix.len();
+                            let mut pos = available;
+                            while pos < chars.len() {
+                                let end = (pos + inner_width.saturating_sub(indent)).min(chars.len());
+                                let chunk: String = chars[pos..end].iter().collect();
+                                box_content.push(Line::from(vec![
+                                    Span::raw(" ".repeat(indent)),
+                                    Span::styled(chunk, text_style),
+                                ]));
+                                pos = end;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if count > 0 {
+            let title = format!("🧠 recalled {} memor{}", count, if count == 1 { "y" } else { "ies" });
+            let box_lines = render_rounded_box(&title, box_content, max_box, border_style);
+            for line in box_lines {
+                lines.push(line);
+            }
+            return lines;
+        }
+    }
+
     let summary = get_tool_summary(tc);
 
     // Determine status: error if content starts with error prefix
@@ -7823,6 +7897,22 @@ fn is_memory_store_tool(tc: &ToolCall) -> bool {
             .get("action")
             .and_then(|v| v.as_str())
             .map_or(true, |a| a == "store"),
+        _ => false,
+    }
+}
+
+fn is_memory_recall_tool(tc: &ToolCall) -> bool {
+    match tc.name.as_str() {
+        "memory" => tc
+            .input
+            .get("action")
+            .and_then(|v| v.as_str())
+            .is_some_and(|a| a == "recall"),
+        "remember" => tc
+            .input
+            .get("action")
+            .and_then(|v| v.as_str())
+            .is_some_and(|a| a == "search"),
         _ => false,
     }
 }
