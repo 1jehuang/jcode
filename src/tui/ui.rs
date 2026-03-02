@@ -3706,12 +3706,12 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 }
             }
             "memory" => {
-                let title = msg.title.as_deref().unwrap_or("🧠 recalled");
+                let title = msg.title.as_deref().unwrap_or("🧠 auto-recalled");
                 let max_box = (width.saturating_sub(4) as usize).min(72);
                 let inner_width = max_box.saturating_sub(4);
-                let border_style = Style::default().fg(Color::Rgb(150, 180, 255));
+                let border_style = Style::default().fg(Color::Rgb(130, 140, 180));
                 let text_style = Style::default().fg(DIM_COLOR);
-                let cat_style = Style::default().fg(Color::Rgb(150, 180, 255));
+                let cat_style = Style::default().fg(Color::Rgb(130, 140, 180));
 
                 let mut box_content: Vec<Line<'static>> = Vec::new();
                 let mut current_category = String::new();

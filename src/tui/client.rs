@@ -638,7 +638,18 @@ impl ClientApp {
                                         tool_data: None,
                                     });
                                 }
+                                self.streaming_md_renderer.borrow_mut().reset();
+                                crate::tui::mermaid::clear_streaming_preview_diagram();
+                                self.streaming_tool_calls.clear();
+                                self.current_tool_id = None;
+                                self.current_tool_name = None;
+                                self.current_tool_input.clear();
+                                self.pending_diffs.clear();
+                                self.streaming_tps_start = None;
+                                self.streaming_tps_elapsed = Duration::ZERO;
+                                self.call_output_tokens_seen = 0;
                                 self.is_processing = false;
+                                self.status = ProcessingStatus::Idle;
                                 disconnect_start = Some(std::time::Instant::now());
                                 self.push_display_message(DisplayMessage {
                                     role: "system".to_string(),
@@ -1108,7 +1119,7 @@ impl ClientApp {
             ServerEvent::MemoryInjected {
                 count,
                 prompt,
-                prompt_chars,
+                prompt_chars: _,
                 computed_age_ms,
             } => {
                 let plural = if count == 1 { "memory" } else { "memories" };
@@ -1117,16 +1128,13 @@ impl ClientApp {
                 } else {
                     prompt.clone()
                 };
-                let display_chars = if prompt_chars == 0 {
-                    display_prompt.chars().count()
-                } else {
-                    prompt_chars
-                };
                 crate::memory::record_injected_prompt(&display_prompt, count, computed_age_ms);
-                self.push_display_message(DisplayMessage::system(format!(
-                    "🧠 Injected {} {} into context ({} chars, computed {}ms ago)\n\n---\n\n{}",
-                    count, plural, display_chars, computed_age_ms, display_prompt
-                )));
+                let summary = if count == 1 {
+                    "🧠 auto-recalled 1 memory".to_string()
+                } else {
+                    format!("🧠 auto-recalled {} memories", count)
+                };
+                self.push_display_message(DisplayMessage::memory(summary, display_prompt));
                 self.status_notice =
                     Some((format!("🧠 {} {} injected", count, plural), Instant::now()));
             }

@@ -4569,7 +4569,15 @@ impl App {
                                         tool_data: None,
                                     });
                                 }
+                                self.clear_streaming_render_state();
+                                self.streaming_tool_calls.clear();
+                                self.thought_line_inserted = false;
+                                self.thinking_prefix_emitted = false;
+                                self.thinking_buffer.clear();
+                                self.streaming_tps_start = None;
+                                self.streaming_tps_elapsed = Duration::ZERO;
                                 self.is_processing = false;
+                                self.status = ProcessingStatus::Idle;
                                 disconnect_start = Some(std::time::Instant::now());
                                 self.push_display_message(DisplayMessage {
                                     role: "system".to_string(),
@@ -5651,7 +5659,7 @@ impl App {
             ServerEvent::MemoryInjected {
                 count,
                 prompt,
-                prompt_chars,
+                prompt_chars: _,
                 computed_age_ms,
             } => {
                 if self.memory_enabled {
@@ -5662,16 +5670,13 @@ impl App {
                     } else {
                         prompt.clone()
                     };
-                    let display_chars = if prompt_chars == 0 {
-                        display_prompt.chars().count()
-                    } else {
-                        prompt_chars
-                    };
                     crate::memory::record_injected_prompt(&display_prompt, count, computed_age_ms);
-                    self.push_display_message(DisplayMessage::system(format!(
-                        "🧠 Injected {} {} into context ({} chars, computed {}ms ago)\n\n---\n\n{}",
-                        count, plural, display_chars, computed_age_ms, display_prompt
-                    )));
+                    let summary = if count == 1 {
+                        "🧠 auto-recalled 1 memory".to_string()
+                    } else {
+                        format!("🧠 auto-recalled {} memories", count)
+                    };
+                    self.push_display_message(DisplayMessage::memory(summary, display_prompt));
                     self.set_status_notice(format!("🧠 {} relevant {} injected", count, plural));
                 }
                 false
@@ -13294,12 +13299,11 @@ impl App {
         if !self.should_inject_memory_context(&display_prompt) {
             return;
         }
-        let prompt_chars = display_prompt.chars().count();
         crate::memory::record_injected_prompt(&display_prompt, count, age_ms);
         let summary = if count == 1 {
-            "🧠 recalled 1 thing".to_string()
+            "🧠 auto-recalled 1 memory".to_string()
         } else {
-            format!("🧠 recalled {} things", count)
+            format!("🧠 auto-recalled {} memories", count)
         };
         self.push_display_message(DisplayMessage::memory(summary, display_prompt));
         self.set_status_notice(format!("🧠 {} {} injected", count, plural));
@@ -14162,6 +14166,7 @@ impl App {
     fn scroll_to_recent_prompt_rank(&mut self, rank: usize) {
         let rank = rank.max(1);
         let positions = super::ui::last_user_prompt_positions();
+        let max_scroll = super::ui::last_max_scroll();
 
         if positions.is_empty() {
             return;
@@ -14169,7 +14174,12 @@ impl App {
 
         // positions are in document order (top to bottom), we want most-recent first
         let target_idx = positions.len().saturating_sub(rank);
-        self.scroll_offset = positions[target_idx];
+        let target_line = positions[target_idx];
+        self.set_status_notice(format!(
+            "Ctrl+{}: idx={}/{} line={} max={}",
+            rank, target_idx, positions.len(), target_line, max_scroll
+        ));
+        self.scroll_offset = target_line;
         self.auto_scroll_paused = true;
     }
 
