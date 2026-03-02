@@ -22,6 +22,7 @@ mod ambient_scheduler;
 mod auth;
 mod background;
 mod build;
+mod browser;
 mod bus;
 mod cache_tracker;
 mod channel;
@@ -439,6 +440,13 @@ enum Command {
     /// Set up a global hotkey (Alt+;) to launch jcode (Windows)
     SetupHotkey,
 
+    /// Firefox Agent Bridge - browser automation setup and management
+    Browser {
+        /// Subcommand (setup, status)
+        #[arg(default_value = "setup")]
+        action: String,
+    },
+
     /// Replay a saved session in the TUI
     Replay {
         /// Session ID, name, or path to session JSON file
@@ -754,6 +762,25 @@ async fn run_main(mut args: Args) -> Result<()> {
         }
         Some(Command::SetupHotkey) => {
             setup_hints::run_setup_hotkey()?;
+        }
+        Some(Command::Browser { action }) => {
+            let rt = tokio::runtime::Runtime::new()?;
+            match action.as_str() {
+                "setup" => rt.block_on(browser::run_setup_command())?,
+                "status" => {
+                    if browser::is_setup_complete() {
+                        println!("Browser bridge: installed and ready");
+                    } else {
+                        println!("Browser bridge: not set up");
+                        println!("Run `jcode browser setup` to install");
+                    }
+                }
+                other => {
+                    eprintln!("Unknown browser action: {}", other);
+                    eprintln!("Available: setup, status");
+                    std::process::exit(1);
+                }
+            }
         }
         Some(Command::Replay {
             session,

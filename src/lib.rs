@@ -5,6 +5,7 @@ pub mod ambient_scheduler;
 pub mod auth;
 pub mod background;
 pub mod build;
+pub mod browser;
 pub mod bus;
 pub mod cache_tracker;
 pub mod channel;

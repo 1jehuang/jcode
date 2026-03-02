@@ -108,24 +108,29 @@ impl Tool for WebSearchTool {
     }
 }
 
+mod search_regex {
+    use regex::Regex;
+    use std::sync::OnceLock;
+
+    macro_rules! static_regex {
+        ($name:ident, $pat:expr) => {
+            pub fn $name() -> &'static Regex {
+                static RE: OnceLock<Regex> = OnceLock::new();
+                RE.get_or_init(|| Regex::new($pat).unwrap())
+            }
+        };
+    }
+
+    static_regex!(result_link, r#"<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>"#);
+    static_regex!(result_snippet, r#"<a[^>]*class="result__snippet"[^>]*>([^<]*(?:<[^>]*>[^<]*)*)</a>"#);
+    static_regex!(tag, r"<[^>]+>");
+}
+
 fn parse_ddg_results(html: &str, max_results: usize) -> Vec<SearchResult> {
     let mut results = Vec::new();
 
-    // DuckDuckGo HTML results are in <div class="result"> elements
-    // Each contains <a class="result__a"> for title/URL and <a class="result__snippet"> for snippet
-
-    // Simple regex-based parsing (not as robust as a proper HTML parser, but works for DDG)
-    let result_re =
-        regex::Regex::new(r#"<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>"#)
-            .unwrap();
-
-    let snippet_re =
-        regex::Regex::new(r#"<a[^>]*class="result__snippet"[^>]*>([^<]*(?:<[^>]*>[^<]*)*)</a>"#)
-            .unwrap();
-
-    // Find all result links
-    let links: Vec<_> = result_re.captures_iter(html).collect();
-    let snippets: Vec<_> = snippet_re.captures_iter(html).collect();
+    let links: Vec<_> = search_regex::result_link().captures_iter(html).collect();
+    let snippets: Vec<_> = search_regex::result_snippet().captures_iter(html).collect();
 
     for (i, link_cap) in links.iter().enumerate() {
         if results.len() >= max_results {
@@ -135,16 +140,13 @@ fn parse_ddg_results(html: &str, max_results: usize) -> Vec<SearchResult> {
         let url = decode_ddg_url(&link_cap[1]);
         let title = html_decode(&link_cap[2]);
 
-        // Skip ads and non-http results
         if !url.starts_with("http") || url.contains("duckduckgo.com") {
             continue;
         }
 
         let snippet = if i < snippets.len() {
             let raw = &snippets[i][1];
-            // Remove HTML tags from snippet
-            let tag_re = regex::Regex::new(r"<[^>]+>").unwrap();
-            html_decode(&tag_re.replace_all(raw, ""))
+            html_decode(&search_regex::tag().replace_all(raw, ""))
         } else {
             String::new()
         };

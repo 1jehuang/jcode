@@ -4561,10 +4561,10 @@ impl App {
                                 disconnect_msg_idx = Some(self.display_messages.len() - 1);
                                 terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
                                 reconnect_attempts = 1;
-                                // Minimal delay: just enough for the new server to
-                                // finish binding its socket after exec. The server
-                                // typically starts listening within ~90ms of exec.
-                                tokio::time::sleep(Duration::from_millis(50)).await;
+                                // Try reconnecting immediately - the new server
+                                // may already be listening (exec + bind takes ~90ms,
+                                // and there's inherent delay from EOF detection).
+                                // If it's not ready yet, the fast retry (100ms) handles it.
                                 continue 'outer;
                             }
                             Some(server_event) => {

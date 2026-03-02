@@ -122,16 +122,17 @@ impl Tool for ReadTool {
             )),
         }));
 
-        let mut output = String::new();
+        let mut output = String::with_capacity((end - offset) * 80);
 
         for (i, line) in lines.iter().enumerate().skip(offset).take(limit) {
-            let line_num = i + 1; // 1-based line numbers
-            let truncated = if line.len() > MAX_LINE_LEN {
-                format!("{}...", &line[..MAX_LINE_LEN])
+            let line_num = i + 1;
+            if line.len() > MAX_LINE_LEN {
+                use std::fmt::Write;
+                let _ = write!(output, "{:>5}\t{}...\n", line_num, &line[..MAX_LINE_LEN]);
             } else {
-                line.to_string()
-            };
-            output.push_str(&format!("{:>5}\t{}\n", line_num, truncated));
+                use std::fmt::Write;
+                let _ = write!(output, "{:>5}\t{}\n", line_num, line);
+            }
         }
 
         // Add metadata
@@ -152,7 +153,7 @@ impl Tool for ReadTool {
 }
 
 fn is_binary_file(path: &Path) -> bool {
-    // Check by extension first
+    // Check by extension first (no I/O needed)
     if let Some(ext) = path.extension() {
         let ext = ext.to_string_lossy().to_lowercase();
         let binary_exts = [
@@ -165,11 +166,16 @@ fn is_binary_file(path: &Path) -> bool {
         }
     }
 
-    // Check first bytes for binary content
-    if let Ok(bytes) = std::fs::read(path) {
-        let check_len = bytes.len().min(8192);
-        let null_count = bytes[..check_len].iter().filter(|&&b| b == 0).count();
-        return null_count > check_len / 10; // More than 10% null bytes = binary
+    // Read only the first 8KB to check for binary content (not the entire file)
+    use std::io::Read;
+    if let Ok(mut file) = std::fs::File::open(path) {
+        let mut buf = [0u8; 8192];
+        if let Ok(n) = file.read(&mut buf) {
+            if n > 0 {
+                let null_count = buf[..n].iter().filter(|&&b| b == 0).count();
+                return null_count > n / 10; // More than 10% null bytes = binary
+            }
+        }
     }
 
     false

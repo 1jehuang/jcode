@@ -485,7 +485,11 @@ pub fn install_binary_at_version(source: &std::path::Path, version: &str) -> Res
         std::fs::remove_file(&dest)?;
     }
 
-    std::fs::copy(source, &dest)?;
+    // Prefer hard link (instant, zero I/O) over copy (71MB+ binary).
+    // Falls back to copy if hard link fails (e.g. cross-filesystem).
+    if std::fs::hard_link(source, &dest).is_err() {
+        std::fs::copy(source, &dest)?;
+    }
     crate::platform::set_permissions_executable(&dest)?;
 
     Ok(dest)

@@ -938,12 +938,12 @@ impl Server {
         let hash_path = format!("{}.hash", self.socket_path.display());
         let _ = std::fs::write(&hash_path, env!("JCODE_GIT_HASH"));
 
-        // Register server in the registry so session picker and clients can discover it
+        // Register server in the registry so session picker and clients can discover it.
+        // Do registration inline (fast) but defer cleanup to background (probes sockets).
         {
             let mut registry = crate::registry::ServerRegistry::load()
                 .await
                 .unwrap_or_default();
-            let _ = registry.cleanup_stale().await;
             let info = crate::registry::ServerInfo {
                 id: self.identity.id.clone(),
                 name: self.identity.name.clone(),
@@ -957,15 +957,20 @@ impl Server {
                 sessions: Vec::new(),
             };
             registry.register(info);
-            // Run cleanup again after registering to deduplicate entries
-            // that share the same socket (e.g. after server exec/reload)
-            let _ = registry.cleanup_stale().await;
             let _ = registry.save().await;
             crate::logging::info(&format!(
                 "Registered as {} in server registry",
                 self.identity.display_name(),
             ));
         }
+
+        // Cleanup stale registry entries in background (probes sockets, can be slow)
+        tokio::spawn(async {
+            if let Ok(mut registry) = crate::registry::ServerRegistry::load().await {
+                let _ = registry.cleanup_stale().await;
+                let _ = registry.save().await;
+            }
+        });
 
         // Spawn selfdev signal monitor (checks for reload signal)
         // Only run on selfdev servers to avoid non-selfdev servers picking up

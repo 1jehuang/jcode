@@ -142,17 +142,56 @@ impl Tool for WebFetchTool {
     }
 }
 
+mod html_regex {
+    use regex::Regex;
+    use std::sync::OnceLock;
+
+    macro_rules! static_regex {
+        ($name:ident, $pat:expr) => {
+            pub fn $name() -> &'static Regex {
+                static RE: OnceLock<Regex> = OnceLock::new();
+                RE.get_or_init(|| Regex::new($pat).unwrap())
+            }
+        };
+    }
+
+    static_regex!(script, r"(?is)<script[^>]*>.*?</script>");
+    static_regex!(style, r"(?is)<style[^>]*>.*?</style>");
+    static_regex!(tag, r"<[^>]+>");
+    static_regex!(whitespace, r"\n\s*\n\s*\n");
+    static_regex!(link, r#"(?i)<a[^>]*href=["']([^"']+)["'][^>]*>([^<]*)</a>"#);
+    static_regex!(strong, r"(?i)<(?:strong|b)>([^<]*)</(?:strong|b)>");
+    static_regex!(em, r"(?i)<(?:em|i)>([^<]*)</(?:em|i)>");
+    static_regex!(code, r"(?i)<code>([^<]*)</code>");
+    static_regex!(pre_code, r"(?is)<pre[^>]*><code[^>]*>(.+?)</code></pre>");
+    static_regex!(li, r"(?i)<li[^>]*>");
+
+    static H_OPEN: OnceLock<[Regex; 6]> = OnceLock::new();
+    static H_CLOSE: OnceLock<[Regex; 6]> = OnceLock::new();
+
+    pub fn h_open() -> &'static [Regex; 6] {
+        H_OPEN.get_or_init(|| {
+            std::array::from_fn(|i| {
+                Regex::new(&format!(r"(?i)<h{}[^>]*>", i + 1)).unwrap()
+            })
+        })
+    }
+
+    pub fn h_close() -> &'static [Regex; 6] {
+        H_CLOSE.get_or_init(|| {
+            std::array::from_fn(|i| {
+                Regex::new(&format!(r"(?i)</h{}>", i + 1)).unwrap()
+            })
+        })
+    }
+}
+
 fn html_to_text(html: &str) -> String {
-    // Simple HTML to text conversion
     let mut text = html.to_string();
 
-    // Remove script and style tags
-    let script_re = regex::Regex::new(r"(?is)<script[^>]*>.*?</script>").unwrap();
-    let style_re = regex::Regex::new(r"(?is)<style[^>]*>.*?</style>").unwrap();
-    text = script_re.replace_all(&text, "").to_string();
-    text = style_re.replace_all(&text, "").to_string();
+    text = html_regex::script().replace_all(&text, "").to_string();
+    text = html_regex::style().replace_all(&text, "").to_string();
 
-    // Replace common elements
     text = text.replace("<br>", "\n");
     text = text.replace("<br/>", "\n");
     text = text.replace("<br />", "\n");
@@ -161,11 +200,8 @@ fn html_to_text(html: &str) -> String {
     text = text.replace("</li>", "\n");
     text = text.replace("</tr>", "\n");
 
-    // Remove all remaining tags
-    let tag_re = regex::Regex::new(r"<[^>]+>").unwrap();
-    text = tag_re.replace_all(&text, "").to_string();
+    text = html_regex::tag().replace_all(&text, "").to_string();
 
-    // Decode common HTML entities
     text = text.replace("&nbsp;", " ");
     text = text.replace("&lt;", "<");
     text = text.replace("&gt;", ">");
@@ -173,70 +209,41 @@ fn html_to_text(html: &str) -> String {
     text = text.replace("&quot;", "\"");
     text = text.replace("&#39;", "'");
 
-    // Clean up whitespace
-    let whitespace_re = regex::Regex::new(r"\n\s*\n\s*\n").unwrap();
-    text = whitespace_re.replace_all(&text, "\n\n").to_string();
+    text = html_regex::whitespace().replace_all(&text, "\n\n").to_string();
 
     text.trim().to_string()
 }
 
 fn html_to_markdown(html: &str) -> String {
-    // Simple HTML to Markdown conversion
     let mut md = html.to_string();
 
-    // Remove script and style tags
-    let script_re = regex::Regex::new(r"(?is)<script[^>]*>.*?</script>").unwrap();
-    let style_re = regex::Regex::new(r"(?is)<style[^>]*>.*?</style>").unwrap();
-    md = script_re.replace_all(&md, "").to_string();
-    md = style_re.replace_all(&md, "").to_string();
+    md = html_regex::script().replace_all(&md, "").to_string();
+    md = html_regex::style().replace_all(&md, "").to_string();
 
-    // Convert headers
-    for i in 1..=6 {
-        let h_open = regex::Regex::new(&format!(r"(?i)<h{}[^>]*>", i)).unwrap();
-        let h_close = regex::Regex::new(&format!(r"(?i)</h{}>", i)).unwrap();
-        let prefix = "#".repeat(i);
-        md = h_open
+    let h_open = html_regex::h_open();
+    let h_close = html_regex::h_close();
+    for i in 0..6 {
+        let prefix = "#".repeat(i + 1);
+        md = h_open[i]
             .replace_all(&md, &format!("\n{} ", prefix))
             .to_string();
-        md = h_close.replace_all(&md, "\n").to_string();
+        md = h_close[i].replace_all(&md, "\n").to_string();
     }
 
-    // Convert links
-    let link_re =
-        regex::Regex::new(r#"(?i)<a[^>]*href=["']([^"']+)["'][^>]*>([^<]*)</a>"#).unwrap();
-    md = link_re.replace_all(&md, "[$2]($1)").to_string();
+    md = html_regex::link().replace_all(&md, "[$2]($1)").to_string();
+    md = html_regex::strong().replace_all(&md, "**$1**").to_string();
+    md = html_regex::em().replace_all(&md, "*$1*").to_string();
+    md = html_regex::code().replace_all(&md, "`$1`").to_string();
+    md = html_regex::pre_code().replace_all(&md, "\n```\n$1\n```\n").to_string();
+    md = html_regex::li().replace_all(&md, "\n- ").to_string();
 
-    // Convert bold/strong
-    let strong_re = regex::Regex::new(r"(?i)<(?:strong|b)>([^<]*)</(?:strong|b)>").unwrap();
-    md = strong_re.replace_all(&md, "**$1**").to_string();
-
-    // Convert italic/em
-    let em_re = regex::Regex::new(r"(?i)<(?:em|i)>([^<]*)</(?:em|i)>").unwrap();
-    md = em_re.replace_all(&md, "*$1*").to_string();
-
-    // Convert code
-    let code_re = regex::Regex::new(r"(?i)<code>([^<]*)</code>").unwrap();
-    md = code_re.replace_all(&md, "`$1`").to_string();
-
-    // Convert pre/code blocks
-    let pre_re = regex::Regex::new(r"(?is)<pre[^>]*><code[^>]*>(.+?)</code></pre>").unwrap();
-    md = pre_re.replace_all(&md, "\n```\n$1\n```\n").to_string();
-
-    // Convert lists
-    let li_re = regex::Regex::new(r"(?i)<li[^>]*>").unwrap();
-    md = li_re.replace_all(&md, "\n- ").to_string();
-
-    // Convert paragraphs and breaks
     md = md.replace("<br>", "\n");
     md = md.replace("<br/>", "\n");
     md = md.replace("<br />", "\n");
     md = md.replace("</p>", "\n\n");
 
-    // Remove remaining tags
-    let tag_re = regex::Regex::new(r"<[^>]+>").unwrap();
-    md = tag_re.replace_all(&md, "").to_string();
+    md = html_regex::tag().replace_all(&md, "").to_string();
 
-    // Decode HTML entities
     md = md.replace("&nbsp;", " ");
     md = md.replace("&lt;", "<");
     md = md.replace("&gt;", ">");
@@ -244,9 +251,7 @@ fn html_to_markdown(html: &str) -> String {
     md = md.replace("&quot;", "\"");
     md = md.replace("&#39;", "'");
 
-    // Clean up whitespace
-    let whitespace_re = regex::Regex::new(r"\n\s*\n\s*\n").unwrap();
-    md = whitespace_re.replace_all(&md, "\n\n").to_string();
+    md = html_regex::whitespace().replace_all(&md, "\n\n").to_string();
 
     md.trim().to_string()
 }
