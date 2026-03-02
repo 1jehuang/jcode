@@ -2471,6 +2471,11 @@ impl Agent {
                         .map(|t| format!(" {} tokens", t))
                         .unwrap_or_default()
                 ));
+                let _ = event_tx.send(ServerEvent::Compaction {
+                    trigger: event.trigger.clone(),
+                    pre_tokens: event.pre_tokens,
+                    messages_dropped: None,
+                });
             }
 
             let tools = self.tool_definitions().await;
@@ -2548,6 +2553,11 @@ impl Agent {
                                 Self::MAX_CONTEXT_LIMIT_RETRIES
                             ));
                         }
+                        let _ = event_tx.send(ServerEvent::Compaction {
+                            trigger: "auto_recovery".to_string(),
+                            pre_tokens: None,
+                            messages_dropped: None,
+                        });
                         continue;
                     }
                     return Err(e);
@@ -2598,6 +2608,11 @@ impl Agent {
                                 ));
                             }
                             retry_after_compaction = true;
+                            let _ = event_tx.send(ServerEvent::Compaction {
+                                trigger: "auto_recovery".to_string(),
+                                pre_tokens: None,
+                                messages_dropped: None,
+                            });
                             break;
                         }
                         return Err(e);
@@ -2789,6 +2804,11 @@ impl Agent {
                                 ));
                             }
                             retry_after_compaction = true;
+                            let _ = event_tx.send(ServerEvent::Compaction {
+                                trigger: "auto_recovery".to_string(),
+                                pre_tokens: None,
+                                messages_dropped: None,
+                            });
                             break;
                         }
                         return Err(StreamError::new(message, retry_after_secs).into());
@@ -3134,6 +3154,11 @@ impl Agent {
                         .map(|t| format!(" {} tokens", t))
                         .unwrap_or_default()
                 ));
+                let _ = event_tx.send(ServerEvent::Compaction {
+                    trigger: event.trigger.clone(),
+                    pre_tokens: event.pre_tokens,
+                    messages_dropped: None,
+                });
             }
 
             let tools = self.tool_definitions().await;
@@ -3211,6 +3236,11 @@ impl Agent {
                                 Self::MAX_CONTEXT_LIMIT_RETRIES
                             ));
                         }
+                        let _ = event_tx.send(ServerEvent::Compaction {
+                            trigger: "auto_recovery".to_string(),
+                            pre_tokens: None,
+                            messages_dropped: None,
+                        });
                         continue;
                     }
                     return Err(e);
@@ -3260,6 +3290,11 @@ impl Agent {
                                 ));
                             }
                             retry_after_compaction = true;
+                            let _ = event_tx.send(ServerEvent::Compaction {
+                                trigger: "auto_recovery".to_string(),
+                                pre_tokens: None,
+                                messages_dropped: None,
+                            });
                             break;
                         }
                         return Err(e);
@@ -3458,6 +3493,11 @@ impl Agent {
                                 ));
                             }
                             retry_after_compaction = true;
+                            let _ = event_tx.send(ServerEvent::Compaction {
+                                trigger: "auto_recovery".to_string(),
+                                pre_tokens: None,
+                                messages_dropped: None,
+                            });
                             break;
                         }
                         return Err(StreamError::new(message, retry_after_secs).into());

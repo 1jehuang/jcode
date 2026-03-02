@@ -1065,6 +1065,24 @@ impl ClientApp {
                 self.status_notice =
                     Some((format!("🧠 {} {} injected", count, plural), Instant::now()));
             }
+            ServerEvent::Compaction {
+                trigger,
+                pre_tokens,
+                messages_dropped,
+            } => {
+                let tokens_str = pre_tokens
+                    .map(|t| format!(" (was {} tokens)", t))
+                    .unwrap_or_default();
+                let dropped_str = messages_dropped
+                    .map(|d| format!(", dropped {} messages", d))
+                    .unwrap_or_default();
+                self.push_display_message(DisplayMessage::system(format!(
+                    "📦 **Compaction complete** — context summarized ({}){}{}",
+                    trigger, tokens_str, dropped_str
+                )));
+                self.status_notice =
+                    Some(("📦 Context compacted".to_string(), Instant::now()));
+            }
             _ => {}
         }
     }

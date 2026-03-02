@@ -451,6 +451,19 @@ pub enum ServerEvent {
         computed_age_ms: u64,
     },
 
+    /// Context compaction occurred (background summary or emergency drop)
+    #[serde(rename = "compaction")]
+    Compaction {
+        /// What triggered it: "background", "hard_compact", "auto_recovery"
+        trigger: String,
+        /// Token count before compaction
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pre_tokens: Option<u64>,
+        /// Number of messages dropped (for hard/emergency compaction)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        messages_dropped: Option<usize>,
+    },
+
     /// Message/turn completed
     #[serde(rename = "done")]
     Done { id: u64 },
