@@ -161,12 +161,47 @@ fn init_tui_terminal() -> Result<ratatui::DefaultTerminal> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         anyhow::bail!("jcode TUI requires an interactive terminal (stdin/stdout must be a TTY)");
     }
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(ratatui::init)).map_err(|payload| {
-        anyhow::anyhow!(
-            "failed to initialize terminal: {}",
-            panic_payload_to_string(payload.as_ref())
-        )
-    })
+    let is_resuming = std::env::var("JCODE_RESUMING").is_ok();
+    if is_resuming {
+        init_tui_terminal_resume()
+    } else {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(ratatui::init)).map_err(|payload| {
+            anyhow::anyhow!(
+                "failed to initialize terminal: {}",
+                panic_payload_to_string(payload.as_ref())
+            )
+        })
+    }
+}
+
+/// Initialize terminal for reload/resume without re-entering alternate screen.
+///
+/// When resuming after exec (hot-reload), the terminal is already in raw mode
+/// and alternate screen. Calling `ratatui::init()` would send another
+/// `EnterAlternateScreen`, which clears the terminal buffer and causes a
+/// visible flash. Instead, we ensure raw mode is enabled and create the
+/// Terminal directly, skipping the alternate screen transition.
+///
+/// We call `terminal.clear()` to force a full redraw on the next `draw()`.
+/// Without this, ratatui's diffing algorithm compares against empty internal
+/// buffers and may not repaint the screen correctly.
+fn init_tui_terminal_resume() -> Result<ratatui::DefaultTerminal> {
+    use ratatui::{backend::CrosstermBackend, Terminal};
+
+    crossterm::terminal::enable_raw_mode().map_err(|e| {
+        anyhow::anyhow!("failed to enable raw mode on resume: {}", e)
+    })?;
+
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = Terminal::new(backend).map_err(|e| {
+        anyhow::anyhow!("failed to create terminal on resume: {}", e)
+    })?;
+
+    terminal.clear().map_err(|e| {
+        anyhow::anyhow!("failed to clear terminal on resume: {}", e)
+    })?;
+
+    Ok(terminal)
 }
 
 #[cfg(unix)]
@@ -1267,10 +1302,18 @@ async fn run_tui(
     if keyboard_enhanced {
         tui::disable_keyboard_enhancement();
     }
-    ratatui::restore();
-    crate::tui::mermaid::clear_image_state();
 
     let run_result = result?;
+
+    // Skip ratatui::restore() when about to exec into a new binary to avoid
+    // a visible flash (LeaveAlternateScreen + EnterAlternateScreen).
+    let will_exec = run_result.reload_session.is_some()
+        || run_result.rebuild_session.is_some()
+        || run_result.update_session.is_some();
+    if !will_exec {
+        ratatui::restore();
+    }
+    crate::tui::mermaid::clear_image_state();
 
     // Check for special exit code (canary wrapper communication)
     if let Some(code) = run_result.exit_code {
@@ -2767,10 +2810,18 @@ async fn run_tui_client(
     if keyboard_enhanced {
         tui::disable_keyboard_enhancement();
     }
-    ratatui::restore();
-    crate::tui::mermaid::clear_image_state();
 
     let run_result = result?;
+
+    // Skip ratatui::restore() when about to exec into a new binary to avoid
+    // a visible flash (LeaveAlternateScreen + EnterAlternateScreen).
+    let will_exec = run_result.reload_session.is_some()
+        || run_result.rebuild_session.is_some()
+        || run_result.update_session.is_some();
+    if !will_exec {
+        ratatui::restore();
+    }
+    crate::tui::mermaid::clear_image_state();
 
     // Check for special exit code (canary wrapper communication)
     if let Some(code) = run_result.exit_code {
@@ -3742,7 +3793,8 @@ async fn run_canary_wrapper(
     // Determine if we're about to exec into a new binary.
     // If so, skip ratatui::restore() to avoid a visible flash -
     // the exec'd process inherits the terminal in alternate screen
-    // mode and re-enters it seamlessly via ratatui::init().
+    // and raw mode. The new process detects JCODE_RESUMING and
+    // creates the Terminal without re-entering alternate screen.
     let will_exec = run_result.reload_session.is_some()
         || run_result.rebuild_session.is_some()
         || run_result.update_session.is_some()
