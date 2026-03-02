@@ -1453,7 +1453,7 @@ fn render_rounded_box(
 
 struct MemoryTile {
     category: String,
-    content: String,
+    items: Vec<String>,
 }
 
 fn render_memory_tiles(
@@ -1473,7 +1473,7 @@ fn render_memory_tiles(
         all_lines.push(header);
     }
 
-    let min_box_inner = 16usize;
+    let min_box_inner = 18usize;
     let min_box_width = min_box_inner + 4;
     let gap = 1usize;
 
@@ -1484,8 +1484,9 @@ fn render_memory_tiles(
         while (cols + 1) * min_box_width + cols * gap <= total_width {
             cols += 1;
         }
-        cols
+        cols.min(tiles.len())
     };
+    let max_cols = max_cols.max(1);
 
     let mut remaining = tiles.iter().collect::<Vec<_>>();
 
@@ -1498,6 +1499,10 @@ fn render_memory_tiles(
         if inner_width < 4 {
             break;
         }
+
+        let bullet = "· ";
+        let bullet_width = unicode_width::UnicodeWidthStr::width(bullet);
+        let item_width = inner_width.saturating_sub(bullet_width);
 
         let mut columns: Vec<Vec<Line<'static>>> = Vec::new();
         let mut max_content_lines = 0usize;
@@ -1514,31 +1519,63 @@ fn render_memory_tiles(
                 border_style,
             ));
 
-            let chars: Vec<char> = tile.content.chars().collect();
             let mut content_lines: Vec<Line<'static>> = Vec::new();
-            let mut pos = 0;
-            while pos < chars.len() {
-                let end = (pos + inner_width).min(chars.len());
-                let chunk: String = chars[pos..end].iter().collect();
-                let padding = inner_width.saturating_sub(
-                    unicode_width::UnicodeWidthStr::width(chunk.as_str()),
-                );
-                let mut spans = vec![
-                    Span::styled("│ ", border_style),
-                    Span::styled(chunk, text_style),
-                ];
-                if padding > 0 {
-                    spans.push(Span::raw(" ".repeat(padding)));
+            for item in &tile.items {
+                let chars: Vec<char> = item.chars().collect();
+                if chars.len() <= item_width {
+                    let text = item.to_string();
+                    let padding = inner_width
+                        .saturating_sub(bullet_width + unicode_width::UnicodeWidthStr::width(text.as_str()));
+                    let mut spans = vec![
+                        Span::styled("│ ", border_style),
+                        Span::styled(bullet.to_string(), border_style),
+                        Span::styled(text, text_style),
+                    ];
+                    if padding > 0 {
+                        spans.push(Span::raw(" ".repeat(padding)));
+                    }
+                    spans.push(Span::styled(" │", border_style));
+                    content_lines.push(Line::from(spans));
+                } else {
+                    let first: String = chars[..item_width].iter().collect();
+                    let padding = inner_width
+                        .saturating_sub(bullet_width + unicode_width::UnicodeWidthStr::width(first.as_str()));
+                    let mut spans = vec![
+                        Span::styled("│ ", border_style),
+                        Span::styled(bullet.to_string(), border_style),
+                        Span::styled(first, text_style),
+                    ];
+                    if padding > 0 {
+                        spans.push(Span::raw(" ".repeat(padding)));
+                    }
+                    spans.push(Span::styled(" │", border_style));
+                    content_lines.push(Line::from(spans));
+                    let indent = bullet_width;
+                    let cont_width = inner_width.saturating_sub(indent);
+                    let mut pos = item_width;
+                    while pos < chars.len() {
+                        let end = (pos + cont_width).min(chars.len());
+                        let chunk: String = chars[pos..end].iter().collect();
+                        let padding = inner_width
+                            .saturating_sub(indent + unicode_width::UnicodeWidthStr::width(chunk.as_str()));
+                        let mut spans = vec![
+                            Span::styled("│ ", border_style),
+                            Span::raw(" ".repeat(indent)),
+                            Span::styled(chunk, text_style),
+                        ];
+                        if padding > 0 {
+                            spans.push(Span::raw(" ".repeat(padding)));
+                        }
+                        spans.push(Span::styled(" │", border_style));
+                        content_lines.push(Line::from(spans));
+                        pos = end;
+                    }
                 }
-                spans.push(Span::styled(" │", border_style));
-                content_lines.push(Line::from(spans));
-                pos = end;
             }
             if content_lines.is_empty() {
-                let padding = inner_width;
                 content_lines.push(Line::from(vec![
                     Span::styled("│ ", border_style),
-                    Span::raw(" ".repeat(padding)),
+                    Span::raw(" ".repeat(inner_width)),
                     Span::styled(" │", border_style),
                 ]));
             }
@@ -1562,12 +1599,11 @@ fn render_memory_tiles(
         for col in &mut columns {
             while col.len() < total_height {
                 let idx = col.len() - 1;
-                let padding = inner_width;
                 col.insert(
                     idx,
                     Line::from(vec![
                         Span::styled("│ ", border_style),
-                        Span::raw(" ".repeat(padding)),
+                        Span::raw(" ".repeat(inner_width)),
                         Span::styled(" │", border_style),
                     ]),
                 );
@@ -3861,8 +3897,9 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 let border_style = Style::default().fg(Color::Rgb(130, 140, 180));
                 let text_style = Style::default().fg(DIM_COLOR);
 
-                let mut tiles: Vec<MemoryTile> = Vec::new();
+                let mut category_items: Vec<(String, Vec<String>)> = Vec::new();
                 let mut current_category = String::new();
+                let mut count = 0usize;
 
                 for text_line in msg.content.lines() {
                     if text_line.starts_with("# ") {
@@ -3886,17 +3923,31 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                         text_line.trim()
                     };
 
-                    tiles.push(MemoryTile {
-                        category: if current_category.is_empty() {
-                            "memory".to_string()
+                    let cat = if current_category.is_empty() {
+                        "memory".to_string()
+                    } else {
+                        current_category.clone()
+                    };
+                    if let Some(last) = category_items.last_mut() {
+                        if last.0 == cat {
+                            last.1.push(content.to_string());
                         } else {
-                            current_category.clone()
-                        },
-                        content: content.to_string(),
-                    });
+                            category_items.push((cat, vec![content.to_string()]));
+                        }
+                    } else {
+                        category_items.push((cat, vec![content.to_string()]));
+                    }
+                    count += 1;
                 }
 
-                let count = tiles.len();
+                let tiles: Vec<MemoryTile> = category_items
+                    .into_iter()
+                    .map(|(cat, items)| MemoryTile {
+                        category: cat,
+                        items,
+                    })
+                    .collect();
+
                 let header_text = if count == 1 {
                     "🧠 1 memory".to_string()
                 } else {
@@ -4067,7 +4118,8 @@ pub(crate) fn render_tool_message(
         let border_style = Style::default().fg(Color::Rgb(150, 180, 255));
         let text_style = Style::default().fg(DIM_COLOR);
 
-        let mut tiles: Vec<MemoryTile> = Vec::new();
+        let mut category_items: Vec<(String, Vec<String>)> = Vec::new();
+        let mut count = 0usize;
         for line in msg.content.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with("- [") {
@@ -4080,17 +4132,29 @@ pub(crate) fn render_tool_message(
                         } else {
                             content
                         };
-                        tiles.push(MemoryTile {
-                            category: cat,
-                            content: content.to_string(),
-                        });
+                        if let Some(last) = category_items.last_mut() {
+                            if last.0 == cat {
+                                last.1.push(content.to_string());
+                            } else {
+                                category_items.push((cat, vec![content.to_string()]));
+                            }
+                        } else {
+                            category_items.push((cat, vec![content.to_string()]));
+                        }
+                        count += 1;
                     }
                 }
             }
         }
 
-        if !tiles.is_empty() {
-            let count = tiles.len();
+        if count > 0 {
+            let tiles: Vec<MemoryTile> = category_items
+                .into_iter()
+                .map(|(cat, items)| MemoryTile {
+                    category: cat,
+                    items,
+                })
+                .collect();
             let header_text = format!(
                 "🧠 recalled {} memor{}",
                 count,
