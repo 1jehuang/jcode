@@ -1418,7 +1418,7 @@ fn render_rounded_box(
 
     let box_width = max_content_width + 4; // "│ " + content + " │"
     let title_text = format!(" {} ", title);
-    let title_len = title_text.chars().count();
+    let title_len = unicode_width::UnicodeWidthStr::width(title_text.as_str());
     let border_chars = box_width.saturating_sub(title_len + 2);
     let left_border = "─".repeat(border_chars / 2);
     let right_border = "─".repeat(border_chars - border_chars / 2);
@@ -1463,13 +1463,24 @@ fn truncate_line_to_width(line: &Line<'static>, width: usize) -> Line<'static> {
             break;
         }
         let text = span.content.as_ref();
-        let len = text.chars().count();
-        if len <= remaining {
+        let span_width = unicode_width::UnicodeWidthStr::width(text);
+        if span_width <= remaining {
             spans.push(span.clone());
-            remaining -= len;
+            remaining -= span_width;
         } else {
-            let clipped: String = text.chars().take(remaining).collect();
-            spans.push(Span::styled(clipped, span.style));
+            let mut clipped = String::new();
+            let mut used = 0;
+            for ch in text.chars() {
+                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if used + cw > remaining {
+                    break;
+                }
+                clipped.push(ch);
+                used += cw;
+            }
+            if !clipped.is_empty() {
+                spans.push(Span::styled(clipped, span.style));
+            }
             remaining = 0;
         }
     }
@@ -9160,5 +9171,81 @@ mod tests {
             );
         }
         crate::tui::markdown::set_center_code_blocks(false);
+    }
+
+    #[test]
+    fn test_render_rounded_box_sides_aligned() {
+        let content = vec![
+            Line::from("short"),
+            Line::from("a longer line of text here"),
+            Line::from("mid"),
+        ];
+        let style = Style::default();
+        let lines = render_rounded_box("title", content, 40, style);
+        assert!(lines.len() >= 5);
+        let top_width = lines[0].width();
+        let bottom_width = lines[lines.len() - 1].width();
+        assert_eq!(
+            top_width, bottom_width,
+            "top and bottom borders must be same width: top={}, bottom={}",
+            top_width, bottom_width
+        );
+        for (i, line) in lines.iter().enumerate() {
+            assert_eq!(
+                line.width(),
+                top_width,
+                "line {} has width {} but expected {} (content: {:?})",
+                i,
+                line.width(),
+                top_width,
+                line.spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn test_render_rounded_box_emoji_title_aligned() {
+        let content = vec![
+            Line::from("memory content line one"),
+            Line::from("memory content line two"),
+        ];
+        let style = Style::default();
+        let lines = render_rounded_box("🧠 recalled 2 memories", content, 50, style);
+        assert!(lines.len() >= 4);
+        let top_width = lines[0].width();
+        let bottom_width = lines[lines.len() - 1].width();
+        assert_eq!(
+            top_width, bottom_width,
+            "emoji title: top={}, bottom={}", top_width, bottom_width
+        );
+        for (i, line) in lines.iter().enumerate() {
+            assert_eq!(
+                line.width(),
+                top_width,
+                "emoji title: line {} width {} != expected {}",
+                i,
+                line.width(),
+                top_width
+            );
+        }
+    }
+
+    #[test]
+    fn test_truncate_line_to_width_uses_display_width() {
+        let line = Line::from(Span::raw("🧠 hello world"));
+        let truncated = truncate_line_to_width(&line, 8);
+        let w = truncated.width();
+        assert!(
+            w <= 8,
+            "truncated line display width {} should be <= 8",
+            w
+        );
+    }
+
+    #[test]
+    fn test_truncate_line_preserves_width_for_ascii() {
+        let line = Line::from(Span::raw("hello world foo bar"));
+        let truncated = truncate_line_to_width(&line, 11);
+        assert_eq!(truncated.width(), 11);
     }
 }
