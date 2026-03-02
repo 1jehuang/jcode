@@ -325,16 +325,25 @@ fn install_native_host_manifest() -> Result<bool> {
     let manifest_dir = native_messaging_hosts_dir()?;
     let manifest_path = manifest_dir.join(format!("{}.json", NATIVE_HOST_NAME));
 
+    // Check if an existing manifest is already valid (from standalone install or previous setup)
+    if manifest_path.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&manifest_path) {
+            if let Ok(existing) = serde_json::from_str::<serde_json::Value>(&contents) {
+                if let Some(existing_path) = existing["path"].as_str() {
+                    if std::path::Path::new(existing_path).exists() {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+    }
+
     let host_path = host_binary_path();
     let browser_bin = browser_binary_path();
 
-    // Use host binary if available, otherwise fall back to browser binary
-    // (some versions bundle host functionality into the main binary)
     let effective_host = if host_path.exists() {
         host_path.to_string_lossy().to_string()
     } else if browser_bin.exists() {
-        // If no separate host binary, the browser CLI might have a `host` subcommand
-        // For now we still need the dedicated host binary
         return Err(anyhow::anyhow!(
             "Host binary not found at {}. The native messaging host is required for the Firefox extension to communicate with the bridge.",
             host_path.display()
@@ -342,17 +351,6 @@ fn install_native_host_manifest() -> Result<bool> {
     } else {
         return Err(anyhow::anyhow!("No browser binaries found"));
     };
-
-    // Check if manifest already exists with correct path
-    if manifest_path.exists() {
-        if let Ok(contents) = std::fs::read_to_string(&manifest_path) {
-            if let Ok(existing) = serde_json::from_str::<serde_json::Value>(&contents) {
-                if existing["path"].as_str() == Some(&effective_host) {
-                    return Ok(false);
-                }
-            }
-        }
-    }
 
     std::fs::create_dir_all(&manifest_dir)?;
 
