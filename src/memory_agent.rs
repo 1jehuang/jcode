@@ -133,6 +133,21 @@ fn record_maintenance_stat(duration_ms: u64) {
     }
 }
 
+/// Per-session state tracked by the memory agent
+#[derive(Default)]
+struct SessionState {
+    /// Last context embedding (for topic change detection)
+    last_context_embedding: Option<Vec<f32>>,
+    /// Last context string (for extraction when topic changes)
+    last_context_string: Option<String>,
+    /// IDs of memories already surfaced to this session (avoid repetition)
+    surfaced_memories: HashSet<String>,
+    /// Conversation turn count for this session
+    turn_count: usize,
+    /// Turn count since last extraction for this session
+    turns_since_extraction: usize,
+}
+
 /// The persistent memory agent state
 pub struct MemoryAgent {
     /// Channel to receive messages
@@ -144,20 +159,8 @@ pub struct MemoryAgent {
     /// Memory manager for storage
     memory_manager: MemoryManager,
 
-    /// Last context embedding (for topic change detection)
-    last_context_embedding: Option<Vec<f32>>,
-
-    /// Last context string (for extraction when topic changes)
-    last_context_string: Option<String>,
-
-    /// IDs of memories already surfaced this "session" (avoid repetition)
-    surfaced_memories: HashSet<String>,
-
-    /// Conversation turn count (for deciding when to reset)
-    turn_count: usize,
-
-    /// Turn count since last extraction (to avoid extracting too frequently)
-    turns_since_extraction: usize,
+    /// Per-session state keyed by session ID
+    sessions: HashMap<String, SessionState>,
 }
 
 impl MemoryAgent {
@@ -167,28 +170,30 @@ impl MemoryAgent {
             rx,
             sidecar: Sidecar::new(),
             memory_manager: MemoryManager::new(),
-            last_context_embedding: None,
-            last_context_string: None,
-            surfaced_memories: HashSet::new(),
-            turn_count: 0,
-            turns_since_extraction: 0,
+            sessions: HashMap::new(),
         }
     }
 
     /// Reset all agent state
     fn reset(&mut self) {
-        crate::logging::info("Memory agent reset: clearing all state");
-        self.last_context_embedding = None;
-        self.last_context_string = None;
-        self.surfaced_memories.clear();
-        self.turn_count = 0;
-        self.turns_since_extraction = 0;
+        crate::logging::info(&format!(
+            "Memory agent reset: clearing all state ({} sessions)",
+            self.sessions.len()
+        ));
+        self.sessions.clear();
         memory::clear_all_injected_memories();
         if let Ok(mut stats) = MEMORY_AGENT_STATS.lock() {
             stats.turns_processed = 0;
             stats.maintenance_runs = 0;
             stats.last_maintenance_ms = None;
         }
+    }
+
+    /// Get or create per-session state
+    fn session_state(&mut self, session_id: &str) -> &mut SessionState {
+        self.sessions
+            .entry(session_id.to_string())
+            .or_insert_with(SessionState::default)
     }
 
     /// Run the memory agent loop
@@ -205,16 +210,23 @@ impl MemoryAgent {
                     messages,
                     timestamp,
                 } => {
-                    self.turn_count += 1;
+                    {
+                        let ss = self.session_state(&session_id);
+                        ss.turn_count += 1;
+                    }
                     bump_turn_stat();
 
-                    if self.turn_count % TURN_RESET_INTERVAL == 0 {
-                        crate::logging::info(&format!(
-                            "Memory agent periodic reset at turn {} (clearing {} surfaced memories)",
-                            self.turn_count,
-                            self.surfaced_memories.len()
-                        ));
-                        self.surfaced_memories.clear();
+                    {
+                        let ss = self.session_state(&session_id);
+                        if ss.turn_count % TURN_RESET_INTERVAL == 0 {
+                            crate::logging::info(&format!(
+                                "[{}] Memory agent periodic reset at turn {} (clearing {} surfaced memories)",
+                                session_id,
+                                ss.turn_count,
+                                ss.surfaced_memories.len()
+                            ));
+                            ss.surfaced_memories.clear();
+                        }
                     }
 
                     if let Err(e) = self.process_context(&session_id, messages, timestamp).await {
@@ -234,16 +246,13 @@ impl MemoryAgent {
         messages: Vec<crate::message::Message>,
         _timestamp: Instant,
     ) -> Result<()> {
-        // Format context for embedding
         let context = memory::format_context_for_relevance(&messages);
         if context.is_empty() {
             return Ok(());
         }
 
-        // Track turns since last extraction
-        self.turns_since_extraction += 1;
+        self.session_state(session_id).turns_since_extraction += 1;
 
-        // Update activity state
         memory::set_state(MemoryState::Embedding);
         memory::add_event(MemoryEventKind::EmbeddingStarted);
 
@@ -258,36 +267,48 @@ impl MemoryAgent {
             }
         };
 
-        // Check for topic change
-        if let Some(ref last_emb) = self.last_context_embedding {
-            let similarity = embedding::cosine_similarity(&context_embedding, last_emb);
-            if similarity < TOPIC_CHANGE_THRESHOLD {
-                crate::logging::info(&format!(
-                    "Topic change detected (sim={:.2}), resetting memory agent state",
-                    similarity
-                ));
+        // Check for topic change (comparing against this session's last embedding)
+        {
+            let ss = self.session_state(session_id);
+            if let Some(ref last_emb) = ss.last_context_embedding {
+                let similarity = embedding::cosine_similarity(&context_embedding, last_emb);
+                if similarity < TOPIC_CHANGE_THRESHOLD {
+                    crate::logging::info(&format!(
+                        "[{}] Topic change detected (sim={:.2}), resetting session memory state",
+                        session_id, similarity
+                    ));
 
-                // Extract memories from the PREVIOUS topic before moving on
-                // Only if we have enough turns and haven't extracted recently
-                if self.turns_since_extraction >= MIN_TURNS_FOR_EXTRACTION {
-                    if let Some(ref prev_context) = self.last_context_string {
-                        crate::logging::info(&format!(
-                            "Triggering incremental extraction ({} turns since last)",
-                            self.turns_since_extraction
-                        ));
-                        self.extract_from_context(prev_context).await;
-                        self.turns_since_extraction = 0;
+                    // Extract memories from the PREVIOUS topic before moving on
+                    if ss.turns_since_extraction >= MIN_TURNS_FOR_EXTRACTION {
+                        if let Some(prev_context) = ss.last_context_string.clone() {
+                            crate::logging::info(&format!(
+                                "[{}] Triggering incremental extraction ({} turns since last)",
+                                session_id, ss.turns_since_extraction
+                            ));
+                            ss.turns_since_extraction = 0;
+                            drop(ss);
+                            self.extract_from_context(&prev_context).await;
+                            let ss = self.session_state(session_id);
+                            ss.surfaced_memories.clear();
+                            memory::clear_injected_memories(session_id);
+                        } else {
+                            ss.surfaced_memories.clear();
+                            memory::clear_injected_memories(session_id);
+                        }
+                    } else {
+                        ss.surfaced_memories.clear();
+                        memory::clear_injected_memories(session_id);
                     }
                 }
-
-                self.surfaced_memories.clear();
-                memory::clear_all_injected_memories();
             }
         }
 
         // Store current context for potential future extraction
-        self.last_context_embedding = Some(context_embedding.clone());
-        self.last_context_string = Some(context.clone());
+        {
+            let ss = self.session_state(session_id);
+            ss.last_context_embedding = Some(context_embedding.clone());
+            ss.last_context_string = Some(context.clone());
+        }
 
         // Step 2: Find similar memories by embedding
         let candidates = self.memory_manager.find_similar_with_embedding(
@@ -307,13 +328,17 @@ impl MemoryAgent {
             return Ok(());
         }
 
-        // Filter out already-surfaced memories (local + global tracking)
-        let new_candidates: Vec<_> = candidates
-            .into_iter()
-            .filter(|(entry, _)| {
-                !self.surfaced_memories.contains(&entry.id) && !memory::is_memory_injected_any(&entry.id)
-            })
-            .collect();
+        // Filter out already-surfaced memories (per-session + global injection tracking)
+        let new_candidates: Vec<_> = {
+            let ss = self.session_state(session_id);
+            candidates
+                .into_iter()
+                .filter(|(entry, _)| {
+                    !ss.surfaced_memories.contains(&entry.id)
+                        && !memory::is_memory_injected(session_id, &entry.id)
+                })
+                .collect()
+        };
 
         if new_candidates.is_empty() {
             memory::set_state(MemoryState::Idle);
@@ -326,12 +351,10 @@ impl MemoryAgent {
         });
         memory::add_event(MemoryEventKind::SidecarStarted);
 
-        // Collect candidate IDs for tracking
         let candidate_ids: Vec<String> = new_candidates.iter().map(|(e, _)| e.id.clone()).collect();
 
         let relevant = self.evaluate_candidates(&context, new_candidates).await?;
 
-        // Build retrieval context for maintenance
         let verified_ids: Vec<String> = relevant.iter().map(|e| e.id.clone()).collect();
         let rejected_ids: Vec<String> = candidate_ids
             .iter()
@@ -348,8 +371,11 @@ impl MemoryAgent {
         // Step 4: Format and store for main agent
         if !relevant.is_empty() {
             let ids: Vec<String> = relevant.iter().map(|e| e.id.clone()).collect();
-            for entry in &relevant {
-                self.surfaced_memories.insert(entry.id.clone());
+            {
+                let ss = self.session_state(session_id);
+                for entry in &relevant {
+                    ss.surfaced_memories.insert(entry.id.clone());
+                }
             }
 
             if let Some(prompt) = memory::format_relevant_prompt(&relevant, MAX_MEMORIES_PER_TURN) {
