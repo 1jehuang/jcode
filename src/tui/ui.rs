@@ -543,8 +543,7 @@ fn render_rabbit(elapsed: f32, width: usize, height: usize) -> Vec<String> {
                     let py = ly + cy;
                     let pz = lz + cz;
                     let (rpx, rpy, rpz) = rotate_xyz(px, py, pz, ax, ay, az);
-                    let (rnx, rny, rnz) =
-                        rotate_xyz(nx / nm, ny / nm, nz / nm, ax, ay, az);
+                    let (rnx, rny, rnz) = rotate_xyz(nx / nm, ny / nm, nz / nm, ax, ay, az);
                     let lum = rnx * 0.3 + rny * 0.5 + rnz * 0.7;
                     if lum > -0.2 {
                         if let Some((xp, yp, depth)) =
@@ -557,8 +556,7 @@ fn render_rabbit(elapsed: f32, width: usize, height: usize) -> Vec<String> {
                                 && depth > zbuffer[yp as usize][xp as usize]
                             {
                                 zbuffer[yp as usize][xp as usize] = depth;
-                                let li = (lum.max(0.0) * (LUMINANCE.len() - 1) as f32)
-                                    as usize;
+                                let li = (lum.max(0.0) * (LUMINANCE.len() - 1) as f32) as usize;
                                 output[yp as usize][xp as usize] =
                                     LUMINANCE[li.min(LUMINANCE.len() - 1)];
                             }
@@ -2761,14 +2759,21 @@ fn prepare_messages(app: &dyn TuiState, width: u16, height: u16) -> PreparedMess
 
         if is_initial_empty {
             let suggestions = app.suggestion_prompts();
+            let is_centered = app.centered_mode();
+            let suggestion_align = if is_centered {
+                ratatui::layout::Alignment::Center
+            } else {
+                ratatui::layout::Alignment::Left
+            };
             if !suggestions.is_empty() {
                 wrapped_lines.push(Line::from(""));
                 for (i, (label, _prompt)) in suggestions.iter().enumerate() {
                     let is_login = _prompt.starts_with('/');
+                    let pad = if is_centered { "" } else { "  " };
                     let spans = if is_login {
                         vec![
                             Span::styled(
-                                format!("  {} ", label),
+                                format!("{}{} ", pad, label),
                                 Style::default()
                                     .fg(Color::Rgb(138, 180, 248))
                                     .add_modifier(Modifier::BOLD),
@@ -2781,7 +2786,7 @@ fn prepare_messages(app: &dyn TuiState, width: u16, height: u16) -> PreparedMess
                     } else {
                         vec![
                             Span::styled(
-                                format!("  [{}] ", i + 1),
+                                format!("{}[{}] ", pad, i + 1),
                                 Style::default().fg(Color::Rgb(138, 180, 248)),
                             ),
                             Span::styled(
@@ -2790,14 +2795,21 @@ fn prepare_messages(app: &dyn TuiState, width: u16, height: u16) -> PreparedMess
                             ),
                         ]
                     };
-                    wrapped_lines.push(Line::from(spans));
+                    wrapped_lines.push(Line::from(spans).alignment(suggestion_align));
                 }
                 if suggestions.len() > 1 {
                     wrapped_lines.push(Line::from(""));
-                    wrapped_lines.push(Line::from(Span::styled(
-                        "  Press 1-3 or type anything to start",
-                        Style::default().fg(DIM_COLOR),
-                    )));
+                    wrapped_lines.push(
+                        Line::from(Span::styled(
+                            if is_centered {
+                                "Press 1-3 or type anything to start"
+                            } else {
+                                "  Press 1-3 or type anything to start"
+                            },
+                            Style::default().fg(DIM_COLOR),
+                        ))
+                        .alignment(suggestion_align),
+                    );
                 }
             }
 
@@ -3325,7 +3337,10 @@ fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
         if has_more {
             content.push(
                 Line::from(Span::styled(
-                    format!("  …{} more · /changelog to see all", new_entries.len() - MAX_LINES),
+                    format!(
+                        "  …{} more · /changelog to see all",
+                        new_entries.len() - MAX_LINES
+                    ),
                     Style::default().fg(DIM_COLOR),
                 ))
                 .alignment(align),
@@ -3645,9 +3660,7 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                         let section = text_line.trim_start_matches("## ");
                         box_content.push(Line::from(Span::styled(
                             section.to_string(),
-                            Style::default()
-                                .fg(Color::Rgb(140, 210, 255))
-                                .bold(),
+                            Style::default().fg(Color::Rgb(140, 210, 255)).bold(),
                         )));
                         continue;
                     }
@@ -3656,10 +3669,8 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                     }
                     let chars: Vec<char> = text_line.chars().collect();
                     if chars.len() <= inner_width {
-                        box_content.push(Line::from(Span::styled(
-                            text_line.to_string(),
-                            text_style,
-                        )));
+                        box_content
+                            .push(Line::from(Span::styled(text_line.to_string(), text_style)));
                     } else {
                         let mut pos = 0;
                         let mut first = true;
@@ -3669,20 +3680,14 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                             let end = (pos + avail).min(chars.len());
                             let chunk: String =
                                 format!("{}{}", indent, chars[pos..end].iter().collect::<String>());
-                            box_content
-                                .push(Line::from(Span::styled(chunk, text_style)));
+                            box_content.push(Line::from(Span::styled(chunk, text_style)));
                             pos = end;
                             first = false;
                         }
                     }
                 }
 
-                let box_lines = render_rounded_box(
-                    title,
-                    box_content,
-                    max_box,
-                    border_style,
-                );
+                let box_lines = render_rounded_box(title, box_content, max_box, border_style);
                 for line in box_lines {
                     lines.push(align_if_unset(line, align));
                 }
@@ -3826,12 +3831,7 @@ pub(crate) fn render_tool_message(
             }
         }
 
-        let box_lines = render_rounded_box(
-            &title,
-            box_content,
-            max_box,
-            border_style,
-        );
+        let box_lines = render_rounded_box(&title, box_content, max_box, border_style);
         for line in box_lines {
             lines.push(line);
         }
@@ -3891,7 +3891,8 @@ pub(crate) fn render_tool_message(
             let sub_results = parse_batch_sub_results(&msg.content);
 
             for (i, call) in calls.iter().enumerate() {
-                let raw_name = call.get("tool")
+                let raw_name = call
+                    .get("tool")
                     .or_else(|| call.get("name"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
@@ -5609,7 +5610,8 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
     if !app.is_processing() {
         if let Some(cache_info) = app.cache_ttl_status() {
             if cache_info.is_cold {
-                let tokens_str = cache_info.cached_tokens
+                let tokens_str = cache_info
+                    .cached_tokens
                     .map(|t| {
                         if t >= 1_000_000 {
                             format!(" ({:.1}M tok)", t as f64 / 1_000_000.0)
@@ -5621,14 +5623,16 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
                     })
                     .unwrap_or_default();
                 if !line.spans.is_empty() {
-                    line.spans.push(Span::styled(" · ", Style::default().fg(DIM_COLOR)));
+                    line.spans
+                        .push(Span::styled(" · ", Style::default().fg(DIM_COLOR)));
                 }
                 line.spans.push(Span::styled(
                     format!("🧊 cache cold{}", tokens_str),
                     Style::default().fg(Color::Rgb(140, 180, 255)),
                 ));
             } else if cache_info.remaining_secs <= 60 {
-                let tokens_str = cache_info.cached_tokens
+                let tokens_str = cache_info
+                    .cached_tokens
                     .map(|t| {
                         if t >= 1_000 {
                             format!(" {}K", t / 1000)
@@ -5638,7 +5642,8 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
                     })
                     .unwrap_or_default();
                 if !line.spans.is_empty() {
-                    line.spans.push(Span::styled(" · ", Style::default().fg(DIM_COLOR)));
+                    line.spans
+                        .push(Span::styled(" · ", Style::default().fg(DIM_COLOR)));
                 }
                 line.spans.push(Span::styled(
                     format!("⏳ cache {}s{}", cache_info.remaining_secs, tokens_str),
@@ -5679,7 +5684,6 @@ fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count:
     let paragraph = Paragraph::new(aligned_line);
     frame.render_widget(paragraph, area);
 }
-
 
 /// Format tokens compactly (1.2M, 45K, 123)
 fn format_tokens_compact(tokens: u64) -> String {
