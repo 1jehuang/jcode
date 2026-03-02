@@ -9221,7 +9221,7 @@ async fn monitor_selfdev_signals(
         return;
     }
 
-    let mut check_interval = interval(Duration::from_millis(500));
+    let mut check_interval = interval(Duration::from_millis(100));
 
     loop {
         check_interval.tick().await;
@@ -9281,7 +9281,9 @@ async fn monitor_selfdev_signals(
 }
 
 /// Signal all active sessions to gracefully stop generation and checkpoint.
-/// Waits up to 10 seconds for processing to finish.
+/// Only waits for sessions that are *actively generating* (status == "running"),
+/// not sessions that are idle/ready/waiting for user input.
+/// Uses a short 2-second timeout since most checkpoints complete in under 1s.
 /// `skip_session` is the session that triggered the reload (selfdev tool) -
 /// it's just sleeping in an infinite loop and will never finish on its own.
 async fn graceful_shutdown_sessions(
@@ -9290,8 +9292,10 @@ async fn graceful_shutdown_sessions(
     shutdown_signals: &Arc<RwLock<HashMap<String, crate::agent::GracefulShutdownSignal>>>,
     skip_session: Option<&str>,
 ) {
-    // Find which sessions are actively processing (excluding the triggering session)
-    let running_sessions: Vec<String> = {
+    // Find sessions that are actively processing (status == "running").
+    // Sessions with status "ready", "stopped", "failed", etc. are idle and
+    // don't need graceful shutdown - they'll reconnect after the server restarts.
+    let actively_generating: Vec<String> = {
         let members = swarm_members.read().await;
         members
             .iter()
@@ -9302,21 +9306,17 @@ async fn graceful_shutdown_sessions(
             .collect()
     };
 
-    if running_sessions.is_empty() {
-        if skip_session.is_some() {
-            crate::logging::info(
-                "Server: no other active generations, proceeding with reload immediately",
-            );
-        } else {
-            crate::logging::info("Server: no active generations, proceeding with reload");
-        }
+    if actively_generating.is_empty() {
+        crate::logging::info(
+            "Server: no sessions actively generating, proceeding with reload immediately",
+        );
         return;
     }
 
     crate::logging::info(&format!(
-        "Server: signaling {} active session(s) to checkpoint: {:?}",
-        running_sessions.len(),
-        running_sessions
+        "Server: signaling {} actively generating session(s) to checkpoint: {:?}",
+        actively_generating.len(),
+        actively_generating
     ));
 
     // Signal graceful shutdown using the server-level signal map.
@@ -9324,7 +9324,7 @@ async fn graceful_shutdown_sessions(
     // processing task during tool execution).
     {
         let signals = shutdown_signals.read().await;
-        for session_id in &running_sessions {
+        for session_id in &actively_generating {
             if let Some(signal) = signals.get(session_id) {
                 signal.store(true, std::sync::atomic::Ordering::SeqCst);
                 crate::logging::info(&format!(
@@ -9340,16 +9340,22 @@ async fn graceful_shutdown_sessions(
         }
     }
 
-    // Wait for all sessions to finish processing (poll swarm member status)
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
-    let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
+    // Wait for actively generating sessions to checkpoint, with a short timeout.
+    // Most sessions checkpoint within 1s; 2s is generous. We don't need to wait
+    // long because:
+    // - The graceful shutdown signal causes the agent to stop after the current
+    //   tool finishes and checkpoint partial content
+    // - Clients will automatically reconnect after the server restarts
+    // - Any in-flight API stream will be interrupted by the exec anyway
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
+    let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_millis(50));
 
     loop {
         poll_interval.tick().await;
 
         let still_running: usize = {
             let members = swarm_members.read().await;
-            running_sessions
+            actively_generating
                 .iter()
                 .filter(|id| {
                     members
@@ -9367,7 +9373,7 @@ async fn graceful_shutdown_sessions(
 
         if tokio::time::Instant::now() >= deadline {
             crate::logging::warn(&format!(
-                "Server: {} session(s) still running after 10s timeout, proceeding with reload anyway",
+                "Server: {} session(s) still generating after 2s timeout, proceeding with reload anyway",
                 still_running
             ));
             break;
