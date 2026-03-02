@@ -536,12 +536,26 @@ impl MemoryAgent {
         let memory_manager = self.memory_manager.clone();
         let context_owned = context.to_string();
 
+        // Gather existing memories to give the sidecar context on what's already known
+        let existing: Vec<String> = self
+            .memory_manager
+            .list_all()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.active)
+            .take(40)
+            .map(|e| e.content)
+            .collect();
+
         // Similarity threshold for duplicate detection
         const DUPLICATE_THRESHOLD: f32 = 0.90;
 
         // Run extraction in background - don't block the main flow
         tokio::spawn(async move {
-            match sidecar.extract_memories(&context_owned).await {
+            match sidecar
+                .extract_memories_with_existing(&context_owned, &existing)
+                .await
+            {
                 Ok(extracted) if !extracted.is_empty() => {
                     let mut stored_count = 0;
                     let mut reinforced_count = 0;

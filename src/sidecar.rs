@@ -290,7 +290,17 @@ Be conservative - only say "yes" if the memory would actually be useful for the 
 
     /// Extract memories from a session transcript
     pub async fn extract_memories(&self, transcript: &str) -> Result<Vec<ExtractedMemory>> {
-        let system = r#"You are a memory extraction assistant. Extract important learnings from the conversation that should be remembered for future sessions.
+        self.extract_memories_with_existing(transcript, &[]).await
+    }
+
+    /// Extract memories from a session transcript, aware of what's already stored.
+    pub async fn extract_memories_with_existing(
+        &self,
+        transcript: &str,
+        existing: &[String],
+    ) -> Result<Vec<ExtractedMemory>> {
+        let mut system = String::from(
+            r#"You are a memory extraction assistant. Extract important NEW learnings from the conversation that should be remembered for future sessions.
 
 Focus on:
 1. Facts about the codebase (architecture, patterns, dependencies)
@@ -306,9 +316,19 @@ Where:
 - CONTENT is a concise statement (1-2 sentences max)
 - TRUST is one of: high (user stated), medium (observed), low (inferred)
 
-Output ONLY the formatted lines, no other text. If no memories worth extracting, output nothing."#;
+Output ONLY the formatted lines, no other text. If no NEW memories worth extracting, output nothing."#,
+        );
 
-        let response = self.complete(system, transcript).await?;
+        if !existing.is_empty() {
+            system.push_str("\n\nAlready known (do NOT re-extract these):\n");
+            for mem in existing.iter().take(40) {
+                system.push_str("- ");
+                system.push_str(mem);
+                system.push('\n');
+            }
+        }
+
+        let response = self.complete(&system, transcript).await?;
 
         let memories = response
             .lines()
