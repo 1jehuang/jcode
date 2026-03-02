@@ -479,6 +479,142 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
     render_markdown_with_width(text, None)
 }
 
+/// Escape dollar signs that look like currency amounts so the math parser
+/// doesn't swallow them.  Currency: `$` followed by a digit (e.g. `$35`,
+/// `$5.99`).  We turn those into `\$` which pulldown-cmark passes through
+/// as literal text rather than starting an inline-math span.
+///
+/// We skip dollars inside code spans/fences and already-escaped `\$`.
+fn escape_currency_dollars(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len);
+    let mut i = 0;
+    let mut in_code_fence = false;
+    // Track inline-code with matching backtick delimiter length (0 = not inside code span).
+    let mut inline_code_len: usize = 0;
+    let mut at_line_start = true;
+    let mut leading_spaces = 0;
+
+    let count_backticks = |bytes: &[u8], start: usize| {
+        let mut j = start;
+        while j < bytes.len() && bytes[j] == b'`' {
+            j += 1;
+        }
+        j - start
+    };
+
+    let is_escaped = |bytes: &[u8], pos: usize| {
+        let mut backslashes = 0usize;
+        let mut j = pos;
+        while j > 0 {
+            if bytes[j - 1] != b'\\' {
+                break;
+            }
+            backslashes += 1;
+            j -= 1;
+        }
+        backslashes % 2 == 1
+    };
+
+    while i < len {
+        let b = bytes[i];
+
+        // Preserve line bookkeeping to avoid false code-fence detection mid-line.
+        if b == b'\n' {
+            at_line_start = true;
+            leading_spaces = 0;
+            out.push('\n');
+            i += 1;
+            continue;
+        }
+
+        if at_line_start {
+            if b == b' ' || b == b'\t' {
+                leading_spaces += 1;
+                out.push(b as char);
+                i += 1;
+                continue;
+            }
+        }
+
+        // Track fenced code blocks (``` at line start with <=3 spaces indentation)
+        let maybe_fence = inline_code_len == 0 && b == b'`' && count_backticks(bytes, i) >= 3;
+        if maybe_fence && at_line_start && leading_spaces <= 3 {
+            let run = count_backticks(bytes, i);
+            out.push_str(&"`".repeat(run));
+            i += run;
+            in_code_fence = !in_code_fence;
+            at_line_start = false;
+            leading_spaces = 0;
+            continue;
+        }
+
+        // Track inline code spans (single backticks and arbitrary-length delimiters)
+        if b == b'`' {
+            let run = count_backticks(bytes, i);
+            if inline_code_len > 0 {
+                if run == inline_code_len {
+                    inline_code_len = 0;
+                }
+                out.push_str(&"`".repeat(run));
+                i += run;
+                at_line_start = false;
+                leading_spaces = 0;
+                continue;
+            }
+
+            // Start inline code span.
+            inline_code_len = run;
+            out.push_str(&"`".repeat(run));
+            i += run;
+            at_line_start = false;
+            leading_spaces = 0;
+            continue;
+        }
+
+        if at_line_start {
+            at_line_start = false;
+        }
+
+        if b == b' ' || b == b'\t' {
+            out.push(b as char);
+            i += 1;
+            continue;
+        }
+
+        // Inside code: pass through
+        if in_code_fence || inline_code_len > 0 {
+            out.push(b as char);
+            i += 1;
+            continue;
+        }
+
+        // Check for $$ (display math delimiter) - leave as-is
+        if b == b'$' && i + 1 < len && bytes[i + 1] == b'$' {
+            out.push_str("$$");
+            i += 2;
+            continue;
+        }
+
+        // Single $ followed by a digit -> currency, escape it
+        if b == b'$' && i + 1 < len && bytes[i + 1].is_ascii_digit() {
+            // Don't escape if already escaped
+            if is_escaped(bytes, i) {
+                out.push('$');
+            } else {
+                out.push_str("\\$");
+            }
+            i += 1;
+            continue;
+        }
+
+        out.push(b as char);
+        i += 1;
+    }
+    out
+}
+
 pub fn debug_stats() -> MarkdownDebugStats {
     if let Ok(state) = MARKDOWN_DEBUG.lock() {
         return state.stats.clone();
@@ -493,6 +629,8 @@ pub fn debug_stats_json() -> Option<serde_json::Value> {
 /// Render markdown with optional width constraint for tables
 pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<Line<'static>> {
     let render_start = Instant::now();
+    let text = escape_currency_dollars(text);
+    let text = text.as_str();
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut current_spans: Vec<Span<'static>> = Vec::new();
     let side_only = diagram_side_only();
@@ -1385,6 +1523,8 @@ pub fn render_markdown_lazy(
     max_width: Option<usize>,
     visible_range: std::ops::Range<usize>,
 ) -> Vec<Line<'static>> {
+    let text = escape_currency_dollars(text);
+    let text = text.as_str();
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut current_spans: Vec<Span<'static>> = Vec::new();
     let side_only = diagram_side_only();
@@ -2395,5 +2535,56 @@ mod tests {
         let lines2 = highlight_code_cached(code, Some("rust"));
 
         assert_eq!(lines1.len(), lines2.len());
+    }
+
+    #[test]
+    fn test_bold_with_dollar_signs() {
+        let md = "Meet the **$35 minimum** (local delivery) and delivery is **free**. Below that, expect a **$5.99** fee.";
+        let lines = render_markdown(md);
+        let rendered = lines_to_string(&lines);
+        assert!(
+            !rendered.contains("**"),
+            "Bold markers should not appear as literal text: {}",
+            rendered
+        );
+        assert!(rendered.contains("$35 minimum"));
+        assert!(rendered.contains("$5.99"));
+    }
+
+    #[test]
+    fn test_escape_currency_preserves_math() {
+        assert_eq!(escape_currency_dollars("$x^2$"), "$x^2$");
+        assert_eq!(escape_currency_dollars("$$E=mc^2$$"), "$$E=mc^2$$");
+        assert_eq!(escape_currency_dollars("costs $35"), "costs \\$35");
+        assert_eq!(escape_currency_dollars("`$100`"), "`$100`");
+        assert_eq!(escape_currency_dollars("```\n$50\n```"), "```\n$50\n```");
+        assert_eq!(escape_currency_dollars("\\$10"), "\\$10");
+    }
+
+    #[test]
+    fn test_currency_dollars_in_indented_code_block() {
+        assert_eq!(
+            escape_currency_dollars("   ```\nCost is $35\n```"),
+            "   ```\nCost is $35\n```"
+        );
+
+        assert_eq!(
+            escape_currency_dollars("    ```\nCost is $35\n```"),
+            "    ```\nCost is $35\n```"
+        );
+
+        assert_eq!(
+            escape_currency_dollars("        ```\nCost is $35\n```"),
+            "        ```\nCost is $35\n```"
+        );
+    }
+
+    #[test]
+    fn test_fence_closing_not_triggered_mid_line() {
+        let md = "```\nvalue = `code` and then ``` in same line\n```";
+        let rendered = lines_to_string(&render_markdown(md));
+
+        assert!(rendered.contains("`code`"));
+        assert!(rendered.contains("in same line"));
     }
 }
