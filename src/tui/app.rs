@@ -767,6 +767,8 @@ pub struct App {
     pending_login: Option<PendingLogin>,
     /// Scroll offset for changelog overlay (None = not visible)
     changelog_scroll: Option<usize>,
+    /// Session picker overlay (None = not visible)
+    session_picker_overlay: Option<RefCell<super::session_picker::SessionPicker>>,
 }
 
 impl ScrollTestState {
@@ -1069,6 +1071,7 @@ impl App {
             ambient_system_prompt: None,
             pending_login: None,
             changelog_scroll: None,
+            session_picker_overlay: None,
         };
 
         for notice in app.provider.drain_startup_notices() {
@@ -1890,6 +1893,10 @@ impl App {
     }
 
     fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+        if let Some(ref picker_cell) = self.session_picker_overlay {
+            picker_cell.borrow_mut().handle_overlay_mouse(mouse);
+            return;
+        }
         self.normalize_diagram_state();
         let diagram_available = self.diagram_available();
         let layout = super::ui::last_layout_snapshot();
@@ -5758,6 +5765,10 @@ impl App {
             return self.handle_changelog_key(code);
         }
 
+        if self.session_picker_overlay.is_some() {
+            return self.handle_session_picker_key(code, modifiers);
+        }
+
         // If picker is active and not in preview mode, handle picker keys first
         if let Some(ref picker) = self.picker_state {
             if !picker.preview {
@@ -6379,110 +6390,8 @@ impl App {
                         return Ok(());
                     }
 
-                    if trimmed == "/resume" || trimmed.starts_with("/resume ") {
-                        let arg = trimmed.strip_prefix("/resume").unwrap_or("").trim();
-                        if arg.is_empty() {
-                            match super::session_picker::load_sessions() {
-                                Ok(sessions) => {
-                                    if sessions.is_empty() {
-                                        self.push_display_message(DisplayMessage::system(
-                                            "No sessions found.".to_string(),
-                                        ));
-                                    } else {
-                                        let current_id = self.remote_session_id.as_deref().unwrap_or("");
-                                        let lines: Vec<String> = sessions
-                                            .iter()
-                                            .filter(|s| s.id != current_id)
-                                            .take(20)
-                                            .map(|s| {
-                                                let age = {
-                                                    let dur = chrono::Utc::now() - s.last_message_time;
-                                                    if dur.num_days() > 0 {
-                                                        format!("{}d ago", dur.num_days())
-                                                    } else if dur.num_hours() > 0 {
-                                                        format!("{}h ago", dur.num_hours())
-                                                    } else {
-                                                        format!("{}m ago", dur.num_minutes().max(1))
-                                                    }
-                                                };
-                                                let status_icon = match s.status {
-                                                    crate::session::SessionStatus::Active => "🟢",
-                                                    crate::session::SessionStatus::Crashed { .. } => "💥",
-                                                    _ => "⏸",
-                                                };
-                                                let dir = s.working_dir.as_deref().unwrap_or("");
-                                                let dir_short = dir
-                                                    .strip_prefix(&std::env::var("HOME").unwrap_or_default())
-                                                    .map(|p| format!("~{}", p))
-                                                    .unwrap_or_else(|| dir.to_string());
-                                                format!(
-                                                    "{} {} **{}** - {} ({}, {})",
-                                                    status_icon, s.icon, s.short_name, s.title, age, dir_short,
-                                                )
-                                            })
-                                            .collect();
-                                        if lines.is_empty() {
-                                            self.push_display_message(DisplayMessage::system(
-                                                "No other sessions found.".to_string(),
-                                            ));
-                                        } else {
-                                            self.push_display_message(DisplayMessage::system(format!(
-                                                "**Recent sessions** (use `/resume <name>` to open in new window):\n\n{}",
-                                                lines.join("\n")
-                                            )));
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    self.push_display_message(DisplayMessage::error(format!(
-                                        "Failed to load sessions: {}", e
-                                    )));
-                                }
-                            }
-                        } else {
-                            match crate::session::find_session_by_name_or_id(arg) {
-                                Ok(full_id) => {
-                                    let exe = std::env::current_exe().unwrap_or_default();
-                                    let mut cwd = std::env::current_dir().unwrap_or_default();
-                                    if let Ok(session) = crate::session::Session::load(&full_id) {
-                                        if let Some(dir) = session.working_dir.as_deref() {
-                                            if std::path::Path::new(dir).is_dir() {
-                                                cwd = std::path::PathBuf::from(dir);
-                                            }
-                                        }
-                                    }
-                                    let socket = std::env::var("JCODE_SOCKET").ok();
-                                    match spawn_in_new_terminal(&exe, &full_id, &cwd, socket.as_deref()) {
-                                        Ok(true) => {
-                                            let name = crate::id::extract_session_name(&full_id)
-                                                .unwrap_or(arg)
-                                                .to_string();
-                                            self.push_display_message(DisplayMessage::system(format!(
-                                                "Resumed **{}** in new window.", name,
-                                            )));
-                                            self.set_status_notice(format!("Resumed {}", name));
-                                        }
-                                        Ok(false) => {
-                                            self.push_display_message(DisplayMessage::system(format!(
-                                                "No terminal found. Resume manually:\n```\njcode --resume {}\n```",
-                                                arg,
-                                            )));
-                                        }
-                                        Err(e) => {
-                                            self.push_display_message(DisplayMessage::error(format!(
-                                                "Failed to open window: {}\n\nResume manually: `jcode --resume {}`",
-                                                e, arg,
-                                            )));
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    self.push_display_message(DisplayMessage::error(format!(
-                                        "{}\n\nUse `/resume` to list available sessions.", e
-                                    )));
-                                }
-                            }
-                        }
+                    if trimmed == "/resume" || trimmed == "/sessions" {
+                        self.open_session_picker();
                         return Ok(());
                     }
 
@@ -6723,6 +6632,10 @@ impl App {
 
         if self.changelog_scroll.is_some() {
             return self.handle_changelog_key(code);
+        }
+
+        if self.session_picker_overlay.is_some() {
+            return self.handle_session_picker_key(code, modifiers);
         }
 
         // If picker is active and not in preview mode, handle picker keys first
@@ -7391,7 +7304,7 @@ impl App {
             "reload" => "`/reload`\nReload to a newer binary if one is available.",
             "rebuild" => "`/rebuild`\nRun full update flow (git pull + cargo build + tests).",
             "split" => "`/split`\nSplit the current session into a new window. Clones the full conversation history so both sessions continue from the same point.",
-            "resume" => "`/resume`\nList recent sessions.\n\n`/resume <name>`\nOpen a previous session in a new terminal window.",
+            "resume" | "sessions" => "`/resume`\nOpen the interactive session picker. Browse and search all sessions, preview conversation history, and open any session in a new terminal window.\n\nPress `Esc` to return to your current session.",
             "info" => "`/info`\nShow session metadata and token usage.",
             "usage" => "`/usage`\nFetch and display subscription usage limits for all connected OAuth providers (Anthropic, OpenAI/ChatGPT).\nShows 5-hour and 7-day windows, reset times, and extra usage status.",
             "version" => "`/version`\nShow jcode version/build details.",
@@ -7493,7 +7406,7 @@ impl App {
                      • `/reload` - Smart reload (client/server if newer binary exists)\n\
                      • `/rebuild` - Full rebuild (git pull + cargo build + tests){}\n\
                      • `/changelog` - Show recent changes in this build\n\
-                     • `/resume` - List recent sessions, `/resume <name>` to open in new window\n\
+                     • `/resume` - Open session picker (browse and resume previous sessions)\n\
                      • `/split` - Split session into a new window (clones conversation)\n\
                      • `/clear` - Clear conversation\n\
                      • `/rewind` - Show history with numbers, `/rewind N` to rewind\n\
@@ -11188,6 +11101,91 @@ impl App {
         }
     }
 
+    fn open_session_picker(&mut self) {
+        match super::session_picker::load_sessions_grouped() {
+            Ok((server_groups, orphan_sessions)) => {
+                let picker = super::session_picker::SessionPicker::new_grouped(
+                    server_groups,
+                    orphan_sessions,
+                );
+                self.session_picker_overlay = Some(RefCell::new(picker));
+            }
+            Err(e) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Failed to load sessions: {}",
+                    e
+                )));
+            }
+        }
+    }
+
+    fn handle_session_picker_selection(&mut self, session_id: &str) {
+        let exe = std::env::current_exe().unwrap_or_default();
+        let mut cwd = std::env::current_dir().unwrap_or_default();
+        if let Ok(session) = crate::session::Session::load(session_id) {
+            if let Some(dir) = session.working_dir.as_deref() {
+                if std::path::Path::new(dir).is_dir() {
+                    cwd = std::path::PathBuf::from(dir);
+                }
+            }
+        }
+        let socket = std::env::var("JCODE_SOCKET").ok();
+        match spawn_in_new_terminal(&exe, session_id, &cwd, socket.as_deref()) {
+            Ok(true) => {
+                let name = crate::id::extract_session_name(session_id)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| session_id.to_string());
+                self.push_display_message(DisplayMessage::system(format!(
+                    "Resumed **{}** in new window.",
+                    name,
+                )));
+                self.set_status_notice(format!("Resumed {}", name));
+            }
+            Ok(false) => {
+                self.push_display_message(DisplayMessage::system(format!(
+                    "No terminal found. Resume manually:\n```\njcode --resume {}\n```",
+                    session_id,
+                )));
+            }
+            Err(e) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Failed to open window: {}\n\nResume manually: `jcode --resume {}`",
+                    e, session_id,
+                )));
+            }
+        }
+    }
+
+    fn handle_session_picker_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> Result<()> {
+        use super::session_picker::OverlayAction;
+        let action = {
+            let picker_cell = self.session_picker_overlay.as_ref().unwrap();
+            let mut picker = picker_cell.borrow_mut();
+            picker.handle_overlay_key(code, modifiers)?
+        };
+        match action {
+            OverlayAction::Continue => {}
+            OverlayAction::Close => {
+                self.session_picker_overlay = None;
+            }
+            OverlayAction::Selected(super::session_picker::PickerResult::Selected(id)) => {
+                self.session_picker_overlay = None;
+                self.handle_session_picker_selection(&id);
+            }
+            OverlayAction::Selected(super::session_picker::PickerResult::RestoreAllCrashed) => {
+                self.session_picker_overlay = None;
+                self.push_display_message(DisplayMessage::system(
+                    "Batch crash restore is only available from `jcode --resume`.".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Handle keyboard input when picker is active
     fn handle_picker_key(&mut self, code: KeyCode, _modifiers: KeyModifiers) -> Result<()> {
         match code {
@@ -13654,24 +13652,6 @@ impl App {
                 .collect();
         }
 
-        if prefix.starts_with("/resume ") {
-            if let Ok(sessions) = super::session_picker::load_sessions() {
-                let current_id = self.remote_session_id.as_deref().unwrap_or("");
-                return sessions
-                    .iter()
-                    .filter(|s| s.id != current_id)
-                    .take(15)
-                    .map(|s| {
-                        (
-                            format!("/resume {}", s.short_name),
-                            "Resume session in new window",
-                        )
-                    })
-                    .collect();
-            }
-            return vec![];
-        }
-
         if prefix.starts_with("/login ") || prefix.starts_with("/auth ") {
             return vec![
                 ("/login anthropic".into(), "Login to Anthropic (OAuth)"),
@@ -13731,7 +13711,7 @@ impl App {
             ("/reload".into(), "Smart reload (if newer binary exists)"),
             ("/rebuild".into(), "Full rebuild (git pull + build + tests)"),
             ("/update".into(), "Check for and install latest release"),
-            ("/resume".into(), "List or resume a previous session"),
+            ("/resume".into(), "Open session picker"),
             ("/split".into(), "Split session into a new window"),
             ("/quit".into(), "Exit jcode"),
             ("/auth".into(), "Show authentication status"),
@@ -14120,122 +14100,76 @@ impl App {
         self.mcp_server_names.clone()
     }
 
-    /// Calculate approximate line heights for each message (from bottom to top)
-    /// Returns vec of (is_user, cumulative_lines_from_bottom)
-    fn message_line_positions(&self, width: usize) -> Vec<(bool, usize)> {
-        let width = width.max(40); // Minimum width estimate
-        let mut positions = Vec::new();
-        let mut cumulative = 0usize;
-
-        // Process messages from bottom to top (reverse order)
-        for msg in self.display_messages.iter().rev() {
-            let is_user = msg.role == "user";
-
-            // Estimate height of this message
-            let height = match msg.role.as_str() {
-                "user" => {
-                    // User messages: "N› content" format
-                    let msg_len = msg.content.len() + 4;
-                    (msg_len / width).max(1) + 1 // +1 for spacing
-                }
-                "assistant" => {
-                    // Assistant: count lines + wrap estimate
-                    let content_lines = msg.content.lines().count().max(1);
-                    let avg_line_len = msg.content.len() / content_lines.max(1);
-                    let wrap_factor = if avg_line_len > width {
-                        (avg_line_len / width) + 1
-                    } else {
-                        1
-                    };
-                    let mut h = content_lines * wrap_factor;
-                    if !msg.tool_calls.is_empty() {
-                        h += 1;
-                    }
-                    if msg.duration_secs.is_some() {
-                        h += 1;
-                    }
-                    h + 1 // +1 for spacing
-                }
-                "tool" => 2, // Tool result line + spacing
-                _ => 1,
-            };
-
-            cumulative += height;
-            positions.push((is_user, cumulative));
+    /// Scroll to the previous user prompt (scroll up - earlier in conversation)
+    pub fn scroll_to_prev_prompt(&mut self) {
+        let positions = super::ui::last_user_prompt_positions();
+        if positions.is_empty() {
+            return;
         }
 
-        positions
-    }
-
-    /// Scroll to the previous user prompt (scroll up)
-    pub fn scroll_to_prev_prompt(&mut self) {
-        let positions = self.message_line_positions(100); // Approximate width
-
-        // Find user messages above current scroll position
         let current = self.scroll_offset;
 
-        // Find the next user message position above current scroll
-        for (is_user, pos) in &positions {
-            if *is_user && *pos > current + 3 {
-                self.scroll_offset = *pos;
+        // positions are in document order (top to bottom).
+        // Find the last position that is strictly less than current (i.e. earlier/above).
+        // If we're at the bottom (!auto_scroll_paused), treat current as past-the-end.
+        if !self.auto_scroll_paused {
+            // Jump to the most recent (last) prompt
+            if let Some(&pos) = positions.last() {
+                self.scroll_offset = pos;
                 self.auto_scroll_paused = true;
+            }
+            return;
+        }
+
+        let mut target = None;
+        for &pos in positions.iter().rev() {
+            if pos < current {
+                target = Some(pos);
+                break;
+            }
+        }
+
+        if let Some(pos) = target {
+            self.scroll_offset = pos;
+        }
+        // If no prompt above, stay where we are
+    }
+
+    /// Scroll to the next user prompt (scroll down - later in conversation)
+    pub fn scroll_to_next_prompt(&mut self) {
+        let positions = super::ui::last_user_prompt_positions();
+        if positions.is_empty() || !self.auto_scroll_paused {
+            return;
+        }
+
+        let current = self.scroll_offset;
+
+        // Find the first position strictly greater than current (i.e. later/below).
+        for &pos in &positions {
+            if pos > current {
+                self.scroll_offset = pos;
                 return;
             }
         }
 
-        // If no more user messages above, scroll to top
-        if let Some((_, max_pos)) = positions.last() {
-            self.scroll_offset = *max_pos;
-            self.auto_scroll_paused = true;
-        }
-    }
-
-    /// Scroll to the next user prompt (scroll down)
-    pub fn scroll_to_next_prompt(&mut self) {
-        let positions = self.message_line_positions(100);
-
-        if self.scroll_offset == 0 {
-            return; // Already at bottom
-        }
-
-        let current = self.scroll_offset;
-
-        // Find user messages, going from bottom up (positions is already reversed)
-        // We want the first user message position that's LESS than current
-        let mut prev_user_pos = 0usize;
-        for (is_user, pos) in &positions {
-            if *is_user {
-                if *pos >= current {
-                    // This user message is at or above current - use the previous one
-                    self.scroll_offset = prev_user_pos;
-                    if prev_user_pos == 0 {
-                        self.follow_chat_bottom();
-                    }
-                    return;
-                }
-                prev_user_pos = *pos;
-            }
-        }
-
-        // No user message found below, go to bottom
+        // No more prompts below - go to bottom
         self.follow_chat_bottom();
     }
 
     /// Scroll to Nth most-recent user prompt (1 = most recent, 2 = second most recent, etc.).
+    /// Uses actual wrapped line positions from the last render frame for accurate placement,
+    /// positioning the prompt at the top of the viewport.
     fn scroll_to_recent_prompt_rank(&mut self, rank: usize) {
         let rank = rank.max(1);
-        let positions = self.message_line_positions(100);
-        let user_positions: Vec<usize> = positions
-            .iter()
-            .filter_map(|(is_user, pos)| if *is_user { Some(*pos) } else { None })
-            .collect();
+        let positions = super::ui::last_user_prompt_positions();
 
-        if user_positions.is_empty() {
+        if positions.is_empty() {
             return;
         }
 
-        let target_idx = (rank - 1).min(user_positions.len().saturating_sub(1));
-        self.scroll_offset = user_positions[target_idx];
+        // positions are in document order (top to bottom), we want most-recent first
+        let target_idx = positions.len().saturating_sub(rank);
+        self.scroll_offset = positions[target_idx];
         self.auto_scroll_paused = true;
     }
 
@@ -15427,6 +15361,12 @@ impl super::TuiState for App {
 
     fn changelog_scroll(&self) -> Option<usize> {
         self.changelog_scroll
+    }
+
+    fn session_picker_overlay(
+        &self,
+    ) -> Option<&RefCell<super::session_picker::SessionPicker>> {
+        self.session_picker_overlay.as_ref()
     }
 
     fn working_dir(&self) -> Option<String> {

@@ -25,6 +25,9 @@ static LAST_MAX_SCROLL: AtomicUsize = AtomicUsize::new(0);
 static DRAW_PANIC_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// Total line count in the pinned diff/content pane (set during render).
 static PINNED_PANE_TOTAL_LINES: AtomicUsize = AtomicUsize::new(0);
+/// Wrapped line indices where each user prompt starts (updated each render frame).
+/// Used by prompt-jump keybindings (Ctrl+1..9, Ctrl+[/]) for accurate positioning.
+static LAST_USER_PROMPT_POSITIONS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
 
 /// Get the last known max scroll value (from the most recent render frame).
 /// Returns 0 if no frame has been rendered yet.
@@ -35,6 +38,24 @@ pub fn last_max_scroll() -> usize {
 /// Get the total line count from the pinned diff/content pane (set during render).
 pub fn pinned_pane_total_lines() -> usize {
     PINNED_PANE_TOTAL_LINES.load(Ordering::Relaxed)
+}
+
+/// Get the last known user prompt line positions (from the most recent render frame).
+/// Returns positions as wrapped line indices from the top of content.
+pub fn last_user_prompt_positions() -> Vec<usize> {
+    LAST_USER_PROMPT_POSITIONS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .map(|v| v.clone())
+        .unwrap_or_default()
+}
+
+fn update_user_prompt_positions(positions: &[usize]) {
+    let mutex = LAST_USER_PROMPT_POSITIONS.get_or_init(|| Mutex::new(Vec::new()));
+    if let Ok(mut v) = mutex.lock() {
+        v.clear();
+        v.extend_from_slice(positions);
+    }
 }
 
 // Minimal color palette
@@ -2179,6 +2200,12 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     if let Some(scroll) = app.changelog_scroll() {
         draw_changelog_overlay(frame, area, scroll);
+        return;
+    }
+
+    if let Some(picker_cell) = app.session_picker_overlay() {
+        let mut picker = picker_cell.borrow_mut();
+        picker.render(frame);
         return;
     }
 
@@ -4846,6 +4873,7 @@ fn draw_messages(
 
     // Publish max_scroll so scroll handlers can clamp without overshoot
     LAST_MAX_SCROLL.store(max_scroll, Ordering::Relaxed);
+    update_user_prompt_positions(wrapped_user_prompt_starts);
 
     let user_scroll = app.scroll_offset().min(max_scroll);
 
