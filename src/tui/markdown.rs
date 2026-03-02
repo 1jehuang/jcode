@@ -486,29 +486,28 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
 ///
 /// We skip dollars inside code spans/fences and already-escaped `\$`.
 fn escape_currency_dollars(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let len = bytes.len();
-    let mut out = String::with_capacity(len);
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(text.len());
     let mut i = 0;
     let mut in_code_fence = false;
-    // Track inline-code with matching backtick delimiter length (0 = not inside code span).
     let mut inline_code_len: usize = 0;
     let mut at_line_start = true;
     let mut leading_spaces = 0;
 
-    let count_backticks = |bytes: &[u8], start: usize| {
+    let count_backticks = |chars: &[char], start: usize| {
         let mut j = start;
-        while j < bytes.len() && bytes[j] == b'`' {
+        while j < chars.len() && chars[j] == '`' {
             j += 1;
         }
         j - start
     };
 
-    let is_escaped = |bytes: &[u8], pos: usize| {
+    let is_escaped = |chars: &[char], pos: usize| {
         let mut backslashes = 0usize;
         let mut j = pos;
         while j > 0 {
-            if bytes[j - 1] != b'\\' {
+            if chars[j - 1] != '\\' {
                 break;
             }
             backslashes += 1;
@@ -518,10 +517,9 @@ fn escape_currency_dollars(text: &str) -> String {
     };
 
     while i < len {
-        let b = bytes[i];
+        let c = chars[i];
 
-        // Preserve line bookkeeping to avoid false code-fence detection mid-line.
-        if b == b'\n' {
+        if c == '\n' {
             at_line_start = true;
             leading_spaces = 0;
             out.push('\n');
@@ -530,19 +528,20 @@ fn escape_currency_dollars(text: &str) -> String {
         }
 
         if at_line_start {
-            if b == b' ' || b == b'\t' {
+            if c == ' ' || c == '\t' {
                 leading_spaces += 1;
-                out.push(b as char);
+                out.push(c);
                 i += 1;
                 continue;
             }
         }
 
-        // Track fenced code blocks (``` at line start with <=3 spaces indentation)
-        let maybe_fence = inline_code_len == 0 && b == b'`' && count_backticks(bytes, i) >= 3;
+        let maybe_fence = inline_code_len == 0 && c == '`' && count_backticks(&chars, i) >= 3;
         if maybe_fence && at_line_start && leading_spaces <= 3 {
-            let run = count_backticks(bytes, i);
-            out.push_str(&"`".repeat(run));
+            let run = count_backticks(&chars, i);
+            for _ in 0..run {
+                out.push('`');
+            }
             i += run;
             in_code_fence = !in_code_fence;
             at_line_start = false;
@@ -550,23 +549,25 @@ fn escape_currency_dollars(text: &str) -> String {
             continue;
         }
 
-        // Track inline code spans (single backticks and arbitrary-length delimiters)
-        if b == b'`' {
-            let run = count_backticks(bytes, i);
+        if c == '`' {
+            let run = count_backticks(&chars, i);
             if inline_code_len > 0 {
                 if run == inline_code_len {
                     inline_code_len = 0;
                 }
-                out.push_str(&"`".repeat(run));
+                for _ in 0..run {
+                    out.push('`');
+                }
                 i += run;
                 at_line_start = false;
                 leading_spaces = 0;
                 continue;
             }
 
-            // Start inline code span.
             inline_code_len = run;
-            out.push_str(&"`".repeat(run));
+            for _ in 0..run {
+                out.push('`');
+            }
             i += run;
             at_line_start = false;
             leading_spaces = 0;
@@ -577,30 +578,26 @@ fn escape_currency_dollars(text: &str) -> String {
             at_line_start = false;
         }
 
-        if b == b' ' || b == b'\t' {
-            out.push(b as char);
+        if c == ' ' || c == '\t' {
+            out.push(c);
             i += 1;
             continue;
         }
 
-        // Inside code: pass through
         if in_code_fence || inline_code_len > 0 {
-            out.push(b as char);
+            out.push(c);
             i += 1;
             continue;
         }
 
-        // Check for $$ (display math delimiter) - leave as-is
-        if b == b'$' && i + 1 < len && bytes[i + 1] == b'$' {
+        if c == '$' && i + 1 < len && chars[i + 1] == '$' {
             out.push_str("$$");
             i += 2;
             continue;
         }
 
-        // Single $ followed by a digit -> currency, escape it
-        if b == b'$' && i + 1 < len && bytes[i + 1].is_ascii_digit() {
-            // Don't escape if already escaped
-            if is_escaped(bytes, i) {
+        if c == '$' && i + 1 < len && chars[i + 1].is_ascii_digit() {
+            if is_escaped(&chars, i) {
                 out.push('$');
             } else {
                 out.push_str("\\$");
@@ -609,7 +606,7 @@ fn escape_currency_dollars(text: &str) -> String {
             continue;
         }
 
-        out.push(b as char);
+        out.push(c);
         i += 1;
     }
     out
@@ -2559,6 +2556,11 @@ mod tests {
         assert_eq!(escape_currency_dollars("`$100`"), "`$100`");
         assert_eq!(escape_currency_dollars("```\n$50\n```"), "```\n$50\n```");
         assert_eq!(escape_currency_dollars("\\$10"), "\\$10");
+        assert_eq!(escape_currency_dollars("████████░░░░"), "████████░░░░");
+        assert_eq!(escape_currency_dollars("⣿⣿⣿⣀⣀⣀"), "⣿⣿⣿⣀⣀⣀");
+        assert_eq!(escape_currency_dollars("▓▓▒▒░░"), "▓▓▒▒░░");
+        assert_eq!(escape_currency_dollars("━━━╺━━━"), "━━━╺━━━");
+        assert_eq!(escape_currency_dollars("⠋ Loading $5"), "⠋ Loading \\$5");
     }
 
     #[test]
