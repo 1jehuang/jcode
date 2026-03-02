@@ -1036,7 +1036,9 @@ async fn run_main(mut args: Args) -> Result<()> {
                 }
 
                 startup_profile::mark("pre_tui_client");
-                eprintln!("Connecting to server...");
+                if std::env::var("JCODE_RESUMING").is_err() {
+                    eprintln!("Connecting to server...");
+                }
                 run_tui_client(args.resume, startup_message).await?;
             }
         }
@@ -1311,11 +1313,15 @@ async fn run_tui(
 fn hot_reload(session_id: &str) -> Result<()> {
     let cwd = std::env::current_dir()?;
 
+    // Signal to the new process that it's resuming after a reload,
+    // so it should suppress startup prints that corrupt the TUI alternate screen.
+    std::env::set_var("JCODE_RESUMING", "1");
+
     // Check if this is a migration to a specific binary (auto-migration to stable)
     if let Ok(migrate_binary) = std::env::var("JCODE_MIGRATE_BINARY") {
         let binary_path = std::path::PathBuf::from(&migrate_binary);
         if binary_path.exists() {
-            eprintln!("Migrating to stable binary...");
+            crate::logging::info("Migrating to stable binary...");
             let err = crate::platform::replace_process(
                 ProcessCommand::new(&binary_path)
                     .arg("--resume")
@@ -1325,10 +1331,10 @@ fn hot_reload(session_id: &str) -> Result<()> {
             );
             return Err(anyhow::anyhow!("Failed to exec {:?}: {}", binary_path, err));
         } else {
-            eprintln!(
-                "Warning: Migration binary not found at {:?}, falling back to local binary",
+            crate::logging::warn(&format!(
+                "Migration binary not found at {:?}, falling back to local binary",
                 binary_path
-            );
+            ));
         }
     }
 
@@ -1354,7 +1360,7 @@ fn hot_reload(session_id: &str) -> Result<()> {
                 }
             })
             .unwrap_or_else(|| "unknown".to_string());
-        eprintln!("Reloading with binary built {}...", age);
+        crate::logging::info(&format!("Reloading with binary built {}...", age));
     }
 
     // Build command with --resume flag.
@@ -1447,6 +1453,9 @@ fn hot_rebuild(session_id: &str) -> Result<()> {
 
     update::print_centered(&format!("Restarting with session {}...", session_id));
 
+    // Signal to the new process that it's resuming after a rebuild
+    std::env::set_var("JCODE_RESUMING", "1");
+
     // Build command with --resume flag.
     // In self-dev mode, preserve the self-dev subcommand so the session
     // continues in self-dev mode after rebuild.
@@ -1487,6 +1496,8 @@ fn hot_update(session_id: &str) -> Result<()> {
 
                     update::print_centered(&format!("Restarting with session {}...", session_id));
 
+                    std::env::set_var("JCODE_RESUMING", "1");
+
                     let mut cmd = ProcessCommand::new(&exe);
                     if is_selfdev {
                         cmd.arg("self-dev");
@@ -1515,6 +1526,7 @@ fn hot_update(session_id: &str) -> Result<()> {
     }
 
     // No update or update failed - restart with current binary to resume session
+    std::env::set_var("JCODE_RESUMING", "1");
     let exe = std::env::current_exe()?;
     let is_selfdev = std::env::var("JCODE_SELFDEV_MODE").is_ok();
     let mut cmd = ProcessCommand::new(&exe);
@@ -3426,6 +3438,7 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
 
     // Get or create session and mark as canary
     startup_profile::mark("selfdev_session_create");
+    let is_resume = resume_session.is_some();
     let session_id = if let Some(id) = resume_session {
         // Load existing session and ensure it's marked as canary
         if let Ok(mut session) = session::Session::load(&id) {
@@ -3477,10 +3490,20 @@ async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Res
     let binary_path = target_binary.clone();
 
     // Launch wrapper process
-    eprintln!("Starting self-dev session with {}...", hash);
+    if !is_resume {
+        eprintln!("Starting self-dev session with {}...", hash);
+    } else {
+        crate::logging::info(&format!("Resuming self-dev session with {}...", hash));
+    }
 
     let exe = std::env::current_exe()?;
     let cwd = std::env::current_dir()?;
+
+    // Tell canary wrapper this is a resume so it suppresses startup prints
+    // (they corrupt the TUI alternate screen during reload)
+    if is_resume {
+        std::env::set_var("JCODE_RESUMING", "1");
+    }
 
     // Use wrapper to handle crashes
     let err = crate::platform::replace_process(
@@ -3555,13 +3578,27 @@ async fn run_canary_wrapper(
     server::set_socket_path(&socket_path);
     startup_profile::mark("canary_wrapper_enter");
 
+    // When resuming after a reload, suppress eprintln! to avoid corrupting the
+    // TUI alternate screen. Route messages to the log instead.
+    let is_resuming = std::env::var("JCODE_RESUMING").is_ok();
+    macro_rules! startup_msg {
+        ($($arg:tt)*) => {
+            if is_resuming {
+                crate::logging::info(&format!($($arg)*));
+            } else {
+                eprintln!($($arg)*);
+            }
+        };
+    }
+
     // Check if server is already running
     let server_alive = is_server_alive(&socket_path).await;
     startup_profile::mark("canary_server_alive_check");
 
     if !server_alive {
         // Server not running - spawn it as a detached daemon
-        eprintln!("Starting self-dev server...");
+        startup_msg!("Starting self-dev server...");
+
 
         // Cleanup stale socket and hash file
         let _ = std::fs::remove_file(&socket_path);
@@ -3616,7 +3653,7 @@ async fn run_canary_wrapper(
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         startup_profile::mark("canary_server_ready");
-        eprintln!("Self-dev server ready on {}", socket_path);
+        startup_msg!("Self-dev server ready on {}", socket_path);
     } else {
         // Server is already running - just connect to it.
         // Don't force a server restart on version mismatch: that would kill
@@ -3633,12 +3670,12 @@ async fn run_canary_wrapper(
         };
 
         if !server_hash.is_empty() && server_hash.trim() != current_hash {
-            eprintln!(
+            startup_msg!(
                 "Connecting to existing self-dev server ({}) on {} (client built from {})",
                 server_ver, socket_path, current_hash
             );
         } else {
-            eprintln!(
+            startup_msg!(
                 "Connecting to existing self-dev server ({}) on {}...",
                 server_ver, socket_path
             );
@@ -3650,7 +3687,7 @@ async fn run_canary_wrapper(
         .map(|s| s.to_string())
         .unwrap_or_else(|| session_id.to_string());
 
-    eprintln!("Starting TUI client...");
+    startup_msg!("Starting TUI client...");
     startup_profile::mark("canary_tui_start");
     set_current_session(session_id);
     spawn_session_signal_watchers();
@@ -3750,6 +3787,9 @@ async fn run_canary_wrapper(
                 .ok_or_else(|| anyhow::anyhow!("No binary found for reload"))?;
 
             let cwd = std::env::current_dir()?;
+
+            // Signal to the new process that it's resuming after a reload
+            std::env::set_var("JCODE_RESUMING", "1");
 
             // Exec into the new binary with self-dev mode and session resume
             let err = crate::platform::replace_process(
