@@ -4220,7 +4220,13 @@ impl App {
                     }
                     terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
 
-                    let backoff = Duration::from_secs((1u64 << reconnect_attempts.min(5)).min(30));
+                    let backoff = if reconnect_attempts <= 2 {
+                        // Fast retries for the first couple attempts (likely a reload)
+                        Duration::from_millis(100)
+                    } else {
+                        // Exponential backoff for persistent disconnects
+                        Duration::from_secs((1u64 << (reconnect_attempts - 2).min(5)).min(30))
+                    };
                     let sleep = tokio::time::sleep(backoff);
                     tokio::pin!(sleep);
                     loop {
@@ -4555,7 +4561,10 @@ impl App {
                                 disconnect_msg_idx = Some(self.display_messages.len() - 1);
                                 terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
                                 reconnect_attempts = 1;
-                                tokio::time::sleep(Duration::from_millis(500)).await;
+                                // Minimal delay: just enough for the new server to
+                                // finish binding its socket after exec. The server
+                                // typically starts listening within ~90ms of exec.
+                                tokio::time::sleep(Duration::from_millis(50)).await;
                                 continue 'outer;
                             }
                             Some(server_event) => {
