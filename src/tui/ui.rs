@@ -3682,41 +3682,73 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 let title = msg.title.as_deref().unwrap_or("🧠 recalled");
                 let max_box = (width.saturating_sub(4) as usize).min(72);
                 let inner_width = max_box.saturating_sub(4);
-                let border_style = Style::default().fg(Color::Rgb(140, 210, 255));
+                let border_style = Style::default().fg(Color::Rgb(150, 180, 255));
                 let text_style = Style::default().fg(DIM_COLOR);
+                let cat_style = Style::default().fg(Color::Rgb(150, 180, 255));
 
                 let mut box_content: Vec<Line<'static>> = Vec::new();
+                let mut current_category = String::new();
+
                 for text_line in msg.content.lines() {
                     if text_line.starts_with("# ") {
                         continue;
                     }
                     if text_line.starts_with("## ") {
-                        let section = text_line.trim_start_matches("## ");
-                        box_content.push(Line::from(Span::styled(
-                            section.to_string(),
-                            Style::default().fg(Color::Rgb(140, 210, 255)).bold(),
-                        )));
+                        current_category = text_line.trim_start_matches("## ").to_string();
                         continue;
                     }
                     if text_line.trim().is_empty() {
                         continue;
                     }
-                    let chars: Vec<char> = text_line.chars().collect();
-                    if chars.len() <= inner_width {
-                        box_content
-                            .push(Line::from(Span::styled(text_line.to_string(), text_style)));
+                    // Parse "1. content" format into "[category] content"
+                    let content = if let Some(dot_pos) = text_line.find(". ") {
+                        let prefix = &text_line[..dot_pos];
+                        if prefix.trim().chars().all(|c| c.is_ascii_digit()) {
+                            text_line[dot_pos + 2..].trim()
+                        } else {
+                            text_line.trim()
+                        }
                     } else {
-                        let mut pos = 0;
-                        let mut first = true;
+                        text_line.trim()
+                    };
+
+                    let cat_prefix = if !current_category.is_empty() {
+                        format!("[{}] ", current_category.to_lowercase())
+                    } else {
+                        String::new()
+                    };
+                    let available = inner_width.saturating_sub(cat_prefix.len());
+                    let chars: Vec<char> = content.chars().collect();
+
+                    if chars.len() <= available {
+                        if cat_prefix.is_empty() {
+                            box_content.push(Line::from(Span::styled(content.to_string(), text_style)));
+                        } else {
+                            box_content.push(Line::from(vec![
+                                Span::styled(cat_prefix, cat_style),
+                                Span::styled(content.to_string(), text_style),
+                            ]));
+                        }
+                    } else {
+                        let first_chunk: String = chars[..available].iter().collect();
+                        if cat_prefix.is_empty() {
+                            box_content.push(Line::from(Span::styled(first_chunk, text_style)));
+                        } else {
+                            box_content.push(Line::from(vec![
+                                Span::styled(cat_prefix.clone(), cat_style),
+                                Span::styled(first_chunk, text_style),
+                            ]));
+                        }
+                        let indent = cat_prefix.len();
+                        let mut pos = available;
                         while pos < chars.len() {
-                            let indent = if first { "" } else { "   " };
-                            let avail = inner_width.saturating_sub(indent.len());
-                            let end = (pos + avail).min(chars.len());
-                            let chunk: String =
-                                format!("{}{}", indent, chars[pos..end].iter().collect::<String>());
-                            box_content.push(Line::from(Span::styled(chunk, text_style)));
+                            let end = (pos + inner_width.saturating_sub(indent)).min(chars.len());
+                            let chunk: String = chars[pos..end].iter().collect();
+                            box_content.push(Line::from(vec![
+                                Span::raw(" ".repeat(indent)),
+                                Span::styled(chunk, text_style),
+                            ]));
                             pos = end;
-                            first = false;
                         }
                     }
                 }
