@@ -197,6 +197,8 @@ pub struct DisplayConfig {
     pub animation_fps: u32,
     /// FPS for active redraw (processing, streaming): 1-120 (default: 30)
     pub redraw_fps: u32,
+    /// Show a truncated preview of the previous prompt at the top when it scrolls out of view (default: true)
+    pub prompt_preview: bool,
 }
 
 impl Default for DisplayConfig {
@@ -218,6 +220,7 @@ impl Default for DisplayConfig {
             performance: String::new(),
             animation_fps: 60,
             redraw_fps: 30,
+            prompt_preview: true,
         }
     }
 }
@@ -296,6 +299,9 @@ pub struct ProviderConfig {
     pub openai_reasoning_effort: Option<String>,
     /// OpenAI transport mode (auto|websocket|https)
     pub openai_transport: Option<String>,
+    /// Copilot premium request mode: "normal", "one", or "zero"
+    /// "zero" means all requests are free (no premium requests consumed)
+    pub copilot_premium: Option<String>,
 }
 
 impl Default for ProviderConfig {
@@ -305,6 +311,7 @@ impl Default for ProviderConfig {
             default_provider: None,
             openai_reasoning_effort: Some("xhigh".to_string()),
             openai_transport: None,
+            copilot_premium: None,
         }
     }
 }
@@ -735,6 +742,21 @@ impl Config {
                 self.provider.openai_transport = Some(trimmed);
             }
         }
+
+        // Copilot premium mode: env var overrides config
+        // If set in config but not in env, propagate config -> env
+        if let Ok(v) = std::env::var("JCODE_COPILOT_PREMIUM") {
+            self.provider.copilot_premium = Some(v);
+        } else if let Some(ref mode) = self.provider.copilot_premium {
+            let env_val = match mode.as_str() {
+                "zero" | "0" => "0",
+                "one" | "1" => "1",
+                _ => "",
+            };
+            if !env_val.is_empty() {
+                std::env::set_var("JCODE_COPILOT_PREMIUM", env_val);
+            }
+        }
     }
 
     /// Save config to file
@@ -883,6 +905,9 @@ update_channel = "stable"
 openai_reasoning_effort = "xhigh"
 # OpenAI transport mode (auto|websocket|https)
 # openai_transport = "auto"
+# Copilot premium mode: "normal" (default), "one" (first msg only), "zero" (all free)
+# Set to "zero" if you have premium Copilot and want free requests
+# copilot_premium = "zero"
 
 [ambient]
 # Ambient mode: background agent that maintains your codebase
