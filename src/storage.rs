@@ -44,6 +44,17 @@ pub fn ensure_dir(path: &Path) -> Result<()> {
 }
 
 pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
+    write_json_inner(path, value, true)
+}
+
+/// Fast JSON write: atomic rename but no fsync. Good for frequent saves where
+/// durability on power loss is not critical (e.g., session saves during tool execution).
+/// Data is still safe against process crashes (atomic rename protects against partial writes).
+pub fn write_json_fast<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
+    write_json_inner(path, value, false)
+}
+
+fn write_json_inner<T: Serialize + ?Sized>(path: &Path, value: &T, durable: bool) -> Result<()> {
     if let Some(parent) = path.parent() {
         ensure_dir(parent)?;
     }
@@ -59,7 +70,10 @@ pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
         let file = writer
             .into_inner()
             .map_err(|e| anyhow::anyhow!("flush failed: {}", e))?;
-        file.sync_all()?;
+
+        if durable {
+            file.sync_all()?;
+        }
 
         if path.exists() {
             let bak_path = path.with_extension("bak");
@@ -69,9 +83,11 @@ pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
         std::fs::rename(&tmp_path, path)?;
 
         #[cfg(unix)]
-        if let Some(parent) = path.parent() {
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
+        if durable {
+            if let Some(parent) = path.parent() {
+                if let Ok(dir) = std::fs::File::open(parent) {
+                    let _ = dir.sync_all();
+                }
             }
         }
 

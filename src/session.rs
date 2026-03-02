@@ -407,7 +407,7 @@ impl Session {
         self.updated_at = Utc::now();
         let path = session_path(&self.id)?;
         let start = std::time::Instant::now();
-        let result = storage::write_json(&path, self);
+        let result = storage::write_json_fast(&path, self);
         let elapsed = start.elapsed();
         if elapsed.as_millis() > 50 {
             crate::logging::info(&format!(

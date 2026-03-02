@@ -25,7 +25,7 @@ pub fn load_todos(session_id: &str) -> Result<Vec<TodoItem>> {
 
 pub fn save_todos(session_id: &str, todos: &[TodoItem]) -> Result<()> {
     let path = todo_path(session_id)?;
-    storage::write_json(&path, todos)
+    storage::write_json_fast(&path, todos)
 }
 
 fn todo_path(session_id: &str) -> Result<PathBuf> {
