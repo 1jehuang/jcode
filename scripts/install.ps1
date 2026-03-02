@@ -1,10 +1,14 @@
-#Requires -Version 5.1
 <#
 .SYNOPSIS
     Install jcode on Windows.
 .DESCRIPTION
     Downloads the latest jcode release and installs it to %LOCALAPPDATA%\jcode\bin.
-    Can also be run with: iwr -useb https://raw.githubusercontent.com/1jehuang/jcode/master/scripts/install.ps1 | iex
+
+    One-liner install:
+      irm https://raw.githubusercontent.com/1jehuang/jcode/master/scripts/install.ps1 | iex
+
+    Or download and run (allows parameters):
+      & ([scriptblock]::Create((irm https://raw.githubusercontent.com/1jehuang/jcode/master/scripts/install.ps1)))
 .PARAMETER InstallDir
     Override the installation directory (default: $env:LOCALAPPDATA\jcode\bin)
 #>
@@ -13,6 +17,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ($PSVersionTable.PSVersion.Major -lt 5) {
+    Write-Host "error: PowerShell 5.1 or later is required" -ForegroundColor Red
+    exit 1
+}
 
 $Repo = "1jehuang/jcode"
 $Artifact = "jcode-windows-x86_64"
