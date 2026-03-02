@@ -1451,6 +1451,158 @@ fn render_rounded_box(
     lines
 }
 
+struct MemoryTile {
+    category: String,
+    content: String,
+}
+
+fn render_memory_tiles(
+    tiles: &[MemoryTile],
+    total_width: usize,
+    border_style: Style,
+    text_style: Style,
+    header_line: Option<Line<'static>>,
+) -> Vec<Line<'static>> {
+    if tiles.is_empty() {
+        return Vec::new();
+    }
+
+    let mut all_lines: Vec<Line<'static>> = Vec::new();
+
+    if let Some(header) = header_line {
+        all_lines.push(header);
+    }
+
+    let min_box_inner = 16usize;
+    let min_box_width = min_box_inner + 4;
+    let gap = 1usize;
+
+    let max_cols = if total_width < min_box_width {
+        1
+    } else {
+        let mut cols = 1;
+        while (cols + 1) * min_box_width + cols * gap <= total_width {
+            cols += 1;
+        }
+        cols
+    };
+
+    let mut remaining = tiles.iter().collect::<Vec<_>>();
+
+    while !remaining.is_empty() {
+        let row_count = remaining.len().min(max_cols);
+        let row_tiles = &remaining[..row_count];
+
+        let box_width = if row_count == 1 {
+            total_width
+        } else {
+            (total_width - (row_count - 1) * gap) / row_count
+        };
+        let inner_width = box_width.saturating_sub(4);
+        if inner_width < 4 {
+            break;
+        }
+
+        let mut columns: Vec<Vec<Line<'static>>> = Vec::new();
+        let mut max_content_lines = 0usize;
+
+        for tile in row_tiles {
+            let title_text = format!(" {} ", tile.category.to_lowercase());
+            let title_len = unicode_width::UnicodeWidthStr::width(title_text.as_str());
+            let border_chars = box_width.saturating_sub(title_len + 2);
+            let left_border = "─".repeat(border_chars / 2);
+            let right_border = "─".repeat(border_chars - border_chars / 2);
+
+            let top = Line::from(Span::styled(
+                format!("╭{}{}{}╮", left_border, title_text, right_border),
+                border_style,
+            ));
+
+            let chars: Vec<char> = tile.content.chars().collect();
+            let mut content_lines: Vec<Line<'static>> = Vec::new();
+            let mut pos = 0;
+            while pos < chars.len() {
+                let end = (pos + inner_width).min(chars.len());
+                let chunk: String = chars[pos..end].iter().collect();
+                let padding = inner_width.saturating_sub(
+                    unicode_width::UnicodeWidthStr::width(chunk.as_str()),
+                );
+                let mut spans = vec![
+                    Span::styled("│ ", border_style),
+                    Span::styled(chunk, text_style),
+                ];
+                if padding > 0 {
+                    spans.push(Span::raw(" ".repeat(padding)));
+                }
+                spans.push(Span::styled(" │", border_style));
+                content_lines.push(Line::from(spans));
+                pos = end;
+            }
+            if content_lines.is_empty() {
+                let padding = inner_width;
+                content_lines.push(Line::from(vec![
+                    Span::styled("│ ", border_style),
+                    Span::raw(" ".repeat(padding)),
+                    Span::styled(" │", border_style),
+                ]));
+            }
+
+            max_content_lines = max_content_lines.max(content_lines.len());
+
+            let bottom_border = "─".repeat(box_width.saturating_sub(2));
+            let bottom = Line::from(Span::styled(
+                format!("╰{}╯", bottom_border),
+                border_style,
+            ));
+
+            let mut col: Vec<Line<'static>> = Vec::new();
+            col.push(top);
+            col.extend(content_lines);
+            col.push(bottom);
+            columns.push(col);
+        }
+
+        let total_height = max_content_lines + 2;
+        for col in &mut columns {
+            while col.len() < total_height {
+                let idx = col.len() - 1;
+                let padding = inner_width;
+                col.insert(
+                    idx,
+                    Line::from(vec![
+                        Span::styled("│ ", border_style),
+                        Span::raw(" ".repeat(padding)),
+                        Span::styled(" │", border_style),
+                    ]),
+                );
+            }
+        }
+
+        for row_idx in 0..total_height {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for (col_idx, col) in columns.iter().enumerate() {
+                if col_idx > 0 {
+                    spans.push(Span::raw(" ".repeat(gap)));
+                }
+                spans.extend(col[row_idx].spans.clone());
+            }
+            if columns.len() < max_cols {
+                let used: usize = columns.len() * box_width
+                    + (columns.len().saturating_sub(1)) * gap;
+                let trailing = total_width.saturating_sub(used);
+                if trailing > 0 {
+                    spans.push(Span::raw(" ".repeat(trailing)));
+                }
+            }
+            all_lines.push(Line::from(spans));
+        }
+
+        remaining = remaining[row_count..].to_vec();
+    }
+
+    all_lines
+}
+
 fn truncate_line_to_width(line: &Line<'static>, width: usize) -> Line<'static> {
     if width == 0 {
         return Line::from("");
@@ -3717,14 +3869,10 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 }
             }
             "memory" => {
-                let title = msg.title.as_deref().unwrap_or("🧠 auto-recalled");
-                let max_box = (width.saturating_sub(4) as usize).min(72);
-                let inner_width = max_box.saturating_sub(4);
                 let border_style = Style::default().fg(Color::Rgb(130, 140, 180));
                 let text_style = Style::default().fg(DIM_COLOR);
-                let cat_style = Style::default().fg(Color::Rgb(130, 140, 180));
 
-                let mut box_content: Vec<Line<'static>> = Vec::new();
+                let mut tiles: Vec<MemoryTile> = Vec::new();
                 let mut current_category = String::new();
 
                 for text_line in msg.content.lines() {
@@ -3738,7 +3886,6 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                     if text_line.trim().is_empty() {
                         continue;
                     }
-                    // Parse "1. content" format into "[category] content"
                     let content = if let Some(dot_pos) = text_line.find(". ") {
                         let prefix = &text_line[..dot_pos];
                         if prefix.trim().chars().all(|c| c.is_ascii_digit()) {
@@ -3750,49 +3897,29 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                         text_line.trim()
                     };
 
-                    let cat_prefix = if !current_category.is_empty() {
-                        format!("[{}] ", current_category.to_lowercase())
-                    } else {
-                        String::new()
-                    };
-                    let available = inner_width.saturating_sub(cat_prefix.len());
-                    let chars: Vec<char> = content.chars().collect();
-
-                    if chars.len() <= available {
-                        if cat_prefix.is_empty() {
-                            box_content.push(Line::from(Span::styled(content.to_string(), text_style)));
+                    tiles.push(MemoryTile {
+                        category: if current_category.is_empty() {
+                            "memory".to_string()
                         } else {
-                            box_content.push(Line::from(vec![
-                                Span::styled(cat_prefix, cat_style),
-                                Span::styled(content.to_string(), text_style),
-                            ]));
-                        }
-                    } else {
-                        let first_chunk: String = chars[..available].iter().collect();
-                        if cat_prefix.is_empty() {
-                            box_content.push(Line::from(Span::styled(first_chunk, text_style)));
-                        } else {
-                            box_content.push(Line::from(vec![
-                                Span::styled(cat_prefix.clone(), cat_style),
-                                Span::styled(first_chunk, text_style),
-                            ]));
-                        }
-                        let indent = cat_prefix.len();
-                        let mut pos = available;
-                        while pos < chars.len() {
-                            let end = (pos + inner_width.saturating_sub(indent)).min(chars.len());
-                            let chunk: String = chars[pos..end].iter().collect();
-                            box_content.push(Line::from(vec![
-                                Span::raw(" ".repeat(indent)),
-                                Span::styled(chunk, text_style),
-                            ]));
-                            pos = end;
-                        }
-                    }
+                            current_category.clone()
+                        },
+                        content: content.to_string(),
+                    });
                 }
 
-                let box_lines = render_rounded_box(title, box_content, max_box, border_style);
-                for line in box_lines {
+                let count = tiles.len();
+                let header_text = if count == 1 {
+                    "🧠 1 memory".to_string()
+                } else {
+                    format!("🧠 {} memories", count)
+                };
+                let header = Line::from(Span::styled(header_text, border_style))
+                    .alignment(align);
+
+                let total_width = width.saturating_sub(if centered { 0 } else { 2 }) as usize;
+                let tile_lines =
+                    render_memory_tiles(&tiles, total_width, border_style, text_style, Some(header));
+                for line in tile_lines {
                     lines.push(align_if_unset(line, align));
                 }
             }
