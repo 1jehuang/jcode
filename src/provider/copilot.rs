@@ -166,9 +166,10 @@ impl CopilotApiProvider {
             if has_tool_result {
                 return false;
             }
-            let is_text_only = msg.content.iter().all(|block| {
-                matches!(block, ContentBlock::Text { .. })
-            });
+            let is_text_only = msg
+                .content
+                .iter()
+                .all(|block| matches!(block, ContentBlock::Text { .. }));
             if !is_text_only || msg.content.is_empty() {
                 return true;
             }
@@ -196,7 +197,9 @@ impl CopilotApiProvider {
         match mode {
             2 => false,
             1 => {
-                let count = self.user_turn_count.load(std::sync::atomic::Ordering::Relaxed);
+                let count = self
+                    .user_turn_count
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 count == 0
             }
             _ => true,
@@ -204,7 +207,8 @@ impl CopilotApiProvider {
     }
 
     pub fn set_premium_mode(&self, mode: PremiumMode) {
-        self.premium_mode.store(mode as u8, std::sync::atomic::Ordering::Relaxed);
+        self.premium_mode
+            .store(mode as u8, std::sync::atomic::Ordering::Relaxed);
         if mode != PremiumMode::Normal {
             crate::logging::info(&format!("Copilot premium mode set to {:?}", mode));
         }
@@ -288,17 +292,11 @@ impl CopilotApiProvider {
     }
 
     async fn wait_for_init(&self) {
-        if self
-            .init_done
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+        if self.init_done.load(std::sync::atomic::Ordering::Acquire) {
             return;
         }
         let notified = self.init_ready.notified();
-        if self
-            .init_done
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+        if self.init_done.load(std::sync::atomic::Ordering::Acquire) {
             return;
         }
         notified.await;
@@ -795,7 +793,8 @@ impl Provider for CopilotApiProvider {
     ) -> Result<EventStream> {
         let is_user_initiated = self.is_user_initiated(messages);
         if is_user_initiated {
-            self.user_turn_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.user_turn_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let built_messages = Self::build_messages(system, messages);
         let built_tools = Self::build_tools(tools);

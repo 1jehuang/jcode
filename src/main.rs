@@ -51,8 +51,8 @@ mod server;
 mod session;
 mod setup_hints;
 mod sidecar;
-mod startup_profile;
 mod skill;
+mod startup_profile;
 mod stdin_detect;
 mod storage;
 mod telegram;
@@ -158,13 +158,8 @@ fn show_crash_resume_hint() {
             crashed.len(),
             session_label
         );
-        eprintln!(
-            "\x1b[33m   Resume with:\x1b[0m  jcode --resume {}",
-            id
-        );
-        eprintln!(
-            "\x1b[33m   List all:\x1b[0m     jcode --resume"
-        );
+        eprintln!("\x1b[33m   Resume with:\x1b[0m  jcode --resume {}", id);
+        eprintln!("\x1b[33m   List all:\x1b[0m     jcode --resume");
     }
     eprintln!();
 }
@@ -620,10 +615,7 @@ async fn main() -> Result<()> {
                     update::UpdateCheckResult::UpdateAvailable {
                         current, latest, ..
                     } => {
-                        logging::info(&format!(
-                            "Update available: {} -> {}",
-                            current, latest
-                        ));
+                        logging::info(&format!("Update available: {} -> {}", current, latest));
                     }
                     update::UpdateCheckResult::UpdateInstalled { version, path } => {
                         update::print_centered(&format!(
@@ -663,7 +655,7 @@ async fn main() -> Result<()> {
                             }
                         } else {
                             logging::info(
-                                "Update available! Run `jcode update` or `/reload` to update."
+                                "Update available! Run `jcode update` or `/reload` to update.",
                             );
                         }
                     }
@@ -715,8 +707,7 @@ async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Serve) => {
             // When running as a background server, skip interactive login prompts
             std::env::set_var("JCODE_NON_INTERACTIVE", "1");
-            let provider =
-                init_provider(&args.provider, args.model.as_deref()).await?;
+            let provider = init_provider(&args.provider, args.model.as_deref()).await?;
             let server = server::Server::new(provider);
             server.run().await?;
         }
@@ -1465,7 +1456,10 @@ fn hot_update(session_id: &str) -> Result<()> {
     match update::check_for_update_blocking() {
         Ok(Some(release)) => {
             let current = env!("JCODE_VERSION");
-            update::print_centered(&format!("Update available: {} -> {}", current, release.tag_name));
+            update::print_centered(&format!(
+                "Update available: {} -> {}",
+                current, release.tag_name
+            ));
             update::print_centered(&format!("Downloading {}...", release.tag_name));
 
             match update::download_and_install_blocking(&release) {
@@ -2396,13 +2390,17 @@ async fn login_claude_flow(label: &str) -> Result<()> {
     eprintln!("Logging in to Claude (account: {})...", label);
     let tokens = auth::oauth::login_claude().await?;
     auth::oauth::save_claude_tokens_for_account(&tokens, label)?;
-    let profile_email = match auth::oauth::update_claude_account_profile(label, &tokens.access_token).await {
-        Ok(email) => email,
-        Err(e) => {
-            eprintln!("Warning: logged in but failed to fetch profile metadata: {}", e);
-            None
-        }
-    };
+    let profile_email =
+        match auth::oauth::update_claude_account_profile(label, &tokens.access_token).await {
+            Ok(email) => email,
+            Err(e) => {
+                eprintln!(
+                    "Warning: logged in but failed to fetch profile metadata: {}",
+                    e
+                );
+                None
+            }
+        };
     eprintln!("Successfully logged in to Claude!");
     eprintln!("Account '{}' stored at ~/.jcode/auth.json", label);
     if let Some(email) = profile_email {

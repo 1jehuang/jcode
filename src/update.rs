@@ -12,7 +12,9 @@ const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub fn print_centered(msg: &str) {
-    let width = crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(80);
+    let width = crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80);
     for line in msg.lines() {
         let visible_len = unicode_display_width(line);
         if visible_len >= width {
@@ -652,7 +654,8 @@ pub fn check_and_maybe_update(auto_install: bool) -> UpdateCheckResult {
                     }
                     Err(e) => {
                         let msg = format!("Failed to install: {}", e);
-                        Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Error(msg.clone())));
+                        Bus::global()
+                            .publish(BusEvent::UpdateStatus(UpdateStatus::Error(msg.clone())));
                         UpdateCheckResult::Error(msg)
                     }
                 }

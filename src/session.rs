@@ -973,7 +973,12 @@ fn find_crashed_via_pid_files() -> Option<Vec<(String, String)>> {
     }
 
     crashed.sort_by(|a, b| b.2.cmp(&a.2));
-    Some(crashed.into_iter().map(|(id, name, _)| (id, name)).collect())
+    Some(
+        crashed
+            .into_iter()
+            .map(|(id, name, _)| (id, name))
+            .collect(),
+    )
 }
 
 /// Legacy fallback: scan the full sessions directory.

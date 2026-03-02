@@ -247,7 +247,7 @@ impl WidgetKind {
             WidgetKind::GitStatus => 8,
             WidgetKind::SwarmStatus => 9, // Session list - lower priority
             WidgetKind::AmbientMode => 10, // Scheduled agent - lower priority
-            WidgetKind::Tips => 11, // Did you know - lowest
+            WidgetKind::Tips => 11,       // Did you know - lowest
         }
     }
 
@@ -904,12 +904,11 @@ impl InfoWidgetData {
                 .map(|b| b.running_count > 0 || b.memory_agent_active)
                 .unwrap_or(false),
             WidgetKind::AmbientMode => self.ambient_info.is_some(),
-            WidgetKind::UsageLimits => {
-                self.usage_info
-                    .as_ref()
-                    .map(|u| u.available)
-                    .unwrap_or(false)
-            }
+            WidgetKind::UsageLimits => self
+                .usage_info
+                .as_ref()
+                .map(|u| u.available)
+                .unwrap_or(false),
             WidgetKind::ModelInfo => self.model.is_some(),
             WidgetKind::Tips => true, // Always available
             WidgetKind::GitStatus => self
@@ -2104,7 +2103,10 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
             stats_parts = vec![nodes_edges];
         }
         lines.push(Line::from(vec![Span::styled(
-            truncate_smart(&stats_parts.join(" · "), inner.width.saturating_sub(2) as usize),
+            truncate_smart(
+                &stats_parts.join(" · "),
+                inner.width.saturating_sub(2) as usize,
+            ),
             Style::default().fg(Color::Rgb(130, 130, 140)),
         )]));
 
@@ -2151,11 +2153,36 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
         let label_color = Color::Rgb(140, 140, 150);
 
         if let Some(pipeline) = &activity.pipeline {
-            let steps: Vec<(&str, &StepStatus, Option<&StepResult>, Option<(usize, usize)>)> = vec![
-                ("search", &pipeline.search, pipeline.search_result.as_ref(), None),
-                ("verify", &pipeline.verify, pipeline.verify_result.as_ref(), pipeline.verify_progress),
-                ("inject", &pipeline.inject, pipeline.inject_result.as_ref(), None),
-                ("maintain", &pipeline.maintain, pipeline.maintain_result.as_ref(), None),
+            let steps: Vec<(
+                &str,
+                &StepStatus,
+                Option<&StepResult>,
+                Option<(usize, usize)>,
+            )> = vec![
+                (
+                    "search",
+                    &pipeline.search,
+                    pipeline.search_result.as_ref(),
+                    None,
+                ),
+                (
+                    "verify",
+                    &pipeline.verify,
+                    pipeline.verify_result.as_ref(),
+                    pipeline.verify_progress,
+                ),
+                (
+                    "inject",
+                    &pipeline.inject,
+                    pipeline.inject_result.as_ref(),
+                    None,
+                ),
+                (
+                    "maintain",
+                    &pipeline.maintain,
+                    pipeline.maintain_result.as_ref(),
+                    None,
+                ),
             ];
 
             for (name, status, result, progress) in steps {
@@ -2194,7 +2221,10 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
                     lines.push(Line::from(vec![
                         Span::styled("🧠 ", Style::default().fg(Color::Rgb(200, 150, 255))),
                         Span::styled(
-                            truncate_smart(&format!("extracting ({}) {}", reason, elapsed), max_width),
+                            truncate_smart(
+                                &format!("extracting ({}) {}", reason, elapsed),
+                                max_width,
+                            ),
                             Style::default().fg(text_color),
                         ),
                     ]));
@@ -2597,16 +2627,14 @@ fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>>
 
     match info.provider {
         UsageProvider::Copilot => {
-            vec![
-                Line::from(vec![Span::styled(
-                    format!(
-                        "{} in + {} out",
-                        format_tokens(info.input_tokens),
-                        format_tokens(info.output_tokens)
-                    ),
-                    Style::default().fg(Color::Rgb(140, 140, 150)),
-                )]),
-            ]
+            vec![Line::from(vec![Span::styled(
+                format!(
+                    "{} in + {} out",
+                    format_tokens(info.input_tokens),
+                    format_tokens(info.output_tokens)
+                ),
+                Style::default().fg(Color::Rgb(140, 140, 150)),
+            )])]
         }
         UsageProvider::CostBased => {
             // Show token costs for API-key providers (OpenRouter, direct API)
@@ -4083,8 +4111,12 @@ fn render_memory_compact(info: &MemoryInfo) -> Vec<Line<'static>> {
 
     if let Some(activity) = &info.activity {
         let icon = match &activity.state {
-            MemoryState::Embedding | MemoryState::SidecarChecking { .. } => Some(("🔍", Color::Rgb(255, 200, 100))),
-            MemoryState::FoundRelevant { count } => Some((if *count > 0 { "✓" } else { "" }, Color::Rgb(100, 200, 100))),
+            MemoryState::Embedding | MemoryState::SidecarChecking { .. } => {
+                Some(("🔍", Color::Rgb(255, 200, 100)))
+            }
+            MemoryState::FoundRelevant { count } => {
+                Some((if *count > 0 { "✓" } else { "" }, Color::Rgb(100, 200, 100)))
+            }
             MemoryState::Extracting { .. } => Some(("🧠", Color::Rgb(200, 150, 255))),
             MemoryState::Maintaining { .. } => Some(("🌿", Color::Rgb(120, 220, 180))),
             MemoryState::ToolAction { .. } => Some(("💾", Color::Rgb(200, 150, 255))),
@@ -4092,7 +4124,10 @@ fn render_memory_compact(info: &MemoryInfo) -> Vec<Line<'static>> {
         };
         if let Some((icon_str, color)) = icon {
             if !icon_str.is_empty() {
-                spans.push(Span::styled(" · ", Style::default().fg(Color::Rgb(100, 100, 110))));
+                spans.push(Span::styled(
+                    " · ",
+                    Style::default().fg(Color::Rgb(100, 100, 110)),
+                ));
                 spans.push(Span::styled(icon_str, Style::default().fg(color)));
             }
         }
@@ -4160,11 +4195,36 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
                 Style::default().fg(label_color).bold(),
             )]));
 
-            let steps: Vec<(&str, &StepStatus, Option<&StepResult>, Option<(usize, usize)>)> = vec![
-                ("search", &pipeline.search, pipeline.search_result.as_ref(), None),
-                ("verify", &pipeline.verify, pipeline.verify_result.as_ref(), pipeline.verify_progress),
-                ("inject", &pipeline.inject, pipeline.inject_result.as_ref(), None),
-                ("maintain", &pipeline.maintain, pipeline.maintain_result.as_ref(), None),
+            let steps: Vec<(
+                &str,
+                &StepStatus,
+                Option<&StepResult>,
+                Option<(usize, usize)>,
+            )> = vec![
+                (
+                    "search",
+                    &pipeline.search,
+                    pipeline.search_result.as_ref(),
+                    None,
+                ),
+                (
+                    "verify",
+                    &pipeline.verify,
+                    pipeline.verify_result.as_ref(),
+                    pipeline.verify_progress,
+                ),
+                (
+                    "inject",
+                    &pipeline.inject,
+                    pipeline.inject_result.as_ref(),
+                    None,
+                ),
+                (
+                    "maintain",
+                    &pipeline.maintain,
+                    pipeline.maintain_result.as_ref(),
+                    None,
+                ),
             ];
 
             for (name, status, result, progress) in steps {
@@ -4251,7 +4311,10 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
                         format!("{}: {}", action, detail)
                     };
                     lines.push(Line::from(vec![
-                        Span::styled(format!("{} ", icon), Style::default().fg(Color::Rgb(200, 150, 255))),
+                        Span::styled(
+                            format!("{} ", icon),
+                            Style::default().fg(Color::Rgb(200, 150, 255)),
+                        ),
                         Span::styled(
                             truncate_with_ellipsis(&text, max_width.saturating_sub(3)),
                             Style::default().fg(text_color),
@@ -4287,7 +4350,8 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
 
             for event in interesting_events {
                 let age = format_age(event.timestamp.elapsed());
-                let (icon, text, color) = format_event_for_expanded(event, max_width.saturating_sub(10));
+                let (icon, text, color) =
+                    format_event_for_expanded(event, max_width.saturating_sub(10));
 
                 lines.push(Line::from(vec![
                     Span::styled(format!("  {} ", icon), Style::default().fg(color)),

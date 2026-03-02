@@ -595,7 +595,11 @@ mod tests {
             subscription_type: None,
         });
 
-        if let Some(account) = auth.anthropic_accounts.iter_mut().find(|a| a.label == "test") {
+        if let Some(account) = auth
+            .anthropic_accounts
+            .iter_mut()
+            .find(|a| a.label == "test")
+        {
             account.email = Some("user@example.com".to_string());
         }
 

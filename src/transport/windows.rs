@@ -138,8 +138,7 @@ impl Stream {
             fn clone(p: *const ()) -> RawWaker {
                 RawWaker::new(p, &VTABLE)
             }
-            const VTABLE: RawWakerVTable =
-                RawWakerVTable::new(clone, no_op, no_op, no_op);
+            const VTABLE: RawWakerVTable = RawWakerVTable::new(clone, no_op, no_op, no_op);
             RawWaker::new(std::ptr::null(), &VTABLE)
         }
         let waker = unsafe { Waker::from_raw(dummy_raw_waker()) };

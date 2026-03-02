@@ -935,15 +935,11 @@ async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
 
-                if let Some(quotas) =
-                    json.get("limited_user_quotas").and_then(|v| v.as_object())
-                {
+                if let Some(quotas) = json.get("limited_user_quotas").and_then(|v| v.as_object()) {
                     for (name, value) in quotas {
                         if let Some(obj) = value.as_object() {
-                            let used =
-                                obj.get("used").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            let limit =
-                                obj.get("limit").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let used = obj.get("used").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let limit = obj.get("limit").and_then(|v| v.as_f64()).unwrap_or(0.0);
                             if limit > 0.0 {
                                 let pct = (used / limit * 100.0) as f32;
                                 limits.push(UsageLimit {
@@ -976,7 +972,10 @@ async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
         format!(
             "{} premium + {} agent = {} total ({} in + {} out)",
             usage.today.premium_requests,
-            usage.today.requests.saturating_sub(usage.today.premium_requests),
+            usage
+                .today
+                .requests
+                .saturating_sub(usage.today.premium_requests),
             usage.today.requests,
             format_token_count(usage.today.input_tokens),
             format_token_count(usage.today.output_tokens),
@@ -987,7 +986,10 @@ async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
         format!(
             "{} premium + {} agent = {} total ({} in + {} out)",
             usage.month.premium_requests,
-            usage.month.requests.saturating_sub(usage.month.premium_requests),
+            usage
+                .month
+                .requests
+                .saturating_sub(usage.month.premium_requests),
             usage.month.requests,
             format_token_count(usage.month.input_tokens),
             format_token_count(usage.month.output_tokens),
@@ -998,7 +1000,10 @@ async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
         format!(
             "{} premium + {} agent = {} total ({} in + {} out)",
             usage.all_time.premium_requests,
-            usage.all_time.requests.saturating_sub(usage.all_time.premium_requests),
+            usage
+                .all_time
+                .requests
+                .saturating_sub(usage.all_time.premium_requests),
             usage.all_time.requests,
             format_token_count(usage.all_time.input_tokens),
             format_token_count(usage.all_time.output_tokens),

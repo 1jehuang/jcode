@@ -82,7 +82,11 @@ pub fn launcher_dir() -> Result<PathBuf> {
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
             return Ok(PathBuf::from(local).join("jcode").join("bin"));
         }
-        Ok(home_dir()?.join("AppData").join("Local").join("jcode").join("bin"))
+        Ok(home_dir()?
+            .join("AppData")
+            .join("Local")
+            .join("jcode")
+            .join("bin"))
     }
     #[cfg(not(windows))]
     {

@@ -73,9 +73,6 @@ jobs:
       - name: Run tests
         shell: bash
         run: |
-          if command -v sccache &>/dev/null && sccache --show-stats &>/dev/null; then
-            export RUSTC_WRAPPER=sccache
-          fi
           cargo test --target ${{ matrix.target }}
 
   fmt:

@@ -306,10 +306,7 @@ mod tests {
     #[test]
     fn vscdb_read_access_token() {
         let dir = TempDir::new().unwrap();
-        let db = create_mock_vscdb(
-            dir.path(),
-            &[("cursorAuth/accessToken", "tok_abc123xyz")],
-        );
+        let db = create_mock_vscdb(dir.path(), &[("cursorAuth/accessToken", "tok_abc123xyz")]);
         let result = read_vscdb_key(&db, "cursorAuth/accessToken").unwrap();
         assert_eq!(result, "tok_abc123xyz");
     }
@@ -319,7 +316,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let db = create_mock_vscdb(
             dir.path(),
-            &[("storage.serviceMachineId", "550e8400-e29b-41d4-a716-446655440000")],
+            &[(
+                "storage.serviceMachineId",
+                "550e8400-e29b-41d4-a716-446655440000",
+            )],
         );
         let result = read_vscdb_key(&db, "storage.serviceMachineId").unwrap();
         assert_eq!(result, "550e8400-e29b-41d4-a716-446655440000");
@@ -331,7 +331,10 @@ mod tests {
         let db = create_mock_vscdb(dir.path(), &[("other/key", "value")]);
         let result = read_vscdb_key(&db, "cursorAuth/accessToken");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found or empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not found or empty"));
     }
 
     #[test]
@@ -399,7 +402,10 @@ mod tests {
         assert!(!paths.is_empty(), "Should have at least one candidate path");
         for path in &paths {
             let s = path.to_string_lossy();
-            assert!(s.contains("ursor"), "Path should contain 'Cursor' or 'cursor'");
+            assert!(
+                s.contains("ursor"),
+                "Path should contain 'Cursor' or 'cursor'"
+            );
             assert!(s.ends_with("state.vscdb"));
         }
     }
@@ -410,10 +416,7 @@ mod tests {
         // On this machine Cursor isn't installed, so it should fail
         // (if Cursor IS installed, this test still passes - it finds the file)
         if result.is_err() {
-            assert!(result
-                .unwrap_err()
-                .to_string()
-                .contains("not found"));
+            assert!(result.unwrap_err().to_string().contains("not found"));
         }
     }
 }

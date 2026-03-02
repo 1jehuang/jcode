@@ -1611,11 +1611,7 @@ impl MemoryManager {
     /// with take_pending_memory(session_id).
     /// This method returns immediately and never blocks the caller.
     /// Only ONE memory check runs at a time per session - additional calls are ignored.
-    pub fn spawn_relevance_check(
-        &self,
-        session_id: &str,
-        messages: Vec<crate::message::Message>,
-    ) {
+    pub fn spawn_relevance_check(&self, session_id: &str, messages: Vec<crate::message::Message>) {
         let sid = session_id.to_string();
 
         // Only spawn if no check is currently in progress for this session
@@ -1864,7 +1860,11 @@ impl MemoryManager {
             }
             // Update pipeline verify progress after each batch
             pipeline_update(|p| {
-                p.verify_progress = Some((relevant_ids.len() + (total_candidates - candidates.len().min(total_candidates)), total_candidates));
+                p.verify_progress = Some((
+                    relevant_ids.len()
+                        + (total_candidates - candidates.len().min(total_candidates)),
+                    total_candidates,
+                ));
             });
         }
 
@@ -1898,10 +1898,7 @@ impl MemoryManager {
             count: relevant.len(),
         });
 
-        let prompt = format_relevant_prompt(
-            &relevant,
-            MEMORY_RELEVANCE_MAX_RESULTS,
-        );
+        let prompt = format_relevant_prompt(&relevant, MEMORY_RELEVANCE_MAX_RESULTS);
 
         // Mark inject as done - the prompt is ready for injection
         pipeline_update(|p| {

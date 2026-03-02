@@ -1453,8 +1453,7 @@ impl TuiState for ClientApp {
         let has_openai_creds = crate::auth::codex::load_credentials().is_ok();
         // Anthropic OAuth: Claude provider, or unknown/remote with Anthropic credentials
         let is_anthropic_oauth = provider_name.contains("claude")
-            || ((provider_name == "unknown" || provider_name == "remote")
-                && has_anthropic_creds);
+            || ((provider_name == "unknown" || provider_name == "remote") && has_anthropic_creds);
         let is_openai_provider = provider_name.contains("openai")
             || ((provider_name == "unknown" || provider_name == "remote")
                 && has_openai_creds

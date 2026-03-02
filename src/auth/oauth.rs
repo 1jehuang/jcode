@@ -389,16 +389,16 @@ struct ClaudeProfileAccount {
     email: Option<String>,
 }
 
-async fn fetch_claude_profile_email_at_url(access_token: &str, profile_url: &str) -> Result<Option<String>> {
+async fn fetch_claude_profile_email_at_url(
+    access_token: &str,
+    profile_url: &str,
+) -> Result<Option<String>> {
     let client = reqwest::Client::new();
     let resp = client
         .get(profile_url)
         .header("Accept", "application/json")
         .header("User-Agent", "claude-cli/1.0.0")
-        .header(
-            "anthropic-beta",
-            "oauth-2025-04-20,claude-code-20250219",
-        )
+        .header("anthropic-beta", "oauth-2025-04-20,claude-code-20250219")
         .bearer_auth(access_token)
         .send()
         .await?;
@@ -414,7 +414,10 @@ async fn fetch_claude_profile_email_at_url(access_token: &str, profile_url: &str
 }
 
 /// Fetch profile metadata for a Claude account and persist any discovered fields.
-pub async fn update_claude_account_profile(label: &str, access_token: &str) -> Result<Option<String>> {
+pub async fn update_claude_account_profile(
+    label: &str,
+    access_token: &str,
+) -> Result<Option<String>> {
     let email = fetch_claude_profile_email_at_url(access_token, claude::PROFILE_URL).await?;
     claude_auth::update_account_profile(label, email.clone())?;
     Ok(email)
@@ -890,7 +893,9 @@ mod tests {
         let (port, _handle) = mock_token_server(200, &body).await;
 
         let url = format!("http://127.0.0.1:{}/api/oauth/profile", port);
-        let email = fetch_claude_profile_email_at_url("token", &url).await.unwrap();
+        let email = fetch_claude_profile_email_at_url("token", &url)
+            .await
+            .unwrap();
 
         assert_eq!(email, Some("user@example.com".to_string()));
     }
@@ -904,7 +909,9 @@ mod tests {
         let (port, _handle) = mock_token_server(200, &body).await;
 
         let url = format!("http://127.0.0.1:{}/api/oauth/profile", port);
-        let email = fetch_claude_profile_email_at_url("token", &url).await.unwrap();
+        let email = fetch_claude_profile_email_at_url("token", &url)
+            .await
+            .unwrap();
 
         assert!(email.is_none());
     }
@@ -1173,8 +1180,7 @@ mod tests {
 
     #[test]
     fn claude_exchange_request_targets_correct_url() {
-        let (url, _ct, _body) =
-            build_claude_exchange_request("c", "v", claude::REDIRECT_URI, None);
+        let (url, _ct, _body) = build_claude_exchange_request("c", "v", claude::REDIRECT_URI, None);
         assert_eq!(url, "https://console.anthropic.com/v1/oauth/token");
     }
 
@@ -1191,7 +1197,10 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect();
         assert_eq!(pairs.get("grant_type").unwrap(), "refresh_token");
-        assert_eq!(pairs.get("refresh_token").unwrap(), "rt_refresh_token_value");
+        assert_eq!(
+            pairs.get("refresh_token").unwrap(),
+            "rt_refresh_token_value"
+        );
         assert_eq!(pairs.get("client_id").unwrap(), claude::CLIENT_ID);
     }
 
@@ -1207,8 +1216,11 @@ mod tests {
 
     #[test]
     fn openai_exchange_request_uses_form_urlencoded() {
-        let (_url, content_type, _body) =
-            build_openai_exchange_request("code", "verifier", "http://localhost:1455/auth/callback");
+        let (_url, content_type, _body) = build_openai_exchange_request(
+            "code",
+            "verifier",
+            "http://localhost:1455/auth/callback",
+        );
         assert_eq!(content_type, "application/x-www-form-urlencoded");
     }
 
@@ -1543,7 +1555,8 @@ mod tests {
 
     #[tokio::test]
     async fn claude_exchange_mock_server_error_propagates() {
-        let error_body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"Invalid"}}"#;
+        let error_body =
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"Invalid"}}"#;
         let (port, _handle) = mock_token_server(400, error_body).await;
 
         let url = format!("http://127.0.0.1:{}/v1/oauth/token", port);
@@ -1568,7 +1581,9 @@ mod tests {
         let (port, handle) = mock_token_server(200, &success_body).await;
 
         let url = format!("http://127.0.0.1:{}/v1/oauth/token", port);
-        let result = refresh_tokens_at_url(&url, "old_refresh_token").await.unwrap();
+        let result = refresh_tokens_at_url(&url, "old_refresh_token")
+            .await
+            .unwrap();
 
         assert_eq!(result.access_token, "at_refreshed");
         assert_eq!(result.refresh_token, "rt_refreshed");
@@ -1596,7 +1611,10 @@ mod tests {
         let url = format!("http://127.0.0.1:{}/v1/oauth/token", port);
         let result = refresh_tokens_at_url(&url, "expired_token").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Token refresh failed"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Token refresh failed"));
     }
 
     // ========================
@@ -1696,7 +1714,9 @@ mod tests {
         .to_string();
         let (port, _handle) = mock_token_server(200, &body_with).await;
         let url = format!("http://127.0.0.1:{}/token", port);
-        let result = exchange_code_at_url(&url, "c", "v", "r", None).await.unwrap();
+        let result = exchange_code_at_url(&url, "c", "v", "r", None)
+            .await
+            .unwrap();
         assert_eq!(result.id_token, Some("idt_value".to_string()));
     }
 
@@ -1710,7 +1730,9 @@ mod tests {
         .to_string();
         let (port, _handle) = mock_token_server(200, &body_without).await;
         let url = format!("http://127.0.0.1:{}/token", port);
-        let result = exchange_code_at_url(&url, "c", "v", "r", None).await.unwrap();
+        let result = exchange_code_at_url(&url, "c", "v", "r", None)
+            .await
+            .unwrap();
         assert!(result.id_token.is_none());
     }
 
@@ -1725,7 +1747,9 @@ mod tests {
         let (port, _handle) = mock_token_server(200, &body).await;
         let url = format!("http://127.0.0.1:{}/token", port);
         let before = chrono::Utc::now().timestamp_millis();
-        let result = exchange_code_at_url(&url, "c", "v", "r", None).await.unwrap();
+        let result = exchange_code_at_url(&url, "c", "v", "r", None)
+            .await
+            .unwrap();
         let after = chrono::Utc::now().timestamp_millis();
         assert!(result.expires_at >= before + 3600 * 1000);
         assert!(result.expires_at <= after + 3600 * 1000);
@@ -1766,10 +1790,19 @@ mod tests {
     #[test]
     fn all_token_requests_use_form_urlencoded_not_json() {
         let checks: Vec<(&str, String)> = vec![
-            ("claude_exchange", build_claude_exchange_request("c", "v", "r", None).1),
-            ("claude_exchange_with_state", build_claude_exchange_request("c", "v", "r", Some("s")).1),
+            (
+                "claude_exchange",
+                build_claude_exchange_request("c", "v", "r", None).1,
+            ),
+            (
+                "claude_exchange_with_state",
+                build_claude_exchange_request("c", "v", "r", Some("s")).1,
+            ),
             ("claude_refresh", build_claude_refresh_request("rt").1),
-            ("openai_exchange", build_openai_exchange_request("c", "v", "r").1),
+            (
+                "openai_exchange",
+                build_openai_exchange_request("c", "v", "r").1,
+            ),
             ("openai_refresh", build_openai_refresh_request("rt").1),
         ];
         for (name, ct) in checks {

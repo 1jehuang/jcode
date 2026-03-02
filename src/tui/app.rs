@@ -1522,24 +1522,22 @@ impl App {
         }
         let last = &messages[messages.len() - 1];
         match last.role {
-            Role::User => {
-                last.content.iter().any(|block| match block {
-                    ContentBlock::ToolResult { content, is_error, .. } => {
-                        is_error.unwrap_or(false)
-                            && (content.contains("interrupted by server reload")
-                                || content.contains("Skipped - server reloading"))
-                    }
-                    _ => false,
-                })
-            }
-            Role::Assistant => {
-                last.content.iter().any(|block| match block {
-                    ContentBlock::Text { text, .. } => {
-                        text.ends_with("[generation interrupted - server reloading]")
-                    }
-                    _ => false,
-                })
-            }
+            Role::User => last.content.iter().any(|block| match block {
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => {
+                    is_error.unwrap_or(false)
+                        && (content.contains("interrupted by server reload")
+                            || content.contains("Skipped - server reloading"))
+                }
+                _ => false,
+            }),
+            Role::Assistant => last.content.iter().any(|block| match block {
+                ContentBlock::Text { text, .. } => {
+                    text.ends_with("[generation interrupted - server reloading]")
+                }
+                _ => false,
+            }),
         }
     }
 
@@ -6827,9 +6825,7 @@ impl App {
                 }
             }
             KeyCode::Char(c) => {
-                if self.input.is_empty()
-                    && !self.is_processing
-                    && self.display_messages.is_empty()
+                if self.input.is_empty() && !self.is_processing && self.display_messages.is_empty()
                 {
                     if let Some(digit) = c.to_digit(10) {
                         let suggestions = self.suggestion_prompts();
@@ -10423,13 +10419,10 @@ impl App {
     ) -> Result<String, String> {
         let redirect_uri =
             redirect_uri.unwrap_or_else(|| crate::auth::oauth::claude::REDIRECT_URI.to_string());
-        let oauth_tokens = crate::auth::oauth::exchange_claude_code(
-            &verifier,
-            input.trim(),
-            &redirect_uri,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+        let oauth_tokens =
+            crate::auth::oauth::exchange_claude_code(&verifier, input.trim(), &redirect_uri)
+                .await
+                .map_err(|e| e.to_string())?;
 
         crate::auth::oauth::save_claude_tokens_for_account(&oauth_tokens, label)
             .map_err(|e| format!("Failed to save tokens: {}", e))?;
@@ -10679,9 +10672,7 @@ impl App {
                     added_any = true;
                 }
 
-                if auth.copilot == crate::auth::AuthState::Available
-                    && !model.contains("[1m]")
-                {
+                if auth.copilot == crate::auth::AuthState::Available && !model.contains("[1m]") {
                     routes.push(crate::provider::ModelRoute {
                         model: model.clone(),
                         provider: "Copilot".to_string(),
@@ -13542,12 +13533,7 @@ impl App {
 
         let auth = crate::auth::AuthStatus::check();
         if !auth.has_any_available() {
-            return vec![
-                (
-                    "Log in to get started".to_string(),
-                    "/login".to_string(),
-                ),
-            ];
+            return vec![("Log in to get started".to_string(), "/login".to_string())];
         }
 
         if !self.display_messages.is_empty() || self.is_processing {
@@ -13560,9 +13546,7 @@ impl App {
                 let path = dir.join("setup_hints.json");
                 std::fs::read_to_string(&path).ok()
             })
-            .and_then(|content| {
-                serde_json::from_str::<serde_json::Value>(&content).ok()
-            })
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
             .and_then(|v| v.get("launch_count")?.as_u64())
             .map(|count| count <= 5)
             .unwrap_or(true);
@@ -13733,7 +13717,11 @@ impl App {
         self.last_api_completed = Some(Instant::now());
         self.last_turn_input_tokens = {
             let input = self.streaming_input_tokens;
-            if input > 0 { Some(input) } else { None }
+            if input > 0 {
+                Some(input)
+            } else {
+                None
+            }
         };
 
         if let Some(footer) = self.build_turn_footer(duration) {

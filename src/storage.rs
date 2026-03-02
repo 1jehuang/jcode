@@ -107,21 +107,15 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
                         let _ = std::fs::copy(&bak_path, path);
                         Ok(val)
                     }
-                    Err(bak_err) => {
-                        Err(anyhow::anyhow!(
-                            "Corrupt JSON at {} ({}), backup also corrupt ({})",
-                            path.display(),
-                            e,
-                            bak_err
-                        ))
-                    }
+                    Err(bak_err) => Err(anyhow::anyhow!(
+                        "Corrupt JSON at {} ({}), backup also corrupt ({})",
+                        path.display(),
+                        e,
+                        bak_err
+                    )),
                 }
             } else {
-                Err(anyhow::anyhow!(
-                    "Corrupt JSON at {}: {}",
-                    path.display(),
-                    e
-                ))
+                Err(anyhow::anyhow!("Corrupt JSON at {}: {}", path.display(), e))
             }
         }
     }

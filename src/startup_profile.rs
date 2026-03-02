@@ -38,10 +38,16 @@ pub fn report() -> String {
         None => return "No startup profile recorded".to_string(),
     };
 
-    let total = profile.marks.last().unwrap().1.duration_since(profile.start);
-    let mut lines = vec![
-        format!("=== Startup Profile ({:.1}ms total) ===", total.as_secs_f64() * 1000.0),
-    ];
+    let total = profile
+        .marks
+        .last()
+        .unwrap()
+        .1
+        .duration_since(profile.start);
+    let mut lines = vec![format!(
+        "=== Startup Profile ({:.1}ms total) ===",
+        total.as_secs_f64() * 1000.0
+    )];
 
     for i in 1..profile.marks.len() {
         let delta = profile.marks[i].1.duration_since(profile.marks[i - 1].1);

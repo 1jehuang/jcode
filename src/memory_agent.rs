@@ -80,19 +80,11 @@ pub struct MemoryAgentHandle {
 
 impl MemoryAgentHandle {
     /// Send a context update to the memory agent (async)
-    pub async fn update_context(
-        &self,
-        session_id: &str,
-        messages: Vec<crate::message::Message>,
-    ) {
+    pub async fn update_context(&self, session_id: &str, messages: Vec<crate::message::Message>) {
         self.update_context_sync(session_id, messages);
     }
 
-    pub fn update_context_sync(
-        &self,
-        session_id: &str,
-        messages: Vec<crate::message::Message>,
-    ) {
+    pub fn update_context_sync(&self, session_id: &str, messages: Vec<crate::message::Message>) {
         let msg = AgentMessage::Context {
             session_id: session_id.to_string(),
             messages,
