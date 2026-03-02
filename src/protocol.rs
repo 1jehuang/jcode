@@ -121,6 +121,10 @@ pub enum Request {
     #[serde(rename = "set_model")]
     SetModel { id: u64, model: String },
 
+    /// Set Copilot premium request conservation mode (0=normal, 1=one-per-session, 2=zero)
+    #[serde(rename = "set_premium_mode")]
+    SetPremiumMode { id: u64, mode: u8 },
+
     /// Toggle a runtime feature for this session
     #[serde(rename = "set_feature")]
     SetFeature {
@@ -765,6 +769,7 @@ impl Request {
             Request::ResumeSession { id, .. } => *id,
             Request::CycleModel { id, .. } => *id,
             Request::SetModel { id, .. } => *id,
+            Request::SetPremiumMode { id, .. } => *id,
             Request::SetFeature { id, .. } => *id,
             Request::Split { id } => *id,
             Request::Compact { id } => *id,

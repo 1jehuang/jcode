@@ -372,6 +372,16 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Set Copilot premium request conservation mode on the server
+    pub async fn set_premium_mode(&mut self, mode: u8) -> Result<()> {
+        let request = Request::SetPremiumMode {
+            id: self.next_request_id,
+            mode,
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await
+    }
+
     /// Toggle a runtime feature on the server for this session
     pub async fn set_feature(&mut self, feature: FeatureToggle, enabled: bool) -> Result<()> {
         let request = Request::SetFeature {
