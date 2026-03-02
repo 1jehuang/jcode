@@ -4760,6 +4760,24 @@ fn draw_messages(
         app.centered_mode(),
     );
 
+    // Compute prompt preview info early so we can adjust margins before info widgets use them
+    let prompt_preview_lines = if crate::config::config().display.prompt_preview && scroll > 0 {
+        compute_prompt_preview_line_count(wrapped_user_prompt_starts, scroll, app, area.width)
+    } else {
+        0u16
+    };
+
+    // Zero out margins for rows occupied by the prompt preview overlay
+    let mut margins = margins;
+    for row in 0..(prompt_preview_lines as usize) {
+        if row < margins.right_widths.len() {
+            margins.right_widths[row] = 0;
+        }
+        if row < margins.left_widths.len() {
+            margins.left_widths[row] = 0;
+        }
+    }
+
     let visible_end = (scroll + visible_height).min(wrapped_lines.len());
 
     let now_ms = app.now_millis();
@@ -5033,6 +5051,41 @@ fn draw_messages(
     }
 
     margins
+}
+
+/// Compute how many lines the prompt preview overlay will use (0 if none).
+/// This mirrors the logic in the draw_messages prompt preview section.
+fn compute_prompt_preview_line_count(
+    wrapped_user_prompt_starts: &[usize],
+    scroll: usize,
+    app: &dyn TuiState,
+    area_width: u16,
+) -> u16 {
+    let last_offscreen = wrapped_user_prompt_starts
+        .iter()
+        .rposition(|&start| start < scroll);
+    let Some(prompt_order) = last_offscreen else {
+        return 0;
+    };
+    let user_messages: Vec<&str> = app
+        .display_messages()
+        .iter()
+        .filter(|m| m.role == "user")
+        .map(|m| m.content.as_str())
+        .collect();
+    let Some(prompt_text) = user_messages.get(prompt_order) else {
+        return 0;
+    };
+    let prompt_text = prompt_text.trim();
+    if prompt_text.is_empty() {
+        return 0;
+    }
+    let num_str = format!("{}", prompt_order + 1);
+    let prefix_len = num_str.len() + 2;
+    let content_width = area_width.saturating_sub(prefix_len as u16 + 2) as usize;
+    let text_flat = prompt_text.replace('\n', " ");
+    let char_count = text_flat.chars().count();
+    if char_count > content_width { 2 } else { 1 }
 }
 
 /// Truncate text to `max_width`, showing the beginning and end with "..." in the middle.
