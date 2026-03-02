@@ -1456,6 +1456,26 @@ struct MemoryTile {
     items: Vec<String>,
 }
 
+fn group_into_tiles(entries: Vec<(String, String)>) -> Vec<MemoryTile> {
+    let mut order: Vec<String> = Vec::new();
+    let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for (cat, content) in entries {
+        if !map.contains_key(&cat) {
+            order.push(cat.clone());
+        }
+        map.entry(cat).or_default().push(content);
+    }
+    order
+        .into_iter()
+        .filter_map(|cat| {
+            map.remove(&cat).map(|items| MemoryTile {
+                category: cat,
+                items,
+            })
+        })
+        .collect()
+}
+
 fn render_memory_tiles(
     tiles: &[MemoryTile],
     total_width: usize,
@@ -3897,9 +3917,8 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 let border_style = Style::default().fg(Color::Rgb(130, 140, 180));
                 let text_style = Style::default().fg(DIM_COLOR);
 
-                let mut category_items: Vec<(String, Vec<String>)> = Vec::new();
+                let mut entries: Vec<(String, String)> = Vec::new();
                 let mut current_category = String::new();
-                let mut count = 0usize;
 
                 for text_line in msg.content.lines() {
                     if text_line.starts_with("# ") {
@@ -3928,25 +3947,11 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                     } else {
                         current_category.clone()
                     };
-                    if let Some(last) = category_items.last_mut() {
-                        if last.0 == cat {
-                            last.1.push(content.to_string());
-                        } else {
-                            category_items.push((cat, vec![content.to_string()]));
-                        }
-                    } else {
-                        category_items.push((cat, vec![content.to_string()]));
-                    }
-                    count += 1;
+                    entries.push((cat, content.to_string()));
                 }
 
-                let tiles: Vec<MemoryTile> = category_items
-                    .into_iter()
-                    .map(|(cat, items)| MemoryTile {
-                        category: cat,
-                        items,
-                    })
-                    .collect();
+                let count = entries.len();
+                let tiles = group_into_tiles(entries);
 
                 let header_text = if count == 1 {
                     "🧠 1 memory".to_string()
@@ -4118,8 +4123,7 @@ pub(crate) fn render_tool_message(
         let border_style = Style::default().fg(Color::Rgb(150, 180, 255));
         let text_style = Style::default().fg(DIM_COLOR);
 
-        let mut category_items: Vec<(String, Vec<String>)> = Vec::new();
-        let mut count = 0usize;
+        let mut entries: Vec<(String, String)> = Vec::new();
         for line in msg.content.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with("- [") {
@@ -4132,29 +4136,15 @@ pub(crate) fn render_tool_message(
                         } else {
                             content
                         };
-                        if let Some(last) = category_items.last_mut() {
-                            if last.0 == cat {
-                                last.1.push(content.to_string());
-                            } else {
-                                category_items.push((cat, vec![content.to_string()]));
-                            }
-                        } else {
-                            category_items.push((cat, vec![content.to_string()]));
-                        }
-                        count += 1;
+                        entries.push((cat, content.to_string()));
                     }
                 }
             }
         }
 
-        if count > 0 {
-            let tiles: Vec<MemoryTile> = category_items
-                .into_iter()
-                .map(|(cat, items)| MemoryTile {
-                    category: cat,
-                    items,
-                })
-                .collect();
+        if !entries.is_empty() {
+            let count = entries.len();
+            let tiles = group_into_tiles(entries);
             let header_text = format!(
                 "🧠 recalled {} memor{}",
                 count,
