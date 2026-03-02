@@ -6400,9 +6400,10 @@ impl App {
                         if trimmed == "/z" {
                             self.provider.set_premium_mode(PremiumMode::Normal);
                             let _ = remote.set_premium_mode(PremiumMode::Normal as u8).await;
+                            let _ = crate::config::Config::set_copilot_premium(None);
                             self.set_status_notice("Premium: normal");
                             self.push_display_message(DisplayMessage::system(
-                                "Premium request mode reset to normal.".to_string(),
+                                "Premium request mode reset to normal. (saved to config)".to_string(),
                             ));
                             return Ok(());
                         }
@@ -6415,13 +6416,20 @@ impl App {
                         if current == mode {
                             self.provider.set_premium_mode(PremiumMode::Normal);
                             let _ = remote.set_premium_mode(PremiumMode::Normal as u8).await;
+                            let _ = crate::config::Config::set_copilot_premium(None);
                             self.set_status_notice("Premium: normal");
                             self.push_display_message(DisplayMessage::system(
-                                "Premium request mode reset to normal.".to_string(),
+                                "Premium request mode reset to normal. (saved to config)".to_string(),
                             ));
                         } else {
                             self.provider.set_premium_mode(mode);
                             let _ = remote.set_premium_mode(mode as u8).await;
+                            let config_val = match mode {
+                                PremiumMode::Zero => "zero",
+                                PremiumMode::OnePerSession => "one",
+                                PremiumMode::Normal => "normal",
+                            };
+                            let _ = crate::config::Config::set_copilot_premium(Some(config_val));
                             let label = match mode {
                                 PremiumMode::OnePerSession => "one premium per session",
                                 PremiumMode::Zero => "zero premium requests",
@@ -6429,7 +6437,7 @@ impl App {
                             };
                             self.set_status_notice(&format!("Premium: {}", label));
                             self.push_display_message(DisplayMessage::system(format!(
-                                "Premium mode: **{}**. Toggle off with `/z`.",
+                                "Premium mode: **{}**. Toggle off with `/z`. (saved to config)",
                                 label,
                             )));
                         }
@@ -8481,9 +8489,10 @@ impl App {
 
             if trimmed == "/z" {
                 self.provider.set_premium_mode(PremiumMode::Normal);
+                let _ = crate::config::Config::set_copilot_premium(None);
                 self.set_status_notice("Premium: normal");
                 self.push_display_message(DisplayMessage::system(
-                    "Premium request mode reset to normal.".to_string(),
+                    "Premium request mode reset to normal. (saved to config)".to_string(),
                 ));
                 return;
             }
@@ -8495,12 +8504,19 @@ impl App {
             };
             if current == mode {
                 self.provider.set_premium_mode(PremiumMode::Normal);
+                let _ = crate::config::Config::set_copilot_premium(None);
                 self.set_status_notice("Premium: normal");
                 self.push_display_message(DisplayMessage::system(
-                    "Premium request mode reset to normal.".to_string(),
+                    "Premium request mode reset to normal. (saved to config)".to_string(),
                 ));
             } else {
                 self.provider.set_premium_mode(mode);
+                let config_val = match mode {
+                    PremiumMode::Zero => "zero",
+                    PremiumMode::OnePerSession => "one",
+                    PremiumMode::Normal => "normal",
+                };
+                let _ = crate::config::Config::set_copilot_premium(Some(config_val));
                 let label = match mode {
                     PremiumMode::OnePerSession => "one premium per session",
                     PremiumMode::Zero => "zero premium requests",
@@ -8508,7 +8524,7 @@ impl App {
                 };
                 self.set_status_notice(&format!("Premium: {}", label));
                 self.push_display_message(DisplayMessage::system(format!(
-                    "Premium mode: **{}**. Toggle off with `/z`.",
+                    "Premium mode: **{}**. Toggle off with `/z`. (saved to config)",
                     label,
                 )));
             }

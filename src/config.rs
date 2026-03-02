@@ -773,6 +773,19 @@ impl Config {
         Ok(())
     }
 
+    /// Update the copilot premium mode in the config file.
+    /// Reloads, patches, and saves so it doesn't clobber other fields.
+    pub fn set_copilot_premium(mode: Option<&str>) -> anyhow::Result<()> {
+        let mut cfg = Self::load();
+        cfg.provider.copilot_premium = mode.map(|s| s.to_string());
+        cfg.save()?;
+        crate::logging::info(&format!(
+            "Saved copilot_premium to config: {}",
+            mode.unwrap_or("(none)")
+        ));
+        Ok(())
+    }
+
     /// Update just the default model and provider in the config file.
     /// This reloads, patches, and saves so it doesn't clobber other fields.
     pub fn set_default_model(model: Option<&str>, provider: Option<&str>) -> anyhow::Result<()> {
