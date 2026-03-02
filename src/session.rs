@@ -323,11 +323,13 @@ impl Session {
     /// Mark session as closed normally
     pub fn mark_closed(&mut self) {
         self.status = SessionStatus::Closed;
+        unregister_active_pid(&self.id);
     }
 
     /// Mark session as crashed
     pub fn mark_crashed(&mut self, message: Option<String>) {
         self.status = SessionStatus::Crashed { message };
+        unregister_active_pid(&self.id);
     }
 
     /// Mark session as having an error
@@ -338,8 +340,10 @@ impl Session {
     /// Mark session as active (e.g., when resuming)
     pub fn mark_active(&mut self) {
         self.status = SessionStatus::Active;
-        self.last_pid = Some(std::process::id());
+        let pid = std::process::id();
+        self.last_pid = Some(pid);
         self.last_active_at = Some(Utc::now());
+        register_active_pid(&self.id, pid);
     }
 
     /// Mark session as active for a specific PID
@@ -347,6 +351,7 @@ impl Session {
         self.status = SessionStatus::Active;
         self.last_pid = Some(pid);
         self.last_active_at = Some(Utc::now());
+        register_active_pid(&self.id, pid);
     }
 
     /// Detect if an active session likely crashed (process no longer running)
@@ -869,9 +874,111 @@ pub fn detect_crashed_sessions() -> Result<Option<CrashedSessionsInfo>> {
     }))
 }
 
-/// Find recent crashed sessions (within the last 24 hours) for showing resume hints.
-/// Unlike `detect_crashed_sessions`, this does NOT apply the 60-second batch window filter.
+/// Lightweight session header for fast scanning (skips messages array).
+/// Uses serde's `deny_unknown_fields` = false (default) so the large `messages`
+/// field is silently ignored during deserialization.
+#[derive(Debug, Clone, Deserialize)]
+struct SessionHeader {
+    id: String,
+    #[serde(default)]
+    parent_id: Option<String>,
+    #[allow(dead_code)]
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    #[serde(default)]
+    short_name: Option<String>,
+    #[serde(default)]
+    status: SessionStatus,
+    #[serde(default)]
+    last_active_at: Option<DateTime<Utc>>,
+}
+
+impl SessionHeader {
+    fn display_name(&self) -> &str {
+        if let Some(ref name) = self.short_name {
+            name
+        } else if let Some(name) = extract_session_name(&self.id) {
+            name
+        } else {
+            &self.id
+        }
+    }
+}
+
+/// Find recent crashed sessions for showing resume hints.
+///
+/// Uses a fast O(n) scan of `~/.jcode/active_pids/` (typically 0-5 files)
+/// instead of scanning the full sessions directory (tens of thousands).
+/// Each file in active_pids/ contains a PID; if that PID is dead, the
+/// session crashed. We then load only those specific session files.
+///
+/// Falls back to the legacy directory scan if active_pids/ doesn't exist
+/// (first run after upgrade).
 pub fn find_recent_crashed_sessions() -> Vec<(String, String)> {
+    if let Some(results) = find_crashed_via_pid_files() {
+        return results;
+    }
+    find_crashed_legacy_scan()
+}
+
+/// Fast path: check active_pids/ directory for dead PIDs.
+fn find_crashed_via_pid_files() -> Option<Vec<(String, String)>> {
+    let dir = active_pids_dir()?;
+    if !dir.exists() {
+        return None;
+    }
+
+    let entries = std::fs::read_dir(&dir).ok()?;
+    let mut crashed: Vec<(String, String, DateTime<Utc>)> = Vec::new();
+
+    for entry in entries.flatten() {
+        let session_id = match entry.file_name().to_str() {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+
+        let pid_str = match std::fs::read_to_string(entry.path()) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let pid: u32 = match pid_str.trim().parse() {
+            Ok(p) => p,
+            Err(_) => {
+                let _ = std::fs::remove_file(entry.path());
+                continue;
+            }
+        };
+
+        if is_pid_running(pid) {
+            continue;
+        }
+
+        match Session::load(&session_id) {
+            Ok(mut session) => {
+                session.mark_crashed(Some(format!(
+                    "Process {} exited unexpectedly (no shutdown signal captured)",
+                    pid
+                )));
+                let _ = session.save();
+                let name = extract_session_name(&session_id)
+                    .unwrap_or(&session_id)
+                    .to_string();
+                let ts = session.last_active_at.unwrap_or(session.updated_at);
+                crashed.push((session_id, name, ts));
+            }
+            Err(_) => {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    crashed.sort_by(|a, b| b.2.cmp(&a.2));
+    Some(crashed.into_iter().map(|(id, name, _)| (id, name)).collect())
+}
+
+/// Legacy fallback: scan the full sessions directory.
+/// Used only on the first launch after upgrading to the active_pids system.
+fn find_crashed_legacy_scan() -> Vec<(String, String)> {
     let sessions_dir = match storage::jcode_dir() {
         Ok(d) => d.join("sessions"),
         Err(_) => return Vec::new(),
@@ -881,8 +988,15 @@ pub fn find_recent_crashed_sessions() -> Vec<(String, String)> {
     }
 
     let cutoff = Utc::now() - Duration::hours(24);
+    let cutoff_system = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(24 * 3600))
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let filename_cutoff_ms: u64 = (chrono::Utc::now() - Duration::hours(48))
+        .timestamp_millis()
+        .max(0) as u64;
+
     let mut recovered_parents: HashSet<String> = HashSet::new();
-    let mut sessions: Vec<Session> = Vec::new();
+    let mut candidates: Vec<SessionHeader> = Vec::new();
 
     let entries = match std::fs::read_dir(&sessions_dir) {
         Ok(e) => e,
@@ -890,22 +1004,57 @@ pub fn find_recent_crashed_sessions() -> Vec<(String, String)> {
     };
 
     for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().map(|e| e == "json").unwrap_or(false) {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if let Ok(session) = Session::load(stem) {
-                    if session.id.starts_with("session_recovery_") {
-                        if let Some(parent) = session.parent_id.as_ref() {
-                            recovered_parents.insert(parent.clone());
-                        }
-                    }
-                    sessions.push(session);
+        if let Some(fname) = entry.file_name().to_str() {
+            if let Some(ts) = extract_timestamp_from_filename(fname) {
+                if ts < filename_cutoff_ms {
+                    continue;
                 }
+            }
+        }
+
+        let path = entry.path();
+        if !path.extension().map(|e| e == "json").unwrap_or(false) {
+            continue;
+        }
+
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if let Ok(mtime) = meta.modified() {
+            if mtime < cutoff_system {
+                continue;
+            }
+        }
+        if meta.len() == 0 {
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let has_crashed = content.contains("\"Crashed\"");
+        let is_recovery = content.contains("\"session_recovery_\"");
+
+        if !has_crashed && !is_recovery {
+            continue;
+        }
+
+        if let Ok(header) = serde_json::from_str::<SessionHeader>(&content) {
+            if header.id.starts_with("session_recovery_") {
+                if let Some(parent) = header.parent_id.as_ref() {
+                    recovered_parents.insert(parent.clone());
+                }
+            }
+            if has_crashed {
+                candidates.push(header);
             }
         }
     }
 
-    let mut crashed: Vec<Session> = sessions
+    let mut crashed: Vec<SessionHeader> = candidates
         .into_iter()
         .filter(|s| matches!(s.status, SessionStatus::Crashed { .. }))
         .filter(|s| !recovered_parents.contains(&s.id))
@@ -927,8 +1076,50 @@ pub fn find_recent_crashed_sessions() -> Vec<(String, String)> {
         .collect()
 }
 
+/// Extract the epoch-ms timestamp embedded in a session filename.
+/// Handles formats like:
+///   "session_fox_1772405007295.json" (memorable id)
+///   "session_1772405007295_hash.json" (legacy)
+///   "session_recovery_1772405007295.json"
+fn extract_timestamp_from_filename(filename: &str) -> Option<u64> {
+    let stem = filename.strip_suffix(".json").unwrap_or(filename);
+    // Walk the underscore-separated parts and find the first one that
+    // looks like a plausible epoch-ms (13+ digits, starts with '1').
+    for part in stem.split('_') {
+        if part.len() >= 13 && part.starts_with('1') && part.chars().all(|c| c.is_ascii_digit()) {
+            return part.parse::<u64>().ok();
+        }
+    }
+    None
+}
+
 fn is_pid_running(pid: u32) -> bool {
     crate::platform::is_process_running(pid)
+}
+
+// ---------------------------------------------------------------------------
+// Active PID tracking
+// ---------------------------------------------------------------------------
+// Lightweight files in ~/.jcode/active_pids/<session_id> containing the PID.
+// Written on mark_active(), removed on mark_closed()/mark_crashed().
+// On startup we only need to scan this tiny directory (usually 0-5 files)
+// instead of the entire sessions/ directory (tens of thousands of files).
+
+fn active_pids_dir() -> Option<std::path::PathBuf> {
+    storage::jcode_dir().ok().map(|d| d.join("active_pids"))
+}
+
+fn register_active_pid(session_id: &str, pid: u32) {
+    if let Some(dir) = active_pids_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join(session_id), pid.to_string());
+    }
+}
+
+fn unregister_active_pid(session_id: &str) {
+    if let Some(dir) = active_pids_dir() {
+        let _ = std::fs::remove_file(dir.join(session_id));
+    }
 }
 
 /// Find a session by ID or memorable name
