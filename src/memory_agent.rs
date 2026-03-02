@@ -112,6 +112,10 @@ enum AgentMessage {
 /// Minimum turns before we consider extracting on topic change
 const MIN_TURNS_FOR_EXTRACTION: usize = 4;
 
+/// Trigger a periodic incremental extraction every N turns, even without a topic change.
+/// This ensures memories are captured during long single-topic sessions.
+const PERIODIC_EXTRACTION_INTERVAL: usize = 12;
+
 fn bump_turn_stat() {
     if let Ok(mut stats) = MEMORY_AGENT_STATS.lock() {
         stats.turns_processed = stats.turns_processed.saturating_add(1);
@@ -300,6 +304,22 @@ impl MemoryAgent {
             let ss = self.session_state(session_id);
             ss.last_context_embedding = Some(context_embedding.clone());
             ss.last_context_string = Some(context.clone());
+        }
+
+        // Periodic extraction: even without topic change, extract every N turns
+        {
+            let ss = self.session_state(session_id);
+            if ss.turns_since_extraction >= PERIODIC_EXTRACTION_INTERVAL {
+                if let Some(ctx) = ss.last_context_string.clone() {
+                    crate::logging::info(&format!(
+                        "[{}] Triggering periodic extraction ({} turns since last)",
+                        session_id, ss.turns_since_extraction
+                    ));
+                    ss.turns_since_extraction = 0;
+                    drop(ss);
+                    self.extract_from_context(&ctx).await;
+                }
+            }
         }
 
         // Step 2: Find similar memories by embedding
@@ -1250,7 +1270,7 @@ pub fn trigger_final_extraction(transcript: String, session_id: String) {
 
         let sidecar = crate::sidecar::Sidecar::new();
         let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
             sidecar.extract_memories(&transcript),
         )
         .await;
@@ -1304,7 +1324,7 @@ pub fn trigger_final_extraction(transcript: String, session_id: String) {
             }
             Err(_) => {
                 crate::logging::info(&format!(
-                    "Final extraction for session {} timed out (5s)",
+                    "Final extraction for session {} timed out (30s)",
                     session_id
                 ));
             }
