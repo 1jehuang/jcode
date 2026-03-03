@@ -12,7 +12,7 @@ workflows:
         BUNDLE_ID: com.jcode.mobile
         SCHEME: JCodeMobile
         TEAM_ID: TAS6ARKDN7
-      xcode: 16.2
+      xcode: 26.2
     triggering:
       events:
         - push
