@@ -886,6 +886,25 @@ pub fn context_limit_for_model(model: &str) -> Option<usize> {
     None
 }
 
+/// Normalize a Copilot-style model name to the canonical form used by our
+/// provider model lists. Copilot uses dots in version numbers (e.g.
+/// `claude-opus-4.6`) while our canonical lists use hyphens (`claude-opus-4-6`).
+/// Returns None if no normalization is needed (model already canonical or unknown).
+fn normalize_copilot_model_name(model: &str) -> Option<&'static str> {
+    for canonical in ALL_CLAUDE_MODELS.iter().chain(ALL_OPENAI_MODELS.iter()) {
+        if *canonical == model {
+            return None;
+        }
+    }
+    let normalized = model.replace('.', "-");
+    for canonical in ALL_CLAUDE_MODELS.iter().chain(ALL_OPENAI_MODELS.iter()) {
+        if *canonical == normalized {
+            return Some(canonical);
+        }
+    }
+    None
+}
+
 /// Detect which provider a model belongs to
 pub fn provider_for_model(model: &str) -> Option<&'static str> {
     if ALL_CLAUDE_MODELS.contains(&model) {
@@ -893,8 +912,11 @@ pub fn provider_for_model(model: &str) -> Option<&'static str> {
     } else if ALL_OPENAI_MODELS.contains(&model) {
         Some("openai")
     } else if model.contains('/') {
-        // OpenRouter uses provider/model format (e.g., "anthropic/claude-sonnet-4")
         Some("openrouter")
+    } else if model.starts_with("claude-") {
+        Some("claude")
+    } else if model.starts_with("gpt-") {
+        Some("openai")
     } else {
         None
     }
@@ -1725,18 +1747,31 @@ impl Provider for MultiProvider {
         // Handle explicit "copilot:" prefix from model picker
         if let Some(copilot_model) = model.strip_prefix("copilot:") {
             let copilot_guard = self.copilot_api.read().unwrap();
-            if copilot_guard.is_none() {
-                return Err(anyhow::anyhow!(
-                    "GitHub Copilot is not available. Run `jcode login --provider copilot`."
-                ));
+            if copilot_guard.is_some() {
+                *self.active.write().unwrap() = ActiveProvider::Copilot;
+                if let Some(ref copilot) = *copilot_guard {
+                    copilot.set_model(copilot_model)?;
+                }
+                return Ok(());
             }
-            *self.active.write().unwrap() = ActiveProvider::Copilot;
-            if let Some(ref copilot) = *copilot_guard {
-                copilot.set_model(copilot_model)?;
-            }
-
-            return Ok(());
+            drop(copilot_guard);
+            // Copilot not available - fall through with the bare model name
+            // so we can try routing it to another provider (e.g. claude-opus-4.6
+            // can be served by Anthropic as claude-opus-4-6).
+            crate::logging::info(&format!(
+                "Copilot not available for '{}', trying other providers",
+                copilot_model
+            ));
+            return self.set_model(copilot_model);
         }
+
+        // Normalize Copilot-style model names (dots -> hyphens) to canonical form.
+        // e.g. "claude-opus-4.6" -> "claude-opus-4-6" so Anthropic/OpenAI accept it.
+        let model = if let Some(canonical) = normalize_copilot_model_name(model) {
+            canonical
+        } else {
+            model
+        };
 
         // Detect which provider this model belongs to
         let target_provider = provider_for_model(model);
@@ -2444,5 +2479,46 @@ mod tests {
         assert!(text.contains("No tokens/providers left"));
         assert!(text.contains("OpenAI: rate limited"));
         assert!(text.contains("GitHub Copilot: not configured"));
+    }
+
+    #[test]
+    fn test_normalize_copilot_model_name_claude() {
+        assert_eq!(
+            normalize_copilot_model_name("claude-opus-4.6"),
+            Some("claude-opus-4-6")
+        );
+        assert_eq!(
+            normalize_copilot_model_name("claude-sonnet-4.6"),
+            Some("claude-sonnet-4-6")
+        );
+        assert_eq!(
+            normalize_copilot_model_name("claude-sonnet-4.5"),
+            Some("claude-sonnet-4-5")
+        );
+        assert_eq!(
+            normalize_copilot_model_name("claude-haiku-4.5"),
+            Some("claude-haiku-4-5")
+        );
+    }
+
+    #[test]
+    fn test_normalize_copilot_model_name_already_canonical() {
+        assert_eq!(normalize_copilot_model_name("claude-opus-4-6"), None);
+        assert_eq!(normalize_copilot_model_name("claude-sonnet-4-6"), None);
+        assert_eq!(normalize_copilot_model_name("gpt-5.3-codex"), None);
+    }
+
+    #[test]
+    fn test_normalize_copilot_model_name_unknown() {
+        assert_eq!(normalize_copilot_model_name("gemini-3-pro-preview"), None);
+        assert_eq!(normalize_copilot_model_name("grok-code-fast-1"), None);
+    }
+
+    #[test]
+    fn test_provider_for_model_copilot_dot_notation() {
+        assert_eq!(provider_for_model("claude-opus-4.6"), Some("claude"));
+        assert_eq!(provider_for_model("claude-sonnet-4.6"), Some("claude"));
+        assert_eq!(provider_for_model("claude-haiku-4.5"), Some("claude"));
+        assert_eq!(provider_for_model("gpt-4.1"), Some("openai"));
     }
 }

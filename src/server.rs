@@ -1723,6 +1723,10 @@ async fn handle_client(
     let stdin_responses: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
+    // Subscribe to bus events so we can forward ModelsUpdated to this client
+    // (e.g. when Copilot finishes async init after the initial History was sent)
+    let mut bus_rx = Bus::global().subscribe();
+
     // Set up stdin request forwarding: tools send StdinInputRequest, we forward to TUI
     let (stdin_req_tx, mut stdin_req_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::tool::StdinInputRequest>();
@@ -1754,6 +1758,20 @@ async fn handle_client(
     loop {
         line.clear();
         tokio::select! {
+            // Forward ModelsUpdated bus events to this client
+            // (fired when Copilot/OpenAI async init completes after History was already sent)
+            bus_event = bus_rx.recv() => {
+                if matches!(bus_event, Ok(BusEvent::ModelsUpdated)) {
+                    let models = {
+                        let agent_guard = agent.lock().await;
+                        agent_guard.available_models_display()
+                    };
+                    let _ = client_event_tx.send(ServerEvent::AvailableModelsUpdated {
+                        available_models: models,
+                    });
+                }
+                continue;
+            }
             // Handle client debug commands from debug socket
             debug_cmd = debug_cmd_rx.recv() => {
                 if let Some((request_id, command)) = debug_cmd {
