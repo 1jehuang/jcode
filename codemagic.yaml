@@ -34,19 +34,10 @@ workflows:
           xcode-project use-profiles
       - name: Set build number
         script: |
-          BUILD_NUMBER=$PROJECT_BUILD_NUMBER
-          cd ios
-          agvtool new-version -all $BUILD_NUMBER || true
-          echo "Build number: $BUILD_NUMBER"
+          echo "Build number: $PROJECT_BUILD_NUMBER"
       - name: Build
         script: |
           cd ios
-          xcodebuild build-for-testing \
-            -project JCodeMobile.xcodeproj \
-            -scheme $SCHEME \
-            -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            || true
           xcodebuild archive \
             -project JCodeMobile.xcodeproj \
             -scheme $SCHEME \
@@ -54,18 +45,14 @@ workflows:
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -archivePath build/JCodeMobile.xcarchive \
-            CURRENT_PROJECT_VERSION=$PROJECT_BUILD_NUMBER \
-            CODE_SIGN_STYLE=Manual \
-            DEVELOPMENT_TEAM=$TEAM_ID
+            CURRENT_PROJECT_VERSION=$PROJECT_BUILD_NUMBER
       - name: Export IPA
         script: |
           cd ios
           xcode-project build-ipa \
-            --archive-path build/JCodeMobile.xcarchive \
-            --export-options-plist ExportOptions.plist
+            --archive-path build/JCodeMobile.xcarchive
     artifacts:
       - ios/build/ios/ipa/*.ipa
-      - ios/build/JCodeMobile.xcarchive
     publishing:
       app_store_connect:
         auth: integration
