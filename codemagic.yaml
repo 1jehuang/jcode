@@ -38,20 +38,15 @@ workflows:
       - name: Build
         script: |
           cd ios
-          xcodebuild archive \
-            -project JCodeMobile.xcodeproj \
-            -scheme $SCHEME \
-            -configuration Release \
-            -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            -archivePath build/JCodeMobile.xcarchive \
-            CURRENT_PROJECT_VERSION=$PROJECT_BUILD_NUMBER
-      - name: Export IPA
-        script: |
-          cd ios
           xcode-project build-ipa \
-            --archive-path build/JCodeMobile.xcarchive
+            --project JCodeMobile.xcodeproj \
+            --scheme $SCHEME \
+            --config Release \
+            --archive-path build/JCodeMobile.xcarchive \
+            --ipa-path build/JCodeMobile.ipa \
+            --build-arg CURRENT_PROJECT_VERSION=$PROJECT_BUILD_NUMBER
     artifacts:
+      - ios/build/*.ipa
       - ios/build/ios/ipa/*.ipa
     publishing:
       app_store_connect:
