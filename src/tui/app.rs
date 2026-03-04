@@ -4458,6 +4458,31 @@ impl App {
 
             let mut bus_receiver_remote = Bus::global().subscribe();
 
+            // Wait for the History event before drawing so the first frame
+            // shows the real provider/model rather than "unknown".
+            // Use a generous timeout: selfdev connections may take several
+            // seconds when MCP servers or tools need initialisation.
+            {
+                let deadline =
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+                while !remote.has_loaded_history() {
+                    let remaining =
+                        deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if remaining.is_zero() {
+                        crate::logging::warn(
+                            "Timed out waiting for History event from server",
+                        );
+                        break;
+                    }
+                    match tokio::time::timeout(remaining, remote.next_event()).await {
+                        Ok(Some(ev)) => {
+                            self.handle_server_event(ev, &mut remote);
+                        }
+                        _ => break,
+                    }
+                }
+            }
+
             // Main event loop
             loop {
                 let desired_redraw = super::redraw_interval(&self);
@@ -5437,6 +5462,7 @@ impl App {
                 server_icon,
                 server_has_update,
                 was_interrupted,
+                upstream_provider,
                 ..
             } => {
                 let prev_session_id = self.remote_session_id.clone();
@@ -5492,6 +5518,9 @@ impl App {
                 if let Some(model) = provider_model {
                     self.update_context_limit_for_model(&model);
                     self.remote_provider_model = Some(model);
+                }
+                if upstream_provider.is_some() {
+                    self.upstream_provider = upstream_provider;
                 }
                 self.remote_available_models = available_models;
                 // Store session list and client count
