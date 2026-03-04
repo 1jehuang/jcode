@@ -17,12 +17,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            cargo_args: "--no-default-features --features pdf"
 
     steps:
       - uses: actions/checkout@v4
@@ -63,17 +67,21 @@ jobs:
           [target.x86_64-unknown-linux-gnu]
           linker = "clang"
           rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+          [target.aarch64-unknown-linux-gnu]
+          linker = "clang"
+          rustflags = ["-C", "link-arg=-fuse-ld=mold"]
           EOF
           fi
           if command -v sccache &>/dev/null && sccache --start-server 2>/dev/null; then
             export RUSTC_WRAPPER=sccache
           fi
-          cargo build --release --target ${{ matrix.target }}
+          cargo build --release --target ${{ matrix.target }} ${{ matrix.cargo_args }}
 
       - name: Run tests
         shell: bash
         run: |
-          cargo test --target ${{ matrix.target }}
+          cargo test --target ${{ matrix.target }} ${{ matrix.cargo_args }}
 
   fmt:
     name: Format
