@@ -1003,13 +1003,12 @@ impl MultiProvider {
 
     fn fallback_sequence(active: ActiveProvider) -> Vec<ActiveProvider> {
         match active {
-            // OAuth-first fallback, then Copilot CLI. Keep OpenRouter out of automatic
-            // exhaustion fallback to avoid silently switching to direct API billing.
             ActiveProvider::Claude => {
                 vec![
                     ActiveProvider::Claude,
                     ActiveProvider::OpenAI,
                     ActiveProvider::Copilot,
+                    ActiveProvider::OpenRouter,
                 ]
             }
             ActiveProvider::OpenAI => {
@@ -1017,6 +1016,7 @@ impl MultiProvider {
                     ActiveProvider::OpenAI,
                     ActiveProvider::Claude,
                     ActiveProvider::Copilot,
+                    ActiveProvider::OpenRouter,
                 ]
             }
             ActiveProvider::Copilot => {
@@ -1024,9 +1024,17 @@ impl MultiProvider {
                     ActiveProvider::Copilot,
                     ActiveProvider::Claude,
                     ActiveProvider::OpenAI,
+                    ActiveProvider::OpenRouter,
                 ]
             }
-            ActiveProvider::OpenRouter => vec![ActiveProvider::OpenRouter],
+            ActiveProvider::OpenRouter => {
+                vec![
+                    ActiveProvider::OpenRouter,
+                    ActiveProvider::Claude,
+                    ActiveProvider::OpenAI,
+                    ActiveProvider::Copilot,
+                ]
+            }
         }
     }
 
@@ -1066,7 +1074,19 @@ impl MultiProvider {
             "re-authenticate",
             "unauthorized",
             "forbidden",
+            " 401",
+            "(401",
+            " 403",
+            "(403",
             "not available for your account",
+            "not accessible by integration",
+            "feature_flag_blocked",
+            "contact support",
+            "token exchange failed",
+            "account suspended",
+            "account disabled",
+            "access denied",
+            "permission denied",
         ]
         .iter()
         .any(|needle| lower.contains(needle));
@@ -1611,15 +1631,26 @@ impl Provider for MultiProvider {
                     clear_provider_unavailable_for_account(key);
                     if candidate != active {
                         self.set_active_provider(candidate);
+                        let from_label = Self::provider_label(active);
+                        let to_label = Self::provider_label(candidate);
                         crate::logging::info(&format!(
-                            "Auto-fallback: switched active provider from {:?} to {:?}",
-                            active, candidate
+                            "Auto-fallback: switched from {} to {}",
+                            from_label, to_label
+                        ));
+                        self.startup_notices.write().unwrap().push(format!(
+                            "⚡ Auto-fallback: {} unavailable, switched to {}",
+                            from_label, to_label
                         ));
                     }
                     return Ok(stream);
                 }
                 Err(err) => {
                     let summary = Self::summarize_error(&err);
+                    crate::logging::info(&format!(
+                        "Provider {} failed: {} (failover={})",
+                        label, summary,
+                        Self::should_failover_on_error(&err)
+                    ));
                     notes.push(format!("{}: {}", label, summary));
                     if Self::should_failover_on_error(&err) {
                         record_provider_unavailable_for_account(key, &summary);
@@ -1683,15 +1714,26 @@ impl Provider for MultiProvider {
                     clear_provider_unavailable_for_account(key);
                     if candidate != active {
                         self.set_active_provider(candidate);
+                        let from_label = Self::provider_label(active);
+                        let to_label = Self::provider_label(candidate);
                         crate::logging::info(&format!(
-                            "Auto-fallback: switched active provider from {:?} to {:?}",
-                            active, candidate
+                            "Auto-fallback (split): switched from {} to {}",
+                            from_label, to_label
+                        ));
+                        self.startup_notices.write().unwrap().push(format!(
+                            "⚡ Auto-fallback: {} unavailable, switched to {}",
+                            from_label, to_label
                         ));
                     }
                     return Ok(stream);
                 }
                 Err(err) => {
                     let summary = Self::summarize_error(&err);
+                    crate::logging::info(&format!(
+                        "Provider {} failed (split): {} (failover={})",
+                        label, summary,
+                        Self::should_failover_on_error(&err)
+                    ));
                     notes.push(format!("{}: {}", label, summary));
                     if Self::should_failover_on_error(&err) {
                         record_provider_unavailable_for_account(key, &summary);
@@ -2464,13 +2506,14 @@ mod tests {
     }
 
     #[test]
-    fn test_fallback_sequence_prefers_oauth_then_copilot() {
+    fn test_fallback_sequence_includes_all_providers() {
         assert_eq!(
             MultiProvider::fallback_sequence(ActiveProvider::Claude),
             vec![
                 ActiveProvider::Claude,
                 ActiveProvider::OpenAI,
                 ActiveProvider::Copilot,
+                ActiveProvider::OpenRouter,
             ]
         );
         assert_eq!(
@@ -2479,8 +2522,52 @@ mod tests {
                 ActiveProvider::OpenAI,
                 ActiveProvider::Claude,
                 ActiveProvider::Copilot,
+                ActiveProvider::OpenRouter,
             ]
         );
+        assert_eq!(
+            MultiProvider::fallback_sequence(ActiveProvider::Copilot),
+            vec![
+                ActiveProvider::Copilot,
+                ActiveProvider::Claude,
+                ActiveProvider::OpenAI,
+                ActiveProvider::OpenRouter,
+            ]
+        );
+        assert_eq!(
+            MultiProvider::fallback_sequence(ActiveProvider::OpenRouter),
+            vec![
+                ActiveProvider::OpenRouter,
+                ActiveProvider::Claude,
+                ActiveProvider::OpenAI,
+                ActiveProvider::Copilot,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_should_failover_on_403_forbidden() {
+        let err = anyhow::anyhow!("Copilot token exchange failed (HTTP 403 Forbidden): not accessible by integration");
+        assert!(MultiProvider::should_failover_on_error(&err));
+    }
+
+    #[test]
+    fn test_should_failover_on_token_exchange_failed() {
+        let msg = r#"Copilot token exchange failed (HTTP 403 Forbidden): {"error_details":{"title":"Contact Support"}}"#;
+        let err = anyhow::anyhow!("{}", msg);
+        assert!(MultiProvider::should_failover_on_error(&err));
+    }
+
+    #[test]
+    fn test_should_failover_on_access_denied() {
+        let err = anyhow::anyhow!("Access denied: account suspended");
+        assert!(MultiProvider::should_failover_on_error(&err));
+    }
+
+    #[test]
+    fn test_should_not_failover_on_generic_error() {
+        let err = anyhow::anyhow!("Connection timed out");
+        assert!(!MultiProvider::should_failover_on_error(&err));
     }
 
     #[test]

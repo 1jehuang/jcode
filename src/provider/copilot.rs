@@ -895,6 +895,16 @@ impl Provider for CopilotApiProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        self.wait_for_init().await;
+
+        self.get_bearer_token().await.map_err(|e| {
+            crate::logging::warn(&format!(
+                "Copilot bearer token acquisition failed (will trigger fallback): {}",
+                e
+            ));
+            e
+        })?;
+
         let is_user_initiated = self.is_user_initiated(messages);
         if is_user_initiated {
             self.user_turn_count
