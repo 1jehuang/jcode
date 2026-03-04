@@ -26,7 +26,11 @@ case "$OS" in
     ;;
   MINGW*|MSYS*|CYGWIN*)
     IS_WINDOWS=true
-    ARTIFACT="jcode-windows-x86_64"
+    case "$ARCH" in
+      x86_64|AMD64)  ARTIFACT="jcode-windows-x86_64" ;;
+      aarch64|arm64|ARM64) ARTIFACT="jcode-windows-aarch64" ;;
+      *)       err "Unsupported Windows architecture: $ARCH" ;;
+    esac
     ;;
   *)
     err "Unsupported OS: $OS (try building from source: https://github.com/$REPO)"

@@ -92,8 +92,19 @@ jobs:
           path: dist/${{ matrix.artifact }}.tar.gz
 
   build-windows:
-    name: Build (x86_64-pc-windows-msvc)
-    runs-on: windows-latest
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: jcode-windows-x86_64
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            artifact: jcode-windows-aarch64
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -108,7 +119,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.7
@@ -117,7 +128,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: x86_64-pc-windows-msvc
+          key: ${{ matrix.target }}
           cache-all-crates: "true"
 
       - name: Build release binary
@@ -126,7 +137,7 @@ jobs:
           if command -v sccache &>/dev/null && sccache --start-server 2>/dev/null; then
             export RUSTC_WRAPPER=sccache
           fi
-          cargo build --release --target x86_64-pc-windows-msvc
+          cargo build --release --target ${{ matrix.target }}
         env:
           JCODE_RELEASE_BUILD: "1"
 
@@ -134,14 +145,14 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp target/x86_64-pc-windows-msvc/release/jcode.exe dist/jcode-windows-x86_64.exe
-          cd dist && tar czf jcode-windows-x86_64.tar.gz jcode-windows-x86_64.exe
+          cp target/${{ matrix.target }}/release/jcode.exe dist/${{ matrix.artifact }}.exe
+          cd dist && tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: jcode-windows-x86_64
-          path: dist/jcode-windows-x86_64.tar.gz
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.tar.gz
 
   release:
     name: Create Release
@@ -286,20 +297,21 @@ jobs:
           git commit -m "Update to ${VERSION}" || echo "No changes"
           git push
 
-  # Windows build runs in parallel but doesn't block the release.
-  # The binary is added to the existing release when it finishes.
+  # Windows builds run in parallel but don't block the release.
+  # The binaries are added to the existing release when they finish.
   release-windows:
-    name: Add Windows binary to release
+    name: Add Windows binaries to release
     needs: [build-windows, release]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: jcode-windows-x86_64
           path: artifacts
 
-      - name: Upload Windows binary to release
+      - name: Upload Windows binaries to release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${GITHUB_REF_NAME}" artifacts/jcode-windows-x86_64.tar.gz --repo "${{ github.repository }}" --clobber
+          for f in artifacts/jcode-windows-*/jcode-windows-*.tar.gz; do
+            gh release upload "${GITHUB_REF_NAME}" "$f" --repo "${{ github.repository }}" --clobber
+          done

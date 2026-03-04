@@ -24,7 +24,6 @@ if ($PSVersionTable.PSVersion.Major -lt 5) {
 }
 
 $Repo = "1jehuang/jcode"
-$Artifact = "jcode-windows-x86_64"
 
 if (-not $InstallDir) {
     $InstallDir = Join-Path $env:LOCALAPPDATA "jcode\bin"
@@ -34,8 +33,10 @@ function Write-Info($msg) { Write-Host $msg -ForegroundColor Blue }
 function Write-Err($msg) { Write-Host "error: $msg" -ForegroundColor Red; exit 1 }
 
 $Arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
-if ($Arch -ne 'X64') {
-    Write-Err "Unsupported architecture: $Arch (only x86_64 supported)"
+switch ($Arch) {
+    'X64'   { $Artifact = "jcode-windows-x86_64" }
+    'Arm64' { $Artifact = "jcode-windows-aarch64" }
+    default { Write-Err "Unsupported architecture: $Arch (supported: x86_64, ARM64)" }
 }
 
 Write-Info "Fetching latest release..."
