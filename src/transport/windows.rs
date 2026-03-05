@@ -313,6 +313,7 @@ impl<'a> AsyncWrite for SplitWriteRef<'a> {
 /// Synchronous named pipe stream for blocking IPC (used by communicate tool).
 pub struct SyncStream {
     handle: std::fs::File,
+    read_timeout: Option<std::time::Duration>,
 }
 
 impl SyncStream {
@@ -320,12 +321,45 @@ impl SyncStream {
         use std::fs::OpenOptions;
         let pipe_name = path_to_pipe_name(path);
         let file = OpenOptions::new().read(true).write(true).open(&pipe_name)?;
-        Ok(Self { handle: file })
+        Ok(Self { handle: file, read_timeout: None })
+    }
+
+    pub fn set_read_timeout(&mut self, timeout: Option<std::time::Duration>) -> io::Result<()> {
+        self.read_timeout = timeout;
+        Ok(())
     }
 }
 
 impl io::Read for SyncStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(timeout) = self.read_timeout {
+            use std::os::windows::io::AsRawHandle;
+            let handle = self.handle.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                let mut available: u32 = 0;
+                let ok = unsafe {
+                    windows_sys::Win32::System::Pipes::PeekNamedPipe(
+                        handle,
+                        std::ptr::null_mut(),
+                        0,
+                        std::ptr::null_mut(),
+                        &mut available,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if ok == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if available > 0 {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "read timed out"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
         self.handle.read(buf)
     }
 }
