@@ -37,7 +37,10 @@ const MAX_RETRIES: u32 = 3;
 const RETRY_BASE_DELAY_MS: u64 = 1000;
 
 /// OpenRouter API base URL
-const API_BASE: &str = "https://openrouter.ai/api/v1";
+const DEFAULT_API_BASE: &str = "https://openrouter.ai/api/v1";
+const DEFAULT_API_KEY_NAME: &str = "OPENROUTER_API_KEY";
+const DEFAULT_ENV_FILE: &str = "openrouter.env";
+const DEFAULT_CACHE_NAMESPACE: &str = "openrouter";
 
 /// Default model (Claude Sonnet via OpenRouter)
 const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
@@ -76,6 +79,126 @@ const CACHE_PIN_TTL_SECS: u64 = 60 * 60;
 
 /// Endpoints cache TTL (1 hour) - per-model provider endpoint data
 const ENDPOINTS_CACHE_TTL_SECS: u64 = 60 * 60;
+
+fn configured_api_base() -> String {
+    let raw = std::env::var("JCODE_OPENROUTER_API_BASE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_API_BASE.to_string());
+    let trimmed = raw.trim();
+
+    let parsed = match reqwest::Url::parse(trimmed) {
+        Ok(url) => url,
+        Err(_) => {
+            crate::logging::warn(&format!(
+                "Ignoring invalid JCODE_OPENROUTER_API_BASE '{}'; using {}",
+                raw, DEFAULT_API_BASE
+            ));
+            return DEFAULT_API_BASE.to_string();
+        }
+    };
+
+    let scheme = parsed.scheme();
+    if scheme != "https" && scheme != "http" {
+        crate::logging::warn(&format!(
+            "Ignoring invalid JCODE_OPENROUTER_API_BASE '{}'; only http/https are supported",
+            raw
+        ));
+        return DEFAULT_API_BASE.to_string();
+    }
+
+    if scheme == "http" {
+        let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+        if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+            crate::logging::warn(&format!(
+                "Ignoring insecure JCODE_OPENROUTER_API_BASE '{}'; http is only allowed for localhost",
+                raw
+            ));
+            return DEFAULT_API_BASE.to_string();
+        }
+    }
+
+    trimmed.trim_end_matches('/').to_string()
+}
+
+fn configured_api_key_name() -> String {
+    let raw = std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_API_KEY_NAME.to_string());
+    if raw
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    {
+        raw
+    } else {
+        crate::logging::warn(&format!(
+            "Ignoring invalid JCODE_OPENROUTER_API_KEY_NAME '{}'; using {}",
+            raw, DEFAULT_API_KEY_NAME
+        ));
+        DEFAULT_API_KEY_NAME.to_string()
+    }
+}
+
+fn configured_env_file_name() -> String {
+    let raw = std::env::var("JCODE_OPENROUTER_ENV_FILE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_ENV_FILE.to_string());
+    let safe = raw
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+    if safe && !raw.contains('/') && !raw.contains('\\') {
+        raw
+    } else {
+        crate::logging::warn(&format!(
+            "Ignoring invalid JCODE_OPENROUTER_ENV_FILE '{}'; using {}",
+            raw, DEFAULT_ENV_FILE
+        ));
+        DEFAULT_ENV_FILE.to_string()
+    }
+}
+
+fn configured_cache_namespace() -> String {
+    let raw = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_CACHE_NAMESPACE.to_string());
+    let sanitized: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if sanitized.is_empty() {
+        DEFAULT_CACHE_NAMESPACE.to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn parse_env_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn provider_features_enabled(api_base: &str) -> bool {
+    if let Ok(raw) = std::env::var("JCODE_OPENROUTER_PROVIDER_FEATURES") {
+        if let Some(value) = parse_env_bool(&raw) {
+            return value;
+        }
+        crate::logging::warn(&format!(
+            "Ignoring invalid JCODE_OPENROUTER_PROVIDER_FEATURES '{}'; expected true/false",
+            raw
+        ));
+    }
+    api_base.contains("openrouter.ai")
+}
 
 /// Model info from OpenRouter API
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -269,8 +392,6 @@ fn parse_model_spec(raw: &str) -> (String, Option<ParsedProvider>) {
     (trimmed.to_string(), None)
 }
 
-
-
 fn add_cache_breakpoint(messages: &mut [Message]) -> bool {
     let mut cache_index = None;
     for (idx, msg) in messages.iter().enumerate().rev() {
@@ -321,13 +442,13 @@ struct ModelsCache {
 
 /// Get the cache file path
 fn cache_path() -> PathBuf {
+    let namespace = configured_cache_namespace();
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".jcode")
         .join("cache")
-        .join("openrouter_models.json")
+        .join(format!("{}_models.json", namespace))
 }
-
 
 /// Load models from disk cache if valid
 fn load_disk_cache() -> Option<Vec<ModelInfo>> {
@@ -451,11 +572,12 @@ fn save_disk_cache(models: &[ModelInfo]) {
 fn endpoints_cache_path(model: &str) -> PathBuf {
     // Use a safe filename from the model ID
     let safe_name = model.replace('/', "__");
+    let namespace = configured_cache_namespace();
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".jcode")
         .join("cache")
-        .join(format!("openrouter_endpoints_{}.json", safe_name))
+        .join(format!("{}_endpoints_{}.json", namespace, safe_name))
 }
 
 /// Public access to endpoints disk cache for picker (ignores TTL — stale data is fine for display).
@@ -508,7 +630,6 @@ fn save_endpoints_disk_cache(model: &str, endpoints: &[EndpointInfo]) {
     }
 }
 
-
 /// Provider routing configuration
 #[derive(Debug, Clone)]
 pub struct ProviderRouting {
@@ -557,7 +678,11 @@ impl ProviderRouting {
 pub struct OpenRouterProvider {
     client: Client,
     model: Arc<RwLock<String>>,
+    api_base: String,
     api_key: String,
+    key_name: String,
+    supports_provider_features: bool,
+    send_openrouter_headers: bool,
     models_cache: Arc<RwLock<ModelsCache>>,
     /// Provider routing preferences
     provider_routing: Arc<RwLock<ProviderRouting>>,
@@ -594,9 +719,15 @@ impl OpenRouterProvider {
     }
 
     pub fn new() -> Result<Self> {
+        let api_base = configured_api_base();
+        let key_name = configured_api_key_name();
+        let supports_provider_features = provider_features_enabled(&api_base);
+        let send_openrouter_headers = supports_provider_features;
         let api_key = Self::get_api_key().ok_or_else(|| {
             anyhow::anyhow!(
-                "OPENROUTER_API_KEY not found in environment or ~/.config/jcode/openrouter.env"
+                "{} not found in environment or ~/.config/jcode/{}",
+                key_name,
+                configured_env_file_name()
             )
         })?;
 
@@ -604,12 +735,20 @@ impl OpenRouterProvider {
             std::env::var("JCODE_OPENROUTER_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
 
         // Parse provider routing from environment
-        let provider_routing = Self::parse_provider_routing();
+        let provider_routing = if supports_provider_features {
+            Self::parse_provider_routing()
+        } else {
+            ProviderRouting::default()
+        };
 
         Ok(Self {
             client: crate::provider::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
+            api_base,
             api_key,
+            key_name,
+            supports_provider_features,
+            send_openrouter_headers,
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             provider_routing: Arc::new(RwLock::new(provider_routing)),
             provider_pin: Arc::new(Mutex::new(None)),
@@ -724,21 +863,31 @@ impl OpenRouterProvider {
                     .as_deref()
                     .and_then(|v| v.parse::<f64>().ok())
                     .unwrap_or(0.0);
-                let cost_score = if cost > 0.0 { 1.0 / (1.0 + cost * 1e6) } else { 0.5 };
+                let cost_score = if cost > 0.0 {
+                    1.0 / (1.0 + cost * 1e6)
+                } else {
+                    0.5
+                };
 
-                let score = 0.50 * throughput.min(200.0) / 200.0
-                    + 0.30 * uptime
-                    + 0.20 * cost_score;
+                let score =
+                    0.50 * throughput.min(200.0) / 200.0 + 0.30 * uptime + 0.20 * cost_score;
 
                 (score, e.provider_name.as_str())
             })
             .collect();
 
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.into_iter().map(|(_, name)| name.to_string()).collect()
+        scored
+            .into_iter()
+            .map(|(_, name)| name.to_string())
+            .collect()
     }
 
     async fn effective_routing(&self, model: &str) -> ProviderRouting {
+        if !self.supports_provider_features {
+            return ProviderRouting::default();
+        }
+
         let base = self.provider_routing.read().await.clone();
         let pin = self.provider_pin.lock().unwrap().clone();
 
@@ -769,11 +918,10 @@ impl OpenRouterProvider {
         }
 
         let ranked = {
-            let mut endpoints = load_endpoints_disk_cache(model)
-                .or_else(|| {
-                    let cache = self.endpoints_cache.try_read().ok()?;
-                    cache.get(model).map(|(_, eps)| eps.clone())
-                });
+            let mut endpoints = load_endpoints_disk_cache(model).or_else(|| {
+                let cache = self.endpoints_cache.try_read().ok()?;
+                cache.get(model).map(|(_, eps)| eps.clone())
+            });
 
             // Fetch endpoints from API if no cache available
             if endpoints.is_none() {
@@ -813,6 +961,9 @@ impl OpenRouterProvider {
 
     /// Set provider routing at runtime
     pub async fn set_provider_routing(&self, routing: ProviderRouting) {
+        if !self.supports_provider_features {
+            return;
+        }
         let mut current = self.provider_routing.write().await;
         *current = routing;
     }
@@ -825,6 +976,10 @@ impl OpenRouterProvider {
     /// Return the currently preferred provider for display.
     /// Returns the pinned provider if set, otherwise the top-ranked provider from endpoint data.
     pub fn preferred_provider(&self) -> Option<String> {
+        if !self.supports_provider_features {
+            return None;
+        }
+
         let model = self.model.try_read().ok()?.clone();
 
         // Check pin first
@@ -871,6 +1026,10 @@ impl OpenRouterProvider {
 
     /// Return a list of known/observed providers for a model (for autocomplete).
     pub fn available_providers_for_model(&self, model: &str) -> Vec<String> {
+        if !self.supports_provider_features {
+            return Vec::new();
+        }
+
         let mut providers: Vec<String> = Vec::new();
 
         if let Some(endpoints) = load_endpoints_disk_cache(model) {
@@ -892,6 +1051,10 @@ impl OpenRouterProvider {
 
     /// Return provider details from cached endpoints data (sync, no network).
     pub fn provider_details_for_model(&self, model: &str) -> Vec<(String, String)> {
+        if !self.supports_provider_features {
+            return Vec::new();
+        }
+
         // Try endpoints disk cache first (has pricing, uptime, cache info)
         if let Some(endpoints) = load_endpoints_disk_cache(model) {
             return endpoints
@@ -920,17 +1083,25 @@ impl OpenRouterProvider {
 
     /// Get API key from environment or config file
     fn get_api_key() -> Option<String> {
+        let key_name = configured_api_key_name();
+
         // First check environment variable
-        if let Ok(key) = std::env::var("OPENROUTER_API_KEY") {
-            return Some(key);
+        if let Ok(key) = std::env::var(&key_name) {
+            let key = key.trim();
+            if !key.is_empty() {
+                return Some(key.to_string());
+            }
         }
 
         // Fall back to config file
-        let config_path = dirs::config_dir()?.join("jcode").join("openrouter.env");
+        let env_file = configured_env_file_name();
+        let config_path = dirs::config_dir()?.join("jcode").join(env_file);
+        crate::storage::harden_secret_file_permissions(&config_path);
         let content = std::fs::read_to_string(config_path).ok()?;
+        let prefix = format!("{}=", key_name);
 
         for line in content.lines() {
-            if let Some(key) = line.strip_prefix("OPENROUTER_API_KEY=") {
+            if let Some(key) = line.strip_prefix(&prefix) {
                 let key = key.trim().trim_matches('"').trim_matches('\'');
                 if !key.is_empty() {
                     return Some(key.to_string());
@@ -960,19 +1131,19 @@ impl OpenRouterProvider {
         }
 
         // Fetch from API
-        let url = format!("{}/models", API_BASE);
+        let url = format!("{}/models", self.api_base);
         let response = self
             .client
             .get(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .send()
             .await
-            .context("Failed to fetch models from OpenRouter")?;
+            .with_context(|| format!("Failed to fetch models from {}", self.api_base))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("OpenRouter API error ({}): {}", status, body);
+            anyhow::bail!("Model catalog API error ({}): {}", status, body);
         }
 
         #[derive(Deserialize)]
@@ -1017,6 +1188,10 @@ impl OpenRouterProvider {
     /// Fetch per-provider endpoint data for a model from OpenRouter API.
     /// Returns cached data if available and fresh (1-hour TTL).
     pub async fn fetch_endpoints(&self, model: &str) -> Result<Vec<EndpointInfo>> {
+        if !self.supports_provider_features {
+            return Ok(Vec::new());
+        }
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -1040,19 +1215,19 @@ impl OpenRouterProvider {
         }
 
         // Fetch from API
-        let url = format!("{}/models/{}/endpoints", API_BASE, model);
+        let url = format!("{}/models/{}/endpoints", self.api_base, model);
         let response = self
             .client
             .get(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .send()
             .await
-            .context("Failed to fetch endpoints from OpenRouter")?;
+            .context("Failed to fetch endpoint data")?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("OpenRouter endpoints API error ({}): {}", status, body);
+            anyhow::bail!("Endpoints API error ({}): {}", status, body);
         }
 
         #[derive(Deserialize)]
@@ -1692,36 +1867,38 @@ impl Provider for OpenRouterProvider {
             });
         }
 
-        // Add provider routing if configured
-        let routing = self.effective_routing(&model).await;
+        // Add provider routing if configured and supported by backend.
         let mut provider_obj = None;
-        if !routing.is_empty() {
-            let mut obj = serde_json::json!({});
-            if let Some(ref order) = routing.order {
-                obj["order"] = serde_json::json!(order);
+        if self.supports_provider_features {
+            let routing = self.effective_routing(&model).await;
+            if !routing.is_empty() {
+                let mut obj = serde_json::json!({});
+                if let Some(ref order) = routing.order {
+                    obj["order"] = serde_json::json!(order);
+                }
+                if !routing.allow_fallbacks {
+                    obj["allow_fallbacks"] = serde_json::json!(false);
+                }
+                if let Some(ref sort) = routing.sort {
+                    obj["sort"] = serde_json::json!(sort);
+                }
+                if let Some(min_tp) = routing.preferred_min_throughput {
+                    obj["preferred_min_throughput"] = serde_json::json!(min_tp);
+                }
+                if let Some(max_latency) = routing.preferred_max_latency {
+                    obj["preferred_max_latency"] = serde_json::json!(max_latency);
+                }
+                if let Some(max_price) = routing.max_price {
+                    obj["max_price"] = serde_json::json!(max_price);
+                }
+                if let Some(require_parameters) = routing.require_parameters {
+                    obj["require_parameters"] = serde_json::json!(require_parameters);
+                }
+                provider_obj = Some(obj);
             }
-            if !routing.allow_fallbacks {
-                obj["allow_fallbacks"] = serde_json::json!(false);
-            }
-            if let Some(ref sort) = routing.sort {
-                obj["sort"] = serde_json::json!(sort);
-            }
-            if let Some(min_tp) = routing.preferred_min_throughput {
-                obj["preferred_min_throughput"] = serde_json::json!(min_tp);
-            }
-            if let Some(max_latency) = routing.preferred_max_latency {
-                obj["preferred_max_latency"] = serde_json::json!(max_latency);
-            }
-            if let Some(max_price) = routing.max_price {
-                obj["max_price"] = serde_json::json!(max_price);
-            }
-            if let Some(require_parameters) = routing.require_parameters {
-                obj["require_parameters"] = serde_json::json!(require_parameters);
-            }
-            provider_obj = Some(obj);
         }
 
-        if cache_control_added {
+        if cache_control_added && self.supports_provider_features {
             let mut obj = provider_obj.unwrap_or_else(|| serde_json::json!({}));
             obj["require_parameters"] = serde_json::json!(true);
             provider_obj = Some(obj);
@@ -1736,6 +1913,9 @@ impl Provider for OpenRouterProvider {
 
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
         let client = self.client.clone();
+        let api_base = self.api_base.clone();
+        let key_name = self.key_name.clone();
+        let send_openrouter_headers = self.send_openrouter_headers;
         let api_key = self.api_key.clone();
         let request_for_retries = request;
         let model_for_stream = model.clone();
@@ -1753,7 +1933,10 @@ impl Provider for OpenRouterProvider {
             }
             run_stream_with_retries(
                 client,
+                api_base,
                 api_key,
+                key_name,
+                send_openrouter_headers,
                 request_for_retries,
                 tx,
                 provider_pin,
@@ -1788,8 +1971,12 @@ impl Provider for OpenRouterProvider {
             ));
         }
 
-        if let Some(provider) = provider {
-            self.set_explicit_pin(&model_id, provider);
+        if self.supports_provider_features {
+            if let Some(provider) = provider {
+                self.set_explicit_pin(&model_id, provider);
+            } else {
+                self.clear_pin_if_model_changed(&model_id, true);
+            }
         } else {
             self.clear_pin_if_model_changed(&model_id, true);
         }
@@ -1823,10 +2010,12 @@ impl Provider for OpenRouterProvider {
 
     async fn prefetch_models(&self) -> Result<()> {
         let _ = self.fetch_models().await?;
-        // Also prefetch endpoints for the current model so preferred_provider() works immediately
-        let model = self.model();
-        if load_endpoints_disk_cache(&model).is_none() {
-            let _ = self.fetch_endpoints(&model).await;
+        if self.supports_provider_features {
+            // Also prefetch endpoints for the current model so preferred_provider() works immediately.
+            let model = self.model();
+            if load_endpoints_disk_cache(&model).is_none() {
+                let _ = self.fetch_endpoints(&model).await;
+            }
         }
         Ok(())
     }
@@ -1860,7 +2049,11 @@ impl Provider for OpenRouterProvider {
             model: Arc::new(RwLock::new(
                 self.model.try_read().map(|m| m.clone()).unwrap_or_default(),
             )),
+            api_base: self.api_base.clone(),
             api_key: self.api_key.clone(),
+            key_name: self.key_name.clone(),
+            supports_provider_features: self.supports_provider_features,
+            send_openrouter_headers: self.send_openrouter_headers,
             models_cache: Arc::clone(&self.models_cache),
             provider_routing: Arc::new(RwLock::new(
                 self.provider_routing
@@ -1880,7 +2073,10 @@ impl Provider for OpenRouterProvider {
 
 async fn run_stream_with_retries(
     client: Client,
+    api_base: String,
     api_key: String,
+    key_name: String,
+    send_openrouter_headers: bool,
     request: Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
@@ -1893,22 +2089,27 @@ async fn run_stream_with_retries(
             let delay = RETRY_BASE_DELAY_MS * (1 << (attempt - 1));
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
             crate::logging::info(&format!(
-                "Retrying OpenRouter API request (attempt {}/{})",
+                "Retrying API request using {} (attempt {}/{})",
+                key_name,
                 attempt + 1,
                 MAX_RETRIES
             ));
         }
 
         crate::logging::info(&format!(
-            "OpenRouter stream attempt {}/{} over HTTPS transport (model: {})",
+            "API stream attempt {}/{} over HTTPS transport (model: {}, auth: {})",
             attempt + 1,
             MAX_RETRIES,
-            model
+            model,
+            key_name
         ));
 
         match stream_response(
             client.clone(),
+            api_base.clone(),
             api_key.clone(),
+            key_name.clone(),
+            send_openrouter_headers,
             request.clone(),
             tx.clone(),
             Arc::clone(&provider_pin),
@@ -1920,7 +2121,7 @@ async fn run_stream_with_retries(
             Err(e) => {
                 let error_str = e.to_string().to_lowercase();
                 if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
-                    crate::logging::info(&format!("OpenRouter transient error, will retry: {}", e));
+                    crate::logging::info(&format!("Transient API error, will retry: {}", e));
                     last_error = Some(e);
                     continue;
                 }
@@ -1944,7 +2145,10 @@ async fn run_stream_with_retries(
 
 async fn stream_response(
     client: Client,
+    api_base: String,
     api_key: String,
+    key_name: String,
+    send_openrouter_headers: bool,
     request: Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
@@ -1958,18 +2162,24 @@ async fn stream_response(
         .await;
     let connect_start = std::time::Instant::now();
 
-    let url = format!("{}/chat/completions", API_BASE);
-    let response = client
+    let url = format!("{}/chat/completions", api_base);
+    let mut req = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
-        .header("Accept-Encoding", "identity")
-        .header("HTTP-Referer", "https://github.com/jcode")
-        .header("X-Title", "jcode")
+        .header("Accept-Encoding", "identity");
+
+    if send_openrouter_headers {
+        req = req
+            .header("HTTP-Referer", "https://github.com/jcode")
+            .header("X-Title", "jcode");
+    }
+
+    let response = req
         .json(&request)
         .send()
         .await
-        .context("Failed to send request to OpenRouter")?;
+        .with_context(|| format!("Failed to send request using {}", key_name))?;
 
     let connect_ms = connect_start.elapsed().as_millis();
     crate::logging::info(&format!(
@@ -1981,7 +2191,7 @@ async fn stream_response(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("OpenRouter API error ({}): {}", status, body);
+        anyhow::bail!("API error ({}): {}", status, body);
     }
 
     let _ = tx
@@ -1990,11 +2200,7 @@ async fn stream_response(
         }))
         .await;
 
-    let mut stream = OpenRouterStream::new(
-        response.bytes_stream(),
-        model.clone(),
-        provider_pin,
-    );
+    let mut stream = OpenRouterStream::new(response.bytes_stream(), model.clone(), provider_pin);
 
     const SSE_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
@@ -2355,6 +2561,33 @@ mod tests {
     }
 
     #[test]
+    fn test_configured_api_base_accepts_https() {
+        let prev = std::env::var("JCODE_OPENROUTER_API_BASE").ok();
+        std::env::set_var(
+            "JCODE_OPENROUTER_API_BASE",
+            "https://api.groq.com/openai/v1/",
+        );
+        assert_eq!(configured_api_base(), "https://api.groq.com/openai/v1");
+        if let Some(value) = prev {
+            std::env::set_var("JCODE_OPENROUTER_API_BASE", value);
+        } else {
+            std::env::remove_var("JCODE_OPENROUTER_API_BASE");
+        }
+    }
+
+    #[test]
+    fn test_configured_api_base_rejects_insecure_http_remote() {
+        let prev = std::env::var("JCODE_OPENROUTER_API_BASE").ok();
+        std::env::set_var("JCODE_OPENROUTER_API_BASE", "http://example.com/v1");
+        assert_eq!(configured_api_base(), DEFAULT_API_BASE);
+        if let Some(value) = prev {
+            std::env::set_var("JCODE_OPENROUTER_API_BASE", value);
+        } else {
+            std::env::remove_var("JCODE_OPENROUTER_API_BASE");
+        }
+    }
+
+    #[test]
     fn test_parse_model_spec() {
         let (model, provider) = parse_model_spec("anthropic/claude-sonnet-4@Fireworks");
         assert_eq!(model, "anthropic/claude-sonnet-4");
@@ -2378,14 +2611,24 @@ mod tests {
         assert!(provider.is_none());
     }
 
-    fn make_endpoint(name: &str, throughput: f64, uptime: f64, cache: bool, cost: f64) -> EndpointInfo {
+    fn make_endpoint(
+        name: &str,
+        throughput: f64,
+        uptime: f64,
+        cache: bool,
+        cost: f64,
+    ) -> EndpointInfo {
         EndpointInfo {
             provider_name: name.to_string(),
             tag: None,
             pricing: ModelPricing {
                 prompt: Some(format!("{:.10}", cost)),
                 completion: None,
-                input_cache_read: if cache { Some("0.00000007".to_string()) } else { None },
+                input_cache_read: if cache {
+                    Some("0.00000007".to_string())
+                } else {
+                    None
+                },
                 input_cache_write: None,
             },
             context_length: None,
@@ -2440,7 +2683,11 @@ mod tests {
         let provider = OpenRouterProvider {
             client: crate::provider::shared_http_client(),
             model: Arc::new(RwLock::new("moonshotai/kimi-k2.5".to_string())),
+            api_base: DEFAULT_API_BASE.to_string(),
             api_key: "test".to_string(),
+            key_name: DEFAULT_API_KEY_NAME.to_string(),
+            supports_provider_features: true,
+            send_openrouter_headers: true,
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
             provider_pin: Arc::new(Mutex::new(None)),

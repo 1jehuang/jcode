@@ -136,22 +136,44 @@ impl AuthStatus {
 
         status.anthropic = anthropic;
 
-        // Check OpenRouter API key (env var or config file)
-        if std::env::var("OPENROUTER_API_KEY").is_ok() {
-            status.openrouter = AuthState::Available;
-        } else if let Some(config_dir) = dirs::config_dir() {
-            let config_path = config_dir.join("jcode").join("openrouter.env");
-            if let Ok(content) = std::fs::read_to_string(config_path) {
-                for line in content.lines() {
-                    if let Some(key) = line.strip_prefix("OPENROUTER_API_KEY=") {
-                        let key = key.trim().trim_matches('"').trim_matches('\'');
-                        if !key.is_empty() {
-                            status.openrouter = AuthState::Available;
-                            break;
-                        }
-                    }
-                }
+        // Check OpenRouter/OpenAI-compatible API keys (env var or config file)
+        let openrouter_like_keys = [
+            ("OPENROUTER_API_KEY", "openrouter.env"),
+            ("OPENCODE_API_KEY", "opencode.env"),
+            ("OPENCODE_GO_API_KEY", "opencode-go.env"),
+            ("ZAI_API_KEY", "zai.env"),
+            ("CHUTES_API_KEY", "chutes.env"),
+            ("CEREBRAS_API_KEY", "cerebras.env"),
+            ("OPENAI_COMPAT_API_KEY", "openai-compatible.env"),
+        ];
+        let mut openrouter_available = openrouter_like_keys
+            .iter()
+            .any(|(env_key, file_name)| api_key_available(env_key, file_name));
+
+        if !openrouter_available {
+            if let Some((env_key, file_name)) = configured_api_key_source(
+                "JCODE_OPENROUTER_API_KEY_NAME",
+                "JCODE_OPENROUTER_ENV_FILE",
+                "OPENROUTER_API_KEY",
+                "openrouter.env",
+            ) {
+                openrouter_available = api_key_available(&env_key, &file_name);
             }
+        }
+
+        if !openrouter_available {
+            if let Some((env_key, file_name)) = configured_api_key_source(
+                "JCODE_OPENAI_COMPAT_API_KEY_NAME",
+                "JCODE_OPENAI_COMPAT_ENV_FILE",
+                "OPENAI_COMPAT_API_KEY",
+                "openai-compatible.env",
+            ) {
+                openrouter_available = api_key_available(&env_key, &file_name);
+            }
+        }
+
+        if openrouter_available {
+            status.openrouter = AuthState::Available;
         }
 
         // Check OpenAI (Codex OAuth or API key)
@@ -232,6 +254,91 @@ impl AuthStatus {
 
         status
     }
+}
+
+fn configured_api_key_source(
+    key_var: &str,
+    file_var: &str,
+    default_key: &str,
+    default_file: &str,
+) -> Option<(String, String)> {
+    if std::env::var_os(key_var).is_none() && std::env::var_os(file_var).is_none() {
+        return None;
+    }
+
+    let env_key = std::env::var(key_var)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| default_key.to_string());
+    let file_name = std::env::var(file_var)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| default_file.to_string());
+
+    if !is_safe_env_key_name(&env_key) {
+        crate::logging::warn(&format!(
+            "Ignoring invalid {}='{}' while probing auth status",
+            key_var, env_key
+        ));
+        return None;
+    }
+    if !is_safe_env_file_name(&file_name) {
+        crate::logging::warn(&format!(
+            "Ignoring invalid {}='{}' while probing auth status",
+            file_var, file_name
+        ));
+        return None;
+    }
+
+    Some((env_key, file_name))
+}
+
+fn is_safe_env_key_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+fn is_safe_env_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+}
+
+fn api_key_available(env_key: &str, file_name: &str) -> bool {
+    if !env_key.is_empty()
+        && std::env::var(env_key)
+            .ok()
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+    {
+        return true;
+    }
+
+    let Some(config_dir) = dirs::config_dir() else {
+        return false;
+    };
+    let config_path = config_dir.join("jcode").join(file_name);
+    crate::storage::harden_secret_file_permissions(&config_path);
+    let Ok(content) = std::fs::read_to_string(config_path) else {
+        return false;
+    };
+    let prefix = format!("{}=", env_key);
+    for line in content.lines() {
+        if let Some(key) = line.strip_prefix(&prefix) {
+            let key = key.trim().trim_matches('"').trim_matches('\'');
+            if !key.is_empty() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub(crate) fn command_available_from_env(env_var: &str, fallback: &str) -> bool {
@@ -584,6 +691,61 @@ mod tests {
         // If copilot has api token, state should be Available
         if status.copilot_has_api_token {
             assert_eq!(status.copilot, AuthState::Available);
+        }
+    }
+
+    #[test]
+    fn configured_api_key_source_uses_valid_overrides() {
+        let key_var = "JCODE_OPENAI_COMPAT_API_KEY_NAME";
+        let file_var = "JCODE_OPENAI_COMPAT_ENV_FILE";
+        let prev_key = std::env::var(key_var).ok();
+        let prev_file = std::env::var(file_var).ok();
+
+        std::env::set_var(key_var, "GROQ_API_KEY");
+        std::env::set_var(file_var, "groq.env");
+
+        let source =
+            configured_api_key_source(key_var, file_var, "OPENAI_COMPAT_API_KEY", "compat.env");
+        assert_eq!(
+            source,
+            Some(("GROQ_API_KEY".to_string(), "groq.env".to_string()))
+        );
+
+        if let Some(v) = prev_key {
+            std::env::set_var(key_var, v);
+        } else {
+            std::env::remove_var(key_var);
+        }
+        if let Some(v) = prev_file {
+            std::env::set_var(file_var, v);
+        } else {
+            std::env::remove_var(file_var);
+        }
+    }
+
+    #[test]
+    fn configured_api_key_source_rejects_invalid_values() {
+        let key_var = "JCODE_OPENAI_COMPAT_API_KEY_NAME";
+        let file_var = "JCODE_OPENAI_COMPAT_ENV_FILE";
+        let prev_key = std::env::var(key_var).ok();
+        let prev_file = std::env::var(file_var).ok();
+
+        std::env::set_var(key_var, "bad-key");
+        std::env::set_var(file_var, "../bad.env");
+
+        let source =
+            configured_api_key_source(key_var, file_var, "OPENAI_COMPAT_API_KEY", "compat.env");
+        assert!(source.is_none());
+
+        if let Some(v) = prev_key {
+            std::env::set_var(key_var, v);
+        } else {
+            std::env::remove_var(key_var);
+        }
+        if let Some(v) = prev_file {
+            std::env::set_var(file_var, v);
+        } else {
+            std::env::remove_var(file_var);
         }
     }
 }

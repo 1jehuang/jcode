@@ -517,8 +517,14 @@ enum PendingLogin {
         label: String,
         redirect_uri: Option<String>,
     },
-    /// Waiting for user to paste OpenRouter API key
-    OpenRouter,
+    /// Waiting for user to paste an API key for an OpenAI-compatible provider.
+    ApiKeyProfile {
+        provider: String,
+        docs_url: String,
+        env_file: String,
+        key_name: String,
+        default_model: Option<String>,
+    },
     /// Waiting for user to paste Cursor API key
     CursorApiKey,
     /// GitHub Copilot device flow in progress (polling in background)
@@ -4463,15 +4469,11 @@ impl App {
             // Use a generous timeout: selfdev connections may take several
             // seconds when MCP servers or tools need initialisation.
             {
-                let deadline =
-                    tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
                 while !remote.has_loaded_history() {
-                    let remaining =
-                        deadline.saturating_duration_since(tokio::time::Instant::now());
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                     if remaining.is_zero() {
-                        crate::logging::warn(
-                            "Timed out waiting for History event from server",
-                        );
+                        crate::logging::warn("Timed out waiting for History event from server");
                         break;
                     }
                     match tokio::time::timeout(remaining, remote.next_event()).await {
@@ -6302,7 +6304,9 @@ impl App {
                     if let Some(sub) = trimmed.strip_prefix("/account ") {
                         let parts: Vec<&str> = sub.trim().splitn(2, ' ').collect();
                         if matches!(parts[0], "switch" | "use") {
-                            if let Some(label) = parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                            if let Some(label) =
+                                parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty())
+                            {
                                 // Validate and persist locally first.
                                 if let Err(e) = crate::auth::claude::set_active_account(label) {
                                     self.push_display_message(DisplayMessage::error(format!(
@@ -6551,7 +6555,8 @@ impl App {
                             let _ = crate::config::Config::set_copilot_premium(None);
                             self.set_status_notice("Premium: normal");
                             self.push_display_message(DisplayMessage::system(
-                                "Premium request mode reset to normal. (saved to config)".to_string(),
+                                "Premium request mode reset to normal. (saved to config)"
+                                    .to_string(),
                             ));
                             return Ok(());
                         }
@@ -6567,7 +6572,8 @@ impl App {
                             let _ = crate::config::Config::set_copilot_premium(None);
                             self.set_status_notice("Premium: normal");
                             self.push_display_message(DisplayMessage::system(
-                                "Premium request mode reset to normal. (saved to config)".to_string(),
+                                "Premium request mode reset to normal. (saved to config)"
+                                    .to_string(),
                             ));
                         } else {
                             self.provider.set_premium_mode(mode);
@@ -7431,7 +7437,7 @@ impl App {
                 "`/config`\nShow active configuration.\n\n`/config init`\nCreate default config file.\n\n`/config edit`\nOpen config in `$EDITOR`."
             }
             "auth" | "login" => {
-                "`/auth`\nShow authentication status for all providers.\n\n`/login`\nInteractive provider selection - pick a provider to log into.\n\n`/login <provider>`\nStart login flow directly (anthropic/claude, openai, openrouter, copilot, antigravity, cursor)."
+                "`/auth`\nShow authentication status for all providers.\n\n`/login`\nInteractive provider selection - pick a provider to log into.\n\n`/login <provider>`\nStart login flow directly (anthropic/claude, openai, openrouter, opencode, opencode-go, zai, chutes, cerebras, openai-compatible, copilot, antigravity, cursor)."
             }
             "account" | "accounts" => {
                 "`/account`\nList all Anthropic OAuth accounts.\n\n`/account add <label>`\nAdd a new account via OAuth login.\n\n`/account switch <label>`\nSwitch the active account.\n\n`/account remove <label>`\nRemove an account."
@@ -7704,7 +7710,8 @@ impl App {
                         let mut stored_count = 0;
 
                         for mem in extracted {
-                            let category = crate::memory::MemoryCategory::from_extracted(&mem.category);
+                            let category =
+                                crate::memory::MemoryCategory::from_extracted(&mem.category);
 
                             let trust = match mem.trust.as_str() {
                                 "high" => crate::memory::TrustLevel::High,
@@ -8361,12 +8368,20 @@ impl App {
                 "claude" | "anthropic" => self.start_claude_login(),
                 "openai" => self.start_openai_login(),
                 "openrouter" => self.start_openrouter_login(),
+                "opencode" => self.start_opencode_login(),
+                "opencode-go" | "opencodego" => self.start_opencode_go_login(),
+                "zai" | "z.ai" => self.start_zai_login(),
+                "chutes" => self.start_chutes_login(),
+                "cerebras" => self.start_cerebras_login(),
+                "openai-compatible" | "openai_compatible" | "compat" => {
+                    self.start_openai_compatible_login()
+                }
                 "copilot" => self.start_copilot_login(),
                 "antigravity" => self.start_antigravity_login(),
                 "cursor" => self.start_cursor_login(),
                 other => {
                     self.push_display_message(DisplayMessage::error(format!(
-                        "Unknown provider '{}'. Use: anthropic/claude, openai, openrouter, copilot, antigravity, or cursor",
+                        "Unknown provider '{}'. Use: anthropic/claude, openai, openrouter, opencode, opencode-go, zai, chutes, cerebras, openai-compatible, copilot, antigravity, or cursor",
                         other
                     )));
                 }
@@ -9684,6 +9699,12 @@ impl App {
              | Anthropic | {} | {}{} |\n\
              | OpenAI | {} | {} |\n\
              | OpenRouter | {} | API key |\n\
+             | OpenCode Zen | {} | API key |\n\
+             | OpenCode Go | {} | API key |\n\
+             | Z.AI Coding | {} | API key |\n\
+             | Chutes | {} | API key |\n\
+             | Cerebras | {} | API key |\n\
+             | OpenAI-compatible | {} | API key |\n\
              | Copilot | {} | CLI login |\n\
              | Antigravity | {} | CLI login |\n\
              | Cursor | {} | API key / CLI |\n\n\
@@ -9693,6 +9714,12 @@ impl App {
             account_info,
             icon(status.openai),
             openai_detail,
+            icon(status.openrouter),
+            icon(status.openrouter),
+            icon(status.openrouter),
+            icon(status.openrouter),
+            icon(status.openrouter),
+            icon(status.openrouter),
             icon(status.openrouter),
             icon(status.copilot),
             icon(status.antigravity),
@@ -9715,12 +9742,24 @@ impl App {
              | 1 | Anthropic/Claude | {} |\n\
              | 2 | OpenAI | {} |\n\
              | 3 | OpenRouter | {} |\n\
-             | 4 | Copilot | {} |\n\
-             | 5 | Antigravity | {} |\n\
-             | 6 | Cursor | {} |\n\n\
-             Type a number (1-6) or provider name, or `/cancel` to cancel.",
+             | 4 | OpenCode Zen | {} |\n\
+             | 5 | OpenCode Go | {} |\n\
+             | 6 | Z.AI Coding | {} |\n\
+             | 7 | Chutes | {} |\n\
+             | 8 | Cerebras | {} |\n\
+             | 9 | OpenAI-compatible | {} |\n\
+             | 10 | Copilot | {} |\n\
+             | 11 | Antigravity | {} |\n\
+             | 12 | Cursor | {} |\n\n\
+             Type a number (1-12) or provider name, or `/cancel` to cancel.",
             icon(status.anthropic.state),
             icon(status.openai),
+            icon(status.openrouter),
+            icon(status.openrouter),
+            icon(status.openrouter),
+            icon(status.openrouter),
+            icon(status.openrouter),
+            icon(status.openrouter),
             icon(status.openrouter),
             icon(status.copilot),
             icon(status.antigravity),
@@ -10161,14 +10200,125 @@ impl App {
     }
 
     fn start_openrouter_login(&mut self) {
-        self.push_display_message(DisplayMessage::system(
-            "**OpenRouter API Key**\n\n\
-             Get your API key from: https://openrouter.ai/keys\n\n\
-             **Paste your API key below** (it will be saved securely)."
-                .to_string(),
-        ));
+        self.start_api_key_login(
+            "OpenRouter",
+            "https://openrouter.ai/keys",
+            "openrouter.env",
+            "OPENROUTER_API_KEY",
+            None,
+        );
+    }
+
+    fn start_opencode_login(&mut self) {
+        self.start_api_key_login(
+            "OpenCode Zen",
+            "https://opencode.ai/docs/providers#opencode-zen",
+            "opencode.env",
+            "OPENCODE_API_KEY",
+            Some("qwen/qwen3-coder-plus"),
+        );
+    }
+
+    fn start_opencode_go_login(&mut self) {
+        self.start_api_key_login(
+            "OpenCode Go",
+            "https://opencode.ai/docs/providers#opencode-go",
+            "opencode-go.env",
+            "OPENCODE_GO_API_KEY",
+            Some("THUDM/GLM-4.5"),
+        );
+    }
+
+    fn start_zai_login(&mut self) {
+        self.start_api_key_login(
+            "Z.AI Coding",
+            "https://docs.z.ai/guides/develop/openai/introduction",
+            "zai.env",
+            "ZAI_API_KEY",
+            Some("glm-4.5"),
+        );
+    }
+
+    fn start_chutes_login(&mut self) {
+        self.start_api_key_login(
+            "Chutes",
+            "https://chutes.ai",
+            "chutes.env",
+            "CHUTES_API_KEY",
+            Some("Qwen/Qwen3-Coder-480B-A35B-Instruct"),
+        );
+    }
+
+    fn start_cerebras_login(&mut self) {
+        self.start_api_key_login(
+            "Cerebras",
+            "https://inference-docs.cerebras.ai/introduction",
+            "cerebras.env",
+            "CEREBRAS_API_KEY",
+            Some("qwen-3-coder-480b"),
+        );
+    }
+
+    fn start_openai_compatible_login(&mut self) {
+        let docs_url = std::env::var("JCODE_OPENAI_COMPAT_SETUP_URL")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "https://opencode.ai/docs/providers#custom-providers".to_string());
+
+        let key_name = std::env::var("JCODE_OPENAI_COMPAT_API_KEY_NAME")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| Self::is_safe_env_key_name(v))
+            .unwrap_or_else(|| "OPENAI_COMPAT_API_KEY".to_string());
+
+        let env_file = std::env::var("JCODE_OPENAI_COMPAT_ENV_FILE")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| Self::is_safe_env_file_name(v))
+            .unwrap_or_else(|| "openai-compatible.env".to_string());
+
+        let default_model = std::env::var("JCODE_OPENAI_COMPAT_DEFAULT_MODEL")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+
+        self.start_api_key_login(
+            "OpenAI-compatible",
+            &docs_url,
+            &env_file,
+            &key_name,
+            default_model.as_deref(),
+        );
+    }
+
+    fn start_api_key_login(
+        &mut self,
+        provider: &str,
+        docs_url: &str,
+        env_file: &str,
+        key_name: &str,
+        default_model: Option<&str>,
+    ) {
+        let model_hint = default_model
+            .map(|m| format!("Suggested default model: `{}`\n\n", m))
+            .unwrap_or_default();
+        self.push_display_message(DisplayMessage::system(format!(
+            "**{} API Key**\n\n\
+             Setup docs: {}\n\
+             Stored variable: `{}`\n\
+             {}\n\
+             **Paste your API key below** (it will be saved securely).",
+            provider, docs_url, key_name, model_hint
+        )));
         self.set_status_notice("Login: paste key…");
-        self.pending_login = Some(PendingLogin::OpenRouter);
+        self.pending_login = Some(PendingLogin::ApiKeyProfile {
+            provider: provider.to_string(),
+            docs_url: docs_url.to_string(),
+            env_file: env_file.to_string(),
+            key_name: key_name.to_string(),
+            default_model: default_model.map(|m| m.to_string()),
+        });
     }
 
     fn start_cursor_login(&mut self) {
@@ -10444,10 +10594,18 @@ impl App {
                     .await
                     {
                         Ok(msg) => {
-                            crate::logging::info(&format!("Claude login: {}", msg));
+                            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                                provider: "claude".to_string(),
+                                success: true,
+                                message: msg,
+                            }));
                         }
                         Err(e) => {
-                            crate::logging::error(&format!("Claude login failed: {}", e));
+                            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                                provider: "claude".to_string(),
+                                success: false,
+                                message: format!("Claude login failed: {}", e),
+                            }));
                         }
                     }
                 });
@@ -10473,16 +10631,18 @@ impl App {
                     .await
                     {
                         Ok(msg) => {
-                            crate::logging::info(&format!(
-                                "Claude login [{}]: {}",
-                                label_clone, msg
-                            ));
+                            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                                provider: "claude".to_string(),
+                                success: true,
+                                message: msg,
+                            }));
                         }
                         Err(e) => {
-                            crate::logging::error(&format!(
-                                "Claude login [{}] failed: {}",
-                                label_clone, e
-                            ));
+                            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                                provider: "claude".to_string(),
+                                success: false,
+                                message: format!("Claude login [{}] failed: {}", label_clone, e),
+                            }));
                         }
                     }
                 });
@@ -10491,29 +10651,46 @@ impl App {
                     label
                 )));
             }
-            PendingLogin::OpenRouter => {
+            PendingLogin::ApiKeyProfile {
+                provider,
+                docs_url: _,
+                env_file,
+                key_name,
+                default_model,
+            } => {
                 let key = input.trim().to_string();
-                if !key.starts_with("sk-or-") {
+                if key_name == "OPENROUTER_API_KEY" && !key.starts_with("sk-or-") {
                     self.push_display_message(DisplayMessage::system(
                         "⚠ OpenRouter keys typically start with `sk-or-`. Saving anyway..."
                             .to_string(),
                     ));
                 }
 
-                match Self::save_openrouter_key(&key) {
+                match Self::save_named_api_key(&env_file, &key_name, &key) {
                     Ok(()) => {
-                        self.push_display_message(DisplayMessage::system(
-                            "✓ **OpenRouter API key saved!**\n\n\
-                             Stored at `~/.config/jcode/openrouter.env`.\n\
-                             You can now use `/model` to switch to OpenRouter models."
-                                .to_string(),
-                        ));
+                        let model_hint = default_model
+                            .map(|m| format!("\nSuggested default model: `{}`", m))
+                            .unwrap_or_default();
+                        let guidance = if key_name == "OPENROUTER_API_KEY" {
+                            "You can now use `/model` to switch to OpenRouter models.".to_string()
+                        } else {
+                            format!(
+                                "Restart with `--provider {}` to use this backend in a new session.",
+                                provider.to_lowercase().replace(' ', "-")
+                            )
+                        };
+                        self.push_display_message(DisplayMessage::system(format!(
+                            "✓ **{} API key saved!**\n\n\
+                             Stored at `~/.config/jcode/{}`.\n\
+                             {}{}",
+                            provider, env_file, guidance, model_hint
+                        )));
                         self.set_status_notice("Login: ✓ saved");
                     }
                     Err(e) => {
                         self.push_display_message(DisplayMessage::error(format!(
-                            "Failed to save OpenRouter key: {}",
-                            e
+                            "Failed to save {} key: {}",
+                            provider, e
                         )));
                     }
                 }
@@ -10561,12 +10738,18 @@ impl App {
                     "1" | "claude" | "anthropic" => self.start_claude_login(),
                     "2" | "openai" => self.start_openai_login(),
                     "3" | "openrouter" => self.start_openrouter_login(),
-                    "4" | "copilot" => self.start_copilot_login(),
-                    "5" | "antigravity" => self.start_antigravity_login(),
-                    "6" | "cursor" => self.start_cursor_login(),
+                    "4" | "opencode" => self.start_opencode_login(),
+                    "5" | "opencode-go" | "opencodego" => self.start_opencode_go_login(),
+                    "6" | "zai" | "z.ai" => self.start_zai_login(),
+                    "7" | "chutes" => self.start_chutes_login(),
+                    "8" | "cerebras" => self.start_cerebras_login(),
+                    "9" | "openai-compatible" | "compat" => self.start_openai_compatible_login(),
+                    "10" | "copilot" => self.start_copilot_login(),
+                    "11" | "antigravity" => self.start_antigravity_login(),
+                    "12" | "cursor" => self.start_cursor_login(),
                     _ => {
                         self.push_display_message(DisplayMessage::error(format!(
-                            "Unknown selection '{}'. Type 1-6 or a provider name.",
+                            "Unknown selection '{}'. Type 1-12 or a provider name.",
                             input.trim()
                         )));
                         self.pending_login = Some(PendingLogin::ProviderSelection);
@@ -10664,20 +10847,44 @@ impl App {
         ))
     }
 
-    fn save_openrouter_key(key: &str) -> anyhow::Result<()> {
+    fn save_named_api_key(env_file: &str, key_name: &str, key: &str) -> anyhow::Result<()> {
+        if !Self::is_safe_env_key_name(key_name) {
+            anyhow::bail!("Invalid API key variable name: {}", key_name);
+        }
+        if !Self::is_safe_env_file_name(env_file) {
+            anyhow::bail!("Invalid env file name: {}", env_file);
+        }
+
         let config_dir = dirs::config_dir()
             .ok_or_else(|| anyhow::anyhow!("No config directory found"))?
             .join("jcode");
         std::fs::create_dir_all(&config_dir)?;
+        crate::platform::set_directory_permissions_owner_only(&config_dir)?;
 
-        let file_path = config_dir.join("openrouter.env");
-        let content = format!("OPENROUTER_API_KEY={}\n", key);
+        let file_path = config_dir.join(env_file);
+        let content = format!("{}={}\n", key_name, key);
         std::fs::write(&file_path, &content)?;
 
         crate::platform::set_permissions_owner_only(&file_path)?;
 
-        std::env::set_var("OPENROUTER_API_KEY", key);
+        std::env::set_var(key_name, key);
         Ok(())
+    }
+
+    fn is_safe_env_key_name(name: &str) -> bool {
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    }
+
+    fn is_safe_env_file_name(name: &str) -> bool {
+        !name.is_empty()
+            && !name.contains('/')
+            && !name.contains('\\')
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
     }
 
     fn model_picker_preview_filter(input: &str) -> Option<String> {
@@ -11317,11 +11524,7 @@ impl App {
         }
     }
 
-    fn handle_session_picker_key(
-        &mut self,
-        code: KeyCode,
-        modifiers: KeyModifiers,
-    ) -> Result<()> {
+    fn handle_session_picker_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
         use super::session_picker::OverlayAction;
         let action = {
             let picker_cell = self.session_picker_overlay.as_ref().unwrap();
@@ -13568,7 +13771,10 @@ impl App {
             .map(|e| e.content)
             .collect();
         let sidecar = crate::sidecar::Sidecar::new();
-        match sidecar.extract_memories_with_existing(&transcript, &existing).await {
+        match sidecar
+            .extract_memories_with_existing(&transcript, &existing)
+            .await
+        {
             Ok(extracted) if !extracted.is_empty() => {
                 let manager = crate::memory::MemoryManager::new();
                 let mut stored_count = 0;
@@ -13829,6 +14035,18 @@ impl App {
                 ("/login claude".into(), "Alias for Anthropic login"),
                 ("/login openai".into(), "Login to OpenAI (OAuth)"),
                 ("/login openrouter".into(), "Login to OpenRouter (API key)"),
+                ("/login opencode".into(), "Login to OpenCode Zen (API key)"),
+                (
+                    "/login opencode-go".into(),
+                    "Login to OpenCode Go (API key)",
+                ),
+                ("/login zai".into(), "Login to Z.AI Coding (API key)"),
+                ("/login chutes".into(), "Login to Chutes (API key)"),
+                ("/login cerebras".into(), "Login to Cerebras (API key)"),
+                (
+                    "/login openai-compatible".into(),
+                    "Login to custom OpenAI-compatible endpoint",
+                ),
                 ("/login copilot".into(), "Login to GitHub Copilot CLI"),
                 ("/login antigravity".into(), "Login to Antigravity CLI"),
                 ("/login cursor".into(), "Login to Cursor (API key / CLI)"),
@@ -14347,7 +14565,11 @@ impl App {
         let target_line = positions[target_idx];
         self.set_status_notice(format!(
             "Ctrl+{}: idx={}/{} line={} max={}",
-            rank, target_idx, positions.len(), target_line, max_scroll
+            rank,
+            target_idx,
+            positions.len(),
+            target_line,
+            max_scroll
         ));
         self.scroll_offset = target_line;
         self.auto_scroll_paused = true;
@@ -15576,9 +15798,7 @@ impl super::TuiState for App {
         self.help_scroll
     }
 
-    fn session_picker_overlay(
-        &self,
-    ) -> Option<&RefCell<super::session_picker::SessionPicker>> {
+    fn session_picker_overlay(&self) -> Option<&RefCell<super::session_picker::SessionPicker>> {
         self.session_picker_overlay.as_ref()
     }
 

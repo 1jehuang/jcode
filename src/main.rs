@@ -21,8 +21,8 @@ mod ambient_runner;
 mod ambient_scheduler;
 mod auth;
 mod background;
-mod build;
 mod browser;
+mod build;
 mod bus;
 mod cache_tracker;
 mod channel;
@@ -195,18 +195,16 @@ fn init_tui_terminal() -> Result<ratatui::DefaultTerminal> {
 fn init_tui_terminal_resume() -> Result<ratatui::DefaultTerminal> {
     use ratatui::{backend::CrosstermBackend, Terminal};
 
-    crossterm::terminal::enable_raw_mode().map_err(|e| {
-        anyhow::anyhow!("failed to enable raw mode on resume: {}", e)
-    })?;
+    crossterm::terminal::enable_raw_mode()
+        .map_err(|e| anyhow::anyhow!("failed to enable raw mode on resume: {}", e))?;
 
     let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend).map_err(|e| {
-        anyhow::anyhow!("failed to create terminal on resume: {}", e)
-    })?;
+    let mut terminal = Terminal::new(backend)
+        .map_err(|e| anyhow::anyhow!("failed to create terminal on resume: {}", e))?;
 
-    terminal.clear().map_err(|e| {
-        anyhow::anyhow!("failed to clear terminal on resume: {}", e)
-    })?;
+    terminal
+        .clear()
+        .map_err(|e| anyhow::anyhow!("failed to clear terminal on resume: {}", e))?;
 
     Ok(terminal)
 }
@@ -310,6 +308,17 @@ enum ProviderChoice {
     ClaudeSubprocess,
     Openai,
     Openrouter,
+    #[value(alias = "opencode-zen", alias = "zen")]
+    Opencode,
+    #[value(alias = "opencodego")]
+    OpencodeGo,
+    #[value(alias = "z.ai", alias = "z-ai", alias = "zai-coding")]
+    Zai,
+    Chutes,
+    #[value(alias = "cerebrascode", alias = "cerberascode")]
+    Cerebras,
+    #[value(alias = "compat", alias = "custom")]
+    OpenaiCompatible,
     Cursor,
     Copilot,
     Antigravity,
@@ -324,6 +333,12 @@ impl ProviderChoice {
             Self::ClaudeSubprocess => "claude-subprocess",
             Self::Openai => "openai",
             Self::Openrouter => "openrouter",
+            Self::Opencode => "opencode",
+            Self::OpencodeGo => "opencode-go",
+            Self::Zai => "zai",
+            Self::Chutes => "chutes",
+            Self::Cerebras => "cerebras",
+            Self::OpenaiCompatible => "openai-compatible",
             Self::Cursor => "cursor",
             Self::Copilot => "copilot",
             Self::Antigravity => "antigravity",
@@ -338,7 +353,7 @@ impl ProviderChoice {
 #[command(version = env!("JCODE_VERSION"))]
 #[command(about = "J-Code: A coding agent using Claude Max or ChatGPT Pro subscriptions")]
 struct Args {
-    /// Provider to use (claude, claude-subprocess, openai, openrouter, cursor, copilot, antigravity, or auto-detect)
+    /// Provider to use (claude, openai, openrouter, opencode, opencode-go, zai, chutes, cerebras, openai-compatible, cursor, copilot, antigravity, or auto-detect)
     #[arg(short, long, default_value = "auto", global = true)]
     provider: ProviderChoice,
 
@@ -622,6 +637,10 @@ async fn main() -> Result<()> {
     startup_profile::mark("log_cleanup");
     logging::info("jcode starting");
 
+    // Best-effort hardening for local config directories that may hold secrets.
+    storage::harden_user_config_permissions();
+    startup_profile::mark("perm_harden");
+
     // Profile system performance on background thread (result ready before first frame)
     perf::init_background();
     startup_profile::mark("perf_init");
@@ -807,24 +826,22 @@ async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::SetupHotkey) => {
             setup_hints::run_setup_hotkey()?;
         }
-        Some(Command::Browser { action }) => {
-            match action.as_str() {
-                "setup" => browser::run_setup_command().await?,
-                "status" => {
-                    if browser::is_setup_complete() {
-                        println!("Browser bridge: installed and ready");
-                    } else {
-                        println!("Browser bridge: not set up");
-                        println!("Run `jcode browser setup` to install");
-                    }
-                }
-                other => {
-                    eprintln!("Unknown browser action: {}", other);
-                    eprintln!("Available: setup, status");
-                    std::process::exit(1);
+        Some(Command::Browser { action }) => match action.as_str() {
+            "setup" => browser::run_setup_command().await?,
+            "status" => {
+                if browser::is_setup_complete() {
+                    println!("Browser bridge: installed and ready");
+                } else {
+                    println!("Browser bridge: not set up");
+                    println!("Run `jcode browser setup` to install");
                 }
             }
-        }
+            other => {
+                eprintln!("Unknown browser action: {}", other);
+                eprintln!("Available: setup, status");
+                std::process::exit(1);
+            }
+        },
         Some(Command::Replay {
             session,
             export,
@@ -968,9 +985,14 @@ async fn run_main(mut args: Args) -> Result<()> {
                         eprintln!("  2. OpenAI      - requires ChatGPT Plus or Pro subscription");
                         eprintln!("  3. GitHub Copilot (free)");
                         eprintln!("  4. OpenRouter  - API key, pay-per-token, 200+ models");
+                        eprintln!("  5. OpenCode Zen (API key)");
+                        eprintln!("  6. OpenCode Go (API key)");
+                        eprintln!("  7. Z.AI Coding (API key)");
+                        eprintln!("  8. Chutes (API key)");
+                        eprintln!("  9. Cerebras (API key)");
                         eprintln!();
                         eprintln!("  Options 1-2 are recommended if you have a subscription.");
-                        eprint!("\nEnter 1-4: ");
+                        eprint!("\nEnter 1-9: ");
                         io::stdout().flush()?;
 
                         let mut input = String::new();
@@ -981,6 +1003,26 @@ async fn run_main(mut args: Args) -> Result<()> {
                             "2" => login_openai_flow().await?,
                             "3" => login_copilot_flow()?,
                             "4" => login_openrouter_flow()?,
+                            "5" => {
+                                login_openai_compatible_flow(&OPENCODE_PROFILE)?;
+                                apply_openai_compatible_profile(Some(OPENCODE_PROFILE));
+                            }
+                            "6" => {
+                                login_openai_compatible_flow(&OPENCODE_GO_PROFILE)?;
+                                apply_openai_compatible_profile(Some(OPENCODE_GO_PROFILE));
+                            }
+                            "7" => {
+                                login_openai_compatible_flow(&ZAI_PROFILE)?;
+                                apply_openai_compatible_profile(Some(ZAI_PROFILE));
+                            }
+                            "8" => {
+                                login_openai_compatible_flow(&CHUTES_PROFILE)?;
+                                apply_openai_compatible_profile(Some(CHUTES_PROFILE));
+                            }
+                            "9" => {
+                                login_openai_compatible_flow(&CEREBRAS_PROFILE)?;
+                                apply_openai_compatible_profile(Some(CEREBRAS_PROFILE));
+                            }
                             _ => anyhow::bail!("Invalid choice. Run 'jcode login' to try again."),
                         }
                         eprintln!();
@@ -1071,15 +1113,277 @@ async fn run_main(mut args: Args) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct OpenAiCompatibleProfile {
+    id: &'static str,
+    display_name: &'static str,
+    api_base: &'static str,
+    api_key_env: &'static str,
+    env_file: &'static str,
+    setup_url: &'static str,
+    default_model: Option<&'static str>,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedOpenAiCompatibleProfile {
+    id: String,
+    display_name: String,
+    api_base: String,
+    api_key_env: String,
+    env_file: String,
+    setup_url: String,
+    default_model: Option<String>,
+}
+
+const OPENCODE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "opencode",
+    display_name: "OpenCode Zen",
+    api_base: "https://opencode.ai/zen/v1",
+    api_key_env: "OPENCODE_API_KEY",
+    env_file: "opencode.env",
+    setup_url: "https://opencode.ai/docs/providers#opencode-zen",
+    default_model: Some("qwen/qwen3-coder-plus"),
+};
+
+const OPENCODE_GO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "opencode-go",
+    display_name: "OpenCode Go",
+    api_base: "https://opencode.ai/zen/go/v1",
+    api_key_env: "OPENCODE_GO_API_KEY",
+    env_file: "opencode-go.env",
+    setup_url: "https://opencode.ai/docs/providers#opencode-go",
+    default_model: Some("THUDM/GLM-4.5"),
+};
+
+const ZAI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "zai",
+    display_name: "Z.AI Coding",
+    api_base: "https://api.z.ai/api/coding/paas/v4",
+    api_key_env: "ZAI_API_KEY",
+    env_file: "zai.env",
+    setup_url: "https://docs.z.ai/guides/develop/openai/introduction",
+    default_model: Some("glm-4.5"),
+};
+
+const CHUTES_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "chutes",
+    display_name: "Chutes",
+    api_base: "https://llm.chutes.ai/v1",
+    api_key_env: "CHUTES_API_KEY",
+    env_file: "chutes.env",
+    setup_url: "https://chutes.ai",
+    default_model: Some("Qwen/Qwen3-Coder-480B-A35B-Instruct"),
+};
+
+const CEREBRAS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "cerebras",
+    display_name: "Cerebras",
+    api_base: "https://api.cerebras.ai/v1",
+    api_key_env: "CEREBRAS_API_KEY",
+    env_file: "cerebras.env",
+    setup_url: "https://inference-docs.cerebras.ai/introduction",
+    default_model: Some("qwen-3-coder-480b"),
+};
+
+const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "openai-compatible",
+    display_name: "OpenAI-compatible",
+    api_base: "https://api.openai.com/v1",
+    api_key_env: "OPENAI_COMPAT_API_KEY",
+    env_file: "openai-compatible.env",
+    setup_url: "https://opencode.ai/docs/providers#custom-providers",
+    default_model: None,
+};
+
+fn profile_for_choice(choice: &ProviderChoice) -> Option<OpenAiCompatibleProfile> {
+    match choice {
+        ProviderChoice::Opencode => Some(OPENCODE_PROFILE),
+        ProviderChoice::OpencodeGo => Some(OPENCODE_GO_PROFILE),
+        ProviderChoice::Zai => Some(ZAI_PROFILE),
+        ProviderChoice::Chutes => Some(CHUTES_PROFILE),
+        ProviderChoice::Cerebras => Some(CEREBRAS_PROFILE),
+        ProviderChoice::OpenaiCompatible => Some(OPENAI_COMPAT_PROFILE),
+        _ => None,
+    }
+}
+
+fn normalize_api_base(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let parsed = reqwest::Url::parse(trimmed).ok()?;
+    let scheme = parsed.scheme();
+    if scheme != "https" && scheme != "http" {
+        return None;
+    }
+
+    if scheme == "http" {
+        let host = parsed.host_str()?.to_ascii_lowercase();
+        if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+            return None;
+        }
+    }
+
+    Some(trimmed.trim_end_matches('/').to_string())
+}
+
+fn env_override(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn resolve_openai_compatible_profile(
+    profile: OpenAiCompatibleProfile,
+) -> ResolvedOpenAiCompatibleProfile {
+    let mut resolved = ResolvedOpenAiCompatibleProfile {
+        id: profile.id.to_string(),
+        display_name: profile.display_name.to_string(),
+        api_base: profile.api_base.to_string(),
+        api_key_env: profile.api_key_env.to_string(),
+        env_file: profile.env_file.to_string(),
+        setup_url: profile.setup_url.to_string(),
+        default_model: profile.default_model.map(|v| v.to_string()),
+    };
+
+    if profile.id != OPENAI_COMPAT_PROFILE.id {
+        return resolved;
+    }
+
+    if let Some(base) = env_override("JCODE_OPENAI_COMPAT_API_BASE") {
+        if let Some(normalized) = normalize_api_base(&base) {
+            resolved.api_base = normalized;
+        } else {
+            eprintln!(
+                "Warning: ignoring invalid JCODE_OPENAI_COMPAT_API_BASE '{}'. Use https://... (or http://localhost).",
+                base
+            );
+        }
+    }
+
+    if let Some(key_name) = env_override("JCODE_OPENAI_COMPAT_API_KEY_NAME") {
+        if is_safe_env_key_name(&key_name) {
+            resolved.api_key_env = key_name;
+        } else {
+            eprintln!(
+                "Warning: ignoring invalid JCODE_OPENAI_COMPAT_API_KEY_NAME '{}'.",
+                key_name
+            );
+        }
+    }
+
+    if let Some(env_file) = env_override("JCODE_OPENAI_COMPAT_ENV_FILE") {
+        if is_safe_env_file_name(&env_file) {
+            resolved.env_file = env_file;
+        } else {
+            eprintln!(
+                "Warning: ignoring invalid JCODE_OPENAI_COMPAT_ENV_FILE '{}'.",
+                env_file
+            );
+        }
+    }
+
+    if let Some(setup_url) = env_override("JCODE_OPENAI_COMPAT_SETUP_URL") {
+        resolved.setup_url = setup_url;
+    }
+
+    if let Some(model) = env_override("JCODE_OPENAI_COMPAT_DEFAULT_MODEL") {
+        resolved.default_model = Some(model);
+    }
+
+    resolved
+}
+
+fn apply_openai_compatible_profile(profile: Option<OpenAiCompatibleProfile>) {
+    let vars = [
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_PROVIDER",
+        "JCODE_OPENROUTER_NO_FALLBACK",
+    ];
+
+    for var in vars {
+        std::env::remove_var(var);
+    }
+
+    if let Some(profile) = profile {
+        let resolved = resolve_openai_compatible_profile(profile);
+        std::env::set_var("JCODE_OPENROUTER_API_BASE", &resolved.api_base);
+        std::env::set_var("JCODE_OPENROUTER_API_KEY_NAME", &resolved.api_key_env);
+        std::env::set_var("JCODE_OPENROUTER_ENV_FILE", &resolved.env_file);
+        std::env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", &resolved.id);
+        std::env::set_var("JCODE_OPENROUTER_PROVIDER_FEATURES", "0");
+    }
+}
+
+fn is_safe_env_key_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+fn is_safe_env_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+}
+
+fn save_named_api_key(env_file: &str, key_name: &str, key: &str) -> Result<()> {
+    if !is_safe_env_key_name(key_name) {
+        anyhow::bail!("Invalid API key variable name: {}", key_name);
+    }
+    if !is_safe_env_file_name(env_file) {
+        anyhow::bail!("Invalid env file name: {}", env_file);
+    }
+
+    let config_dir = dirs::config_dir()
+        .ok_or_else(|| anyhow::anyhow!("No config directory found"))?
+        .join("jcode");
+    std::fs::create_dir_all(&config_dir)?;
+    crate::platform::set_directory_permissions_owner_only(&config_dir)?;
+
+    let file_path = config_dir.join(env_file);
+    let content = format!("{}={}\n", key_name, key);
+    std::fs::write(&file_path, &content)?;
+    crate::platform::set_permissions_owner_only(&file_path)?;
+
+    std::env::set_var(key_name, key);
+    Ok(())
+}
+
 async fn init_provider(
     choice: &ProviderChoice,
     model: Option<&str>,
 ) -> Result<Arc<dyn provider::Provider>> {
+    if let Some(profile) = profile_for_choice(choice) {
+        apply_openai_compatible_profile(Some(profile));
+    } else {
+        apply_openai_compatible_profile(None);
+    }
+
+    let lock_provider = |provider_key: &str| {
+        std::env::set_var("JCODE_ACTIVE_PROVIDER", provider_key);
+        std::env::set_var("JCODE_FORCE_PROVIDER", "1");
+    };
+    let unlock_provider = || {
+        std::env::remove_var("JCODE_FORCE_PROVIDER");
+    };
+
     let provider: Arc<dyn provider::Provider> = match choice {
         ProviderChoice::Claude => {
-            // Explicit Claude - use MultiProvider but prefer Claude
-            eprintln!("Using Claude (with multi-provider support)");
-            std::env::set_var("JCODE_ACTIVE_PROVIDER", "claude");
+            // Explicit Claude: lock to Claude so auth/rate errors are surfaced clearly.
+            eprintln!("Using Claude (provider locked)");
+            lock_provider("claude");
             Arc::new(provider::MultiProvider::with_preference(false))
         }
         ProviderChoice::ClaudeSubprocess => {
@@ -1087,42 +1391,64 @@ async fn init_provider(
                 "Using --provider claude-subprocess is deprecated. Prefer `--provider claude`.",
             );
             std::env::set_var("JCODE_USE_CLAUDE_CLI", "1");
-            eprintln!("Using deprecated Claude subprocess transport (legacy mode)");
-            std::env::set_var("JCODE_ACTIVE_PROVIDER", "claude");
+            eprintln!("Using deprecated Claude subprocess transport (provider locked)");
+            lock_provider("claude");
             Arc::new(provider::MultiProvider::with_preference(false))
         }
         ProviderChoice::Openai => {
-            // Explicit OpenAI - use MultiProvider but prefer OpenAI
-            eprintln!("Using OpenAI (with multi-provider support)");
-            std::env::set_var("JCODE_ACTIVE_PROVIDER", "openai");
+            // Explicit OpenAI: lock to OpenAI so auth/rate errors are surfaced clearly.
+            eprintln!("Using OpenAI (provider locked)");
+            lock_provider("openai");
             Arc::new(provider::MultiProvider::with_preference(true))
         }
         ProviderChoice::Cursor => {
             eprintln!("Using Cursor CLI provider (experimental)");
+            unlock_provider();
             std::env::set_var("JCODE_ACTIVE_PROVIDER", "cursor");
             Arc::new(provider::cursor::CursorCliProvider::new())
         }
         ProviderChoice::Copilot => {
-            eprintln!("Using GitHub Copilot API provider");
-            std::env::set_var("JCODE_ACTIVE_PROVIDER", "copilot");
+            eprintln!("Using GitHub Copilot API provider (provider locked)");
+            lock_provider("copilot");
             Arc::new(provider::MultiProvider::new())
         }
         ProviderChoice::Openrouter => {
-            eprintln!("Using OpenRouter provider");
-            std::env::set_var("JCODE_ACTIVE_PROVIDER", "openrouter");
+            eprintln!("Using OpenRouter provider (provider locked)");
+            lock_provider("openrouter");
+            Arc::new(provider::MultiProvider::new())
+        }
+        ProviderChoice::Opencode
+        | ProviderChoice::OpencodeGo
+        | ProviderChoice::Zai
+        | ProviderChoice::Chutes
+        | ProviderChoice::Cerebras
+        | ProviderChoice::OpenaiCompatible => {
+            let profile = profile_for_choice(choice)
+                .ok_or_else(|| anyhow::anyhow!("missing provider profile for choice"))?;
+            let resolved = resolve_openai_compatible_profile(profile);
+            eprintln!(
+                "Using {} via OpenAI-compatible API (provider locked)",
+                resolved.display_name
+            );
+            lock_provider("openrouter");
             Arc::new(provider::MultiProvider::new())
         }
         ProviderChoice::Antigravity => {
             eprintln!("Using Antigravity CLI provider (experimental)");
+            unlock_provider();
             std::env::set_var("JCODE_ACTIVE_PROVIDER", "antigravity");
             Arc::new(provider::antigravity::AntigravityCliProvider::new())
         }
         ProviderChoice::Google => {
-            eprintln!("Note: Google/Gmail is not a model provider. Using auto-detect for model provider.");
+            eprintln!(
+                "Note: Google/Gmail is not a model provider. Using auto-detect for model provider."
+            );
             eprintln!("Gmail tool is available if you've run `jcode login google`.");
+            unlock_provider();
             Arc::new(provider::MultiProvider::new())
         }
         ProviderChoice::Auto => {
+            unlock_provider();
             // Check if we have any credentials (in parallel)
             let (has_claude, has_openai) = tokio::join!(
                 tokio::task::spawn_blocking(|| auth::claude::load_credentials().is_ok()),
@@ -1153,10 +1479,15 @@ async fn init_provider(
                 eprintln!("  1. Claude (Claude Max subscription)");
                 eprintln!("  2. OpenAI (ChatGPT Pro subscription)");
                 eprintln!("  3. OpenRouter (API key - 200+ models)");
-                eprintln!("  4. Cursor");
-                eprintln!("  5. GitHub Copilot");
-                eprintln!("  6. Antigravity");
-                eprint!("\nEnter 1-6: ");
+                eprintln!("  4. OpenCode Zen (API key)");
+                eprintln!("  5. OpenCode Go (API key)");
+                eprintln!("  6. Z.AI Coding (API key)");
+                eprintln!("  7. Chutes (API key)");
+                eprintln!("  8. Cerebras (API key)");
+                eprintln!("  9. Cursor");
+                eprintln!("  10. GitHub Copilot");
+                eprintln!("  11. Antigravity");
+                eprint!("\nEnter 1-11: ");
                 io::stdout().flush()?;
 
                 let mut input = String::new();
@@ -1179,16 +1510,71 @@ async fn init_provider(
                         Arc::new(provider::MultiProvider::new())
                     }
                     "4" => {
+                        login_openai_compatible_flow(&OPENCODE_PROFILE)?;
+                        eprintln!();
+                        apply_openai_compatible_profile(Some(OPENCODE_PROFILE));
+                        lock_provider("openrouter");
+                        let multi = provider::MultiProvider::new();
+                        if let Some(model) = OPENCODE_PROFILE.default_model {
+                            let _ = multi.set_model(model);
+                        }
+                        Arc::new(multi)
+                    }
+                    "5" => {
+                        login_openai_compatible_flow(&OPENCODE_GO_PROFILE)?;
+                        eprintln!();
+                        apply_openai_compatible_profile(Some(OPENCODE_GO_PROFILE));
+                        lock_provider("openrouter");
+                        let multi = provider::MultiProvider::new();
+                        if let Some(model) = OPENCODE_GO_PROFILE.default_model {
+                            let _ = multi.set_model(model);
+                        }
+                        Arc::new(multi)
+                    }
+                    "6" => {
+                        login_openai_compatible_flow(&ZAI_PROFILE)?;
+                        eprintln!();
+                        apply_openai_compatible_profile(Some(ZAI_PROFILE));
+                        lock_provider("openrouter");
+                        let multi = provider::MultiProvider::new();
+                        if let Some(model) = ZAI_PROFILE.default_model {
+                            let _ = multi.set_model(model);
+                        }
+                        Arc::new(multi)
+                    }
+                    "7" => {
+                        login_openai_compatible_flow(&CHUTES_PROFILE)?;
+                        eprintln!();
+                        apply_openai_compatible_profile(Some(CHUTES_PROFILE));
+                        lock_provider("openrouter");
+                        let multi = provider::MultiProvider::new();
+                        if let Some(model) = CHUTES_PROFILE.default_model {
+                            let _ = multi.set_model(model);
+                        }
+                        Arc::new(multi)
+                    }
+                    "8" => {
+                        login_openai_compatible_flow(&CEREBRAS_PROFILE)?;
+                        eprintln!();
+                        apply_openai_compatible_profile(Some(CEREBRAS_PROFILE));
+                        lock_provider("openrouter");
+                        let multi = provider::MultiProvider::new();
+                        if let Some(model) = CEREBRAS_PROFILE.default_model {
+                            let _ = multi.set_model(model);
+                        }
+                        Arc::new(multi)
+                    }
+                    "9" => {
                         login_cursor_flow()?;
                         eprintln!();
                         Arc::new(provider::cursor::CursorCliProvider::new())
                     }
-                    "5" => {
+                    "10" => {
                         login_copilot_flow()?;
                         eprintln!();
                         Arc::new(provider::MultiProvider::new())
                     }
-                    "6" => {
+                    "11" => {
                         login_antigravity_flow()?;
                         eprintln!();
                         Arc::new(provider::antigravity::AntigravityCliProvider::new())
@@ -1200,6 +1586,20 @@ async fn init_provider(
             }
         }
     };
+
+    if model.is_none() {
+        if let Some(profile) = profile_for_choice(choice) {
+            let resolved = resolve_openai_compatible_profile(profile);
+            if let Some(default_model) = resolved.default_model {
+                if provider.set_model(&default_model).is_ok() {
+                    eprintln!(
+                        "Using default model for {}: {}",
+                        resolved.display_name, default_model
+                    );
+                }
+            }
+        }
+    }
 
     // Apply model selection if specified
     if let Some(model_name) = model {
@@ -2408,6 +2808,16 @@ async fn run_login(choice: &ProviderChoice, account_label: Option<&str>) -> Resu
         ProviderChoice::Openrouter => {
             login_openrouter_flow()?;
         }
+        ProviderChoice::Opencode
+        | ProviderChoice::OpencodeGo
+        | ProviderChoice::Zai
+        | ProviderChoice::Chutes
+        | ProviderChoice::Cerebras
+        | ProviderChoice::OpenaiCompatible => {
+            let profile = profile_for_choice(choice)
+                .ok_or_else(|| anyhow::anyhow!("missing provider profile for choice"))?;
+            login_openai_compatible_flow(&profile)?;
+        }
         ProviderChoice::Cursor => {
             login_cursor_flow()?;
         }
@@ -2421,17 +2831,28 @@ async fn run_login(choice: &ProviderChoice, account_label: Option<&str>) -> Resu
             login_google_flow().await?;
         }
         ProviderChoice::Auto => {
+            if !io::stdin().is_terminal() {
+                anyhow::bail!(
+                    "`jcode login --provider auto` requires an interactive terminal. Use `jcode login --provider <provider>` in non-interactive mode."
+                );
+            }
             eprintln!("Choose a provider to log in:");
             eprintln!("  1. Claude         - requires Claude Pro or Max subscription");
             eprintln!("  2. OpenAI         - requires ChatGPT Plus or Pro subscription");
             eprintln!("  3. GitHub Copilot (free)");
             eprintln!("  4. OpenRouter     - API key, pay-per-token, 200+ models");
-            eprintln!("  5. Cursor");
-            eprintln!("  6. Antigravity");
-            eprintln!("  7. Google/Gmail   - read, draft, and send emails");
+            eprintln!("  5. OpenCode Zen   - API key");
+            eprintln!("  6. OpenCode Go    - API key");
+            eprintln!("  7. Z.AI Coding    - API key");
+            eprintln!("  8. Chutes         - API key");
+            eprintln!("  9. Cerebras       - API key");
+            eprintln!("  10. OpenAI-compatible custom API key");
+            eprintln!("  11. Cursor");
+            eprintln!("  12. Antigravity");
+            eprintln!("  13. Google/Gmail   - read, draft, and send emails");
             eprintln!();
             eprintln!("  Options 1-2 are recommended if you have a subscription.");
-            eprint!("\nEnter 1-7: ");
+            eprint!("\nEnter 1-13: ");
             io::stdout().flush()?;
 
             let mut input = String::new();
@@ -2441,11 +2862,17 @@ async fn run_login(choice: &ProviderChoice, account_label: Option<&str>) -> Resu
                 "2" => login_openai_flow().await?,
                 "3" => login_copilot_flow()?,
                 "4" => login_openrouter_flow()?,
-                "5" => login_cursor_flow()?,
-                "6" => login_antigravity_flow()?,
-                "7" => login_google_flow().await?,
+                "5" => login_openai_compatible_flow(&OPENCODE_PROFILE)?,
+                "6" => login_openai_compatible_flow(&OPENCODE_GO_PROFILE)?,
+                "7" => login_openai_compatible_flow(&ZAI_PROFILE)?,
+                "8" => login_openai_compatible_flow(&CHUTES_PROFILE)?,
+                "9" => login_openai_compatible_flow(&CEREBRAS_PROFILE)?,
+                "10" => login_openai_compatible_flow(&OPENAI_COMPAT_PROFILE)?,
+                "11" => login_cursor_flow()?,
+                "12" => login_antigravity_flow()?,
+                "13" => login_google_flow().await?,
                 _ => anyhow::bail!(
-                    "Invalid choice. Use --provider claude|openai|openrouter|cursor|copilot|antigravity|google"
+                    "Invalid choice. Use --provider claude|openai|openrouter|opencode|opencode-go|zai|chutes|cerebras|openai-compatible|cursor|copilot|antigravity|google"
                 ),
             }
         }
@@ -2502,9 +2929,33 @@ fn login_openrouter_flow() -> Result<()> {
         eprintln!("Warning: OpenRouter API keys typically start with 'sk-or-'. Saving anyway.");
     }
 
-    save_openrouter_key(&key)?;
+    save_named_api_key("openrouter.env", "OPENROUTER_API_KEY", &key)?;
     eprintln!("\nSuccessfully saved OpenRouter API key!");
     eprintln!("Stored at ~/.config/jcode/openrouter.env");
+    Ok(())
+}
+
+fn login_openai_compatible_flow(profile: &OpenAiCompatibleProfile) -> Result<()> {
+    let resolved = resolve_openai_compatible_profile(*profile);
+
+    eprintln!("Setting up {}...", resolved.display_name);
+    eprintln!("See setup details: {}\n", resolved.setup_url);
+    eprintln!("Endpoint: {}", resolved.api_base);
+    eprintln!("API key env variable: {}\n", resolved.api_key_env);
+    eprint!("Paste your {} API key: ", resolved.display_name);
+    io::stdout().flush()?;
+
+    let key = read_secret_line()?;
+    if key.is_empty() {
+        anyhow::bail!("No API key provided.");
+    }
+
+    save_named_api_key(&resolved.env_file, &resolved.api_key_env, &key)?;
+    eprintln!("\nSuccessfully saved {} API key!", resolved.display_name);
+    eprintln!("Stored at ~/.config/jcode/{}", resolved.env_file);
+    if let Some(default_model) = resolved.default_model {
+        eprintln!("Default model hint: {}", default_model);
+    }
     Ok(())
 }
 
@@ -2551,26 +3002,6 @@ fn read_secret_line() -> Result<String> {
     }
 
     Ok(input.trim().to_string())
-}
-
-/// Save OpenRouter API key to config file with restrictive permissions
-fn save_openrouter_key(key: &str) -> Result<()> {
-    let config_dir = dirs::config_dir()
-        .ok_or_else(|| anyhow::anyhow!("No config directory found"))?
-        .join("jcode");
-    std::fs::create_dir_all(&config_dir)?;
-
-    let file_path = config_dir.join("openrouter.env");
-    let content = format!("OPENROUTER_API_KEY={}\n", key);
-    std::fs::write(&file_path, &content)?;
-
-    // Set restrictive file permissions (owner read/write only)
-    crate::platform::set_permissions_owner_only(&file_path)?;
-
-    // Also set the env var so it's immediately available this session
-    std::env::set_var("OPENROUTER_API_KEY", key);
-
-    Ok(())
 }
 
 fn login_cursor_flow() -> Result<()> {
@@ -2656,7 +3087,10 @@ async fn login_google_flow() -> Result<()> {
     // Step 1: Check for existing credentials or set them up
     let creds = match auth::google::load_credentials() {
         Ok(creds) => {
-            eprintln!("✓ Google credentials found (client_id: {}...)\n", &creds.client_id[..20.min(creds.client_id.len())]);
+            eprintln!(
+                "✓ Google credentials found (client_id: {}...)\n",
+                &creds.client_id[..20.min(creds.client_id.len())]
+            );
             creds
         }
         Err(_) => {
@@ -2737,8 +3171,10 @@ async fn login_google_flow() -> Result<()> {
                         .join("google_credentials.json");
                     if let Some(parent) = dest.parent() {
                         std::fs::create_dir_all(parent)?;
+                        crate::platform::set_directory_permissions_owner_only(parent)?;
                     }
                     std::fs::write(&dest, &data)?;
+                    crate::platform::set_permissions_owner_only(&dest)?;
 
                     let creds = auth::google::load_credentials()
                         .context("Could not parse the credentials file. Make sure it's the OAuth client JSON from Google Cloud Console.")?;
@@ -2760,7 +3196,9 @@ async fn login_google_flow() -> Result<()> {
 
                     eprintln!("\n2. Enable the Gmail API:");
                     eprintln!("   Opening: Gmail API library page\n");
-                    let _ = open::that("https://console.cloud.google.com/apis/library/gmail.googleapis.com");
+                    let _ = open::that(
+                        "https://console.cloud.google.com/apis/library/gmail.googleapis.com",
+                    );
                     eprintln!("   Click the blue 'Enable' button.");
                     eprint!("   Press Enter when done...");
                     io::stdout().flush()?;
@@ -3870,7 +4308,6 @@ async fn run_canary_wrapper(
         // Server not running - spawn it as a detached daemon
         startup_msg!("Starting self-dev server...");
 
-
         // Cleanup stale socket and hash file
         let _ = std::fs::remove_file(&socket_path);
         let _ = std::fs::remove_file(format!("{}.hash", socket_path));
@@ -3933,12 +4370,15 @@ async fn run_canary_wrapper(
         if !server_hash.is_empty() && server_hash.trim() != current_hash {
             startup_msg!(
                 "Connecting to existing self-dev server ({}) on {} (client built from {})",
-                server_ver, socket_path, current_hash
+                server_ver,
+                socket_path,
+                current_hash
             );
         } else {
             startup_msg!(
                 "Connecting to existing self-dev server ({}) on {}...",
-                server_ver, socket_path
+                server_ver,
+                socket_path
             );
         }
     }
@@ -3992,7 +4432,8 @@ async fn run_canary_wrapper(
         Err(e) => {
             let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
             if mouse_capture {
-                let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+                let _ =
+                    crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
             }
             if keyboard_enhanced {
                 tui::disable_keyboard_enhancement();
@@ -4039,7 +4480,6 @@ async fn run_canary_wrapper(
     // Check if reload was requested - exec into new binary
     if let Some(code) = run_result.exit_code {
         if code == EXIT_RELOAD_REQUESTED {
-
             // No delay needed - the binary was already written before we got here
 
             // Get canary binary path for reload
@@ -4188,11 +4628,104 @@ mod tests {
         );
         assert_eq!(ProviderChoice::Openai.as_arg_value(), "openai");
         assert_eq!(ProviderChoice::Openrouter.as_arg_value(), "openrouter");
+        assert_eq!(ProviderChoice::Opencode.as_arg_value(), "opencode");
+        assert_eq!(ProviderChoice::OpencodeGo.as_arg_value(), "opencode-go");
+        assert_eq!(ProviderChoice::Zai.as_arg_value(), "zai");
+        assert_eq!(ProviderChoice::Chutes.as_arg_value(), "chutes");
+        assert_eq!(ProviderChoice::Cerebras.as_arg_value(), "cerebras");
+        assert_eq!(
+            ProviderChoice::OpenaiCompatible.as_arg_value(),
+            "openai-compatible"
+        );
         assert_eq!(ProviderChoice::Cursor.as_arg_value(), "cursor");
         assert_eq!(ProviderChoice::Copilot.as_arg_value(), "copilot");
         assert_eq!(ProviderChoice::Antigravity.as_arg_value(), "antigravity");
         assert_eq!(ProviderChoice::Google.as_arg_value(), "google");
         assert_eq!(ProviderChoice::Auto.as_arg_value(), "auto");
+    }
+
+    #[test]
+    fn test_provider_choice_aliases_parse() {
+        let args = Args::try_parse_from(["jcode", "--provider", "z.ai", "run", "smoke"]).unwrap();
+        assert_eq!(args.provider, ProviderChoice::Zai);
+
+        let args =
+            Args::try_parse_from(["jcode", "--provider", "cerebrascode", "run", "smoke"]).unwrap();
+        assert_eq!(args.provider, ProviderChoice::Cerebras);
+
+        let args = Args::try_parse_from(["jcode", "--provider", "compat", "run", "smoke"]).unwrap();
+        assert_eq!(args.provider, ProviderChoice::OpenaiCompatible);
+    }
+
+    #[test]
+    fn test_openai_compatible_profile_overrides() {
+        let _guard = TEST_SESSION_LOCK.lock().unwrap();
+        let keys = [
+            "JCODE_OPENAI_COMPAT_API_BASE",
+            "JCODE_OPENAI_COMPAT_API_KEY_NAME",
+            "JCODE_OPENAI_COMPAT_ENV_FILE",
+            "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
+        ];
+        let saved: Vec<(String, Option<String>)> = keys
+            .iter()
+            .map(|k| (k.to_string(), std::env::var(k).ok()))
+            .collect();
+
+        std::env::set_var(
+            "JCODE_OPENAI_COMPAT_API_BASE",
+            "https://api.groq.com/openai/v1/",
+        );
+        std::env::set_var("JCODE_OPENAI_COMPAT_API_KEY_NAME", "GROQ_API_KEY");
+        std::env::set_var("JCODE_OPENAI_COMPAT_ENV_FILE", "groq.env");
+        std::env::set_var("JCODE_OPENAI_COMPAT_DEFAULT_MODEL", "openai/gpt-oss-120b");
+
+        let resolved = resolve_openai_compatible_profile(OPENAI_COMPAT_PROFILE);
+        assert_eq!(resolved.api_base, "https://api.groq.com/openai/v1");
+        assert_eq!(resolved.api_key_env, "GROQ_API_KEY");
+        assert_eq!(resolved.env_file, "groq.env");
+        assert_eq!(
+            resolved.default_model.as_deref(),
+            Some("openai/gpt-oss-120b")
+        );
+
+        for (key, value) in saved {
+            if let Some(value) = value {
+                std::env::set_var(&key, value);
+            } else {
+                std::env::remove_var(&key);
+            }
+        }
+    }
+
+    #[test]
+    fn test_openai_compatible_profile_rejects_invalid_overrides() {
+        let _guard = TEST_SESSION_LOCK.lock().unwrap();
+        let keys = [
+            "JCODE_OPENAI_COMPAT_API_BASE",
+            "JCODE_OPENAI_COMPAT_API_KEY_NAME",
+            "JCODE_OPENAI_COMPAT_ENV_FILE",
+        ];
+        let saved: Vec<(String, Option<String>)> = keys
+            .iter()
+            .map(|k| (k.to_string(), std::env::var(k).ok()))
+            .collect();
+
+        std::env::set_var("JCODE_OPENAI_COMPAT_API_BASE", "http://example.com/v1");
+        std::env::set_var("JCODE_OPENAI_COMPAT_API_KEY_NAME", "bad-key-name");
+        std::env::set_var("JCODE_OPENAI_COMPAT_ENV_FILE", "../bad.env");
+
+        let resolved = resolve_openai_compatible_profile(OPENAI_COMPAT_PROFILE);
+        assert_eq!(resolved.api_base, OPENAI_COMPAT_PROFILE.api_base);
+        assert_eq!(resolved.api_key_env, OPENAI_COMPAT_PROFILE.api_key_env);
+        assert_eq!(resolved.env_file, OPENAI_COMPAT_PROFILE.env_file);
+
+        for (key, value) in saved {
+            if let Some(value) = value {
+                std::env::set_var(&key, value);
+            } else {
+                std::env::remove_var(&key);
+            }
+        }
     }
 
     #[test]

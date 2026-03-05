@@ -1,8 +1,10 @@
 #![allow(dead_code)]
-#![allow(dead_code)]
 
 use chrono::{Local, Utc};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::sync::OnceLock;
 
 /// Role in conversation
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -193,6 +195,133 @@ pub fn sanitize_tool_id(id: &str) -> String {
     }
 }
 
+/// Redact likely secrets from persisted tool output.
+///
+/// This is a best-effort safeguard for local session history files. It targets
+/// high-confidence token/key patterns and common `KEY=VALUE` assignments used by
+/// auth flows.
+pub fn redact_secrets(text: &str) -> String {
+    // Fast path to avoid regex work for most tool outputs.
+    let lower = text.to_ascii_lowercase();
+
+    if !text.contains("sk-")
+        && !text.contains("ghp_")
+        && !text.contains("github_pat_")
+        && !text.contains("AIza")
+        && !text.contains("ya29.")
+        && !text.contains("xox")
+        && !lower.contains("api_key")
+        && !lower.contains("token")
+    {
+        return text.to_string();
+    }
+
+    static DIRECT_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    static ASSIGNMENT_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+
+    let direct_patterns = DIRECT_PATTERNS.get_or_init(|| {
+        vec![
+            Regex::new(r"sk-ant-(?:oat|ort)01-[A-Za-z0-9_-]{20,}")
+                .expect("valid Anthropic OAuth token regex"),
+            Regex::new(r"sk-or-v1-[A-Za-z0-9_-]{20,}").expect("valid OpenRouter key regex"),
+            Regex::new(r"ghp_[A-Za-z0-9]{20,}").expect("valid GitHub PAT regex"),
+            Regex::new(r"github_pat_[A-Za-z0-9_]{20,}")
+                .expect("valid GitHub fine-grained PAT regex"),
+            Regex::new(r"ya29\.[A-Za-z0-9._-]{20,}").expect("valid Google OAuth token regex"),
+            Regex::new(r"AIza[0-9A-Za-z_-]{20,}").expect("valid Google API key regex"),
+            Regex::new(r"xox[baprs]-[A-Za-z0-9-]{10,}").expect("valid Slack token regex"),
+        ]
+    });
+
+    let assignment_patterns = ASSIGNMENT_PATTERNS.get_or_init(|| {
+        vec![
+            Regex::new(r"(?m)^\s*(OPENROUTER_API_KEY\s*=\s*)[^\r\n]+")
+                .expect("valid OPENROUTER_API_KEY assignment regex"),
+            Regex::new(r"(?m)^\s*(OPENCODE_API_KEY\s*=\s*)[^\r\n]+")
+                .expect("valid OPENCODE_API_KEY assignment regex"),
+            Regex::new(r"(?m)^\s*(OPENCODE_GO_API_KEY\s*=\s*)[^\r\n]+")
+                .expect("valid OPENCODE_GO_API_KEY assignment regex"),
+            Regex::new(r"(?m)^\s*(ZAI_API_KEY\s*=\s*)[^\r\n]+")
+                .expect("valid ZAI_API_KEY assignment regex"),
+            Regex::new(r"(?m)^\s*(CHUTES_API_KEY\s*=\s*)[^\r\n]+")
+                .expect("valid CHUTES_API_KEY assignment regex"),
+            Regex::new(r"(?m)^\s*(CEREBRAS_API_KEY\s*=\s*)[^\r\n]+")
+                .expect("valid CEREBRAS_API_KEY assignment regex"),
+            Regex::new(r"(?m)^\s*(OPENAI_COMPAT_API_KEY\s*=\s*)[^\r\n]+")
+                .expect("valid OPENAI_COMPAT_API_KEY assignment regex"),
+            Regex::new(r"(?m)^\s*(ANTHROPIC_API_KEY\s*=\s*)[^\r\n]+")
+                .expect("valid ANTHROPIC_API_KEY assignment regex"),
+            Regex::new(r"(?m)^\s*(OPENAI_API_KEY\s*=\s*)[^\r\n]+")
+                .expect("valid OPENAI_API_KEY assignment regex"),
+            Regex::new(r"(?m)^\s*(CURSOR_API_KEY\s*=\s*)[^\r\n]+")
+                .expect("valid CURSOR_API_KEY assignment regex"),
+            Regex::new(r"(?m)^\s*(GITHUB_TOKEN\s*=\s*)[^\r\n]+")
+                .expect("valid GITHUB_TOKEN assignment regex"),
+        ]
+    });
+
+    let mut redacted = text.to_string();
+    let mut redacted_keys: HashSet<String> = [
+        "OPENROUTER_API_KEY",
+        "OPENCODE_API_KEY",
+        "OPENCODE_GO_API_KEY",
+        "ZAI_API_KEY",
+        "CHUTES_API_KEY",
+        "CEREBRAS_API_KEY",
+        "OPENAI_COMPAT_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "CURSOR_API_KEY",
+        "GITHUB_TOKEN",
+    ]
+    .iter()
+    .map(|k| (*k).to_string())
+    .collect();
+
+    for re in direct_patterns {
+        redacted = re.replace_all(&redacted, "[REDACTED_SECRET]").into_owned();
+    }
+
+    for re in assignment_patterns {
+        redacted = re
+            .replace_all(&redacted, "${1}[REDACTED_SECRET]")
+            .into_owned();
+    }
+
+    // Also redact custom API key variable names configured at runtime.
+    for source in [
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENAI_COMPAT_API_KEY_NAME",
+    ] {
+        let Some(key_name) = std::env::var(source)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        else {
+            continue;
+        };
+
+        if !key_name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        {
+            continue;
+        }
+        if !redacted_keys.insert(key_name.clone()) {
+            continue;
+        }
+
+        let pattern = format!(r"(?m)^\s*({}\s*=\s*)[^\r\n]+", regex::escape(&key_name));
+        if let Ok(re) = Regex::new(&pattern) {
+            redacted = re
+                .replace_all(&redacted, "${1}[REDACTED_SECRET]")
+                .into_owned();
+        }
+    }
+
+    redacted
+}
+
 /// Tool definition for the API
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolDefinition {
@@ -310,20 +439,32 @@ mod tests {
 
     #[test]
     fn sanitize_tool_id_alphanumeric_passthrough() {
-        assert_eq!(sanitize_tool_id("toolu_01XFDUDYJgAACzvnptvVer6u"), "toolu_01XFDUDYJgAACzvnptvVer6u");
+        assert_eq!(
+            sanitize_tool_id("toolu_01XFDUDYJgAACzvnptvVer6u"),
+            "toolu_01XFDUDYJgAACzvnptvVer6u"
+        );
         assert_eq!(sanitize_tool_id("call_abc123"), "call_abc123");
-        assert_eq!(sanitize_tool_id("call_1234567890_9876543210"), "call_1234567890_9876543210");
+        assert_eq!(
+            sanitize_tool_id("call_1234567890_9876543210"),
+            "call_1234567890_9876543210"
+        );
     }
 
     #[test]
     fn sanitize_tool_id_hyphens_passthrough() {
         assert_eq!(sanitize_tool_id("call-abc-123"), "call-abc-123");
-        assert_eq!(sanitize_tool_id("tool_use-id_with-mixed"), "tool_use-id_with-mixed");
+        assert_eq!(
+            sanitize_tool_id("tool_use-id_with-mixed"),
+            "tool_use-id_with-mixed"
+        );
     }
 
     #[test]
     fn sanitize_tool_id_replaces_dots() {
-        assert_eq!(sanitize_tool_id("chatcmpl-abc.def.ghi"), "chatcmpl-abc_def_ghi");
+        assert_eq!(
+            sanitize_tool_id("chatcmpl-abc.def.ghi"),
+            "chatcmpl-abc_def_ghi"
+        );
         assert_eq!(sanitize_tool_id("call.123"), "call_123");
     }
 
@@ -334,7 +475,10 @@ mod tests {
 
     #[test]
     fn sanitize_tool_id_replaces_special_chars() {
-        assert_eq!(sanitize_tool_id("id@with#special$chars"), "id_with_special_chars");
+        assert_eq!(
+            sanitize_tool_id("id@with#special$chars"),
+            "id_with_special_chars"
+        );
         assert_eq!(sanitize_tool_id("id with spaces"), "id_with_spaces");
     }
 
@@ -368,5 +512,62 @@ mod tests {
         for id in valid_ids {
             assert_eq!(sanitize_tool_id(id), id, "ID '{}' should be unchanged", id);
         }
+    }
+
+    #[test]
+    fn redact_secrets_redacts_known_direct_token_formats() {
+        let input = "access=sk-ant-oat01-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\nopenrouter=sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789\ngithub=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123\n";
+        let out = redact_secrets(input);
+        assert!(!out.contains("sk-ant-oat01-"));
+        assert!(!out.contains("sk-or-v1-"));
+        assert!(!out.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"));
+        assert!(out.matches("[REDACTED_SECRET]").count() >= 3);
+    }
+
+    #[test]
+    fn redact_secrets_redacts_env_style_assignments() {
+        let input = "OPENROUTER_API_KEY=sk-or-v1-abc123abc123abc123abc123\nOPENCODE_API_KEY=oc_test_secret\nOPENCODE_GO_API_KEY=ocgo_test_secret\nZAI_API_KEY=zai_secret\nCHUTES_API_KEY=chutes_secret\nCEREBRAS_API_KEY=cerebras_secret\nOPENAI_COMPAT_API_KEY=compat_secret\nCURSOR_API_KEY='my_cursor_secret_value'\nOPENAI_API_KEY=sk-test-openai-example\n";
+        let out = redact_secrets(input);
+        assert!(out.contains("OPENROUTER_API_KEY=[REDACTED_SECRET]"));
+        assert!(out.contains("OPENCODE_API_KEY=[REDACTED_SECRET]"));
+        assert!(out.contains("OPENCODE_GO_API_KEY=[REDACTED_SECRET]"));
+        assert!(out.contains("ZAI_API_KEY=[REDACTED_SECRET]"));
+        assert!(out.contains("CHUTES_API_KEY=[REDACTED_SECRET]"));
+        assert!(out.contains("CEREBRAS_API_KEY=[REDACTED_SECRET]"));
+        assert!(out.contains("OPENAI_COMPAT_API_KEY=[REDACTED_SECRET]"));
+        assert!(out.contains("CURSOR_API_KEY=[REDACTED_SECRET]"));
+        assert!(out.contains("OPENAI_API_KEY=[REDACTED_SECRET]"));
+        assert!(!out.contains("my_cursor_secret_value"));
+    }
+
+    #[test]
+    fn redact_secrets_redacts_runtime_key_assignment() {
+        let key_var = "JCODE_OPENAI_COMPAT_API_KEY_NAME";
+        let prev = std::env::var(key_var).ok();
+        std::env::set_var(key_var, "GROQ_API_KEY");
+
+        let input = "GROQ_API_KEY=my_secret_token_value";
+        let out = redact_secrets(input);
+        assert_eq!(out, "GROQ_API_KEY=[REDACTED_SECRET]");
+
+        if let Some(v) = prev {
+            std::env::set_var(key_var, v);
+        } else {
+            std::env::remove_var(key_var);
+        }
+    }
+
+    #[test]
+    fn redact_secrets_redacts_mixed_case_token_assignments() {
+        let input = "my_token=ya29.ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let out = redact_secrets(input);
+        assert!(out.contains("[REDACTED_SECRET]"));
+        assert!(!out.contains("ya29.ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"));
+    }
+
+    #[test]
+    fn redact_secrets_leaves_normal_output_unchanged() {
+        let input = "Found 5 files\nNo auth errors\nDone.";
+        assert_eq!(redact_secrets(input), input);
     }
 }
