@@ -79,6 +79,7 @@ impl Sidecar {
     }
 
     /// Set custom max tokens
+    #[allow(dead_code)]
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = max_tokens;
         self
@@ -372,6 +373,7 @@ impl Default for Sidecar {
 }
 
 /// The public model constant for backward compatibility
+#[allow(dead_code)]
 pub const SIDECAR_FAST_MODEL: &str = SIDECAR_OPENAI_MODEL;
 
 /// A memory extracted by the sidecar
