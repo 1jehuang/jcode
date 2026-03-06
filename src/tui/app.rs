@@ -10976,6 +10976,9 @@ impl App {
         }
 
         const RECOMMENDED_MODELS: &[&str] = &[
+            "gpt-5.4",
+            "gpt-5.4[1m]",
+            "gpt-5.4-pro",
             "gpt-5.3-codex-spark",
             "gpt-5.3-codex",
             "claude-opus-4-6",
@@ -10993,9 +10996,22 @@ impl App {
             "claude-sonnet-4-6[1m]",
         ];
 
-        const OPENAI_OAUTH_ONLY_MODELS: &[&str] = &["gpt-5.3-codex-spark", "gpt-5.3-codex"];
+        const OPENAI_OAUTH_ONLY_MODELS: &[&str] = &[
+            "gpt-5.4",
+            "gpt-5.4[1m]",
+            "gpt-5.4-pro",
+            "gpt-5.3-codex-spark",
+            "gpt-5.3-codex",
+        ];
 
-        const COPILOT_OAUTH_MODELS: &[&str] = &["claude-opus-4.6", "gpt-5.3-codex"];
+        const COPILOT_OAUTH_MODELS: &[&str] = &["claude-opus-4.6", "gpt-5.4", "gpt-5.3-codex"];
+
+        fn recommendation_rank(name: &str, recommended_models: &[&str]) -> usize {
+            recommended_models
+                .iter()
+                .position(|model| *model == name)
+                .unwrap_or(usize::MAX)
+        }
 
         // Find the latest recommended model's created timestamp from OpenRouter cache,
         // then mark anything more than 1 month older as "old".
@@ -11058,6 +11074,7 @@ impl App {
                                         || r.api_method == "copilot")
                                         && r.available
                                 })),
+                        recommendation_rank: recommendation_rank(name, RECOMMENDED_MODELS),
                         old: old_threshold_secs > 0
                             && or_created.map(|t| t < old_threshold_secs).unwrap_or(false),
                         created_date: or_created.map(|t| format_created(t)),
@@ -11085,6 +11102,7 @@ impl App {
                     selected_route: 0,
                     is_current: *name == current_model,
                     recommended: is_recommended,
+                    recommendation_rank: recommendation_rank(name, RECOMMENDED_MODELS),
                     old: is_old,
                     created_date: or_created.map(|t| format_created(t)),
                     effort: None,
@@ -11099,6 +11117,16 @@ impl App {
             let b_current = if b.is_current { 0u8 } else { 1 };
             let a_rec = if a.recommended { 0u8 } else { 1 };
             let b_rec = if b.recommended { 0u8 } else { 1 };
+            let a_rec_rank = if a.recommended {
+                a.recommendation_rank
+            } else {
+                usize::MAX
+            };
+            let b_rec_rank = if b.recommended {
+                b.recommendation_rank
+            } else {
+                usize::MAX
+            };
             let a_avail = if a.routes.first().map(|r| r.available).unwrap_or(false) {
                 0u8
             } else {
@@ -11114,6 +11142,7 @@ impl App {
             a_current
                 .cmp(&b_current)
                 .then(a_rec.cmp(&b_rec))
+                .then(a_rec_rank.cmp(&b_rec_rank))
                 .then(a_avail.cmp(&b_avail))
                 .then(a_old.cmp(&b_old))
                 .then(a.name.cmp(&b.name))
@@ -11863,7 +11892,15 @@ impl App {
                 })
                 .collect();
             // Sort by score descending (best matches first)
-            scored.sort_by(|a, b| b.1.cmp(&a.1));
+            scored.sort_by(|a, b| {
+                b.1.cmp(&a.1)
+                    .then(
+                        picker.models[a.0]
+                            .recommendation_rank
+                            .cmp(&picker.models[b.0].recommendation_rank),
+                    )
+                    .then(picker.models[a.0].name.cmp(&picker.models[b.0].name))
+            });
             picker.filtered = scored.into_iter().map(|(i, _)| i).collect();
         }
         // Clamp selection
@@ -16554,6 +16591,31 @@ mod tests {
             vec!["gpt-5.3-codex".to_string(), "gpt-5.2-codex".to_string()];
     }
 
+    fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
+        app.is_remote = true;
+        app.remote_provider_model = Some("gpt-5.2".to_string());
+        app.remote_available_models = vec![
+            "gpt-5.2".to_string(),
+            "gpt-5.4".to_string(),
+            "gpt-5.4-pro".to_string(),
+            "gpt-5.3-codex-spark".to_string(),
+            "gpt-5.3-codex".to_string(),
+            "claude-opus-4-6".to_string(),
+        ];
+        app.remote_model_routes = app
+            .remote_available_models
+            .iter()
+            .cloned()
+            .map(|model| crate::provider::ModelRoute {
+                model,
+                provider: "OpenAI".to_string(),
+                api_method: "openai-oauth".to_string(),
+                available: true,
+                detail: String::new(),
+            })
+            .collect();
+    }
+
     #[test]
     fn test_model_picker_preview_filter_parsing() {
         assert_eq!(
@@ -16723,6 +16785,56 @@ mod tests {
             grok_entry.routes.iter().any(|r| r.api_method == "copilot"),
             "grok-code-fast-1 should have a copilot route, got: {:?}",
             grok_entry.routes
+        );
+    }
+
+    #[test]
+    fn test_model_picker_preserves_recommendation_priority_order() {
+        let mut app = create_test_app();
+        configure_test_remote_models_with_openai_recommendations(&mut app);
+
+        app.open_model_picker();
+
+        let picker = app
+            .picker_state
+            .as_ref()
+            .expect("model picker should be open");
+
+        let model_names: Vec<&str> = picker.models.iter().map(|m| m.name.as_str()).collect();
+
+        assert_eq!(model_names.first().copied(), Some("gpt-5.2"));
+
+        let gpt54 = model_names
+            .iter()
+            .position(|name| *name == "gpt-5.4")
+            .expect("gpt-5.4 should be present");
+        let gpt54_pro = model_names
+            .iter()
+            .position(|name| *name == "gpt-5.4-pro")
+            .expect("gpt-5.4-pro should be present");
+        let spark = model_names
+            .iter()
+            .position(|name| *name == "gpt-5.3-codex-spark")
+            .expect("gpt-5.3-codex-spark should be present");
+        let codex = model_names
+            .iter()
+            .position(|name| *name == "gpt-5.3-codex")
+            .expect("gpt-5.3-codex should be present");
+
+        assert!(
+            gpt54 < gpt54_pro,
+            "gpt-5.4 should rank ahead of gpt-5.4-pro, got {:?}",
+            model_names
+        );
+        assert!(
+            gpt54_pro < spark,
+            "gpt-5.4-pro should rank ahead of gpt-5.3-codex-spark, got {:?}",
+            model_names
+        );
+        assert!(
+            spark < codex,
+            "gpt-5.3-codex-spark should rank ahead of gpt-5.3-codex, got {:?}",
+            model_names
         );
     }
 

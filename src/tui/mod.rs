@@ -170,9 +170,7 @@ pub trait TuiState {
     /// Help overlay scroll offset (None = not showing)
     fn help_scroll(&self) -> Option<usize>;
     /// Session picker overlay for /resume command
-    fn session_picker_overlay(
-        &self,
-    ) -> Option<&std::cell::RefCell<session_picker::SessionPicker>>;
+    fn session_picker_overlay(&self) -> Option<&std::cell::RefCell<session_picker::SessionPicker>>;
     /// Working directory for this session
     fn working_dir(&self) -> Option<String>;
     /// Monotonic clock for viewport animations
@@ -237,6 +235,7 @@ pub struct ModelEntry {
     pub is_current: bool,
     pub is_default: bool,
     pub recommended: bool,
+    pub recommendation_rank: usize,
     pub old: bool,
     /// Human-readable created date (e.g. "Jan 2026") for OpenRouter models
     pub created_date: Option<String>,

@@ -971,8 +971,8 @@ async fn binary_version_command() -> Result<()> {
     use std::process::Command;
     let _env = setup_test_env()?;
 
-    let output = Command::new("cargo")
-        .args(["run", "--release", "--bin", "jcode", "--", "--version"])
+    let output = Command::new(env!("CARGO_BIN_EXE_jcode"))
+        .arg("--version")
         .output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);

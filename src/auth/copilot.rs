@@ -617,7 +617,10 @@ mod tests {
     fn save_github_token_creates_config_dir() {
         let dir = TempDir::new().unwrap();
         let config_dir = dir.path().join("github-copilot");
+        let prev_jcode_home = std::env::var_os("JCODE_HOME");
+        let prev_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
 
+        std::env::remove_var("JCODE_HOME");
         std::env::set_var("XDG_CONFIG_HOME", dir.path().to_str().unwrap());
 
         let result = save_github_token("gho_newtoken", "testuser");
@@ -629,7 +632,17 @@ mod tests {
         let loaded = load_token_from_json(&hosts_path).unwrap();
         assert_eq!(loaded, "gho_newtoken");
 
-        std::env::remove_var("XDG_CONFIG_HOME");
+        if let Some(prev) = prev_jcode_home {
+            std::env::set_var("JCODE_HOME", prev);
+        } else {
+            std::env::remove_var("JCODE_HOME");
+        }
+
+        if let Some(prev) = prev_xdg_config_home {
+            std::env::set_var("XDG_CONFIG_HOME", prev);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
     }
 
     #[test]
