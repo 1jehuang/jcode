@@ -11181,6 +11181,7 @@ impl App {
                     api_method: "openrouter".to_string(),
                     available: auth.openrouter != crate::auth::AuthState::NotConfigured,
                     detail: auto_detail,
+                    cheapness: None,
                 });
                 if let Some((endpoints, age)) = cached {
                     let age_str = if age < 3600 {
@@ -11197,6 +11198,7 @@ impl App {
                             api_method: "openrouter".to_string(),
                             available: auth.openrouter != crate::auth::AuthState::NotConfigured,
                             detail: format!("{} ({})", ep.detail_string(), age_str),
+                            cheapness: None,
                         });
                     }
                 }
@@ -11223,6 +11225,7 @@ impl App {
                         api_method: "claude-oauth".to_string(),
                         available,
                         detail,
+                        cheapness: None,
                     });
                     added_any = true;
                 }
@@ -11259,6 +11262,7 @@ impl App {
                     api_method: "openai-oauth".to_string(),
                     available,
                     detail,
+                    cheapness: None,
                 });
                 added_any = true;
             }
@@ -11271,6 +11275,7 @@ impl App {
                     available: auth.copilot == crate::auth::AuthState::Available
                         || Self::remote_model_is_server_copilot_only(model),
                     detail: String::new(),
+                    cheapness: None,
                 });
                 added_any = true;
             }
@@ -11282,6 +11287,7 @@ impl App {
                     api_method: "unknown".to_string(),
                     available: false,
                     detail: String::new(),
+                    cheapness: None,
                 });
             }
         }
@@ -16617,6 +16623,7 @@ mod tests {
                 api_method: "openai-oauth".to_string(),
                 available: true,
                 detail: String::new(),
+                cheapness: None,
             })
             .collect();
     }
