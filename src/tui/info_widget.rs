@@ -340,7 +340,7 @@ impl Side {
     }
 }
 
-fn is_overview_mergeable(kind: WidgetKind) -> bool {
+pub(crate) fn is_overview_mergeable(kind: WidgetKind) -> bool {
     matches!(
         kind,
         WidgetKind::Todos
@@ -361,15 +361,7 @@ pub struct WidgetPlacement {
     pub side: Side,
 }
 
-/// Available margin space on one side
-#[derive(Debug, Clone)]
-pub struct MarginSpace {
-    pub side: Side,
-    /// Free width for each row (index = row from top of messages area)
-    pub widths: Vec<u16>,
-    /// X offset where this margin starts
-    pub x_offset: u16,
-}
+pub use super::info_widget_layout::Margins;
 
 /// Swarm/subagent status for the info widget
 #[derive(Debug, Default, Clone)]
@@ -767,15 +759,6 @@ pub struct AmbientWidgetData {
     pub budget_percent: Option<f32>,
 }
 
-/// Minimum width needed to show the widget
-const MIN_WIDGET_WIDTH: u16 = 24;
-/// Maximum width the widget can take
-const MAX_WIDGET_WIDTH: u16 = 40;
-/// Minimum height needed to show the widget
-const MIN_WIDGET_HEIGHT: u16 = 5;
-/// How much width shrinkage to tolerate before forcing a widget to reposition.
-/// Higher values = stickier widgets during scroll (less jitter).
-const STICKY_WIDTH_TOLERANCE: u16 = 4;
 const PAGE_SWITCH_SECONDS: u64 = 30;
 
 /// Data to display in the info widget
@@ -1038,17 +1021,6 @@ pub fn is_enabled() -> bool {
         .unwrap_or(true)
 }
 
-/// Margin information for layout calculation
-#[derive(Debug, Clone)]
-pub struct Margins {
-    /// Free widths on the right side for each row
-    pub right_widths: Vec<u16>,
-    /// Free widths on the left side for each row (only populated in centered mode)
-    pub left_widths: Vec<u16>,
-    /// Whether we're in centered mode
-    pub centered: bool,
-}
-
 /// Calculate widget placements for multiple widgets
 /// Returns a list of placements for widgets that fit
 pub fn calculate_placements(
@@ -1062,256 +1034,19 @@ pub fn calculate_placements(
         None => return Vec::new(),
     };
 
-    // User disabled
-    if !state.enabled {
-        state.placements.clear();
-        return Vec::new();
-    }
-
-    if messages_area.height == 0 || messages_area.width == 0 {
-        state.placements.clear();
-        return Vec::new();
-    }
-
-    // Get available widgets in priority order
-    let available = data.available_widgets();
-    if available.is_empty() {
-        state.placements.clear();
-        return Vec::new();
-    }
-    let overview_requested = available.contains(&WidgetKind::Overview);
-
-    // Build margin spaces
-    let mut margin_spaces: Vec<MarginSpace> = Vec::new();
-
-    // Right margin is always available
-    if !margins.right_widths.is_empty() {
-        margin_spaces.push(MarginSpace {
-            side: Side::Right,
-            widths: margins.right_widths.clone(),
-            x_offset: messages_area.x + messages_area.width, // Will subtract widget width
-        });
-    }
-
-    // Left margin only in centered mode
-    if margins.centered && !margins.left_widths.is_empty() {
-        margin_spaces.push(MarginSpace {
-            side: Side::Left,
-            widths: margins.left_widths.clone(),
-            x_offset: messages_area.x,
-        });
-    }
-
-    // Find rectangles in each margin
-    // Format: (side, top, height, width, x_offset, margin_index)
-    // We store margin_index to recalculate width when shrinking rects
-    let mut all_rects: Vec<(Side, u16, u16, u16, u16, usize)> = Vec::new();
-
-    for (margin_idx, margin) in margin_spaces.iter().enumerate() {
-        let rects = find_all_empty_rects(&margin.widths, MIN_WIDGET_WIDTH, MIN_WIDGET_HEIGHT);
-        for (top, height, width) in rects {
-            let clamped_width = width.min(MAX_WIDGET_WIDTH);
-            // Anchor widget flush against the edge — right edge stays at x_offset,
-            // left edge stays at x_offset. Only the widget width varies.
-            let x = match margin.side {
-                Side::Right => margin.x_offset.saturating_sub(clamped_width),
-                Side::Left => margin.x_offset,
-            };
-            all_rects.push((margin.side, top, height, clamped_width, x, margin_idx));
-        }
-    }
-
-    // Phase 1: Sticky positioning — try to keep previous widgets in place.
-    // This prevents jittery repositioning during scroll when margins change slightly.
-    let prev_placements = state.placements.clone();
-    let mut placements: Vec<WidgetPlacement> = Vec::new();
-    let mut kept: std::collections::HashSet<WidgetKind> = std::collections::HashSet::new();
-
-    for prev in &prev_placements {
-        if !available.contains(&prev.kind) {
-            continue;
-        }
-        // Never keep border-only placements from older frames.
-        if prev.rect.height <= 2 {
-            continue;
-        }
-        // When overview is available, prefer reflowing mergeable widgets into one panel
-        // rather than sticking to old scattered placements.
-        if overview_requested && is_overview_mergeable(prev.kind) {
-            continue;
-        }
-
-        // Convert widget rect to row-relative coordinates
-        let row_start = prev.rect.y.saturating_sub(messages_area.y) as usize;
-        let row_end = row_start + prev.rect.height as usize;
-
-        // Check if the old position still has enough margin space (with tolerance)
-        let widths = match prev.side {
-            Side::Right => &margins.right_widths,
-            Side::Left => &margins.left_widths,
-        };
-
-        // All rows must still exist and have enough width
-        let still_fits = row_end <= widths.len()
-            && (row_start..row_end)
-                .all(|row| widths[row] + STICKY_WIDTH_TOLERANCE >= prev.rect.width);
-
-        if still_fits {
-            // Keep the same rows/side, but clamp width to the current actual margin.
-            // This preserves sticky positioning without allowing text overlap.
-            let actual_fit_width = widths[row_start..row_end]
-                .iter()
-                .copied()
-                .min()
-                .unwrap_or(0)
-                .min(MAX_WIDGET_WIDTH);
-            if actual_fit_width < MIN_WIDGET_WIDTH {
-                continue;
-            }
-            let kept_width = prev.rect.width.min(actual_fit_width);
-            let kept_x = match prev.side {
-                Side::Right => messages_area
-                    .x
-                    .saturating_add(messages_area.width)
-                    .saturating_sub(kept_width),
-                Side::Left => messages_area.x,
-            };
-            placements.push(WidgetPlacement {
-                kind: prev.kind,
-                rect: Rect::new(kept_x, prev.rect.y, kept_width, prev.rect.height),
-                side: prev.side,
-            });
-            kept.insert(prev.kind);
-
-            // Remove the kept widget's rows from available rects so greedy placement
-            // doesn't overlap. Shrink or split any rect that overlaps these rows.
-            for rect in all_rects.iter_mut() {
-                if rect.2 == 0 || rect.0 != prev.side {
-                    continue;
-                }
-                let r_start = rect.1 as usize;
-                let r_end = r_start + rect.2 as usize;
-                // Check overlap
-                if row_start < r_end && row_end > r_start {
-                    if row_start <= r_start && row_end >= r_end {
-                        // Fully consumed
-                        rect.2 = 0;
-                    } else if row_start <= r_start {
-                        // Trim from top
-                        let trim = (row_end - r_start) as u16;
-                        rect.1 += trim;
-                        rect.2 = rect.2.saturating_sub(trim);
-                    } else {
-                        // Trim from bottom (keep top portion only)
-                        rect.2 = (row_start - r_start) as u16;
-                    }
-                }
-            }
-        }
-    }
-
-    // Phase 2: Greedy placement for widgets that couldn't keep their position
-    let mut overview_placed = placements.iter().any(|p| p.kind == WidgetKind::Overview);
-    for kind in available {
-        if kept.contains(&kind) {
-            continue;
-        }
-        if overview_placed && is_overview_mergeable(kind) {
-            continue;
-        }
-
-        let min_h = kind.min_height() + 2; // Add border
-        let preferred = kind.preferred_side();
-
-        // Find best rectangle for this widget
-        // Prefer: 1) correct side, 2) smallest rect that fits (reduces waste)
-        let mut best_idx: Option<usize> = None;
-        let mut best_score: i32 = i32::MIN;
-
-        for (idx, &(side, _top, height, width, _x, _margin_idx)) in all_rects.iter().enumerate() {
-            if height < min_h || width < MIN_WIDGET_WIDTH {
-                continue;
-            }
-
-            // Score: prefer correct side (+1000), then prefer smaller rects (less waste)
-            // Negative area so smaller = higher score
-            let mut score = -((height as i32 * width as i32) / 10);
-            if side == preferred {
-                score += 1000;
-            }
-
-            if score > best_score {
-                best_score = score;
-                best_idx = Some(idx);
-            }
-        }
-
-        if let Some(idx) = best_idx {
-            let (side, top, height, width, x, margin_idx) = all_rects[idx];
-
-            // Calculate actual widget height based on content
-            let widget_height = calculate_widget_height(kind, data, width, height);
-            // Skip widgets that would render as an empty border.
-            if widget_height <= 2 {
-                continue;
-            }
-
-            // Place widget at top of rect
-            let y = messages_area.y + top;
-
-            placements.push(WidgetPlacement {
-                kind,
-                rect: Rect::new(x, y, width, widget_height),
-                side,
-            });
-            if kind == WidgetKind::Overview {
-                overview_placed = true;
-            }
-
-            // Shrink the rect: move top down, reduce height, recalculate width
-            let remaining_height = height.saturating_sub(widget_height);
-            if remaining_height >= MIN_WIDGET_HEIGHT {
-                let new_top = top + widget_height;
-                all_rects[idx].1 = new_top; // new top
-                all_rects[idx].2 = remaining_height; // new height
-
-                // Recalculate width for the new row range to avoid overlapping text
-                // The new rows might have wider text than the original rows
-                let margin = &margin_spaces[margin_idx];
-                let new_end =
-                    (new_top as usize + remaining_height as usize).min(margin.widths.len());
-                if (new_top as usize) < new_end {
-                    // Get actual minimum margin width (unclamped) for positioning
-                    let actual_min_width = margin.widths[new_top as usize..new_end]
-                        .iter()
-                        .copied()
-                        .min()
-                        .unwrap_or(0);
-                    // Widget width is clamped to MAX_WIDGET_WIDTH
-                    let new_min_width = actual_min_width.min(MAX_WIDGET_WIDTH);
-                    all_rects[idx].3 = new_min_width;
-                    // Anchor flush against the edge.
-                    all_rects[idx].4 = match side {
-                        Side::Right => margin.x_offset.saturating_sub(new_min_width),
-                        Side::Left => margin.x_offset,
-                    };
-                } else {
-                    // Invalid range - mark as empty
-                    all_rects[idx].2 = 0;
-                }
-            } else {
-                // Too small to reuse - mark as empty
-                all_rects[idx].2 = 0;
-            }
-        }
-    }
-
+    let placements = super::info_widget_layout::calculate_placements(
+        messages_area,
+        margins,
+        data,
+        state.enabled,
+        &state.placements,
+    );
     state.placements = placements.clone();
     placements
 }
 
 /// Calculate the height needed for a specific widget type
-fn calculate_widget_height(
+pub(crate) fn calculate_widget_height(
     kind: WidgetKind,
     data: &InfoWidgetData,
     width: u16,
@@ -1531,92 +1266,6 @@ pub fn calculate_layout(
     };
     let placements = calculate_placements(messages_area, &margins, data);
     placements.first().map(|p| p.rect)
-}
-
-fn find_largest_empty_rect(
-    free_widths: &[u16],
-    min_width: u16,
-    min_height: u16,
-) -> Option<(u16, u16, u16)> {
-    find_all_empty_rects(free_widths, min_width, min_height)
-        .into_iter()
-        .max_by_key(|&(_, h, w)| h as u32 * w as u32)
-}
-
-/// Find all valid empty rectangles in the margin
-/// Returns list of (top_row, height, width)
-fn find_all_empty_rects(
-    free_widths: &[u16],
-    min_width: u16,
-    min_height: u16,
-) -> Vec<(u16, u16, u16)> {
-    let mut rects: Vec<(u16, u16, u16)> = Vec::new();
-
-    if free_widths.is_empty() {
-        return rects;
-    }
-
-    // Find contiguous regions where width >= min_width
-    let mut region_start: Option<usize> = None;
-
-    for (i, &width) in free_widths.iter().enumerate() {
-        if width >= min_width {
-            if region_start.is_none() {
-                region_start = Some(i);
-            }
-        } else {
-            // End of region
-            if let Some(start) = region_start {
-                add_region_rects(&mut rects, free_widths, start, i, min_width, min_height);
-                region_start = None;
-            }
-        }
-    }
-
-    // Handle region extending to end
-    if let Some(start) = region_start {
-        add_region_rects(
-            &mut rects,
-            free_widths,
-            start,
-            free_widths.len(),
-            min_width,
-            min_height,
-        );
-    }
-
-    rects
-}
-
-/// Add rectangles from a contiguous region
-fn add_region_rects(
-    rects: &mut Vec<(u16, u16, u16)>,
-    free_widths: &[u16],
-    start: usize,
-    end: usize,
-    min_width: u16,
-    min_height: u16,
-) {
-    let region_height = end - start;
-    if region_height < min_height as usize {
-        return;
-    }
-
-    // Find the minimum width in this region
-    let min_w = free_widths[start..end]
-        .iter()
-        .copied()
-        .min()
-        .unwrap_or(0)
-        .min(MAX_WIDGET_WIDTH);
-
-    if min_w >= min_width {
-        // Add the full region as one rectangle
-        rects.push((start as u16, region_height as u16, min_w));
-
-        // If the region is tall enough, we could split it to place multiple widgets
-        // For now, we'll let the placement algorithm handle stacking
-    }
 }
 
 /// Render all placed widgets

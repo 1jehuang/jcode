@@ -4,6 +4,7 @@ pub(crate) mod color_support;
 mod core;
 pub mod image;
 pub mod info_widget;
+mod info_widget_layout;
 mod keybind;
 mod layout_utils;
 pub mod markdown;
