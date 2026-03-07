@@ -5,6 +5,9 @@
 //! In left-aligned mode, widgets only appear on the right margin.
 
 use super::color_support::rgb;
+use super::info_widget_overview::{
+    compute_page_layout, InfoPageKind, MAX_CONTEXT_LINES, MAX_TODO_LINES,
+};
 use crate::ambient::AmbientStatus;
 use crate::memory_graph::EdgeKind;
 use crate::prompt::ContextInfo;
@@ -760,6 +763,7 @@ pub struct AmbientWidgetData {
 }
 
 const PAGE_SWITCH_SECONDS: u64 = 30;
+pub(crate) const MAX_MEMORY_EVENTS: usize = 4;
 
 /// Data to display in the info widget
 #[derive(Debug, Default, Clone)]
@@ -2546,130 +2550,6 @@ pub fn render(frame: &mut Frame, rect: Rect, data: &InfoWidgetData) {
     render_single_widget(frame, &placement, data);
 }
 
-const MAX_CONTEXT_LINES: usize = 5;
-const MAX_TODO_LINES: usize = 12;
-const MAX_MEMORY_EVENTS: usize = 4;
-
-#[derive(Clone, Copy, Debug)]
-enum InfoPageKind {
-    CompactOnly,
-    TodosExpanded,
-    ContextExpanded,
-    MemoryExpanded,
-    SwarmExpanded,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct InfoPage {
-    kind: InfoPageKind,
-    height: u16,
-}
-
-struct PageLayout {
-    pages: Vec<InfoPage>,
-    max_page_height: u16,
-    show_dots: bool,
-}
-
-fn compute_page_layout(
-    data: &InfoWidgetData,
-    _inner_width: usize,
-    inner_height: u16,
-) -> PageLayout {
-    let compact_height = compact_overview_height(data);
-    if compact_height == 0 {
-        return PageLayout {
-            pages: Vec::new(),
-            max_page_height: 0,
-            show_dots: false,
-        };
-    }
-
-    let mut candidates: Vec<InfoPage> = Vec::new();
-    let context_compact = compact_context_height(data);
-    let todos_compact = compact_todos_height(data);
-
-    let context_expanded = expanded_context_height(data);
-    if context_expanded > 0 {
-        candidates.push(InfoPage {
-            kind: InfoPageKind::ContextExpanded,
-            height: compact_height - context_compact + context_expanded,
-        });
-    }
-
-    let todos_expanded = expanded_todos_height(data);
-    if todos_expanded > 0 {
-        candidates.push(InfoPage {
-            kind: InfoPageKind::TodosExpanded,
-            height: compact_height - todos_compact + todos_expanded,
-        });
-    }
-
-    let memory_compact = compact_memory_height(data);
-    let memory_expanded = expanded_memory_height(data);
-    if memory_expanded > 0 {
-        candidates.push(InfoPage {
-            kind: InfoPageKind::MemoryExpanded,
-            height: compact_height - memory_compact + memory_expanded,
-        });
-    }
-
-    let swarm_compact = compact_swarm_height(data);
-    let swarm_expanded = expanded_swarm_height(data);
-    if swarm_expanded > 0 {
-        candidates.push(InfoPage {
-            kind: InfoPageKind::SwarmExpanded,
-            height: compact_height - swarm_compact + swarm_expanded,
-        });
-    }
-
-    let mut pages: Vec<InfoPage> = candidates
-        .into_iter()
-        .filter(|p| p.height <= inner_height)
-        .collect();
-
-    if pages.is_empty() {
-        if compact_height <= inner_height {
-            pages.push(InfoPage {
-                kind: InfoPageKind::CompactOnly,
-                height: compact_height,
-            });
-        } else {
-            return PageLayout {
-                pages,
-                max_page_height: 0,
-                show_dots: false,
-            };
-        }
-    }
-
-    let mut show_dots = false;
-    if pages.len() > 1 {
-        let filtered: Vec<InfoPage> = pages
-            .iter()
-            .copied()
-            .filter(|p| p.height + 1 <= inner_height)
-            .collect();
-        if filtered.len() > 1 {
-            pages = filtered;
-            show_dots = true;
-        } else if filtered.len() == 1 {
-            pages = filtered;
-        }
-    }
-    let max_page_height = pages
-        .iter()
-        .map(|p| p.height + if show_dots { 1 } else { 0 })
-        .max()
-        .unwrap_or(0);
-
-    PageLayout {
-        pages,
-        max_page_height,
-        show_dots,
-    }
-}
-
 fn render_page(kind: InfoPageKind, data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
     match kind {
         InfoPageKind::CompactOnly => render_sections(data, inner, None),
@@ -2686,196 +2566,6 @@ fn render_page(kind: InfoPageKind, data: &InfoWidgetData, inner: Rect) -> Vec<Li
             render_sections(data, inner, Some(InfoPageKind::SwarmExpanded))
         }
     }
-}
-
-fn compact_context_height(data: &InfoWidgetData) -> u16 {
-    if let Some(info) = &data.context_info {
-        if info.total_chars > 0 {
-            return 1;
-        }
-    }
-    0
-}
-
-fn compact_todos_height(data: &InfoWidgetData) -> u16 {
-    if data.todos.is_empty() {
-        0
-    } else {
-        2
-    }
-}
-
-fn compact_queue_height(data: &InfoWidgetData) -> u16 {
-    if data.queue_mode.is_some() {
-        1
-    } else {
-        0
-    }
-}
-
-fn compact_memory_height(data: &InfoWidgetData) -> u16 {
-    if let Some(info) = &data.memory_info {
-        if info.total_count > 0 {
-            return 1;
-        }
-    }
-    0
-}
-
-fn compact_model_height(data: &InfoWidgetData) -> u16 {
-    if data.model.is_some() {
-        let mut lines = 1u16;
-        let has_provider = data
-            .provider_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .is_some();
-        if has_provider || data.auth_method != AuthMethod::Unknown {
-            lines += 1;
-        }
-        if data.session_count.is_some() || data.session_name.is_some() {
-            lines += 1;
-        }
-        lines
-    } else {
-        0
-    }
-}
-
-fn compact_background_height(data: &InfoWidgetData) -> u16 {
-    if let Some(info) = &data.background_info {
-        if info.running_count > 0 || info.memory_agent_active {
-            return 1;
-        }
-    }
-    0
-}
-
-fn compact_usage_height(data: &InfoWidgetData) -> u16 {
-    if let Some(info) = &data.usage_info {
-        if info.available {
-            match info.provider {
-                UsageProvider::CostBased | UsageProvider::Copilot => return 2,
-                _ => {
-                    let label = info.provider.label();
-                    let label_line = if label.is_empty() { 0 } else { 1 };
-                    let spark_line = if info.spark.is_some() { 1 } else { 0 };
-                    return 2 + label_line + spark_line;
-                }
-            }
-        }
-    }
-    0
-}
-
-fn compact_git_height(data: &InfoWidgetData) -> u16 {
-    if let Some(info) = &data.git_info {
-        if info.is_interesting() {
-            return 1;
-        }
-    }
-    0
-}
-
-fn compact_overview_height(data: &InfoWidgetData) -> u16 {
-    compact_model_height(data)
-        + compact_context_height(data)
-        + compact_todos_height(data)
-        + compact_queue_height(data)
-        + compact_memory_height(data)
-        + compact_swarm_height(data)
-        + compact_background_height(data)
-        + compact_usage_height(data)
-        + compact_git_height(data)
-}
-
-fn expanded_context_height(data: &InfoWidgetData) -> u16 {
-    if let Some(info) = &data.context_info {
-        if info.total_chars > 0 {
-            return 3 + context_entries(info).len().min(MAX_CONTEXT_LINES) as u16;
-        }
-    }
-    0
-}
-
-fn expanded_todos_height(data: &InfoWidgetData) -> u16 {
-    if data.todos.is_empty() {
-        return 0;
-    }
-    // Header (1) + progress bar (1) + todo items + possible "+N more" line
-    let available_lines = MAX_TODO_LINES.saturating_sub(2); // Same as in render
-    let todo_lines = data.todos.len().min(available_lines);
-    let mut height = 2 + todo_lines as u16; // Header + progress bar + items
-    if data.todos.len() > available_lines {
-        height += 1; // "+N more" line
-    }
-    height
-}
-
-fn expanded_memory_height(data: &InfoWidgetData) -> u16 {
-    if let Some(info) = &data.memory_info {
-        if info.total_count > 0 || info.activity.is_some() {
-            // Title line + stats line + activity lines
-            let mut height = 2u16;
-
-            // Add lines for activity
-            if let Some(activity) = &info.activity {
-                // State line
-                height += 1;
-                // Recent events (up to MAX_MEMORY_EVENTS)
-                let event_count = activity.recent_events.len().min(MAX_MEMORY_EVENTS);
-                height += event_count as u16;
-            }
-
-            // Category breakdown if we have memories
-            if !info.by_category.is_empty() {
-                height += 1; // One line for categories
-            }
-
-            return height;
-        }
-    }
-    0
-}
-
-fn compact_swarm_height(data: &InfoWidgetData) -> u16 {
-    if let Some(info) = &data.swarm_info {
-        // Show if we have active subagent or multiple sessions
-        if info.subagent_status.is_some()
-            || info.session_count > 1
-            || info.client_count.is_some()
-            || !info.members.is_empty()
-        {
-            return 1;
-        }
-    }
-    0
-}
-
-fn expanded_swarm_height(data: &InfoWidgetData) -> u16 {
-    if let Some(info) = &data.swarm_info {
-        if info.subagent_status.is_some()
-            || info.session_count > 1
-            || info.client_count.is_some()
-            || !info.members.is_empty()
-        {
-            // Title (1) + status line (1) + session list (up to 4)
-            let mut height = 2u16;
-            if info.subagent_status.is_some() {
-                height += 1; // Active subagent line
-            }
-            // Show session names (up to 4)
-            let member_len = if info.members.is_empty() {
-                info.session_names.len()
-            } else {
-                info.members.len()
-            };
-            height += member_len.min(4) as u16;
-            return height;
-        }
-    }
-    0
 }
 
 fn render_sections(
@@ -4807,7 +4497,7 @@ fn render_pagination_dots(count: usize, current: usize, width: u16) -> Line<'sta
     ])
 }
 
-fn context_entries(info: &ContextInfo) -> Vec<(&'static str, &'static str, usize)> {
+pub(crate) fn context_entries(info: &ContextInfo) -> Vec<(&'static str, &'static str, usize)> {
     let docs_chars = info.project_agents_md_chars
         + info.project_claude_md_chars
         + info.global_agents_md_chars
