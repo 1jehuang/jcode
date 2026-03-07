@@ -10144,6 +10144,8 @@ struct FileDiffViewCache {
     file_lines: Vec<Line<'static>>,
     change_line_indices: Vec<usize>,
     first_change_line: usize,
+    additions: usize,
+    deletions: usize,
 }
 
 static FILE_DIFF_CACHE: OnceLock<Mutex<Option<FileDiffViewCache>>> = OnceLock::new();
@@ -10278,62 +10280,149 @@ fn draw_file_diff_view(
             .extension()
             .and_then(|e| e.to_str());
 
-        let added_lines: Vec<String> = diff_lines
-            .iter()
-            .filter(|l| l.kind == DiffLineKind::Add)
-            .map(|l| l.content.clone())
-            .collect();
+        struct DiffHunk {
+            dels: Vec<String>,
+            adds: Vec<String>,
+        }
+
+        let mut hunks: Vec<DiffHunk> = Vec::new();
+        {
+            let mut current_dels: Vec<String> = Vec::new();
+            let mut current_adds: Vec<String> = Vec::new();
+            for dl in &diff_lines {
+                match dl.kind {
+                    DiffLineKind::Del => {
+                        if !current_adds.is_empty() {
+                            hunks.push(DiffHunk { dels: current_dels, adds: current_adds });
+                            current_dels = Vec::new();
+                            current_adds = Vec::new();
+                        }
+                        current_dels.push(dl.content.clone());
+                    }
+                    DiffLineKind::Add => {
+                        current_adds.push(dl.content.clone());
+                    }
+                }
+            }
+            if !current_dels.is_empty() || !current_adds.is_empty() {
+                hunks.push(DiffHunk { dels: current_dels, adds: current_adds });
+            }
+        }
+
+        let mut add_to_dels: std::collections::HashMap<usize, Vec<String>> = std::collections::HashMap::new();
+        let mut orphan_dels: Vec<String> = Vec::new();
+        let file_lines_vec: Vec<&str> = file_content.lines().collect();
+
+        let mut used_file_lines: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+        for hunk in &hunks {
+            if hunk.adds.is_empty() {
+                orphan_dels.extend(hunk.dels.clone());
+                continue;
+            }
+
+            let first_add_trimmed = hunk.adds[0].trim();
+            if first_add_trimmed.is_empty() {
+                orphan_dels.extend(hunk.dels.clone());
+                continue;
+            }
+            let mut found_idx = None;
+            for (fi, fl) in file_lines_vec.iter().enumerate() {
+                if !used_file_lines.contains(&fi) && fl.trim() == first_add_trimmed {
+                    found_idx = Some(fi);
+                    break;
+                }
+            }
+
+            if let Some(idx) = found_idx {
+                for (ai, _) in hunk.adds.iter().enumerate() {
+                    used_file_lines.insert(idx + ai);
+                }
+                if !hunk.dels.is_empty() {
+                    add_to_dels.insert(idx, hunk.dels.clone());
+                }
+            } else {
+                orphan_dels.extend(hunk.dels.clone());
+            }
+        }
 
         let mut rendered_lines: Vec<Line<'static>> = Vec::new();
         let mut change_line_indices: Vec<usize> = Vec::new();
         let mut first_change_line = usize::MAX;
+        let mut del_count = 0usize;
+        let mut add_count = 0usize;
 
-        let line_num_width = file_content.lines().count().to_string().len().max(3);
+        let line_num_width = file_lines_vec.len().to_string().len().max(3);
+        let gutter_pad: String = " ".repeat(line_num_width);
 
-        for (i, line_text) in file_content.lines().enumerate() {
+        for (i, line_text) in file_lines_vec.iter().enumerate() {
             let line_num = i + 1;
-            let is_changed = added_lines.iter().any(|added| {
-                let trimmed_added = added.trim();
-                let trimmed_line = line_text.trim();
-                !trimmed_added.is_empty() && !trimmed_line.is_empty() && trimmed_line == trimmed_added
-            });
 
-            let num_style = if is_changed {
-                Style::default().fg(diff_add_color())
-            } else {
-                Style::default().fg(dim_color())
-            };
-
-            let mut spans: Vec<Span<'static>> = Vec::new();
-
-            if is_changed {
-                spans.push(Span::styled(
-                    format!("{:>width$} │+", line_num, width = line_num_width),
-                    num_style,
-                ));
-                change_line_indices.push(rendered_lines.len());
-                if first_change_line == usize::MAX {
-                    first_change_line = rendered_lines.len();
+            if let Some(dels) = add_to_dels.get(&i) {
+                for del_text in dels {
+                    let mut del_spans: Vec<Span<'static>> = vec![Span::styled(
+                        format!("{} │-", gutter_pad),
+                        Style::default().fg(diff_del_color()),
+                    )];
+                    let highlighted = markdown::highlight_line(del_text, file_ext);
+                    for span in highlighted {
+                        let tinted = tint_span_with_diff_color(span, diff_del_color());
+                        del_spans.push(tinted);
+                    }
+                    change_line_indices.push(rendered_lines.len());
+                    if first_change_line == usize::MAX {
+                        first_change_line = rendered_lines.len();
+                    }
+                    del_count += 1;
+                    rendered_lines.push(Line::from(del_spans));
                 }
-            } else {
-                spans.push(Span::styled(
-                    format!("{:>width$} │ ", line_num, width = line_num_width),
-                    num_style,
-                ));
             }
 
-            if is_changed {
+            let is_added = used_file_lines.contains(&i);
+
+            if is_added {
+                let mut spans: Vec<Span<'static>> = vec![Span::styled(
+                    format!("{:>width$} │+", line_num, width = line_num_width),
+                    Style::default().fg(diff_add_color()),
+                )];
                 let highlighted = markdown::highlight_line(line_text, file_ext);
                 for span in highlighted {
                     let tinted = tint_span_with_diff_color(span, diff_add_color());
                     spans.push(tinted);
                 }
+                change_line_indices.push(rendered_lines.len());
+                if first_change_line == usize::MAX {
+                    first_change_line = rendered_lines.len();
+                }
+                add_count += 1;
+                rendered_lines.push(Line::from(spans));
             } else {
+                let mut spans: Vec<Span<'static>> = vec![Span::styled(
+                    format!("{:>width$} │ ", line_num, width = line_num_width),
+                    Style::default().fg(dim_color()),
+                )];
                 let highlighted = markdown::highlight_line(line_text, file_ext);
                 spans.extend(highlighted);
+                rendered_lines.push(Line::from(spans));
             }
+        }
 
-            rendered_lines.push(Line::from(spans));
+        for del_text in &orphan_dels {
+            let mut del_spans: Vec<Span<'static>> = vec![Span::styled(
+                format!("{} │-", gutter_pad),
+                Style::default().fg(diff_del_color()),
+            )];
+            let highlighted = markdown::highlight_line(del_text, file_ext);
+            for span in highlighted {
+                let tinted = tint_span_with_diff_color(span, diff_del_color());
+                del_spans.push(tinted);
+            }
+            change_line_indices.push(rendered_lines.len());
+            if first_change_line == usize::MAX {
+                first_change_line = rendered_lines.len();
+            }
+            del_count += 1;
+            rendered_lines.push(Line::from(del_spans));
         }
 
         if rendered_lines.is_empty() {
@@ -10349,6 +10438,8 @@ fn draw_file_diff_view(
             file_lines: rendered_lines,
             change_line_indices,
             first_change_line,
+            additions: add_count,
+            deletions: del_count,
         });
     }
 
@@ -10363,8 +10454,6 @@ fn draw_file_diff_view(
         .collect::<Vec<_>>()
         .join("/");
 
-    let change_count = cached.change_line_indices.len();
-
     let mut title_parts = vec![
         Span::styled(" ", Style::default().fg(dim_color())),
         Span::styled(
@@ -10374,11 +10463,23 @@ fn draw_file_diff_view(
                 .add_modifier(ratatui::style::Modifier::BOLD),
         ),
     ];
-    if change_count > 0 {
-        title_parts.push(Span::styled(
-            format!(" +{}", change_count),
-            Style::default().fg(diff_add_color()),
-        ));
+    if cached.additions > 0 || cached.deletions > 0 {
+        title_parts.push(Span::styled(" ", Style::default().fg(dim_color())));
+        if cached.additions > 0 {
+            title_parts.push(Span::styled(
+                format!("+{}", cached.additions),
+                Style::default().fg(diff_add_color()),
+            ));
+        }
+        if cached.deletions > 0 {
+            if cached.additions > 0 {
+                title_parts.push(Span::styled(" ", Style::default().fg(dim_color())));
+            }
+            title_parts.push(Span::styled(
+                format!("-{}", cached.deletions),
+                Style::default().fg(diff_del_color()),
+            ));
+        }
     }
     title_parts.push(Span::styled(
         format!(" {}L ", cached.file_lines.len()),
