@@ -126,10 +126,8 @@ enum ClaudeCodeContentBlock {
 
 /// Discover all Claude Code projects and their sessions-index.json files
 fn discover_projects() -> Result<Vec<PathBuf>> {
-    let claude_dir = dirs::home_dir()
-        .context("Could not find home directory")?
-        .join(".claude")
-        .join("projects");
+    let claude_dir = crate::storage::user_home_path(".claude/projects")
+        .context("Could not find Claude projects directory")?;
 
     if !claude_dir.exists() {
         return Ok(Vec::new());
@@ -508,6 +506,9 @@ pub fn print_sessions_table(sessions: &[ClaudeCodeSessionInfo]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_truncate_title() {
@@ -568,6 +569,28 @@ mod tests {
         match &blocks[2] {
             ContentBlock::ToolUse { name, .. } => assert_eq!(name, "bash"),
             _ => panic!("Expected tool use"),
+        }
+    }
+
+    #[test]
+    fn test_discover_projects_uses_sandboxed_external_home() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev_home = std::env::var_os("JCODE_HOME");
+        let temp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("JCODE_HOME", temp.path());
+
+        let project_dir = temp.path().join("external/.claude/projects/demo");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("sessions-index.json"), r#"{"version":1,"entries":[]}"#)
+            .unwrap();
+
+        let projects = discover_projects().unwrap();
+        assert_eq!(projects, vec![project_dir.join("sessions-index.json")]);
+
+        if let Some(prev_home) = prev_home {
+            std::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            std::env::remove_var("JCODE_HOME");
         }
     }
 }

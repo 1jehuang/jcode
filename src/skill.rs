@@ -45,9 +45,8 @@ impl SkillRegistry {
         let mut sources = Vec::new();
         let mut copied = Vec::new();
 
-        if let Some(home) = dirs::home_dir() {
-            // Import from Claude Code (~/.claude/skills/)
-            let claude_skills = home.join(".claude").join("skills");
+        // Import from Claude Code (~/.claude/skills/)
+        if let Ok(claude_skills) = crate::storage::user_home_path(".claude/skills") {
             if claude_skills.is_dir() {
                 let count = Self::copy_skills_dir(&claude_skills, &jcode_skills);
                 if count > 0 {
@@ -55,9 +54,10 @@ impl SkillRegistry {
                     copied.extend(Self::list_skill_names(&jcode_skills));
                 }
             }
+        }
 
-            // Import from Codex CLI (~/.codex/skills/)
-            let codex_skills = home.join(".codex").join("skills");
+        // Import from Codex CLI (~/.codex/skills/)
+        if let Ok(codex_skills) = crate::storage::user_home_path(".codex/skills") {
             if codex_skills.is_dir() {
                 let count = Self::copy_skills_dir(&codex_skills, &jcode_skills);
                 if count > 0 {

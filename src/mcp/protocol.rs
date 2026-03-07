@@ -227,8 +227,7 @@ impl McpConfig {
         let mut sources = Vec::new();
 
         // Import from Claude Code (~/.claude/mcp.json)
-        if let Some(home) = dirs::home_dir() {
-            let claude_mcp = home.join(".claude/mcp.json");
+        if let Ok(claude_mcp) = crate::storage::user_home_path(".claude/mcp.json") {
             if claude_mcp.exists() {
                 if let Ok(config) = Self::load_from_file(&claude_mcp) {
                     let count = config.servers.len();
@@ -238,9 +237,10 @@ impl McpConfig {
                     }
                 }
             }
+        }
 
-            // Import from Codex CLI (~/.codex/config.toml)
-            let codex_config = home.join(".codex/config.toml");
+        // Import from Codex CLI (~/.codex/config.toml)
+        if let Ok(codex_config) = crate::storage::user_home_path(".codex/config.toml") {
             if codex_config.exists() {
                 if let Ok(config) = Self::load_from_codex_toml(&codex_config) {
                     let count = config.servers.len();
