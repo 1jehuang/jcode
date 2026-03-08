@@ -2,12 +2,13 @@ use super::{
     ctrl_bracket_fallback_to_esc, parse_rate_limit_error, spawn_in_new_terminal, App,
     DisplayMessage, ProcessingStatus, SendAction,
 };
+use crate::bus::BusEvent;
 use crate::message::ToolCall;
 use crate::protocol::ServerEvent;
 use crate::tool::selfdev::ReloadContext;
 use crate::tui::backend::RemoteConnection;
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEvent};
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use std::time::{Duration, Instant};
@@ -33,6 +34,133 @@ pub(super) enum PostConnectOutcome {
 pub(super) enum RemoteEventOutcome {
     Continue,
     Reconnect,
+}
+
+pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) {
+    if app.stream_buffer.should_flush() {
+        if let Some(chunk) = app.stream_buffer.flush() {
+            app.streaming_text.push_str(&chunk);
+        }
+    }
+
+    let _ = check_debug_command(app, remote).await;
+
+    if let Some(reset_time) = app.rate_limit_reset {
+        if Instant::now() >= reset_time {
+            app.rate_limit_reset = None;
+            if !app.is_processing {
+                if let Some(pending) = app.rate_limit_pending_message.clone() {
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "✓ Rate limit reset. Retrying...{}",
+                        if pending.is_system {
+                            " (system message)"
+                        } else {
+                            ""
+                        }
+                    )));
+                    let _ = begin_remote_send(
+                        app,
+                        remote,
+                        pending.content,
+                        pending.images,
+                        pending.is_system,
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+    }
+
+    if !app.is_processing && !app.queued_messages.is_empty() {
+        let messages = std::mem::take(&mut app.queued_messages);
+        let combined = messages.join("\n\n");
+        crate::logging::info(&format!(
+            "Sending queued continuation message ({} chars)",
+            combined.len()
+        ));
+        for msg in &messages {
+            app.push_display_message(DisplayMessage::user(msg.clone()));
+        }
+        if begin_remote_send(app, remote, combined, vec![], true)
+            .await
+            .is_err()
+        {
+            crate::logging::error("Failed to send queued continuation message");
+        }
+    }
+
+    detect_and_cancel_stall(app, remote).await;
+}
+
+pub(super) async fn handle_terminal_event(
+    app: &mut App,
+    terminal: &mut DefaultTerminal,
+    remote: &mut RemoteConnection,
+    event: Option<std::result::Result<Event, std::io::Error>>,
+) -> Result<()> {
+    match event {
+        Some(Ok(Event::Key(key))) => {
+            if key.kind == KeyEventKind::Press {
+                handle_remote_key(app, key.code, key.modifiers, remote).await?;
+                if let Some(spec) = app.pending_model_switch.take() {
+                    let _ = remote.set_model(&spec).await;
+                }
+            }
+        }
+        Some(Ok(Event::Paste(text))) => {
+            app.handle_paste(text);
+        }
+        Some(Ok(Event::Mouse(mouse))) => {
+            handle_mouse_event(app, mouse);
+        }
+        Some(Ok(Event::Resize(_, _))) => {
+            let _ = terminal.clear();
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+pub(super) async fn handle_bus_event(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    bus_event: std::result::Result<BusEvent, tokio::sync::broadcast::error::RecvError>,
+) {
+    match bus_event {
+        Ok(BusEvent::UsageReport(results)) => {
+            app.handle_usage_report(results);
+        }
+        Ok(BusEvent::LoginCompleted(login)) => {
+            let success = login.success && login.provider != "copilot_code";
+            app.handle_login_completed(login);
+            if success {
+                let _ = remote.notify_auth_changed().await;
+            }
+        }
+        Ok(BusEvent::UpdateStatus(status)) => {
+            app.handle_update_status(status);
+        }
+        _ => {}
+    }
+}
+
+pub(super) async fn check_debug_command(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+) -> Option<String> {
+    let cmd_path = super::debug_cmd_path();
+    if let Ok(cmd) = std::fs::read_to_string(&cmd_path) {
+        let _ = std::fs::remove_file(&cmd_path);
+        let cmd = cmd.trim();
+
+        app.debug_trace.record("cmd", cmd.to_string());
+
+        let response = handle_debug_command(app, cmd, remote).await;
+        let _ = std::fs::write(super::debug_response_path(), &response);
+        return Some(response);
+    }
+    None
 }
 
 pub(super) async fn connect_with_retry(
@@ -388,7 +516,7 @@ pub(super) async fn handle_remote_event(
             Ok(RemoteEventOutcome::Reconnect)
         }
         Some(ServerEvent::ClientDebugRequest { id, command }) => {
-            let output = app.handle_debug_command_remote(&command, remote).await;
+            let output = handle_debug_command(app, &command, remote).await;
             let _ = remote.send_client_debug_response(id, output).await;
             process_remote_followups(app, remote).await;
             Ok(RemoteEventOutcome::Continue)
@@ -450,6 +578,148 @@ async fn process_remote_followups(app: &mut App, remote: &mut RemoteConnection) 
         }
         let _ = begin_remote_send(app, remote, combined, vec![], true).await;
     }
+}
+
+async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteConnection) {
+    const STALL_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+    let is_running_tool = matches!(app.status, ProcessingStatus::RunningTool(_));
+    if app.is_processing && !is_running_tool {
+        let stalled = app
+            .last_stream_activity
+            .map(|t| t.elapsed() > STALL_TIMEOUT)
+            .unwrap_or_else(|| {
+                app.processing_started
+                    .map(|t| t.elapsed() > STALL_TIMEOUT)
+                    .unwrap_or(false)
+            });
+        if stalled {
+            crate::logging::warn(&format!(
+                "Stream stall detected: no server events for {:?}, cancelling",
+                app.last_stream_activity
+                    .map(|t| t.elapsed())
+                    .or(app.processing_started.map(|t| t.elapsed()))
+            ));
+            let _ = remote.cancel().await;
+            app.is_processing = false;
+            app.status = ProcessingStatus::Idle;
+            app.current_message_id = None;
+            app.processing_started = None;
+            app.last_stream_activity = None;
+            app.rate_limit_pending_message = None;
+            if !app.streaming_text.is_empty() {
+                let content = app.take_streaming_text();
+                app.push_display_message(DisplayMessage {
+                    role: "assistant".to_string(),
+                    content,
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+            }
+            app.push_display_message(DisplayMessage::system(
+                "⚠ Stream stalled (no response for 2 minutes). Processing cancelled. You can resend your message.".to_string(),
+            ));
+        }
+    }
+}
+
+fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
+    app.handle_mouse_event(mouse);
+}
+
+async fn handle_debug_command(app: &mut App, cmd: &str, remote: &mut RemoteConnection) -> String {
+    let cmd = cmd.trim();
+    if cmd.starts_with("message:") {
+        let msg = cmd.strip_prefix("message:").unwrap_or("");
+        app.input = msg.to_string();
+        let result = handle_remote_key(app, KeyCode::Enter, KeyModifiers::empty(), remote).await;
+        if let Err(e) = result {
+            return format!("ERR: {}", e);
+        }
+        app.debug_trace
+            .record("message", format!("submitted:{}", msg));
+        return format!("OK: queued message '{}'", msg);
+    }
+    if cmd == "reload" {
+        app.input = "/reload".to_string();
+        let result = handle_remote_key(app, KeyCode::Enter, KeyModifiers::empty(), remote).await;
+        if let Err(e) = result {
+            return format!("ERR: {}", e);
+        }
+        app.debug_trace.record("reload", "triggered".to_string());
+        return "OK: reload triggered".to_string();
+    }
+    if cmd == "state" {
+        return serde_json::json!({
+            "processing": app.is_processing,
+            "messages": app.messages.len(),
+            "display_messages": app.display_messages.len(),
+            "input": app.input,
+            "cursor_pos": app.cursor_pos,
+            "scroll_offset": app.scroll_offset,
+            "queued_messages": app.queued_messages.len(),
+            "provider_session_id": app.provider_session_id,
+            "provider_name": app.remote_provider_name.clone(),
+            "model": app.remote_provider_model.as_deref().unwrap_or(app.provider.name()),
+            "diagram_mode": format!("{:?}", app.diagram_mode),
+            "diagram_focus": app.diagram_focus,
+            "diagram_index": app.diagram_index,
+            "diagram_scroll": [app.diagram_scroll_x, app.diagram_scroll_y],
+            "diagram_pane_ratio": app.diagram_pane_ratio_target,
+            "diagram_pane_enabled": app.diagram_pane_enabled,
+            "diagram_pane_position": format!("{:?}", app.diagram_pane_position),
+            "diagram_zoom": app.diagram_zoom,
+            "diagram_count": crate::tui::mermaid::get_active_diagrams().len(),
+            "remote": true,
+            "server_version": app.remote_server_version.clone(),
+            "server_has_update": app.remote_server_has_update,
+            "version": env!("JCODE_VERSION"),
+            "diagram_mode": format!("{:?}", app.diagram_mode),
+        })
+        .to_string();
+    }
+    if cmd.starts_with("keys:") {
+        let keys_str = cmd.strip_prefix("keys:").unwrap_or("");
+        let mut results = Vec::new();
+        for key_spec in keys_str.split(',') {
+            match parse_and_inject_key(app, key_spec.trim(), remote).await {
+                Ok(desc) => {
+                    app.debug_trace.record("key", desc.clone());
+                    results.push(format!("OK: {}", desc));
+                }
+                Err(e) => results.push(format!("ERR: {}", e)),
+            }
+        }
+        return results.join("\n");
+    }
+    if cmd == "submit" {
+        if app.input.is_empty() {
+            return "submit error: input is empty".to_string();
+        }
+        let result = handle_remote_key(app, KeyCode::Enter, KeyModifiers::empty(), remote).await;
+        if let Err(e) = result {
+            return format!("ERR: {}", e);
+        }
+        app.debug_trace.record("input", "submitted".to_string());
+        return "OK: submitted".to_string();
+    }
+    if cmd.starts_with("run:") || cmd.starts_with("script:") {
+        return "ERR: script/run not supported in remote debug mode".to_string();
+    }
+    app.handle_debug_command(cmd)
+}
+
+async fn parse_and_inject_key(
+    app: &mut App,
+    key_spec: &str,
+    remote: &mut RemoteConnection,
+) -> std::result::Result<String, String> {
+    let (key_code, modifiers) = app.parse_key_spec(key_spec)?;
+    handle_remote_key(app, key_code, modifiers, remote)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(format!("injected {:?} with {:?}", key_code, modifiers))
 }
 
 pub(super) async fn begin_remote_send(

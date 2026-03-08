@@ -3180,104 +3180,6 @@ impl App {
         }
     }
 
-    async fn handle_debug_command_remote(
-        &mut self,
-        cmd: &str,
-        remote: &mut super::backend::RemoteConnection,
-    ) -> String {
-        let cmd = cmd.trim();
-        if cmd.starts_with("message:") {
-            let msg = cmd.strip_prefix("message:").unwrap_or("");
-            self.input = msg.to_string();
-            let result = self
-                .handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), remote)
-                .await;
-            if let Err(e) = result {
-                return format!("ERR: {}", e);
-            }
-            self.debug_trace
-                .record("message", format!("submitted:{}", msg));
-            return format!("OK: queued message '{}'", msg);
-        }
-        if cmd == "reload" {
-            self.input = "/reload".to_string();
-            let result = self
-                .handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), remote)
-                .await;
-            if let Err(e) = result {
-                return format!("ERR: {}", e);
-            }
-            self.debug_trace.record("reload", "triggered".to_string());
-            return "OK: reload triggered".to_string();
-        }
-        if cmd == "state" {
-            return serde_json::json!({
-                "processing": self.is_processing,
-                "messages": self.messages.len(),
-                "display_messages": self.display_messages.len(),
-                "input": self.input,
-                "cursor_pos": self.cursor_pos,
-                "scroll_offset": self.scroll_offset,
-                "queued_messages": self.queued_messages.len(),
-                "provider_session_id": self.provider_session_id,
-                "provider_name": self.remote_provider_name.clone(),
-                "model": self
-                    .remote_provider_model
-                    .as_deref()
-                    .unwrap_or(self.provider.name()),
-                "diagram_mode": format!("{:?}", self.diagram_mode),
-                "diagram_focus": self.diagram_focus,
-                "diagram_index": self.diagram_index,
-                "diagram_scroll": [self.diagram_scroll_x, self.diagram_scroll_y],
-                "diagram_pane_ratio": self.diagram_pane_ratio_target,
-                "diagram_pane_enabled": self.diagram_pane_enabled,
-                "diagram_pane_position": format!("{:?}", self.diagram_pane_position),
-                "diagram_zoom": self.diagram_zoom,
-                "diagram_count": crate::tui::mermaid::get_active_diagrams().len(),
-                "remote": true,
-                "server_version": self.remote_server_version.clone(),
-                "server_has_update": self.remote_server_has_update,
-                "version": env!("JCODE_VERSION"),
-                "diagram_mode": format!("{:?}", self.diagram_mode),
-            })
-            .to_string();
-        }
-        if cmd.starts_with("keys:") {
-            let keys_str = cmd.strip_prefix("keys:").unwrap_or("");
-            let mut results = Vec::new();
-            for key_spec in keys_str.split(',') {
-                match self
-                    .parse_and_inject_key_remote(key_spec.trim(), remote)
-                    .await
-                {
-                    Ok(desc) => {
-                        self.debug_trace.record("key", format!("{}", desc));
-                        results.push(format!("OK: {}", desc));
-                    }
-                    Err(e) => results.push(format!("ERR: {}", e)),
-                }
-            }
-            return results.join("\n");
-        }
-        if cmd == "submit" {
-            if self.input.is_empty() {
-                return "submit error: input is empty".to_string();
-            }
-            let result = self
-                .handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), remote)
-                .await;
-            if let Err(e) = result {
-                return format!("ERR: {}", e);
-            }
-            self.debug_trace.record("input", "submitted".to_string());
-            return "OK: submitted".to_string();
-        }
-        if cmd.starts_with("run:") || cmd.starts_with("script:") {
-            return "ERR: script/run not supported in remote debug mode".to_string();
-        }
-        self.handle_debug_command(cmd)
-    }
-
     /// Check for new stable version and trigger migration if at safe point
     fn check_stable_version(&mut self) {
         // Only check every 5 seconds to avoid excessive file reads
@@ -3849,28 +3751,6 @@ impl App {
         None
     }
 
-    async fn check_debug_command_remote(
-        &mut self,
-        remote: &mut super::backend::RemoteConnection,
-    ) -> Option<String> {
-        let cmd_path = debug_cmd_path();
-        if let Ok(cmd) = std::fs::read_to_string(&cmd_path) {
-            // Remove command file immediately
-            let _ = std::fs::remove_file(&cmd_path);
-            let cmd = cmd.trim();
-
-            self.debug_trace
-                .record("cmd", format!("{}", cmd.to_string()));
-
-            let response = self.handle_debug_command_remote(cmd, remote).await;
-
-            // Write response
-            let _ = std::fs::write(debug_response_path(), &response);
-            return Some(response);
-        }
-        None
-    }
-
     fn parse_key_spec(&self, key_spec: &str) -> Result<(KeyCode, KeyModifiers), String> {
         let key_spec = key_spec.to_lowercase();
         let parts: Vec<&str> = key_spec.split('+').collect();
@@ -3921,18 +3801,6 @@ impl App {
         let (key_code, modifiers) = self.parse_key_spec(key_spec)?;
         let key_event = crossterm::event::KeyEvent::new(key_code, modifiers);
         self.handle_key_event(key_event);
-        Ok(format!("injected {:?} with {:?}", key_code, modifiers))
-    }
-
-    async fn parse_and_inject_key_remote(
-        &mut self,
-        key_spec: &str,
-        remote: &mut super::backend::RemoteConnection,
-    ) -> Result<String, String> {
-        let (key_code, modifiers) = self.parse_key_spec(key_spec)?;
-        self.handle_remote_key(key_code, modifiers, remote)
-            .await
-            .map_err(|e| format!("{}", e))?;
         Ok(format!("injected {:?} with {:?}", key_code, modifiers))
     }
 
@@ -4167,100 +4035,7 @@ impl App {
 
                 tokio::select! {
                     _ = redraw_interval.tick() => {
-                        // Flush stream buffer
-                        if self.stream_buffer.should_flush() {
-                            if let Some(chunk) = self.stream_buffer.flush() {
-                                self.streaming_text.push_str(&chunk);
-                            }
-                        }
-                        // Check for debug commands (remote mode)
-                        let _ = self.check_debug_command_remote(&mut remote).await;
-                        if let Some(reset_time) = self.rate_limit_reset {
-                            if Instant::now() >= reset_time {
-                                self.rate_limit_reset = None;
-                                if !self.is_processing {
-                                    if let Some(pending) = self.rate_limit_pending_message.clone() {
-                                        self.push_display_message(DisplayMessage::system(format!(
-                                            "✓ Rate limit reset. Retrying...{}",
-                                            if pending.is_system { " (system message)" } else { "" }
-                                        )));
-                                        let _ = self
-                                            .begin_remote_send(
-                                                &mut remote,
-                                                pending.content,
-                                                pending.images,
-                                                pending.is_system,
-                                            )
-                                            .await;
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-                        // Process queued messages (e.g. reload continuation)
-                        if !self.is_processing && !self.queued_messages.is_empty() {
-                            let messages = std::mem::take(&mut self.queued_messages);
-                            let combined = messages.join("\n\n");
-                            crate::logging::info(&format!("Sending queued continuation message ({} chars)", combined.len()));
-                            for msg in &messages {
-                                self.push_display_message(DisplayMessage::user(msg.clone()));
-                            }
-                            if self
-                                .begin_remote_send(&mut remote, combined, vec![], true)
-                                .await
-                                .is_err()
-                            {
-                                crate::logging::error("Failed to send queued continuation message");
-                            }
-                        }
-                        // Stall detection: if processing for too long with no server events,
-                        // cancel and reset so the user isn't stuck forever.
-                        // Provider-level SSE timeouts (90s) should catch most stalls first;
-                        // this is a secondary safety net.
-                        //
-                        // Skip stall detection while a tool is executing - tools like
-                        // `cargo build` can legitimately run for many minutes with no
-                        // server events. The tool's own timeout (bash default: 2min,
-                        // background: unlimited) handles runaway commands.
-                        const STALL_TIMEOUT: Duration = Duration::from_secs(2 * 60);
-                        let is_running_tool = matches!(self.status, ProcessingStatus::RunningTool(_));
-                        if self.is_processing && !is_running_tool {
-                            let stalled = self.last_stream_activity
-                                .map(|t| t.elapsed() > STALL_TIMEOUT)
-                                .unwrap_or_else(|| {
-                                    self.processing_started
-                                        .map(|t| t.elapsed() > STALL_TIMEOUT)
-                                        .unwrap_or(false)
-                                });
-                            if stalled {
-                                crate::logging::warn(&format!(
-                                    "Stream stall detected: no server events for {:?}, cancelling",
-                                    self.last_stream_activity.map(|t| t.elapsed())
-                                        .or(self.processing_started.map(|t| t.elapsed()))
-                                ));
-                                let _ = remote.cancel().await;
-                                self.is_processing = false;
-                                self.status = ProcessingStatus::Idle;
-                                self.current_message_id = None;
-                                self.processing_started = None;
-                                self.last_stream_activity = None;
-                                self.rate_limit_pending_message = None;
-                                if !self.streaming_text.is_empty() {
-                                    let content = self.take_streaming_text();
-                                    self.push_display_message(DisplayMessage {
-                                        role: "assistant".to_string(),
-                                        content,
-                                        tool_calls: vec![],
-                                        duration_secs: None,
-                                        title: None,
-                                        tool_data: None,
-                                    });
-                                }
-                                self.push_display_message(DisplayMessage::system(
-                                    "⚠ Stream stalled (no response for 2 minutes). Processing cancelled. You can resend your message.".to_string()
-                                ));
-                            }
-                        }
+                        remote::handle_tick(&mut self, &mut remote).await;
                     }
                     event = remote.next_event() => {
                         match remote::handle_remote_event(
@@ -4277,45 +4052,10 @@ impl App {
                         }
                     }
                     event = event_stream.next() => {
-                        match event {
-                            Some(Ok(Event::Key(key))) => {
-                                if key.kind == KeyEventKind::Press {
-                                    self.handle_remote_key(key.code, key.modifiers, &mut remote).await?;
-                                    // Process deferred model switch from picker
-                                    if let Some(spec) = self.pending_model_switch.take() {
-                                        let _ = remote.set_model(&spec).await;
-                                    }
-                                }
-                            }
-                            Some(Ok(Event::Paste(text))) => {
-                                self.handle_paste(text);
-                            }
-                            Some(Ok(Event::Mouse(mouse))) => {
-                                self.handle_mouse_event(mouse);
-                            }
-                            Some(Ok(Event::Resize(_, _))) => {
-                                let _ = terminal.clear();
-                            }
-                            _ => {}
-                        }
+                        remote::handle_terminal_event(&mut self, &mut terminal, &mut remote, event).await?;
                     }
                     bus_event = bus_receiver_remote.recv() => {
-                        match bus_event {
-                            Ok(BusEvent::UsageReport(results)) => {
-                                self.handle_usage_report(results);
-                            }
-                            Ok(BusEvent::LoginCompleted(login)) => {
-                                let success = login.success && login.provider != "copilot_code";
-                                self.handle_login_completed(login);
-                                if success {
-                                    let _ = remote.notify_auth_changed().await;
-                                }
-                            }
-                            Ok(BusEvent::UpdateStatus(status)) => {
-                                self.handle_update_status(status);
-                            }
-                            _ => {}
-                        }
+                        remote::handle_bus_event(&mut self, &mut remote, bus_event).await;
                     }
                 }
             }
