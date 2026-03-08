@@ -2590,8 +2590,8 @@ mod tests {
     fn manager_persists_and_forgets_memories() {
         with_temp_home(|_dir| {
             let manager = MemoryManager::new_test();
-            let entry_project =
-                MemoryEntry::new(MemoryCategory::Fact, "Project memory").with_embedding(vec![1.0, 0.0, 0.0]);
+            let entry_project = MemoryEntry::new(MemoryCategory::Fact, "Project memory")
+                .with_embedding(vec![1.0, 0.0, 0.0]);
             let entry_global = MemoryEntry::new(MemoryCategory::Preference, "Global memory")
                 .with_embedding(vec![0.0, 1.0, 0.0]);
 
@@ -2623,7 +2623,10 @@ mod tests {
             let manager = MemoryManager::new_test();
 
             // Create two memories
-            let entry1 = MemoryEntry::new(MemoryCategory::Fact, "The capital of France is Paris, a city known for the Eiffel Tower");
+            let entry1 = MemoryEntry::new(
+                MemoryCategory::Fact,
+                "The capital of France is Paris, a city known for the Eiffel Tower",
+            );
             let entry2 = MemoryEntry::new(MemoryCategory::Fact, "Photosynthesis converts carbon dioxide and water into glucose using sunlight energy");
 
             let id1 = manager.remember_project(entry1).expect("remember 1");
