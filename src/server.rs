@@ -14,6 +14,7 @@ mod debug_ambient;
 mod debug_events;
 mod debug_jobs;
 mod debug_server_state;
+mod debug_session_admin;
 mod debug_swarm_read;
 mod debug_swarm_write;
 mod debug_testers;

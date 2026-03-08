@@ -4,12 +4,12 @@ use super::debug_events::{
 };
 use super::debug_jobs::{maybe_handle_job_command, maybe_start_async_debug_job, DebugJob};
 use super::debug_server_state::maybe_handle_server_state_command;
+use super::debug_session_admin::maybe_handle_session_admin_command;
 use super::debug_swarm_read::maybe_handle_swarm_read_command;
 use super::debug_swarm_write::maybe_handle_swarm_write_command;
 use super::debug_testers::execute_tester_command;
 use super::{
-    broadcast_swarm_status, create_headless_session, debug_control_allowed, record_swarm_event,
-    FileAccess, ServerIdentity, SharedContext, SwarmEvent, SwarmEventType, SwarmMember,
+    debug_control_allowed, FileAccess, ServerIdentity, SharedContext, SwarmEvent, SwarmMember,
     VersionedPlan,
 };
 use crate::agent::Agent;
@@ -1205,121 +1205,23 @@ pub(super) async fn handle_debug_client(
                         // Server commands (default)
                         if let Some(output) = maybe_handle_job_command(cmd, &debug_jobs).await? {
                             Ok(output)
-                        } else if cmd == "create_session" || cmd.starts_with("create_session:") {
-                            create_headless_session(
-                                &sessions,
-                                &session_id,
-                                &provider,
-                                cmd,
-                                &swarm_members,
-                                &swarms_by_id,
-                                &swarm_coordinators,
-                                &swarm_plans,
-                                None,
-                                mcp_pool.clone(),
-                            )
-                            .await
-                        } else if cmd.starts_with("destroy_session:") {
-                            let target_id =
-                                cmd.strip_prefix("destroy_session:").unwrap_or("").trim();
-                            if target_id.is_empty() {
-                                Err(anyhow::anyhow!("destroy_session: requires a session_id"))
-                            } else {
-                                // Remove session first, extract transcript for final memory extraction
-                                let removed_agent = {
-                                    let mut sessions_guard = sessions.write().await;
-                                    sessions_guard.remove(target_id)
-                                };
-                                if let Some(ref agent_arc) = removed_agent {
-                                    let agent = agent_arc.lock().await;
-                                    let memory_enabled = agent.memory_enabled();
-                                    let transcript = if memory_enabled {
-                                        Some(agent.build_transcript_for_extraction())
-                                    } else {
-                                        None
-                                    };
-                                    let sid = target_id.to_string();
-                                    drop(agent);
-                                    if let Some(transcript) = transcript {
-                                        crate::memory_agent::trigger_final_extraction(
-                                            transcript, sid,
-                                        );
-                                    }
-                                }
-                                let removed = removed_agent.is_some();
-                                if removed {
-                                    // Clean up swarm membership
-                                    let (swarm_id, friendly_name) = {
-                                        let mut members = swarm_members.write().await;
-                                        let info = members
-                                            .remove(target_id)
-                                            .map(|m| (m.swarm_id, m.friendly_name));
-                                        info.map(|(sid, name)| (sid, name)).unwrap_or((None, None))
-                                    };
-                                    if let Some(ref id) = swarm_id {
-                                        // Fire status change event before removing from swarm
-                                        record_swarm_event(
-                                            &event_history,
-                                            &event_counter,
-                                            &swarm_event_tx,
-                                            target_id.to_string(),
-                                            friendly_name.clone(),
-                                            Some(id.clone()),
-                                            SwarmEventType::StatusChange {
-                                                old_status: "ready".to_string(),
-                                                new_status: "stopped".to_string(),
-                                            },
-                                        )
-                                        .await;
-                                        record_swarm_event(
-                                            &event_history,
-                                            &event_counter,
-                                            &swarm_event_tx,
-                                            target_id.to_string(),
-                                            friendly_name,
-                                            Some(id.clone()),
-                                            SwarmEventType::MemberChange {
-                                                action: "left".to_string(),
-                                            },
-                                        )
-                                        .await;
-                                        // Remove from swarm (scoped to drop write guard)
-                                        {
-                                            let mut swarms = swarms_by_id.write().await;
-                                            if let Some(swarm) = swarms.get_mut(id) {
-                                                swarm.remove(target_id);
-                                                if swarm.is_empty() {
-                                                    swarms.remove(id);
-                                                }
-                                            }
-                                        }
-                                        // Handle coordinator change if needed
-                                        let was_coordinator = {
-                                            let coordinators = swarm_coordinators.read().await;
-                                            coordinators
-                                                .get(id)
-                                                .map(|c| c == target_id)
-                                                .unwrap_or(false)
-                                        };
-                                        if was_coordinator {
-                                            let new_coordinator = {
-                                                let swarms = swarms_by_id.read().await;
-                                                swarms.get(id).and_then(|s| s.iter().min().cloned())
-                                            };
-                                            let mut coordinators = swarm_coordinators.write().await;
-                                            coordinators.remove(id);
-                                            if let Some(new_id) = new_coordinator {
-                                                coordinators.insert(id.clone(), new_id);
-                                            }
-                                        }
-                                        broadcast_swarm_status(id, &swarm_members, &swarms_by_id)
-                                            .await;
-                                    }
-                                    Ok(format!("Session '{}' destroyed", target_id))
-                                } else {
-                                    Err(anyhow::anyhow!("Unknown session_id '{}'", target_id))
-                                }
-                            }
+                        } else if let Some(output) = maybe_handle_session_admin_command(
+                            cmd,
+                            &sessions,
+                            &session_id,
+                            &provider,
+                            &swarm_members,
+                            &swarms_by_id,
+                            &swarm_coordinators,
+                            &swarm_plans,
+                            &event_history,
+                            &event_counter,
+                            &swarm_event_tx,
+                            mcp_pool.clone(),
+                        )
+                        .await?
+                        {
+                            Ok(output)
                         } else if let Some(output) = maybe_handle_server_state_command(
                             cmd,
                             &sessions,
