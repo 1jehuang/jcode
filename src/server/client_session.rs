@@ -1,6 +1,7 @@
+use super::client_state::send_history;
 use super::reload::{do_server_reload_with_progress, normalize_model_arg, provider_cli_arg};
 use super::{
-    broadcast_swarm_status, is_jcode_repo_or_parent, remove_plan_participant,
+    broadcast_swarm_status, is_jcode_repo_or_parent, is_selfdev_env, remove_plan_participant,
     rename_plan_participant, socket_path, swarm_id_for_dir, update_member_status,
     ClientConnectionInfo, SwarmEvent, SwarmMember, VersionedPlan,
 };
@@ -8,6 +9,8 @@ use crate::agent::Agent;
 use crate::protocol::{NotificationType, ServerEvent};
 use crate::provider::Provider;
 use crate::tool::Registry;
+use crate::transport::WriteHalf;
+use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -306,4 +309,185 @@ pub(super) async fn handle_reload(
     });
 
     let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn handle_resume_session(
+    id: u64,
+    session_id: String,
+    client_selfdev: &mut bool,
+    client_session_id: &mut String,
+    client_connection_id: &str,
+    agent: &Arc<Mutex<Agent>>,
+    provider: &Arc<dyn Provider>,
+    registry: &Registry,
+    sessions: &Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
+    swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
+    client_count: &Arc<RwLock<usize>>,
+    writer: &Arc<Mutex<WriteHalf>>,
+    server_name: &str,
+    server_icon: &str,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    mcp_pool: &Arc<crate::mcp::SharedMcpPool>,
+    event_history: &Arc<RwLock<Vec<SwarmEvent>>>,
+    event_counter: &Arc<std::sync::atomic::AtomicU64>,
+    swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+) -> Result<()> {
+    {
+        let mut agent_guard = agent.lock().await;
+        agent_guard.mark_closed();
+    }
+
+    let (result, is_canary) = {
+        let mut agent_guard = agent.lock().await;
+        let result = agent_guard.restore_session(&session_id);
+        if *client_selfdev || is_selfdev_env() {
+            agent_guard.set_canary("self-dev");
+        }
+        let is_canary = agent_guard.is_canary();
+        (result, is_canary)
+    };
+
+    let was_interrupted = match &result {
+        Ok(status) => match status {
+            crate::session::SessionStatus::Crashed { .. } => true,
+            crate::session::SessionStatus::Active => {
+                let agent_guard = agent.lock().await;
+                let last_role = agent_guard.last_message_role();
+                let last_is_user = last_role
+                    .as_ref()
+                    .map(|role| *role == crate::message::Role::User)
+                    .unwrap_or(false);
+                let last_is_reload_interrupted = last_role
+                    .as_ref()
+                    .map(|role| *role == crate::message::Role::Assistant)
+                    .unwrap_or(false)
+                    && agent_guard
+                        .last_message_text()
+                        .map(|text| text.ends_with("[generation interrupted - server reloading]"))
+                        .unwrap_or(false);
+                if last_is_user {
+                    crate::logging::info(&format!(
+                        "Session {} was Active with pending user message - treating as interrupted",
+                        session_id
+                    ));
+                }
+                if last_is_reload_interrupted {
+                    crate::logging::info(&format!(
+                        "Session {} was interrupted by reload - will auto-resume",
+                        session_id
+                    ));
+                }
+                last_is_user || last_is_reload_interrupted
+            }
+            _ => false,
+        },
+        Err(_) => false,
+    };
+
+    if result.is_ok() && is_canary {
+        *client_selfdev = true;
+        registry.register_selfdev_tools().await;
+    }
+
+    if result.is_ok() {
+        registry
+            .register_mcp_tools(
+                Some(client_event_tx.clone()),
+                Some(Arc::clone(mcp_pool)),
+                Some(client_session_id.clone()),
+            )
+            .await;
+    }
+
+    match result {
+        Ok(_prev_status) => {
+            let old_session_id = client_session_id.clone();
+            *client_session_id = session_id.clone();
+
+            {
+                let mut sessions_guard = sessions.write().await;
+                sessions_guard.remove(&old_session_id);
+                sessions_guard.insert(session_id.clone(), Arc::clone(agent));
+            }
+            {
+                let mut connections = client_connections.write().await;
+                if let Some(info) = connections.get_mut(client_connection_id) {
+                    info.session_id = session_id.clone();
+                    info.last_seen = Instant::now();
+                }
+            }
+
+            {
+                let mut members = swarm_members.write().await;
+                if let Some(mut member) = members.remove(&old_session_id) {
+                    if let Some(ref swarm_id) = member.swarm_id {
+                        let mut swarms = swarms_by_id.write().await;
+                        if let Some(swarm) = swarms.get_mut(swarm_id) {
+                            swarm.remove(&old_session_id);
+                            swarm.insert(session_id.clone());
+                        }
+                    }
+                    member.session_id = session_id.clone();
+                    member.status = "ready".to_string();
+                    member.detail = None;
+                    members.insert(session_id.clone(), member);
+                }
+            }
+            {
+                let mut coordinators = swarm_coordinators.write().await;
+                for coordinator in coordinators.values_mut() {
+                    if *coordinator == old_session_id {
+                        *coordinator = session_id.clone();
+                    }
+                }
+            }
+            update_member_status(
+                &session_id,
+                "ready",
+                None,
+                swarm_members,
+                swarms_by_id,
+                Some(event_history),
+                Some(event_counter),
+                Some(swarm_event_tx),
+            )
+            .await;
+            if let Some(swarm_id) = {
+                let members = swarm_members.read().await;
+                members
+                    .get(&session_id)
+                    .and_then(|member| member.swarm_id.clone())
+            } {
+                rename_plan_participant(&swarm_id, &old_session_id, &session_id, swarm_plans).await;
+            }
+
+            let _ = provider.prefetch_models().await;
+            send_history(
+                id,
+                &session_id,
+                agent,
+                sessions,
+                client_count,
+                writer,
+                server_name,
+                server_icon,
+                if was_interrupted { Some(true) } else { None },
+            )
+            .await?;
+        }
+        Err(error) => {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: format!("Failed to restore session: {}", error),
+                retry_after_secs: None,
+            });
+        }
+    }
+
+    Ok(())
 }

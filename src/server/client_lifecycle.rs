@@ -5,8 +5,10 @@ use super::client_comm::{
     handle_comm_list, handle_comm_message, handle_comm_read, handle_comm_share,
     handle_comm_subscribe_channel, handle_comm_unsubscribe_channel,
 };
-use super::client_session::{handle_clear_session, handle_reload, handle_subscribe};
-use super::client_state::{handle_get_history, handle_get_state, send_history};
+use super::client_session::{
+    handle_clear_session, handle_reload, handle_resume_session, handle_subscribe,
+};
+use super::client_state::{handle_get_history, handle_get_state};
 use super::comm_control::{
     handle_client_debug_command, handle_client_debug_response, handle_comm_assign_role,
     handle_comm_assign_task, handle_comm_await_members,
@@ -21,10 +23,9 @@ use super::provider_control::{
     handle_switch_anthropic_account,
 };
 use super::{
-    broadcast_swarm_status, is_selfdev_env, record_swarm_event, remove_session_from_swarm,
-    rename_plan_participant, swarm_id_for_dir, truncate_detail, update_member_status,
-    ClientConnectionInfo, ClientDebugState, FileAccess, SharedContext, SwarmEvent, SwarmEventType,
-    SwarmMember, VersionedPlan,
+    broadcast_swarm_status, record_swarm_event, remove_session_from_swarm, swarm_id_for_dir,
+    truncate_detail, update_member_status, ClientConnectionInfo, ClientDebugState, FileAccess,
+    SharedContext, SwarmEvent, SwarmEventType, SwarmMember, VersionedPlan,
 };
 use crate::agent::{Agent, StreamError};
 use crate::bus::{Bus, BusEvent};
@@ -737,170 +738,35 @@ pub(super) async fn handle_client(
             }
 
             Request::ResumeSession { id, session_id } => {
-                // Mark the current session as closed before switching
+                if handle_resume_session(
+                    id,
+                    session_id,
+                    &mut client_selfdev,
+                    &mut client_session_id,
+                    &client_connection_id,
+                    &agent,
+                    &provider,
+                    &registry,
+                    &sessions,
+                    &client_connections,
+                    &swarm_members,
+                    &swarms_by_id,
+                    &swarm_plans,
+                    &swarm_coordinators,
+                    &client_count,
+                    &writer,
+                    &server_name,
+                    &server_icon,
+                    &client_event_tx,
+                    &mcp_pool,
+                    &event_history,
+                    &event_counter,
+                    &swarm_event_tx,
+                )
+                .await
+                .is_err()
                 {
-                    let mut agent_guard = agent.lock().await;
-                    agent_guard.mark_closed();
-                }
-
-                // Load the specified session into this client's agent
-                let (result, is_canary) = {
-                    let mut agent_guard = agent.lock().await;
-                    let result = agent_guard.restore_session(&session_id);
-                    if client_selfdev || is_selfdev_env() {
-                        agent_guard.set_canary("self-dev");
-                    }
-                    let is_canary = agent_guard.is_canary();
-                    (result, is_canary)
-                };
-
-                let was_interrupted = match &result {
-                    Ok(status) => match status {
-                        crate::session::SessionStatus::Crashed { .. } => true,
-                        crate::session::SessionStatus::Active => {
-                            let agent_guard = agent.lock().await;
-                            let last_role = agent_guard.last_message_role();
-                            let last_is_user = last_role
-                                .as_ref()
-                                .map(|r| *r == crate::message::Role::User)
-                                .unwrap_or(false);
-                            let last_is_reload_interrupted = last_role
-                                .as_ref()
-                                .map(|r| *r == crate::message::Role::Assistant)
-                                .unwrap_or(false)
-                                && agent_guard
-                                    .last_message_text()
-                                    .map(|t| {
-                                        t.ends_with("[generation interrupted - server reloading]")
-                                    })
-                                    .unwrap_or(false);
-                            if last_is_user {
-                                crate::logging::info(&format!(
-                                        "Session {} was Active with pending user message - treating as interrupted",
-                                        session_id
-                                    ));
-                            }
-                            if last_is_reload_interrupted {
-                                crate::logging::info(&format!(
-                                    "Session {} was interrupted by reload - will auto-resume",
-                                    session_id
-                                ));
-                            }
-                            last_is_user || last_is_reload_interrupted
-                        }
-                        _ => false,
-                    },
-                    Err(_) => false,
-                };
-
-                if result.is_ok() && is_canary {
-                    client_selfdev = true;
-                    registry.register_selfdev_tools().await;
-                }
-
-                // Register MCP tools for resumed sessions
-                if result.is_ok() {
-                    registry
-                        .register_mcp_tools(
-                            Some(client_event_tx.clone()),
-                            Some(Arc::clone(&mcp_pool)),
-                            Some(client_session_id.clone()),
-                        )
-                        .await;
-                }
-
-                match result {
-                    Ok(_prev_status) => {
-                        // Update client_session_id to match the restored session
-                        let old_session_id = client_session_id.clone();
-                        client_session_id = session_id.clone();
-
-                        {
-                            let mut sessions_guard = sessions.write().await;
-                            sessions_guard.remove(&old_session_id);
-                            sessions_guard.insert(session_id.clone(), Arc::clone(&agent));
-                        }
-                        {
-                            let mut connections = client_connections.write().await;
-                            if let Some(info) = connections.get_mut(&client_connection_id) {
-                                info.session_id = session_id.clone();
-                                info.last_seen = Instant::now();
-                            }
-                        }
-
-                        {
-                            let mut members = swarm_members.write().await;
-                            if let Some(mut member) = members.remove(&old_session_id) {
-                                if let Some(ref swarm_id) = member.swarm_id {
-                                    let mut swarms = swarms_by_id.write().await;
-                                    if let Some(swarm) = swarms.get_mut(swarm_id) {
-                                        swarm.remove(&old_session_id);
-                                        swarm.insert(session_id.clone());
-                                    }
-                                }
-                                member.session_id = session_id.clone();
-                                member.status = "ready".to_string();
-                                member.detail = None;
-                                members.insert(session_id.clone(), member);
-                            }
-                        }
-                        {
-                            let mut coordinators = swarm_coordinators.write().await;
-                            for coord in coordinators.values_mut() {
-                                if *coord == old_session_id {
-                                    *coord = session_id.clone();
-                                }
-                            }
-                        }
-                        update_member_status(
-                            &session_id,
-                            "ready",
-                            None,
-                            &swarm_members,
-                            &swarms_by_id,
-                            Some(&event_history),
-                            Some(&event_counter),
-                            Some(&swarm_event_tx),
-                        )
-                        .await;
-                        if let Some(swarm_id) = {
-                            let members = swarm_members.read().await;
-                            members.get(&session_id).and_then(|m| m.swarm_id.clone())
-                        } {
-                            rename_plan_participant(
-                                &swarm_id,
-                                &old_session_id,
-                                &session_id,
-                                &swarm_plans,
-                            )
-                            .await;
-                        }
-
-                        let _ = provider.prefetch_models().await;
-                        if send_history(
-                            id,
-                            &session_id,
-                            &agent,
-                            &sessions,
-                            &client_count,
-                            &writer,
-                            &server_name,
-                            &server_icon,
-                            if was_interrupted { Some(true) } else { None },
-                        )
-                        .await
-                        .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = client_event_tx.send(ServerEvent::Error {
-                            id,
-                            message: format!("Failed to restore session: {}", e),
-                            retry_after_secs: None,
-                        });
-                    }
+                    break;
                 }
             }
 
