@@ -1,6 +1,8 @@
 #![allow(unused_assignments)]
 #![allow(unused_assignments)]
 
+mod prompt_support;
+
 use crate::build;
 use crate::bus::{Bus, BusEvent, SubagentStatus, ToolEvent, ToolStatus};
 use crate::cache_tracker::CacheTracker;
@@ -1342,107 +1344,6 @@ impl Agent {
     fn unlock_tools_if_needed(&mut self, tool_name: &str) {
         if tool_name == "mcp" {
             self.unlock_tools();
-        }
-    }
-
-    /// Build the system prompt, including skill, memory, self-dev context, and CLAUDE.md files
-    fn build_system_prompt(&self, memory_prompt: Option<&str>) -> String {
-        let split = self.build_system_prompt_split(memory_prompt);
-        if split.dynamic_part.is_empty() {
-            split.static_part
-        } else if split.static_part.is_empty() {
-            split.dynamic_part
-        } else {
-            format!("{}\n\n{}", split.static_part, split.dynamic_part)
-        }
-    }
-
-    /// Build split system prompt for better caching
-    /// Returns static (cacheable) and dynamic (not cached) parts separately
-    fn build_system_prompt_split(
-        &self,
-        memory_prompt: Option<&str>,
-    ) -> crate::prompt::SplitSystemPrompt {
-        // If there's a system prompt override (e.g., ambient mode), use it directly
-        if let Some(ref override_prompt) = self.system_prompt_override {
-            return crate::prompt::SplitSystemPrompt {
-                static_part: override_prompt.clone(),
-                dynamic_part: String::new(),
-            };
-        }
-
-        // Get skill prompt if active
-        let skill_prompt = self
-            .active_skill
-            .as_ref()
-            .and_then(|name| self.skills.get(name).map(|s| s.get_prompt().to_string()));
-
-        // Build list of available skills for prompt
-        let available_skills: Vec<crate::prompt::SkillInfo> = self
-            .skills
-            .list()
-            .iter()
-            .map(|s| crate::prompt::SkillInfo {
-                name: s.name.clone(),
-                description: s.description.clone(),
-            })
-            .collect();
-
-        // Get working directory from session for context loading
-        let working_dir = self
-            .session
-            .working_dir
-            .as_ref()
-            .map(|s| std::path::PathBuf::from(s));
-
-        // Use split prompt builder for better cache efficiency
-        let (split, _context_info) = crate::prompt::build_system_prompt_split(
-            skill_prompt.as_deref(),
-            &available_skills,
-            self.session.is_canary,
-            memory_prompt,
-            working_dir.as_deref(),
-        );
-
-        split
-    }
-
-    /// Non-blocking memory prompt - takes pending result and spawns check for next turn
-    fn build_memory_prompt_nonblocking(
-        &self,
-        messages: &[Message],
-    ) -> Option<crate::memory::PendingMemory> {
-        if !self.memory_enabled {
-            return None;
-        }
-
-        let sid = &self.session.id;
-
-        // Take pending memory if available (computed in background during last turn)
-        let pending = crate::memory::take_pending_memory(sid);
-
-        // Spawn a background check for the NEXT turn (doesn't block current send)
-        let manager = crate::memory::MemoryManager::new();
-        manager.spawn_relevance_check(sid, messages.to_vec());
-
-        // Send context to memory agent for incremental extraction
-        // (topic change detection and periodic extraction every N turns)
-        crate::memory_agent::update_context_sync(sid, messages.to_vec());
-
-        // Return pending memory from previous turn
-        pending
-    }
-
-    /// Legacy blocking memory prompt - kept for fallback
-    #[allow(dead_code)]
-    async fn build_memory_prompt(&self, messages: &[Message]) -> Option<String> {
-        let manager = crate::memory::MemoryManager::new();
-        match manager.relevant_prompt_for_messages(messages).await {
-            Ok(prompt) => prompt,
-            Err(e) => {
-                logging::info(&format!("Memory relevance skipped: {}", e));
-                None
-            }
         }
     }
 
