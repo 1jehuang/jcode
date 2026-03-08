@@ -4,6 +4,7 @@ mod client_comm;
 mod client_lifecycle;
 mod debug;
 mod headless;
+mod provider_control;
 mod reload;
 mod swarm;
 
