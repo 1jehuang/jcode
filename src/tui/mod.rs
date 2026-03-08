@@ -17,6 +17,7 @@ pub mod session_picker;
 mod stream_buffer;
 pub mod test_harness;
 mod ui;
+mod ui_diff;
 pub mod visual_debug;
 
 pub use app::{App, DisplayMessage, ProcessingStatus, RunResult};
