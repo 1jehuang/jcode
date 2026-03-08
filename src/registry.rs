@@ -71,10 +71,12 @@ impl ServerRegistry {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
+            crate::platform::set_directory_permissions_owner_only(parent)?;
         }
 
         let content = serde_json::to_string_pretty(self)?;
         fs::write(&path, content).await?;
+        crate::platform::set_permissions_owner_only(&path)?;
         Ok(())
     }
 

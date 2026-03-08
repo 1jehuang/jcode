@@ -8,10 +8,11 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-const DEFAULT_MODEL: &str = "gpt-5";
+const DEFAULT_MODEL: &str = "gpt-5.4";
 const AVAILABLE_MODELS: &[&str] = &[
     "composer-1",
     "composer-1.5",
+    "gpt-5.4",
     "gpt-5",
     "sonnet-4-6",
     "sonnet-4-6-thinking",
