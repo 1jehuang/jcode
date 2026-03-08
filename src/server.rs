@@ -9,6 +9,7 @@ mod comm_plan;
 mod comm_session;
 mod comm_sync;
 mod debug;
+mod debug_testers;
 mod headless;
 mod provider_control;
 mod reload;
