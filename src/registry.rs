@@ -71,12 +71,24 @@ impl ServerRegistry {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
-            crate::platform::set_directory_permissions_owner_only(parent)?;
+            if let Err(e) = crate::platform::set_directory_permissions_owner_only(parent) {
+                crate::logging::info(&format!(
+                    "Registry save: failed to harden directory permissions for {}: {}",
+                    parent.display(),
+                    e
+                ));
+            }
         }
 
         let content = serde_json::to_string_pretty(self)?;
         fs::write(&path, content).await?;
-        crate::platform::set_permissions_owner_only(&path)?;
+        if let Err(e) = crate::platform::set_permissions_owner_only(&path) {
+            crate::logging::info(&format!(
+                "Registry save: failed to harden file permissions for {}: {}",
+                path.display(),
+                e
+            ));
+        }
         Ok(())
     }
 
