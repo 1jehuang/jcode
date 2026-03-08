@@ -1,5 +1,9 @@
 use super::{Tool, ToolContext, ToolOutput};
 use crate::plan::PlanItem;
+use crate::protocol::{
+    AgentInfo, AwaitedMemberStatus, ContextEntry, HistoryMessage, Request, ServerEvent,
+    ToolCallSummary,
+};
 use crate::transport::SyncStream;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -7,27 +11,29 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 
+const REQUEST_ID: u64 = 1;
+
 fn socket_path() -> std::path::PathBuf {
     crate::storage::runtime_dir().join("jcode.sock")
 }
 
-fn send_request(request: &Value) -> Result<Value> {
+fn send_request(request: Request) -> Result<ServerEvent> {
     send_request_with_timeout(request, None)
 }
 
 fn send_request_with_timeout(
-    request: &Value,
+    request: Request,
     timeout: Option<std::time::Duration>,
-) -> Result<Value> {
+) -> Result<ServerEvent> {
     let path = socket_path();
     let mut stream = SyncStream::connect(&path)?;
 
     let read_timeout = timeout.unwrap_or(std::time::Duration::from_secs(30));
     stream.set_read_timeout(Some(read_timeout))?;
 
-    let request_id = request.get("id").and_then(|v| v.as_u64()).unwrap_or(1);
+    let request_id = request.id();
 
-    let json = serde_json::to_string(request)? + "\n";
+    let json = serde_json::to_string(&request)? + "\n";
     stream.write_all(json.as_bytes())?;
 
     let mut reader = BufReader::new(stream);
@@ -41,7 +47,9 @@ fn send_request_with_timeout(
         line.clear();
         let n = reader.read_line(&mut line)?;
         if n == 0 {
-            return Err(anyhow::anyhow!("Connection closed before receiving response"));
+            return Err(anyhow::anyhow!(
+                "Connection closed before receiving response"
+            ));
         }
 
         let value: Value = serde_json::from_str(line.trim())?;
@@ -53,12 +61,28 @@ fn send_request_with_timeout(
             // Skip ack — not a response
             "ack" => continue,
             // Skip broadcast/async events that are not tied to our request
-            "swarm_status" | "swarm_plan" | "swarm_event" | "notification"
-            | "soft_interrupt_injected" | "session_id" | "history" => continue,
+            "swarm_status"
+            | "swarm_plan"
+            | "swarm_plan_proposal"
+            | "swarm_event"
+            | "notification"
+            | "soft_interrupt_injected"
+            | "session"
+            | "session_id"
+            | "history"
+            | "mcp_status"
+            | "memory_injected"
+            | "compaction"
+            | "connection_type"
+            | "connection_phase"
+            | "upstream_provider"
+            | "reloading"
+            | "reload_progress"
+            | "interrupted" => continue,
             // Terminal responses: match on our request id if present
             "done" | "error" => {
                 if event_id == Some(request_id) || event_id.is_none() {
-                    return Ok(value);
+                    return Ok(serde_json::from_value(value)?);
                 }
                 // Wrong id — skip
                 continue;
@@ -66,7 +90,7 @@ fn send_request_with_timeout(
             // All other typed responses (comm_spawn_response, etc.) — return them
             _ => {
                 if event_id == Some(request_id) || event_id.is_none() {
-                    return Ok(value);
+                    return Ok(serde_json::from_value(value)?);
                 }
                 continue;
             }
@@ -74,15 +98,127 @@ fn send_request_with_timeout(
     }
 }
 
-fn check_error(response: &Value) -> Option<String> {
-    if response.get("type").and_then(|t| t.as_str()) == Some("error") {
-        response
-            .get("message")
-            .and_then(|m| m.as_str())
-            .map(|s| s.to_string())
+fn check_error(response: &ServerEvent) -> Option<&str> {
+    if let ServerEvent::Error { message, .. } = response {
+        Some(message)
     } else {
         None
     }
+}
+
+fn ensure_success(response: &ServerEvent) -> Result<()> {
+    if let Some(message) = check_error(response) {
+        Err(anyhow::anyhow!(message.to_string()))
+    } else {
+        Ok(())
+    }
+}
+
+fn format_context_entries(entries: &[ContextEntry]) -> ToolOutput {
+    if entries.is_empty() {
+        ToolOutput::new("No shared context found.")
+    } else {
+        let mut output = String::from("Shared context from other agents:\n\n");
+        for entry in entries {
+            let from = entry.from_name.as_deref().unwrap_or(&entry.from_session);
+            output.push_str(&format!(
+                "  {} (from {}): {}\n",
+                entry.key, from, entry.value
+            ));
+        }
+        ToolOutput::new(output)
+    }
+}
+
+fn format_members(ctx: &ToolContext, members: &[AgentInfo]) -> ToolOutput {
+    if members.is_empty() {
+        ToolOutput::new("No other agents in this codebase.")
+    } else {
+        let mut output = String::from("Agents in this codebase:\n\n");
+        for member in members {
+            let name = member.friendly_name.as_deref().unwrap_or("unknown");
+            let session = &member.session_id;
+            let role = member.role.as_deref().unwrap_or("agent");
+            let files = member.files_touched.join(", ");
+            let is_me = session == &ctx.session_id;
+            let role_label = if role != "agent" {
+                format!(" [{}]", role)
+            } else {
+                String::new()
+            };
+            output.push_str(&format!(
+                "  {}{} ({}){}\n",
+                name,
+                role_label,
+                if is_me { "you" } else { session },
+                if files.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n    Files: {}", files)
+                }
+            ));
+        }
+        ToolOutput::new(output)
+    }
+}
+
+fn format_tool_summary(target: &str, calls: &[ToolCallSummary]) -> ToolOutput {
+    if calls.is_empty() {
+        ToolOutput::new(format!("No tool calls found for {}", target))
+    } else {
+        let mut output = format!("Tool call summary for {}:\n\n", target);
+        for call in calls {
+            output.push_str(&format!("  {} — {}\n", call.tool_name, call.brief_output));
+        }
+        ToolOutput::new(output)
+    }
+}
+
+fn format_context_history(target: &str, messages: &[HistoryMessage]) -> ToolOutput {
+    if messages.is_empty() {
+        ToolOutput::new(format!("No conversation history for {}", target))
+    } else {
+        let mut output = format!(
+            "Conversation context for {} ({} messages):\n\n",
+            target,
+            messages.len()
+        );
+        for msg in messages {
+            let truncated = if msg.content.len() > 500 {
+                format!("{}...", &msg.content[..500])
+            } else {
+                msg.content.clone()
+            };
+            output.push_str(&format!("[{}] {}\n\n", msg.role, truncated));
+        }
+        ToolOutput::new(output)
+    }
+}
+
+fn format_awaited_members(
+    completed: bool,
+    summary: &str,
+    members: &[AwaitedMemberStatus],
+) -> ToolOutput {
+    let mut output = if completed {
+        format!("All members done. {}\n", summary)
+    } else {
+        format!("Await incomplete. {}\n", summary)
+    };
+
+    if !members.is_empty() {
+        output.push_str("\nMember statuses:\n");
+        for member in members {
+            let name = member
+                .friendly_name
+                .as_deref()
+                .unwrap_or(&member.session_id);
+            let icon = if member.done { "✓" } else { "✗" };
+            output.push_str(&format!("  {} {} ({})\n", icon, name, member.status));
+        }
+    }
+
+    ToolOutput::new(output)
 }
 
 pub struct CommunicateTool;
@@ -295,61 +431,37 @@ impl Tool for CommunicateTool {
                     .value
                     .ok_or_else(|| anyhow::anyhow!("'value' is required for share action"))?;
 
-                let request = json!({
-                    "type": "comm_share",
-                    "id": 1,
-                    "session_id": ctx.session_id,
-                    "key": key,
-                    "value": value
-                });
+                let request = Request::CommShare {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    key: key.clone(),
+                    value: value.clone(),
+                };
 
-                match send_request(&request) {
-                    Ok(_) => Ok(ToolOutput::new(format!(
-                        "Shared with other agents: {} = {}",
-                        key, value
-                    ))),
+                match send_request(request) {
+                    Ok(response) => {
+                        ensure_success(&response)?;
+                        Ok(ToolOutput::new(format!(
+                            "Shared with other agents: {} = {}",
+                            key, value
+                        )))
+                    }
                     Err(e) => Err(anyhow::anyhow!("Failed to share: {}", e)),
                 }
             }
 
             "read" => {
-                let request = json!({
-                    "type": "comm_read",
-                    "id": 1,
-                    "session_id": ctx.session_id,
-                    "key": params.key
-                });
+                let request = Request::CommRead {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    key: params.key.clone(),
+                };
 
-                match send_request(&request) {
+                match send_request(request) {
+                    Ok(ServerEvent::CommContext { entries, .. }) => Ok(format_context_entries(&entries)),
                     Ok(response) => {
-                        if let Some(entries) = response.get("entries").and_then(|e| e.as_array()) {
-                            if entries.is_empty() {
-                                Ok(ToolOutput::new("No shared context found."))
-                            } else {
-                                let mut output =
-                                    String::from("Shared context from other agents:\n\n");
-                                for entry in entries {
-                                    let key =
-                                        entry.get("key").and_then(|k| k.as_str()).unwrap_or("?");
-                                    let value =
-                                        entry.get("value").and_then(|v| v.as_str()).unwrap_or("?");
-                                    let from = entry
-                                        .get("from_name")
-                                        .and_then(|f| f.as_str())
-                                        .or_else(|| {
-                                            entry.get("from_session").and_then(|f| f.as_str())
-                                        })
-                                        .unwrap_or("unknown");
-                                    output.push_str(&format!(
-                                        "  {} (from {}): {}\n",
-                                        key, from, value
-                                    ));
-                                }
-                                Ok(ToolOutput::new(output))
-                            }
-                        } else {
-                            Ok(ToolOutput::new("No shared context found."))
-                        }
+                        ensure_success(&response)?;
+                        Ok(ToolOutput::new("No shared context found."))
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to read shared context: {}", e)),
                 }
@@ -360,18 +472,22 @@ impl Tool for CommunicateTool {
                     .message
                     .ok_or_else(|| anyhow::anyhow!("'message' is required for message action"))?;
 
-                let request = json!({
-                    "type": "comm_message",
-                    "id": 1,
-                    "from_session": ctx.session_id,
-                    "message": message
-                });
+                let request = Request::CommMessage {
+                    id: REQUEST_ID,
+                    from_session: ctx.session_id.clone(),
+                    message: message.clone(),
+                    to_session: None,
+                    channel: None,
+                };
 
-                match send_request(&request) {
-                    Ok(_) => Ok(ToolOutput::new(format!(
-                        "Message sent to other agents: {}",
-                        message
-                    ))),
+                match send_request(request) {
+                    Ok(response) => {
+                        ensure_success(&response)?;
+                        Ok(ToolOutput::new(format!(
+                            "Message sent to other agents: {}",
+                            message
+                        )))
+                    }
                     Err(e) => Err(anyhow::anyhow!("Failed to send message: {}", e)),
                 }
             }
@@ -384,19 +500,22 @@ impl Tool for CommunicateTool {
                     .to_session
                     .ok_or_else(|| anyhow::anyhow!("'to_session' is required for dm action"))?;
 
-                let request = json!({
-                    "type": "comm_message",
-                    "id": 1,
-                    "from_session": ctx.session_id,
-                    "message": message,
-                    "to_session": to_session
-                });
+                let request = Request::CommMessage {
+                    id: REQUEST_ID,
+                    from_session: ctx.session_id.clone(),
+                    message: message.clone(),
+                    to_session: Some(to_session.clone()),
+                    channel: None,
+                };
 
-                match send_request(&request) {
-                    Ok(_) => Ok(ToolOutput::new(format!(
-                        "Direct message sent to {}: {}",
-                        to_session, message
-                    ))),
+                match send_request(request) {
+                    Ok(response) => {
+                        ensure_success(&response)?;
+                        Ok(ToolOutput::new(format!(
+                            "Direct message sent to {}: {}",
+                            to_session, message
+                        )))
+                    }
                     Err(e) => Err(anyhow::anyhow!("Failed to send DM: {}", e)),
                 }
             }
@@ -409,84 +528,37 @@ impl Tool for CommunicateTool {
                     .channel
                     .ok_or_else(|| anyhow::anyhow!("'channel' is required for channel action"))?;
 
-                let request = json!({
-                    "type": "comm_message",
-                    "id": 1,
-                    "from_session": ctx.session_id,
-                    "message": message,
-                    "channel": channel
-                });
+                let request = Request::CommMessage {
+                    id: REQUEST_ID,
+                    from_session: ctx.session_id.clone(),
+                    message: message.clone(),
+                    to_session: None,
+                    channel: Some(channel.clone()),
+                };
 
-                match send_request(&request) {
-                    Ok(_) => Ok(ToolOutput::new(format!(
-                        "Channel message sent to #{}: {}",
-                        channel, message
-                    ))),
+                match send_request(request) {
+                    Ok(response) => {
+                        ensure_success(&response)?;
+                        Ok(ToolOutput::new(format!(
+                            "Channel message sent to #{}: {}",
+                            channel, message
+                        )))
+                    }
                     Err(e) => Err(anyhow::anyhow!("Failed to send channel message: {}", e)),
                 }
             }
 
             "list" => {
-                let request = json!({
-                    "type": "comm_list",
-                    "id": 1,
-                    "session_id": ctx.session_id
-                });
+                let request = Request::CommList {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                };
 
-                match send_request(&request) {
+                match send_request(request) {
+                    Ok(ServerEvent::CommMembers { members, .. }) => Ok(format_members(&ctx, &members)),
                     Ok(response) => {
-                        if let Some(members) = response.get("members").and_then(|m| m.as_array()) {
-                            if members.is_empty() {
-                                Ok(ToolOutput::new("No other agents in this codebase."))
-                            } else {
-                                let mut output = String::from("Agents in this codebase:\n\n");
-                                for member in members {
-                                    let name = member
-                                        .get("friendly_name")
-                                        .and_then(|n| n.as_str())
-                                        .unwrap_or("unknown");
-                                    let session = member
-                                        .get("session_id")
-                                        .and_then(|s| s.as_str())
-                                        .unwrap_or("?");
-                                    let role = member
-                                        .get("role")
-                                        .and_then(|r| r.as_str())
-                                        .unwrap_or("agent");
-                                    let files = member
-                                        .get("files_touched")
-                                        .and_then(|f| f.as_array())
-                                        .map(|arr| {
-                                            arr.iter()
-                                                .filter_map(|v| v.as_str())
-                                                .collect::<Vec<_>>()
-                                                .join(", ")
-                                        })
-                                        .unwrap_or_default();
-
-                                    let is_me = session == ctx.session_id;
-                                    let role_label = if role != "agent" {
-                                        format!(" [{}]", role)
-                                    } else {
-                                        String::new()
-                                    };
-                                    output.push_str(&format!(
-                                        "  {}{} ({}){}\n",
-                                        name,
-                                        role_label,
-                                        if is_me { "you" } else { session },
-                                        if files.is_empty() {
-                                            String::new()
-                                        } else {
-                                            format!("\n    Files: {}", files)
-                                        }
-                                    ));
-                                }
-                                Ok(ToolOutput::new(output))
-                            }
-                        } else {
-                            Ok(ToolOutput::new("No agents found."))
-                        }
+                        ensure_success(&response)?;
+                        Ok(ToolOutput::new("No agents found."))
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to list agents: {}", e)),
                 }
@@ -501,27 +573,20 @@ impl Tool for CommunicateTool {
                         "'plan_items' must include at least one item"
                     ));
                 }
-                let item_count = items.len();
+                let item_count = items.len() as u64;
 
-                let request = json!({
-                    "type": "comm_propose_plan",
-                    "id": 1,
-                    "session_id": ctx.session_id,
-                    "items": items
-                });
+                let request = Request::CommProposePlan {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    items,
+                };
 
-                match send_request(&request) {
+                match send_request(request) {
                     Ok(response) => {
-                        if let Some(err) = check_error(&response) {
-                            return Err(anyhow::anyhow!("{}", err));
-                        }
-                        let response_count = response
-                            .get("item_count")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(item_count as u64);
+                        ensure_success(&response)?;
                         Ok(ToolOutput::new(format!(
                             "Plan proposal submitted ({} items).",
-                            response_count
+                            item_count
                         )))
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to propose plan: {}", e)),
@@ -533,18 +598,15 @@ impl Tool for CommunicateTool {
                     anyhow::anyhow!("'proposer_session' is required for approve_plan action")
                 })?;
 
-                let request = json!({
-                    "type": "comm_approve_plan",
-                    "id": 1,
-                    "session_id": ctx.session_id,
-                    "proposer_session": proposer
-                });
+                let request = Request::CommApprovePlan {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    proposer_session: proposer.clone(),
+                };
 
-                match send_request(&request) {
+                match send_request(request) {
                     Ok(response) => {
-                        if let Some(err) = check_error(&response) {
-                            return Err(anyhow::anyhow!("{}", err));
-                        }
+                        ensure_success(&response)?;
                         Ok(ToolOutput::new(format!(
                             "Approved plan proposal from {}",
                             proposer
@@ -558,22 +620,19 @@ impl Tool for CommunicateTool {
                 let proposer = params.proposer_session.ok_or_else(|| {
                     anyhow::anyhow!("'proposer_session' is required for reject_plan action")
                 })?;
+                let reason = params.reason.clone();
 
-                let request = json!({
-                    "type": "comm_reject_plan",
-                    "id": 1,
-                    "session_id": ctx.session_id,
-                    "proposer_session": proposer,
-                    "reason": params.reason
-                });
+                let request = Request::CommRejectPlan {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    proposer_session: proposer.clone(),
+                    reason: reason.clone(),
+                };
 
-                match send_request(&request) {
+                match send_request(request) {
                     Ok(response) => {
-                        if let Some(err) = check_error(&response) {
-                            return Err(anyhow::anyhow!("{}", err));
-                        }
-                        let reason_msg = params
-                            .reason
+                        ensure_success(&response)?;
+                        let reason_msg = reason
                             .as_ref()
                             .map(|r| format!(" (reason: {})", r))
                             .unwrap_or_default();
@@ -587,31 +646,24 @@ impl Tool for CommunicateTool {
             }
 
             "spawn" => {
-                let request = json!({
-                    "type": "comm_spawn",
-                    "id": 1,
-                    "session_id": ctx.session_id,
-                    "working_dir": params.working_dir,
-                    "initial_message": params.initial_message
-                });
+                let request = Request::CommSpawn {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    working_dir: params.working_dir.clone(),
+                    initial_message: params.initial_message.clone(),
+                };
 
-                match send_request(&request) {
+                match send_request(request) {
+                    Ok(ServerEvent::CommSpawnResponse { new_session_id, .. })
+                        if !new_session_id.is_empty() =>
+                    {
+                        Ok(ToolOutput::new(format!("Spawned new agent: {}", new_session_id)))
+                    }
                     Ok(response) => {
-                        if let Some(err) = check_error(&response) {
-                            return Err(anyhow::anyhow!("{}", err));
-                        }
-                        let new_id = response
-                            .get("new_session_id")
-                            .and_then(|s| s.as_str())
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or("<unknown>");
-                        if new_id == "<unknown>" {
-                            return Err(anyhow::anyhow!(
-                                "Spawn succeeded but new session ID was not returned. Response: {}",
-                                response
-                            ));
-                        }
-                        Ok(ToolOutput::new(format!("Spawned new agent: {}", new_id)))
+                        ensure_success(&response)?;
+                        Err(anyhow::anyhow!(
+                            "Spawn succeeded but new session ID was not returned."
+                        ))
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to spawn agent: {}", e)),
                 }
@@ -622,18 +674,15 @@ impl Tool for CommunicateTool {
                     anyhow::anyhow!("'target_session' is required for stop action")
                 })?;
 
-                let request = json!({
-                    "type": "comm_stop",
-                    "id": 1,
-                    "session_id": ctx.session_id,
-                    "target_session": target
-                });
+                let request = Request::CommStop {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    target_session: target.clone(),
+                };
 
-                match send_request(&request) {
+                match send_request(request) {
                     Ok(response) => {
-                        if let Some(err) = check_error(&response) {
-                            return Err(anyhow::anyhow!("{}", err));
-                        }
+                        ensure_success(&response)?;
                         Ok(ToolOutput::new(format!("Stopped agent: {}", target)))
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to stop agent: {}", e)),
@@ -655,19 +704,16 @@ impl Tool for CommunicateTool {
                     target_raw
                 };
 
-                let request = json!({
-                    "type": "comm_assign_role",
-                    "id": 1,
-                    "session_id": ctx.session_id,
-                    "target_session": target,
-                    "role": role
-                });
+                let request = Request::CommAssignRole {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    target_session: target.clone(),
+                    role: role.clone(),
+                };
 
-                match send_request(&request) {
+                match send_request(request) {
                     Ok(response) => {
-                        if let Some(err) = check_error(&response) {
-                            return Err(anyhow::anyhow!("{}", err));
-                        }
+                        ensure_success(&response)?;
                         Ok(ToolOutput::new(format!(
                             "Assigned role '{}' to {}",
                             role, target
@@ -682,45 +728,20 @@ impl Tool for CommunicateTool {
                     anyhow::anyhow!("'target_session' is required for summary action")
                 })?;
 
-                let request = json!({
-                    "type": "comm_summary",
-                    "id": 1,
-                    "session_id": ctx.session_id,
-                    "target_session": target,
-                    "limit": params.limit
-                });
+                let request = Request::CommSummary {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    target_session: target.clone(),
+                    limit: params.limit,
+                };
 
-                match send_request(&request) {
+                match send_request(request) {
+                    Ok(ServerEvent::CommSummaryResponse { tool_calls, .. }) => {
+                        Ok(format_tool_summary(&target, &tool_calls))
+                    }
                     Ok(response) => {
-                        if let Some(err) = check_error(&response) {
-                            return Err(anyhow::anyhow!("{}", err));
-                        }
-                        if let Some(calls) =
-                            response.get("tool_calls").and_then(|t| t.as_array())
-                        {
-                            if calls.is_empty() {
-                                Ok(ToolOutput::new(format!(
-                                    "No tool calls found for {}",
-                                    target
-                                )))
-                            } else {
-                                let mut output = format!("Tool call summary for {}:\n\n", target);
-                                for call in calls {
-                                    let name = call
-                                        .get("tool_name")
-                                        .and_then(|n| n.as_str())
-                                        .unwrap_or("?");
-                                    let brief = call
-                                        .get("brief_output")
-                                        .and_then(|b| b.as_str())
-                                        .unwrap_or("");
-                                    output.push_str(&format!("  {} — {}\n", name, brief));
-                                }
-                                Ok(ToolOutput::new(output))
-                            }
-                        } else {
-                            Ok(ToolOutput::new("No tool call data returned."))
-                        }
+                        ensure_success(&response)?;
+                        Ok(ToolOutput::new("No tool call data returned."))
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to get summary: {}", e)),
                 }
@@ -731,68 +752,33 @@ impl Tool for CommunicateTool {
                     anyhow::anyhow!("'target_session' is required for read_context action")
                 })?;
 
-                let request = json!({
-                    "type": "comm_read_context",
-                    "id": 1,
-                    "session_id": ctx.session_id,
-                    "target_session": target
-                });
+                let request = Request::CommReadContext {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    target_session: target.clone(),
+                };
 
-                match send_request(&request) {
+                match send_request(request) {
+                    Ok(ServerEvent::CommContextHistory { messages, .. }) => {
+                        Ok(format_context_history(&target, &messages))
+                    }
                     Ok(response) => {
-                        if let Some(err) = check_error(&response) {
-                            return Err(anyhow::anyhow!("{}", err));
-                        }
-                        if let Some(messages) =
-                            response.get("messages").and_then(|m| m.as_array())
-                        {
-                            if messages.is_empty() {
-                                Ok(ToolOutput::new(format!(
-                                    "No conversation history for {}",
-                                    target
-                                )))
-                            } else {
-                                let mut output =
-                                    format!("Conversation context for {} ({} messages):\n\n", target, messages.len());
-                                for msg in messages {
-                                    let role = msg
-                                        .get("role")
-                                        .and_then(|r| r.as_str())
-                                        .unwrap_or("?");
-                                    let content = msg
-                                        .get("content")
-                                        .and_then(|c| c.as_str())
-                                        .unwrap_or("");
-                                    // Truncate long messages
-                                    let truncated = if content.len() > 500 {
-                                        format!("{}...", &content[..500])
-                                    } else {
-                                        content.to_string()
-                                    };
-                                    output.push_str(&format!("[{}] {}\n\n", role, truncated));
-                                }
-                                Ok(ToolOutput::new(output))
-                            }
-                        } else {
-                            Ok(ToolOutput::new("No context data returned."))
-                        }
+                        ensure_success(&response)?;
+                        Ok(ToolOutput::new("No context data returned."))
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to read context: {}", e)),
                 }
             }
 
             "resync_plan" => {
-                let request = json!({
-                    "type": "comm_resync_plan",
-                    "id": 1,
-                    "session_id": ctx.session_id
-                });
+                let request = Request::CommResyncPlan {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                };
 
-                match send_request(&request) {
+                match send_request(request) {
                     Ok(response) => {
-                        if let Some(err) = check_error(&response) {
-                            return Err(anyhow::anyhow!("{}", err));
-                        }
+                        ensure_success(&response)?;
                         Ok(ToolOutput::new("Swarm plan re-synced to your session."))
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to resync plan: {}", e)),
@@ -807,20 +793,17 @@ impl Tool for CommunicateTool {
                     anyhow::anyhow!("'task_id' is required for assign_task action")
                 })?;
 
-                let request = json!({
-                    "type": "comm_assign_task",
-                    "id": 1,
-                    "session_id": ctx.session_id,
-                    "target_session": target,
-                    "task_id": task_id,
-                    "message": params.message
-                });
+                let request = Request::CommAssignTask {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    target_session: target.clone(),
+                    task_id: task_id.clone(),
+                    message: params.message.clone(),
+                };
 
-                match send_request(&request) {
+                match send_request(request) {
                     Ok(response) => {
-                        if let Some(err) = check_error(&response) {
-                            return Err(anyhow::anyhow!("{}", err));
-                        }
+                        ensure_success(&response)?;
                         Ok(ToolOutput::new(format!(
                             "Task '{}' assigned to {}",
                             task_id, target
@@ -835,18 +818,15 @@ impl Tool for CommunicateTool {
                     anyhow::anyhow!("'channel' is required for subscribe_channel action")
                 })?;
 
-                let request = json!({
-                    "type": "comm_subscribe_channel",
-                    "id": 1,
-                    "session_id": ctx.session_id,
-                    "channel": channel
-                });
+                let request = Request::CommSubscribeChannel {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    channel: channel.clone(),
+                };
 
-                match send_request(&request) {
+                match send_request(request) {
                     Ok(response) => {
-                        if let Some(err) = check_error(&response) {
-                            return Err(anyhow::anyhow!("{}", err));
-                        }
+                        ensure_success(&response)?;
                         Ok(ToolOutput::new(format!("Subscribed to #{}", channel)))
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to subscribe: {}", e)),
@@ -858,18 +838,15 @@ impl Tool for CommunicateTool {
                     anyhow::anyhow!("'channel' is required for unsubscribe_channel action")
                 })?;
 
-                let request = json!({
-                    "type": "comm_unsubscribe_channel",
-                    "id": 1,
-                    "session_id": ctx.session_id,
-                    "channel": channel
-                });
+                let request = Request::CommUnsubscribeChannel {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    channel: channel.clone(),
+                };
 
-                match send_request(&request) {
+                match send_request(request) {
                     Ok(response) => {
-                        if let Some(err) = check_error(&response) {
-                            return Err(anyhow::anyhow!("{}", err));
-                        }
+                        ensure_success(&response)?;
                         Ok(ToolOutput::new(format!("Unsubscribed from #{}", channel)))
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to unsubscribe: {}", e)),
@@ -888,71 +865,26 @@ impl Tool for CommunicateTool {
                 let timeout_minutes = params.timeout_minutes.unwrap_or(60);
                 let timeout_secs = timeout_minutes * 60;
 
-                let request = json!({
-                    "type": "comm_await_members",
-                    "id": 1,
-                    "session_id": ctx.session_id,
-                    "target_status": target_status,
-                    "session_ids": session_ids,
-                    "timeout_secs": timeout_secs
-                });
+                let request = Request::CommAwaitMembers {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    target_status,
+                    session_ids,
+                    timeout_secs: Some(timeout_secs),
+                };
 
-                let socket_timeout =
-                    std::time::Duration::from_secs(timeout_secs + 30);
+                let socket_timeout = std::time::Duration::from_secs(timeout_secs + 30);
 
-                match send_request_with_timeout(&request, Some(socket_timeout)) {
+                match send_request_with_timeout(request, Some(socket_timeout)) {
+                    Ok(ServerEvent::CommAwaitMembersResponse {
+                        completed,
+                        members,
+                        summary,
+                        ..
+                    }) => Ok(format_awaited_members(completed, &summary, &members)),
                     Ok(response) => {
-                        if let Some(err) = check_error(&response) {
-                            return Err(anyhow::anyhow!("{}", err));
-                        }
-                        let completed = response
-                            .get("completed")
-                            .and_then(|c| c.as_bool())
-                            .unwrap_or(false);
-                        let summary = response
-                            .get("summary")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or("Unknown result")
-                            .to_string();
-
-                        let mut output = if completed {
-                            format!("All members done. {}\n", summary)
-                        } else {
-                            format!("Await incomplete. {}\n", summary)
-                        };
-
-                        if let Some(members) =
-                            response.get("members").and_then(|m| m.as_array())
-                        {
-                            output.push_str("\nMember statuses:\n");
-                            for member in members {
-                                let name = member
-                                    .get("friendly_name")
-                                    .and_then(|n| n.as_str())
-                                    .or_else(|| {
-                                        member
-                                            .get("session_id")
-                                            .and_then(|s| s.as_str())
-                                    })
-                                    .unwrap_or("?");
-                                let status = member
-                                    .get("status")
-                                    .and_then(|s| s.as_str())
-                                    .unwrap_or("?");
-                                let done = member
-                                    .get("done")
-                                    .and_then(|d| d.as_bool())
-                                    .unwrap_or(false);
-                                let icon = if done { "✓" } else { "✗" };
-                                output.push_str(&format!(
-                                    "  {} {} ({})",
-                                    icon, name, status
-                                ));
-                                output.push('\n');
-                            }
-                        }
-
-                        Ok(ToolOutput::new(output))
+                        ensure_success(&response)?;
+                        Ok(ToolOutput::new("Await completed."))
                     }
                     Err(e) => Err(anyhow::anyhow!(
                         "Failed to await members: {}",
