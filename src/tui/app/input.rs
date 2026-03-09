@@ -396,7 +396,14 @@ pub(super) fn handle_global_control_shortcuts(
 
     match code {
         KeyCode::Char('c') | KeyCode::Char('d') => {
-            app.handle_quit_request();
+            if app.is_processing {
+                app.cancel_requested = true;
+                app.interleave_message = None;
+                app.pending_soft_interrupts.clear();
+                app.set_status_notice("Interrupting...");
+            } else {
+                app.handle_quit_request();
+            }
             true
         }
         KeyCode::Char('r') => {
