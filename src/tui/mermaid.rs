@@ -1193,8 +1193,28 @@ fn infer_protocol_from_env(
     None
 }
 
+fn query_font_size() -> (u16, u16) {
+    match crossterm::terminal::window_size() {
+        Ok(ws) if ws.columns > 0 && ws.rows > 0 && ws.width > 0 && ws.height > 0 => {
+            let fw = ws.width / ws.columns;
+            let fh = ws.height / ws.rows;
+            if fw > 0 && fh > 0 {
+                crate::logging::info(&format!(
+                    "Detected terminal font size: {}x{} pixels/cell (window {}x{} px, {}x{} cells)",
+                    fw, fh, ws.width, ws.height, ws.columns, ws.rows
+                ));
+                (fw, fh)
+            } else {
+                DEFAULT_PICKER_FONT_SIZE
+            }
+        }
+        _ => DEFAULT_PICKER_FONT_SIZE,
+    }
+}
+
 fn fast_picker() -> Picker {
-    let mut picker = Picker::from_fontsize(DEFAULT_PICKER_FONT_SIZE);
+    let font_size = query_font_size();
+    let mut picker = Picker::from_fontsize(font_size);
     if let Some(protocol) = infer_protocol_from_env(
         std::env::var("TERM").ok().as_deref(),
         std::env::var("TERM_PROGRAM").ok().as_deref(),

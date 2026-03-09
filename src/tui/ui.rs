@@ -4106,4 +4106,94 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_hidpi_font_size_does_not_halve_diagram_width() {
+        const HIDPI_FONT: Option<(u16, u16)> = Some((15, 34));
+
+        let terminal_width: u16 = 95;
+        let terminal_height: u16 = 51;
+
+        let diagram = info_widget::DiagramInfo {
+            hash: 99,
+            width: 614,
+            height: 743,
+            label: None,
+        };
+
+        let min_diagram_width: u16 = 24;
+        let min_chat_width: u16 = 20;
+        let max_diagram = terminal_width.saturating_sub(min_chat_width);
+        let ratio: u32 = 40;
+        let ratio_cap = ((terminal_width as u32 * ratio) / 100) as u16;
+
+        let needed_hidpi = estimate_pinned_diagram_pane_width_with_font(
+            &diagram,
+            terminal_height,
+            min_diagram_width,
+            HIDPI_FONT,
+        );
+        let pane_width = needed_hidpi
+            .min(ratio_cap)
+            .max(min_diagram_width)
+            .min(max_diagram);
+
+        let inner = Rect {
+            x: terminal_width.saturating_sub(pane_width) + 1,
+            y: 1,
+            width: pane_width.saturating_sub(2),
+            height: terminal_height.saturating_sub(2),
+        };
+
+        let render_area =
+            vcenter_fitted_image_with_font(inner, diagram.width, diagram.height, HIDPI_FONT);
+
+        let w_util = render_area.width as f64 / inner.width as f64;
+        assert!(
+            w_util > 0.7,
+            "HiDPI (15x34 font): image should use >70% of pane width, got {:.0}% ({}/{}) \
+             pane_width={}, inner={}x{}, render={}x{}, img={}x{}",
+            w_util * 100.0,
+            render_area.width,
+            inner.width,
+            pane_width,
+            inner.width,
+            inner.height,
+            render_area.width,
+            render_area.height,
+            diagram.width,
+            diagram.height,
+        );
+
+        let render_default =
+            vcenter_fitted_image_with_font(inner, diagram.width, diagram.height, TEST_FONT);
+        let w_util_default = render_default.width as f64 / inner.width as f64;
+
+        assert!(
+            (w_util - w_util_default).abs() < 0.15 || w_util > 0.7,
+            "Font size should not drastically change width utilization. \
+             HiDPI={:.0}%, default={:.0}%",
+            w_util * 100.0,
+            w_util_default * 100.0,
+        );
+    }
+
+    #[test]
+    fn test_query_font_size_returns_valid_dimensions() {
+        let font = super::super::mermaid::get_font_size();
+        if let Some((w, h)) = font {
+            assert!(w > 0, "font width should be positive, got {}", w);
+            assert!(h > 0, "font height should be positive, got {}", h);
+            assert!(
+                w <= 100,
+                "font width should be reasonable, got {} (likely bogus)",
+                w
+            );
+            assert!(
+                h <= 200,
+                "font height should be reasonable, got {} (likely bogus)",
+                h
+            );
+        }
+    }
 }
