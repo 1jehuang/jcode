@@ -793,6 +793,7 @@ impl App {
                 finish the work, update the todo list to reflect what is done, or ask for user input if genuinely blocked."
             }
             "reload" => "`/reload`\nReload to a newer binary if one is available.",
+            "restart" => "`/restart`\nRestart jcode with the current binary. Session is preserved.\nUseful after config changes, MCP server updates, or env var changes.",
             "rebuild" => "`/rebuild`\nRun full update flow (git pull + cargo build + tests).",
             "split" => "`/split`\nSplit the current session into a new window. Clones the full conversation history so both sessions continue from the same point.",
             "resume" | "sessions" => "`/resume`\nOpen the interactive session picker. Browse and search all sessions, preview conversation history, and open any session in a new terminal window.\n\nPress `Esc` to return to your current session.",

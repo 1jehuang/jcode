@@ -104,6 +104,8 @@ pub struct RunResult {
     pub rebuild_session: Option<String>,
     /// Session ID to update (download from GitHub releases and reload)
     pub update_session: Option<String>,
+    /// Session ID to restart (exec into current binary, no build)
+    pub restart_session: Option<String>,
     /// Exit code to use (for canary wrapper communication)
     pub exit_code: Option<i32>,
     /// The session ID that was active (for resume hints on exit)
@@ -212,6 +214,8 @@ pub struct App {
     rebuild_requested: Option<String>,
     // Update: if set, check for and download update from GitHub releases then exec
     update_requested: Option<String>,
+    // Restart: if set, exec into current binary with this session ID (no build)
+    restart_requested: Option<String>,
     // Pasted content storage (displayed as placeholders, expanded on submit)
     pasted_contents: Vec<String>,
     // Pending pasted images (media_type, base64_data) attached to next message

@@ -162,6 +162,7 @@ impl App {
             reload_requested: None,
             rebuild_requested: None,
             update_requested: None,
+            restart_requested: None,
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
             debug_tx: None,
@@ -764,6 +765,25 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
         let _ = app.session.save();
         app.save_input_for_reload(&app.session.id.clone());
         app.reload_requested = Some(app.session.id.clone());
+        app.should_quit = true;
+        return true;
+    }
+
+    if trimmed == "/restart" {
+        app.push_display_message(DisplayMessage {
+            role: "system".to_string(),
+            content: "Restarting jcode (same binary, session preserved)...".to_string(),
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+        });
+        app.session.provider_session_id = app.provider_session_id.clone();
+        app.session
+            .set_status(crate::session::SessionStatus::Reloaded);
+        let _ = app.session.save();
+        app.save_input_for_reload(&app.session.id.clone());
+        app.restart_requested = Some(app.session.id.clone());
         app.should_quit = true;
         return true;
     }

@@ -255,6 +255,7 @@ impl App {
             ("/info".into(), "Show session info and tokens"),
             ("/usage".into(), "Show subscription usage limits"),
             ("/reload".into(), "Smart reload (if newer binary exists)"),
+            ("/restart".into(), "Restart with current binary (no build)"),
             ("/rebuild".into(), "Full rebuild (git pull + build + tests)"),
             ("/update".into(), "Check for and install latest release"),
             ("/resume".into(), "Open session picker"),
