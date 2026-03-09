@@ -4,8 +4,7 @@ use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 
 use crate::{
-    build, id, logging, provider, replay, server, session, startup_profile, tool, tui, update,
-    video_export,
+    id, logging, provider, replay, server, session, startup_profile, tool, tui, video_export,
 };
 
 pub use super::hot_exec::{check_for_updates, get_repo_dir, run_auto_update, run_update};
