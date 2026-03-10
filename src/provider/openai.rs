@@ -13,7 +13,7 @@ use reqwest::header::HeaderValue;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -45,7 +45,8 @@ const WEBSOCKET_UPGRADE_REQUIRED_ERROR: StatusCode = StatusCode::UPGRADE_REQUIRE
 const WEBSOCKET_FALLBACK_NOTICE: &str = "falling back from websockets to https transport";
 const WEBSOCKET_CONNECT_TIMEOUT_SECS: u64 = 8;
 const WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS: u64 = 8;
-const WEBSOCKET_IDLE_TIMEOUT_SECS: u64 = 8;
+const WEBSOCKET_IDLE_TIMEOUT_SECS: u64 = 30;
+const WEBSOCKET_PERSISTENT_IDLE_TIMEOUT_SECS: u64 = 30;
 const WEBSOCKET_COMPLETION_TIMEOUT_SECS: u64 = 300;
 /// Maximum age of a persistent WebSocket connection before forcing reconnect
 const WEBSOCKET_PERSISTENT_MAX_AGE_SECS: u64 = 3000; // 50 min (server limit is 60 min)
@@ -1073,13 +1074,79 @@ struct ResponseSseEvent {
     kind: String,
     item: Option<Value>,
     delta: Option<String>,
+    item_id: Option<String>,
+    call_id: Option<String>,
+    name: Option<String>,
+    arguments: Option<String>,
     response: Option<Value>,
     error: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct StreamingToolCallState {
+    call_id: Option<String>,
+    name: Option<String>,
+    arguments: String,
+}
+
+fn normalize_openai_tool_arguments(raw_arguments: String) -> String {
+    if raw_arguments.trim() == "null" {
+        let total = NORMALIZED_NULL_TOOL_ARGUMENTS.fetch_add(1, Ordering::Relaxed) + 1;
+        crate::logging::warn(&format!(
+            "[openai] Normalized null tool arguments to empty object (total={})",
+            total
+        ));
+        "{}".to_string()
+    } else {
+        raw_arguments
+    }
+}
+
+fn streaming_tool_item_id(item: &Value) -> Option<String> {
+    item.get("id")
+        .and_then(|v| v.as_str())
+        .or_else(|| item.get("item_id").and_then(|v| v.as_str()))
+        .map(|id| id.to_string())
+}
+
+fn stream_tool_call_from_state(
+    item_id: Option<String>,
+    mut state: StreamingToolCallState,
+    pending: &mut VecDeque<StreamEvent>,
+) -> Option<StreamEvent> {
+    let tool_name = state.name.take().filter(|name| !name.is_empty())?;
+    let raw_call_id = state
+        .call_id
+        .take()
+        .filter(|id| !id.is_empty())
+        .or(item_id)
+        .unwrap_or_else(|| {
+            format!(
+                "fallback_text_call_{}",
+                FALLBACK_TOOL_CALL_COUNTER.fetch_add(1, Ordering::Relaxed)
+            )
+        });
+    let call_id = crate::message::sanitize_tool_id(&raw_call_id);
+    let arguments = normalize_openai_tool_arguments(if state.arguments.is_empty() {
+        "{}".to_string()
+    } else {
+        state.arguments
+    });
+
+    pending.push_back(StreamEvent::ToolUseStart {
+        id: call_id,
+        name: tool_name,
+    });
+    pending.push_back(StreamEvent::ToolInputDelta(arguments));
+    pending.push_back(StreamEvent::ToolUseEnd);
+    pending.pop_front()
 }
 
 fn parse_openai_response_event(
     data: &str,
     saw_text_delta: &mut bool,
+    streaming_tool_calls: &mut HashMap<String, StreamingToolCallState>,
+    completed_tool_items: &mut HashSet<String>,
     pending: &mut VecDeque<StreamEvent>,
 ) -> Option<StreamEvent> {
     if data == "[DONE]" {
@@ -1123,10 +1190,85 @@ fn parse_openai_response_event(
                 if item.get("type").and_then(|v| v.as_str()) == Some("reasoning") {
                     return Some(StreamEvent::ThinkingStart);
                 }
+                if matches!(
+                    item.get("type").and_then(|v| v.as_str()),
+                    Some("function_call") | Some("custom_tool_call")
+                ) {
+                    if let Some(item_id) = streaming_tool_item_id(item) {
+                        let state = streaming_tool_calls.entry(item_id).or_default();
+                        state.call_id = item
+                            .get("call_id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .or_else(|| state.call_id.clone());
+                        state.name = item
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .or_else(|| state.name.clone());
+                        if let Some(arguments) = item
+                            .get("arguments")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| item.get("input").and_then(|v| v.as_str()))
+                        {
+                            state.arguments = arguments.to_string();
+                        } else if let Some(input) = item.get("input") {
+                            if input.is_object() || input.is_array() {
+                                state.arguments = input.to_string();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            if let Some(item_id) = event.item_id {
+                let state = streaming_tool_calls.entry(item_id).or_default();
+                if let Some(call_id) = event.call_id {
+                    state.call_id = Some(call_id);
+                }
+                if let Some(name) = event.name {
+                    state.name = Some(name);
+                }
+                if let Some(delta) = event.delta {
+                    state.arguments.push_str(&delta);
+                }
+            }
+        }
+        "response.function_call_arguments.done" => {
+            if let Some(item_id) = event.item_id {
+                let mut state = streaming_tool_calls.remove(&item_id).unwrap_or_default();
+                if let Some(call_id) = event.call_id {
+                    state.call_id = Some(call_id);
+                }
+                if let Some(name) = event.name {
+                    state.name = Some(name);
+                }
+                if let Some(arguments) = event.arguments {
+                    state.arguments = arguments;
+                }
+                if let Some(tool_event) =
+                    stream_tool_call_from_state(Some(item_id.clone()), state.clone(), pending)
+                {
+                    completed_tool_items.insert(item_id);
+                    return Some(tool_event);
+                }
+                streaming_tool_calls.insert(item_id, state);
             }
         }
         "response.output_item.done" => {
             if let Some(item) = event.item {
+                if let Some(item_id) = streaming_tool_item_id(&item) {
+                    if completed_tool_items.contains(&item_id)
+                        && matches!(
+                            item.get("type").and_then(|v| v.as_str()),
+                            Some("function_call") | Some("custom_tool_call")
+                        )
+                    {
+                        completed_tool_items.remove(&item_id);
+                        return None;
+                    }
+                }
                 if let Some(event) = handle_openai_output_item(item, saw_text_delta, pending) {
                     return Some(event);
                 }
@@ -1246,16 +1388,7 @@ fn handle_openai_output_item(
                     })
                 })
                 .unwrap_or_else(|| "{}".to_string());
-            let arguments = if raw_arguments.trim() == "null" {
-                let total = NORMALIZED_NULL_TOOL_ARGUMENTS.fetch_add(1, Ordering::Relaxed) + 1;
-                crate::logging::warn(&format!(
-                    "[openai] Normalized null tool arguments to empty object (total={})",
-                    total
-                ));
-                "{}".to_string()
-            } else {
-                raw_arguments
-            };
+            let arguments = normalize_openai_tool_arguments(raw_arguments);
 
             pending.push_back(StreamEvent::ToolUseStart {
                 id: call_id.clone(),
@@ -1342,6 +1475,8 @@ struct OpenAIResponsesStream {
     buffer: String,
     pending: VecDeque<StreamEvent>,
     saw_text_delta: bool,
+    streaming_tool_calls: HashMap<String, StreamingToolCallState>,
+    completed_tool_items: HashSet<String>,
 }
 
 impl OpenAIResponsesStream {
@@ -1351,6 +1486,8 @@ impl OpenAIResponsesStream {
             buffer: String::new(),
             pending: VecDeque::new(),
             saw_text_delta: false,
+            streaming_tool_calls: HashMap::new(),
+            completed_tool_items: HashSet::new(),
         }
     }
 
@@ -1375,9 +1512,13 @@ impl OpenAIResponsesStream {
             }
 
             let data = data_lines.join("\n");
-            if let Some(event) =
-                parse_openai_response_event(&data, &mut self.saw_text_delta, &mut self.pending)
-            {
+            if let Some(event) = parse_openai_response_event(
+                &data,
+                &mut self.saw_text_delta,
+                &mut self.streaming_tool_calls,
+                &mut self.completed_tool_items,
+                &mut self.pending,
+            ) {
                 return Some(event);
             }
         }
@@ -2110,6 +2251,8 @@ async fn stream_response_websocket(
 
     use futures::StreamExt;
     let mut saw_text_delta = false;
+    let mut streaming_tool_calls = HashMap::new();
+    let mut completed_tool_items = HashSet::new();
     let mut saw_response_completed = false;
     let mut saw_api_activity = false;
     let ws_started_at = Instant::now();
@@ -2180,9 +2323,13 @@ async fn stream_response_websocket(
                     }
 
                     let mut made_api_activity = is_websocket_activity_payload(&text);
-                    if let Some(event) =
-                        parse_openai_response_event(&text, &mut saw_text_delta, &mut pending)
-                    {
+                    if let Some(event) = parse_openai_response_event(
+                        &text,
+                        &mut saw_text_delta,
+                        &mut streaming_tool_calls,
+                        &mut completed_tool_items,
+                        &mut pending,
+                    ) {
                         if is_stream_activity_event(&event) {
                             made_api_activity = true;
                         }
@@ -2236,6 +2383,7 @@ async fn stream_response_websocket(
                     }
                 }
                 WsMessage::Ping(payload) => {
+                    last_api_activity_at = Instant::now();
                     let _ = ws_stream.send(WsMessage::Pong(payload)).await;
                 }
                 WsMessage::Close(_) => {
@@ -2251,7 +2399,9 @@ async fn stream_response_websocket(
                         "Unexpected binary websocket event"
                     )));
                 }
-                WsMessage::Pong(_) => {}
+                WsMessage::Pong(_) => {
+                    last_api_activity_at = Instant::now();
+                }
                 _ => {}
             },
             Err(err) => {
@@ -2372,24 +2522,39 @@ async fn try_persistent_ws_continuation(
 
     // Stream the response, extracting the new response_id
     let mut saw_text_delta = false;
+    let mut streaming_tool_calls = HashMap::new();
+    let mut completed_tool_items = HashSet::new();
     let mut saw_response_completed = false;
     let mut pending: VecDeque<StreamEvent> = VecDeque::new();
     let mut new_response_id: Option<String> = None;
     let stream_started = Instant::now();
+    let mut last_api_activity_at = Instant::now();
 
     loop {
         if stream_started.elapsed() >= Duration::from_secs(WEBSOCKET_COMPLETION_TIMEOUT_SECS) {
             return PersistentWsResult::Failed("completion timeout".to_string());
         }
 
-        let timeout_secs = WEBSOCKET_IDLE_TIMEOUT_SECS;
+        if last_api_activity_at.elapsed()
+            >= Duration::from_secs(WEBSOCKET_PERSISTENT_IDLE_TIMEOUT_SECS)
+        {
+            return PersistentWsResult::Failed(format!(
+                "idle timeout on persistent WS ({}s)",
+                WEBSOCKET_PERSISTENT_IDLE_TIMEOUT_SECS
+            ));
+        }
+
+        let timeout_secs = WEBSOCKET_PERSISTENT_IDLE_TIMEOUT_SECS;
         let next_item =
             match tokio::time::timeout(Duration::from_secs(timeout_secs), state.ws_stream.next())
                 .await
             {
                 Ok(item) => item,
                 Err(_) => {
-                    return PersistentWsResult::Failed("idle timeout on persistent WS".to_string())
+                    return PersistentWsResult::Failed(format!(
+                        "idle timeout on persistent WS ({}s)",
+                        timeout_secs
+                    ))
                 }
             };
 
@@ -2404,6 +2569,7 @@ async fn try_persistent_ws_continuation(
 
         match result {
             Ok(WsMessage::Text(text)) => {
+                last_api_activity_at = Instant::now();
                 let text = text.to_string();
                 if is_websocket_fallback_notice(&text) {
                     return PersistentWsResult::Failed("server requested fallback".to_string());
@@ -2428,9 +2594,13 @@ async fn try_persistent_ws_continuation(
                     }
                 }
 
-                if let Some(event) =
-                    parse_openai_response_event(&text, &mut saw_text_delta, &mut pending)
-                {
+                if let Some(event) = parse_openai_response_event(
+                    &text,
+                    &mut saw_text_delta,
+                    &mut streaming_tool_calls,
+                    &mut completed_tool_items,
+                    &mut pending,
+                ) {
                     if matches!(event, StreamEvent::MessageEnd { .. }) {
                         saw_response_completed = true;
                     }
@@ -2456,6 +2626,7 @@ async fn try_persistent_ws_continuation(
                 }
             }
             Ok(WsMessage::Ping(payload)) => {
+                last_api_activity_at = Instant::now();
                 let _ = state.ws_stream.send(WsMessage::Pong(payload)).await;
             }
             Ok(WsMessage::Close(_)) => {
@@ -2464,7 +2635,12 @@ async fn try_persistent_ws_continuation(
                 }
                 return PersistentWsResult::Failed("server closed connection".to_string());
             }
-            Ok(WsMessage::Pong(_)) | Ok(_) => {}
+            Ok(WsMessage::Pong(_)) => {
+                last_api_activity_at = Instant::now();
+            }
+            Ok(_) => {
+                last_api_activity_at = Instant::now();
+            }
             Err(e) => {
                 return PersistentWsResult::Failed(format!("ws error: {}", e));
             }
@@ -2615,6 +2791,8 @@ async fn stream_response_websocket_persistent(
         .map_err(|err| OpenAIStreamFailure::Other(anyhow::anyhow!(err)))?;
 
     let mut saw_text_delta = false;
+    let mut streaming_tool_calls = HashMap::new();
+    let mut completed_tool_items = HashSet::new();
     let mut saw_response_completed = false;
     let mut saw_api_activity = false;
     let ws_started_at = Instant::now();
@@ -2707,9 +2885,13 @@ async fn stream_response_websocket_persistent(
                     }
 
                     let mut made_api_activity = is_websocket_activity_payload(&text);
-                    if let Some(event) =
-                        parse_openai_response_event(&text, &mut saw_text_delta, &mut pending)
-                    {
+                    if let Some(event) = parse_openai_response_event(
+                        &text,
+                        &mut saw_text_delta,
+                        &mut streaming_tool_calls,
+                        &mut completed_tool_items,
+                        &mut pending,
+                    ) {
                         if is_stream_activity_event(&event) {
                             made_api_activity = true;
                         }
@@ -2763,6 +2945,7 @@ async fn stream_response_websocket_persistent(
                     }
                 }
                 WsMessage::Ping(payload) => {
+                    last_api_activity_at = Instant::now();
                     let _ = ws_stream.send(WsMessage::Pong(payload)).await;
                 }
                 WsMessage::Close(_) => {
@@ -2778,7 +2961,9 @@ async fn stream_response_websocket_persistent(
                         "Unexpected binary websocket event"
                     )));
                 }
-                WsMessage::Pong(_) => {}
+                WsMessage::Pong(_) => {
+                    last_api_activity_at = Instant::now();
+                }
                 _ => {}
             },
             Err(err) => {
@@ -3109,7 +3294,7 @@ mod tests {
     use super::*;
     use crate::auth::codex::CodexCredentials;
     use anyhow::Result;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::ffi::OsString;
     use std::path::PathBuf;
     use std::sync::{Mutex, MutexGuard};
@@ -3715,6 +3900,41 @@ mod tests {
     }
 
     #[test]
+    fn test_websocket_idle_timeout_is_long_enough_for_reasoning_gaps() {
+        assert!(
+            WEBSOCKET_IDLE_TIMEOUT_SECS >= 30,
+            "idle timeout regressed to {}s; this causes false websocket fallbacks during reasoning gaps",
+            WEBSOCKET_IDLE_TIMEOUT_SECS
+        );
+        assert!(
+            WEBSOCKET_PERSISTENT_IDLE_TIMEOUT_SECS >= 30,
+            "persistent idle timeout regressed to {}s; this causes false websocket fallbacks during reasoning gaps",
+            WEBSOCKET_PERSISTENT_IDLE_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn test_stream_activity_event_treats_any_stream_event_as_activity() {
+        assert!(is_stream_activity_event(&StreamEvent::ThinkingStart));
+        assert!(is_stream_activity_event(&StreamEvent::ThinkingDelta(
+            "working".to_string()
+        )));
+        assert!(is_stream_activity_event(&StreamEvent::TextDelta(
+            "hello".to_string()
+        )));
+        assert!(is_stream_activity_event(&StreamEvent::MessageEnd {
+            stop_reason: None
+        }));
+    }
+
+    #[test]
+    fn test_websocket_activity_payload_counts_response_completed() {
+        assert!(is_websocket_activity_payload(
+            r#"{"type":"response.completed","response":{"status":"completed"}}"#
+        ));
+    }
+
+    #[test]
     fn test_build_response_request_includes_stream_for_http() {
         let request = OpenAIProvider::build_response_request(
             "gpt-5.4",
@@ -3849,10 +4069,18 @@ mod tests {
     fn test_parse_openai_response_completed_captures_incomplete_stop_reason() {
         let data = r#"{"type":"response.completed","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}"#;
         let mut saw_text_delta = false;
+        let mut streaming_tool_calls = HashMap::new();
+        let mut completed_tool_items = HashSet::new();
         let mut pending = VecDeque::new();
 
-        let event = parse_openai_response_event(data, &mut saw_text_delta, &mut pending)
-            .expect("expected message end");
+        let event = parse_openai_response_event(
+            data,
+            &mut saw_text_delta,
+            &mut streaming_tool_calls,
+            &mut completed_tool_items,
+            &mut pending,
+        )
+        .expect("expected message end");
         match event {
             StreamEvent::MessageEnd { stop_reason } => {
                 assert_eq!(stop_reason.as_deref(), Some("max_output_tokens"));
@@ -3865,10 +4093,18 @@ mod tests {
     fn test_parse_openai_response_completed_without_stop_reason() {
         let data = r#"{"type":"response.completed","response":{"status":"completed"}}"#;
         let mut saw_text_delta = false;
+        let mut streaming_tool_calls = HashMap::new();
+        let mut completed_tool_items = HashSet::new();
         let mut pending = VecDeque::new();
 
-        let event = parse_openai_response_event(data, &mut saw_text_delta, &mut pending)
-            .expect("expected message end");
+        let event = parse_openai_response_event(
+            data,
+            &mut saw_text_delta,
+            &mut streaming_tool_calls,
+            &mut completed_tool_items,
+            &mut pending,
+        )
+        .expect("expected message end");
         match event {
             StreamEvent::MessageEnd { stop_reason } => {
                 assert!(stop_reason.is_none());
@@ -3881,10 +4117,18 @@ mod tests {
     fn test_parse_openai_response_completed_commentary_phase_sets_stop_reason() {
         let data = r#"{"type":"response.completed","response":{"status":"completed","output":[{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Still working"}]}]}}"#;
         let mut saw_text_delta = false;
+        let mut streaming_tool_calls = HashMap::new();
+        let mut completed_tool_items = HashSet::new();
         let mut pending = VecDeque::new();
 
-        let event = parse_openai_response_event(data, &mut saw_text_delta, &mut pending)
-            .expect("expected message end");
+        let event = parse_openai_response_event(
+            data,
+            &mut saw_text_delta,
+            &mut streaming_tool_calls,
+            &mut completed_tool_items,
+            &mut pending,
+        )
+        .expect("expected message end");
         match event {
             StreamEvent::MessageEnd { stop_reason } => {
                 assert_eq!(stop_reason.as_deref(), Some("commentary"));
@@ -3897,16 +4141,113 @@ mod tests {
     fn test_parse_openai_response_incomplete_emits_message_end_with_reason() {
         let data = r#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"content_filter"}}}"#;
         let mut saw_text_delta = false;
+        let mut streaming_tool_calls = HashMap::new();
+        let mut completed_tool_items = HashSet::new();
         let mut pending = VecDeque::new();
 
-        let event = parse_openai_response_event(data, &mut saw_text_delta, &mut pending)
-            .expect("expected message end");
+        let event = parse_openai_response_event(
+            data,
+            &mut saw_text_delta,
+            &mut streaming_tool_calls,
+            &mut completed_tool_items,
+            &mut pending,
+        )
+        .expect("expected message end");
         match event {
             StreamEvent::MessageEnd { stop_reason } => {
                 assert_eq!(stop_reason.as_deref(), Some("content_filter"));
             }
             other => panic!("expected MessageEnd, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_parse_openai_response_function_call_arguments_streaming() {
+        let mut saw_text_delta = false;
+        let mut streaming_tool_calls = HashMap::new();
+        let mut completed_tool_items = HashSet::new();
+        let mut pending = VecDeque::new();
+
+        let added = r#"{"type":"response.output_item.added","item":{"id":"fc_123","type":"function_call","call_id":"call_123","name":"batch","arguments":""}}"#;
+        assert!(
+            parse_openai_response_event(
+                added,
+                &mut saw_text_delta,
+                &mut streaming_tool_calls,
+                &mut completed_tool_items,
+                &mut pending,
+            )
+            .is_none(),
+            "output_item.added should just seed tool state"
+        );
+
+        let delta = r#"{"type":"response.function_call_arguments.delta","item_id":"fc_123","delta":"{\"tool_calls\":[{\"tool\":\"read\"}]"}"#;
+        assert!(
+            parse_openai_response_event(
+                delta,
+                &mut saw_text_delta,
+                &mut streaming_tool_calls,
+                &mut completed_tool_items,
+                &mut pending,
+            )
+            .is_none(),
+            "argument delta should accumulate state only"
+        );
+
+        let done = r#"{"type":"response.function_call_arguments.done","item_id":"fc_123","arguments":"{\"tool_calls\":[{\"tool\":\"read\"}]}"}"#;
+        let first = parse_openai_response_event(
+            done,
+            &mut saw_text_delta,
+            &mut streaming_tool_calls,
+            &mut completed_tool_items,
+            &mut pending,
+        )
+        .expect("expected tool start");
+
+        match first {
+            StreamEvent::ToolUseStart { id, name } => {
+                assert_eq!(id, "call_123");
+                assert_eq!(name, "batch");
+            }
+            other => panic!("expected ToolUseStart, got {:?}", other),
+        }
+
+        match pending.pop_front() {
+            Some(StreamEvent::ToolInputDelta(delta)) => {
+                let parsed: Value = serde_json::from_str(&delta).expect("valid args json");
+                let tool_calls = parsed
+                    .get("tool_calls")
+                    .and_then(|v| v.as_array())
+                    .expect("tool_calls array");
+                assert_eq!(tool_calls.len(), 1);
+            }
+            other => panic!("expected ToolInputDelta, got {:?}", other),
+        }
+
+        assert!(matches!(pending.pop_front(), Some(StreamEvent::ToolUseEnd)));
+        assert!(streaming_tool_calls.is_empty());
+        assert!(completed_tool_items.contains("fc_123"));
+    }
+
+    #[test]
+    fn test_parse_openai_response_output_item_done_skips_duplicate_after_arguments_done() {
+        let mut saw_text_delta = false;
+        let mut streaming_tool_calls = HashMap::new();
+        let mut completed_tool_items = HashSet::from(["fc_123".to_string()]);
+        let mut pending = VecDeque::new();
+
+        let duplicate_done = r#"{"type":"response.output_item.done","item":{"id":"fc_123","type":"function_call","call_id":"call_123","name":"batch","arguments":"{\"tool_calls\":[]}"}}"#;
+        let event = parse_openai_response_event(
+            duplicate_done,
+            &mut saw_text_delta,
+            &mut streaming_tool_calls,
+            &mut completed_tool_items,
+            &mut pending,
+        );
+
+        assert!(event.is_none(), "duplicate function call should be skipped");
+        assert!(pending.is_empty());
+        assert!(!completed_tool_items.contains("fc_123"));
     }
 
     #[test]
