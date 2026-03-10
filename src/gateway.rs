@@ -281,7 +281,7 @@ async fn handle_ws_connection(
 ) -> Result<()> {
     // Perform WebSocket handshake with a callback to inspect headers.
     // Prefer Authorization headers, but continue accepting ?token= for browser clients.
-    let auth = Arc::new(tokio::sync::Mutex::new(None::<WsAuth>));
+    let auth = Arc::new(std::sync::Mutex::new(None::<WsAuth>));
     let auth_cb = Arc::clone(&auth);
 
     let ws_stream = tokio_tungstenite::accept_hdr_async(
@@ -297,7 +297,7 @@ async fn handle_ws_connection(
             }
 
             let ws_auth = extract_ws_auth(request)?;
-            *auth_cb.blocking_lock() = Some(ws_auth);
+            *auth_cb.lock().expect("websocket auth mutex poisoned") = Some(ws_auth);
             Ok(response)
         },
     )
@@ -306,7 +306,7 @@ async fn handle_ws_connection(
     // Validate auth token
     let auth = auth
         .lock()
-        .await
+        .expect("websocket auth mutex poisoned")
         .take()
         .ok_or_else(|| anyhow::anyhow!("No auth token provided"))?;
     let token = auth.token;

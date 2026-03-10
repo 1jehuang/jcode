@@ -1,6 +1,191 @@
 use super::*;
 use std::cell::RefCell;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WidgetProviderKind {
+    Anthropic,
+    OpenAI,
+    OpenRouter,
+    Copilot,
+    Unknown,
+}
+
+impl WidgetProviderKind {
+    fn from_provider_key(raw: Option<&str>) -> Self {
+        match raw.map(|s| s.trim().to_ascii_lowercase()) {
+            Some(provider) if provider == "openrouter" => Self::OpenRouter,
+            Some(provider) if provider == "copilot" => Self::Copilot,
+            Some(provider) if provider == "openai" => Self::OpenAI,
+            Some(provider) if provider == "claude" => Self::Anthropic,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WidgetRouteInfo {
+    provider: WidgetProviderKind,
+    is_remote: bool,
+}
+
+impl App {
+    fn widget_route_info(&self, model: Option<&str>) -> WidgetRouteInfo {
+        let provider_name = if self.is_remote || self.is_replay {
+            self.remote_provider_name.as_deref()
+        } else {
+            Some(self.provider.name())
+        };
+
+        let provider = WidgetProviderKind::from_provider_key(
+            model
+                .map(|model| crate::provider::resolve_model_capabilities(model, provider_name))
+                .and_then(|caps| caps.provider)
+                .as_deref()
+                .or(provider_name),
+        );
+
+        WidgetRouteInfo {
+            provider,
+            is_remote: self.is_remote || self.is_replay,
+        }
+    }
+
+    fn widget_auth_method(&self, route: WidgetRouteInfo) -> crate::tui::info_widget::AuthMethod {
+        if route.is_remote {
+            return crate::tui::info_widget::AuthMethod::Unknown;
+        }
+
+        match route.provider {
+            WidgetProviderKind::Anthropic => {
+                if crate::auth::claude::has_credentials() {
+                    crate::tui::info_widget::AuthMethod::AnthropicOAuth
+                } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+                    crate::tui::info_widget::AuthMethod::AnthropicApiKey
+                } else {
+                    crate::tui::info_widget::AuthMethod::Unknown
+                }
+            }
+            WidgetProviderKind::OpenAI => match crate::auth::codex::load_credentials() {
+                Ok(creds) if !creds.refresh_token.is_empty() => {
+                    crate::tui::info_widget::AuthMethod::OpenAIOAuth
+                }
+                _ => {
+                    if std::env::var("OPENAI_API_KEY").is_ok() {
+                        crate::tui::info_widget::AuthMethod::OpenAIApiKey
+                    } else {
+                        crate::tui::info_widget::AuthMethod::Unknown
+                    }
+                }
+            },
+            WidgetProviderKind::OpenRouter => crate::tui::info_widget::AuthMethod::OpenRouterApiKey,
+            WidgetProviderKind::Copilot => crate::tui::info_widget::AuthMethod::CopilotOAuth,
+            WidgetProviderKind::Unknown => crate::tui::info_widget::AuthMethod::Unknown,
+        }
+    }
+
+    fn widget_usage_info(
+        &self,
+        route: WidgetRouteInfo,
+    ) -> Option<crate::tui::info_widget::UsageInfo> {
+        let output_tps = if self.is_processing {
+            self.compute_streaming_tps()
+        } else {
+            None
+        };
+
+        match route.provider {
+            WidgetProviderKind::Copilot => Some(crate::tui::info_widget::UsageInfo {
+                provider: crate::tui::info_widget::UsageProvider::Copilot,
+                five_hour: 0.0,
+                five_hour_resets_at: None,
+                seven_day: 0.0,
+                seven_day_resets_at: None,
+                spark: None,
+                spark_resets_at: None,
+                total_cost: 0.0,
+                input_tokens: self.total_input_tokens,
+                output_tokens: self.total_output_tokens,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                output_tps,
+                available: self.total_input_tokens > 0 || self.total_output_tokens > 0,
+            }),
+            WidgetProviderKind::Anthropic => {
+                let usage = crate::usage::get_sync();
+                Some(crate::tui::info_widget::UsageInfo {
+                    provider: crate::tui::info_widget::UsageProvider::Anthropic,
+                    five_hour: usage.five_hour,
+                    five_hour_resets_at: usage.five_hour_resets_at.clone(),
+                    seven_day: usage.seven_day,
+                    seven_day_resets_at: usage.seven_day_resets_at.clone(),
+                    spark: None,
+                    spark_resets_at: None,
+                    total_cost: 0.0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    output_tps,
+                    available: true,
+                })
+            }
+            WidgetProviderKind::OpenAI => {
+                let openai_usage = crate::usage::get_openai_usage_sync();
+                Some(crate::tui::info_widget::UsageInfo {
+                    provider: crate::tui::info_widget::UsageProvider::OpenAI,
+                    five_hour: openai_usage
+                        .five_hour
+                        .as_ref()
+                        .map(|w| w.usage_ratio)
+                        .unwrap_or(0.0),
+                    five_hour_resets_at: openai_usage
+                        .five_hour
+                        .as_ref()
+                        .and_then(|w| w.resets_at.clone()),
+                    seven_day: openai_usage
+                        .seven_day
+                        .as_ref()
+                        .map(|w| w.usage_ratio)
+                        .unwrap_or(0.0),
+                    seven_day_resets_at: openai_usage
+                        .seven_day
+                        .as_ref()
+                        .and_then(|w| w.resets_at.clone()),
+                    spark: openai_usage.spark.as_ref().map(|w| w.usage_ratio),
+                    spark_resets_at: openai_usage
+                        .spark
+                        .as_ref()
+                        .and_then(|w| w.resets_at.clone()),
+                    total_cost: 0.0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    output_tps,
+                    available: openai_usage.has_limits(),
+                })
+            }
+            WidgetProviderKind::OpenRouter => Some(crate::tui::info_widget::UsageInfo {
+                provider: crate::tui::info_widget::UsageProvider::CostBased,
+                five_hour: 0.0,
+                five_hour_resets_at: None,
+                seven_day: 0.0,
+                seven_day_resets_at: None,
+                spark: None,
+                spark_resets_at: None,
+                total_cost: self.total_cost,
+                input_tokens: self.total_input_tokens,
+                output_tokens: self.total_output_tokens,
+                cache_read_tokens: self.streaming_cache_read_tokens,
+                cache_write_tokens: self.streaming_cache_creation_tokens,
+                output_tps,
+                available: true,
+            }),
+            WidgetProviderKind::Unknown => None,
+        }
+    }
+}
+
 impl crate::tui::TuiState for App {
     fn display_messages(&self) -> &[DisplayMessage] {
         &self.display_messages
@@ -592,179 +777,12 @@ impl crate::tui::TuiState for App {
             }
         };
 
-        // Gather subscription usage info
-        let usage_info = {
-            // Check if current provider uses OAuth (Anthropic OAuth or OpenAI Codex)
-            let provider_name = self.provider.name().to_lowercase();
-            // Also check for "remote" provider with OAuth credentials (selfdev/client mode)
-            let has_anthropic_oauth = crate::auth::claude::has_credentials();
-            let has_openai_oauth = crate::auth::codex::load_credentials().is_ok();
-            let is_anthropic_oauth = provider_name.contains("anthropic")
-                || provider_name.contains("claude")
-                || (provider_name == "remote" && has_anthropic_oauth);
-            let is_openai_provider = provider_name.contains("openai")
-                || ((provider_name == "remote" || provider_name == "unknown")
-                    && has_openai_oauth
-                    && !has_anthropic_oauth);
-            let is_api_key_provider = provider_name.contains("openrouter");
-            let is_copilot_provider = provider_name.contains("copilot");
-
-            let output_tps = if self.is_processing {
-                self.compute_streaming_tps()
-            } else {
-                None
-            };
-
-            if is_copilot_provider {
-                Some(crate::tui::info_widget::UsageInfo {
-                    provider: crate::tui::info_widget::UsageProvider::Copilot,
-                    five_hour: 0.0,
-                    five_hour_resets_at: None,
-                    seven_day: 0.0,
-                    seven_day_resets_at: None,
-                    spark: None,
-                    spark_resets_at: None,
-                    total_cost: 0.0,
-                    input_tokens: self.total_input_tokens,
-                    output_tokens: self.total_output_tokens,
-                    cache_read_tokens: None,
-                    cache_write_tokens: None,
-                    output_tps,
-                    available: self.total_input_tokens > 0 || self.total_output_tokens > 0,
-                })
-            } else if is_anthropic_oauth {
-                let usage = crate::usage::get_sync();
-                Some(crate::tui::info_widget::UsageInfo {
-                    provider: crate::tui::info_widget::UsageProvider::Anthropic,
-                    five_hour: usage.five_hour,
-                    five_hour_resets_at: usage.five_hour_resets_at.clone(),
-                    seven_day: usage.seven_day,
-                    seven_day_resets_at: usage.seven_day_resets_at.clone(),
-                    spark: None,
-                    spark_resets_at: None,
-                    total_cost: 0.0,
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    cache_read_tokens: None,
-                    cache_write_tokens: None,
-                    output_tps,
-                    available: true,
-                })
-            } else if is_openai_provider {
-                let openai_usage = crate::usage::get_openai_usage_sync();
-                if openai_usage.has_limits() {
-                    Some(crate::tui::info_widget::UsageInfo {
-                        provider: crate::tui::info_widget::UsageProvider::OpenAI,
-                        five_hour: openai_usage
-                            .five_hour
-                            .as_ref()
-                            .map(|w| w.usage_ratio)
-                            .unwrap_or(0.0),
-                        five_hour_resets_at: openai_usage
-                            .five_hour
-                            .as_ref()
-                            .and_then(|w| w.resets_at.clone()),
-                        seven_day: openai_usage
-                            .seven_day
-                            .as_ref()
-                            .map(|w| w.usage_ratio)
-                            .unwrap_or(0.0),
-                        seven_day_resets_at: openai_usage
-                            .seven_day
-                            .as_ref()
-                            .and_then(|w| w.resets_at.clone()),
-                        spark: openai_usage.spark.as_ref().map(|w| w.usage_ratio),
-                        spark_resets_at: openai_usage
-                            .spark
-                            .as_ref()
-                            .and_then(|w| w.resets_at.clone()),
-                        total_cost: 0.0,
-                        input_tokens: 0,
-                        output_tokens: 0,
-                        cache_read_tokens: None,
-                        cache_write_tokens: None,
-                        output_tps,
-                        available: true,
-                    })
-                } else {
-                    Some(crate::tui::info_widget::UsageInfo {
-                        provider: crate::tui::info_widget::UsageProvider::CostBased,
-                        five_hour: 0.0,
-                        five_hour_resets_at: None,
-                        seven_day: 0.0,
-                        seven_day_resets_at: None,
-                        spark: None,
-                        spark_resets_at: None,
-                        total_cost: self.total_cost,
-                        input_tokens: self.total_input_tokens,
-                        output_tokens: self.total_output_tokens,
-                        cache_read_tokens: self.streaming_cache_read_tokens,
-                        cache_write_tokens: self.streaming_cache_creation_tokens,
-                        output_tps,
-                        available: true,
-                    })
-                }
-            } else if is_api_key_provider {
-                // Show costs for API-key providers (OpenRouter)
-                Some(crate::tui::info_widget::UsageInfo {
-                    provider: crate::tui::info_widget::UsageProvider::CostBased,
-                    five_hour: 0.0,
-                    five_hour_resets_at: None,
-                    seven_day: 0.0,
-                    seven_day_resets_at: None,
-                    spark: None,
-                    spark_resets_at: None,
-                    total_cost: self.total_cost,
-                    input_tokens: self.total_input_tokens,
-                    output_tokens: self.total_output_tokens,
-                    cache_read_tokens: self.streaming_cache_read_tokens,
-                    cache_write_tokens: self.streaming_cache_creation_tokens,
-                    output_tps,
-                    available: true,
-                })
-            } else {
-                None
-            }
-        };
+        let route = self.widget_route_info(model.as_deref());
+        let usage_info = self.widget_usage_info(route);
 
         let tokens_per_second = self.compute_streaming_tps();
 
-        // Determine authentication method
-        let auth_method = if self.is_remote {
-            crate::tui::info_widget::AuthMethod::Unknown
-        } else {
-            let provider_name = self.provider.name().to_lowercase();
-            if provider_name.contains("anthropic") || provider_name.contains("claude") {
-                // Check if using OAuth or API key
-                if crate::auth::claude::has_credentials() {
-                    crate::tui::info_widget::AuthMethod::AnthropicOAuth
-                } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-                    crate::tui::info_widget::AuthMethod::AnthropicApiKey
-                } else {
-                    crate::tui::info_widget::AuthMethod::Unknown
-                }
-            } else if provider_name.contains("openai") {
-                // Check if using OAuth or API key
-                match crate::auth::codex::load_credentials() {
-                    Ok(creds) if !creds.refresh_token.is_empty() => {
-                        crate::tui::info_widget::AuthMethod::OpenAIOAuth
-                    }
-                    _ => {
-                        if std::env::var("OPENAI_API_KEY").is_ok() {
-                            crate::tui::info_widget::AuthMethod::OpenAIApiKey
-                        } else {
-                            crate::tui::info_widget::AuthMethod::Unknown
-                        }
-                    }
-                }
-            } else if provider_name.contains("openrouter") {
-                crate::tui::info_widget::AuthMethod::OpenRouterApiKey
-            } else if provider_name.contains("copilot") {
-                crate::tui::info_widget::AuthMethod::CopilotOAuth
-            } else {
-                crate::tui::info_widget::AuthMethod::Unknown
-            }
-        };
+        let auth_method = self.widget_auth_method(route);
 
         // Get active mermaid diagrams - only for margin mode (pinned mode uses dedicated pane)
         let diagrams = if self.diagram_mode == crate::config::DiagramDisplayMode::Margin {

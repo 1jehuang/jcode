@@ -691,7 +691,8 @@ pub trait Provider: Send + Sync {
     /// Providers should override this to return accurate, dynamic values.
     /// Falls back to hardcoded lookup if not overridden.
     fn context_window(&self) -> usize {
-        context_limit_for_model(&self.model()).unwrap_or(DEFAULT_CONTEXT_LIMIT)
+        context_limit_for_model_with_provider(&self.model(), Some(self.name()))
+            .unwrap_or(DEFAULT_CONTEXT_LIMIT)
     }
 
     /// Create a new provider instance with the same credentials/config and model,
@@ -883,6 +884,112 @@ fn normalize_model_id(model: &str) -> String {
 
 fn normalize_provider_id(provider: &str) -> String {
     provider.trim().to_ascii_lowercase()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelCapabilities {
+    pub provider: Option<String>,
+    pub context_window: Option<usize>,
+}
+
+fn provider_key_from_hint(provider_hint: Option<&str>) -> Option<&'static str> {
+    let normalized = normalize_provider_id(provider_hint?);
+    match normalized.as_str() {
+        "anthropic" | "claude" => Some("claude"),
+        "openai" => Some("openai"),
+        "openrouter" => Some("openrouter"),
+        "copilot" | "github copilot" => Some("copilot"),
+        _ => None,
+    }
+}
+
+fn model_id_for_capability_lookup(model: &str, provider: Option<&str>) -> (String, bool) {
+    let normalized = model.trim().to_ascii_lowercase();
+    let (base, is_1m) = if let Some(base) = normalized.strip_suffix("[1m]") {
+        (base.to_string(), true)
+    } else {
+        (normalized, false)
+    };
+
+    let lookup = if matches!(provider, Some("openrouter")) || base.contains('/') {
+        base.rsplit('/').next().unwrap_or(&base).to_string()
+    } else {
+        base
+    };
+
+    (lookup, is_1m)
+}
+
+fn copilot_context_limit_for_model(model: &str) -> usize {
+    match model {
+        "claude-sonnet-4" | "claude-sonnet-4-6" | "claude-sonnet-4.6" => 128_000,
+        "claude-opus-4-6" | "claude-opus-4.6" | "claude-opus-4.6-fast" => 200_000,
+        "claude-opus-4.5" | "claude-opus-4-5" => 200_000,
+        "claude-sonnet-4.5" | "claude-sonnet-4-5" => 200_000,
+        "claude-haiku-4.5" | "claude-haiku-4-5" => 200_000,
+        "gpt-4o" | "gpt-4o-mini" => 128_000,
+        m if m.starts_with("gpt-4o") => 128_000,
+        m if m.starts_with("gpt-4.1") => 128_000,
+        m if m.starts_with("gpt-5") => 128_000,
+        "o3-mini" | "o4-mini" => 128_000,
+        m if m.starts_with("gemini-2.0-flash") => 1_000_000,
+        m if m.starts_with("gemini-2.5") => 1_000_000,
+        m if m.starts_with("gemini-3") => 1_000_000,
+        _ => 128_000,
+    }
+}
+
+fn fallback_context_limit_for_model(model: &str, provider_hint: Option<&str>) -> Option<usize> {
+    let provider = provider_key_from_hint(provider_hint).or_else(|| provider_for_model(model));
+    let (model, is_1m) = model_id_for_capability_lookup(model, provider);
+    let model = model.as_str();
+
+    if !matches!(provider, Some("claude" | "copilot")) {
+        if let Some(limit) = get_cached_context_limit(model) {
+            return Some(limit);
+        }
+    }
+
+    if matches!(provider, Some("copilot")) {
+        return Some(copilot_context_limit_for_model(model));
+    }
+
+    // Spark variant has a smaller context window than the full codex model
+    if model.starts_with("gpt-5.3-codex-spark") {
+        return Some(128_000);
+    }
+
+    if model.starts_with("gpt-5.2-chat")
+        || model.starts_with("gpt-5.1-chat")
+        || model.starts_with("gpt-5-chat")
+    {
+        return Some(128_000);
+    }
+
+    // GPT-5.4-family models should default to the long-context window.
+    // The live Codex OAuth catalog can still override this via the dynamic cache above.
+    if model.starts_with("gpt-5.4") {
+        return Some(1_000_000);
+    }
+
+    // Most GPT-5.x codex/reasoning models: 272k per Codex backend API
+    if model.starts_with("gpt-5") {
+        return Some(272_000);
+    }
+
+    if model.starts_with("claude-opus-4-6") || model.starts_with("claude-opus-4.6") {
+        return Some(if is_1m { 1_048_576 } else { 200_000 });
+    }
+
+    if model.starts_with("claude-sonnet-4-6") || model.starts_with("claude-sonnet-4.6") {
+        return Some(if is_1m { 1_048_576 } else { 200_000 });
+    }
+
+    if model.starts_with("claude-opus-4-5") || model.starts_with("claude-opus-4.5") {
+        return Some(200_000);
+    }
+
+    None
 }
 
 fn openai_static_model_ids() -> Vec<String> {
@@ -1413,64 +1520,23 @@ pub async fn fetch_openai_context_limits(access_token: &str) -> Result<HashMap<S
 /// First checks the dynamic cache (populated from the Codex backend API at startup),
 /// then falls back to hardcoded defaults.
 pub fn context_limit_for_model(model: &str) -> Option<usize> {
-    // Check dynamic cache first (populated from API)
-    if let Some(limit) = get_cached_context_limit(model) {
-        return Some(limit);
+    context_limit_for_model_with_provider(model, None)
+}
+
+pub fn context_limit_for_model_with_provider(
+    model: &str,
+    provider_hint: Option<&str>,
+) -> Option<usize> {
+    fallback_context_limit_for_model(model, provider_hint)
+}
+
+pub fn resolve_model_capabilities(model: &str, provider_hint: Option<&str>) -> ModelCapabilities {
+    let provider = provider_for_model_with_hint(model, provider_hint).map(str::to_string);
+    let context_window = context_limit_for_model_with_provider(model, provider_hint);
+    ModelCapabilities {
+        provider,
+        context_window,
     }
-
-    // Hardcoded fallbacks
-    let model = model.to_lowercase();
-
-    // [1m] suffix explicitly requests 1M context
-    let (model, is_1m) = if let Some(base) = model.strip_suffix("[1m]") {
-        (base.to_string(), true)
-    } else {
-        (model, false)
-    };
-    let model = model.as_str();
-
-    if is_1m {
-        if let Some(limit) = get_cached_context_limit(model) {
-            return Some(limit);
-        }
-    }
-
-    // Spark variant has a smaller context window than the full codex model
-    if model.starts_with("gpt-5.3-codex-spark") {
-        return Some(128_000);
-    }
-
-    if model.starts_with("gpt-5.2-chat")
-        || model.starts_with("gpt-5.1-chat")
-        || model.starts_with("gpt-5-chat")
-    {
-        return Some(128_000);
-    }
-
-    // GPT-5.4 currently reports 272k on the live Codex OAuth catalog.
-    // If the backend starts advertising >=1M, the dynamic cache above takes over.
-    if model.starts_with("gpt-5.4") {
-        return Some(272_000);
-    }
-
-    // Most GPT-5.x codex/reasoning models: 272k per Codex backend API
-    if model.starts_with("gpt-5") {
-        return Some(272_000);
-    }
-
-    if model.starts_with("claude-opus-4-6") || model.starts_with("claude-opus-4.6") {
-        return Some(if is_1m { 1_048_576 } else { 200_000 });
-    }
-
-    if model.starts_with("claude-sonnet-4-6") || model.starts_with("claude-sonnet-4.6") {
-        return Some(if is_1m { 1_048_576 } else { 200_000 });
-    }
-
-    if model.starts_with("claude-opus-4-5") || model.starts_with("claude-opus-4.5") {
-        return Some(200_000);
-    }
-
-    None
 }
 
 /// Normalize a Copilot-style model name to the canonical form used by our
@@ -1493,7 +1559,15 @@ fn normalize_copilot_model_name(model: &str) -> Option<&'static str> {
 }
 
 /// Detect which provider a model belongs to
-pub fn provider_for_model(model: &str) -> Option<&'static str> {
+pub fn provider_for_model_with_hint(
+    model: &str,
+    provider_hint: Option<&str>,
+) -> Option<&'static str> {
+    if let Some(provider) = provider_key_from_hint(provider_hint) {
+        return Some(provider);
+    }
+
+    let model = model.trim();
     if ALL_CLAUDE_MODELS.contains(&model) {
         Some("claude")
     } else if ALL_OPENAI_MODELS.contains(&model) {
@@ -1507,6 +1581,11 @@ pub fn provider_for_model(model: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// Detect which provider a model belongs to
+pub fn provider_for_model(model: &str) -> Option<&'static str> {
+    provider_for_model_with_hint(model, None)
 }
 
 /// MultiProvider wraps multiple providers and allows seamless model switching
@@ -3377,9 +3456,36 @@ mod tests {
 
     #[test]
     fn test_context_limit_gpt_5_4() {
-        assert_eq!(context_limit_for_model("gpt-5.4"), Some(272_000));
-        assert_eq!(context_limit_for_model("gpt-5.4-pro"), Some(272_000));
-        assert_eq!(context_limit_for_model("gpt-5.4[1m]"), Some(272_000));
+        assert_eq!(context_limit_for_model("gpt-5.4"), Some(1_000_000));
+        assert_eq!(context_limit_for_model("gpt-5.4-pro"), Some(1_000_000));
+        assert_eq!(context_limit_for_model("gpt-5.4[1m]"), Some(1_000_000));
+    }
+
+    #[test]
+    fn test_context_limit_respects_provider_hint() {
+        assert_eq!(
+            context_limit_for_model_with_provider("gpt-5.4", Some("openai")),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            context_limit_for_model_with_provider("gpt-5.4", Some("copilot")),
+            Some(128_000)
+        );
+        assert_eq!(
+            context_limit_for_model_with_provider("claude-sonnet-4-6[1m]", Some("claude")),
+            Some(1_048_576)
+        );
+    }
+
+    #[test]
+    fn test_resolve_model_capabilities_uses_provider_hint() {
+        let openai = resolve_model_capabilities("gpt-5.4", Some("openai"));
+        assert_eq!(openai.provider.as_deref(), Some("openai"));
+        assert_eq!(openai.context_window, Some(1_000_000));
+
+        let copilot = resolve_model_capabilities("gpt-5.4", Some("copilot"));
+        assert_eq!(copilot.provider.as_deref(), Some("copilot"));
+        assert_eq!(copilot.context_window, Some(128_000));
     }
 
     #[test]

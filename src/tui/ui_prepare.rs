@@ -69,6 +69,7 @@ fn prepare_messages_inner(
             wrapped_lines: Vec::new(),
             wrapped_user_indices: Vec::new(),
             wrapped_user_prompt_starts: Vec::new(),
+            wrapped_user_prompt_ends: Vec::new(),
             user_prompt_texts: Vec::new(),
             image_regions: Vec::new(),
             edit_tool_ranges: Vec::new(),
@@ -85,6 +86,7 @@ fn prepare_messages_inner(
             wrapped_lines: Vec::new(),
             wrapped_user_indices: Vec::new(),
             wrapped_user_prompt_starts: Vec::new(),
+            wrapped_user_prompt_ends: Vec::new(),
             user_prompt_texts: Vec::new(),
             image_regions: Vec::new(),
             edit_tool_ranges: Vec::new(),
@@ -94,6 +96,7 @@ fn prepare_messages_inner(
     let mut wrapped_lines: Vec<Line<'static>>;
     let wrapped_user_indices;
     let wrapped_user_prompt_starts;
+    let wrapped_user_prompt_ends;
     let user_prompt_texts;
     let mut image_regions;
     let edit_tool_ranges;
@@ -135,6 +138,7 @@ fn prepare_messages_inner(
         wrapped_lines.extend(content_lines);
         wrapped_user_indices = Vec::new();
         wrapped_user_prompt_starts = Vec::new();
+        wrapped_user_prompt_ends = Vec::new();
         user_prompt_texts = Vec::new();
         image_regions = Vec::new();
         edit_tool_ranges = Vec::new();
@@ -230,6 +234,12 @@ fn prepare_messages_inner(
             .map(|idx| idx + body_offset)
             .collect();
 
+        wrapped_user_prompt_ends = body_prepared
+            .wrapped_user_prompt_ends
+            .iter()
+            .map(|idx| idx + body_offset)
+            .collect();
+
         user_prompt_texts = body_prepared.user_prompt_texts.clone();
 
         image_regions = Vec::with_capacity(
@@ -238,11 +248,13 @@ fn prepare_messages_inner(
         for region in &body_prepared.image_regions {
             image_regions.push(ImageRegion {
                 abs_line_idx: region.abs_line_idx + body_offset,
+                end_line: region.end_line + body_offset,
                 ..*region
             });
         }
         for mut region in streaming_prepared.image_regions {
             region.abs_line_idx += body_offset + body_len;
+            region.end_line += body_offset + body_len;
             image_regions.push(region);
         }
 
@@ -263,6 +275,7 @@ fn prepare_messages_inner(
         wrapped_lines,
         wrapped_user_indices,
         wrapped_user_prompt_starts,
+        wrapped_user_prompt_ends,
         user_prompt_texts,
         image_regions,
         edit_tool_ranges,
@@ -575,6 +588,11 @@ fn prepare_body_incremental(
         wrapped_user_prompt_starts.push(idx + prev_len);
     }
 
+    let mut wrapped_user_prompt_ends = prev.wrapped_user_prompt_ends.clone();
+    for idx in new_wrapped.wrapped_user_prompt_ends {
+        wrapped_user_prompt_ends.push(idx + prev_len);
+    }
+
     let mut user_prompt_texts = prev.user_prompt_texts.clone();
     user_prompt_texts.extend(new_user_prompt_texts);
 
@@ -582,6 +600,7 @@ fn prepare_body_incremental(
     for region in new_wrapped.image_regions {
         image_regions.push(ImageRegion {
             abs_line_idx: region.abs_line_idx + prev_len,
+            end_line: region.end_line + prev_len,
             ..region
         });
     }
@@ -601,6 +620,7 @@ fn prepare_body_incremental(
         wrapped_lines,
         wrapped_user_indices,
         wrapped_user_prompt_starts,
+        wrapped_user_prompt_ends,
         user_prompt_texts,
         image_regions,
         edit_tool_ranges,
@@ -618,6 +638,7 @@ fn prepare_streaming_cached(
             wrapped_lines: Vec::new(),
             wrapped_user_indices: Vec::new(),
             wrapped_user_prompt_starts: Vec::new(),
+            wrapped_user_prompt_ends: Vec::new(),
             user_prompt_texts: Vec::new(),
             image_regions: Vec::new(),
             edit_tool_ranges: Vec::new(),
@@ -904,6 +925,7 @@ fn wrap_lines(
     let user_width = width.saturating_sub(2) as usize;
     let mut wrapped_user_indices: Vec<usize> = Vec::new();
     let mut wrapped_user_prompt_starts: Vec<usize> = Vec::new();
+    let mut wrapped_user_prompt_ends: Vec<usize> = Vec::new();
     let mut user_line_mask = vec![false; lines.len()];
     for &idx in user_line_indices {
         if idx < user_line_mask.len() {
@@ -921,6 +943,7 @@ fn wrap_lines(
 
         if is_user_line {
             wrapped_user_prompt_starts.push(wrapped_idx);
+            wrapped_user_prompt_ends.push(wrapped_idx + count);
             for i in 0..count {
                 wrapped_user_indices.push(wrapped_idx + i);
             }
@@ -945,6 +968,7 @@ fn wrap_lines(
             }
             image_regions.push(ImageRegion {
                 abs_line_idx: idx,
+                end_line: idx + height as usize,
                 hash,
                 height,
             });
@@ -955,6 +979,7 @@ fn wrap_lines(
         wrapped_lines,
         wrapped_user_indices,
         wrapped_user_prompt_starts,
+        wrapped_user_prompt_ends,
         user_prompt_texts: user_prompt_texts.to_vec(),
         image_regions,
         edit_tool_ranges: Vec::new(),
@@ -972,6 +997,7 @@ fn wrap_lines_with_map(
     let user_width = width.saturating_sub(2) as usize;
     let mut wrapped_user_indices: Vec<usize> = Vec::new();
     let mut wrapped_user_prompt_starts: Vec<usize> = Vec::new();
+    let mut wrapped_user_prompt_ends: Vec<usize> = Vec::new();
     let mut user_line_mask = vec![false; lines.len()];
     for &idx in user_line_indices {
         if idx < user_line_mask.len() {
@@ -992,6 +1018,7 @@ fn wrap_lines_with_map(
 
         if is_user_line {
             wrapped_user_prompt_starts.push(wrapped_idx);
+            wrapped_user_prompt_ends.push(wrapped_idx + count);
             for i in 0..count {
                 wrapped_user_indices.push(wrapped_idx + i);
             }
@@ -1017,6 +1044,7 @@ fn wrap_lines_with_map(
             }
             image_regions.push(ImageRegion {
                 abs_line_idx: idx,
+                end_line: idx + height as usize,
                 hash,
                 height,
             });
@@ -1043,6 +1071,7 @@ fn wrap_lines_with_map(
         wrapped_lines,
         wrapped_user_indices,
         wrapped_user_prompt_starts,
+        wrapped_user_prompt_ends,
         user_prompt_texts: user_prompt_texts.to_vec(),
         image_regions,
         edit_tool_ranges,

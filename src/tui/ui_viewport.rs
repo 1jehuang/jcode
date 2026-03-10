@@ -1,6 +1,4 @@
 use super::*;
-use std::collections::HashSet;
-
 fn lower_bound(values: &[usize], target: usize) -> usize {
     values.partition_point(|&v| v < target)
 }
@@ -14,11 +12,9 @@ pub(super) fn compute_visible_margins(
 ) -> info_widget::Margins {
     let visible_height = area.height as usize;
     let visible_end = scroll + visible_height;
-    let user_set: HashSet<usize> = user_line_indices
-        .iter()
-        .copied()
-        .filter(|&idx| idx >= scroll && idx < visible_end)
-        .collect();
+    let visible_user_start = lower_bound(user_line_indices, scroll);
+    let visible_user_end = lower_bound(user_line_indices, visible_end);
+    let visible_user_indices = &user_line_indices[visible_user_start..visible_user_end];
 
     let mut right_widths = Vec::with_capacity(visible_height);
     let mut left_widths = Vec::with_capacity(visible_height);
@@ -27,7 +23,7 @@ pub(super) fn compute_visible_margins(
         let line_idx = scroll + row;
         if line_idx < lines.len() {
             let mut used = lines[line_idx].width().min(area.width as usize) as u16;
-            if user_set.contains(&line_idx) && area.width > 0 {
+            if visible_user_indices.binary_search(&line_idx).is_ok() && area.width > 0 {
                 used = used.saturating_add(1).min(area.width);
             }
 
@@ -75,6 +71,7 @@ pub(super) fn draw_messages(
     let wrapped_lines = &prepared.wrapped_lines;
     let wrapped_user_indices = &prepared.wrapped_user_indices;
     let wrapped_user_prompt_starts = &prepared.wrapped_user_prompt_starts;
+    let wrapped_user_prompt_ends = &prepared.wrapped_user_prompt_ends;
     let user_prompt_texts = &prepared.user_prompt_texts;
 
     let total_lines = wrapped_lines.len();
@@ -162,24 +159,16 @@ pub(super) fn draw_messages(
         let t = (now_ms.saturating_sub(anim.start_ms) as f32 / PROMPT_ENTRY_ANIMATION_MS as f32)
             .clamp(0.0, 1.0);
 
-        let prompt_end = wrapped_user_prompt_starts
-            .iter()
-            .find(|&&s| s > anim.line_idx)
-            .copied()
-            .unwrap_or(
-                wrapped_user_indices
-                    .last()
-                    .map(|&l| l + 1)
-                    .unwrap_or(anim.line_idx + 1),
-            );
+        let prompt_idx = lower_bound(wrapped_user_prompt_starts, anim.line_idx);
+        if prompt_idx < wrapped_user_prompt_starts.len()
+            && wrapped_user_prompt_starts[prompt_idx] == anim.line_idx
+        {
+            let prompt_end = wrapped_user_prompt_ends
+                .get(prompt_idx)
+                .copied()
+                .unwrap_or(anim.line_idx + 1);
 
-        for abs_idx in anim.line_idx..prompt_end {
-            if abs_idx >= scroll
-                && abs_idx < visible_end
-                && wrapped_user_indices[visible_user_start..visible_user_end]
-                    .binary_search(&abs_idx)
-                    .is_ok()
-            {
+            for abs_idx in anim.line_idx.max(scroll)..prompt_end.min(visible_end) {
                 let rel_idx = abs_idx - scroll;
                 if let Some(line) = visible_lines.get_mut(rel_idx) {
                     for span in &mut line.spans {
@@ -200,25 +189,16 @@ pub(super) fn draw_messages(
         let highlight_style = Style::default().fg(file_link_color()).bold();
         let accent_style = Style::default().fg(file_link_color());
 
-        for range in &prepared.edit_tool_ranges {
-            if range.msg_index != active.msg_index {
-                continue;
-            }
-
-            let highlight_start = range.start_line.max(scroll);
-            let highlight_end = range.end_line.min(visible_end);
-
-            for abs_idx in highlight_start..highlight_end {
-                let rel_idx = abs_idx.saturating_sub(scroll);
-                if let Some(line) = visible_lines.get_mut(rel_idx) {
-                    if abs_idx == range.start_line {
-                        line.spans.insert(
-                            0,
-                            Span::styled(format!("→ edit#{} ", active.edit_index), highlight_style),
-                        );
-                    } else {
-                        line.spans.insert(0, Span::styled("  │ ", accent_style));
-                    }
+        for abs_idx in active.start_line.max(scroll)..active.end_line.min(visible_end) {
+            let rel_idx = abs_idx.saturating_sub(scroll);
+            if let Some(line) = visible_lines.get_mut(rel_idx) {
+                if abs_idx == active.start_line {
+                    line.spans.insert(
+                        0,
+                        Span::styled(format!("→ edit#{} ", active.edit_index), highlight_style),
+                    );
+                } else {
+                    line.spans.insert(0, Span::styled("  │ ", accent_style));
                 }
             }
         }
@@ -229,11 +209,18 @@ pub(super) fn draw_messages(
     let centered = app.centered_mode();
     let diagram_mode = app.diagram_mode();
     if diagram_mode != crate::config::DiagramDisplayMode::Pinned {
-        for region in &prepared.image_regions {
+        let visible_image_start = prepared
+            .image_regions
+            .partition_point(|region| region.end_line <= scroll);
+        let visible_image_end = prepared
+            .image_regions
+            .partition_point(|region| region.abs_line_idx < visible_end);
+
+        for region in &prepared.image_regions[visible_image_start..visible_image_end] {
             let abs_idx = region.abs_line_idx;
             let hash = region.hash;
             let total_height = region.height;
-            let image_end = abs_idx + total_height as usize;
+            let image_end = region.end_line;
 
             if image_end > scroll && abs_idx < visible_end {
                 let marker_visible = abs_idx >= scroll && abs_idx < visible_end;
@@ -326,9 +313,8 @@ pub(super) fn draw_messages(
     }
 
     if crate::config::config().display.prompt_preview && scroll > 0 {
-        let last_offscreen_prompt_idx = wrapped_user_prompt_starts
-            .iter()
-            .rposition(|&start| start < scroll);
+        let last_offscreen_prompt_idx =
+            lower_bound(wrapped_user_prompt_starts, scroll).checked_sub(1);
 
         if let Some(prompt_order) = last_offscreen_prompt_idx {
             if let Some(prompt_text) = user_prompt_texts.get(prompt_order) {
@@ -426,9 +412,7 @@ fn compute_prompt_preview_line_count(
     scroll: usize,
     area_width: u16,
 ) -> u16 {
-    let last_offscreen = wrapped_user_prompt_starts
-        .iter()
-        .rposition(|&start| start < scroll);
+    let last_offscreen = lower_bound(wrapped_user_prompt_starts, scroll).checked_sub(1);
     let Some(prompt_order) = last_offscreen else {
         return 0;
     };

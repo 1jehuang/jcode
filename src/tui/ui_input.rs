@@ -7,6 +7,7 @@ use super::{
 };
 use crate::message::ConnectionPhase;
 use crate::tui::color_support::rgb;
+use crate::tui::info_widget::occasional_status_tip;
 use ratatui::{prelude::*, widgets::Paragraph};
 
 pub(super) fn send_mode_reserved_width(app: &dyn TuiState) -> usize {
@@ -442,11 +443,21 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                     Style::default().fg(dim_color()),
                 ),
             ])
+        } else if let Some(tip) =
+            occasional_status_tip(area.width as usize, app.animation_elapsed() as u64)
+        {
+            Line::from(vec![Span::styled(tip, Style::default().fg(dim_color()))])
         } else {
             Line::from("")
         }
     } else {
-        Line::from("")
+        if let Some(tip) =
+            occasional_status_tip(area.width as usize, app.animation_elapsed() as u64)
+        {
+            Line::from(vec![Span::styled(tip, Style::default().fg(dim_color()))])
+        } else {
+            Line::from("")
+        }
     };
 
     crate::memory::check_staleness();

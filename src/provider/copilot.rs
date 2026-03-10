@@ -42,26 +42,6 @@ pub(crate) fn is_known_display_model(model: &str) -> bool {
     FALLBACK_MODELS.contains(&model)
 }
 
-/// Context window sizes for Copilot models
-fn copilot_context_window(model: &str) -> usize {
-    match model {
-        "claude-sonnet-4" | "claude-sonnet-4-6" | "claude-sonnet-4.6" => 128_000,
-        "claude-opus-4-6" | "claude-opus-4.6" | "claude-opus-4.6-fast" => 200_000,
-        "claude-opus-4.5" | "claude-opus-4-5" => 200_000,
-        "claude-sonnet-4.5" | "claude-sonnet-4-5" => 200_000,
-        "claude-haiku-4.5" | "claude-haiku-4-5" => 200_000,
-        "gpt-4o" | "gpt-4o-mini" => 128_000,
-        m if m.starts_with("gpt-4o") => 128_000,
-        m if m.starts_with("gpt-4.1") => 128_000,
-        m if m.starts_with("gpt-5") => 128_000,
-        "o3-mini" | "o4-mini" => 128_000,
-        m if m.starts_with("gemini-2.0-flash") => 1_000_000,
-        m if m.starts_with("gemini-2.5") => 1_000_000,
-        m if m.starts_with("gemini-3") => 1_000_000,
-        _ => 128_000,
-    }
-}
-
 /// Copilot API provider - uses GitHub Copilot's OpenAI-compatible API.
 /// Authenticates via GitHub OAuth token, exchanges for Copilot bearer token,
 /// and sends requests to api.githubcopilot.com.
@@ -1009,7 +989,8 @@ impl Provider for CopilotApiProvider {
     }
 
     fn context_window(&self) -> usize {
-        copilot_context_window(&self.model())
+        crate::provider::context_limit_for_model_with_provider(&self.model(), Some(self.name()))
+            .unwrap_or(128_000)
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
@@ -1098,17 +1079,77 @@ mod tests {
 
     #[test]
     fn context_window_handles_dot_and_dash_names() {
-        assert_eq!(copilot_context_window("claude-opus-4.6"), 200_000);
-        assert_eq!(copilot_context_window("claude-opus-4-6"), 200_000);
-        assert_eq!(copilot_context_window("claude-opus-4.6-fast"), 200_000);
-        assert_eq!(copilot_context_window("claude-sonnet-4.6"), 128_000);
-        assert_eq!(copilot_context_window("claude-sonnet-4-6"), 128_000);
-        assert_eq!(copilot_context_window("gpt-5.4"), 128_000);
-        assert_eq!(copilot_context_window("gpt-5.4-pro"), 128_000);
-        assert_eq!(copilot_context_window("gpt-5.3-codex"), 128_000);
-        assert_eq!(copilot_context_window("gemini-3-pro-preview"), 1_000_000);
-        assert_eq!(copilot_context_window("gemini-2.5-pro"), 1_000_000);
-        assert_eq!(copilot_context_window("unknown-model"), 128_000);
+        assert_eq!(
+            crate::provider::context_limit_for_model_with_provider(
+                "claude-opus-4.6",
+                Some("copilot")
+            ),
+            Some(200_000)
+        );
+        assert_eq!(
+            crate::provider::context_limit_for_model_with_provider(
+                "claude-opus-4-6",
+                Some("copilot")
+            ),
+            Some(200_000)
+        );
+        assert_eq!(
+            crate::provider::context_limit_for_model_with_provider(
+                "claude-opus-4.6-fast",
+                Some("copilot")
+            ),
+            Some(200_000)
+        );
+        assert_eq!(
+            crate::provider::context_limit_for_model_with_provider(
+                "claude-sonnet-4.6",
+                Some("copilot")
+            ),
+            Some(128_000)
+        );
+        assert_eq!(
+            crate::provider::context_limit_for_model_with_provider(
+                "claude-sonnet-4-6",
+                Some("copilot")
+            ),
+            Some(128_000)
+        );
+        assert_eq!(
+            crate::provider::context_limit_for_model_with_provider("gpt-5.4", Some("copilot")),
+            Some(128_000)
+        );
+        assert_eq!(
+            crate::provider::context_limit_for_model_with_provider("gpt-5.4-pro", Some("copilot")),
+            Some(128_000)
+        );
+        assert_eq!(
+            crate::provider::context_limit_for_model_with_provider(
+                "gpt-5.3-codex",
+                Some("copilot")
+            ),
+            Some(128_000)
+        );
+        assert_eq!(
+            crate::provider::context_limit_for_model_with_provider(
+                "gemini-3-pro-preview",
+                Some("copilot")
+            ),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            crate::provider::context_limit_for_model_with_provider(
+                "gemini-2.5-pro",
+                Some("copilot")
+            ),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            crate::provider::context_limit_for_model_with_provider(
+                "unknown-model",
+                Some("copilot")
+            ),
+            Some(128_000)
+        );
     }
 
     #[test]

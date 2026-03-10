@@ -98,8 +98,11 @@ impl App {
 
     pub(super) fn update_context_limit_for_model(&mut self, model: &str) {
         let limit = if self.is_remote {
-            crate::provider::context_limit_for_model(model)
-                .unwrap_or(self.provider.context_window())
+            crate::provider::context_limit_for_model_with_provider(
+                model,
+                self.remote_provider_name.as_deref(),
+            )
+            .unwrap_or(self.provider.context_window())
         } else {
             self.provider.context_window()
         };
@@ -804,10 +807,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
         let mode = mode.trim();
         match app.provider.set_transport(mode) {
             Ok(()) => {
-                let new_transport = app
-                    .provider
-                    .transport()
-                    .unwrap_or_else(|| mode.to_string());
+                let new_transport = app.provider.transport().unwrap_or_else(|| mode.to_string());
                 app.push_display_message(DisplayMessage::system(format!(
                     "✓ Transport → {}",
                     new_transport

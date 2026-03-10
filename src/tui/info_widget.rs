@@ -804,6 +804,13 @@ pub struct InfoWidgetData {
 }
 
 impl InfoWidgetData {
+    fn widget_disabled(kind: WidgetKind) -> bool {
+        matches!(
+            kind,
+            WidgetKind::SwarmStatus | WidgetKind::AmbientMode | WidgetKind::Tips
+        )
+    }
+
     pub fn is_empty(&self) -> bool {
         self.todos.is_empty()
             && self.context_info.is_none()
@@ -817,6 +824,10 @@ impl InfoWidgetData {
 
     /// Check if a specific widget kind has data to display
     pub fn has_data_for(&self, kind: WidgetKind) -> bool {
+        if Self::widget_disabled(kind) {
+            return false;
+        }
+
         match kind {
             WidgetKind::Diagrams => !self.diagrams.is_empty(),
             WidgetKind::Overview => {
@@ -833,19 +844,6 @@ impl InfoWidgetData {
                     sections += 1;
                 }
                 if !self.todos.is_empty() {
-                    sections += 1;
-                }
-                if self
-                    .swarm_info
-                    .as_ref()
-                    .map(|s| {
-                        s.subagent_status.is_some()
-                            || s.session_count > 1
-                            || s.client_count.is_some()
-                            || !s.members.is_empty()
-                    })
-                    .unwrap_or(false)
-                {
                     sections += 1;
                 }
                 if self
@@ -889,29 +887,20 @@ impl InfoWidgetData {
                 .as_ref()
                 .map(|m| m.total_count > 0 || m.activity.is_some())
                 .unwrap_or(false),
-            WidgetKind::SwarmStatus => self
-                .swarm_info
-                .as_ref()
-                .map(|s| {
-                    s.subagent_status.is_some()
-                        || s.session_count > 1
-                        || s.client_count.is_some()
-                        || !s.members.is_empty()
-                })
-                .unwrap_or(false),
+            WidgetKind::SwarmStatus => false,
             WidgetKind::BackgroundTasks => self
                 .background_info
                 .as_ref()
                 .map(|b| b.running_count > 0 || b.memory_agent_active)
                 .unwrap_or(false),
-            WidgetKind::AmbientMode => self.ambient_info.is_some(),
+            WidgetKind::AmbientMode => false,
             WidgetKind::UsageLimits => self
                 .usage_info
                 .as_ref()
                 .map(|u| u.available)
                 .unwrap_or(false),
             WidgetKind::ModelInfo => self.model.is_some(),
-            WidgetKind::Tips => true, // Always available
+            WidgetKind::Tips => false,
             WidgetKind::GitStatus => self
                 .git_info
                 .as_ref()
@@ -2548,9 +2537,6 @@ fn render_page(kind: InfoPageKind, data: &InfoWidgetData, inner: Rect) -> Vec<Li
         InfoPageKind::MemoryExpanded => {
             render_sections(data, inner, Some(InfoPageKind::MemoryExpanded))
         }
-        InfoPageKind::SwarmExpanded => {
-            render_sections(data, inner, Some(InfoPageKind::SwarmExpanded))
-        }
     }
 }
 
@@ -2595,21 +2581,6 @@ fn render_sections(
                 lines.extend(render_memory_expanded(info, inner));
             } else {
                 lines.extend(render_memory_compact(info));
-            }
-        }
-    }
-
-    // Swarm/subagent info at the bottom
-    if let Some(info) = &data.swarm_info {
-        if info.subagent_status.is_some()
-            || info.session_count > 1
-            || info.client_count.is_some()
-            || !info.members.is_empty()
-        {
-            if matches!(focus, Some(InfoPageKind::SwarmExpanded)) {
-                lines.extend(render_swarm_expanded(info, inner));
-            } else {
-                lines.extend(render_swarm_compact(info));
             }
         }
     }
@@ -2834,6 +2805,9 @@ fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
 // ---------------------------------------------------------------------------
 
 const TIP_CYCLE_SECONDS: u64 = 15;
+const STATUS_TIP_PERIOD_SECONDS: u64 = 90;
+const STATUS_TIP_OFFSET_SECONDS: u64 = 28;
+const STATUS_TIP_SHOW_SECONDS: u64 = 12;
 
 struct Tip {
     text: String,
@@ -2879,6 +2853,31 @@ fn current_tip(_max_width: usize) -> Tip {
     Tip {
         text: tips[i].text.clone(),
     }
+}
+
+pub(crate) fn occasional_status_tip(max_width: usize, elapsed_secs: u64) -> Option<String> {
+    if max_width < 16 {
+        return None;
+    }
+
+    let cycle_pos = elapsed_secs % STATUS_TIP_PERIOD_SECONDS;
+    let show_until = STATUS_TIP_OFFSET_SECONDS + STATUS_TIP_SHOW_SECONDS;
+    if cycle_pos < STATUS_TIP_OFFSET_SECONDS || cycle_pos >= show_until {
+        return None;
+    }
+
+    let prefix = "💡 ";
+    let available = max_width.saturating_sub(prefix.chars().count());
+    if available < 12 {
+        return None;
+    }
+
+    let tip = current_tip(available);
+    Some(format!(
+        "{}{}",
+        prefix,
+        truncate_smart(&tip.text, available)
+    ))
 }
 
 fn wrap_tip_text(text: &str, width: usize) -> Vec<String> {
@@ -3033,9 +3032,10 @@ fn render_tips_widget(inner: Rect) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        calculate_placements, render_memory_topology_lines, render_memory_widget,
-        render_model_widget, truncate_smart, BackgroundInfo, GraphEdge, GraphNode, InfoWidgetData,
-        Margins, MemoryInfo, SwarmInfo, UsageInfo, UsageProvider, WidgetKind,
+        calculate_placements, occasional_status_tip, render_memory_topology_lines,
+        render_memory_widget, render_model_widget, truncate_smart, BackgroundInfo, GraphEdge,
+        GraphNode, InfoWidgetData, Margins, MemoryInfo, SwarmInfo, UsageInfo, UsageProvider,
+        WidgetKind,
     };
     use ratatui::layout::Rect;
 
@@ -3044,6 +3044,16 @@ mod tests {
         let s = "eagle running — keep going";
         let out = truncate_smart(s, 15);
         assert_eq!(out, "eagle runnin...");
+    }
+
+    #[test]
+    fn occasional_status_tip_only_shows_during_part_of_cycle() {
+        assert!(occasional_status_tip(60, 5).is_none());
+        assert!(occasional_status_tip(60, 27).is_none());
+        assert!(occasional_status_tip(60, 28).is_some());
+        assert!(occasional_status_tip(60, 39).is_some());
+        assert!(occasional_status_tip(60, 40).is_none());
+        assert!(occasional_status_tip(60, 89).is_none());
     }
 
     fn node(kind: &str, label: &str, degree: usize) -> GraphNode {

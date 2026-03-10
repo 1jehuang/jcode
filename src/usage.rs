@@ -213,7 +213,10 @@ fn anthropic_usage_cache() -> &'static std::sync::Mutex<HashMap<String, UsageDat
 }
 
 fn anthropic_usage_cache_key(access_token: &str, account_label: Option<&str>) -> String {
-    if let Some(label) = account_label.map(str::trim).filter(|label| !label.is_empty()) {
+    if let Some(label) = account_label
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+    {
         return format!("label:{}", label);
     }
 
@@ -292,10 +295,7 @@ fn provider_report_from_usage_data(display_name: String, data: &UsageData) -> Pr
     }
 }
 
-async fn fetch_anthropic_usage_data(
-    access_token: String,
-    cache_key: String,
-) -> Result<UsageData> {
+async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> Result<UsageData> {
     if let Some(cached) = cached_anthropic_usage(&cache_key) {
         return Ok(cached);
     }
@@ -316,7 +316,9 @@ async fn fetch_anthropic_usage_data(
         Err(e) => {
             let err = anthropic_usage_error(format!("Failed to fetch usage data: {}", e));
             store_anthropic_usage(cache_key, err.clone());
-            anyhow::bail!(err.last_error.unwrap_or_else(|| "Failed to fetch usage data".into()));
+            anyhow::bail!(err
+                .last_error
+                .unwrap_or_else(|| "Failed to fetch usage data".into()));
         }
     };
 
@@ -445,7 +447,15 @@ async fn sync_active_anthropic_usage_from_reports(results: &[ProviderUsage]) {
 
     match report {
         Some(report) => {
-            *cached = usage_data_from_provider_report(report);
+            let usage_data = usage_data_from_provider_report(report);
+            if let Ok(creds) = auth::claude::load_credentials() {
+                let cache_key = anthropic_usage_cache_key(
+                    &creds.access_token,
+                    auth::claude::active_account_label().as_deref(),
+                );
+                store_anthropic_usage(cache_key, usage_data.clone());
+            }
+            *cached = usage_data;
             if report.error.is_none() {
                 crate::provider::clear_provider_unavailable_for_account("claude");
             }
@@ -834,87 +844,12 @@ async fn fetch_anthropic_usage_for_token(
         access_token
     };
 
-    let client = crate::provider::shared_http_client();
-    let response = client
-        .get(USAGE_URL)
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/json")
-        .header("User-Agent", "claude-cli/1.0.0")
-        .header("Authorization", format!("Bearer {}", access_token))
-        .header("anthropic-beta", "oauth-2025-04-20,claude-code-20250219")
-        .send()
-        .await;
-
-    let response = match response {
-        Ok(r) => r,
-        Err(e) => {
-            return ProviderUsage {
-                provider_name: display_name.to_string(),
-                error: Some(format!("Failed to fetch: {}", e)),
-                ..Default::default()
-            };
-        }
-    };
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return ProviderUsage {
-            provider_name: display_name.to_string(),
-            error: Some(format!("API error ({}): {}", status, body)),
-            ..Default::default()
-        };
-    }
-
-    match response.json::<UsageResponse>().await {
-        Ok(data) => {
-            let mut limits = Vec::new();
-            if let Some(ref w) = data.five_hour {
-                limits.push(UsageLimit {
-                    name: "5-hour window".to_string(),
-                    usage_percent: w.utilization.unwrap_or(0.0),
-                    resets_at: w.resets_at.clone(),
-                });
-            }
-            if let Some(ref w) = data.seven_day {
-                limits.push(UsageLimit {
-                    name: "7-day window".to_string(),
-                    usage_percent: w.utilization.unwrap_or(0.0),
-                    resets_at: w.resets_at.clone(),
-                });
-            }
-            if let Some(ref w) = data.seven_day_opus {
-                if let Some(u) = w.utilization {
-                    limits.push(UsageLimit {
-                        name: "7-day Opus window".to_string(),
-                        usage_percent: u,
-                        resets_at: w.resets_at.clone(),
-                    });
-                }
-            }
-
-            let mut extra_info = Vec::new();
-            if let Some(ref eu) = data.extra_usage {
-                extra_info.push((
-                    "Extra usage (long context)".to_string(),
-                    if eu.is_enabled.unwrap_or(false) {
-                        "enabled".to_string()
-                    } else {
-                        "disabled".to_string()
-                    },
-                ));
-            }
-
-            ProviderUsage {
-                provider_name: display_name.to_string(),
-                limits,
-                extra_info,
-                error: None,
-            }
-        }
+    let cache_key = anthropic_usage_cache_key(&access_token, Some(&account_label));
+    match fetch_anthropic_usage_data(access_token, cache_key).await {
+        Ok(data) => provider_report_from_usage_data(display_name, &data),
         Err(e) => ProviderUsage {
-            provider_name: display_name.to_string(),
-            error: Some(format!("Failed to parse response: {}", e)),
+            provider_name: display_name,
+            error: Some(e.to_string()),
             ..Default::default()
         },
     }
@@ -1469,9 +1404,9 @@ async fn fetch_usage() -> Result<UsageData> {
     let creds = auth::claude::load_credentials().context("Failed to load Claude credentials")?;
 
     let now = chrono::Utc::now().timestamp_millis();
+    let active_label =
+        auth::claude::active_account_label().unwrap_or_else(|| "default".to_string());
     let access_token = if creds.expires_at < now + 300_000 && !creds.refresh_token.is_empty() {
-        let active_label =
-            auth::claude::active_account_label().unwrap_or_else(|| "default".to_string());
         match auth::oauth::refresh_claude_tokens_for_account(&creds.refresh_token, &active_label)
             .await
         {
@@ -1482,58 +1417,8 @@ async fn fetch_usage() -> Result<UsageData> {
         creds.access_token
     };
 
-    let client = crate::provider::shared_http_client();
-    let response = client
-        .get(USAGE_URL)
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/json")
-        .header("User-Agent", "claude-cli/1.0.0")
-        .header("Authorization", format!("Bearer {}", access_token))
-        .header("anthropic-beta", "oauth-2025-04-20,claude-code-20250219")
-        .send()
-        .await
-        .context("Failed to fetch usage data")?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_text = response.text().await.unwrap_or_default();
-        anyhow::bail!("Usage API error ({}): {}", status, error_text);
-    }
-
-    let data: UsageResponse = response
-        .json()
-        .await
-        .context("Failed to parse usage response")?;
-
-    // API returns percentages (0-100), convert to fractions (0.0-1.0)
-    Ok(UsageData {
-        five_hour: data
-            .five_hour
-            .as_ref()
-            .and_then(|w| w.utilization)
-            .map(|u| u / 100.0)
-            .unwrap_or(0.0),
-        five_hour_resets_at: data.five_hour.as_ref().and_then(|w| w.resets_at.clone()),
-        seven_day: data
-            .seven_day
-            .as_ref()
-            .and_then(|w| w.utilization)
-            .map(|u| u / 100.0)
-            .unwrap_or(0.0),
-        seven_day_resets_at: data.seven_day.as_ref().and_then(|w| w.resets_at.clone()),
-        seven_day_opus: data
-            .seven_day_opus
-            .as_ref()
-            .and_then(|w| w.utilization)
-            .map(|u| u / 100.0),
-        extra_usage_enabled: data
-            .extra_usage
-            .as_ref()
-            .and_then(|e| e.is_enabled)
-            .unwrap_or(false),
-        fetched_at: Some(Instant::now()),
-        last_error: None,
-    })
+    let cache_key = anthropic_usage_cache_key(&access_token, Some(&active_label));
+    fetch_anthropic_usage_data(access_token, cache_key).await
 }
 
 async fn refresh_usage(usage: Arc<RwLock<UsageData>>) {
@@ -1658,9 +1543,11 @@ pub fn get_openai_usage_sync() -> OpenAIUsageData {
         }
     }
 
-    tokio::spawn(async {
-        let _ = get_openai_usage().await;
-    });
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::spawn(async {
+            let _ = get_openai_usage().await;
+        });
+    }
 
     OpenAIUsageData::default()
 }
@@ -1685,22 +1572,10 @@ pub fn fetch_usage_for_account_sync(
     refresh_token: &str,
     expires_at: i64,
 ) -> Result<UsageData> {
-    static ACCOUNT_CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, UsageData>>> =
-        std::sync::OnceLock::new();
-    let cache = ACCOUNT_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let cache_key = anthropic_usage_cache_key(access_token, None);
 
-    let cache_key = if access_token.len() > 20 {
-        access_token[..20].to_string()
-    } else {
-        access_token.to_string()
-    };
-
-    if let Ok(map) = cache.lock() {
-        if let Some(cached) = map.get(&cache_key) {
-            if !cached.is_stale() {
-                return Ok(cached.clone());
-            }
-        }
+    if let Some(cached) = cached_anthropic_usage(&cache_key) {
+        return Ok(cached);
     }
 
     let result = tokio::task::block_in_place(|| {
@@ -1712,23 +1587,7 @@ pub fn fetch_usage_for_account_sync(
     });
 
     if let Ok(ref data) = result {
-        if let Ok(mut map) = cache.lock() {
-            map.insert(cache_key, data.clone());
-        }
-    } else if let Err(ref e) = result {
-        let err_msg = e.to_string();
-        if err_msg.contains("429") || err_msg.contains("rate limit") {
-            if let Ok(mut map) = cache.lock() {
-                map.insert(
-                    cache_key,
-                    UsageData {
-                        fetched_at: Some(Instant::now()),
-                        last_error: Some(err_msg),
-                        ..Default::default()
-                    },
-                );
-            }
-        }
+        store_anthropic_usage(cache_key, data.clone());
     }
 
     result
@@ -1744,57 +1603,8 @@ async fn fetch_usage_for_account(
         anyhow::bail!("OAuth token expired");
     }
 
-    let client = crate::provider::shared_http_client();
-    let response = client
-        .get(USAGE_URL)
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/json")
-        .header("User-Agent", "claude-cli/1.0.0")
-        .header("Authorization", format!("Bearer {}", access_token))
-        .header("anthropic-beta", "oauth-2025-04-20,claude-code-20250219")
-        .send()
-        .await
-        .context("Failed to fetch usage data")?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_text = response.text().await.unwrap_or_default();
-        anyhow::bail!("Usage API error ({}): {}", status, error_text);
-    }
-
-    let data: UsageResponse = response
-        .json()
-        .await
-        .context("Failed to parse usage response")?;
-
-    Ok(UsageData {
-        five_hour: data
-            .five_hour
-            .as_ref()
-            .and_then(|w| w.utilization)
-            .map(|u| u / 100.0)
-            .unwrap_or(0.0),
-        five_hour_resets_at: data.five_hour.as_ref().and_then(|w| w.resets_at.clone()),
-        seven_day: data
-            .seven_day
-            .as_ref()
-            .and_then(|w| w.utilization)
-            .map(|u| u / 100.0)
-            .unwrap_or(0.0),
-        seven_day_resets_at: data.seven_day.as_ref().and_then(|w| w.resets_at.clone()),
-        seven_day_opus: data
-            .seven_day_opus
-            .as_ref()
-            .and_then(|w| w.utilization)
-            .map(|u| u / 100.0),
-        extra_usage_enabled: data
-            .extra_usage
-            .as_ref()
-            .and_then(|e| e.is_enabled)
-            .unwrap_or(false),
-        fetched_at: Some(std::time::Instant::now()),
-        last_error: None,
-    })
+    let cache_key = anthropic_usage_cache_key(&access_token, None);
+    fetch_anthropic_usage_data(access_token, cache_key).await
 }
 
 /// Get usage data synchronously (returns cached data, triggers refresh if stale)
@@ -1811,9 +1621,11 @@ pub fn get_sync() -> UsageData {
     }
 
     // Not initialized yet - trigger initialization
-    tokio::spawn(async {
-        let _ = get().await;
-    });
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::spawn(async {
+            let _ = get().await;
+        });
+    }
 
     UsageData::default()
 }
@@ -1846,6 +1658,24 @@ mod tests {
         assert_eq!(humanize_key("five_hour"), "Five Hour");
         assert_eq!(humanize_key("seven_day_opus"), "Seven Day Opus");
         assert_eq!(humanize_key("plan"), "Plan");
+    }
+
+    #[test]
+    fn test_get_sync_without_runtime_does_not_panic() {
+        let result = std::panic::catch_unwind(get_sync);
+        assert!(
+            result.is_ok(),
+            "get_sync should not require a Tokio runtime"
+        );
+    }
+
+    #[test]
+    fn test_get_openai_usage_sync_without_runtime_does_not_panic() {
+        let result = std::panic::catch_unwind(get_openai_usage_sync);
+        assert!(
+            result.is_ok(),
+            "get_openai_usage_sync should not require a Tokio runtime"
+        );
     }
 
     #[test]

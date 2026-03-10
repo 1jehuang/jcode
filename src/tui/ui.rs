@@ -1232,6 +1232,10 @@ fn format_status_for_debug(app: &dyn TuiState) -> String {
                     input / 1000,
                     output / 1000
                 )
+            } else if let Some(tip) =
+                info_widget::occasional_status_tip(120, app.animation_elapsed() as u64)
+            {
+                format!("Idle ({})", tip)
             } else {
                 "Idle".to_string()
             }
@@ -1263,6 +1267,8 @@ fn format_status_for_debug(app: &dyn TuiState) -> String {
 struct ImageRegion {
     /// Absolute line index in wrapped_lines
     abs_line_idx: usize,
+    /// Absolute exclusive end line of the image placeholder region.
+    end_line: usize,
     /// Hash of the mermaid content (for cache lookup)
     hash: u64,
     /// Total height of the image placeholder in lines
@@ -1275,6 +1281,8 @@ struct PreparedMessages {
     wrapped_user_indices: Vec<usize>,
     /// Wrapped line indices where a user prompt line starts
     wrapped_user_prompt_starts: Vec<usize>,
+    /// Wrapped line indices where a user prompt line ends (exclusive)
+    wrapped_user_prompt_ends: Vec<usize>,
     /// Flattened user prompt text in display order, used by prompt preview without
     /// scanning display_messages on every frame.
     user_prompt_texts: Vec<String>,
@@ -2747,6 +2755,7 @@ mod tests {
             wrapped_lines: vec![Line::from("a"); 20],
             wrapped_user_indices: Vec::new(),
             wrapped_user_prompt_starts: Vec::new(),
+            wrapped_user_prompt_ends: Vec::new(),
             user_prompt_texts: Vec::new(),
             image_regions: Vec::new(),
             edit_tool_ranges: vec![
@@ -2791,6 +2800,7 @@ mod tests {
             wrapped_lines: vec![Line::from("a")],
             wrapped_user_indices: Vec::new(),
             wrapped_user_prompt_starts: Vec::new(),
+            wrapped_user_prompt_ends: Vec::new(),
             user_prompt_texts: Vec::new(),
             image_regions: Vec::new(),
             edit_tool_ranges: Vec::new(),
@@ -2799,6 +2809,7 @@ mod tests {
             wrapped_lines: vec![Line::from("b")],
             wrapped_user_indices: Vec::new(),
             wrapped_user_prompt_starts: Vec::new(),
+            wrapped_user_prompt_ends: Vec::new(),
             user_prompt_texts: Vec::new(),
             image_regions: Vec::new(),
             edit_tool_ranges: Vec::new(),
@@ -2836,6 +2847,7 @@ mod tests {
                 wrapped_lines: vec![Line::from(format!("{idx}"))],
                 wrapped_user_indices: Vec::new(),
                 wrapped_user_prompt_starts: Vec::new(),
+                wrapped_user_prompt_ends: Vec::new(),
                 user_prompt_texts: Vec::new(),
                 image_regions: Vec::new(),
                 edit_tool_ranges: Vec::new(),

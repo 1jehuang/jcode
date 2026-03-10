@@ -11,6 +11,7 @@ use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEvent};
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 #[derive(Default)]
@@ -93,6 +94,133 @@ pub(super) enum PostConnectOutcome {
 pub(super) enum RemoteEventOutcome {
     Continue,
     Reconnect,
+}
+
+const RELOAD_SOCKET_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
+const RELOAD_SOCKET_WAIT_WINDOW: Duration = Duration::from_secs(10);
+const RELOAD_SOCKET_PROBE_INTERVAL: Duration = Duration::from_millis(100);
+
+pub(super) fn should_wait_for_reload_socket(state: &RemoteRunState) -> bool {
+    state.server_reload_in_progress
+        && state
+            .disconnect_start
+            .map(|start| start.elapsed() < RELOAD_SOCKET_WAIT_WINDOW)
+            .unwrap_or(true)
+}
+
+async fn socket_is_connectable(path: &Path) -> bool {
+    crate::transport::is_socket_path(path) && crate::transport::Stream::connect(path).await.is_ok()
+}
+
+async fn wait_for_socket_ready(path: &Path, timeout: Duration) -> bool {
+    if socket_is_connectable(path).await {
+        return true;
+    }
+
+    let mut dir_event = Box::pin(wait_for_socket_dir_event(path, timeout));
+    let mut dir_event_done = false;
+    let deadline = Instant::now() + timeout;
+    let mut probe_interval = tokio::time::interval(RELOAD_SOCKET_PROBE_INTERVAL);
+    probe_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        if Instant::now() >= deadline {
+            return false;
+        }
+
+        tokio::select! {
+            saw_event = &mut dir_event, if !dir_event_done => {
+                dir_event_done = true;
+                if saw_event && socket_is_connectable(path).await {
+                    return true;
+                }
+            }
+            _ = probe_interval.tick() => {
+                if socket_is_connectable(path).await {
+                    return true;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_socket_dir_event(path: &Path, timeout: Duration) -> bool {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || wait_for_socket_dir_event_blocking(&path, timeout))
+        .await
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn wait_for_socket_dir_event(_path: &Path, _timeout: Duration) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_socket_dir_event_blocking(path: &Path, timeout: Duration) -> bool {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+
+    let Ok(parent) = CString::new(parent.as_os_str().as_bytes()) else {
+        return false;
+    };
+
+    unsafe {
+        let fd = libc::inotify_init1(libc::IN_CLOEXEC);
+        if fd < 0 {
+            return false;
+        }
+
+        let mask = (libc::IN_CREATE
+            | libc::IN_MOVED_TO
+            | libc::IN_ATTRIB
+            | libc::IN_CLOSE_WRITE
+            | libc::IN_DELETE
+            | libc::IN_MOVE_SELF
+            | libc::IN_DELETE_SELF) as u32;
+        if libc::inotify_add_watch(fd, parent.as_ptr(), mask) < 0 {
+            let _ = libc::close(fd);
+            return false;
+        }
+
+        let start = Instant::now();
+        let mut poll_fd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+
+        while start.elapsed() < timeout {
+            let remaining = timeout.saturating_sub(start.elapsed());
+            let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+            let ready = libc::poll(&mut poll_fd, 1, timeout_ms);
+            if ready > 0 && (poll_fd.revents & libc::POLLIN) != 0 {
+                let mut buf = [0u8; 256];
+                let _ = libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len());
+                let _ = libc::close(fd);
+                return true;
+            }
+            if ready == 0 {
+                break;
+            }
+            if ready < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                break;
+            }
+        }
+
+        let _ = libc::close(fd);
+    }
+
+    false
 }
 
 pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) {
@@ -311,28 +439,61 @@ pub(super) async fn connect_with_retry(
             }
             terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
 
-            let backoff = if state.initial_server_start && state.reconnect_attempts <= 20 {
-                Duration::from_millis(100)
-            } else if state.reconnect_attempts <= 2 {
-                Duration::from_millis(100)
-            } else {
-                if state.initial_server_start {
-                    state.initial_server_start = false;
+            let reload_socket_wait = should_wait_for_reload_socket(state);
+            let mut use_backoff_sleep = !reload_socket_wait;
+            if reload_socket_wait {
+                crate::logging::info("Reconnect wait: waiting for reload socket readiness");
+                let socket_path = crate::server::socket_path();
+                let readiness_wait =
+                    wait_for_socket_ready(&socket_path, RELOAD_SOCKET_WAIT_TIMEOUT);
+                tokio::pin!(readiness_wait);
+                loop {
+                    tokio::select! {
+                        ready = &mut readiness_wait => {
+                            if ready {
+                                break;
+                            }
+                            crate::logging::info("Reconnect wait: reload socket readiness timed out; falling back to backoff");
+                            use_backoff_sleep = true;
+                            break;
+                        }
+                        event = event_stream.next() => {
+                            if handle_terminal_event_while_disconnected(
+                                app,
+                                terminal,
+                                event,
+                            )? {
+                                return Ok(ConnectOutcome::Quit);
+                            }
+                        }
+                    }
                 }
-                Duration::from_secs((1u64 << (state.reconnect_attempts - 2).min(5)).min(30))
-            };
-            let sleep = tokio::time::sleep(backoff);
-            tokio::pin!(sleep);
-            loop {
-                tokio::select! {
-                    _ = &mut sleep => break,
-                    event = event_stream.next() => {
-                        if handle_terminal_event_while_disconnected(
-                            app,
-                            terminal,
-                            event,
-                        )? {
-                            return Ok(ConnectOutcome::Quit);
+            }
+
+            if use_backoff_sleep {
+                let backoff = if state.initial_server_start && state.reconnect_attempts <= 20 {
+                    Duration::from_millis(100)
+                } else if state.reconnect_attempts <= 2 {
+                    Duration::from_millis(100)
+                } else {
+                    if state.initial_server_start {
+                        state.initial_server_start = false;
+                    }
+                    Duration::from_secs((1u64 << (state.reconnect_attempts - 2).min(5)).min(30))
+                };
+                let sleep = tokio::time::sleep(backoff);
+                tokio::pin!(sleep);
+                loop {
+                    tokio::select! {
+                        _ = &mut sleep => break,
+                        event = event_stream.next() => {
+                            if handle_terminal_event_while_disconnected(
+                                app,
+                                terminal,
+                                event,
+                            )? {
+                                return Ok(ConnectOutcome::Quit);
+                            }
                         }
                     }
                 }
@@ -2355,9 +2516,7 @@ pub(super) async fn handle_remote_key(
                 if let Some(mode) = trimmed.strip_prefix("/transport ") {
                     let mode = mode.trim();
                     if mode.is_empty() {
-                        app.push_display_message(DisplayMessage::error(
-                            "Usage: /transport <mode>",
-                        ));
+                        app.push_display_message(DisplayMessage::error("Usage: /transport <mode>"));
                         return Ok(());
                     }
                     remote.set_transport(mode).await?;

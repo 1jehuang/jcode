@@ -1341,38 +1341,6 @@ impl Provider for OpenRouterProvider {
             }));
         }
 
-        let build_content_parts = |blocks: &[ContentBlock]| -> Vec<Value> {
-            let mut parts = Vec::new();
-            for block in blocks {
-                match block {
-                    ContentBlock::Text {
-                        text,
-                        cache_control,
-                    } => {
-                        let mut part = serde_json::json!({
-                            "type": "text",
-                            "text": text
-                        });
-                        if let Some(cache_control) = cache_control {
-                            part["cache_control"] =
-                                serde_json::to_value(cache_control).unwrap_or(Value::Null);
-                        }
-                        parts.push(part);
-                    }
-                    ContentBlock::Image { media_type, data } => {
-                        parts.push(serde_json::json!({
-                            "type": "image_url",
-                            "image_url": {
-                                "url": format!("data:{};base64,{}", media_type, data)
-                            }
-                        }));
-                    }
-                    _ => {}
-                }
-            }
-            parts
-        };
-
         let content_from_parts = |parts: Vec<Value>| -> Option<Value> {
             if parts.is_empty() {
                 return None;
@@ -1412,44 +1380,79 @@ impl Provider for OpenRouterProvider {
         for (idx, msg) in effective_messages.iter().enumerate() {
             match msg.role {
                 Role::User => {
-                    let parts = build_content_parts(&msg.content);
-                    if let Some(content) = content_from_parts(parts) {
+                    let mut pending_user_parts: Vec<Value> = Vec::new();
+                    for block in &msg.content {
+                        match block {
+                            ContentBlock::Text {
+                                text,
+                                cache_control,
+                            } => {
+                                let mut part = serde_json::json!({
+                                    "type": "text",
+                                    "text": text
+                                });
+                                if let Some(cache_control) = cache_control {
+                                    part["cache_control"] =
+                                        serde_json::to_value(cache_control).unwrap_or(Value::Null);
+                                }
+                                pending_user_parts.push(part);
+                            }
+                            ContentBlock::Image { media_type, data } => {
+                                pending_user_parts.push(serde_json::json!({
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": format!("data:{};base64,{}", media_type, data)
+                                    }
+                                }));
+                            }
+                            ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                                is_error,
+                            } => {
+                                if let Some(content) =
+                                    content_from_parts(std::mem::take(&mut pending_user_parts))
+                                {
+                                    api_messages.push(serde_json::json!({
+                                        "role": "user",
+                                        "content": content
+                                    }));
+                                }
+
+                                if used_tool_results.contains(tool_use_id) {
+                                    skipped_results += 1;
+                                    continue;
+                                }
+                                let output = if is_error == &Some(true) {
+                                    format!("[Error] {}", content)
+                                } else {
+                                    content.clone()
+                                };
+                                if tool_calls_seen.contains(tool_use_id) {
+                                    api_messages.push(serde_json::json!({
+                                        "role": "tool",
+                                        "tool_call_id": crate::message::sanitize_tool_id(tool_use_id),
+                                        "content": output
+                                    }));
+                                    used_tool_results.insert(tool_use_id.clone());
+                                } else if pending_tool_results.contains_key(tool_use_id) {
+                                    skipped_results += 1;
+                                } else {
+                                    pending_tool_results.insert(tool_use_id.clone(), output);
+                                    delayed_results += 1;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if let Some(content) =
+                        content_from_parts(std::mem::take(&mut pending_user_parts))
+                    {
                         api_messages.push(serde_json::json!({
                             "role": "user",
                             "content": content
                         }));
-                    }
-
-                    for block in &msg.content {
-                        if let ContentBlock::ToolResult {
-                            tool_use_id,
-                            content,
-                            is_error,
-                        } = block
-                        {
-                            if used_tool_results.contains(tool_use_id) {
-                                skipped_results += 1;
-                                continue;
-                            }
-                            let output = if is_error == &Some(true) {
-                                format!("[Error] {}", content)
-                            } else {
-                                content.clone()
-                            };
-                            if tool_calls_seen.contains(tool_use_id) {
-                                api_messages.push(serde_json::json!({
-                                    "role": "tool",
-                                    "tool_call_id": crate::message::sanitize_tool_id(tool_use_id),
-                                    "content": output
-                                }));
-                                used_tool_results.insert(tool_use_id.clone());
-                            } else if pending_tool_results.contains_key(tool_use_id) {
-                                skipped_results += 1;
-                            } else {
-                                pending_tool_results.insert(tool_use_id.clone(), output);
-                                delayed_results += 1;
-                            }
-                        }
                     }
                 }
                 Role::Assistant => {
@@ -1991,7 +1994,7 @@ impl Provider for OpenRouterProvider {
                 }
             }
         }
-        crate::provider::context_limit_for_model(&model_id)
+        crate::provider::context_limit_for_model_with_provider(&model_id, Some(self.name()))
             .unwrap_or(crate::provider::DEFAULT_CONTEXT_LIMIT)
     }
 

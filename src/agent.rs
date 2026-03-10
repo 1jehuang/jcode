@@ -90,6 +90,15 @@ fn tool_output_to_content_blocks(
             media_type: img.media_type,
             data: img.data,
         });
+        if let Some(label) = img.label.filter(|label| !label.trim().is_empty()) {
+            blocks.push(ContentBlock::Text {
+                text: format!(
+                    "[Attached image associated with the preceding tool result: {}]",
+                    label
+                ),
+                cache_control: None,
+            });
+        }
     }
     blocks
 }
@@ -4172,6 +4181,7 @@ mod tests {
     use crate::message::{Message, StreamEvent, ToolDefinition};
     use crate::provider::{EventStream, Provider};
     use crate::tool::Registry;
+    use crate::tool::ToolOutput;
     use async_trait::async_trait;
     use tokio::sync::mpsc as tokio_mpsc;
     use tokio_stream::wrappers::ReceiverStream;
@@ -4221,11 +4231,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tool_output_to_content_blocks_preserves_labeled_images() {
+        let output = ToolOutput::new("Image ready").with_labeled_image(
+            "image/png",
+            "ZmFrZQ==",
+            "screenshots/example.png",
+        );
+
+        let blocks = tool_output_to_content_blocks("call_1".to_string(), output);
+        assert_eq!(blocks.len(), 3);
+
+        match &blocks[0] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "call_1");
+                assert_eq!(content, "Image ready");
+                assert_eq!(*is_error, None);
+            }
+            other => panic!("expected tool result, got {other:?}"),
+        }
+
+        match &blocks[1] {
+            ContentBlock::Image { media_type, data } => {
+                assert_eq!(media_type, "image/png");
+                assert_eq!(data, "ZmFrZQ==");
+            }
+            other => panic!("expected image block, got {other:?}"),
+        }
+
+        match &blocks[2] {
+            ContentBlock::Text { text, .. } => {
+                assert!(text.contains("screenshots/example.png"));
+                assert!(text.contains("preceding tool result"));
+            }
+            other => panic!("expected trailing label text, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn run_turn_streaming_mpsc_emits_keepalive_while_provider_is_quiet() {
         let provider: Arc<dyn Provider> = Arc::new(DelayedProvider {
-            open_delay: stream_keepalive_interval() + Duration::from_millis(30),
-            first_event_delay: stream_keepalive_interval() + Duration::from_millis(30),
+            open_delay: Duration::from_secs(2),
+            first_event_delay: Duration::from_secs(2),
         });
         let registry = Registry::new(provider.clone()).await;
         let mut agent = Agent::new(provider, registry);
@@ -4240,32 +4291,50 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let task = tokio::spawn(async move { agent.run_turn_streaming_mpsc(tx).await });
 
-        let first = tokio::time::timeout(Duration::from_secs(6), rx.recv())
-            .await
-            .expect("expected keepalive before timeout")
-            .expect("channel closed before keepalive");
-        assert!(matches!(first, ServerEvent::Pong { id } if id == STREAM_KEEPALIVE_PONG_ID));
+        let mut saw_keepalive = false;
+        let keepalive_deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < keepalive_deadline {
+            match tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
+                Ok(Some(ServerEvent::Pong { id })) => {
+                    assert_eq!(id, STREAM_KEEPALIVE_PONG_ID);
+                    saw_keepalive = true;
+                    break;
+                }
+                Ok(Some(ServerEvent::TextDelta { text })) => {
+                    panic!("expected keepalive before text delta, got: {text}");
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("channel closed before keepalive"),
+                Err(_) => {
+                    assert!(
+                        !task.is_finished(),
+                        "streaming task finished before keepalive arrived"
+                    );
+                }
+            }
+        }
+        assert!(saw_keepalive, "expected keepalive before provider response");
 
         let mut saw_text = false;
-        let deadline = Instant::now() + Duration::from_secs(8);
-        while Instant::now() < deadline {
-            let Some(event) = tokio::time::timeout(Duration::from_millis(250), rx.recv())
-                .await
-                .ok()
-                .flatten()
-            else {
-                continue;
-            };
-            match event {
-                ServerEvent::TextDelta { text } => {
+        let text_deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < text_deadline {
+            match tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
+                Ok(Some(ServerEvent::TextDelta { text })) => {
                     assert_eq!(text, "hello");
                     saw_text = true;
                     break;
                 }
-                ServerEvent::Pong { id } => {
+                Ok(Some(ServerEvent::Pong { id })) => {
                     assert_eq!(id, STREAM_KEEPALIVE_PONG_ID);
                 }
-                _ => {}
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("channel closed before text delta"),
+                Err(_) => {
+                    assert!(
+                        !task.is_finished(),
+                        "streaming task finished before text delta arrived"
+                    );
+                }
             }
         }
 

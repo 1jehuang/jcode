@@ -244,7 +244,10 @@ impl App {
             ("/commands".into(), "Alias for /help"),
             ("/model".into(), "List or switch models"),
             ("/effort".into(), "Show/change reasoning effort (Alt+←/→)"),
-            ("/transport".into(), "Show/change connection transport (auto/https/websocket)"),
+            (
+                "/transport".into(),
+                "Show/change connection transport (auto/https/websocket)",
+            ),
             ("/clear".into(), "Clear conversation history"),
             ("/rewind".into(), "Rewind conversation to previous message"),
             ("/poke".into(), "Poke model to resume with incomplete todos"),

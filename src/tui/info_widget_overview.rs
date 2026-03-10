@@ -11,7 +11,6 @@ pub(crate) enum InfoPageKind {
     TodosExpanded,
     ContextExpanded,
     MemoryExpanded,
-    SwarmExpanded,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -66,15 +65,6 @@ pub(crate) fn compute_page_layout(
         candidates.push(InfoPage {
             kind: InfoPageKind::MemoryExpanded,
             height: compact_height - memory_compact + memory_expanded,
-        });
-    }
-
-    let swarm_compact = compact_swarm_height(data);
-    let swarm_expanded = expanded_swarm_height(data);
-    if swarm_expanded > 0 {
-        candidates.push(InfoPage {
-            kind: InfoPageKind::SwarmExpanded,
-            height: compact_height - swarm_compact + swarm_expanded,
         });
     }
 
@@ -222,7 +212,6 @@ fn compact_overview_height(data: &InfoWidgetData) -> u16 {
         + compact_todos_height(data)
         + compact_queue_height(data)
         + compact_memory_height(data)
-        + compact_swarm_height(data)
         + compact_background_height(data)
         + compact_usage_height(data)
         + compact_git_height(data)
@@ -262,42 +251,6 @@ fn expanded_memory_height(data: &InfoWidgetData) -> u16 {
             if !info.by_category.is_empty() {
                 height += 1;
             }
-            return height;
-        }
-    }
-    0
-}
-
-fn compact_swarm_height(data: &InfoWidgetData) -> u16 {
-    if let Some(info) = &data.swarm_info {
-        if info.subagent_status.is_some()
-            || info.session_count > 1
-            || info.client_count.is_some()
-            || !info.members.is_empty()
-        {
-            return 1;
-        }
-    }
-    0
-}
-
-fn expanded_swarm_height(data: &InfoWidgetData) -> u16 {
-    if let Some(info) = &data.swarm_info {
-        if info.subagent_status.is_some()
-            || info.session_count > 1
-            || info.client_count.is_some()
-            || !info.members.is_empty()
-        {
-            let mut height = 2u16;
-            if info.subagent_status.is_some() {
-                height += 1;
-            }
-            let member_len = if info.members.is_empty() {
-                info.session_names.len()
-            } else {
-                info.members.len()
-            };
-            height += member_len.min(4) as u16;
             return height;
         }
     }

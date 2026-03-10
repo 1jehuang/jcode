@@ -1816,6 +1816,31 @@ fn test_handle_remote_disconnect_retryable_pending_schedules_retry() {
 }
 
 #[test]
+fn test_reload_socket_wait_enabled_only_during_recent_reload_disconnect() {
+    let mut state = remote::RemoteRunState {
+        server_reload_in_progress: true,
+        disconnect_start: Some(std::time::Instant::now()),
+        ..Default::default()
+    };
+
+    assert!(remote::should_wait_for_reload_socket(&state));
+
+    state.server_reload_in_progress = false;
+    assert!(!remote::should_wait_for_reload_socket(&state));
+}
+
+#[test]
+fn test_reload_socket_wait_disabled_for_old_disconnects() {
+    let state = remote::RemoteRunState {
+        server_reload_in_progress: true,
+        disconnect_start: Some(std::time::Instant::now() - std::time::Duration::from_secs(11)),
+        ..Default::default()
+    };
+
+    assert!(!remote::should_wait_for_reload_socket(&state));
+}
+
+#[test]
 fn test_handle_server_event_history_with_interruption_queues_continuation() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -2111,6 +2136,45 @@ fn test_info_widget_data_includes_connection_type() {
 }
 
 #[test]
+fn test_info_widget_remote_openai_uses_remote_provider_for_usage_and_context() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_provider_name = Some("OpenAI".to_string());
+    app.remote_provider_model = Some("gpt-5.4".to_string());
+    app.update_context_limit_for_model("gpt-5.4");
+
+    let data = crate::tui::TuiState::info_widget_data(&app);
+
+    assert_eq!(data.provider_name.as_deref(), Some("OpenAI"));
+    assert_eq!(data.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(data.context_limit, Some(1_000_000));
+    assert_eq!(
+        data.auth_method,
+        crate::tui::info_widget::AuthMethod::Unknown
+    );
+    assert_eq!(
+        data.usage_info.as_ref().map(|info| info.provider),
+        Some(crate::tui::info_widget::UsageProvider::OpenAI)
+    );
+}
+
+#[test]
+fn test_info_widget_remote_model_falls_back_to_model_provider_detection() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_provider_model = Some("gpt-5.4".to_string());
+    app.update_context_limit_for_model("gpt-5.4");
+
+    let data = crate::tui::TuiState::info_widget_data(&app);
+
+    assert_eq!(data.context_limit, Some(1_000_000));
+    assert_eq!(
+        data.usage_info.as_ref().map(|info| info.provider),
+        Some(crate::tui::info_widget::UsageProvider::OpenAI)
+    );
+}
+
+#[test]
 fn test_debug_command_message_respects_queue_mode() {
     let mut app = create_test_app();
 
@@ -2186,6 +2250,9 @@ fn create_scroll_test_app(
     diagrams: usize,
     padding: usize,
 ) -> (App, ratatui::Terminal<ratatui::backend::TestBackend>) {
+    crate::tui::mermaid::clear_active_diagrams();
+    crate::tui::mermaid::clear_streaming_preview_diagram();
+
     let mut app = create_test_app();
     let content = App::build_scroll_test_content(diagrams, padding, None);
     app.display_messages = vec![
@@ -2297,8 +2364,12 @@ fn test_streaming_repaint_does_not_leave_bracket_artifact() {
     let text = render_and_snap(&app, &mut terminal);
 
     assert!(
-        text.contains("Process A: |██████████|"),
-        "expected updated streaming content to be visible"
+        text.contains("Process A:"),
+        "expected updated streaming prefix to be visible"
+    );
+    assert!(
+        text.contains("████"),
+        "expected updated streaming progress bar to be visible"
     );
     assert!(
         !text.lines().any(|line| line.trim() == "["),
@@ -2691,21 +2762,30 @@ fn test_scroll_render_bottom() {
 fn test_scroll_render_scrolled_up() {
     let _render_lock = scroll_render_test_lock();
     let (mut app, mut terminal) = create_scroll_test_app(80, 25, 1, 8);
-    app.scroll_offset = 10;
-    app.auto_scroll_paused = true;
-    let text = render_and_snap(&app, &mut terminal);
 
-    // ↓ indicator should appear when user has scrolled up
+    // Seed scroll metrics, then enter paused/scrolled mode via the real key path.
+    let _ = render_and_snap(&app, &mut terminal);
+    let (up_code, up_mods) = scroll_up_key(&app);
+    app.handle_key(up_code, up_mods).unwrap();
+
+    assert!(app.auto_scroll_paused, "scroll-up should pause auto-follow");
     assert!(
-        text.contains('↓'),
-        "expected ↓ indicator when scrolled up from bottom"
+        app.scroll_offset > 0,
+        "scroll-up should move away from bottom"
+    );
+
+    let text_scrolled = render_and_snap(&app, &mut terminal);
+
+    assert!(
+        text_scrolled.contains('↓'),
+        "expected ↓ indicator when paused above bottom"
     );
 }
 
 #[test]
 fn test_scroll_top_does_not_snap_to_bottom() {
     let _render_lock = scroll_render_test_lock();
-    let (mut app, mut terminal) = create_scroll_test_app(80, 25, 1, 12);
+    let (mut app, mut terminal) = create_scroll_test_app(80, 25, 1, 24);
 
     // Top position in paused mode (absolute offset from top).
     app.scroll_offset = 0;

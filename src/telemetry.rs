@@ -98,9 +98,7 @@ fn get_or_create_id() -> Option<String> {
 }
 
 fn is_first_run() -> bool {
-    telemetry_id_path()
-        .map(|p| !p.exists())
-        .unwrap_or(false)
+    telemetry_id_path().map(|p| !p.exists()).unwrap_or(false)
 }
 
 fn version() -> String {
@@ -116,10 +114,7 @@ fn fire_and_forget(payload: serde_json::Value) {
             Ok(c) => c,
             Err(_) => return,
         };
-        let _ = client
-            .post(TELEMETRY_ENDPOINT)
-            .json(&payload)
-            .send();
+        let _ = client.post(TELEMETRY_ENDPOINT).json(&payload).send();
     });
 }
 
@@ -304,7 +299,7 @@ mod tests {
         let event = InstallEvent {
             id: "test-uuid".to_string(),
             event: "install",
-            version: "0.6.0".to_string(),
+            version: "0.6.1".to_string(),
             os: "linux",
             arch: "x86_64",
         };
@@ -318,7 +313,7 @@ mod tests {
         let event = SessionEndEvent {
             id: "test-uuid".to_string(),
             event: "session_end",
-            version: "0.6.0".to_string(),
+            version: "0.6.1".to_string(),
             os: "linux",
             arch: "x86_64",
             provider_start: "claude".to_string(),

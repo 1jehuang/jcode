@@ -246,8 +246,8 @@ impl OpenAIProvider {
         }
     }
 
-    fn should_prefer_websocket(_model: &str) -> bool {
-        false
+    fn should_prefer_websocket(model: &str) -> bool {
+        !model.trim().is_empty()
     }
 
     fn normalize_reasoning_effort(raw: &str) -> Option<String> {
@@ -1648,6 +1648,12 @@ impl Provider for OpenAIProvider {
 
                 match continuation_result {
                     PersistentWsResult::Success => {
+                        record_websocket_success(
+                            &websocket_cooldowns,
+                            &websocket_failure_streaks,
+                            &model_for_transport,
+                        )
+                        .await;
                         return;
                     }
                     PersistentWsResult::NotAvailable => {
@@ -1893,7 +1899,10 @@ impl Provider for OpenAIProvider {
     }
 
     fn transport(&self) -> Option<String> {
-        self.transport_mode.try_read().ok().map(|g| g.as_str().to_string())
+        self.transport_mode
+            .try_read()
+            .ok()
+            .map(|g| g.as_str().to_string())
     }
 
     fn set_transport(&self, transport: &str) -> Result<()> {
@@ -1927,7 +1936,7 @@ impl Provider for OpenAIProvider {
 
     fn context_window(&self) -> usize {
         let model = self.model();
-        crate::provider::context_limit_for_model(&model)
+        crate::provider::context_limit_for_model_with_provider(&model, Some(self.name()))
             .unwrap_or(crate::provider::DEFAULT_CONTEXT_LIMIT)
     }
 
@@ -2283,7 +2292,7 @@ async fn stream_response_websocket(
     let mut saw_response_completed = false;
     let mut saw_api_activity = false;
     let ws_started_at = Instant::now();
-    let mut _last_api_activity_at = Instant::now();
+    let mut last_api_activity_at = ws_started_at;
     let mut pending: VecDeque<StreamEvent> = VecDeque::new();
 
     loop {
@@ -2305,17 +2314,28 @@ async fn stream_response_websocket(
             )));
         }
 
-        let timeout_secs = if !saw_api_activity {
-            WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS
-        } else {
-            WEBSOCKET_COMPLETION_TIMEOUT_SECS.saturating_sub(ws_started_at.elapsed().as_secs()).max(1)
-        };
+        let timeout_secs = websocket_next_activity_timeout_secs(
+            ws_started_at,
+            last_api_activity_at,
+            saw_api_activity,
+        )
+        .ok_or_else(|| {
+            OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                "WebSocket stream timed out waiting for {} websocket activity ({}s)",
+                websocket_activity_timeout_kind(saw_api_activity),
+                if saw_api_activity {
+                    WEBSOCKET_COMPLETION_TIMEOUT_SECS
+                } else {
+                    WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS
+                }
+            ))
+        })?;
         let next_item = tokio::time::timeout(Duration::from_secs(timeout_secs), ws_stream.next())
             .await
             .map_err(|_| {
                 OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
                     "WebSocket stream timed out waiting for {} websocket activity ({}s)",
-                    if saw_api_activity { "next" } else { "first" },
+                    websocket_activity_timeout_kind(saw_api_activity),
                     timeout_secs
                 ))
             })?;
@@ -2397,14 +2417,14 @@ async fn stream_response_websocket(
                     }
                     if made_api_activity {
                         saw_api_activity = true;
-                        _last_api_activity_at = Instant::now();
+                        last_api_activity_at = Instant::now();
+                    }
+                    if saw_response_completed {
+                        return Ok(());
                     }
                 }
                 WsMessage::Ping(payload) => {
                     let _ = ws_stream.send(WsMessage::Pong(payload)).await;
-                    if saw_api_activity {
-                        _last_api_activity_at = Instant::now();
-                    }
                 }
                 WsMessage::Close(_) => {
                     if saw_response_completed {
@@ -2419,11 +2439,7 @@ async fn stream_response_websocket(
                         "Unexpected binary websocket event"
                     )));
                 }
-                WsMessage::Pong(_) => {
-                    if saw_api_activity {
-                        _last_api_activity_at = Instant::now();
-                    }
-                }
+                WsMessage::Pong(_) => {}
                 _ => {}
             },
             Err(err) => {
@@ -2550,14 +2566,32 @@ async fn try_persistent_ws_continuation(
     let mut pending: VecDeque<StreamEvent> = VecDeque::new();
     let mut new_response_id: Option<String> = None;
     let stream_started = Instant::now();
-    let mut _last_api_activity_at = Instant::now();
+    let mut last_api_activity_at = stream_started;
+    let mut saw_api_activity = false;
 
     loop {
         if stream_started.elapsed() >= Duration::from_secs(WEBSOCKET_COMPLETION_TIMEOUT_SECS) {
             return PersistentWsResult::Failed("completion timeout".to_string());
         }
 
-        let timeout_secs = WEBSOCKET_COMPLETION_TIMEOUT_SECS.saturating_sub(stream_started.elapsed().as_secs()).max(1);
+        let timeout_secs = match websocket_next_activity_timeout_secs(
+            stream_started,
+            last_api_activity_at,
+            saw_api_activity,
+        ) {
+            Some(timeout_secs) => timeout_secs,
+            None => {
+                return PersistentWsResult::Failed(format!(
+                    "timed out waiting for {} websocket activity on persistent WS ({}s)",
+                    websocket_activity_timeout_kind(saw_api_activity),
+                    if saw_api_activity {
+                        WEBSOCKET_COMPLETION_TIMEOUT_SECS
+                    } else {
+                        WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS
+                    }
+                ));
+            }
+        };
         let next_item =
             match tokio::time::timeout(Duration::from_secs(timeout_secs), state.ws_stream.next())
                 .await
@@ -2565,7 +2599,8 @@ async fn try_persistent_ws_continuation(
                 Ok(item) => item,
                 Err(_) => {
                     return PersistentWsResult::Failed(format!(
-                        "completion timeout on persistent WS ({}s)",
+                        "timed out waiting for {} websocket activity on persistent WS ({}s)",
+                        websocket_activity_timeout_kind(saw_api_activity),
                         timeout_secs
                     ))
                 }
@@ -2582,11 +2617,12 @@ async fn try_persistent_ws_continuation(
 
         match result {
             Ok(WsMessage::Text(text)) => {
-                _last_api_activity_at = Instant::now();
                 let text = text.to_string();
                 if is_websocket_fallback_notice(&text) {
                     return PersistentWsResult::Failed("server requested fallback".to_string());
                 }
+
+                let mut made_api_activity = is_websocket_activity_payload(&text);
 
                 // Extract response_id from response.created event
                 if new_response_id.is_none() {
@@ -2614,6 +2650,9 @@ async fn try_persistent_ws_continuation(
                     &mut completed_tool_items,
                     &mut pending,
                 ) {
+                    if is_stream_activity_event(&event) {
+                        made_api_activity = true;
+                    }
                     if matches!(event, StreamEvent::MessageEnd { .. }) {
                         saw_response_completed = true;
                     }
@@ -2630,12 +2669,22 @@ async fn try_persistent_ws_continuation(
                     }
                 }
                 while let Some(event) = pending.pop_front() {
+                    if is_stream_activity_event(&event) {
+                        made_api_activity = true;
+                    }
                     if matches!(event, StreamEvent::MessageEnd { .. }) {
                         saw_response_completed = true;
                     }
                     if tx.send(Ok(event)).await.is_err() {
                         break;
                     }
+                }
+                if made_api_activity {
+                    saw_api_activity = true;
+                    last_api_activity_at = Instant::now();
+                }
+                if saw_response_completed {
+                    break;
                 }
             }
             Ok(WsMessage::Ping(payload)) => {
@@ -2803,7 +2852,7 @@ async fn stream_response_websocket_persistent(
     let mut saw_response_completed = false;
     let mut saw_api_activity = false;
     let ws_started_at = Instant::now();
-    let mut _last_api_activity_at = Instant::now();
+    let mut last_api_activity_at = ws_started_at;
     let mut pending: VecDeque<StreamEvent> = VecDeque::new();
     let mut response_id: Option<String> = None;
     let connected_at = Instant::now();
@@ -2827,17 +2876,28 @@ async fn stream_response_websocket_persistent(
             )));
         }
 
-        let timeout_secs = if !saw_api_activity {
-            WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS
-        } else {
-            WEBSOCKET_COMPLETION_TIMEOUT_SECS.saturating_sub(ws_started_at.elapsed().as_secs()).max(1)
-        };
+        let timeout_secs = websocket_next_activity_timeout_secs(
+            ws_started_at,
+            last_api_activity_at,
+            saw_api_activity,
+        )
+        .ok_or_else(|| {
+            OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                "WebSocket stream timed out waiting for {} websocket activity ({}s)",
+                websocket_activity_timeout_kind(saw_api_activity),
+                if saw_api_activity {
+                    WEBSOCKET_COMPLETION_TIMEOUT_SECS
+                } else {
+                    WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS
+                }
+            ))
+        })?;
         let next_item = tokio::time::timeout(Duration::from_secs(timeout_secs), ws_stream.next())
             .await
             .map_err(|_| {
                 OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
                     "WebSocket stream timed out waiting for {} websocket activity ({}s)",
-                    if saw_api_activity { "next" } else { "first" },
+                    websocket_activity_timeout_kind(saw_api_activity),
                     timeout_secs
                 ))
             })?;
@@ -2939,14 +2999,14 @@ async fn stream_response_websocket_persistent(
                     }
                     if made_api_activity {
                         saw_api_activity = true;
-                        _last_api_activity_at = Instant::now();
+                        last_api_activity_at = Instant::now();
+                    }
+                    if saw_response_completed {
+                        break;
                     }
                 }
                 WsMessage::Ping(payload) => {
                     let _ = ws_stream.send(WsMessage::Pong(payload)).await;
-                    if saw_api_activity {
-                        _last_api_activity_at = Instant::now();
-                    }
                 }
                 WsMessage::Close(_) => {
                     if saw_response_completed {
@@ -2961,11 +3021,7 @@ async fn stream_response_websocket_persistent(
                         "Unexpected binary websocket event"
                     )));
                 }
-                WsMessage::Pong(_) => {
-                    if saw_api_activity {
-                        _last_api_activity_at = Instant::now();
-                    }
-                }
+                WsMessage::Pong(_) => {}
                 _ => {}
             },
             Err(err) => {
@@ -3162,6 +3218,36 @@ fn is_websocket_activity_payload(data: &str) -> bool {
         return false;
     };
     kind.starts_with("response.") || kind == "error"
+}
+
+fn websocket_remaining_timeout_secs(since: Instant, timeout_secs: u64) -> Option<u64> {
+    let timeout = Duration::from_secs(timeout_secs);
+    let elapsed = since.elapsed();
+    if elapsed >= timeout {
+        return None;
+    }
+
+    Some(timeout_secs.saturating_sub(elapsed.as_secs()).max(1))
+}
+
+fn websocket_next_activity_timeout_secs(
+    ws_started_at: Instant,
+    last_api_activity_at: Instant,
+    saw_api_activity: bool,
+) -> Option<u64> {
+    if !saw_api_activity {
+        websocket_remaining_timeout_secs(ws_started_at, WEBSOCKET_FIRST_EVENT_TIMEOUT_SECS)
+    } else {
+        websocket_remaining_timeout_secs(last_api_activity_at, WEBSOCKET_COMPLETION_TIMEOUT_SECS)
+    }
+}
+
+fn websocket_activity_timeout_kind(saw_api_activity: bool) -> &'static str {
+    if saw_api_activity {
+        "next"
+    } else {
+        "first"
+    }
 }
 
 fn normalize_transport_model(model: &str) -> Option<String> {
@@ -3562,6 +3648,90 @@ mod tests {
     }
 
     #[test]
+    fn test_build_responses_input_keeps_image_context_after_tool_output() {
+        let messages = vec![
+            ChatMessage {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"file_path": "screenshot.png"}),
+                }],
+                timestamp: None,
+            },
+            ChatMessage {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call_1".to_string(),
+                        content: "Image: screenshot.png\nImage sent to model for vision analysis."
+                            .to_string(),
+                        is_error: None,
+                    },
+                    ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: "ZmFrZQ==".to_string(),
+                    },
+                    ContentBlock::Text {
+                        text: "[Attached image associated with the preceding tool result: screenshot.png]"
+                            .to_string(),
+                        cache_control: None,
+                    },
+                ],
+                timestamp: None,
+            },
+        ];
+
+        let items = build_responses_input(&messages);
+        let mut output_pos = None;
+        let mut image_msg_pos = None;
+
+        for (idx, item) in items.iter().enumerate() {
+            match item.get("type").and_then(|v| v.as_str()) {
+                Some("function_call_output")
+                    if item.get("call_id").and_then(|v| v.as_str()) == Some("call_1") =>
+                {
+                    output_pos = Some(idx);
+                    assert_eq!(
+                        item.get("output").and_then(|v| v.as_str()),
+                        Some("Image: screenshot.png\nImage sent to model for vision analysis.")
+                    );
+                }
+                Some("message") if item.get("role").and_then(|v| v.as_str()) == Some("user") => {
+                    let Some(content) = item.get("content").and_then(|v| v.as_array()) else {
+                        continue;
+                    };
+                    let has_image = content.iter().any(|part| {
+                        part.get("type").and_then(|v| v.as_str()) == Some("input_image")
+                    });
+                    let has_label = content.iter().any(|part| {
+                        part.get("type").and_then(|v| v.as_str()) == Some("input_text")
+                            && part
+                                .get("text")
+                                .and_then(|v| v.as_str())
+                                .map(|text| text.contains("screenshot.png"))
+                                .unwrap_or(false)
+                    });
+                    if has_image && has_label {
+                        image_msg_pos = Some(idx);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        assert!(output_pos.is_some(), "expected function call output item");
+        assert!(
+            image_msg_pos.is_some(),
+            "expected follow-up user image message"
+        );
+        assert!(
+            image_msg_pos.unwrap() > output_pos.unwrap(),
+            "image context should stay after the tool output"
+        );
+    }
+
+    #[test]
     fn test_build_responses_input_injects_only_missing_outputs() {
         let expected_missing = format!("[Error] {}", TOOL_OUTPUT_MISSING_TEXT);
         let messages = vec![
@@ -3792,12 +3962,47 @@ mod tests {
     }
 
     #[test]
-    fn test_should_prefer_websocket_disabled_by_default() {
-        assert!(!OpenAIProvider::should_prefer_websocket("gpt-5.3-codex-spark"));
-        assert!(!OpenAIProvider::should_prefer_websocket("gpt-5.3-codex"));
-        assert!(!OpenAIProvider::should_prefer_websocket("gpt-5"));
-        assert!(!OpenAIProvider::should_prefer_websocket("codex-mini"));
+    fn test_should_prefer_websocket_enabled_for_named_models() {
+        assert!(OpenAIProvider::should_prefer_websocket(
+            "gpt-5.3-codex-spark"
+        ));
+        assert!(OpenAIProvider::should_prefer_websocket("gpt-5.3-codex"));
+        assert!(OpenAIProvider::should_prefer_websocket("gpt-5"));
+        assert!(OpenAIProvider::should_prefer_websocket("codex-mini"));
         assert!(!OpenAIProvider::should_prefer_websocket(""));
+    }
+
+    #[test]
+    fn test_openai_transport_mode_defaults_to_auto() {
+        let mode = OpenAITransportMode::from_config(None);
+        assert_eq!(mode.as_str(), "auto");
+    }
+
+    #[test]
+    fn test_openai_transport_mode_auto_prefers_websocket_for_openai_models() {
+        let mode = OpenAITransportMode::from_config(Some("auto"));
+        assert_eq!(mode.as_str(), "auto");
+        assert!(OpenAIProvider::should_prefer_websocket("gpt-5.4"));
+    }
+
+    #[tokio::test]
+    async fn test_record_websocket_fallback_sets_cooldown_for_auto_default_models() {
+        let cooldowns = Arc::new(RwLock::new(HashMap::new()));
+        let streaks = Arc::new(RwLock::new(HashMap::new()));
+        let model = "gpt-5.4";
+
+        let (streak, cooldown) = record_websocket_fallback(&cooldowns, &streaks, model).await;
+        assert_eq!(streak, 1);
+        assert_eq!(
+            cooldown,
+            Duration::from_secs(WEBSOCKET_MODEL_COOLDOWN_BASE_SECS)
+        );
+        assert!(
+            websocket_cooldown_remaining(&cooldowns, model)
+                .await
+                .is_some(),
+            "auto websocket default must still be guarded by cooldown after fallback"
+        );
     }
 
     #[tokio::test]
@@ -3942,6 +4147,88 @@ mod tests {
             r#"{"type":"rate_limits.updated"}"#
         ));
         assert!(!is_websocket_activity_payload(r#"not json at all"#));
+    }
+
+    #[test]
+    fn test_websocket_remaining_timeout_secs_uses_idle_time_budget() {
+        let recent = Instant::now() - Duration::from_secs(2);
+        let remaining = websocket_remaining_timeout_secs(recent, 8).expect("still within budget");
+        assert!(
+            (6..=7).contains(&remaining),
+            "expected remaining idle budget near 6-7s, got {remaining}"
+        );
+    }
+
+    #[test]
+    fn test_websocket_remaining_timeout_secs_expires_after_budget() {
+        let expired = Instant::now() - Duration::from_secs(9);
+        assert!(websocket_remaining_timeout_secs(expired, 8).is_none());
+    }
+
+    #[test]
+    fn test_websocket_next_activity_timeout_uses_request_start_before_first_event() {
+        let ws_started_at = Instant::now() - Duration::from_secs(3);
+        let last_api_activity_at = Instant::now() - Duration::from_secs(1);
+        let remaining =
+            websocket_next_activity_timeout_secs(ws_started_at, last_api_activity_at, false)
+                .expect("first-event timeout should still be active");
+        assert!(
+            (5..=6).contains(&remaining),
+            "expected first-event timeout near 5-6s, got {remaining}"
+        );
+    }
+
+    #[test]
+    fn test_websocket_next_activity_timeout_resets_after_api_activity() {
+        let ws_started_at = Instant::now() - Duration::from_secs(299);
+        let last_api_activity_at = Instant::now() - Duration::from_secs(2);
+        let remaining =
+            websocket_next_activity_timeout_secs(ws_started_at, last_api_activity_at, true)
+                .expect("idle timeout should use last activity, not total request age");
+        assert!(
+            remaining >= WEBSOCKET_COMPLETION_TIMEOUT_SECS.saturating_sub(3),
+            "expected full idle budget to reset after activity, got {remaining}"
+        );
+    }
+
+    #[test]
+    fn test_websocket_activity_timeout_kind_labels_first_and_next() {
+        assert_eq!(websocket_activity_timeout_kind(false), "first");
+        assert_eq!(websocket_activity_timeout_kind(true), "next");
+    }
+
+    #[test]
+    fn test_normalize_transport_model_trims_and_lowercases() {
+        assert_eq!(
+            normalize_transport_model("  GPT-5.4  "),
+            Some("gpt-5.4".to_string())
+        );
+        assert_eq!(normalize_transport_model("   \t\n  "), None);
+    }
+
+    #[tokio::test]
+    async fn test_record_websocket_success_clears_normalized_keys() {
+        let cooldowns = Arc::new(RwLock::new(HashMap::new()));
+        let streaks = Arc::new(RwLock::new(HashMap::new()));
+        let canonical = "gpt-5.4";
+
+        record_websocket_fallback(&cooldowns, &streaks, canonical).await;
+        assert!(websocket_cooldown_remaining(&cooldowns, canonical)
+            .await
+            .is_some());
+
+        record_websocket_success(&cooldowns, &streaks, " GPT-5.4 ").await;
+
+        assert!(
+            websocket_cooldown_remaining(&cooldowns, canonical)
+                .await
+                .is_none(),
+            "success should clear normalized cooldown entries"
+        );
+        assert!(
+            !streaks.read().await.contains_key(canonical),
+            "success should clear normalized failure streak entries"
+        );
     }
 
     #[test]

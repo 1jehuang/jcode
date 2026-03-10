@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::Path;
 
-const DEFAULT_LIMIT: usize = 2000;
+const DEFAULT_LIMIT: usize = 5000;
 const MAX_LINE_LEN: usize = 2000;
 
 pub struct ReadTool;
@@ -36,7 +36,8 @@ impl Tool for ReadTool {
     fn description(&self) -> &str {
         "Read the contents of a file. Returns lines with line numbers. \
          Supports reading specific ranges with offset and limit parameters. \
-         Can read text files, and will indicate if a file is binary."
+         Can read text files, and will indicate if a file is binary. \
+         Image files are attached for vision-capable model analysis when supported."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -54,7 +55,7 @@ impl Tool for ReadTool {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of lines to read (default 2000)"
+                    "description": "Maximum number of lines to read (default 5000)"
                 }
             }
         })
