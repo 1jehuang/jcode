@@ -681,6 +681,14 @@ struct MemoryTile {
     items: Vec<String>,
 }
 
+#[derive(Clone)]
+struct MemoryTilePlan {
+    lines: Vec<Line<'static>>,
+    width: usize,
+    height: usize,
+    score: usize,
+}
+
 fn group_into_tiles(entries: Vec<(String, String)>) -> Vec<MemoryTile> {
     let mut order: Vec<String> = Vec::new();
     let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
@@ -727,6 +735,180 @@ fn split_by_display_width(s: &str, max_width: usize) -> Vec<String> {
     chunks
 }
 
+fn memory_tile_content_lines(
+    items: &[String],
+    inner_width: usize,
+    border_style: Style,
+    text_style: Style,
+) -> Vec<Line<'static>> {
+    let bullet = "· ";
+    let bullet_width = unicode_width::UnicodeWidthStr::width(bullet);
+    let item_width = inner_width.saturating_sub(bullet_width);
+
+    let mut content_lines: Vec<Line<'static>> = Vec::new();
+    for item in items {
+        let text_display_width = unicode_width::UnicodeWidthStr::width(item.as_str());
+        if text_display_width <= item_width {
+            let text = item.to_string();
+            let padding = inner_width.saturating_sub(bullet_width + text_display_width);
+            let mut spans = vec![
+                Span::styled("│ ", border_style),
+                Span::styled(bullet.to_string(), border_style),
+                Span::styled(text, text_style),
+            ];
+            if padding > 0 {
+                spans.push(Span::raw(" ".repeat(padding)));
+            }
+            spans.push(Span::styled(" │", border_style));
+            content_lines.push(Line::from(spans));
+        } else {
+            let indent = bullet_width;
+            let cont_width = inner_width.saturating_sub(indent);
+            let first_chunk_width = item_width;
+            let mut all_chunks: Vec<String> = Vec::new();
+            let first_chunks = split_by_display_width(item, first_chunk_width);
+            if let Some(first) = first_chunks.first() {
+                all_chunks.push(first.clone());
+                let remainder: String = item.chars().skip(first.chars().count()).collect();
+                if !remainder.is_empty() {
+                    all_chunks.extend(split_by_display_width(&remainder, cont_width));
+                }
+            }
+            for (ci, chunk) in all_chunks.iter().enumerate() {
+                let chunk_width = unicode_width::UnicodeWidthStr::width(chunk.as_str());
+                if ci == 0 {
+                    let padding = inner_width.saturating_sub(bullet_width + chunk_width);
+                    let mut spans = vec![
+                        Span::styled("│ ", border_style),
+                        Span::styled(bullet.to_string(), border_style),
+                        Span::styled(chunk.clone(), text_style),
+                    ];
+                    if padding > 0 {
+                        spans.push(Span::raw(" ".repeat(padding)));
+                    }
+                    spans.push(Span::styled(" │", border_style));
+                    content_lines.push(Line::from(spans));
+                } else {
+                    let padding = inner_width.saturating_sub(indent + chunk_width);
+                    let mut spans = vec![
+                        Span::styled("│ ", border_style),
+                        Span::raw(" ".repeat(indent)),
+                        Span::styled(chunk.clone(), text_style),
+                    ];
+                    if padding > 0 {
+                        spans.push(Span::raw(" ".repeat(padding)));
+                    }
+                    spans.push(Span::styled(" │", border_style));
+                    content_lines.push(Line::from(spans));
+                }
+            }
+        }
+    }
+
+    if content_lines.is_empty() {
+        content_lines.push(Line::from(vec![
+            Span::styled("│ ", border_style),
+            Span::raw(" ".repeat(inner_width)),
+            Span::styled(" │", border_style),
+        ]));
+    }
+
+    content_lines
+}
+
+fn render_memory_tile_box(
+    tile: &MemoryTile,
+    box_width: usize,
+    border_style: Style,
+    text_style: Style,
+) -> Vec<Line<'static>> {
+    let inner_width = box_width.saturating_sub(4);
+    if inner_width < 4 {
+        return Vec::new();
+    }
+
+    let title_text = format!(" {} ", tile.category.to_lowercase());
+    let title_len = unicode_width::UnicodeWidthStr::width(title_text.as_str());
+    let border_chars = box_width.saturating_sub(title_len + 2);
+    let left_border = "─".repeat(border_chars / 2);
+    let right_border = "─".repeat(border_chars - border_chars / 2);
+
+    let top = Line::from(Span::styled(
+        format!("╭{}{}{}╮", left_border, title_text, right_border),
+        border_style,
+    ));
+    let content_lines = memory_tile_content_lines(&tile.items, inner_width, border_style, text_style);
+    let bottom = Line::from(Span::styled(
+        format!("╰{}╯", "─".repeat(box_width.saturating_sub(2))),
+        border_style,
+    ));
+
+    let mut lines = Vec::with_capacity(content_lines.len() + 2);
+    lines.push(top);
+    lines.extend(content_lines);
+    lines.push(bottom);
+    lines
+}
+
+fn plan_memory_tile(
+    tile: &MemoryTile,
+    box_width: usize,
+    border_style: Style,
+    text_style: Style,
+) -> Option<MemoryTilePlan> {
+    let lines = render_memory_tile_box(tile, box_width, border_style, text_style);
+    if lines.is_empty() {
+        return None;
+    }
+    let width = lines.first().map(Line::width).unwrap_or(box_width);
+    let height = lines.len();
+    let score = tile.items.len() * 10
+        + tile
+            .items
+            .iter()
+            .map(|item| unicode_width::UnicodeWidthStr::width(item.as_str()).min(80))
+            .sum::<usize>();
+    Some(MemoryTilePlan {
+        lines,
+        width,
+        height,
+        score,
+    })
+}
+
+fn choose_memory_tile_width(
+    tile: &MemoryTile,
+    min_box_width: usize,
+    max_box_width: usize,
+    border_style: Style,
+    text_style: Style,
+) -> usize {
+    let mut best_width = min_box_width;
+    let mut best_score = usize::MAX;
+
+    let mut candidates = vec![min_box_width.min(max_box_width), max_box_width];
+    let mid = (min_box_width + max_box_width) / 2;
+    candidates.push(mid);
+    if max_box_width > min_box_width {
+        candidates.push((min_box_width + max_box_width * 2) / 3);
+    }
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    for width in candidates.into_iter().filter(|w| *w >= min_box_width && *w <= max_box_width) {
+        if let Some(plan) = plan_memory_tile(tile, width, border_style, text_style) {
+            let whitespace = width * plan.height;
+            let score = whitespace.saturating_sub(plan.score * 2);
+            if score < best_score {
+                best_score = score;
+                best_width = width;
+            }
+        }
+    }
+
+    best_width
+}
+
 fn render_memory_tiles(
     tiles: &[MemoryTile],
     total_width: usize,
@@ -744,159 +926,123 @@ fn render_memory_tiles(
         all_lines.push(header);
     }
 
-    let min_box_inner = 18usize;
+    let min_box_inner = 16usize;
     let min_box_width = min_box_inner + 4;
-    let gap = 1usize;
+    let gap = 2usize;
+    let usable_width = total_width.max(min_box_width);
+    let max_box_width = usable_width.min(96).max(min_box_width);
 
-    let max_cols = if total_width < min_box_width {
-        1
-    } else {
-        let mut cols = 1;
-        while (cols + 1) * min_box_width + cols * gap <= total_width {
-            cols += 1;
-        }
-        cols.min(tiles.len())
-    };
-    let max_cols = max_cols.max(1);
-
-    let mut remaining = tiles.iter().collect::<Vec<_>>();
-
-    while !remaining.is_empty() {
-        let row_count = remaining.len().min(max_cols);
-        let row_tiles = &remaining[..row_count];
-
-        let box_width = (total_width - (row_count.saturating_sub(1)) * gap) / row_count;
-        let inner_width = box_width.saturating_sub(4);
-        if inner_width < 4 {
-            break;
-        }
-
-        let bullet = "· ";
-        let bullet_width = unicode_width::UnicodeWidthStr::width(bullet);
-        let item_width = inner_width.saturating_sub(bullet_width);
-
-        let mut columns: Vec<Vec<Line<'static>>> = Vec::new();
-        let mut max_content_lines = 0usize;
-
-        for tile in row_tiles {
-            let title_text = format!(" {} ", tile.category.to_lowercase());
-            let title_len = unicode_width::UnicodeWidthStr::width(title_text.as_str());
-            let border_chars = box_width.saturating_sub(title_len + 2);
-            let left_border = "─".repeat(border_chars / 2);
-            let right_border = "─".repeat(border_chars - border_chars / 2);
-
-            let top = Line::from(Span::styled(
-                format!("╭{}{}{}╮", left_border, title_text, right_border),
+    let mut planned: Vec<MemoryTilePlan> = tiles
+        .iter()
+        .filter_map(|tile| {
+            let width = choose_memory_tile_width(
+                tile,
+                min_box_width.min(usable_width),
+                max_box_width,
                 border_style,
-            ));
+                text_style,
+            )
+            .min(usable_width);
+            plan_memory_tile(tile, width, border_style, text_style)
+        })
+        .collect();
 
-            let mut content_lines: Vec<Line<'static>> = Vec::new();
-            for item in &tile.items {
-                let text_display_width = unicode_width::UnicodeWidthStr::width(item.as_str());
-                if text_display_width <= item_width {
-                    let text = item.to_string();
-                    let padding = inner_width.saturating_sub(bullet_width + text_display_width);
-                    let mut spans = vec![
-                        Span::styled("│ ", border_style),
-                        Span::styled(bullet.to_string(), border_style),
-                        Span::styled(text, text_style),
-                    ];
-                    if padding > 0 {
-                        spans.push(Span::raw(" ".repeat(padding)));
-                    }
-                    spans.push(Span::styled(" │", border_style));
-                    content_lines.push(Line::from(spans));
-                } else {
-                    let indent = bullet_width;
-                    let cont_width = inner_width.saturating_sub(indent);
-                    let first_chunk_width = item_width;
-                    let mut all_chunks: Vec<String> = Vec::new();
-                    let first_chunks = split_by_display_width(item, first_chunk_width);
-                    if let Some(first) = first_chunks.first() {
-                        all_chunks.push(first.clone());
-                        let remainder: String = item.chars().skip(first.chars().count()).collect();
-                        if !remainder.is_empty() {
-                            all_chunks.extend(split_by_display_width(&remainder, cont_width));
-                        }
-                    }
-                    for (ci, chunk) in all_chunks.iter().enumerate() {
-                        let chunk_width = unicode_width::UnicodeWidthStr::width(chunk.as_str());
-                        if ci == 0 {
-                            let padding = inner_width.saturating_sub(bullet_width + chunk_width);
-                            let mut spans = vec![
-                                Span::styled("│ ", border_style),
-                                Span::styled(bullet.to_string(), border_style),
-                                Span::styled(chunk.clone(), text_style),
-                            ];
-                            if padding > 0 {
-                                spans.push(Span::raw(" ".repeat(padding)));
-                            }
-                            spans.push(Span::styled(" │", border_style));
-                            content_lines.push(Line::from(spans));
-                        } else {
-                            let padding = inner_width.saturating_sub(indent + chunk_width);
-                            let mut spans = vec![
-                                Span::styled("│ ", border_style),
-                                Span::raw(" ".repeat(indent)),
-                                Span::styled(chunk.clone(), text_style),
-                            ];
-                            if padding > 0 {
-                                spans.push(Span::raw(" ".repeat(padding)));
-                            }
-                            spans.push(Span::styled(" │", border_style));
-                            content_lines.push(Line::from(spans));
-                        }
-                    }
-                }
-            }
-            if content_lines.is_empty() {
-                content_lines.push(Line::from(vec![
-                    Span::styled("│ ", border_style),
-                    Span::raw(" ".repeat(inner_width)),
-                    Span::styled(" │", border_style),
-                ]));
-            }
+    if planned.is_empty() {
+        return all_lines;
+    }
 
-            max_content_lines = max_content_lines.max(content_lines.len());
+    planned.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| b.height.cmp(&a.height))
+            .then_with(|| b.width.cmp(&a.width))
+    });
 
-            let bottom_border = "─".repeat(box_width.saturating_sub(2));
-            let bottom = Line::from(Span::styled(format!("╰{}╯", bottom_border), border_style));
+    #[derive(Clone)]
+    struct Placement {
+        x: usize,
+        y: usize,
+        plan: MemoryTilePlan,
+    }
 
-            let mut col: Vec<Line<'static>> = Vec::new();
-            col.push(top);
-            col.extend(content_lines);
-            col.push(bottom);
-            columns.push(col);
+    let mut placements: Vec<Placement> = Vec::new();
+
+    for plan in planned {
+        let mut candidate_xs = vec![0usize];
+        for placed in &placements {
+            candidate_xs.push(placed.x);
+            candidate_xs.push((placed.x + placed.plan.width + gap).min(usable_width));
         }
+        candidate_xs.sort_unstable();
+        candidate_xs.dedup();
 
-        let total_height = max_content_lines + 2;
-        for col in &mut columns {
-            while col.len() < total_height {
-                let idx = col.len() - 1;
-                col.insert(
-                    idx,
-                    Line::from(vec![
-                        Span::styled("│ ", border_style),
-                        Span::raw(" ".repeat(inner_width)),
-                        Span::styled(" │", border_style),
-                    ]),
-                );
+        let mut best_x = 0usize;
+        let mut best_y = usize::MAX;
+
+        for x in candidate_xs {
+            if x + plan.width > usable_width {
+                continue;
+            }
+
+            let y = placements
+                .iter()
+                .filter(|placed| {
+                    let left = x;
+                    let right = x + plan.width;
+                    let placed_left = placed.x;
+                    let placed_right = placed.x + placed.plan.width;
+                    left < placed_right && placed_left < right
+                })
+                .map(|placed| placed.y + placed.plan.height + 1)
+                .max()
+                .unwrap_or(0);
+
+            if y < best_y || (y == best_y && x < best_x) {
+                best_x = x;
+                best_y = y;
             }
         }
 
-        for row_idx in 0..total_height {
-            let mut spans: Vec<Span<'static>> = Vec::new();
-            for (col_idx, col) in columns.iter().enumerate() {
-                if col_idx > 0 {
-                    spans.push(Span::raw(" ".repeat(gap)));
-                }
-                spans.extend(col[row_idx].spans.clone());
-            }
+        if best_y == usize::MAX {
+            best_x = 0;
+            best_y = placements
+                .iter()
+                .map(|placed| placed.y + placed.plan.height + 1)
+                .max()
+                .unwrap_or(0);
+        }
 
+        placements.push(Placement {
+            x: best_x,
+            y: best_y,
+            plan,
+        });
+    }
+
+    let total_height = placements
+        .iter()
+        .map(|placed| placed.y + placed.plan.height)
+        .max()
+        .unwrap_or(0);
+
+    placements.sort_by(|a, b| a.x.cmp(&b.x));
+
+    for y in 0..total_height {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut cursor = 0usize;
+        let mut row_has_content = false;
+        for placed in placements.iter().filter(|placed| y >= placed.y && y < placed.y + placed.plan.height)
+        {
+            if placed.x > cursor {
+                spans.push(Span::raw(" ".repeat(placed.x - cursor)));
+            }
+            spans.extend(placed.plan.lines[y - placed.y].spans.clone());
+            cursor = placed.x + placed.plan.width;
+            row_has_content = true;
+        }
+        if row_has_content {
             all_lines.push(Line::from(spans));
         }
-
-        remaining = remaining[row_count..].to_vec();
     }
 
     all_lines
@@ -3501,6 +3647,108 @@ mod tests {
         let truncated = truncate_line_to_width(&line, 8);
         let w = truncated.width();
         assert!(w <= 8, "truncated line display width {} should be <= 8", w);
+    }
+
+    #[test]
+    fn test_render_memory_tiles_uses_variable_box_widths() {
+        let mut tiles = group_into_tiles(vec![
+            (
+                "preference".to_string(),
+                "The user wants the mobile experience to be beautiful, animated, and performant."
+                    .to_string(),
+            ),
+            (
+                "preference".to_string(),
+                "User wants a release cut after testing is complete.".to_string(),
+            ),
+            ("fact".to_string(), "Jeremy".to_string()),
+        ]);
+        let border_style = Style::default();
+        let text_style = Style::default();
+
+        let preference = tiles.remove(0);
+        let fact = tiles.remove(0);
+
+        let preference_width = choose_memory_tile_width(
+            &preference,
+            20,
+            96,
+            border_style,
+            text_style,
+        );
+        let fact_width = choose_memory_tile_width(&fact, 20, 96, border_style, text_style);
+        let narrow_preference = plan_memory_tile(&preference, 20, border_style, text_style)
+            .expect("narrow preference plan");
+        let chosen_preference = plan_memory_tile(
+            &preference,
+            preference_width,
+            border_style,
+            text_style,
+        )
+        .expect("chosen preference plan");
+
+        assert!(
+            chosen_preference.height <= narrow_preference.height,
+            "expected chosen preference width to be at least as space-efficient as the minimum width: chosen_width={}, chosen_height={}, narrow_height={}",
+            preference_width,
+            chosen_preference.height,
+            narrow_preference.height
+        );
+        assert!(
+            preference_width >= fact_width,
+            "expected long preference content to not choose a narrower box than fact: pref={}, fact={}",
+            preference_width,
+            fact_width
+        );
+    }
+
+    #[test]
+    fn test_render_memory_tiles_allows_boxes_below_other_boxes() {
+        let tiles = group_into_tiles(vec![
+            (
+                "preference".to_string(),
+                "The mobile experience should be beautiful, animated, and performant.".to_string(),
+            ),
+            (
+                "preference".to_string(),
+                "User prefers quick verification that jcode is up-to-date.".to_string(),
+            ),
+            ("fact".to_string(), "Jeremy".to_string()),
+            (
+                "entity".to_string(),
+                "Star is a named source providing product strategy input.".to_string(),
+            ),
+            (
+                "correction".to_string(),
+                "Assistant incorrectly said it had no memory hits despite existing memories."
+                    .to_string(),
+            ),
+        ]);
+
+        let lines = render_memory_tiles(
+            &tiles,
+            120,
+            Style::default(),
+            Style::default(),
+            Some(Line::from("🧠 recalled 5 memories")),
+        );
+        let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
+
+        let correction_idx = rendered
+            .iter()
+            .position(|line| line.contains(" correction "))
+            .expect("correction box present");
+
+        assert!(
+            correction_idx > 0,
+            "expected correction box to render below first row: {:?}",
+            rendered
+        );
+        assert!(
+            rendered.iter().skip(1).any(|line| line.contains(" correction ")),
+            "expected at least one box to appear on a later visual row: {:?}",
+            rendered
+        );
     }
 
     #[test]

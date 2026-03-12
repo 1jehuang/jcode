@@ -527,7 +527,7 @@ fn prepare_body_incremental(
                 let border_style = Style::default().fg(rgb(170, 110, 255));
                 let text_style = Style::default().fg(rgb(230, 220, 255));
                 let total_width = if centered {
-                    (width.saturating_sub(4) as usize).min(90)
+                    (width.saturating_sub(4) as usize).min(120)
                 } else {
                     width.saturating_sub(2) as usize
                 };
@@ -600,7 +600,7 @@ fn prepare_body_incremental(
                 let header = Line::from(Span::styled(header_text, border_style)).alignment(align);
 
                 let total_width = if centered {
-                    (width.saturating_sub(4) as usize).min(90)
+                    (width.saturating_sub(4) as usize).min(120)
                 } else {
                     width.saturating_sub(2) as usize
                 };
@@ -943,7 +943,7 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 let header = Line::from(Span::styled(header_text, border_style)).alignment(align);
 
                 let total_width = if centered {
-                    (width.saturating_sub(4) as usize).min(90)
+                    (width.saturating_sub(4) as usize).min(120)
                 } else {
                     width.saturating_sub(2) as usize
                 };

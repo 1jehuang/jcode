@@ -194,7 +194,7 @@ pub(crate) fn render_tool_message(
                 if count == 1 { "y" } else { "ies" }
             );
             let header = Line::from(Span::styled(header_text, border_style));
-            let total_width = (width.saturating_sub(4) as usize).min(90);
+            let total_width = (width.saturating_sub(4) as usize).min(120);
             let tile_lines =
                 render_memory_tiles(&tiles, total_width, border_style, text_style, Some(header));
             for line in tile_lines {

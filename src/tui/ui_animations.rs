@@ -16,7 +16,6 @@ const STARTUP_VARIANTS: &[&str] = &[
     "donut",
     "globe",
     "cube",
-    "mobius",
     "octahedron",
     "lorenz",
     "rabbit",
@@ -1650,6 +1649,11 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_variants_exclude_mobius() {
+        assert!(!STARTUP_VARIANTS.contains(&"mobius"));
+    }
 
     #[test]
     fn disabling_mobius_also_disables_knot_alias() {

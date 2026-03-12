@@ -403,13 +403,18 @@ impl App {
         } else {
             format!("{}{}", server_icon, session_icon)
         };
+        let server_label = if server_name.eq_ignore_ascii_case("jcode") {
+            "jcode".to_string()
+        } else {
+            format!("jcode/{}", server_name.to_lowercase())
+        };
         let _ = crossterm::execute!(
             std::io::stdout(),
             crossterm::terminal::SetTitle(format!(
                 "{} {} {}{}",
-                ui::capitalize(server_name),
-                ui::capitalize(&session_name),
                 icons,
+                server_label,
+                ui::capitalize(&session_name),
                 suffix
             ))
         );
