@@ -782,14 +782,14 @@ fn filtered_display_models(models: impl IntoIterator<Item = String>) -> Vec<Stri
     models
         .into_iter()
         .filter(|model| {
-            !crate::subscription_catalog::has_credentials()
+            !crate::subscription_catalog::is_runtime_mode_enabled()
                 || crate::subscription_catalog::is_curated_model(model)
         })
         .collect()
 }
 
 fn filtered_model_routes(routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
-    if !crate::subscription_catalog::has_credentials() {
+    if !crate::subscription_catalog::is_runtime_mode_enabled() {
         return routes;
     }
 
@@ -800,7 +800,7 @@ fn filtered_model_routes(routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
 }
 
 fn ensure_model_allowed_for_subscription(model: &str) -> Result<()> {
-    if crate::subscription_catalog::has_credentials()
+    if crate::subscription_catalog::is_runtime_mode_enabled()
         && !crate::subscription_catalog::is_curated_model(model)
     {
         anyhow::bail!(
@@ -3833,25 +3833,21 @@ mod tests {
     #[test]
     fn test_subscription_model_guard_allows_only_curated_models_when_enabled() {
         let _guard = crate::storage::lock_test_env();
-        let original = std::env::var(crate::subscription_catalog::JCODE_API_KEY_ENV).ok();
-        std::env::set_var(crate::subscription_catalog::JCODE_API_KEY_ENV, "test-key");
+        crate::subscription_catalog::clear_runtime_env();
+        crate::subscription_catalog::apply_runtime_env();
 
         assert!(ensure_model_allowed_for_subscription("moonshotai/kimi-k2.5").is_ok());
         assert!(ensure_model_allowed_for_subscription("kimi/k2.5").is_ok());
         assert!(ensure_model_allowed_for_subscription("gpt-5.4").is_err());
 
-        if let Some(value) = original {
-            std::env::set_var(crate::subscription_catalog::JCODE_API_KEY_ENV, value);
-        } else {
-            std::env::remove_var(crate::subscription_catalog::JCODE_API_KEY_ENV);
-        }
+        crate::subscription_catalog::clear_runtime_env();
     }
 
     #[test]
     fn test_filtered_display_models_respects_curated_subscription_catalog() {
         let _guard = crate::storage::lock_test_env();
-        let original = std::env::var(crate::subscription_catalog::JCODE_API_KEY_ENV).ok();
-        std::env::set_var(crate::subscription_catalog::JCODE_API_KEY_ENV, "test-key");
+        crate::subscription_catalog::clear_runtime_env();
+        crate::subscription_catalog::apply_runtime_env();
 
         let filtered = filtered_display_models(vec![
             "gpt-5.4".to_string(),
@@ -3867,10 +3863,25 @@ mod tests {
             ]
         );
 
-        if let Some(value) = original {
-            std::env::set_var(crate::subscription_catalog::JCODE_API_KEY_ENV, value);
-        } else {
-            std::env::remove_var(crate::subscription_catalog::JCODE_API_KEY_ENV);
-        }
+        crate::subscription_catalog::clear_runtime_env();
+    }
+
+    #[test]
+    fn test_subscription_filters_do_not_activate_from_saved_credentials_alone() {
+        let _guard = crate::storage::lock_test_env();
+        crate::subscription_catalog::clear_runtime_env();
+        std::env::set_var(crate::subscription_catalog::JCODE_API_KEY_ENV, "test-key");
+
+        assert!(ensure_model_allowed_for_subscription("gpt-5.4").is_ok());
+        assert_eq!(
+            filtered_display_models(vec![
+                "gpt-5.4".to_string(),
+                "moonshotai/kimi-k2.5".to_string(),
+            ]),
+            vec!["gpt-5.4".to_string(), "moonshotai/kimi-k2.5".to_string()]
+        );
+
+        std::env::remove_var(crate::subscription_catalog::JCODE_API_KEY_ENV);
+        crate::subscription_catalog::clear_runtime_env();
     }
 }
