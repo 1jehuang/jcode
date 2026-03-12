@@ -4,6 +4,7 @@ pub const JCODE_API_KEY_ENV: &str = "JCODE_API_KEY";
 pub const JCODE_API_BASE_ENV: &str = "JCODE_API_BASE";
 pub const JCODE_ENV_FILE: &str = "jcode-subscription.env";
 pub const JCODE_CACHE_NAMESPACE: &str = "jcode-subscription";
+pub const JCODE_SUBSCRIPTION_ACTIVE_ENV: &str = "JCODE_SUBSCRIPTION_ACTIVE";
 pub const DEFAULT_JCODE_API_BASE: &str = "https://subscription.jcode.invalid/v1";
 
 const HEALER_ALPHA_PROVIDERS: &[&str] = &["Stealth"];
@@ -145,7 +146,15 @@ pub fn has_router_base() -> bool {
     configured_api_base().is_some()
 }
 
+pub fn is_runtime_mode_enabled() -> bool {
+    std::env::var(JCODE_SUBSCRIPTION_ACTIVE_ENV)
+        .ok()
+        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
 pub fn apply_runtime_env() {
+    std::env::set_var(JCODE_SUBSCRIPTION_ACTIVE_ENV, "1");
     std::env::set_var(
         "JCODE_OPENROUTER_API_BASE",
         configured_api_base().unwrap_or_else(|| DEFAULT_JCODE_API_BASE.to_string()),
@@ -154,6 +163,17 @@ pub fn apply_runtime_env() {
     std::env::set_var("JCODE_OPENROUTER_ENV_FILE", JCODE_ENV_FILE);
     std::env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", JCODE_CACHE_NAMESPACE);
     std::env::set_var("JCODE_OPENROUTER_PROVIDER_FEATURES", "0");
+    std::env::remove_var("JCODE_OPENROUTER_PROVIDER");
+    std::env::remove_var("JCODE_OPENROUTER_NO_FALLBACK");
+}
+
+pub fn clear_runtime_env() {
+    std::env::remove_var(JCODE_SUBSCRIPTION_ACTIVE_ENV);
+    std::env::remove_var("JCODE_OPENROUTER_API_BASE");
+    std::env::remove_var("JCODE_OPENROUTER_API_KEY_NAME");
+    std::env::remove_var("JCODE_OPENROUTER_ENV_FILE");
+    std::env::remove_var("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    std::env::remove_var("JCODE_OPENROUTER_PROVIDER_FEATURES");
     std::env::remove_var("JCODE_OPENROUTER_PROVIDER");
     std::env::remove_var("JCODE_OPENROUTER_NO_FALLBACK");
 }
@@ -189,5 +209,18 @@ mod tests {
             canonical_model_id("moonshotai/kimi-k2.5@Fireworks"),
             Some("moonshotai/kimi-k2.5")
         );
+    }
+
+    #[test]
+    fn runtime_mode_flag_tracks_subscription_activation() {
+        let _guard = crate::storage::lock_test_env();
+        clear_runtime_env();
+        assert!(!is_runtime_mode_enabled());
+
+        apply_runtime_env();
+        assert!(is_runtime_mode_enabled());
+
+        clear_runtime_env();
+        assert!(!is_runtime_mode_enabled());
     }
 }
