@@ -149,7 +149,12 @@ pub fn has_router_base() -> bool {
 pub fn is_runtime_mode_enabled() -> bool {
     std::env::var(JCODE_SUBSCRIPTION_ACTIVE_ENV)
         .ok()
-        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
         .unwrap_or(false)
 }
 
