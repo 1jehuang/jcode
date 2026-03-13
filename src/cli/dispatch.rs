@@ -439,9 +439,12 @@ pub(crate) async fn spawn_server(
 
     startup_profile::mark("server_spawn_start");
     eprintln!("Starting server...");
-    let exe = std::env::current_exe()?;
-    let mut cmd = ProcessCommand::new(&exe);
     let client_requested_selfdev = selfdev::client_selfdev_requested();
+    let exe = build::client_update_candidate(client_requested_selfdev)
+        .map(|(path, _)| path)
+        .or_else(|| std::env::current_exe().ok())
+        .ok_or_else(|| anyhow::anyhow!("Could not determine executable path for server spawn"))?;
+    let mut cmd = ProcessCommand::new(&exe);
     cmd.env_remove(selfdev::CLIENT_SELFDEV_ENV);
     if client_requested_selfdev {
         cmd.env("JCODE_DEBUG_CONTROL", "1");
