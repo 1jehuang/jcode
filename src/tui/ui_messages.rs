@@ -341,16 +341,14 @@ pub(crate) fn render_tool_message(
                     .or_else(|| call.get("name"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                let display_name = tools_ui::resolve_display_tool_name(raw_name);
                 let params = tools_ui::batch_subcall_params(call);
 
                 let sub_tc = ToolCall {
                     id: String::new(),
-                    name: display_name.to_string(),
+                    name: tools_ui::resolve_display_tool_name(raw_name).to_string(),
                     input: params,
                     intent: None,
                 };
-                let sub_summary = tools_ui::get_tool_summary(&sub_tc);
 
                 let sub_errored = sub_results.get(i).copied().unwrap_or(false);
                 let (sub_icon, sub_icon_color) = if sub_errored {
@@ -359,17 +357,12 @@ pub(crate) fn render_tool_message(
                     ("✓", rgb(100, 180, 100))
                 };
 
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("    {} ", sub_icon),
-                        Style::default().fg(sub_icon_color),
-                    ),
-                    Span::styled(display_name.to_string(), Style::default().fg(tool_color())),
-                    Span::styled(
-                        format!(" {}", sub_summary),
-                        Style::default().fg(dim_color()),
-                    ),
-                ]));
+                lines.push(tools_ui::render_batch_subcall_line(
+                    &sub_tc,
+                    sub_icon,
+                    sub_icon_color,
+                    50,
+                ));
             }
         }
     }

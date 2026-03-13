@@ -70,7 +70,7 @@ pub(crate) use messages::{
 };
 use picker_ui::draw_picker_line;
 use pinned_ui::{collect_pinned_content_cached, draw_pinned_content_cached};
-use tools_ui::get_tool_summary;
+use tools_ui::summarize_batch_running_tools_compact;
 #[cfg(test)]
 use viewport::compute_visible_margins;
 use viewport::draw_messages;
@@ -177,6 +177,14 @@ fn header_session_color() -> Color {
 
 // Spinner frames for animated status
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+pub(super) fn spinner_frame_index(elapsed: f32, fps: f32) -> usize {
+    ((elapsed * fps) as usize) % SPINNER_FRAMES.len()
+}
+
+pub(super) fn spinner_frame(elapsed: f32, fps: f32) -> &'static str {
+    SPINNER_FRAMES[spinner_frame_index(elapsed, fps)]
+}
 
 // Keep the picker spacious on tall terminals without crowding the chat pane.
 const MODEL_PICKER_MAX_HEIGHT: u16 = 16;
@@ -1059,16 +1067,9 @@ fn format_status_for_debug(app: &dyn TuiState) -> String {
                     let completed = progress.completed;
                     let total = progress.total;
                     let mut status = format!("Running batch: {}/{} done", completed, total);
-                    if let Some(running) = progress.running.first() {
-                        let detail = get_tool_summary(running);
-                        if detail.is_empty() {
-                            status.push_str(&format!(", running: {}", running.name));
-                        } else {
-                            status.push_str(&format!(", running: {} ({})", running.name, detail));
-                        }
-                        if progress.running.len() > 1 {
-                            status.push_str(&format!(" +{} more", progress.running.len() - 1));
-                        }
+                    if let Some(running) = summarize_batch_running_tools_compact(&progress.running)
+                    {
+                        status.push_str(&format!(", running: {}", running));
                     }
                     if let Some(last) = progress.last_completed.filter(|_| completed < total) {
                         status.push_str(&format!(", last done: {}", last));
@@ -1399,6 +1400,7 @@ struct FullPrepCacheKey {
     centered: bool,
     is_processing: bool,
     streaming_text_len: usize,
+    batch_progress_hash: u64,
     startup_active: bool,
 }
 
@@ -2617,11 +2619,12 @@ mod tests {
     use super::*;
     use crate::tui::session_picker;
 
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct TestState {
         input: String,
         cursor_pos: usize,
         display_messages: Vec<DisplayMessage>,
+        batch_progress: Option<crate::bus::BatchProgress>,
         queued_messages: Vec<String>,
         pending_soft_interrupts: Vec<String>,
         interleave_message: Option<String>,
@@ -2629,6 +2632,7 @@ mod tests {
         queue_mode: bool,
         active_skill: Option<String>,
         centered_mode: bool,
+        anim_elapsed: f32,
         picker_state: Option<crate::tui::PickerState>,
     }
 
@@ -2712,7 +2716,7 @@ mod tests {
             None
         }
         fn batch_progress(&self) -> Option<crate::bus::BatchProgress> {
-            None
+            self.batch_progress.clone()
         }
         fn time_since_activity(&self) -> Option<Duration> {
             None
@@ -2754,7 +2758,7 @@ mod tests {
             None
         }
         fn animation_elapsed(&self) -> f32 {
-            0.0
+            self.anim_elapsed
         }
         fn rate_limit_remaining(&self) -> Option<Duration> {
             None
@@ -3369,6 +3373,222 @@ mod tests {
             "missing second read summary in {:?}",
             rendered
         );
+    }
+
+    #[test]
+    fn test_prepare_messages_shows_live_batch_progress_in_chat_history() {
+        let state = TestState {
+            display_messages: vec![DisplayMessage {
+                role: "user".to_string(),
+                content: "build it".to_string(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            }],
+            status: ProcessingStatus::RunningTool("batch".to_string()),
+            anim_elapsed: 0.0,
+            batch_progress: Some(crate::bus::BatchProgress {
+                session_id: "s".to_string(),
+                tool_call_id: "tc".to_string(),
+                total: 2,
+                completed: 1,
+                last_completed: Some("read".to_string()),
+                running: vec![ToolCall {
+                    id: "batch-2-bash".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "cargo build --release --workspace"}),
+                    intent: None,
+                }],
+                subcalls: vec![
+                    crate::bus::BatchSubcallProgress {
+                        index: 1,
+                        tool_call: ToolCall {
+                            id: "batch-1-read".to_string(),
+                            name: "read".to_string(),
+                            input: serde_json::json!({"file_path": "Cargo.toml"}),
+                            intent: None,
+                        },
+                        state: crate::bus::BatchSubcallState::Succeeded,
+                    },
+                    crate::bus::BatchSubcallProgress {
+                        index: 2,
+                        tool_call: ToolCall {
+                            id: "batch-2-bash".to_string(),
+                            name: "bash".to_string(),
+                            input: serde_json::json!({"command": "cargo build --release --workspace"}),
+                            intent: None,
+                        },
+                        state: crate::bus::BatchSubcallState::Running,
+                    },
+                ],
+            }),
+            ..Default::default()
+        };
+
+        let prepared = prepare::prepare_messages(&state, 100, 30);
+        let rendered: Vec<String> = prepared
+            .wrapped_lines
+            .iter()
+            .map(extract_line_text)
+            .collect();
+
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("⠋ batch 2 calls · 1/2 done")),
+            "missing live batch header in {:?}",
+            rendered
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("✓ read Cargo.toml")),
+            "missing completed batch subcall in {:?}",
+            rendered
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("⠋ bash $ cargo build --release --workspace")),
+            "missing running batch subcall in {:?}",
+            rendered
+        );
+        assert!(
+            rendered
+                .iter()
+                .all(|line| !line.contains("#1") && !line.contains("#2")),
+            "live batch rows should align with completed rows in {:?}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn test_prepare_messages_live_batch_spinner_advances_between_frames() {
+        let batch_progress = crate::bus::BatchProgress {
+            session_id: "s".to_string(),
+            tool_call_id: "tc".to_string(),
+            total: 1,
+            completed: 0,
+            last_completed: None,
+            running: vec![ToolCall {
+                id: "batch-1-bash".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({"command": "sleep 1"}),
+                intent: None,
+            }],
+            subcalls: vec![crate::bus::BatchSubcallProgress {
+                index: 1,
+                tool_call: ToolCall {
+                    id: "batch-1-bash".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "sleep 1"}),
+                    intent: None,
+                },
+                state: crate::bus::BatchSubcallState::Running,
+            }],
+        };
+
+        let first = TestState {
+            status: ProcessingStatus::RunningTool("batch".to_string()),
+            anim_elapsed: 0.0,
+            batch_progress: Some(batch_progress.clone()),
+            ..Default::default()
+        };
+        let second = TestState {
+            status: ProcessingStatus::RunningTool("batch".to_string()),
+            anim_elapsed: 0.1,
+            batch_progress: Some(batch_progress),
+            ..Default::default()
+        };
+
+        let first_rendered: Vec<String> = prepare::prepare_messages(&first, 100, 20)
+            .wrapped_lines
+            .iter()
+            .map(extract_line_text)
+            .collect();
+        let second_rendered: Vec<String> = prepare::prepare_messages(&second, 100, 20)
+            .wrapped_lines
+            .iter()
+            .map(extract_line_text)
+            .collect();
+
+        assert!(
+            first_rendered
+                .iter()
+                .any(|line| line.contains("⠋ batch 1 calls · 0/1 done")),
+            "expected first spinner frame in {:?}",
+            first_rendered
+        );
+        assert!(
+            second_rendered
+                .iter()
+                .any(|line| line.contains("⠙ batch 1 calls · 0/1 done")),
+            "expected second spinner frame in {:?}",
+            second_rendered
+        );
+        assert_ne!(
+            first_rendered, second_rendered,
+            "batch progress should rerender as spinner advances"
+        );
+    }
+
+    #[test]
+    fn test_prepare_messages_live_batch_centered_mode_uses_left_aligned_padding() {
+        let state = TestState {
+            centered_mode: true,
+            status: ProcessingStatus::RunningTool("batch".to_string()),
+            anim_elapsed: 0.0,
+            batch_progress: Some(crate::bus::BatchProgress {
+                session_id: "s".to_string(),
+                tool_call_id: "tc".to_string(),
+                total: 1,
+                completed: 0,
+                last_completed: None,
+                running: vec![ToolCall {
+                    id: "batch-1-read".to_string(),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"file_path": "Cargo.toml"}),
+                    intent: None,
+                }],
+                subcalls: vec![crate::bus::BatchSubcallProgress {
+                    index: 1,
+                    tool_call: ToolCall {
+                        id: "batch-1-read".to_string(),
+                        name: "read".to_string(),
+                        input: serde_json::json!({"file_path": "Cargo.toml"}),
+                        intent: None,
+                    },
+                    state: crate::bus::BatchSubcallState::Running,
+                }],
+            }),
+            ..Default::default()
+        };
+
+        let prepared = prepare::prepare_messages(&state, 100, 20);
+        let batch_lines: Vec<&Line<'static>> = prepared
+            .wrapped_lines
+            .iter()
+            .filter(|line| {
+                let text = extract_line_text(line);
+                text.contains("batch") || text.contains("Cargo.toml")
+            })
+            .collect();
+
+        assert!(!batch_lines.is_empty(), "expected centered batch lines");
+        for line in batch_lines {
+            assert_eq!(
+                line.alignment,
+                Some(Alignment::Left),
+                "centered live batch lines should be left-aligned with padding"
+            );
+            assert!(
+                line.spans
+                    .first()
+                    .is_some_and(|span| span.content.starts_with(' ')),
+                "centered live batch lines should start with padding"
+            );
+        }
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use super::*;
+use std::hash::{Hash, Hasher};
 
 fn user_prompt_number_style(color: Color) -> Style {
     Style::default().fg(color).bg(user_bg())
@@ -32,6 +33,141 @@ fn assistant_message_copy_targets(
     crate::tui::markdown::extract_copy_targets_from_rendered_lines(rendered_lines)
 }
 
+fn empty_prepared_messages() -> PreparedMessages {
+    PreparedMessages {
+        wrapped_lines: Vec::new(),
+        wrapped_user_indices: Vec::new(),
+        wrapped_user_prompt_starts: Vec::new(),
+        wrapped_user_prompt_ends: Vec::new(),
+        user_prompt_texts: Vec::new(),
+        image_regions: Vec::new(),
+        edit_tool_ranges: Vec::new(),
+        copy_targets: Vec::new(),
+    }
+}
+
+fn active_batch_progress(app: &dyn TuiState) -> Option<crate::bus::BatchProgress> {
+    match app.status() {
+        ProcessingStatus::RunningTool(name) if name == "batch" => app.batch_progress(),
+        _ => None,
+    }
+}
+
+pub(super) fn active_batch_progress_hash(app: &dyn TuiState) -> u64 {
+    let Some(progress) = active_batch_progress(app) else {
+        return 0;
+    };
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    if progress.completed < progress.total {
+        super::spinner_frame_index(app.animation_elapsed(), 12.5).hash(&mut hasher);
+    }
+    progress.total.hash(&mut hasher);
+    progress.completed.hash(&mut hasher);
+    progress.last_completed.hash(&mut hasher);
+    for subcall in &progress.subcalls {
+        subcall.index.hash(&mut hasher);
+        subcall.tool_call.id.hash(&mut hasher);
+        subcall.tool_call.name.hash(&mut hasher);
+        match subcall.state {
+            crate::bus::BatchSubcallState::Running => 0u8,
+            crate::bus::BatchSubcallState::Succeeded => 1u8,
+            crate::bus::BatchSubcallState::Failed => 2u8,
+        }
+        .hash(&mut hasher);
+        if let Ok(input) = serde_json::to_string(&subcall.tool_call.input) {
+            input.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn pad_lines_for_centered_mode(lines: &mut [Line<'static>], width: u16) {
+    let max_line_width = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0);
+    let pad = (width as usize).saturating_sub(max_line_width) / 2;
+    if pad == 0 {
+        return;
+    }
+
+    let pad_str = " ".repeat(pad);
+    for line in lines {
+        line.spans.insert(0, Span::raw(pad_str.clone()));
+        line.alignment = Some(ratatui::layout::Alignment::Left);
+    }
+}
+
+fn prepare_active_batch_progress(
+    app: &dyn TuiState,
+    width: u16,
+    prefix_blank: bool,
+) -> PreparedMessages {
+    let Some(progress) = active_batch_progress(app) else {
+        return empty_prepared_messages();
+    };
+
+    let centered = app.centered_mode();
+    let accent = rgb(255, 193, 94);
+    let spinner = super::spinner_frame(app.animation_elapsed(), 12.5);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    if prefix_blank {
+        lines.push(Line::from(""));
+    }
+
+    let mut header = vec![
+        Span::styled(format!("  {} ", spinner), Style::default().fg(accent)),
+        Span::styled("batch", Style::default().fg(tool_color())),
+        Span::styled(
+            format!(
+                " {} calls · {}/{} done",
+                progress.total, progress.completed, progress.total
+            ),
+            Style::default().fg(dim_color()),
+        ),
+    ];
+    if let Some(last) = progress
+        .last_completed
+        .as_ref()
+        .filter(|_| progress.completed < progress.total)
+    {
+        header.push(Span::styled(
+            format!(" · last done: {}", last),
+            Style::default().fg(dim_color()),
+        ));
+    }
+    lines.push(Line::from(header));
+
+    for subcall in &progress.subcalls {
+        let (icon, icon_color) = match subcall.state {
+            crate::bus::BatchSubcallState::Running => (spinner, accent),
+            crate::bus::BatchSubcallState::Succeeded => ("✓", rgb(100, 180, 100)),
+            crate::bus::BatchSubcallState::Failed => ("✗", rgb(220, 100, 100)),
+        };
+
+        lines.push(tools_ui::render_batch_subcall_line(
+            &subcall.tool_call,
+            icon,
+            icon_color,
+            50,
+        ));
+    }
+
+    if centered {
+        pad_lines_for_centered_mode(&mut lines, width);
+    }
+
+    wrap_lines_with_map(lines, &[], &[], width, &[], &[])
+}
+
 pub(super) fn prepare_messages(
     app: &dyn TuiState,
     width: u16,
@@ -48,6 +184,7 @@ pub(super) fn prepare_messages(
         centered: app.centered_mode(),
         is_processing: app.is_processing(),
         streaming_text_len: app.streaming_text().len(),
+        batch_progress_hash: active_batch_progress_hash(app),
         startup_active,
     };
 
@@ -110,21 +247,21 @@ fn prepare_messages_inner(
     };
 
     let body_prepared = prepare_body_cached(app, width);
+    let has_batch_progress = active_batch_progress(app).is_some();
+    let batch_prefix_blank = has_batch_progress && !body_prepared.wrapped_lines.is_empty();
+    let batch_progress_prepared = if has_batch_progress {
+        prepare_active_batch_progress(app, width, batch_prefix_blank)
+    } else {
+        empty_prepared_messages()
+    };
     let has_streaming = app.is_processing() && !app.streaming_text().is_empty();
-    let stream_prefix_blank = has_streaming && !body_prepared.wrapped_lines.is_empty();
+    let stream_prefix_blank = has_streaming
+        && (!body_prepared.wrapped_lines.is_empty()
+            || !batch_progress_prepared.wrapped_lines.is_empty());
     let streaming_prepared = if has_streaming {
         prepare_streaming_cached(app, width, stream_prefix_blank)
     } else {
-        PreparedMessages {
-            wrapped_lines: Vec::new(),
-            wrapped_user_indices: Vec::new(),
-            wrapped_user_prompt_starts: Vec::new(),
-            wrapped_user_prompt_ends: Vec::new(),
-            user_prompt_texts: Vec::new(),
-            image_regions: Vec::new(),
-            edit_tool_ranges: Vec::new(),
-            copy_targets: Vec::new(),
-        }
+        empty_prepared_messages()
     };
 
     let mut wrapped_lines: Vec<Line<'static>>;
@@ -255,7 +392,9 @@ fn prepare_messages_inner(
         wrapped_lines.extend(startup_prepared.wrapped_lines);
         let body_offset = header_len + startup_len;
         let body_len = body_prepared.wrapped_lines.len();
+        let batch_len = batch_progress_prepared.wrapped_lines.len();
         wrapped_lines.extend_from_slice(&body_prepared.wrapped_lines);
+        wrapped_lines.extend(batch_progress_prepared.wrapped_lines);
         wrapped_lines.extend(streaming_prepared.wrapped_lines);
 
         wrapped_user_indices = body_prepared
@@ -289,8 +428,8 @@ fn prepare_messages_inner(
             });
         }
         for mut region in streaming_prepared.image_regions {
-            region.abs_line_idx += body_offset + body_len;
-            region.end_line += body_offset + body_len;
+            region.abs_line_idx += body_offset + body_len + batch_len;
+            region.end_line += body_offset + body_len + batch_len;
             image_regions.push(region);
         }
 

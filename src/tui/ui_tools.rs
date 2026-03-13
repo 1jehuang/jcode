@@ -1,5 +1,8 @@
 use crate::message::ToolCall;
 
+use super::{dim_color, tool_color};
+use ratatui::prelude::*;
+
 /// Map provider-side tool names to internal display names.
 /// Mirrors `Registry::resolve_tool_name` so the TUI shows friendly names.
 pub(super) fn resolve_display_tool_name(name: &str) -> &str {
@@ -179,6 +182,21 @@ pub(super) fn extract_unified_patch_primary_file(patch_text: &str) -> Option<Str
     None
 }
 
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    match s.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => format!("{}...", &s[..byte_idx]),
+        None => s.to_string(),
+    }
+}
+
+pub(super) fn batch_subcall_index(id: &str) -> Option<usize> {
+    id.strip_prefix("batch-")?
+        .split('-')
+        .next()?
+        .parse::<usize>()
+        .ok()
+}
+
 pub(super) fn is_memory_store_tool(tc: &ToolCall) -> bool {
     match tc.name.as_str() {
         "memory" => tc
@@ -203,17 +221,18 @@ pub(super) fn is_memory_recall_tool(tc: &ToolCall) -> bool {
 
 /// Extract a brief summary from a tool call input (file path, command, etc.)
 pub(super) fn get_tool_summary(tool: &ToolCall) -> String {
-    let truncate = |s: &str, max_chars: usize| match s.char_indices().nth(max_chars) {
-        Some((byte_idx, _)) => format!("{}...", &s[..byte_idx]),
-        None => s.to_string(),
-    };
+    get_tool_summary_with_bash_limit(tool, 50)
+}
+
+pub(super) fn get_tool_summary_with_bash_limit(tool: &ToolCall, bash_max_chars: usize) -> String {
+    let truncate = |s: &str, max_chars: usize| truncate_chars(s, max_chars);
 
     match tool.name.as_str() {
         "bash" => tool
             .input
             .get("command")
             .and_then(|v| v.as_str())
-            .map(|cmd| format!("$ {}", truncate(cmd, 50)))
+            .map(|cmd| format!("$ {}", truncate(cmd, bash_max_chars)))
             .unwrap_or_default(),
         "read" => {
             let path = tool
@@ -505,5 +524,98 @@ pub(super) fn get_tool_summary(tool: &ToolCall) -> String {
             .map(|s| truncate(s, 40))
             .unwrap_or_default(),
         _ => String::new(),
+    }
+}
+
+pub(super) fn render_batch_subcall_line(
+    tool: &ToolCall,
+    icon: &str,
+    icon_color: Color,
+    bash_max_chars: usize,
+) -> Line<'static> {
+    let display_name = resolve_display_tool_name(&tool.name).to_string();
+    let summary = get_tool_summary_with_bash_limit(tool, bash_max_chars);
+
+    let mut spans = vec![
+        Span::styled(format!("    {} ", icon), Style::default().fg(icon_color)),
+        Span::styled(display_name, Style::default().fg(tool_color())),
+    ];
+    if !summary.is_empty() {
+        spans.push(Span::styled(
+            format!(" {}", summary),
+            Style::default().fg(dim_color()),
+        ));
+    }
+
+    Line::from(spans)
+}
+
+pub(super) fn format_batch_running_tool(tool: &ToolCall, bash_max_chars: usize) -> String {
+    let prefix = batch_subcall_index(&tool.id)
+        .map(|idx| format!("#{} ", idx))
+        .unwrap_or_default();
+    let detail = get_tool_summary_with_bash_limit(tool, bash_max_chars);
+
+    if detail.is_empty() {
+        format!("{}{}", prefix, tool.name)
+    } else {
+        format!("{}{} ({})", prefix, tool.name, detail)
+    }
+}
+
+pub(super) fn summarize_batch_running_tools(
+    running: &[ToolCall],
+    max_visible: usize,
+    bash_max_chars: usize,
+) -> Option<String> {
+    if running.is_empty() {
+        return None;
+    }
+
+    let mut running_sorted = running.to_vec();
+    running_sorted.sort_by(|a, b| {
+        batch_subcall_index(&a.id)
+            .unwrap_or(usize::MAX)
+            .cmp(&batch_subcall_index(&b.id).unwrap_or(usize::MAX))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    let visible = max_visible.max(1);
+    let mut labels: Vec<String> = running_sorted
+        .iter()
+        .take(visible)
+        .map(|tool| format_batch_running_tool(tool, bash_max_chars))
+        .collect();
+
+    if running_sorted.len() > visible {
+        labels.push(format!("+{} more", running_sorted.len() - visible));
+    }
+
+    Some(labels.join(", "))
+}
+
+pub(super) fn summarize_batch_running_tools_compact(running: &[ToolCall]) -> Option<String> {
+    if running.is_empty() {
+        return None;
+    }
+
+    let mut running_sorted = running.to_vec();
+    running_sorted.sort_by(|a, b| {
+        batch_subcall_index(&a.id)
+            .unwrap_or(usize::MAX)
+            .cmp(&batch_subcall_index(&b.id).unwrap_or(usize::MAX))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    let first = &running_sorted[0];
+    let label = match batch_subcall_index(&first.id) {
+        Some(idx) => format!("#{} {}", idx, first.name),
+        None => first.name.clone(),
+    };
+
+    if running_sorted.len() == 1 {
+        Some(label)
+    } else {
+        Some(format!("{} +{}", label, running_sorted.len() - 1))
     }
 }
