@@ -27,6 +27,7 @@ pub enum LoginProviderTarget {
     Claude,
     OpenAi,
     OpenRouter,
+    Azure,
     OpenAiCompatible(OpenAiCompatibleProfile),
     Cursor,
     Copilot,
@@ -40,6 +41,7 @@ pub enum LoginProviderAuthStateKey {
     Jcode,
     Anthropic,
     OpenAi,
+    Azure,
     OpenRouterLike,
     Copilot,
     Gemini,
@@ -251,6 +253,19 @@ pub const OPENROUTER_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDesc
     order: LoginProviderSurfaceOrder::new(Some(4), Some(3), Some(4), Some(3), Some(3)),
 };
 
+pub const AZURE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "azure",
+    display_name: "Azure OpenAI",
+    auth_kind: LoginProviderAuthKind::Hybrid,
+    auth_state_key: LoginProviderAuthStateKey::Azure,
+    auth_status_method: "Entra ID / API key",
+    aliases: &["azure-openai", "azure_openai", "aoai"],
+    menu_detail: "Microsoft Entra ID or Azure OpenAI API key",
+    recommended: false,
+    target: LoginProviderTarget::Azure,
+    order: LoginProviderSurfaceOrder::new(Some(5), None, None, None, Some(4)),
+};
+
 pub const OPENCODE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "opencode",
     display_name: "OpenCode Zen",
@@ -394,11 +409,12 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-const LOGIN_PROVIDERS: [LoginProviderDescriptor; 15] = [
+const LOGIN_PROVIDERS: [LoginProviderDescriptor; 16] = [
     CLAUDE_LOGIN_PROVIDER,
     OPENAI_LOGIN_PROVIDER,
     JCODE_LOGIN_PROVIDER,
     OPENROUTER_LOGIN_PROVIDER,
+    AZURE_LOGIN_PROVIDER,
     OPENCODE_LOGIN_PROVIDER,
     OPENCODE_GO_LOGIN_PROVIDER,
     ZAI_LOGIN_PROVIDER,
@@ -544,6 +560,9 @@ pub fn apply_openai_compatible_profile_env(profile: Option<OpenAiCompatibleProfi
         "JCODE_OPENROUTER_ENV_FILE",
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
         "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_OPENROUTER_AUTH_HEADER",
+        "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
         "JCODE_OPENROUTER_PROVIDER",
         "JCODE_OPENROUTER_NO_FALLBACK",
     ];
@@ -854,6 +873,10 @@ mod tests {
             Some("openai-compatible")
         );
         assert_eq!(
+            resolve_login_provider("aoai").map(|provider| provider.id),
+            Some("azure")
+        );
+        assert_eq!(
             resolve_login_provider("cerberascode").map(|provider| provider.id),
             Some("cerebras")
         );
@@ -916,11 +939,15 @@ mod tests {
             Some("openrouter")
         );
         assert_eq!(
-            resolve_login_selection("14", &providers).map(|provider| provider.id),
-            Some("gemini")
+            resolve_login_selection("6", &providers).map(|provider| provider.id),
+            Some("azure")
         );
         assert_eq!(
             resolve_login_selection("15", &providers).map(|provider| provider.id),
+            Some("gemini")
+        );
+        assert_eq!(
+            resolve_login_selection("16", &providers).map(|provider| provider.id),
             Some("google")
         );
     }

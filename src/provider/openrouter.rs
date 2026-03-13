@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use reqwest::Client;
+use reqwest::header::HeaderName;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -169,6 +170,90 @@ fn provider_features_enabled(api_base: &str) -> bool {
         ));
     }
     api_base.contains("openrouter.ai")
+}
+
+fn model_catalog_enabled() -> bool {
+    if let Ok(raw) = std::env::var("JCODE_OPENROUTER_MODEL_CATALOG") {
+        if let Some(value) = parse_env_bool(&raw) {
+            return value;
+        }
+        crate::logging::warn(&format!(
+            "Ignoring invalid JCODE_OPENROUTER_MODEL_CATALOG '{}'; expected true/false",
+            raw
+        ));
+    }
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthHeaderMode {
+    AuthorizationBearer,
+    ApiKey,
+}
+
+fn configured_auth_header_mode() -> AuthHeaderMode {
+    let Some(raw) = std::env::var("JCODE_OPENROUTER_AUTH_HEADER")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty())
+    else {
+        return AuthHeaderMode::AuthorizationBearer;
+    };
+
+    match raw.as_str() {
+        "authorization" | "authorization-bearer" | "bearer" => {
+            AuthHeaderMode::AuthorizationBearer
+        }
+        "api-key" | "apikey" => AuthHeaderMode::ApiKey,
+        other => {
+            crate::logging::warn(&format!(
+                "Ignoring invalid JCODE_OPENROUTER_AUTH_HEADER '{}'; expected authorization-bearer or api-key",
+                other
+            ));
+            AuthHeaderMode::AuthorizationBearer
+        }
+    }
+}
+
+fn configured_dynamic_bearer_provider() -> Option<String> {
+    std::env::var("JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty())
+}
+
+#[derive(Debug, Clone)]
+enum ProviderAuth {
+    AuthorizationBearer { token: String, label: String },
+    HeaderValue {
+        header_name: HeaderName,
+        value: String,
+        label: String,
+    },
+    AzureEntra { label: String },
+}
+
+impl ProviderAuth {
+    async fn apply(&self, req: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder> {
+        match self {
+            Self::AuthorizationBearer { token, .. } => Ok(req.bearer_auth(token)),
+            Self::HeaderValue {
+                header_name, value, ..
+            } => Ok(req.header(header_name, value)),
+            Self::AzureEntra { .. } => {
+                let token = crate::auth::azure::get_bearer_token().await?;
+                Ok(req.bearer_auth(token))
+            }
+        }
+    }
+
+    fn label(&self) -> &str {
+        match self {
+            Self::AuthorizationBearer { label, .. } => label,
+            Self::HeaderValue { label, .. } => label,
+            Self::AzureEntra { label } => label,
+        }
+    }
 }
 
 /// Model info from OpenRouter API
@@ -657,9 +742,9 @@ pub struct OpenRouterProvider {
     client: Client,
     model: Arc<RwLock<String>>,
     api_base: String,
-    api_key: String,
-    key_name: String,
+    auth: ProviderAuth,
     supports_provider_features: bool,
+    supports_model_catalog: bool,
     send_openrouter_headers: bool,
     models_cache: Arc<RwLock<ModelsCache>>,
     /// Provider routing preferences
@@ -698,16 +783,10 @@ impl OpenRouterProvider {
 
     pub fn new() -> Result<Self> {
         let api_base = configured_api_base();
-        let key_name = configured_api_key_name();
         let supports_provider_features = provider_features_enabled(&api_base);
+        let supports_model_catalog = model_catalog_enabled();
         let send_openrouter_headers = supports_provider_features;
-        let api_key = Self::get_api_key().ok_or_else(|| {
-            anyhow::anyhow!(
-                "{} not found in environment or ~/.config/jcode/{}",
-                key_name,
-                configured_env_file_name()
-            )
-        })?;
+        let auth = Self::resolve_auth()?;
 
         let model =
             std::env::var("JCODE_OPENROUTER_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
@@ -723,9 +802,9 @@ impl OpenRouterProvider {
             client: crate::provider::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
             api_base,
-            api_key,
-            key_name,
+            auth,
             supports_provider_features,
+            supports_model_catalog,
             send_openrouter_headers,
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             provider_routing: Arc::new(RwLock::new(provider_routing)),
@@ -1056,7 +1135,53 @@ impl OpenRouterProvider {
 
     /// Check if OPENROUTER_API_KEY is available (env var or config file)
     pub fn has_credentials() -> bool {
+        if matches!(configured_dynamic_bearer_provider().as_deref(), Some("azure")) {
+            return crate::auth::azure::has_configuration();
+        }
         Self::get_api_key().is_some()
+    }
+
+    fn resolve_auth() -> Result<ProviderAuth> {
+        if let Some(provider) = configured_dynamic_bearer_provider() {
+            return match provider.as_str() {
+                "azure" => {
+                    if crate::auth::azure::has_configuration() {
+                        Ok(ProviderAuth::AzureEntra {
+                            label: "Azure OpenAI Entra ID".to_string(),
+                        })
+                    } else {
+                        anyhow::bail!(
+                            "Azure OpenAI is configured for Entra ID, but Azure settings are incomplete. Run `jcode login --provider azure`."
+                        )
+                    }
+                }
+                other => anyhow::bail!(
+                    "Unsupported JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER '{}'.",
+                    other
+                ),
+            };
+        }
+
+        let key_name = configured_api_key_name();
+        let api_key = Self::get_api_key().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} not found in environment or ~/.config/jcode/{}",
+                key_name,
+                configured_env_file_name()
+            )
+        })?;
+
+        Ok(match configured_auth_header_mode() {
+            AuthHeaderMode::AuthorizationBearer => ProviderAuth::AuthorizationBearer {
+                token: api_key,
+                label: key_name,
+            },
+            AuthHeaderMode::ApiKey => ProviderAuth::HeaderValue {
+                header_name: HeaderName::from_static("api-key"),
+                value: api_key,
+                label: key_name,
+            },
+        })
     }
 
     /// Get API key from environment or config file
@@ -1068,6 +1193,10 @@ impl OpenRouterProvider {
 
     /// Fetch available models from OpenRouter API (with disk caching)
     pub async fn fetch_models(&self) -> Result<Vec<ModelInfo>> {
+        if !self.supports_model_catalog {
+            return Ok(Vec::new());
+        }
+
         // Check in-memory cache first
         {
             let cache = self.models_cache.read().await;
@@ -1087,9 +1216,9 @@ impl OpenRouterProvider {
         // Fetch from API
         let url = format!("{}/models", self.api_base);
         let response = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .auth
+            .apply(self.client.get(&url))
+            .await?
             .send()
             .await
             .with_context(|| format!("Failed to fetch models from {}", self.api_base))?;
@@ -1142,7 +1271,7 @@ impl OpenRouterProvider {
     /// Fetch per-provider endpoint data for a model from OpenRouter API.
     /// Returns cached data if available and fresh (1-hour TTL).
     pub async fn fetch_endpoints(&self, model: &str) -> Result<Vec<EndpointInfo>> {
-        if !self.supports_provider_features {
+        if !self.supports_provider_features || !self.supports_model_catalog {
             return Ok(Vec::new());
         }
 
@@ -1171,9 +1300,9 @@ impl OpenRouterProvider {
         // Fetch from API
         let url = format!("{}/models/{}/endpoints", self.api_base, model);
         let response = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .auth
+            .apply(self.client.get(&url))
+            .await?
             .send()
             .await
             .context("Failed to fetch endpoint data")?;
@@ -1869,9 +1998,8 @@ impl Provider for OpenRouterProvider {
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
         let client = self.client.clone();
         let api_base = self.api_base.clone();
-        let key_name = self.key_name.clone();
+        let auth = self.auth.clone();
         let send_openrouter_headers = self.send_openrouter_headers;
-        let api_key = self.api_key.clone();
         let request_for_retries = request;
         let model_for_stream = model.clone();
         let provider_pin = Arc::clone(&self.provider_pin);
@@ -1889,8 +2017,7 @@ impl Provider for OpenRouterProvider {
             run_stream_with_retries(
                 client,
                 api_base,
-                api_key,
-                key_name,
+                auth,
                 send_openrouter_headers,
                 request_for_retries,
                 tx,
@@ -1946,6 +2073,14 @@ impl Provider for OpenRouterProvider {
     }
 
     fn available_models_display(&self) -> Vec<String> {
+        if !self.supports_model_catalog {
+            let model = self.model();
+            if model.trim().is_empty() {
+                return Vec::new();
+            }
+            return vec![model];
+        }
+
         if let Ok(cache) = self.models_cache.try_read() {
             if cache.fetched && !cache.models.is_empty() {
                 return cache.models.iter().map(|m| m.id.clone()).collect();
@@ -1964,6 +2099,10 @@ impl Provider for OpenRouterProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
+        if !self.supports_model_catalog {
+            return Ok(());
+        }
+
         let _ = self.fetch_models().await?;
         if self.supports_provider_features {
             // Also prefetch endpoints for the current model so preferred_provider() works immediately.
@@ -2005,9 +2144,9 @@ impl Provider for OpenRouterProvider {
                 self.model.try_read().map(|m| m.clone()).unwrap_or_default(),
             )),
             api_base: self.api_base.clone(),
-            api_key: self.api_key.clone(),
-            key_name: self.key_name.clone(),
+            auth: self.auth.clone(),
             supports_provider_features: self.supports_provider_features,
+            supports_model_catalog: self.supports_model_catalog,
             send_openrouter_headers: self.send_openrouter_headers,
             models_cache: Arc::clone(&self.models_cache),
             provider_routing: Arc::new(RwLock::new(
@@ -2029,8 +2168,7 @@ impl Provider for OpenRouterProvider {
 async fn run_stream_with_retries(
     client: Client,
     api_base: String,
-    api_key: String,
-    key_name: String,
+    auth: ProviderAuth,
     send_openrouter_headers: bool,
     request: Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
@@ -2045,7 +2183,7 @@ async fn run_stream_with_retries(
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
             crate::logging::info(&format!(
                 "Retrying API request using {} (attempt {}/{})",
-                key_name,
+                auth.label(),
                 attempt + 1,
                 MAX_RETRIES
             ));
@@ -2056,14 +2194,13 @@ async fn run_stream_with_retries(
             attempt + 1,
             MAX_RETRIES,
             model,
-            key_name
+            auth.label()
         ));
 
         match stream_response(
             client.clone(),
             api_base.clone(),
-            api_key.clone(),
-            key_name.clone(),
+            auth.clone(),
             send_openrouter_headers,
             request.clone(),
             tx.clone(),
@@ -2101,8 +2238,7 @@ async fn run_stream_with_retries(
 async fn stream_response(
     client: Client,
     api_base: String,
-    api_key: String,
-    key_name: String,
+    auth: ProviderAuth,
     send_openrouter_headers: bool,
     request: Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
@@ -2118,11 +2254,14 @@ async fn stream_response(
     let connect_start = std::time::Instant::now();
 
     let url = format!("{}/chat/completions", api_base);
-    let mut req = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .header("Accept-Encoding", "identity");
+    let mut req = auth
+        .apply(
+            client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Accept-Encoding", "identity"),
+        )
+        .await?;
 
     if send_openrouter_headers {
         req = req
@@ -2134,7 +2273,7 @@ async fn stream_response(
         .json(&request)
         .send()
         .await
-        .with_context(|| format!("Failed to send request using {}", key_name))?;
+        .with_context(|| format!("Failed to send request using {}", auth.label()))?;
 
     let connect_ms = connect_start.elapsed().as_millis();
     crate::logging::info(&format!(
@@ -2644,9 +2783,12 @@ mod tests {
             client: crate::provider::shared_http_client(),
             model: Arc::new(RwLock::new("moonshotai/kimi-k2.5".to_string())),
             api_base: DEFAULT_API_BASE.to_string(),
-            api_key: "test".to_string(),
-            key_name: DEFAULT_API_KEY_NAME.to_string(),
+            auth: ProviderAuth::AuthorizationBearer {
+                token: "test".to_string(),
+                label: DEFAULT_API_KEY_NAME.to_string(),
+            },
             supports_provider_features: true,
+            supports_model_catalog: true,
             send_openrouter_headers: true,
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),

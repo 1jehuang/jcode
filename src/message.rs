@@ -253,6 +253,8 @@ pub fn redact_secrets(text: &str) -> String {
                 .expect("valid ANTHROPIC_API_KEY assignment regex"),
             Regex::new(r"(?m)^\s*(OPENAI_API_KEY\s*=\s*)[^\r\n]+")
                 .expect("valid OPENAI_API_KEY assignment regex"),
+            Regex::new(r"(?m)^\s*(AZURE_OPENAI_API_KEY\s*=\s*)[^\r\n]+")
+                .expect("valid AZURE_OPENAI_API_KEY assignment regex"),
             Regex::new(r"(?m)^\s*(CURSOR_API_KEY\s*=\s*)[^\r\n]+")
                 .expect("valid CURSOR_API_KEY assignment regex"),
             Regex::new(r"(?m)^\s*(GITHUB_TOKEN\s*=\s*)[^\r\n]+")
@@ -271,6 +273,7 @@ pub fn redact_secrets(text: &str) -> String {
         "OPENAI_COMPAT_API_KEY",
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
+        "AZURE_OPENAI_API_KEY",
         "CURSOR_API_KEY",
         "GITHUB_TOKEN",
     ]
@@ -526,7 +529,7 @@ mod tests {
 
     #[test]
     fn redact_secrets_redacts_env_style_assignments() {
-        let input = "OPENROUTER_API_KEY=sk-or-v1-abc123abc123abc123abc123\nOPENCODE_API_KEY=oc_test_secret\nOPENCODE_GO_API_KEY=ocgo_test_secret\nZAI_API_KEY=zai_secret\nCHUTES_API_KEY=chutes_secret\nCEREBRAS_API_KEY=cerebras_secret\nOPENAI_COMPAT_API_KEY=compat_secret\nCURSOR_API_KEY='my_cursor_secret_value'\nOPENAI_API_KEY=sk-test-openai-example\n";
+        let input = "OPENROUTER_API_KEY=sk-or-v1-abc123abc123abc123abc123\nOPENCODE_API_KEY=oc_test_secret\nOPENCODE_GO_API_KEY=ocgo_test_secret\nZAI_API_KEY=zai_secret\nCHUTES_API_KEY=chutes_secret\nCEREBRAS_API_KEY=cerebras_secret\nOPENAI_COMPAT_API_KEY=compat_secret\nCURSOR_API_KEY='my_cursor_secret_value'\nOPENAI_API_KEY=sk-test-openai-example\nAZURE_OPENAI_API_KEY=azure-openai-secret\n";
         let out = redact_secrets(input);
         assert!(out.contains("OPENROUTER_API_KEY=[REDACTED_SECRET]"));
         assert!(out.contains("OPENCODE_API_KEY=[REDACTED_SECRET]"));
@@ -537,6 +540,7 @@ mod tests {
         assert!(out.contains("OPENAI_COMPAT_API_KEY=[REDACTED_SECRET]"));
         assert!(out.contains("CURSOR_API_KEY=[REDACTED_SECRET]"));
         assert!(out.contains("OPENAI_API_KEY=[REDACTED_SECRET]"));
+        assert!(out.contains("AZURE_OPENAI_API_KEY=[REDACTED_SECRET]"));
         assert!(!out.contains("my_cursor_secret_value"));
     }
 

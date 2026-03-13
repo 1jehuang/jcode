@@ -22,6 +22,8 @@ pub enum ProviderChoice {
     ClaudeSubprocess,
     Openai,
     Openrouter,
+    #[value(alias = "azure-openai", alias = "aoai")]
+    Azure,
     #[value(alias = "opencode-zen", alias = "zen")]
     Opencode,
     #[value(alias = "opencodego")]
@@ -49,6 +51,7 @@ impl ProviderChoice {
             Self::ClaudeSubprocess => "claude-subprocess",
             Self::Openai => "openai",
             Self::Openrouter => "openrouter",
+            Self::Azure => "azure",
             Self::Opencode => "opencode",
             Self::OpencodeGo => "opencode-go",
             Self::Zai => "zai",
@@ -85,6 +88,7 @@ pub fn login_provider_for_choice(choice: &ProviderChoice) -> Option<LoginProvide
         }
         ProviderChoice::Openai => Some(crate::provider_catalog::OPENAI_LOGIN_PROVIDER),
         ProviderChoice::Openrouter => Some(crate::provider_catalog::OPENROUTER_LOGIN_PROVIDER),
+        ProviderChoice::Azure => Some(crate::provider_catalog::AZURE_LOGIN_PROVIDER),
         ProviderChoice::Opencode => Some(crate::provider_catalog::OPENCODE_LOGIN_PROVIDER),
         ProviderChoice::OpencodeGo => Some(crate::provider_catalog::OPENCODE_GO_LOGIN_PROVIDER),
         ProviderChoice::Zai => Some(crate::provider_catalog::ZAI_LOGIN_PROVIDER),
@@ -179,6 +183,16 @@ pub async fn login_and_bootstrap_provider(
         LoginProviderTarget::OpenRouter => {
             disable_subscription_runtime_mode();
             Arc::new(provider::MultiProvider::new())
+        }
+        LoginProviderTarget::Azure => {
+            disable_subscription_runtime_mode();
+            crate::auth::azure::apply_runtime_env()?;
+            lock_model_provider("openrouter");
+            let multi = provider::MultiProvider::new();
+            if let Some(model) = crate::auth::azure::load_model() {
+                let _ = multi.set_model(&model);
+            }
+            Arc::new(multi)
         }
         LoginProviderTarget::OpenAiCompatible(profile) => {
             disable_subscription_runtime_mode();
@@ -307,6 +321,17 @@ pub async fn init_provider(
             eprintln!("Using OpenRouter provider (provider locked)");
             lock_model_provider("openrouter");
             Arc::new(provider::MultiProvider::new())
+        }
+        ProviderChoice::Azure => {
+            disable_subscription_runtime_mode();
+            crate::auth::azure::apply_runtime_env()?;
+            eprintln!("Using Azure OpenAI provider (provider locked)");
+            lock_model_provider("openrouter");
+            let multi = provider::MultiProvider::new();
+            if let Some(model) = crate::auth::azure::load_model() {
+                let _ = multi.set_model(&model);
+            }
+            Arc::new(multi)
         }
         ProviderChoice::Opencode
         | ProviderChoice::OpencodeGo
@@ -439,6 +464,7 @@ mod tests {
         );
         assert_eq!(ProviderChoice::Openai.as_arg_value(), "openai");
         assert_eq!(ProviderChoice::Openrouter.as_arg_value(), "openrouter");
+        assert_eq!(ProviderChoice::Azure.as_arg_value(), "azure");
         assert_eq!(ProviderChoice::Opencode.as_arg_value(), "opencode");
         assert_eq!(ProviderChoice::OpencodeGo.as_arg_value(), "opencode-go");
         assert_eq!(ProviderChoice::Zai.as_arg_value(), "zai");

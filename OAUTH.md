@@ -19,6 +19,8 @@ Relevant code:
 - OpenAI login + refresh: `src/auth/oauth.rs`
 - OpenAI credentials parsing: `src/auth/codex.rs`
 - OpenAI requests: `src/provider/openai.rs`
+- Azure OpenAI auth/config: `src/auth/azure.rs`
+- Azure OpenAI transport: `src/provider/openrouter.rs`
 - Gemini login + refresh: `src/auth/gemini.rs`
 - Gemini Code Assist provider: `src/provider/gemini.rs`
 
@@ -103,6 +105,50 @@ Otherwise it uses:
 - 401/403: re-run `jcode login --provider openai`.
 - Callback issues: make sure port 9876 is free and the browser can reach
   `http://localhost:9876/callback`.
+
+## Azure OpenAI
+
+This was added after comparing J-Code to OpenCode/Crush. The meaningful auth gap
+was not another browser OAuth flow, but support for **Azure OpenAI** using either:
+- **Microsoft Entra ID** credentials (via Azure's `DefaultAzureCredential` chain), or
+- **Azure OpenAI API keys**.
+
+### Login/setup steps
+1. Run `jcode login --provider azure`.
+2. Enter your Azure OpenAI endpoint, for example:
+   - `https://your-resource.openai.azure.com`
+3. Enter your Azure deployment/model name.
+4. Choose one auth mode:
+   - **Entra ID** (recommended)
+   - **API key**
+5. jcode saves settings to `~/.config/jcode/azure-openai.env`.
+
+### Stored configuration
+The Azure env file may contain:
+- `AZURE_OPENAI_ENDPOINT`
+- `AZURE_OPENAI_MODEL`
+- `AZURE_OPENAI_USE_ENTRA`
+- `AZURE_OPENAI_API_KEY` (only when using key auth)
+
+### Runtime behavior
+- jcode normalizes the endpoint to the newer Azure OpenAI `/openai/v1` base.
+- In **Entra ID** mode, jcode obtains bearer tokens using `azure_identity::DefaultAzureCredential` with scope:
+  - `https://cognitiveservices.azure.com/.default`
+- In **API key** mode, jcode sends the credential in the Azure-style `api-key` header.
+- The Azure provider currently reuses J-Code's OpenAI-compatible transport layer under the hood.
+- Model catalog fetching is disabled for Azure by default, so you should configure a deployment/model explicitly.
+
+### Entra ID credential sources
+`DefaultAzureCredential` can resolve credentials from sources like:
+- `az login`
+- managed identity
+- Azure environment credentials
+
+### Troubleshooting
+- If Entra ID auth fails locally, try `az login` first.
+- Make sure your identity has access to the Azure OpenAI resource.
+- If requests fail with deployment/model errors, verify `AZURE_OPENAI_MODEL` matches your deployed model name.
+- If you prefer static credentials, re-run `jcode login --provider azure` and choose API key mode.
 
 ## Gemini OAuth
 

@@ -181,6 +181,12 @@ impl App {
             crate::provider_catalog::LoginProviderTarget::OpenRouter => {
                 self.start_openrouter_login()
             }
+            crate::provider_catalog::LoginProviderTarget::Azure => {
+                self.push_display_message(DisplayMessage::error(
+                    "Azure OpenAI login is currently CLI-only. Run `jcode login --provider azure`."
+                        .to_string(),
+                ));
+            }
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
                 self.start_openai_compatible_profile_login(profile)
             }

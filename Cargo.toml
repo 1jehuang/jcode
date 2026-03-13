@@ -71,6 +71,8 @@ hex = "0.4"
 url = "2"
 open = "5"               # Open URLs in browser
 global-hotkey = "0.7"
+azure_core = "0.24"
+azure_identity = "0.24"
 
 # Streaming
 tokio-stream = "0.1"

@@ -1,3 +1,4 @@
+pub mod azure;
 pub mod claude;
 pub mod codex;
 pub mod copilot;
@@ -33,12 +34,18 @@ pub struct AuthStatus {
     pub anthropic: ProviderAuth,
     /// OpenRouter provider - via API key
     pub openrouter: AuthState,
+    /// Azure OpenAI provider - via Entra ID or API key
+    pub azure: AuthState,
     /// OpenAI provider - via OAuth or API key
     pub openai: AuthState,
     /// OpenAI has OAuth credentials
     pub openai_has_oauth: bool,
     /// OpenAI has API key available
     pub openai_has_api_key: bool,
+    /// Azure OpenAI has API key available
+    pub azure_has_api_key: bool,
+    /// Azure OpenAI is configured for Entra ID authentication
+    pub azure_uses_entra: bool,
     /// Copilot API available (GitHub OAuth token found)
     pub copilot: AuthState,
     /// Copilot has API token (from hosts.json/apps.json/GITHUB_TOKEN)
@@ -105,6 +112,7 @@ impl AuthStatus {
             || self.jcode == AuthState::Available
             || self.openai == AuthState::Available
             || self.openrouter == AuthState::Available
+            || self.azure == AuthState::Available
             || self.copilot == AuthState::Available
             || self.antigravity == AuthState::Available
             || self.gemini == AuthState::Available
@@ -116,6 +124,7 @@ impl AuthStatus {
             LoginProviderAuthStateKey::Jcode => self.jcode,
             LoginProviderAuthStateKey::Anthropic => self.anthropic.state,
             LoginProviderAuthStateKey::OpenAi => self.openai,
+            LoginProviderAuthStateKey::Azure => self.azure,
             LoginProviderAuthStateKey::OpenRouterLike => self.openrouter,
             LoginProviderAuthStateKey::Copilot => self.copilot,
             LoginProviderAuthStateKey::Antigravity => self.antigravity,
@@ -136,6 +145,13 @@ impl AuthStatus {
             }
             crate::provider_catalog::LoginProviderTarget::OpenRouter => {
                 if api_key_available("OPENROUTER_API_KEY", "openrouter.env") {
+                    AuthState::Available
+                } else {
+                    AuthState::NotConfigured
+                }
+            }
+            crate::provider_catalog::LoginProviderTarget::Azure => {
+                if crate::auth::azure::has_configuration() {
                     AuthState::Available
                 } else {
                     AuthState::NotConfigured
@@ -180,6 +196,13 @@ impl AuthStatus {
             crate::provider_catalog::LoginProviderTarget::OpenRouter => {
                 if self.state_for_provider(provider) == AuthState::Available {
                     "API key (`OPENROUTER_API_KEY`)".to_string()
+                } else {
+                    "not configured".to_string()
+                }
+            }
+            crate::provider_catalog::LoginProviderTarget::Azure => {
+                if self.state_for_provider(provider) == AuthState::Available {
+                    crate::auth::azure::method_detail()
                 } else {
                     "not configured".to_string()
                 }
@@ -282,6 +305,12 @@ impl AuthStatus {
 
         if openrouter_available {
             status.openrouter = AuthState::Available;
+        }
+
+        status.azure_has_api_key = crate::auth::azure::has_api_key();
+        status.azure_uses_entra = crate::auth::azure::uses_entra_id();
+        if crate::auth::azure::has_configuration() {
+            status.azure = AuthState::Available;
         }
 
         // Check OpenAI (Codex OAuth or API key)

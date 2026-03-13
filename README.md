@@ -129,6 +129,7 @@ You need at least one of:
 | **GitHub Copilot** | Run `/login copilot` inside jcode (GitHub device flow) |
 | **OpenAI** | Run `/login openai` inside jcode (opens browser for OAuth) |
 | **Google Gemini** | Run `/login gemini` inside jcode (native Google OAuth for Code Assist) |
+| **Azure OpenAI** | Run `jcode login --provider azure` (Microsoft Entra ID or API key) |
 | **OpenRouter** | Set `OPENROUTER_API_KEY=sk-or-v1-...` |
 | **Direct API Key** | Set `ANTHROPIC_API_KEY=sk-ant-...` |
 
@@ -168,6 +169,7 @@ jcode --provider claude
 jcode --provider copilot
 jcode --provider openai
 jcode --provider openrouter
+jcode --provider azure
 
 # Change working directory
 jcode -C /path/to/project
@@ -220,7 +222,7 @@ graph TB
     Server --> Agent["Agent<br>agent.rs"]
     TUI <-->|events| Server
 
-    Agent --> Provider["Provider<br>Claude / Copilot / OpenAI / OpenRouter"]
+    Agent --> Provider["Provider<br>Claude / Copilot / OpenAI / OpenRouter / Azure OpenAI"]
     Agent --> Registry["Tool Registry<br>30+ tools"]
     Agent --> Session["Session<br>Persistence"]
 
@@ -254,18 +256,21 @@ graph TB
     MP --> Copilot["CopilotProvider<br>provider/copilot.rs"]
     MP --> OpenAI["OpenAIProvider<br>provider/openai.rs"]
     MP --> OR["OpenRouterProvider<br>provider/openrouter.rs"]
+    MP --> Azure["Azure OpenAI<br>provider/openrouter.rs + auth/azure.rs"]
 
     Claude --> ClaudeCreds["~/.claude/.credentials.json<br><i>OAuth (Claude Max)</i>"]
     Claude --> APIKey["ANTHROPIC_API_KEY<br><i>Direct API</i>"]
     Copilot --> GHCreds["~/.config/github-copilot/<br><i>OAuth (Copilot Pro/Free)</i>"]
     OpenAI --> CodexCreds["~/.codex/auth.json<br><i>OAuth (ChatGPT Pro)</i>"]
     OR --> ORKey["OPENROUTER_API_KEY<br><i>200+ models</i>"]
+    Azure --> AzureCreds["Azure CLI / Managed Identity / API key<br><i>Entra ID or direct key</i>"]
 
     style MP fill:#8b5cf6,color:#fff
     style Claude fill:#d97706,color:#fff
     style Copilot fill:#6366f1,color:#fff
     style OpenAI fill:#10b981,color:#fff
     style OR fill:#3b82f6,color:#fff
+    style Azure fill:#0ea5e9,color:#fff
 ```
 
 **Key Design:**
@@ -273,6 +278,7 @@ graph TB
 - Seamless runtime switching between providers with `/model` command
 - Claude direct API with OAuth - no API key needed with a subscription
 - GitHub Copilot OAuth - access Claude, GPT, Gemini, and more through your Copilot subscription
+- Azure OpenAI supports either Microsoft Entra ID credentials or an `api-key` header
 - OpenRouter gives access to 200+ models from all major providers
 
 </details>

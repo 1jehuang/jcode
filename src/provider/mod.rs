@@ -1025,6 +1025,13 @@ fn fallback_context_limit_for_model(model: &str, provider_hint: Option<&str>) ->
         return Some(200_000);
     }
 
+    if model.starts_with("gemini-2.0-flash")
+        || model.starts_with("gemini-2.5")
+        || model.starts_with("gemini-3")
+    {
+        return Some(1_000_000);
+    }
+
     None
 }
 
@@ -2310,7 +2317,8 @@ impl MultiProvider {
         let has_openai_creds = auth::codex::load_credentials().is_ok();
         let auth_status = auth::AuthStatus::check();
         let has_copilot_api = auth_status.copilot_has_api_token;
-        let has_gemini_creds = auth_status.gemini == auth::AuthState::Available;
+        // Treat expired Gemini OAuth as configured: GeminiProvider refreshes lazily on first use.
+        let has_gemini_creds = auth::gemini::load_tokens().is_ok();
         let has_openrouter_creds = openrouter::OpenRouterProvider::has_credentials();
 
         // Check if we should use Claude CLI instead of direct API.
@@ -3315,12 +3323,9 @@ impl Provider for MultiProvider {
         }
 
         let already_has_gemini = self.gemini.read().unwrap().is_some();
-        if !already_has_gemini {
-            let status = crate::auth::AuthStatus::check();
-            if status.gemini == crate::auth::AuthState::Available {
-                crate::logging::info("Hot-initialized Gemini provider after login");
-                *self.gemini.write().unwrap() = Some(gemini::GeminiProvider::new());
-            }
+        if !already_has_gemini && crate::auth::gemini::load_tokens().is_ok() {
+            crate::logging::info("Hot-initialized Gemini provider after login");
+            *self.gemini.write().unwrap() = Some(gemini::GeminiProvider::new());
         }
     }
 

@@ -81,6 +81,7 @@ pub async fn run_login_provider(
         }
         LoginProviderTarget::OpenAi => login_openai_flow().await?,
         LoginProviderTarget::OpenRouter => login_openrouter_flow()?,
+        LoginProviderTarget::Azure => login_azure_flow()?,
         LoginProviderTarget::OpenAiCompatible(profile) => login_openai_compatible_flow(&profile)?,
         LoginProviderTarget::Cursor => login_cursor_flow()?,
         LoginProviderTarget::Copilot => login_copilot_flow()?,
@@ -216,6 +217,86 @@ fn login_openrouter_flow() -> Result<()> {
     Ok(())
 }
 
+fn login_azure_flow() -> Result<()> {
+    use crate::auth::azure;
+
+    eprintln!("Setting up Azure OpenAI...");
+    eprintln!(
+        "Reference: OpenCode supports Azure OpenAI with Entra credentials. jcode uses Azure OpenAI's newer `/openai/v1` API with either Microsoft Entra ID or an API key.\n"
+    );
+
+    let endpoint_raw = read_line_trimmed(
+        "Azure OpenAI endpoint (for example `https://your-resource.openai.azure.com`): ",
+    )?;
+    let endpoint = azure::normalize_endpoint(&endpoint_raw).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid Azure OpenAI endpoint. Use https://<resource>.openai.azure.com (or the full /openai/v1 URL)."
+        )
+    })?;
+
+    let model = read_line_trimmed(
+        "Azure deployment/model name (required, for example `gpt-4.1-nano`): ",
+    )?;
+    if model.is_empty() {
+        anyhow::bail!("No deployment/model name provided.");
+    }
+
+    eprintln!("\nAuthentication method:");
+    eprintln!("  1. Microsoft Entra ID (recommended)");
+    eprintln!("  2. API key");
+    let auth_choice = read_line_trimmed("Enter 1-2 [1]: ")?;
+    let use_entra = match auth_choice.trim() {
+        "" | "1" => true,
+        "2" => false,
+        other if other.eq_ignore_ascii_case("entra") || other.eq_ignore_ascii_case("oauth") => {
+            true
+        }
+        other if other.eq_ignore_ascii_case("key") || other.eq_ignore_ascii_case("api-key") => {
+            false
+        }
+        other => anyhow::bail!("Invalid auth choice '{}'. Use 1 or 2.", other),
+    };
+
+    let mut assignments = vec![
+        (azure::ENDPOINT_ENV, endpoint),
+        (azure::MODEL_ENV, model),
+        (
+            azure::USE_ENTRA_ENV,
+            if use_entra { "1" } else { "0" }.to_string(),
+        ),
+    ];
+
+    if use_entra {
+        eprintln!();
+        eprintln!("Using Microsoft Entra ID via Azure's DefaultAzureCredential chain.");
+        eprintln!("That means jcode can authenticate via `az login`, managed identity, or Azure environment credentials.");
+    } else {
+        eprint!("Paste your Azure OpenAI API key: ");
+        io::stdout().flush()?;
+        let key = read_secret_line()?;
+        if key.is_empty() {
+            anyhow::bail!("No API key provided.");
+        }
+        assignments.push((azure::API_KEY_ENV, key));
+    }
+
+    save_named_env_vars(azure::ENV_FILE, &assignments)?;
+    azure::apply_runtime_env()?;
+
+    eprintln!("\nSuccessfully saved Azure OpenAI configuration!");
+    eprintln!("Stored at ~/.config/jcode/{}", azure::ENV_FILE);
+    eprintln!("Base URL: {}", azure::load_endpoint().unwrap_or_default());
+    if let Some(model) = azure::load_model() {
+        eprintln!("Default deployment/model: {}", model);
+    }
+    if use_entra {
+        eprintln!(
+            "Next step: if you're using Azure CLI auth, run `az login` (and ensure your identity has the Cognitive Services OpenAI User role)."
+        );
+    }
+    Ok(())
+}
+
 fn login_openai_compatible_flow(profile: &OpenAiCompatibleProfile) -> Result<()> {
     let resolved = resolve_openai_compatible_profile(*profile);
 
@@ -281,6 +362,47 @@ pub fn read_secret_line() -> Result<String> {
     }
 
     Ok(input.trim().to_string())
+}
+
+fn read_line_trimmed(prompt: &str) -> Result<String> {
+    print!("{}", prompt);
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim().to_string())
+}
+
+fn save_named_env_vars(env_file: &str, vars: &[(&str, String)]) -> Result<()> {
+    if !crate::provider_catalog::is_safe_env_file_name(env_file) {
+        anyhow::bail!("Invalid env file name: {}", env_file);
+    }
+
+    for (key, _) in vars {
+        if !crate::provider_catalog::is_safe_env_key_name(key) {
+            anyhow::bail!("Invalid API key variable name: {}", key);
+        }
+    }
+
+    let config_dir = dirs::config_dir()
+        .ok_or_else(|| anyhow::anyhow!("No config directory found"))?
+        .join("jcode");
+    std::fs::create_dir_all(&config_dir)?;
+    crate::platform::set_directory_permissions_owner_only(&config_dir)?;
+
+    let file_path = config_dir.join(env_file);
+    let mut content = String::new();
+    for (key, value) in vars {
+        content.push_str(&format!("{}={}\n", key, value));
+    }
+    std::fs::write(&file_path, &content)?;
+    crate::platform::set_permissions_owner_only(&file_path)?;
+
+    for (key, value) in vars {
+        std::env::set_var(key, value);
+    }
+
+    Ok(())
 }
 
 fn login_cursor_flow() -> Result<()> {

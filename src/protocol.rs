@@ -812,7 +812,7 @@ pub struct AgentInfo {
 }
 
 /// Swarm member status for lifecycle updates
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SwarmMemberStatus {
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
