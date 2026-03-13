@@ -7,7 +7,29 @@ use crate::agent::{Agent, InterruptSignal};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{broadcast, Mutex, RwLock};
+
+const RELOAD_DISCONNECT_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DisconnectDisposition {
+    Closed,
+    Crashed,
+    Reloading,
+}
+
+fn disconnect_disposition(disconnected_while_processing: bool) -> DisconnectDisposition {
+    if !disconnected_while_processing {
+        return DisconnectDisposition::Closed;
+    }
+
+    if crate::server::reload_marker_active(RELOAD_DISCONNECT_MARKER_MAX_AGE) {
+        DisconnectDisposition::Reloading
+    } else {
+        DisconnectDisposition::Crashed
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn cleanup_client_connection(
@@ -36,6 +58,7 @@ pub(super) async fn cleanup_client_connection(
             .as_ref()
             .map(|handle| !handle.is_finished())
             .unwrap_or(false);
+    let disposition = disconnect_disposition(disconnected_while_processing);
 
     {
         let mut sessions_guard = sessions.write().await;
@@ -46,11 +69,15 @@ pub(super) async fn cleanup_client_connection(
 
             match lock_result {
                 Ok(mut agent) => {
-                    if disconnected_while_processing {
-                        agent
-                            .mark_crashed(Some("Client disconnected while processing".to_string()));
-                    } else {
-                        agent.mark_closed();
+                    match disposition {
+                        DisconnectDisposition::Closed | DisconnectDisposition::Reloading => {
+                            agent.mark_closed();
+                        }
+                        DisconnectDisposition::Crashed => {
+                            agent.mark_crashed(Some(
+                                "Client disconnected while processing".to_string(),
+                            ));
+                        }
                     }
 
                     let memory_enabled = agent.memory_enabled();
@@ -76,10 +103,14 @@ pub(super) async fn cleanup_client_connection(
     }
 
     {
-        let (status, detail) = if disconnected_while_processing {
-            ("crashed", Some("disconnect while running".to_string()))
-        } else {
-            ("stopped", Some("disconnected".to_string()))
+        let (status, detail) = match disposition {
+            DisconnectDisposition::Closed => ("stopped", Some("disconnected".to_string())),
+            DisconnectDisposition::Crashed => {
+                ("crashed", Some("disconnect while running".to_string()))
+            }
+            DisconnectDisposition::Reloading => {
+                ("stopped", Some("server reload in progress".to_string()))
+            }
         };
         update_member_status(
             client_session_id,
@@ -148,4 +179,41 @@ pub(super) async fn cleanup_client_connection(
 
     event_handle.abort();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{disconnect_disposition, DisconnectDisposition};
+
+    #[test]
+    fn idle_disconnect_is_closed() {
+        assert_eq!(
+            disconnect_disposition(false),
+            DisconnectDisposition::Closed
+        );
+    }
+
+    #[test]
+    fn running_disconnect_without_reload_is_crash() {
+        crate::server::clear_reload_marker();
+        assert_eq!(
+            disconnect_disposition(true),
+            DisconnectDisposition::Crashed
+        );
+    }
+
+    #[test]
+    fn running_disconnect_during_reload_is_expected() {
+        crate::server::write_reload_state(
+            "test-request",
+            "test-hash",
+            crate::server::ReloadPhase::Starting,
+            None,
+        );
+        assert_eq!(
+            disconnect_disposition(true),
+            DisconnectDisposition::Reloading
+        );
+        crate::server::clear_reload_marker();
+    }
 }

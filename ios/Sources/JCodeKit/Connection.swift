@@ -18,6 +18,7 @@ public actor JCodeConnection {
     private var state: State = .disconnected
     private var nextId: UInt64 = 1
     private var eventContinuation: AsyncStream<Event>.Continuation?
+    private var expectingReloadDisconnect = false
     private let authToken: String
     private let serverURL: URL
     private let encoder = JSONEncoder()
@@ -40,6 +41,7 @@ public actor JCodeConnection {
     }
 
     public func connect(workingDir: String? = nil) async throws {
+        expectingReloadDisconnect = false
         setState(.connecting)
 
         let session = URLSession(configuration: .default)
@@ -61,6 +63,7 @@ public actor JCodeConnection {
     }
 
     public func disconnect() {
+        expectingReloadDisconnect = false
         webSocket?.cancel(with: .normalClosure, reason: nil)
         webSocket = nil
         urlSession = nil
@@ -142,6 +145,9 @@ public actor JCodeConnection {
             case .string(let text):
                 if let data = text.data(using: .utf8),
                    let event = try? self.decoder.decode(ServerEvent.self, from: data) {
+                    if case .reloading = event {
+                        expectingReloadDisconnect = true
+                    }
                     if case .sessionId(let sid) = event {
                         setState(.connected(sessionId: sid))
                     }
@@ -155,8 +161,13 @@ public actor JCodeConnection {
             startReceiving()
 
         case .failure(let error):
-            setState(.error(error.localizedDescription))
-            eventContinuation?.yield(.stateChanged(.error(error.localizedDescription)))
+            if expectingReloadDisconnect {
+                expectingReloadDisconnect = false
+                setState(.disconnected)
+            } else {
+                setState(.error(error.localizedDescription))
+                eventContinuation?.yield(.stateChanged(.error(error.localizedDescription)))
+            }
         }
     }
 
