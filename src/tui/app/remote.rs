@@ -321,10 +321,8 @@ fn wait_for_socket_dir_event_blocking(path: &Path, timeout: Duration) -> bool {
 }
 
 pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) {
-    if app.stream_buffer.should_flush() {
-        if let Some(chunk) = app.stream_buffer.flush() {
-            app.streaming_text.push_str(&chunk);
-        }
+    if let Some(chunk) = app.stream_buffer.flush() {
+        app.streaming_text.push_str(&chunk);
     }
 
     let _ = check_debug_command(app, remote).await;

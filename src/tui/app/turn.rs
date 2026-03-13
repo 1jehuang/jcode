@@ -712,11 +712,8 @@ impl App {
                 tokio::select! {
                     // Redraw periodically
                     _ = redraw_interval.tick() => {
-                        // Flush stream buffer on timeout
-                        if self.stream_buffer.should_flush() {
-                            if let Some(chunk) = self.stream_buffer.flush() {
-                                self.streaming_text.push_str(&chunk);
-                            }
+                        if let Some(chunk) = self.stream_buffer.flush() {
+                            self.streaming_text.push_str(&chunk);
                         }
                         // Poll for background compaction completion during streaming
                         self.poll_compaction_completion();

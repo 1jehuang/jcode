@@ -32,10 +32,8 @@ pub(super) async fn process_turn_with_input(
 }
 
 pub(super) fn handle_tick(app: &mut App) {
-    if app.stream_buffer.should_flush() {
-        if let Some(chunk) = app.stream_buffer.flush() {
-            app.streaming_text.push_str(&chunk);
-        }
+    if let Some(chunk) = app.stream_buffer.flush() {
+        app.streaming_text.push_str(&chunk);
     }
     app.poll_compaction_completion();
     app.check_debug_command();

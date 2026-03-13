@@ -43,10 +43,8 @@ pub(super) async fn run_replay(
 
         tokio::select! {
             _ = redraw_interval.tick() => {
-                if app.stream_buffer.should_flush() {
-                    if let Some(chunk) = app.stream_buffer.flush() {
-                        app.streaming_text.push_str(&chunk);
-                    }
+                if let Some(chunk) = app.stream_buffer.flush() {
+                    app.streaming_text.push_str(&chunk);
                 }
             }
             event = event_stream.next() => {
