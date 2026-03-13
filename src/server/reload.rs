@@ -16,6 +16,13 @@ fn reload_grace_period() -> std::time::Duration {
         .unwrap_or_else(|| std::time::Duration::from_millis(DEFAULT_RELOAD_GRACE_MS))
 }
 
+fn prepare_server_exec(cmd: &mut std::process::Command, socket_path: &std::path::Path) {
+    // The replacement daemon must own the published socket paths. Unlink them
+    // before exec so we never inherit a stale on-disk endpoint through reload.
+    crate::server::cleanup_socket_pair(socket_path);
+    cmd.env_remove("JCODE_READY_FD");
+}
+
 pub(super) fn get_repo_dir() -> Option<PathBuf> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let path = PathBuf::from(manifest_dir);
@@ -70,7 +77,11 @@ pub(super) fn do_server_reload() -> Result<()> {
         anyhow::bail!("Built executable not found at {:?}", exe);
     }
 
-    let err = crate::platform::replace_process(std::process::Command::new(&exe).arg("serve"));
+    let socket = crate::server::socket_path();
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("serve");
+    prepare_server_exec(&mut cmd, &socket);
+    let err = crate::platform::replace_process(&mut cmd);
     Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
 }
 
@@ -178,6 +189,7 @@ pub(super) async fn do_server_reload_with_progress(
 
     crate::logging::info(&format!("Exec'ing into binary: {:?}", exe));
 
+    let socket_path = PathBuf::from(&socket_arg);
     let mut cmd = std::process::Command::new(&exe);
     cmd.arg("serve").arg("--socket").arg(socket_arg);
     if let Some(provider) = provider_arg {
@@ -186,6 +198,7 @@ pub(super) async fn do_server_reload_with_progress(
     if let Some(model) = model_arg {
         cmd.arg("--model").arg(model);
     }
+    prepare_server_exec(&mut cmd, &socket_path);
     let err = crate::platform::replace_process(&mut cmd);
     crate::server::write_reload_state(
         &request_id,
@@ -289,12 +302,10 @@ pub(super) async fn await_reload_signal(
                     socket,
                     reload_started.elapsed().as_millis()
                 ));
-                let err = crate::platform::replace_process(
-                    ProcessCommand::new(&binary)
-                        .arg("serve")
-                        .arg("--socket")
-                        .arg(socket.as_os_str()),
-                );
+                let mut cmd = ProcessCommand::new(&binary);
+                cmd.arg("serve").arg("--socket").arg(socket.as_os_str());
+                prepare_server_exec(&mut cmd, &socket);
+                let err = crate::platform::replace_process(&mut cmd);
                 crate::server::write_reload_state(
                     &signal.request_id,
                     &signal.hash,
@@ -339,7 +350,22 @@ pub(super) async fn graceful_shutdown_sessions(
             .collect()
     };
 
-    if actively_generating.is_empty() {
+    let (signalable_sessions, unsignalable_sessions) = {
+        let signals = shutdown_signals.read().await;
+        actively_generating
+            .into_iter()
+            .partition::<Vec<_>, _>(|session_id| signals.contains_key(session_id))
+    };
+
+    if !unsignalable_sessions.is_empty() {
+        crate::logging::warn(&format!(
+            "Server: {} running session(s) had no shutdown signal and will not block reload: {:?}",
+            unsignalable_sessions.len(),
+            unsignalable_sessions
+        ));
+    }
+
+    if signalable_sessions.is_empty() {
         crate::logging::info(
             "Server: no sessions actively generating, proceeding with reload immediately",
         );
@@ -348,25 +374,21 @@ pub(super) async fn graceful_shutdown_sessions(
 
     crate::logging::info(&format!(
         "Server: signaling {} actively generating session(s) to checkpoint: {:?}",
-        actively_generating.len(),
-        actively_generating
+        signalable_sessions.len(),
+        signalable_sessions
     ));
 
     {
         let signals = shutdown_signals.read().await;
-        for session_id in &actively_generating {
-            if let Some(signal) = signals.get(session_id) {
-                signal.fire();
-                crate::logging::info(&format!(
-                    "Server: sent graceful shutdown signal to session {}",
-                    session_id
-                ));
-            } else {
-                crate::logging::warn(&format!(
-                    "Server: no shutdown signal registered for session {} (may have already disconnected)",
-                    session_id
-                ));
-            }
+        for session_id in &signalable_sessions {
+            let signal = signals
+                .get(session_id)
+                .expect("signalable sessions were filtered against shutdown_signals");
+            signal.fire();
+            crate::logging::info(&format!(
+                "Server: sent graceful shutdown signal to session {}",
+                session_id
+            ));
         }
     }
 
@@ -379,7 +401,7 @@ pub(super) async fn graceful_shutdown_sessions(
 
         let still_running: usize = {
             let members = swarm_members.read().await;
-            actively_generating
+            signalable_sessions
                 .iter()
                 .filter(|id| {
                     members
@@ -530,6 +552,24 @@ mod tests {
         assert!(
             !idle_signal.is_set(),
             "idle sessions should not be interrupted during reload"
+        );
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_sessions_does_not_wait_on_running_sessions_without_signal() {
+        let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let swarm_members = Arc::new(RwLock::new(HashMap::from([(
+            "orphan_running".to_string(),
+            member("orphan_running", "running"),
+        )])));
+        let shutdown_signals = Arc::new(RwLock::new(HashMap::new()));
+
+        let started = Instant::now();
+        graceful_shutdown_sessions(&sessions, &swarm_members, &shutdown_signals).await;
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "running sessions without shutdown signals should not consume the reload grace period"
         );
     }
 }

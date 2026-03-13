@@ -387,6 +387,15 @@ async fn socket_has_live_listener(path: &std::path::Path) -> bool {
     crate::transport::is_socket_path(path) && Stream::connect(path).await.is_ok()
 }
 
+#[cfg(unix)]
+fn mark_close_on_exec<T: std::os::fd::AsRawFd>(io: &T) {
+    let fd = io.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags >= 0 {
+        let _ = unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+    }
+}
+
 #[cfg(test)]
 mod socket_tests {
     use super::{
@@ -706,6 +715,16 @@ pub async fn spawn_server_notify(cmd: &mut std::process::Command) -> Result<std:
             crate::logging::info("Timed out waiting for server ready signal; falling back to poll");
             poll_for_socket(&socket_path(), Duration::from_secs(5)).await?;
         }
+    }
+
+    if let Some(mut stderr) = child.stderr.take() {
+        // The shared daemon outlives the spawning client. Keep draining the
+        // stderr pipe after startup so later reloads cannot die on SIGPIPE
+        // when they emit provider/model selection notices during boot.
+        std::thread::spawn(move || {
+            let mut sink = std::io::sink();
+            let _ = std::io::copy(&mut stderr, &mut sink);
+        });
     }
 
     Ok(child)
@@ -1492,6 +1511,14 @@ impl Server {
 
         let main_listener = Listener::bind(&self.socket_path)?;
         let debug_listener = Listener::bind(&self.debug_socket_path)?;
+
+        #[cfg(unix)]
+        {
+            // Server reload uses exec. Force the published listener fds to close
+            // across exec so the replacement daemon can safely rebind them.
+            mark_close_on_exec(&main_listener);
+            mark_close_on_exec(&debug_listener);
+        }
 
         // We successfully rebound the socket pair, so any reload handoff is complete.
         clear_reload_marker();
