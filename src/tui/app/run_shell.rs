@@ -164,6 +164,16 @@ impl App {
         replay::run_replay(self, terminal, timeline, speed).await
     }
 
+    /// Run an interactive swarm replay, rendering multiple sessions in tiled panes.
+    pub async fn run_swarm_replay(
+        terminal: DefaultTerminal,
+        panes: Vec<crate::replay::PaneReplayInput>,
+        speed: f64,
+        centered_override: Option<bool>,
+    ) -> Result<()> {
+        replay::run_swarm_replay(terminal, panes, speed, centered_override).await
+    }
+
     /// Run replay headlessly, rendering each frame to an in-memory buffer.
     /// Returns a list of (timestamp_secs, Buffer) pairs for video export.
     pub async fn run_headless_replay(

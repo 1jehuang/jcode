@@ -299,9 +299,39 @@ pub async fn run_replay_command(
             return Ok(());
         }
 
-        anyhow::bail!(
-            "Interactive swarm replay is not implemented yet; use `--swarm --video` or `--swarm --export`."
+        let replayable_panes: Vec<_> = swarm_sessions
+            .into_iter()
+            .filter(|pane| !pane.timeline.is_empty())
+            .map(|pane| replay::PaneReplayInput {
+                session: pane.session,
+                timeline: pane.timeline,
+            })
+            .collect();
+
+        if replayable_panes.is_empty() {
+            eprintln!("Swarm has no messages to replay.");
+            return Ok(());
+        }
+
+        let pane_count = replayable_panes.len();
+        eprintln!(
+            "🐝 Replaying swarm: {} ({} panes, {:.1}x speed)",
+            session_id_or_path, pane_count, speed
         );
+        eprintln!("  Controls: Space=pause  +/-=speed  q=quit\n");
+
+        let (terminal, tui_runtime) = init_tui_runtime()?;
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::SetTitle(format!("🐝 swarm replay: {}", session_id_or_path))
+        );
+
+        let result =
+            tui::App::run_swarm_replay(terminal, replayable_panes, speed, centered_override).await;
+
+        cleanup_tui_runtime(&tui_runtime, true);
+        result?;
+        return Ok(());
     }
 
     let session = replay::load_session(session_id_or_path)?;
