@@ -242,6 +242,42 @@ impl CompactionManager {
         self.suppress_compaction_until_new_message = count > 0;
     }
 
+    /// Restore a previously persisted compacted view.
+    pub fn restore_persisted_state(
+        &mut self,
+        state: &crate::session::StoredCompactionState,
+        total_messages: usize,
+    ) {
+        self.pending_task = None;
+        self.pending_trigger = None;
+        self.pending_cutoff = 0;
+        self.observed_input_tokens = None;
+        self.last_compaction = None;
+        self.token_history.clear();
+        self.turns_since_last_compact = 0;
+        self.embedding_history.clear();
+        self.total_turns = total_messages;
+        self.compacted_count = state.compacted_count.min(total_messages);
+        self.active_summary = Some(Summary {
+            text: state.summary_text.clone(),
+            covers_up_to_turn: state.covers_up_to_turn,
+            original_turn_count: state.original_turn_count,
+        });
+        self.suppress_compaction_until_new_message = total_messages > 0;
+    }
+
+    /// Export the currently active compacted view for persistence.
+    pub fn persisted_state(&self) -> Option<crate::session::StoredCompactionState> {
+        self.active_summary
+            .as_ref()
+            .map(|summary| crate::session::StoredCompactionState {
+                summary_text: summary.text.clone(),
+                covers_up_to_turn: summary.covers_up_to_turn,
+                original_turn_count: summary.original_turn_count,
+                compacted_count: self.compacted_count,
+            })
+    }
+
     // ── Token snapshot (proactive mode) ────────────────────────────────────
 
     /// Record the observed token count after a completed turn.
@@ -1949,6 +1985,42 @@ mod tests {
         }
         // Remaining should be recent turns from original messages
         assert!(api_msgs.len() < messages.len());
+    }
+
+    #[test]
+    fn test_persisted_state_round_trip_preserves_compacted_view() {
+        let mut manager = CompactionManager::new().with_budget(500);
+        let mut messages = Vec::new();
+        for i in 0..20 {
+            messages.push(make_text_message(
+                Role::User,
+                &format!("turn {} {}", i, "x".repeat(40)),
+            ));
+            manager.notify_message_added();
+        }
+        manager.update_observed_input_tokens(490);
+        manager
+            .hard_compact_with(&messages)
+            .expect("should compact before persisting");
+
+        let persisted = manager
+            .persisted_state()
+            .expect("compaction state should be exportable");
+        let expected = manager.messages_for_api_with(&messages);
+
+        let mut restored = CompactionManager::new().with_budget(500);
+        restored.restore_persisted_state(&persisted, messages.len());
+        let restored_msgs = restored.messages_for_api_with(&messages);
+
+        assert_eq!(restored.compacted_count, persisted.compacted_count);
+        assert_eq!(restored_msgs.len(), expected.len());
+        match &restored_msgs[0].content[0] {
+            ContentBlock::Text { text, .. } => {
+                assert!(text.contains("Previous Conversation Summary"));
+                assert!(text.contains("Emergency compaction"));
+            }
+            _ => panic!("expected restored summary block"),
+        }
     }
 
     // ── context_usage accuracy ──────────────────────────────────────

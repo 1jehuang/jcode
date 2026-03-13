@@ -108,6 +108,14 @@ pub struct StoredTokenUsage {
     pub cache_creation_input_tokens: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredCompactionState {
+    pub summary_text: String,
+    pub covers_up_to_turn: usize,
+    pub original_turn_count: usize,
+    pub compacted_count: usize,
+}
+
 impl StoredMessage {
     pub fn to_message(&self) -> Message {
         Message {
@@ -152,6 +160,10 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub messages: Vec<StoredMessage>,
+    /// Persisted compacted-view state so reload/resume can continue using the
+    /// active summary + recent tail instead of re-sending the full transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<StoredCompactionState>,
     /// Provider-specific session ID (e.g., Claude Code CLI session for resume)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_id: Option<String>,
@@ -260,6 +272,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             messages: Vec::new(),
+            compaction: None,
             provider_session_id: None,
             model: None,
             is_canary: false,
@@ -290,6 +303,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             messages: Vec::new(),
+            compaction: None,
             provider_session_id: None,
             model: None,
             is_canary: false,
@@ -463,6 +477,9 @@ impl Session {
 
     pub fn redacted_for_export(&self) -> Self {
         let mut redacted = self.clone();
+        if let Some(compaction) = redacted.compaction.as_mut() {
+            compaction.summary_text = crate::message::redact_secrets(&compaction.summary_text);
+        }
         for msg in &mut redacted.messages {
             for block in &mut msg.content {
                 match block {
@@ -889,6 +906,34 @@ mod tests {
             }
             _ => panic!("expected tool use block"),
         }
+    }
+
+    #[test]
+    fn test_save_persists_compaction_state() {
+        let _env_lock = lock_env();
+        let temp_home = tempfile::Builder::new()
+            .prefix("jcode-session-compaction-save-test-")
+            .tempdir()
+            .expect("create temp JCODE_HOME");
+        let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+        let mut session = Session::create_with_id(
+            "session_compaction_persist_test".to_string(),
+            None,
+            Some("compaction persistence test".to_string()),
+        );
+        session.compaction = Some(StoredCompactionState {
+            summary_text: "saved summary".to_string(),
+            covers_up_to_turn: 8,
+            original_turn_count: 8,
+            compacted_count: 8,
+        });
+
+        session.save().expect("save session with compaction state");
+
+        let loaded =
+            Session::load("session_compaction_persist_test").expect("load saved session");
+        assert_eq!(loaded.compaction, session.compaction);
     }
 
     #[test]

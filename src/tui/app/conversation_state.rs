@@ -122,8 +122,28 @@ impl App {
         if let Ok(mut manager) = compaction.try_write() {
             manager.reset();
             manager.set_budget(self.context_limit as usize);
-            manager.seed_restored_messages(self.messages.len());
+            if let Some(state) = self.session.compaction.as_ref() {
+                manager.restore_persisted_state(state, self.messages.len());
+            } else {
+                manager.seed_restored_messages(self.messages.len());
+            }
         };
+    }
+
+    pub(super) fn sync_session_compaction_state_from_manager(
+        &mut self,
+        manager: &crate::compaction::CompactionManager,
+    ) {
+        let new_state = manager.persisted_state();
+        if self.session.compaction != new_state {
+            self.session.compaction = new_state;
+            if let Err(err) = self.session.save() {
+                crate::logging::error(&format!(
+                    "Failed to persist compaction state for session {}: {}",
+                    self.session.id, err
+                ));
+            }
+        }
     }
 
     pub(super) fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
@@ -151,6 +171,9 @@ impl App {
                 }
                 let messages = manager.messages_for_api_with(&self.messages);
                 let event = manager.take_compaction_event();
+                if event.is_some() {
+                    self.sync_session_compaction_state_from_manager(&manager);
+                }
                 (messages, event)
             }
             Err(_) => (self.messages.clone(), None),
@@ -165,6 +188,7 @@ impl App {
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
             if let Some(event) = manager.poll_compaction_event() {
+                self.sync_session_compaction_state_from_manager(&manager);
                 self.handle_compaction_event(event);
             }
         };

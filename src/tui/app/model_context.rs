@@ -205,6 +205,7 @@ impl App {
         if usage > 1.5 {
             match manager.hard_compact_with(&self.messages) {
                 Ok(dropped) => {
+                    self.sync_session_compaction_state_from_manager(&manager);
                     let post_usage = manager.context_usage_with(&self.messages);
                     if post_usage <= 1.0 {
                         return Some(format!(
@@ -252,10 +253,13 @@ impl App {
                     reason
                 ));
                 match manager.hard_compact_with(&self.messages) {
-                    Ok(dropped) => Some(format!(
-                        "⚡ Emergency compaction: dropped {} old messages. You can continue.",
-                        dropped
-                    )),
+                    Ok(dropped) => {
+                        self.sync_session_compaction_state_from_manager(&manager);
+                        Some(format!(
+                            "⚡ Emergency compaction: dropped {} old messages. You can continue.",
+                            dropped
+                        ))
+                    }
                     Err(_) => {
                         let truncated = manager.emergency_truncate_with(&mut self.messages);
                         if truncated > 0 {
@@ -296,6 +300,7 @@ impl App {
                 if usage > 1.5 {
                     match manager.hard_compact_with(&self.messages) {
                         Ok(dropped) => {
+                            self.sync_session_compaction_state_from_manager(&manager);
                             self.push_display_message(DisplayMessage::system(
                                 format!(
                                     "⚡ Emergency compaction: dropped {} old messages (context was at {:.0}%).",
@@ -375,6 +380,7 @@ impl App {
                         Ok(()) => true,
                         Err(_) => match manager.hard_compact_with(&self.messages) {
                             Ok(_) => {
+                                self.sync_session_compaction_state_from_manager(&manager);
                                 drop(manager);
                                 self.provider_session_id = None;
                                 self.session.provider_session_id = None;
@@ -437,6 +443,7 @@ impl App {
             let compaction = self.registry.compaction();
             let done = if let Ok(mut manager) = compaction.try_write() {
                 if let Some(event) = manager.poll_compaction_event() {
+                    self.sync_session_compaction_state_from_manager(&manager);
                     self.handle_compaction_event(event);
                     true
                 } else {
@@ -670,6 +677,7 @@ impl App {
                     if usage > 1.5 {
                         match manager.hard_compact_with(&self.messages) {
                             Ok(dropped) => {
+                                self.sync_session_compaction_state_from_manager(&manager);
                                 actions.push(format!(
                                     "Emergency compaction: dropped {} old messages (context was at {:.0}%).",
                                     dropped,
@@ -697,6 +705,7 @@ impl App {
                             }
                             Err(reason) => match manager.hard_compact_with(&self.messages) {
                                 Ok(dropped) => {
+                                    self.sync_session_compaction_state_from_manager(&manager);
                                     actions.push(format!(
                                             "Emergency compaction: dropped {} old messages (normal compaction failed: {}).",
                                             dropped, reason

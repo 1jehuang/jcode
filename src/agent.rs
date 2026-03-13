@@ -304,7 +304,10 @@ impl Agent {
                 manager.update_observed_input_tokens(context_limit);
                 let usage_pct = manager.context_usage_with(&all_messages) * 100.0;
                 match manager.hard_compact_with(&all_messages) {
-                    Ok(dropped) => (dropped, usage_pct),
+                    Ok(dropped) => {
+                        self.sync_session_compaction_state_from_manager(&manager);
+                        (dropped, usage_pct)
+                    }
                     Err(reason) => {
                         logging::warn(&format!(
                             "Context-limit auto-recovery failed: hard compact failed ({})",
@@ -375,11 +378,31 @@ impl Agent {
         manager.reset();
         let budget = self.provider.context_window();
         manager.set_budget(budget);
-        manager.seed_restored_messages(self.session.messages.len());
+        if let Some(state) = self.session.compaction.as_ref() {
+            manager.restore_persisted_state(state, self.session.messages.len());
+        } else {
+            manager.seed_restored_messages(self.session.messages.len());
+        }
         logging::info(&format!(
             "seed_compaction_from_session: seeded compaction with {} messages",
             self.session.messages.len()
         ));
+    }
+
+    fn sync_session_compaction_state_from_manager(
+        &mut self,
+        manager: &crate::compaction::CompactionManager,
+    ) {
+        let new_state = manager.persisted_state();
+        if self.session.compaction != new_state {
+            self.session.compaction = new_state;
+            if let Err(err) = self.session.save() {
+                logging::error(&format!(
+                    "Failed to persist compaction state for session {}: {}",
+                    self.session.id, err
+                ));
+            }
+        }
     }
 
     fn add_message(&mut self, role: Role, content: Vec<ContentBlock>) -> String {
@@ -446,6 +469,9 @@ impl Agent {
                     }
                     let messages = manager.messages_for_api_with(&all_messages);
                     let event = manager.take_compaction_event();
+                    if event.is_some() {
+                        self.sync_session_compaction_state_from_manager(&manager);
+                    }
                     logging::info(&format!(
                         "messages_for_provider (compaction): returning {} messages, roles: {:?}",
                         messages.len(),
