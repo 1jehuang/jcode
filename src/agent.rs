@@ -375,10 +375,7 @@ impl Agent {
         manager.reset();
         let budget = self.provider.context_window();
         manager.set_budget(budget);
-        // Just tell the manager how many messages exist (no cloning)
-        for _ in &self.session.messages {
-            manager.notify_message_added();
-        }
+        manager.seed_restored_messages(self.session.messages.len());
         logging::info(&format!(
             "seed_compaction_from_session: seeded compaction with {} messages",
             self.session.messages.len()

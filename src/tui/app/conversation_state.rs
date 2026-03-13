@@ -122,9 +122,7 @@ impl App {
         if let Ok(mut manager) = compaction.try_write() {
             manager.reset();
             manager.set_budget(self.context_limit as usize);
-            for _ in &self.messages {
-                manager.notify_message_added();
-            }
+            manager.seed_restored_messages(self.messages.len());
         };
     }
 

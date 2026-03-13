@@ -137,6 +137,10 @@ pub struct CompactionManager {
     /// Total turns seen (for tracking)
     total_turns: usize,
 
+    /// When true, session restore/reseed has just loaded old history and
+    /// compaction must stay disabled until a genuinely new message is added.
+    suppress_compaction_until_new_message: bool,
+
     /// Token budget
     token_budget: usize,
 
@@ -181,6 +185,7 @@ impl CompactionManager {
             pending_trigger: None,
             pending_cutoff: 0,
             total_turns: 0,
+            suppress_compaction_until_new_message: false,
             token_budget: DEFAULT_TOKEN_BUDGET,
             observed_input_tokens: None,
             last_compaction: None,
@@ -216,6 +221,7 @@ impl CompactionManager {
     /// This just increments the turn counter — no data is stored.
     pub fn notify_message_added(&mut self) {
         self.total_turns += 1;
+        self.suppress_compaction_until_new_message = false;
     }
 
     /// Backward-compatible alias for `notify_message_added`.
@@ -223,6 +229,17 @@ impl CompactionManager {
     /// updated yet can still call `add_message(msg)`.
     pub fn add_message(&mut self, _message: Message) {
         self.notify_message_added();
+    }
+
+    /// Seed the manager from already-existing history that was restored from
+    /// disk or otherwise replayed into memory.
+    ///
+    /// This updates turn counts but deliberately suppresses compaction until a
+    /// genuinely new message is added after the restore. Restoring history must
+    /// not itself trigger compaction.
+    pub fn seed_restored_messages(&mut self, count: usize) {
+        self.total_turns = count;
+        self.suppress_compaction_until_new_message = count > 0;
     }
 
     // ── Token snapshot (proactive mode) ────────────────────────────────────
@@ -594,6 +611,9 @@ impl CompactionManager {
     /// Check if we should start compaction
     pub fn should_compact_with(&self, all_messages: &[Message]) -> bool {
         use crate::config::CompactionMode;
+        if self.suppress_compaction_until_new_message {
+            return false;
+        }
         let active = self.active_messages(all_messages);
         match self.mode {
             CompactionMode::Reactive => {
@@ -1409,6 +1429,42 @@ mod tests {
         manager.notify_message_added();
         manager.notify_message_added();
         assert_eq!(manager.total_turns, 2);
+    }
+
+    #[test]
+    fn test_restored_messages_do_not_trigger_compaction_immediately() {
+        let mut manager = CompactionManager::new().with_budget(1_000);
+        let mut messages = Vec::new();
+        for i in 0..20 {
+            messages.push(make_text_message(Role::User, &format!("restored {}", i)));
+        }
+        manager.seed_restored_messages(messages.len());
+        manager.update_observed_input_tokens(900);
+
+        assert!(
+            !manager.should_compact_with(&messages),
+            "restored history should not compact until a new message is added"
+        );
+    }
+
+    #[test]
+    fn test_new_message_after_restore_reenables_compaction() {
+        let mut manager = CompactionManager::new().with_budget(1_000);
+        let mut messages = Vec::new();
+        for i in 0..20 {
+            messages.push(make_text_message(Role::User, &format!("restored {}", i)));
+        }
+        manager.seed_restored_messages(messages.len());
+        manager.update_observed_input_tokens(900);
+        assert!(!manager.should_compact_with(&messages));
+
+        messages.push(make_text_message(Role::User, "new turn after restore"));
+        manager.notify_message_added();
+
+        assert!(
+            manager.should_compact_with(&messages),
+            "compaction should resume once a genuinely new message is added"
+        );
     }
 
     #[test]
