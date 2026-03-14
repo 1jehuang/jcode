@@ -1595,12 +1595,17 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     };
     let pane_enabled = app.diagram_pane_enabled();
     let pane_position = app.diagram_pane_position();
-    let pinned_diagram =
-        if diagram_mode == crate::config::DiagramDisplayMode::Pinned && pane_enabled {
-            diagrams.get(selected_index).cloned()
-        } else {
-            None
-        };
+    let has_side_panel_content = app.side_panel().focused_page().is_some();
+    let suppress_side_diagram =
+        has_side_panel_content && pane_position == crate::config::DiagramPanePosition::Side;
+    let pinned_diagram = if diagram_mode == crate::config::DiagramDisplayMode::Pinned
+        && pane_enabled
+        && !suppress_side_diagram
+    {
+        diagrams.get(selected_index).cloned()
+    } else {
+        None
+    };
     let diagram_focus = app.diagram_focus();
     let (diagram_scroll_x, diagram_scroll_y) = app.diagram_scroll();
 
@@ -1686,7 +1691,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     };
 
     let diff_mode = app.diff_mode();
-    let has_side_panel_content = app.side_panel().focused_page().is_some();
     let pin_images = app.pin_images();
     let collect_diffs = diff_mode.is_pinned();
     let has_pinned_content = if collect_diffs || pin_images {

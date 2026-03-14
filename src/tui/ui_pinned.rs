@@ -81,6 +81,22 @@ struct PinnedCacheState {
     rendered_lines: Option<PinnedRenderedCache>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SidePanelRenderKey {
+    page_id: String,
+    updated_at_ms: u64,
+    inner_width: u16,
+    inner_height: u16,
+    has_protocol: bool,
+}
+
+#[derive(Default)]
+struct SidePanelRenderCacheState {
+    key: Option<SidePanelRenderKey>,
+    rendered: Option<PinnedRenderedCache>,
+}
+
+#[derive(Clone)]
 struct PinnedRenderedCache {
     inner_width: u16,
     line_wrap: bool,
@@ -88,6 +104,7 @@ struct PinnedRenderedCache {
     image_placements: Vec<PinnedImagePlacement>,
 }
 
+#[derive(Clone)]
 struct PinnedImagePlacement {
     after_text_line: usize,
     hash: u64,
@@ -95,9 +112,14 @@ struct PinnedImagePlacement {
 }
 
 static PINNED_CACHE: OnceLock<Mutex<PinnedCacheState>> = OnceLock::new();
+static SIDE_PANEL_RENDER_CACHE: OnceLock<Mutex<SidePanelRenderCacheState>> = OnceLock::new();
 
 fn pinned_cache() -> &'static Mutex<PinnedCacheState> {
     PINNED_CACHE.get_or_init(|| Mutex::new(PinnedCacheState::default()))
+}
+
+fn side_panel_render_cache() -> &'static Mutex<SidePanelRenderCacheState> {
+    SIDE_PANEL_RENDER_CACHE.get_or_init(|| Mutex::new(SidePanelRenderCacheState::default()))
 }
 
 pub(super) fn collect_pinned_content_cached(
@@ -615,48 +637,16 @@ pub(super) fn draw_side_panel_markdown(
         return;
     }
 
-    let saved_override = markdown::get_diagram_mode_override();
-    let saved_centered = markdown::center_code_blocks();
-    markdown::set_diagram_mode_override(Some(crate::config::DiagramDisplayMode::None));
-    markdown::set_center_code_blocks(false);
-    let rendered = markdown::render_markdown_with_width(&page.content, Some(inner.width as usize));
-    markdown::set_center_code_blocks(saved_centered);
-    markdown::set_diagram_mode_override(saved_override);
-
     let has_protocol = mermaid::protocol_type().is_some();
-    let mut text_lines: Vec<Line<'static>> = Vec::new();
-    let mut image_placements: Vec<PinnedImagePlacement> = Vec::new();
-    for line in rendered {
-        if has_protocol {
-            if let Some(hash) = mermaid::parse_image_placeholder(&line) {
-                let img_rows = inner.height.min(12).max(4);
-                image_placements.push(PinnedImagePlacement {
-                    after_text_line: text_lines.len(),
-                    hash,
-                    rows: img_rows,
-                });
-                for _ in 0..img_rows {
-                    text_lines.push(Line::from(""));
-                }
-                continue;
-            }
-        }
-        text_lines.push(line);
-    }
+    let rendered = render_side_panel_markdown_cached(page, inner, has_protocol);
 
-    if text_lines.is_empty() {
-        text_lines.push(Line::from(Span::styled(
-            "No side panel content yet",
-            Style::default().fg(dim_color()),
-        )));
-    }
-
-    PINNED_PANE_TOTAL_LINES.store(text_lines.len(), Ordering::Relaxed);
-    let max_scroll = text_lines.len().saturating_sub(inner.height as usize);
+    PINNED_PANE_TOTAL_LINES.store(rendered.lines.len(), Ordering::Relaxed);
+    let max_scroll = rendered.lines.len().saturating_sub(inner.height as usize);
     let clamped_scroll = scroll.min(max_scroll);
     LAST_DIFF_PANE_EFFECTIVE_SCROLL.store(clamped_scroll, Ordering::Relaxed);
 
-    let visible_lines: Vec<Line<'static>> = text_lines
+    let visible_lines: Vec<Line<'static>> = rendered
+        .lines
         .iter()
         .skip(clamped_scroll)
         .take(inner.height as usize)
@@ -665,7 +655,7 @@ pub(super) fn draw_side_panel_markdown(
     frame.render_widget(Paragraph::new(visible_lines), inner);
 
     if has_protocol {
-        for placement in &image_placements {
+        for placement in &rendered.image_placements {
             let text_y = placement.after_text_line as u16;
             if text_y < clamped_scroll as u16 {
                 continue;
@@ -693,6 +683,84 @@ pub(super) fn draw_side_panel_markdown(
             );
         }
     }
+}
+
+fn render_side_panel_markdown_cached(
+    page: &crate::side_panel::SidePanelPage,
+    inner: Rect,
+    has_protocol: bool,
+) -> PinnedRenderedCache {
+    let key = SidePanelRenderKey {
+        page_id: page.id.clone(),
+        updated_at_ms: page.updated_at_ms,
+        inner_width: inner.width,
+        inner_height: inner.height,
+        has_protocol,
+    };
+
+    {
+        let cache = match side_panel_render_cache().lock() {
+            Ok(cache) => cache,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if cache.key.as_ref() == Some(&key) {
+            if let Some(rendered) = &cache.rendered {
+                return rendered.clone();
+            }
+        }
+    }
+
+    let saved_override = markdown::get_diagram_mode_override();
+    let saved_centered = markdown::center_code_blocks();
+    markdown::set_diagram_mode_override(Some(crate::config::DiagramDisplayMode::None));
+    markdown::set_center_code_blocks(false);
+    let rendered_markdown =
+        markdown::render_markdown_with_width(&page.content, Some(inner.width as usize));
+    markdown::set_center_code_blocks(saved_centered);
+    markdown::set_diagram_mode_override(saved_override);
+
+    let mut text_lines: Vec<Line<'static>> = Vec::new();
+    let mut image_placements: Vec<PinnedImagePlacement> = Vec::new();
+    for line in rendered_markdown {
+        if has_protocol {
+            if let Some(hash) = mermaid::parse_image_placeholder(&line) {
+                let img_rows = inner.height.min(12).max(4);
+                image_placements.push(PinnedImagePlacement {
+                    after_text_line: text_lines.len(),
+                    hash,
+                    rows: img_rows,
+                });
+                for _ in 0..img_rows {
+                    text_lines.push(Line::from(""));
+                }
+                continue;
+            }
+        }
+        text_lines.push(line);
+    }
+
+    if text_lines.is_empty() {
+        text_lines.push(Line::from(Span::styled(
+            "No side panel content yet",
+            Style::default().fg(dim_color()),
+        )));
+    }
+
+    let rendered = PinnedRenderedCache {
+        inner_width: inner.width,
+        line_wrap: false,
+        lines: text_lines,
+        image_placements,
+    };
+
+    let mut cache = match side_panel_render_cache().lock() {
+        Ok(cache) => cache,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    cache.key = Some(key);
+    cache.rendered = Some(rendered.clone());
+
+    rendered
 }
 
 #[allow(dead_code)]
