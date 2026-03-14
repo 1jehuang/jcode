@@ -24,6 +24,9 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: jcode-linux-x86_64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: jcode-linux-aarch64
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: jcode-macos-aarch64
@@ -67,6 +70,10 @@ jobs:
           if [ "$RUNNER_OS" = "Linux" ]; then
             cat > .cargo/config.toml << 'EOF'
           [target.x86_64-unknown-linux-gnu]
+          linker = "clang"
+          rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+          [target.aarch64-unknown-linux-gnu]
           linker = "clang"
           rustflags = ["-C", "link-arg=-fuse-ld=mold"]
           EOF
@@ -176,7 +183,8 @@ jobs:
           VERSION="${GITHUB_REF_NAME}"
           VERSION_NUM="${VERSION#v}"
 
-          LINUX_SHA=$(sha256sum artifacts/jcode-linux-x86_64/jcode-linux-x86_64.tar.gz | cut -d' ' -f1)
+          LINUX_X86_SHA=$(sha256sum artifacts/jcode-linux-x86_64/jcode-linux-x86_64.tar.gz | cut -d' ' -f1)
+          LINUX_ARM_SHA=$(sha256sum artifacts/jcode-linux-aarch64/jcode-linux-aarch64.tar.gz | cut -d' ' -f1)
           MACOS_SHA=$(sha256sum artifacts/jcode-macos-aarch64/jcode-macos-aarch64.tar.gz | cut -d' ' -f1)
 
           mkdir -p ~/.ssh
@@ -207,10 +215,19 @@ jobs:
             on_linux do
               on_intel do
                 url "https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-linux-x86_64.tar.gz"
-                sha256 "${LINUX_SHA}"
+                sha256 "${LINUX_X86_SHA}"
 
                 def install
                   bin.install "jcode-linux-x86_64" => "jcode"
+                end
+              end
+
+              on_arm do
+                url "https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-linux-aarch64.tar.gz"
+                sha256 "${LINUX_ARM_SHA}"
+
+                def install
+                  bin.install "jcode-linux-aarch64" => "jcode"
                 end
               end
             end
@@ -238,8 +255,10 @@ jobs:
           VERSION="${GITHUB_REF_NAME}"
           VERSION_NUM="${VERSION#v}"
 
-          LINUX_SHA=$(sha256sum artifacts/jcode-linux-x86_64/jcode-linux-x86_64.tar.gz | cut -d' ' -f1)
-          LINUX_URL="https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-linux-x86_64.tar.gz"
+          LINUX_X86_SHA=$(sha256sum artifacts/jcode-linux-x86_64/jcode-linux-x86_64.tar.gz | cut -d' ' -f1)
+          LINUX_ARM_SHA=$(sha256sum artifacts/jcode-linux-aarch64/jcode-linux-aarch64.tar.gz | cut -d' ' -f1)
+          LINUX_X86_URL="https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-linux-x86_64.tar.gz"
+          LINUX_ARM_URL="https://github.com/1jehuang/jcode/releases/download/${VERSION}/jcode-linux-aarch64.tar.gz"
 
           mkdir -p ~/.ssh
           echo "$AUR_SSH_KEY" > ~/.ssh/aur_key
@@ -254,22 +273,30 @@ jobs:
           pkgver=VERSION_PLACEHOLDER
           pkgrel=1
           pkgdesc="AI coding agent powered by Claude and ChatGPT"
-          arch=('x86_64')
+          arch=('x86_64' 'aarch64')
           url="https://github.com/1jehuang/jcode"
           license=('MIT')
           provides=('jcode')
           conflicts=('jcode')
-          source=("URL_PLACEHOLDER")
-          sha256sums=('SHA_PLACEHOLDER')
+          source_x86_64=("URL_X86_PLACEHOLDER")
+          sha256sums_x86_64=('SHA_X86_PLACEHOLDER')
+          source_aarch64=("URL_ARM_PLACEHOLDER")
+          sha256sums_aarch64=('SHA_ARM_PLACEHOLDER')
 
           package() {
-              install -Dm755 "${srcdir}/jcode-linux-x86_64" "${pkgdir}/usr/bin/jcode"
+              if [ "$CARCH" = "x86_64" ]; then
+                  install -Dm755 "${srcdir}/jcode-linux-x86_64" "${pkgdir}/usr/bin/jcode"
+              elif [ "$CARCH" = "aarch64" ]; then
+                  install -Dm755 "${srcdir}/jcode-linux-aarch64" "${pkgdir}/usr/bin/jcode"
+              fi
           }
           PKGBUILD_END
 
           sed -i "s|VERSION_PLACEHOLDER|${VERSION_NUM}|" /tmp/jcode-aur/PKGBUILD
-          sed -i "s|URL_PLACEHOLDER|${LINUX_URL}|" /tmp/jcode-aur/PKGBUILD
-          sed -i "s|SHA_PLACEHOLDER|${LINUX_SHA}|" /tmp/jcode-aur/PKGBUILD
+          sed -i "s|URL_X86_PLACEHOLDER|${LINUX_X86_URL}|" /tmp/jcode-aur/PKGBUILD
+          sed -i "s|SHA_X86_PLACEHOLDER|${LINUX_X86_SHA}|" /tmp/jcode-aur/PKGBUILD
+          sed -i "s|URL_ARM_PLACEHOLDER|${LINUX_ARM_URL}|" /tmp/jcode-aur/PKGBUILD
+          sed -i "s|SHA_ARM_PLACEHOLDER|${LINUX_ARM_SHA}|" /tmp/jcode-aur/PKGBUILD
           sed -i 's/^          //' /tmp/jcode-aur/PKGBUILD
 
           # Generate .SRCINFO without makepkg (AUR uses tab indentation)
@@ -279,11 +306,14 @@ jobs:
           printf '\tpkgrel = 1\n' >> /tmp/jcode-aur/.SRCINFO
           printf '\turl = https://github.com/1jehuang/jcode\n' >> /tmp/jcode-aur/.SRCINFO
           printf '\tarch = x86_64\n' >> /tmp/jcode-aur/.SRCINFO
+          printf '\tarch = aarch64\n' >> /tmp/jcode-aur/.SRCINFO
           printf '\tlicense = MIT\n' >> /tmp/jcode-aur/.SRCINFO
           printf '\tprovides = jcode\n' >> /tmp/jcode-aur/.SRCINFO
           printf '\tconflicts = jcode\n' >> /tmp/jcode-aur/.SRCINFO
-          printf '\tsource = %s\n' "${LINUX_URL}" >> /tmp/jcode-aur/.SRCINFO
-          printf '\tsha256sums = %s\n' "${LINUX_SHA}" >> /tmp/jcode-aur/.SRCINFO
+          printf '\tsource_x86_64 = %s\n' "${LINUX_X86_URL}" >> /tmp/jcode-aur/.SRCINFO
+          printf '\tsha256sums_x86_64 = %s\n' "${LINUX_X86_SHA}" >> /tmp/jcode-aur/.SRCINFO
+          printf '\tsource_aarch64 = %s\n' "${LINUX_ARM_URL}" >> /tmp/jcode-aur/.SRCINFO
+          printf '\tsha256sums_aarch64 = %s\n' "${LINUX_ARM_SHA}" >> /tmp/jcode-aur/.SRCINFO
           printf '\npkgname = jcode-bin\n' >> /tmp/jcode-aur/.SRCINFO
 
           cd /tmp/jcode-aur
