@@ -593,14 +593,27 @@ pub async fn exchange_claude_code(
 }
 
 pub fn openai_auth_url(redirect_uri: &str, challenge: &str, state: &str) -> String {
+    openai_auth_url_with_prompt(redirect_uri, challenge, state, None)
+}
+
+pub fn openai_auth_url_with_prompt(
+    redirect_uri: &str,
+    challenge: &str,
+    state: &str,
+    prompt: Option<&str>,
+) -> String {
+    let prompt_param = prompt
+        .map(|p| format!("&prompt={}", urlencoding::encode(p)))
+        .unwrap_or_default();
     format!(
-        "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=codex_cli_rs",
+        "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=codex_cli_rs{}",
         openai::AUTHORIZE_URL,
         openai::CLIENT_ID,
         urlencoding::encode(redirect_uri),
         urlencoding::encode(openai::SCOPES),
         challenge,
-        state
+        state,
+        prompt_param
     )
 }
 
@@ -685,7 +698,7 @@ pub async fn login_openai() -> Result<OAuthTokens> {
 
     let port = openai::DEFAULT_PORT;
     let redirect_uri = openai::redirect_uri(port);
-    let auth_url = openai_auth_url(&redirect_uri, &challenge, &state);
+    let auth_url = openai_auth_url_with_prompt(&redirect_uri, &challenge, &state, Some("login"));
 
     eprintln!("\nOpen this URL in your browser:\n");
     eprintln!("{}\n", auth_url);

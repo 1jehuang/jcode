@@ -671,7 +671,7 @@ impl App {
 
         let port = crate::auth::oauth::openai::DEFAULT_PORT;
         let redirect_uri = crate::auth::oauth::openai::redirect_uri(port);
-        let auth_url = crate::auth::oauth::openai_auth_url(&redirect_uri, &challenge, &state);
+        let auth_url = crate::auth::oauth::openai_auth_url_with_prompt(&redirect_uri, &challenge, &state, Some("login"));
         let qr_section = crate::login_qr::markdown_section(
             &auth_url,
             "Scan this on another device if this machine has no browser, then paste the full callback URL here:",
