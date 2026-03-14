@@ -423,6 +423,10 @@ pub(super) fn handle_pre_control_shortcuts(
         app.toggle_diagram_pane_position();
         return true;
     }
+    if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('s')) {
+        app.toggle_typing_scroll_lock();
+        return true;
+    }
     if let Some(direction) = app.model_switch_keys.direction_for(code, modifiers) {
         app.cycle_model(direction);
         return true;
@@ -586,7 +590,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                         if !prompt.starts_with('/') {
                             app.input = prompt.clone();
                             app.cursor_pos = app.input.len();
-                            app.follow_chat_bottom();
+                            app.follow_chat_bottom_for_typing();
                             return true;
                         }
                     }
@@ -1032,6 +1036,9 @@ impl App {
             }
             "effort" => {
                 "`/effort`\nShow current reasoning effort.\n\n`/effort <level>`\nSet reasoning effort (none|low|medium|high|xhigh).\n\nAlso: Alt+←/→ to cycle."
+            }
+            "fast" => {
+                "`/fast`\nShow whether OpenAI/Codex fast mode is enabled.\n\n`/fast on`\nEnable fast mode (`service_tier = \"priority\"`).\n\n`/fast off`\nDisable fast mode.\n\n`/fast status`\nShow current fast-mode status."
             }
             "memory" => "`/memory [on|off|status]`\nToggle memory features for this session.",
             "swarm" => "`/swarm [on|off|status]`\nToggle swarm features for this session.",

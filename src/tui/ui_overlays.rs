@@ -131,6 +131,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Set reasoning effort (none|low|medium|high|xhigh)",
     ));
     lines.push(help_entry(
+        "/fast [on|off|status]",
+        "Toggle OpenAI/Codex fast mode",
+    ));
+    lines.push(help_entry(
         "/transport <mode>",
         "Set connection transport (auto|https|websocket)",
     ));
@@ -293,6 +297,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(key_entry("Ctrl+R", "Recover from missing tool outputs"));
     lines.push(key_entry("Ctrl+V", "Paste clipboard (text or image)"));
     lines.push(key_entry("Alt+V", "Paste image from clipboard"));
+    lines.push(key_entry("Alt+S", "Toggle typing scroll lock"));
     lines.push(key_entry("Alt+Left / Right", "Cycle reasoning effort"));
 
     lines.push(Line::from(""));

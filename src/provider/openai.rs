@@ -16,7 +16,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, RwLock as StdRwLock};
 use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
@@ -167,7 +167,7 @@ pub struct OpenAIProvider {
     prompt_cache_retention: Option<String>,
     max_output_tokens: Option<u32>,
     reasoning_effort: Arc<RwLock<Option<String>>>,
-    service_tier: Arc<RwLock<Option<String>>>,
+    service_tier: Arc<StdRwLock<Option<String>>>,
     transport_mode: Arc<RwLock<OpenAITransportMode>>,
     websocket_cooldowns: Arc<RwLock<HashMap<String, Instant>>>,
     websocket_failure_streaks: Arc<RwLock<HashMap<String, u32>>>,
@@ -234,7 +234,7 @@ impl OpenAIProvider {
             prompt_cache_retention,
             max_output_tokens,
             reasoning_effort: Arc::new(RwLock::new(reasoning_effort)),
-            service_tier: Arc::new(RwLock::new(service_tier)),
+            service_tier: Arc::new(StdRwLock::new(service_tier)),
             transport_mode: Arc::new(RwLock::new(transport_mode)),
             websocket_cooldowns: Arc::clone(&WEBSOCKET_COOLDOWNS),
             websocket_failure_streaks: Arc::clone(&WEBSOCKET_FAILURE_STREAKS),
@@ -1676,7 +1676,11 @@ impl Provider for OpenAIProvider {
             (instructions, is_chatgpt)
         };
         let reasoning_effort = self.reasoning_effort.read().await.clone();
-        let service_tier = self.service_tier.read().await.clone();
+        let service_tier = self
+            .service_tier
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
         let request = Self::build_response_request(
             &model_id,
             instructions,
@@ -1979,20 +1983,20 @@ impl Provider for OpenAIProvider {
     }
 
     fn service_tier(&self) -> Option<String> {
-        self.service_tier.try_read().ok().and_then(|g| g.clone())
+        self.service_tier
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
     }
 
     fn set_service_tier(&self, service_tier: &str) -> Result<()> {
         let normalized = Self::normalize_service_tier(service_tier)?;
-        match self.service_tier.try_write() {
-            Ok(mut guard) => {
-                *guard = normalized;
-                Ok(())
-            }
-            Err(_) => Err(anyhow::anyhow!(
-                "Cannot change service tier while a request is in progress"
-            )),
-        }
+        let mut guard = self
+            .service_tier
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = normalized;
+        Ok(())
     }
 
     fn available_service_tiers(&self) -> Vec<&'static str> {
@@ -2051,7 +2055,7 @@ impl Provider for OpenAIProvider {
             prompt_cache_retention: self.prompt_cache_retention.clone(),
             max_output_tokens: self.max_output_tokens,
             reasoning_effort: Arc::new(RwLock::new(self.reasoning_effort())),
-            service_tier: Arc::new(RwLock::new(self.service_tier())),
+            service_tier: Arc::new(StdRwLock::new(self.service_tier())),
             transport_mode: Arc::clone(&self.transport_mode),
             websocket_cooldowns: Arc::clone(&self.websocket_cooldowns),
             websocket_failure_streaks: Arc::clone(&self.websocket_failure_streaks),
@@ -3672,6 +3676,44 @@ mod tests {
 
         provider.set_model("gpt-5.1-codex-mini").unwrap();
         assert_eq!(provider.model(), "gpt-5.1-codex-mini");
+    }
+
+    #[test]
+    fn test_service_tier_can_be_changed_while_a_request_snapshot_is_held() {
+        let provider = Arc::new(OpenAIProvider::new(CodexCredentials {
+            access_token: "test".to_string(),
+            refresh_token: String::new(),
+            id_token: None,
+            account_id: None,
+            expires_at: None,
+        }));
+
+        let read_guard = provider
+            .service_tier
+            .read()
+            .expect("service tier read lock should be available");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let provider_for_write = Arc::clone(&provider);
+        let handle = std::thread::spawn(move || {
+            let result = provider_for_write.set_service_tier("priority");
+            tx.send(result).expect("send result from setter thread");
+        });
+
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(
+            rx.try_recv().is_err(),
+            "writer should wait for the in-flight snapshot to finish"
+        );
+
+        drop(read_guard);
+
+        rx.recv()
+            .expect("receive service tier setter result")
+            .expect("service tier update should succeed once read lock is released");
+        handle.join().expect("join setter thread");
+
+        assert_eq!(provider.service_tier(), Some("priority".to_string()));
     }
 
     #[test]

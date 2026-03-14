@@ -9,7 +9,6 @@ pub(crate) const MAX_TODO_LINES: usize = 12;
 pub(crate) enum InfoPageKind {
     CompactOnly,
     TodosExpanded,
-    ContextExpanded,
     MemoryExpanded,
 }
 
@@ -40,16 +39,7 @@ pub(crate) fn compute_page_layout(
     }
 
     let mut candidates: Vec<InfoPage> = Vec::new();
-    let context_compact = compact_context_height(data);
     let todos_compact = compact_todos_height(data);
-
-    let context_expanded = expanded_context_height(data);
-    if context_expanded > 0 {
-        candidates.push(InfoPage {
-            kind: InfoPageKind::ContextExpanded,
-            height: compact_height - context_compact + context_expanded,
-        });
-    }
 
     let todos_expanded = expanded_todos_height(data);
     if todos_expanded > 0 {
@@ -129,10 +119,6 @@ fn compact_todos_height(data: &InfoWidgetData) -> u16 {
     if data.todos.is_empty() { 0 } else { 2 }
 }
 
-fn compact_queue_height(data: &InfoWidgetData) -> u16 {
-    if data.queue_mode.is_some() { 1 } else { 0 }
-}
-
 fn compact_memory_height(data: &InfoWidgetData) -> u16 {
     if let Some(info) = &data.memory_info {
         if info.total_count > 0 {
@@ -202,7 +188,6 @@ fn compact_overview_height(data: &InfoWidgetData) -> u16 {
     compact_model_height(data)
         + compact_context_height(data)
         + compact_todos_height(data)
-        + compact_queue_height(data)
         + compact_memory_height(data)
         + compact_background_height(data)
         + compact_usage_height(data)
@@ -252,9 +237,9 @@ fn expanded_memory_height(data: &InfoWidgetData) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::{InfoPageKind, compute_page_layout};
-    use crate::prompt::ContextInfo;
     use crate::todo::TodoItem;
-    use crate::tui::info_widget::InfoWidgetData;
+    use crate::tui::info_widget::{InfoWidgetData, MemoryInfo};
+    use std::collections::HashMap;
 
     #[test]
     fn compute_page_layout_falls_back_to_compact_page() {
@@ -274,11 +259,6 @@ mod tests {
     #[test]
     fn compute_page_layout_keeps_multiple_expanded_pages_when_height_allows() {
         let data = InfoWidgetData {
-            context_info: Some(ContextInfo {
-                total_chars: 24_000,
-                system_prompt_chars: 12_000,
-                ..Default::default()
-            }),
             todos: vec![TodoItem {
                 content: "ship refactor".to_string(),
                 status: "pending".to_string(),
@@ -287,6 +267,13 @@ mod tests {
                 blocked_by: Vec::new(),
                 assigned_to: None,
             }],
+            memory_info: Some(MemoryInfo {
+                total_count: 3,
+                project_count: 2,
+                global_count: 1,
+                by_category: HashMap::from([("fact".to_string(), 3usize)]),
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
@@ -298,13 +285,13 @@ mod tests {
             layout
                 .pages
                 .iter()
-                .any(|page| page.kind == InfoPageKind::ContextExpanded)
+                .any(|page| page.kind == InfoPageKind::TodosExpanded)
         );
         assert!(
             layout
                 .pages
                 .iter()
-                .any(|page| page.kind == InfoPageKind::TodosExpanded)
+                .any(|page| page.kind == InfoPageKind::MemoryExpanded)
         );
     }
 }

@@ -857,6 +857,80 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    if matches!(trimmed, "/fast" | "/fast status") {
+        let current = app.provider.service_tier();
+        let status = if current.as_deref() == Some("priority") {
+            "on"
+        } else {
+            "off"
+        };
+        let current_label = current
+            .as_deref()
+            .map(service_tier_display_label)
+            .unwrap_or("Standard");
+        app.push_display_message(DisplayMessage::system(format!(
+            "Fast mode is {}.\nCurrent tier: {}\nUse `/fast on` or `/fast off`.",
+            status, current_label
+        )));
+        return true;
+    }
+
+    if let Some(mode) = trimmed.strip_prefix("/fast ") {
+        let mode = mode.trim().to_ascii_lowercase();
+        let target = match mode.as_str() {
+            "on" => "priority",
+            "off" => "off",
+            "status" => {
+                let current = app.provider.service_tier();
+                let status = if current.as_deref() == Some("priority") {
+                    "on"
+                } else {
+                    "off"
+                };
+                let current_label = current
+                    .as_deref()
+                    .map(service_tier_display_label)
+                    .unwrap_or("Standard");
+                app.push_display_message(DisplayMessage::system(format!(
+                    "Fast mode is {}.\nCurrent tier: {}",
+                    status, current_label
+                )));
+                return true;
+            }
+            _ => {
+                app.push_display_message(DisplayMessage::error(
+                    "Usage: /fast [on|off|status]".to_string(),
+                ));
+                return true;
+            }
+        };
+
+        match app.provider.set_service_tier(target) {
+            Ok(()) => {
+                let current = app.provider.service_tier();
+                let enabled = current.as_deref() == Some("priority");
+                let label = current
+                    .as_deref()
+                    .map(service_tier_display_label)
+                    .unwrap_or("Standard");
+                let applies_next_request = app.is_processing;
+                app.push_display_message(DisplayMessage::system(fast_mode_success_message(
+                    enabled,
+                    label,
+                    applies_next_request,
+                )));
+                app.set_status_notice(fast_mode_status_notice(enabled, applies_next_request));
+            }
+            Err(e) => {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to set fast mode: {}",
+                    e
+                )));
+            }
+        }
+        return true;
+    }
+
     if trimmed == "/transport" {
         let current = app.provider.transport();
         let transports = app.provider.available_transports();

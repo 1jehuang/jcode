@@ -190,6 +190,35 @@ pub(super) async fn handle_set_reasoning_effort(
     }
 }
 
+pub(super) async fn handle_set_service_tier(
+    id: u64,
+    service_tier: String,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let provider = {
+        let agent_guard = agent.lock().await;
+        agent_guard.provider_handle()
+    };
+
+    match provider.set_service_tier(&service_tier) {
+        Ok(()) => {
+            let _ = client_event_tx.send(ServerEvent::ServiceTierChanged {
+                id,
+                service_tier: provider.service_tier(),
+                error: None,
+            });
+        }
+        Err(e) => {
+            let _ = client_event_tx.send(ServerEvent::ServiceTierChanged {
+                id,
+                service_tier: None,
+                error: Some(e.to_string()),
+            });
+        }
+    }
+}
+
 pub(super) async fn handle_set_transport(
     id: u64,
     transport: String,
