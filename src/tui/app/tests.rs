@@ -1423,6 +1423,44 @@ fn test_ctrl_c_still_arms_quit_when_idle() {
 }
 
 #[test]
+fn test_ctrl_x_cuts_entire_input_line_to_clipboard() {
+    let mut app = create_test_app();
+    app.input = "hello world".to_string();
+    app.cursor_pos = 5;
+
+    let copied = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let copied_for_closure = copied.clone();
+
+    let cut = super::input::cut_input_line_to_clipboard_with(&mut app, |text| {
+        *copied_for_closure.lock().unwrap() = text.to_string();
+        true
+    });
+
+    assert!(cut);
+    assert_eq!(&*copied.lock().unwrap(), "hello world");
+    assert!(app.input().is_empty());
+    assert_eq!(app.cursor_pos(), 0);
+    assert_eq!(app.status_notice(), Some("✂ Cut input line".to_string()));
+}
+
+#[test]
+fn test_ctrl_x_preserves_input_when_clipboard_copy_fails() {
+    let mut app = create_test_app();
+    app.input = "hello world".to_string();
+    app.cursor_pos = 5;
+
+    let cut = super::input::cut_input_line_to_clipboard_with(&mut app, |_text| false);
+
+    assert!(!cut);
+    assert_eq!(app.input(), "hello world");
+    assert_eq!(app.cursor_pos(), 5);
+    assert_eq!(
+        app.status_notice(),
+        Some("Failed to copy input line".to_string())
+    );
+}
+
+#[test]
 fn test_ctrl_up_edits_queued_message() {
     let mut app = create_test_app();
     app.queue_mode = true;

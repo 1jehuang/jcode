@@ -54,6 +54,31 @@ pub(super) fn paste_from_clipboard(app: &mut App) {
     app.set_status_notice("No text or image in clipboard");
 }
 
+pub(super) fn cut_input_line_to_clipboard(app: &mut App) -> bool {
+    cut_input_line_to_clipboard_with(app, super::copy_to_clipboard)
+}
+
+pub(super) fn cut_input_line_to_clipboard_with<F>(app: &mut App, mut copy_text: F) -> bool
+where
+    F: FnMut(&str) -> bool,
+{
+    if app.input.is_empty() {
+        return false;
+    }
+
+    if !copy_text(&app.input) {
+        app.set_status_notice("Failed to copy input line");
+        return false;
+    }
+
+    app.input.clear();
+    app.cursor_pos = 0;
+    app.reset_tab_completion();
+    app.sync_model_picker_preview_from_input();
+    app.set_status_notice("✂ Cut input line");
+    true
+}
+
 pub(super) fn handle_paste(app: &mut App, text: String) {
     // Note: clipboard_image() is NOT checked here. Bracketed paste events from the
     // terminal always deliver text. Checking clipboard_image() here caused a bug where
@@ -182,6 +207,10 @@ pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
             app.input.drain(..app.cursor_pos);
             app.cursor_pos = 0;
             app.sync_model_picker_preview_from_input();
+            true
+        }
+        KeyCode::Char('x') => {
+            cut_input_line_to_clipboard(app);
             true
         }
         KeyCode::Char('a') => {

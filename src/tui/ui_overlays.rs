@@ -290,6 +290,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Ctrl+C / Ctrl+D",
         "Quit (press twice to confirm)",
     ));
+    lines.push(key_entry("Ctrl+X", "Cut entire input line to clipboard"));
     lines.push(key_entry("Ctrl+U", "Clear input line"));
     lines.push(key_entry("Ctrl+S", "Stash / pop input (save for later)"));
     lines.push(key_entry("Ctrl+Up", "Retrieve pending message for editing"));
