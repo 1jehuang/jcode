@@ -1120,7 +1120,7 @@ impl App {
                 "`/auth`\nShow authentication status for all providers.\n\n`/login`\nInteractive provider selection - pick a provider to log into.\n\n`/login <provider>`\nStart login flow directly for any provider shown by `/login` or the `/login ` completions.\n\nUse `/login jcode` for curated jcode subscription access via your router, not OpenRouter BYOK."
             }
             "account" | "accounts" => {
-                "`/account`\nList all Anthropic OAuth accounts.\n\n`/account add <label>`\nAdd a new account via OAuth login.\n\n`/account switch <label>`\nSwitch the active account.\n\n`/account remove <label>`\nRemove an account."
+                "`/account`\nList all Anthropic OAuth accounts.\n\n`/account add <label>`\nAdd a new Anthropic account via OAuth login.\n\n`/account switch <label>`\nSwitch the active Anthropic account.\n\n`/account remove <label>`\nRemove an Anthropic account.\n\n`/account openai`\nList all OpenAI OAuth accounts.\n\n`/account openai add <label>`\nAdd a new OpenAI account via OAuth login.\n\n`/account openai switch <label>`\nSwitch the active OpenAI account.\n\n`/account openai remove <label>`\nRemove an OpenAI account."
             }
             "save" => {
                 "`/save`\nBookmark the current session so it appears at the top of `/resume`.\n\n`/save <label>`\nBookmark with a custom label for easy identification.\n\nSaved sessions are shown in a dedicated \"Saved\" section in the session picker."

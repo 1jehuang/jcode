@@ -371,3 +371,44 @@ pub(super) async fn handle_switch_anthropic_account(
         }
     }
 }
+
+pub(super) async fn handle_switch_openai_account(
+    id: u64,
+    label: String,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    match crate::auth::codex::set_active_account(&label) {
+        Ok(()) => {
+            crate::auth::AuthStatus::invalidate_cache();
+
+            {
+                let agent_guard = agent.lock().await;
+                let provider = agent_guard.provider_handle();
+                drop(agent_guard);
+                provider.invalidate_credentials().await;
+            }
+
+            crate::provider::clear_all_provider_unavailability_for_account();
+            crate::provider::clear_all_model_unavailability_for_account();
+
+            {
+                let mut agent_guard = agent.lock().await;
+                agent_guard.reset_provider_session();
+            }
+
+            tokio::spawn(async {
+                let _ = crate::usage::get_openai_usage().await;
+            });
+
+            let _ = client_event_tx.send(ServerEvent::Done { id });
+        }
+        Err(e) => {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: format!("Failed to switch OpenAI account: {}", e),
+                retry_after_secs: None,
+            });
+        }
+    }
+}

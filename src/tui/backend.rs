@@ -546,6 +546,17 @@ impl RemoteConnection {
         .await
     }
 
+    /// Ask server to switch active OpenAI account for this process/session.
+    pub async fn switch_openai_account(&mut self, label: &str) -> Result<()> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::SwitchOpenAiAccount {
+            id,
+            label: label.to_string(),
+        })
+        .await
+    }
+
     /// Send a response for a client debug request
     pub async fn send_client_debug_response(&mut self, id: u64, output: String) -> Result<()> {
         self.send_request(Request::ClientDebugResponse { id, output })

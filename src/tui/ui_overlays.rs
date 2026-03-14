@@ -200,7 +200,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "/login [provider]",
         "Interactive or direct login",
     ));
-    lines.push(help_entry("/account", "Manage Anthropic OAuth accounts"));
+    lines.push(help_entry(
+        "/account",
+        "Manage Anthropic/OpenAI OAuth accounts",
+    ));
     lines.push(help_entry(
         "/subscription",
         "Inspect jcode subscription scaffold",

@@ -3368,6 +3368,9 @@ impl Provider for MultiProvider {
         if let Some(ref anthropic) = self.anthropic {
             anthropic.invalidate_credentials().await;
         }
+        if let Some(ref openai) = self.openai {
+            openai.invalidate_credentials().await;
+        }
     }
 
     fn handles_tools_internally(&self) -> bool {

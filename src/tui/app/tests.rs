@@ -302,6 +302,37 @@ fn test_show_accounts_includes_masked_email_column() {
 }
 
 #[test]
+fn test_account_openai_command_lists_openai_accounts() {
+    let _guard = crate::storage::lock_test_env();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+        label: "work".to_string(),
+        access_token: "acc".to_string(),
+        refresh_token: "ref".to_string(),
+        id_token: None,
+        account_id: Some("acct_work".to_string()),
+        expires_at: Some(now_ms + 60_000),
+        email: Some("user@example.com".to_string()),
+    })
+    .unwrap();
+
+    let mut app = create_test_app();
+    app.input = "/account openai".to_string();
+    app.submit_input();
+
+    let msg = app
+        .display_messages()
+        .last()
+        .expect("missing /account openai response");
+    assert_eq!(msg.role, "system");
+    assert!(msg.content.contains("**OpenAI Accounts:**"));
+    assert!(msg.content.contains("work"));
+    assert!(msg.content.contains("u***r@example.com"));
+    assert!(msg.content.contains("acct_work"));
+}
+
+#[test]
 fn test_commands_alias_shows_help() {
     let mut app = create_test_app();
     app.input = "/commands".to_string();
@@ -711,7 +742,11 @@ fn test_mouse_scroll_over_tool_side_panel_updates_visible_render() {
 
     let before = render_and_snap(&app, &mut terminal);
     assert!(crate::tui::ui::pinned_pane_total_lines() > 3);
-    assert!(crate::tui::ui::last_layout_snapshot().and_then(|l| l.diff_pane_area).is_some());
+    assert!(
+        crate::tui::ui::last_layout_snapshot()
+            .and_then(|l| l.diff_pane_area)
+            .is_some()
+    );
     assert!(before.contains("side-scroll-01"));
 
     let scroll_only = app.handle_mouse_event(MouseEvent {
@@ -720,12 +755,18 @@ fn test_mouse_scroll_over_tool_side_panel_updates_visible_render() {
         row: 3,
         modifiers: KeyModifiers::empty(),
     });
-    assert!(scroll_only, "wheel scroll should remain deferrable while streaming");
+    assert!(
+        scroll_only,
+        "wheel scroll should remain deferrable while streaming"
+    );
     assert_eq!(app.diff_pane_scroll, 3);
 
     let after = render_and_snap(&app, &mut terminal);
     assert_eq!(crate::tui::ui::last_diff_pane_effective_scroll(), 3);
-    assert_ne!(before, after, "hover scrolling should repaint the side panel");
+    assert_ne!(
+        before, after,
+        "hover scrolling should repaint the side panel"
+    );
     assert!(after.contains("side-scroll-04"));
     assert!(after.contains("side-scroll-05"));
     assert!(!after.contains("side-scroll-01"));

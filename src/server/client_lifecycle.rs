@@ -23,7 +23,7 @@ use super::comm_sync::{handle_comm_read_context, handle_comm_resync_plan, handle
 use super::provider_control::{
     handle_cycle_model, handle_notify_auth_changed, handle_set_compaction_mode, handle_set_model,
     handle_set_premium_mode, handle_set_reasoning_effort, handle_set_service_tier,
-    handle_set_transport, handle_switch_anthropic_account,
+    handle_set_transport, handle_switch_anthropic_account, handle_switch_openai_account,
 };
 use super::{
     ClientConnectionInfo, ClientDebugState, FileAccess, SessionInterruptQueues, SharedContext,
@@ -766,6 +766,10 @@ pub(super) async fn handle_client(
 
             Request::SwitchAnthropicAccount { id, label } => {
                 handle_switch_anthropic_account(id, label, &agent, &client_event_tx).await;
+            }
+
+            Request::SwitchOpenAiAccount { id, label } => {
+                handle_switch_openai_account(id, label, &agent, &client_event_tx).await;
             }
 
             Request::SetFeature {

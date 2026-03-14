@@ -50,6 +50,25 @@ fn mask_email(email: &str) -> String {
     format!("{}@{}", masked_local, domain)
 }
 
+fn openai_provider_display_name(
+    label: &str,
+    email: Option<&str>,
+    account_count: usize,
+    is_active: bool,
+) -> String {
+    let email_suffix = email
+        .map(mask_email)
+        .map(|masked| format!(" ({})", masked))
+        .unwrap_or_default();
+
+    if account_count <= 1 {
+        format!("OpenAI (ChatGPT){}", email_suffix)
+    } else {
+        let active_marker = if is_active { " ✦" } else { "" };
+        format!("OpenAI - {}{}{}", label, email_suffix, active_marker)
+    }
+}
+
 /// Usage data from the API
 #[derive(Debug, Clone, Default)]
 pub struct UsageData {
@@ -405,17 +424,15 @@ pub async fn fetch_all_provider_usage() -> Vec<ProviderUsage> {
 
     let mut results = Vec::new();
 
-    let (anthropic_results, openai, openrouter, copilot) = tokio::join!(
+    let (anthropic_results, openai_results, openrouter, copilot) = tokio::join!(
         fetch_all_anthropic_usage_reports(),
-        fetch_openai_usage_report(),
+        fetch_all_openai_usage_reports(),
         fetch_openrouter_usage_report(),
         fetch_copilot_usage_report(),
     );
 
     results.extend(anthropic_results);
-    if let Some(r) = openai {
-        results.push(r);
-    }
+    results.extend(openai_results);
     if let Some(r) = openrouter {
         results.push(r);
     }
@@ -472,9 +489,7 @@ async fn sync_active_anthropic_usage_from_reports(results: &[ProviderUsage]) {
 }
 
 async fn sync_openai_usage_from_reports(results: &[ProviderUsage]) {
-    let report = results
-        .iter()
-        .find(|report| report.provider_name == "OpenAI (ChatGPT)");
+    let report = active_openai_usage_report(results);
     let usage = get_openai_usage_cell().await;
     let mut cached = usage.write().await;
 
@@ -511,6 +526,41 @@ fn active_anthropic_usage_report(results: &[ProviderUsage]) -> Option<&ProviderU
             report.provider_name.starts_with("Anthropic") && report.provider_name.contains(" ✦")
         })
         .or(Some(first))
+}
+
+fn active_openai_usage_report(results: &[ProviderUsage]) -> Option<&ProviderUsage> {
+    let accounts = auth::codex::list_accounts().unwrap_or_default();
+    if accounts.is_empty() {
+        return results
+            .iter()
+            .find(|report| report.provider_name.starts_with("OpenAI (ChatGPT)"));
+    }
+
+    let active_label = auth::codex::active_account_label();
+    let active_account = active_label.as_deref().and_then(|label| {
+        accounts
+            .iter()
+            .find(|account| account.label == label)
+            .or_else(|| accounts.first())
+    });
+
+    let expected_name = active_account.map(|account| {
+        openai_provider_display_name(
+            &account.label,
+            account.email.as_deref(),
+            accounts.len(),
+            accounts.len() > 1,
+        )
+    });
+
+    expected_name
+        .as_deref()
+        .and_then(|name| results.iter().find(|report| report.provider_name == name))
+        .or_else(|| {
+            results
+                .iter()
+                .find(|report| report.provider_name.starts_with("OpenAI"))
+        })
 }
 
 fn usage_data_from_provider_report(report: &ProviderUsage) -> UsageData {
@@ -856,90 +906,166 @@ async fn fetch_anthropic_usage_for_token(
     }
 }
 
-async fn fetch_openai_usage_report() -> Option<ProviderUsage> {
-    let creds = auth::codex::load_credentials().ok()?;
-    if creds.access_token.is_empty() {
-        return None;
+async fn fetch_all_openai_usage_reports() -> Vec<ProviderUsage> {
+    let accounts = auth::codex::list_accounts().unwrap_or_default();
+    if !accounts.is_empty() {
+        let active_label = auth::codex::active_account_label();
+        let mut reports = Vec::with_capacity(accounts.len());
+        for account in &accounts {
+            let display_name = openai_provider_display_name(
+                &account.label,
+                account.email.as_deref(),
+                accounts.len(),
+                active_label.as_deref() == Some(&account.label),
+            );
+            reports.push(
+                fetch_openai_usage_for_account(
+                    display_name,
+                    auth::codex::CodexCredentials {
+                        access_token: account.access_token.clone(),
+                        refresh_token: account.refresh_token.clone(),
+                        id_token: account.id_token.clone(),
+                        account_id: account.account_id.clone(),
+                        expires_at: account.expires_at,
+                    },
+                    Some(account.label.as_str()),
+                )
+                .await,
+            );
+        }
+        return reports;
     }
 
+    let creds = match auth::codex::load_credentials() {
+        Ok(creds) => creds,
+        Err(_) => return Vec::new(),
+    };
     let is_chatgpt = !creds.refresh_token.is_empty() || creds.id_token.is_some();
-    if !is_chatgpt {
-        return None;
+    if !is_chatgpt || creds.access_token.is_empty() {
+        return Vec::new();
     }
 
-    let access_token = if let Some(expires_at) = creds.expires_at {
+    vec![
+        fetch_openai_usage_for_account(
+            openai_provider_display_name("default", None, 1, true),
+            creds,
+            None,
+        )
+        .await,
+    ]
+}
+
+async fn fetch_openai_usage_report() -> Option<ProviderUsage> {
+    let reports = fetch_all_openai_usage_reports().await;
+    active_openai_usage_report(&reports)
+        .cloned()
+        .or_else(|| reports.into_iter().next())
+}
+
+async fn fetch_openai_usage_for_account(
+    display_name: String,
+    mut creds: auth::codex::CodexCredentials,
+    account_label: Option<&str>,
+) -> ProviderUsage {
+    let is_chatgpt = !creds.refresh_token.is_empty() || creds.id_token.is_some();
+    if creds.access_token.is_empty() || !is_chatgpt {
+        return ProviderUsage {
+            provider_name: display_name,
+            error: Some("No OpenAI/Codex OAuth credentials found".to_string()),
+            ..Default::default()
+        };
+    }
+
+    if let Some(expires_at) = creds.expires_at {
         let now = chrono::Utc::now().timestamp_millis();
         if expires_at < now + 300_000 && !creds.refresh_token.is_empty() {
-            match crate::auth::oauth::refresh_openai_tokens(&creds.refresh_token).await {
-                Ok(refreshed) => refreshed.access_token,
+            let refreshed = match account_label {
+                Some(label) => {
+                    crate::auth::oauth::refresh_openai_tokens_for_account(
+                        &creds.refresh_token,
+                        label,
+                    )
+                    .await
+                }
+                None => crate::auth::oauth::refresh_openai_tokens(&creds.refresh_token).await,
+            };
+            match refreshed {
+                Ok(refreshed) => {
+                    creds.access_token = refreshed.access_token;
+                    creds.refresh_token = refreshed.refresh_token;
+                    creds.id_token = refreshed.id_token.or(creds.id_token);
+                    creds.account_id = creds.account_id.clone().or_else(|| {
+                        creds
+                            .id_token
+                            .as_deref()
+                            .and_then(auth::codex::extract_account_id)
+                    });
+                    creds.expires_at = Some(refreshed.expires_at);
+                }
                 Err(e) => {
-                    return Some(ProviderUsage {
-                        provider_name: "OpenAI (ChatGPT)".to_string(),
+                    return ProviderUsage {
+                        provider_name: display_name,
                         error: Some(format!(
                             "Token refresh failed: {} - use `/login openai` to re-authenticate",
                             e
                         )),
                         ..Default::default()
-                    });
+                    };
                 }
             }
-        } else {
-            creds.access_token.clone()
         }
-    } else {
-        creds.access_token.clone()
-    };
+    }
 
     let client = crate::provider::shared_http_client();
     let mut builder = client
         .get(OPENAI_USAGE_URL)
         .header("Accept", "application/json")
-        .header("Authorization", format!("Bearer {}", access_token));
+        .header("Authorization", format!("Bearer {}", creds.access_token));
 
     if let Some(ref account_id) = creds.account_id {
         builder = builder.header("chatgpt-account-id", account_id);
     }
 
     let response = match builder.send().await {
-        Ok(r) => r,
+        Ok(response) => response,
         Err(e) => {
-            return Some(ProviderUsage {
-                provider_name: "OpenAI (ChatGPT)".to_string(),
+            return ProviderUsage {
+                provider_name: display_name,
                 error: Some(format!("Failed to fetch: {}", e)),
                 ..Default::default()
-            });
+            };
         }
     };
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Some(ProviderUsage {
-            provider_name: "OpenAI (ChatGPT)".to_string(),
+        return ProviderUsage {
+            provider_name: display_name,
             error: Some(format!("API error ({}): {}", status, body)),
             ..Default::default()
-        });
+        };
     }
 
     let body_text = match response.text().await {
-        Ok(t) => t,
+        Ok(text) => text,
         Err(e) => {
-            return Some(ProviderUsage {
-                provider_name: "OpenAI (ChatGPT)".to_string(),
+            return ProviderUsage {
+                provider_name: display_name,
                 error: Some(format!("Failed to read response: {}", e)),
                 ..Default::default()
-            });
+            };
         }
     };
 
     let json: serde_json::Value = match serde_json::from_str(&body_text) {
-        Ok(v) => v,
+        Ok(value) => value,
         Err(e) => {
-            return Some(ProviderUsage {
-                provider_name: "OpenAI (ChatGPT)".to_string(),
+            return ProviderUsage {
+                provider_name: display_name,
                 error: Some(format!("Failed to parse response: {}", e)),
                 ..Default::default()
-            });
+            };
         }
     };
 
@@ -1003,51 +1129,50 @@ async fn fetch_openai_usage_report() -> Option<ProviderUsage> {
         }
     }
 
-    if limits.is_empty() {
-        if let Some(rate_limits) = json.get("rate_limits").and_then(|v| v.as_array()) {
-            for entry in rate_limits {
-                if let Some(obj) = entry.as_object() {
-                    if let Some(usage_percent) = parse_usage_percent_from_obj(obj) {
-                        limits.push(UsageLimit {
-                            name: parse_limit_name(entry, "unknown"),
-                            usage_percent,
-                            resets_at: parse_resets_at_from_obj(obj),
-                        });
-                    }
-                }
+    if limits.is_empty()
+        && let Some(rate_limits) = json.get("rate_limits").and_then(|v| v.as_array())
+    {
+        for entry in rate_limits {
+            if let Some(obj) = entry.as_object()
+                && let Some(usage_percent) = parse_usage_percent_from_obj(obj)
+            {
+                limits.push(UsageLimit {
+                    name: parse_limit_name(entry, "unknown"),
+                    usage_percent,
+                    resets_at: parse_resets_at_from_obj(obj),
+                });
             }
         }
     }
 
-    if limits.is_empty() {
-        if let Some(obj) = json.as_object() {
-            for (key, value) in obj {
-                if key == "rate_limits" || key == "rate_limit" || key == "additional_rate_limits" {
+    if limits.is_empty()
+        && let Some(obj) = json.as_object()
+    {
+        for (key, value) in obj {
+            if key == "rate_limits" || key == "rate_limit" || key == "additional_rate_limits" {
+                continue;
+            }
+
+            if let Some(inner) = value.as_object() {
+                if let Some(usage_percent) = parse_usage_percent_from_obj(inner) {
+                    limits.push(UsageLimit {
+                        name: humanize_key(key),
+                        usage_percent,
+                        resets_at: parse_resets_at_from_obj(inner),
+                    });
                     continue;
                 }
 
-                if let Some(inner) = value.as_object() {
-                    if let Some(usage_percent) = parse_usage_percent_from_obj(inner) {
-                        limits.push(UsageLimit {
-                            name: humanize_key(key),
-                            usage_percent,
-                            resets_at: parse_resets_at_from_obj(inner),
-                        });
-                        continue;
-                    }
-
-                    if let Some(windows) = inner.get("rate_limits").and_then(|v| v.as_array()) {
-                        for entry in windows {
-                            if let Some(entry_obj) = entry.as_object() {
-                                if let Some(usage_percent) = parse_usage_percent_from_obj(entry_obj)
-                                {
-                                    limits.push(UsageLimit {
-                                        name: parse_limit_name(entry, key),
-                                        usage_percent,
-                                        resets_at: parse_resets_at_from_obj(entry_obj),
-                                    });
-                                }
-                            }
+                if let Some(windows) = inner.get("rate_limits").and_then(|v| v.as_array()) {
+                    for entry in windows {
+                        if let Some(entry_obj) = entry.as_object()
+                            && let Some(usage_percent) = parse_usage_percent_from_obj(entry_obj)
+                        {
+                            limits.push(UsageLimit {
+                                name: parse_limit_name(entry, key),
+                                usage_percent,
+                                resets_at: parse_resets_at_from_obj(entry_obj),
+                            });
                         }
                     }
                 }
@@ -1064,12 +1189,12 @@ async fn fetch_openai_usage_report() -> Option<ProviderUsage> {
         extra_info.insert(0, ("Plan".to_string(), plan.to_string()));
     }
 
-    Some(ProviderUsage {
-        provider_name: "OpenAI (ChatGPT)".to_string(),
+    ProviderUsage {
+        provider_name: display_name,
         limits,
         extra_info,
         error: None,
-    })
+    }
 }
 
 async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {

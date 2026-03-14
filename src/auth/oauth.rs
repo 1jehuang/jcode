@@ -888,45 +888,39 @@ pub async fn refresh_claude_tokens_for_account(
 
 /// Save OpenAI tokens to auth file
 pub fn save_openai_tokens(tokens: &OAuthTokens) -> Result<()> {
-    let auth_path = crate::storage::user_home_path(".codex/auth.json")?;
-    let creds_dir = auth_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("OpenAI auth path has no parent directory"))?;
-    std::fs::create_dir_all(creds_dir)?;
-    crate::platform::set_directory_permissions_owner_only(creds_dir)?;
+    save_openai_tokens_for_account(tokens, "default")
+}
 
-    #[derive(Serialize)]
-    struct AuthFile {
-        tokens: TokenInfo,
-    }
-
-    #[derive(Serialize)]
-    struct TokenInfo {
-        access_token: String,
-        refresh_token: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        id_token: Option<String>,
-        expires_at: i64,
-    }
-
-    let auth = AuthFile {
-        tokens: TokenInfo {
-            access_token: tokens.access_token.clone(),
-            refresh_token: tokens.refresh_token.clone(),
-            id_token: tokens.id_token.clone(),
-            expires_at: tokens.expires_at,
-        },
-    };
-
-    let json = serde_json::to_string_pretty(&auth)?;
-    std::fs::write(&auth_path, json)?;
-    crate::platform::set_permissions_owner_only(&auth_path)?;
-
+/// Save OpenAI tokens for a named account.
+pub fn save_openai_tokens_for_account(tokens: &OAuthTokens, label: &str) -> Result<()> {
+    crate::auth::codex::upsert_account_from_tokens(
+        label,
+        &tokens.access_token,
+        &tokens.refresh_token,
+        tokens.id_token.clone(),
+        Some(tokens.expires_at),
+    )?;
     Ok(())
 }
 
 /// Refresh OpenAI/Codex OAuth tokens
 pub async fn refresh_openai_tokens(refresh_token: &str) -> Result<OAuthTokens> {
+    let active_label = crate::auth::codex::active_account_label();
+    refresh_openai_tokens_inner(refresh_token, active_label.as_deref()).await
+}
+
+/// Refresh OpenAI/Codex OAuth tokens for a specific named account.
+pub async fn refresh_openai_tokens_for_account(
+    refresh_token: &str,
+    label: &str,
+) -> Result<OAuthTokens> {
+    refresh_openai_tokens_inner(refresh_token, Some(label)).await
+}
+
+async fn refresh_openai_tokens_inner(
+    refresh_token: &str,
+    label: Option<&str>,
+) -> Result<OAuthTokens> {
     let client = reqwest::Client::new();
     let resp = client
         .post(openai::TOKEN_URL)
@@ -962,7 +956,11 @@ pub async fn refresh_openai_tokens(refresh_token: &str) -> Result<OAuthTokens> {
         id_token: tokens.id_token,
     };
 
-    save_openai_tokens(&oauth_tokens)?;
+    if let Some(label) = label {
+        save_openai_tokens_for_account(&oauth_tokens, label)?;
+    } else {
+        save_openai_tokens(&oauth_tokens)?;
+    }
     Ok(oauth_tokens)
 }
 

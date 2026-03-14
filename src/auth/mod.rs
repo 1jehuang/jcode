@@ -243,14 +243,29 @@ impl AuthStatus {
                     }
                 }
                 LoginProviderAuthStateKey::OpenAi => {
-                    if self.openai_has_oauth && self.openai_has_api_key {
-                        "OAuth + API key".to_string()
+                    let detail = if self.openai_has_oauth && self.openai_has_api_key {
+                        "OAuth + API key"
                     } else if self.openai_has_oauth {
-                        "OAuth".to_string()
+                        "OAuth"
                     } else if self.openai_has_api_key {
-                        "API key".to_string()
+                        "API key"
                     } else {
-                        "not configured".to_string()
+                        "not configured"
+                    };
+
+                    let accounts = crate::auth::codex::list_accounts().unwrap_or_default();
+                    if accounts.len() > 1 {
+                        let active = crate::auth::codex::active_account_label()
+                            .unwrap_or_else(|| "?".to_string());
+                        format!(
+                            "{detail} ({} accounts, active: `{}`)",
+                            accounts.len(),
+                            active
+                        )
+                    } else if accounts.len() == 1 {
+                        format!("{detail} (account: `{}`)", accounts[0].label)
+                    } else {
+                        detail.to_string()
                     }
                 }
                 _ => provider.auth_status_method.to_string(),

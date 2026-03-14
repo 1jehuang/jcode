@@ -19,6 +19,13 @@ pub(super) enum PendingLogin {
         expected_state: String,
         redirect_uri: String,
     },
+    /// Waiting for user to paste an OpenAI OAuth callback URL/query for a named account.
+    OpenAiAccount {
+        verifier: String,
+        label: String,
+        expected_state: String,
+        redirect_uri: String,
+    },
     /// Waiting for user to paste a Gemini OAuth callback URL/query or auth code.
     Gemini {
         verifier: String,
@@ -132,7 +139,7 @@ impl App {
             ));
         }
         message.push_str(
-            "\nUse `/login <provider>` to authenticate. `/login jcode` is for curated jcode subscription access; `/account` manages Anthropic OAuth accounts.",
+            "\nUse `/login <provider>` to authenticate. `/login jcode` is for curated jcode subscription access; `/account` manages Anthropic accounts and `/account openai` manages OpenAI accounts.",
         );
         self.push_display_message(DisplayMessage::system(message));
     }
@@ -478,6 +485,53 @@ impl App {
         self.push_display_message(DisplayMessage::system(lines.join("\n")));
     }
 
+    pub(super) fn show_openai_accounts(&mut self) {
+        let accounts = crate::auth::codex::list_accounts().unwrap_or_default();
+        let active_label = crate::auth::codex::active_account_label();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        if accounts.is_empty() {
+            self.push_display_message(DisplayMessage::system(
+                "**OpenAI Accounts:** none configured\n\n\
+                 Use `/account openai add <label>` to add an account, or `/login openai` for a default account."
+                    .to_string(),
+            ));
+            return;
+        }
+
+        let mut lines = vec!["**OpenAI Accounts:**\n".to_string()];
+        lines.push("| Account | Email | Status | ChatGPT Account ID | Active |".to_string());
+        lines.push("|---------|-------|--------|--------------------|--------|".to_string());
+
+        for account in &accounts {
+            let is_active = active_label.as_deref() == Some(&account.label);
+            let status = match account.expires_at {
+                Some(expires_at) if expires_at > now_ms => "✓ valid",
+                Some(_) => "⚠ expired",
+                None => "✓ valid",
+            };
+            let email = account
+                .email
+                .as_deref()
+                .map(mask_email)
+                .unwrap_or_else(|| "unknown".to_string());
+            let account_id = account.account_id.as_deref().unwrap_or("unknown");
+            let active_mark = if is_active { "◉" } else { "" };
+            lines.push(format!(
+                "| {} | {} | {} | {} | {} |",
+                account.label, email, status, account_id, active_mark
+            ));
+        }
+
+        lines.push(String::new());
+        lines.push(
+            "Commands: `/account openai switch <label>`, `/account openai add <label>`, `/account openai remove <label>`"
+                .to_string(),
+        );
+
+        self.push_display_message(DisplayMessage::system(lines.join("\n")));
+    }
+
     pub(super) fn switch_account(&mut self, label: &str) {
         match crate::auth::claude::set_active_account(label) {
             Ok(()) => {
@@ -527,7 +581,59 @@ impl App {
         }
     }
 
+    pub(super) fn switch_openai_account(&mut self, label: &str) {
+        match crate::auth::codex::set_active_account(label) {
+            Ok(()) => {
+                {
+                    let provider = self.provider.clone();
+                    let label_owned = label.to_string();
+                    tokio::spawn(async move {
+                        provider.invalidate_credentials().await;
+                        crate::logging::info(&format!(
+                            "Switched to OpenAI account '{}'",
+                            label_owned
+                        ));
+                    });
+                }
+                self.push_display_message(DisplayMessage::system(format!(
+                    "Switched to OpenAI account `{}`.",
+                    label
+                )));
+                crate::auth::AuthStatus::invalidate_cache();
+                self.context_limit = self.provider.context_window() as u64;
+                self.context_warning_shown = false;
+            }
+            Err(e) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Failed to switch OpenAI account: {}",
+                    e
+                )));
+            }
+        }
+    }
+
+    pub(super) fn remove_openai_account(&mut self, label: &str) {
+        match crate::auth::codex::remove_account(label) {
+            Ok(()) => {
+                self.push_display_message(DisplayMessage::system(format!(
+                    "Removed OpenAI account `{}`.",
+                    label
+                )));
+            }
+            Err(e) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Failed to remove OpenAI account: {}",
+                    e
+                )));
+            }
+        }
+    }
+
     fn start_openai_login(&mut self) {
+        self.start_openai_login_for_account("default");
+    }
+
+    fn start_openai_login_for_account(&mut self, label: &str) {
         use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
         use sha2::{Digest, Sha256};
 
@@ -567,12 +673,21 @@ impl App {
         let callback_listener = crate::auth::oauth::bind_callback_listener(port).ok();
         let callback_available = callback_listener.is_some();
         let browser_opened = open::that(&auth_url).is_ok();
+        let label_owned = label.to_string();
 
         if let Some(listener) = callback_listener {
             let verifier_clone = verifier.clone();
             let state_clone = state.clone();
+            let label_clone = label_owned.clone();
             tokio::spawn(async move {
-                match Self::openai_login_callback(verifier_clone, state_clone, listener).await {
+                match Self::openai_login_callback(
+                    verifier_clone,
+                    state_clone,
+                    Some(label_clone),
+                    listener,
+                )
+                .await
+                {
                     Ok(msg) => {
                         crate::logging::info(&format!("OpenAI login: {}", msg));
                         Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
@@ -609,24 +724,34 @@ impl App {
         };
 
         self.push_display_message(DisplayMessage::system(format!(
-            "**OpenAI OAuth Login**\n\n\
+            "**OpenAI OAuth Login** (account: `{}`)\n\n\
              Opening browser for authentication...\n\n\
              If the browser didn't open, visit:\n{}\n\n\
              {}{}\
              Or paste the full callback URL or query string here to finish from another device.{}",
-            auth_url, browser_line, callback_line, qr_section
+            label, auth_url, browser_line, callback_line, qr_section
         )));
-        self.set_status_notice("Login: waiting…");
-        self.pending_login = Some(PendingLogin::OpenAi {
-            verifier,
-            expected_state: state,
-            redirect_uri,
-        });
+        self.set_status_notice(&format!("Login [{}]: waiting…", label));
+        self.pending_login = if label == "default" {
+            Some(PendingLogin::OpenAi {
+                verifier,
+                expected_state: state,
+                redirect_uri,
+            })
+        } else {
+            Some(PendingLogin::OpenAiAccount {
+                verifier,
+                label: label.to_string(),
+                expected_state: state,
+                redirect_uri,
+            })
+        };
     }
 
     async fn openai_login_callback(
         verifier: String,
         expected_state: String,
+        label: Option<String>,
         listener: tokio::net::TcpListener,
     ) -> Result<String, String> {
         let port = crate::auth::oauth::openai::DEFAULT_PORT;
@@ -639,12 +764,13 @@ impl App {
         .map_err(|_| "Login timed out after 5 minutes. Please try again.".to_string())?
         .map_err(|e| format!("Callback failed: {}", e))?;
 
-        Self::openai_token_exchange(verifier, code, None, &redirect_uri).await
+        Self::openai_token_exchange(verifier, code, label, None, &redirect_uri).await
     }
 
     async fn openai_token_exchange(
         verifier: String,
         input: String,
+        label: Option<String>,
         expected_state: Option<String>,
         redirect_uri: &str,
     ) -> Result<String, String> {
@@ -663,10 +789,18 @@ impl App {
                 .map_err(|e| e.to_string())?
         };
 
-        crate::auth::oauth::save_openai_tokens(&oauth_tokens)
+        let label = label.unwrap_or_else(|| "default".to_string());
+        crate::auth::oauth::save_openai_tokens_for_account(&oauth_tokens, &label)
             .map_err(|e| format!("Failed to save tokens: {}", e))?;
 
-        Ok("Successfully logged in to OpenAI!".to_string())
+        if label == "default" {
+            Ok("Successfully logged in to OpenAI!".to_string())
+        } else {
+            Ok(format!(
+                "Successfully logged in to OpenAI! (account: {})",
+                label
+            ))
+        }
     }
 
     fn start_gemini_login(&mut self) {
@@ -1144,6 +1278,7 @@ impl App {
 
         match &pending {
             PendingLogin::OpenAi { .. }
+            | PendingLogin::OpenAiAccount { .. }
             | PendingLogin::Gemini {
                 expected_state: Some(_),
                 ..
@@ -1242,6 +1377,7 @@ impl App {
                     match Self::openai_token_exchange(
                         verifier,
                         input_owned,
+                        None,
                         Some(expected_state),
                         &redirect_uri,
                     )
@@ -1266,6 +1402,46 @@ impl App {
                 self.push_display_message(DisplayMessage::system(
                     "Exchanging OpenAI callback for tokens...".to_string(),
                 ));
+            }
+            PendingLogin::OpenAiAccount {
+                verifier,
+                label,
+                expected_state,
+                redirect_uri,
+            } => {
+                self.set_status_notice(&format!("Login [{}]: exchanging...", label));
+                let input_owned = input.clone();
+                let label_clone = label.clone();
+                tokio::spawn(async move {
+                    match Self::openai_token_exchange(
+                        verifier,
+                        input_owned,
+                        Some(label_clone.clone()),
+                        Some(expected_state),
+                        &redirect_uri,
+                    )
+                    .await
+                    {
+                        Ok(msg) => {
+                            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                                provider: "openai".to_string(),
+                                success: true,
+                                message: msg,
+                            }));
+                        }
+                        Err(e) => {
+                            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                                provider: "openai".to_string(),
+                                success: false,
+                                message: format!("OpenAI login [{}] failed: {}", label_clone, e),
+                            }));
+                        }
+                    }
+                });
+                self.push_display_message(DisplayMessage::system(format!(
+                    "Exchanging OpenAI callback for account `{}`...",
+                    label
+                )));
             }
             PendingLogin::Gemini {
                 verifier,
@@ -1606,12 +1782,63 @@ pub(super) fn handle_auth_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    if trimmed == "/account openai" || trimmed == "/accounts openai" {
+        app.show_openai_accounts();
+        return true;
+    }
+
     if trimmed == "/subscription" || trimmed == "/subscription status" {
         app.show_jcode_subscription_status();
         return true;
     }
 
     if let Some(sub) = trimmed.strip_prefix("/account ") {
+        if let Some(openai_sub) = sub.trim().strip_prefix("openai") {
+            let openai_sub = openai_sub.trim();
+            if openai_sub.is_empty() {
+                app.show_openai_accounts();
+                return true;
+            }
+            let parts: Vec<&str> = openai_sub.splitn(2, ' ').collect();
+            match parts[0] {
+                "list" | "ls" => app.show_openai_accounts(),
+                "switch" | "use" => {
+                    if let Some(label) = parts.get(1) {
+                        app.switch_openai_account(label.trim());
+                    } else {
+                        app.push_display_message(DisplayMessage::error(
+                            "Usage: `/account openai switch <label>`".to_string(),
+                        ));
+                    }
+                }
+                "add" | "login" => {
+                    let label = parts.get(1).map(|s| s.trim()).unwrap_or("default");
+                    app.start_openai_login_for_account(label);
+                }
+                "remove" | "rm" | "delete" => {
+                    if let Some(label) = parts.get(1) {
+                        app.remove_openai_account(label.trim());
+                    } else {
+                        app.push_display_message(DisplayMessage::error(
+                            "Usage: `/account openai remove <label>`".to_string(),
+                        ));
+                    }
+                }
+                other => {
+                    let accounts = crate::auth::codex::list_accounts().unwrap_or_default();
+                    if accounts.iter().any(|a| a.label == other) {
+                        app.switch_openai_account(other);
+                    } else {
+                        app.push_display_message(DisplayMessage::error(format!(
+                            "Unknown OpenAI subcommand '{}'. Use: list, switch, add, remove",
+                            other
+                        )));
+                    }
+                }
+            }
+            return true;
+        }
+
         let parts: Vec<&str> = sub.trim().splitn(2, ' ').collect();
         match parts[0] {
             "list" | "ls" => app.show_accounts(),

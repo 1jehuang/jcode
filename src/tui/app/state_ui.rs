@@ -255,12 +255,30 @@ impl App {
                 ),
                 ("/account switch".into(), "Switch active account"),
                 ("/account remove".into(), "Remove an account"),
+                ("/account openai".into(), "List all OpenAI accounts"),
+                (
+                    "/account openai add".into(),
+                    "Add a new OpenAI account (start OAuth login)",
+                ),
+                (
+                    "/account openai switch".into(),
+                    "Switch active OpenAI account",
+                ),
+                ("/account openai remove".into(), "Remove an OpenAI account"),
             ];
             if let Ok(accounts) = crate::auth::claude::list_accounts() {
                 for account in accounts {
                     suggestions.push((
                         format!("/account switch {}", account.label),
                         "Switch to this account",
+                    ));
+                }
+            }
+            if let Ok(accounts) = crate::auth::codex::list_accounts() {
+                for account in accounts {
+                    suggestions.push((
+                        format!("/account openai switch {}", account.label),
+                        "Switch to this OpenAI account",
                     ));
                 }
             }
@@ -309,7 +327,7 @@ impl App {
             ),
             (
                 "/account".into(),
-                "Manage Anthropic accounts (list/add/switch/remove)",
+                "Manage Anthropic/OpenAI accounts (list/add/switch/remove)",
             ),
         ];
 

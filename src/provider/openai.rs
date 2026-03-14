@@ -2062,6 +2062,16 @@ impl Provider for OpenAIProvider {
             persistent_ws: Arc::new(Mutex::new(None)),
         })
     }
+
+    async fn invalidate_credentials(&self) {
+        if let Ok(credentials) = crate::auth::codex::load_credentials() {
+            let mut guard = self.credentials.write().await;
+            *guard = credentials;
+        }
+
+        let mut persistent_ws = self.persistent_ws.lock().await;
+        *persistent_ws = None;
+    }
 }
 
 async fn openai_access_token(

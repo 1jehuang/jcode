@@ -181,6 +181,11 @@ pub enum Request {
     #[serde(rename = "switch_anthropic_account")]
     SwitchAnthropicAccount { id: u64, label: String },
 
+    /// Switch active OpenAI account label on the server session.
+    /// This keeps account overrides and provider credential caches in sync.
+    #[serde(rename = "switch_openai_account")]
+    SwitchOpenAiAccount { id: u64, label: String },
+
     /// Send stdin input to a running command that requested it
     #[serde(rename = "stdin_response")]
     StdinResponse {
@@ -942,6 +947,7 @@ impl Request {
             Request::Compact { id } => *id,
             Request::NotifyAuthChanged { id } => *id,
             Request::SwitchAnthropicAccount { id, .. } => *id,
+            Request::SwitchOpenAiAccount { id, .. } => *id,
             Request::StdinResponse { id, .. } => *id,
             Request::AgentRegister { id, .. } => *id,
             Request::AgentTask { id, .. } => *id,

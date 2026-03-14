@@ -2907,6 +2907,53 @@ pub(super) async fn handle_remote_key(
                 }
 
                 if let Some(sub) = trimmed.strip_prefix("/account ") {
+                    if let Some(openai_sub) = sub.trim().strip_prefix("openai") {
+                        let openai_sub = openai_sub.trim();
+                        if openai_sub.is_empty() {
+                            app.input = trimmed.to_string();
+                            app.cursor_pos = app.input.len();
+                            app.submit_input();
+                            return Ok(());
+                        }
+
+                        let parts: Vec<&str> = openai_sub.splitn(2, ' ').collect();
+                        if matches!(parts[0], "switch" | "use") {
+                            if let Some(label) =
+                                parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty())
+                            {
+                                if let Err(e) = crate::auth::codex::set_active_account(label) {
+                                    app.push_display_message(DisplayMessage::error(format!(
+                                        "Failed to switch OpenAI account: {}",
+                                        e
+                                    )));
+                                    return Ok(());
+                                }
+                                crate::auth::AuthStatus::invalidate_cache();
+                                app.context_limit = app.provider.context_window() as u64;
+                                app.context_warning_shown = false;
+                                remote.switch_openai_account(label).await?;
+                                app.push_display_message(DisplayMessage::system(format!(
+                                    "Switched to OpenAI account `{}`.",
+                                    label
+                                )));
+                                app.set_status_notice(&format!(
+                                    "OpenAI account: switched to {}",
+                                    label
+                                ));
+                                return Ok(());
+                            }
+                            app.push_display_message(DisplayMessage::error(
+                                "Usage: `/account openai switch <label>`".to_string(),
+                            ));
+                            return Ok(());
+                        }
+
+                        app.input = trimmed.to_string();
+                        app.cursor_pos = app.input.len();
+                        app.submit_input();
+                        return Ok(());
+                    }
+
                     let parts: Vec<&str> = sub.trim().splitn(2, ' ').collect();
                     if matches!(parts[0], "switch" | "use") {
                         if let Some(label) =
