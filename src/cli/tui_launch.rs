@@ -87,6 +87,113 @@ fn resumed_window_title(session_id: &str) -> String {
     format!("{} jcode {}", icon, session_name)
 }
 
+fn push_unique_terminal(candidates: &mut Vec<String>, term: impl Into<String>) {
+    let term = term.into();
+    if term.trim().is_empty() {
+        return;
+    }
+    if !candidates.iter().any(|candidate| candidate == &term) {
+        candidates.push(term);
+    }
+}
+
+#[cfg(unix)]
+fn detected_resume_terminal() -> Option<&'static str> {
+    if std::env::var("KITTY_PID").is_ok() {
+        return Some("kitty");
+    }
+    if std::env::var("WEZTERM_EXECUTABLE").is_ok() || std::env::var("WEZTERM_PANE").is_ok() {
+        return Some("wezterm");
+    }
+    if std::env::var("ALACRITTY_WINDOW_ID").is_ok() {
+        return Some("alacritty");
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let term_program = std::env::var("TERM_PROGRAM")
+            .ok()
+            .map(|value| value.to_ascii_lowercase());
+        return match term_program.as_deref() {
+            Some("kitty") => Some("kitty"),
+            Some("wezterm") => Some("wezterm"),
+            Some("alacritty") => Some("alacritty"),
+            Some("iterm.app") | Some("iterm2") => Some("iterm2"),
+            Some("apple_terminal") | Some("terminal") => Some("terminal"),
+            _ => None,
+        };
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn resume_terminal_candidates_unix() -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Ok(term) = std::env::var("JCODE_TERMINAL") {
+        push_unique_terminal(&mut candidates, term);
+    }
+    if let Some(term) = detected_resume_terminal() {
+        push_unique_terminal(&mut candidates, term);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        for term in ["kitty", "wezterm", "alacritty", "iterm2", "terminal"] {
+            push_unique_terminal(&mut candidates, term);
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        for term in [
+            "kitty",
+            "wezterm",
+            "alacritty",
+            "gnome-terminal",
+            "konsole",
+            "xterm",
+            "foot",
+        ] {
+            push_unique_terminal(&mut candidates, term);
+        }
+    }
+
+    candidates
+}
+
+#[cfg(not(unix))]
+fn detected_resume_terminal() -> Option<&'static str> {
+    if std::env::var("WT_SESSION").is_ok() {
+        return Some("wt");
+    }
+    if std::env::var("WEZTERM_EXECUTABLE").is_ok() || std::env::var("WEZTERM_PANE").is_ok() {
+        return Some("wezterm");
+    }
+    if std::env::var("ALACRITTY_WINDOW_ID").is_ok() {
+        return Some("alacritty");
+    }
+    None
+}
+
+#[cfg(not(unix))]
+fn resume_terminal_candidates_windows() -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Ok(term) = std::env::var("JCODE_TERMINAL") {
+        push_unique_terminal(&mut candidates, term);
+    }
+    if let Some(term) = detected_resume_terminal() {
+        push_unique_terminal(&mut candidates, term);
+    }
+    for term in ["wezterm", "wt", "alacritty"] {
+        push_unique_terminal(&mut candidates, term);
+    }
+    candidates
+}
+
 pub async fn run_client() -> Result<()> {
     let mut client = server::Client::connect().await?;
 
@@ -448,40 +555,7 @@ pub fn spawn_resume_in_new_terminal(
 ) -> Result<bool> {
     use std::process::{Command, Stdio};
 
-    let mut candidates: Vec<String> = Vec::new();
-    if let Ok(term) = std::env::var("JCODE_TERMINAL") {
-        if !term.trim().is_empty() {
-            candidates.push(term);
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        candidates.extend(
-            ["alacritty", "kitty", "wezterm", "iterm2", "terminal"]
-                .iter()
-                .map(|s| s.to_string()),
-        );
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        candidates.extend(
-            [
-                "alacritty",
-                "kitty",
-                "wezterm",
-                "gnome-terminal",
-                "konsole",
-                "xterm",
-                "foot",
-            ]
-            .iter()
-            .map(|s| s.to_string()),
-        );
-    }
-
-    for term in candidates {
+    for term in resume_terminal_candidates_unix() {
         let mut cmd = Command::new(&term);
         cmd.current_dir(cwd)
             .stdin(Stdio::null())
@@ -616,6 +690,7 @@ pub fn spawn_resume_in_new_terminal(
 ) -> Result<bool> {
     use std::process::{Command, Stdio};
 
+    let wezterm_gui = find_wezterm_gui_binary();
     let alacritty_available = Command::new("where")
         .arg("alacritty")
         .stdout(Stdio::null())
@@ -623,45 +698,6 @@ pub fn spawn_resume_in_new_terminal(
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
-
-    if alacritty_available {
-        let mut cmd = Command::new("alacritty");
-        cmd.args(["-e"])
-            .arg(exe)
-            .arg("--resume")
-            .arg(session_id)
-            .current_dir(cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let status = crate::platform::spawn_detached(&mut cmd);
-        if status.is_ok() {
-            return Ok(true);
-        }
-    }
-
-    let wezterm_gui = find_wezterm_gui_binary();
-
-    if let Some(ref wezterm_bin) = wezterm_gui {
-        let mut cmd = Command::new(wezterm_bin);
-        cmd.args([
-            "start",
-            "--always-new-process",
-            "--",
-            &exe.to_string_lossy(),
-            "--resume",
-            session_id,
-        ])
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-        let status = crate::platform::spawn_detached(&mut cmd);
-        if status.is_ok() {
-            return Ok(true);
-        }
-    }
-
     let wt_available = std::env::var("WT_SESSION").is_ok()
         || Command::new("where")
             .arg("wt")
@@ -671,20 +707,63 @@ pub fn spawn_resume_in_new_terminal(
             .map(|s| s.success())
             .unwrap_or(false);
 
-    if wt_available {
-        let mut cmd = Command::new("wt.exe");
-        cmd.args([
-            "-p",
-            "Command Prompt",
-            &exe.to_string_lossy(),
-            "--resume",
-            session_id,
-        ])
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-        let status = crate::platform::spawn_detached(&mut cmd);
+    for term in resume_terminal_candidates_windows() {
+        let status = match term.as_str() {
+            "wezterm" => {
+                let Some(ref wezterm_bin) = wezterm_gui else {
+                    continue;
+                };
+                let mut cmd = Command::new(wezterm_bin);
+                cmd.args([
+                    "start",
+                    "--always-new-process",
+                    "--",
+                    &exe.to_string_lossy(),
+                    "--resume",
+                    session_id,
+                ])
+                .current_dir(cwd)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+                crate::platform::spawn_detached(&mut cmd)
+            }
+            "wt" | "windows-terminal" => {
+                if !wt_available {
+                    continue;
+                }
+                let mut cmd = Command::new("wt.exe");
+                cmd.args([
+                    "-p",
+                    "Command Prompt",
+                    &exe.to_string_lossy(),
+                    "--resume",
+                    session_id,
+                ])
+                .current_dir(cwd)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+                crate::platform::spawn_detached(&mut cmd)
+            }
+            "alacritty" => {
+                if !alacritty_available {
+                    continue;
+                }
+                let mut cmd = Command::new("alacritty");
+                cmd.args(["-e"])
+                    .arg(exe)
+                    .arg("--resume")
+                    .arg(session_id)
+                    .current_dir(cwd)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                crate::platform::spawn_detached(&mut cmd)
+            }
+            _ => continue,
+        };
+
         if status.is_ok() {
             return Ok(true);
         }
