@@ -713,6 +713,20 @@ impl Tool for ScheduleTool {
         json!({
             "type": "object",
             "required": ["task"],
+            "anyOf": [
+                {
+                    "type": "object",
+                    "required": ["wake_in_minutes"],
+                    "properties": {},
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "required": ["wake_at"],
+                    "properties": {},
+                    "additionalProperties": false
+                }
+            ],
             "properties": {
                 "task": {
                     "type": "string",
@@ -1235,6 +1249,33 @@ mod tests {
         assert!(parsed.relevant_files.is_empty());
         assert!(parsed.background.is_none());
         assert!(parsed.success_criteria.is_none());
+    }
+
+    #[test]
+    fn test_schedule_tool_schema_requires_a_time_field() {
+        let tool = ScheduleTool::new();
+        let schema = tool.parameters_schema();
+
+        let any_of = schema
+            .get("anyOf")
+            .and_then(|v| v.as_array())
+            .expect("schedule schema should define anyOf time requirement");
+
+        assert!(any_of.iter().any(|entry| {
+            entry
+                .get("required")
+                .and_then(|v| v.as_array())
+                .map(|required| required.iter().any(|field| field == "wake_in_minutes"))
+                .unwrap_or(false)
+        }));
+
+        assert!(any_of.iter().any(|entry| {
+            entry
+                .get("required")
+                .and_then(|v| v.as_array())
+                .map(|required| required.iter().any(|field| field == "wake_at"))
+                .unwrap_or(false)
+        }));
     }
 
     #[tokio::test]
