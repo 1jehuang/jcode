@@ -12,7 +12,6 @@ use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEvent};
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 #[derive(Default)]
@@ -24,6 +23,7 @@ pub(super) struct RemoteRunState {
     pub last_disconnect_reason: Option<String>,
     pub server_reload_in_progress: bool,
     pub reload_recovery_attempted: bool,
+    pub last_reload_pid: Option<u32>,
 }
 
 fn format_disconnect_reason(reason: &RemoteDisconnectReason) -> String {
@@ -98,11 +98,12 @@ pub(super) enum RemoteEventOutcome {
     Reconnect,
 }
 
-const RELOAD_SOCKET_WAIT_TIMEOUT: Duration = Duration::from_millis(800);
-const RELOAD_SOCKET_WAIT_WINDOW: Duration = Duration::from_secs(30);
-const RELOAD_SOCKET_PROBE_INTERVAL: Duration = Duration::from_millis(25);
-const RELOAD_SOCKET_RETRY_DELAY: Duration = Duration::from_millis(250);
-const RELOAD_RECOVERY_SPAWN_AFTER: Duration = Duration::from_secs(5);
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct ReloadReconnectHints {
+    pub has_reload_ctx_for_session: bool,
+    pub has_client_reload_marker: bool,
+}
+
 const RELOAD_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
 
 fn persist_replay_display_message(app: &mut App, role: &str, title: Option<String>, content: &str) {
@@ -134,77 +135,24 @@ fn reload_marker_active() -> bool {
     crate::server::reload_marker_active(RELOAD_MARKER_MAX_AGE)
 }
 
-fn reload_handoff_active(state: &RemoteRunState) -> bool {
+pub(super) fn reload_handoff_active(state: &RemoteRunState) -> bool {
     state.server_reload_in_progress || reload_marker_active()
-}
-
-fn disconnect_elapsed(state: &RemoteRunState) -> Duration {
-    state
-        .disconnect_start
-        .map(|start| start.elapsed())
-        .unwrap_or_default()
-}
-
-pub(super) fn should_wait_for_reload_socket(state: &RemoteRunState) -> bool {
-    reload_handoff_active(state) && disconnect_elapsed(state) < RELOAD_SOCKET_WAIT_WINDOW
-}
-
-fn should_attempt_reload_recovery(state: &RemoteRunState) -> bool {
-    reload_handoff_active(state)
-        && !state.reload_recovery_attempted
-        && disconnect_elapsed(state) >= RELOAD_RECOVERY_SPAWN_AFTER
-}
-
-async fn socket_is_ready(path: &Path) -> bool {
-    crate::server::is_server_ready(path).await
-}
-
-async fn wait_for_socket_ready(path: &Path, timeout: Duration) -> bool {
-    if socket_is_ready(path).await {
-        return true;
-    }
-
-    let mut dir_event = Box::pin(wait_for_socket_dir_event(path, timeout));
-    let mut dir_event_done = false;
-    let deadline = Instant::now() + timeout;
-    let mut probe_interval = tokio::time::interval(RELOAD_SOCKET_PROBE_INTERVAL);
-    probe_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-    loop {
-        if Instant::now() >= deadline {
-            return false;
-        }
-
-        tokio::select! {
-            saw_event = &mut dir_event, if !dir_event_done => {
-                dir_event_done = true;
-                if saw_event && socket_is_ready(path).await {
-                    return true;
-                }
-            }
-            _ = probe_interval.tick() => {
-                if socket_is_ready(path).await {
-                    return true;
-                }
-            }
-        }
-    }
 }
 
 async fn recover_reloading_server(
     app: &mut App,
     terminal: &mut DefaultTerminal,
     state: &mut RemoteRunState,
+    detail: &str,
 ) -> Result<bool> {
-    if !should_attempt_reload_recovery(state) || crate::cli::dispatch::server_is_running().await {
+    if state.reload_recovery_attempted || crate::cli::dispatch::server_is_running().await {
         return Ok(false);
     }
 
     state.reload_recovery_attempted = true;
-    state.last_disconnect_reason = Some("reload stalled; starting replacement server".to_string());
+    state.last_disconnect_reason = Some(detail.to_string());
 
-    let content =
-        reconnect_status_message(app, state, "reload stalled; starting replacement server");
+    let content = reconnect_status_message(app, state, detail);
     if let Some(idx) = state.disconnect_msg_idx {
         if idx < app.display_messages.len() {
             app.display_messages[idx].content = content;
@@ -215,7 +163,10 @@ async fn recover_reloading_server(
     }
     terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
 
-    crate::logging::warn("Reload reconnect stalled; spawning a replacement shared server");
+    crate::logging::warn(&format!(
+        "Reload reconnect failed definitively ({}); spawning a replacement shared server",
+        detail
+    ));
 
     match crate::cli::dispatch::spawn_server(&crate::cli::provider_init::ProviderChoice::Auto, None)
         .await
@@ -233,91 +184,12 @@ async fn recover_reloading_server(
                 error
             ));
             crate::logging::error(&format!(
-                "Failed to start replacement server after stalled reload: {}",
+                "Failed to start replacement server after reload failure: {}",
                 error
             ));
             Ok(false)
         }
     }
-}
-
-#[cfg(target_os = "linux")]
-async fn wait_for_socket_dir_event(path: &Path, timeout: Duration) -> bool {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || wait_for_socket_dir_event_blocking(&path, timeout))
-        .await
-        .unwrap_or(false)
-}
-
-#[cfg(not(target_os = "linux"))]
-async fn wait_for_socket_dir_event(_path: &Path, _timeout: Duration) -> bool {
-    false
-}
-
-#[cfg(target_os = "linux")]
-fn wait_for_socket_dir_event_blocking(path: &Path, timeout: Duration) -> bool {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let Some(parent) = path.parent() else {
-        return false;
-    };
-
-    let Ok(parent) = CString::new(parent.as_os_str().as_bytes()) else {
-        return false;
-    };
-
-    unsafe {
-        let fd = libc::inotify_init1(libc::IN_CLOEXEC);
-        if fd < 0 {
-            return false;
-        }
-
-        let mask = (libc::IN_CREATE
-            | libc::IN_MOVED_TO
-            | libc::IN_ATTRIB
-            | libc::IN_CLOSE_WRITE
-            | libc::IN_DELETE
-            | libc::IN_MOVE_SELF
-            | libc::IN_DELETE_SELF) as u32;
-        if libc::inotify_add_watch(fd, parent.as_ptr(), mask) < 0 {
-            let _ = libc::close(fd);
-            return false;
-        }
-
-        let start = Instant::now();
-        let mut poll_fd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-
-        while start.elapsed() < timeout {
-            let remaining = timeout.saturating_sub(start.elapsed());
-            let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
-            let ready = libc::poll(&mut poll_fd, 1, timeout_ms);
-            if ready > 0 && (poll_fd.revents & libc::POLLIN) != 0 {
-                let mut buf = [0u8; 256];
-                let _ = libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len());
-                let _ = libc::close(fd);
-                return true;
-            }
-            if ready == 0 {
-                break;
-            }
-            if ready < 0 {
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                break;
-            }
-        }
-
-        let _ = libc::close(fd);
-    }
-
-    false
 }
 
 pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) {
@@ -461,74 +333,21 @@ pub(super) async fn handle_terminal_event(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        RELOAD_RECOVERY_SPAWN_AFTER, RELOAD_SOCKET_WAIT_WINDOW, RemoteRunState,
-        should_attempt_reload_recovery, should_wait_for_reload_socket,
-    };
-    use std::time::{Duration, Instant};
+    use super::{RemoteRunState, reload_handoff_active};
 
     #[test]
-    fn reload_socket_wait_stays_enabled_during_handoff_window() {
+    fn reload_handoff_active_when_server_flag_is_set() {
         let state = RemoteRunState {
             server_reload_in_progress: true,
-            disconnect_start: Some(Instant::now() - Duration::from_secs(2)),
             ..RemoteRunState::default()
         };
 
-        assert!(should_wait_for_reload_socket(&state));
+        assert!(reload_handoff_active(&state));
     }
 
     #[test]
-    fn reload_socket_wait_expires_after_window() {
-        let state = RemoteRunState {
-            server_reload_in_progress: true,
-            disconnect_start: Some(
-                Instant::now() - RELOAD_SOCKET_WAIT_WINDOW - Duration::from_secs(1),
-            ),
-            ..RemoteRunState::default()
-        };
-
-        assert!(!should_wait_for_reload_socket(&state));
-    }
-
-    #[test]
-    fn reload_recovery_waits_for_stall_threshold() {
-        let state = RemoteRunState {
-            server_reload_in_progress: true,
-            disconnect_start: Some(
-                Instant::now() - RELOAD_RECOVERY_SPAWN_AFTER + Duration::from_millis(250),
-            ),
-            ..RemoteRunState::default()
-        };
-
-        assert!(!should_attempt_reload_recovery(&state));
-    }
-
-    #[test]
-    fn reload_recovery_triggers_after_stall_threshold() {
-        let state = RemoteRunState {
-            server_reload_in_progress: true,
-            disconnect_start: Some(
-                Instant::now() - RELOAD_RECOVERY_SPAWN_AFTER - Duration::from_millis(250),
-            ),
-            ..RemoteRunState::default()
-        };
-
-        assert!(should_attempt_reload_recovery(&state));
-    }
-
-    #[test]
-    fn reload_recovery_only_attempts_once_per_disconnect_window() {
-        let state = RemoteRunState {
-            server_reload_in_progress: true,
-            reload_recovery_attempted: true,
-            disconnect_start: Some(
-                Instant::now() - RELOAD_RECOVERY_SPAWN_AFTER - Duration::from_secs(1),
-            ),
-            ..RemoteRunState::default()
-        };
-
-        assert!(!should_attempt_reload_recovery(&state));
+    fn reload_handoff_inactive_without_flag_or_marker() {
+        assert!(!reload_handoff_active(&RemoteRunState::default()));
     }
 }
 
@@ -591,6 +410,7 @@ pub(super) async fn connect_with_retry(
             state.last_disconnect_reason = None;
             state.server_reload_in_progress = false;
             state.reload_recovery_attempted = false;
+            state.last_reload_pid = None;
             Ok(ConnectOutcome::Connected(remote))
         }
         Err(e) => {
@@ -640,67 +460,67 @@ pub(super) async fn connect_with_retry(
             }
             terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
 
-            if recover_reloading_server(app, terminal, state).await? {
-                return Ok(ConnectOutcome::Retry);
-            }
-
-            let reload_socket_wait = should_wait_for_reload_socket(state);
-            let mut use_backoff_sleep = !reload_socket_wait;
-            let mut use_reload_retry_sleep = false;
-            if reload_socket_wait {
-                crate::logging::info("Reconnect wait: waiting for reload socket readiness");
+            if reload_handoff_active(state) {
                 let socket_path = crate::server::socket_path();
-                let readiness_wait =
-                    wait_for_socket_ready(&socket_path, RELOAD_SOCKET_WAIT_TIMEOUT);
-                tokio::pin!(readiness_wait);
-                loop {
-                    tokio::select! {
-                        ready = &mut readiness_wait => {
-                            if ready {
-                                break;
-                            }
-                            if should_wait_for_reload_socket(state) {
-                                crate::logging::info("Reconnect wait: reload socket readiness timed out; keeping fast retry cadence");
-                                use_reload_retry_sleep = true;
-                            } else {
-                                crate::logging::info("Reconnect wait: reload socket readiness timed out; falling back to backoff");
-                                use_backoff_sleep = true;
-                            }
-                            break;
+                match crate::server::inspect_reload_wait_status(
+                    &socket_path,
+                    RELOAD_MARKER_MAX_AGE,
+                    state.last_reload_pid,
+                )
+                .await
+                {
+                    crate::server::ReloadWaitStatus::Ready => {
+                        return Ok(ConnectOutcome::Retry);
+                    }
+                    crate::server::ReloadWaitStatus::Failed(detail) => {
+                        let detail = detail.unwrap_or_else(|| {
+                            "reload failed before the replacement server became ready; starting replacement server"
+                                .to_string()
+                        });
+                        if recover_reloading_server(app, terminal, state, &detail).await? {
+                            return Ok(ConnectOutcome::Retry);
                         }
-                        event = event_stream.next() => {
-                            if handle_terminal_event_while_disconnected(
-                                app,
-                                terminal,
-                                event,
-                            )? {
-                                return Ok(ConnectOutcome::Quit);
+                    }
+                    crate::server::ReloadWaitStatus::Idle => {
+                        if recover_reloading_server(
+                            app,
+                            terminal,
+                            state,
+                            "reload ended without a ready replacement server; starting replacement server",
+                        )
+                        .await?
+                        {
+                            return Ok(ConnectOutcome::Retry);
+                        }
+                    }
+                    crate::server::ReloadWaitStatus::Waiting { pid } => {
+                        state.last_reload_pid = pid;
+                        crate::logging::info(&format!(
+                            "Reconnect wait: awaiting reload lifecycle event (pid={:?})",
+                            pid
+                        ));
+                        let wait = crate::server::wait_for_reload_handoff_event(pid, &socket_path);
+                        tokio::pin!(wait);
+                        loop {
+                            tokio::select! {
+                                _ = &mut wait => break,
+                                event = event_stream.next() => {
+                                    if handle_terminal_event_while_disconnected(
+                                        app,
+                                        terminal,
+                                        event,
+                                    )? {
+                                        return Ok(ConnectOutcome::Quit);
+                                    }
+                                }
                             }
                         }
+                        return Ok(ConnectOutcome::Retry);
                     }
                 }
             }
 
-            if use_reload_retry_sleep {
-                let sleep = tokio::time::sleep(RELOAD_SOCKET_RETRY_DELAY);
-                tokio::pin!(sleep);
-                loop {
-                    tokio::select! {
-                        _ = &mut sleep => break,
-                        event = event_stream.next() => {
-                            if handle_terminal_event_while_disconnected(
-                                app,
-                                terminal,
-                                event,
-                            )? {
-                                return Ok(ConnectOutcome::Quit);
-                            }
-                        }
-                    }
-                }
-            }
-
-            if use_backoff_sleep {
+            {
                 let backoff = if state.initial_server_start && state.reconnect_attempts <= 20 {
                     Duration::from_millis(100)
                 } else if state.reconnect_attempts <= 2 {
@@ -771,9 +591,9 @@ fn handle_terminal_event_while_disconnected(
     Ok(app.should_quit)
 }
 
-pub(super) async fn handle_post_connect(
+pub(super) async fn handle_post_connect<B: ratatui::backend::Backend>(
     app: &mut App,
-    terminal: &mut DefaultTerminal,
+    terminal: &mut ratatui::Terminal<B>,
     remote: &mut RemoteConnection,
     state: &mut RemoteRunState,
     session_to_resume: Option<&str>,
@@ -782,44 +602,8 @@ pub(super) async fn handle_post_connect(
         "Reload check: session_to_resume={:?}, remote_session_id={:?}, reconnect_attempts={}",
         session_to_resume, app.remote_session_id, state.reconnect_attempts
     ));
-    let has_reload_ctx_for_session = session_to_resume
-        .and_then(|sid| {
-            let result = ReloadContext::peek_for_session(sid);
-            crate::logging::info(&format!(
-                "Reload peek_for_session({}) = {:?}",
-                sid,
-                result.as_ref().map(|r| r.is_some())
-            ));
-            result.ok().flatten()
-        })
-        .is_some();
-
-    let has_client_reload_marker = session_to_resume
-        .and_then(|sid| {
-            let jcode_dir = crate::storage::jcode_dir().ok()?;
-            let marker = jcode_dir.join(format!("client-reload-pending-{}", sid));
-            if marker.exists() {
-                let info = std::fs::read_to_string(&marker).ok()?;
-                let _ = std::fs::remove_file(&marker);
-                crate::logging::info(&format!(
-                    "Found client-reload-pending marker for {}, injecting reload info",
-                    sid
-                ));
-                if app.reload_info.is_empty() {
-                    for line in info.lines() {
-                        let trimmed = line.trim();
-                        if !trimmed.is_empty() {
-                            app.reload_info.push(trimmed.to_string());
-                        }
-                    }
-                }
-                Some(())
-            } else {
-                None
-            }
-        })
-        .is_some();
-
+    let hints = load_reload_reconnect_hints(app, session_to_resume);
+    let has_reload_ctx_for_session = hints.has_reload_ctx_for_session;
     if state.reconnect_attempts > 0 {
         if let Some(disconnect_start) = state.disconnect_start {
             crate::logging::info(&format!(
@@ -893,49 +677,7 @@ pub(super) async fn handle_post_connect(
         )));
     }
 
-    let should_queue_reload_continuation = has_reload_ctx_for_session || has_client_reload_marker;
-    crate::logging::info(&format!(
-        "Reload continuation check: should_queue={}, reload_info_empty={}, has_ctx={}, has_marker={}",
-        should_queue_reload_continuation,
-        app.reload_info.is_empty(),
-        has_reload_ctx_for_session,
-        has_client_reload_marker
-    ));
-    if should_queue_reload_continuation {
-        let reload_ctx = session_to_resume.and_then(|sid| {
-            let result = ReloadContext::load_for_session(sid);
-            crate::logging::info(&format!(
-                "Reload load_for_session({}) = {:?}",
-                sid,
-                result.as_ref().map(|r| r.is_some())
-            ));
-            result.ok().flatten()
-        });
-
-        if let Some(ctx) = reload_ctx {
-            let task_info = ctx
-                .task_context
-                .map(|t| format!("\nTask context: {}", t))
-                .unwrap_or_default();
-
-            let continuation_msg = format!(
-                "Reload succeeded ({} → {}).{} Continue immediately from where you left off. Do not ask the user what to do next. Do not summarize the reload.",
-                ctx.version_before, ctx.version_after, task_info
-            );
-
-            crate::logging::info(&format!(
-                "Queuing reload continuation message ({} chars)",
-                continuation_msg.len()
-            ));
-            app.push_display_message(DisplayMessage::system("Reload complete — continuing."));
-            app.hidden_queued_system_messages.push(continuation_msg);
-        } else {
-            crate::logging::warn(
-                "Reload context expected but not found (race condition?), skipping continuation",
-            );
-        }
-        app.reload_info.clear();
-    }
+    finalize_reload_reconnect(app, session_to_resume, hints, state.reconnect_attempts > 0);
 
     let same_session_reload_fast_path = state.reconnect_attempts > 0
         && session_to_resume
@@ -977,6 +719,114 @@ pub(super) async fn handle_post_connect(
     }
 
     Ok(PostConnectOutcome::Ready)
+}
+
+pub(super) fn load_reload_reconnect_hints(
+    app: &mut App,
+    session_to_resume: Option<&str>,
+) -> ReloadReconnectHints {
+    let has_reload_ctx_for_session = session_to_resume
+        .and_then(|sid| {
+            let result = ReloadContext::peek_for_session(sid);
+            crate::logging::info(&format!(
+                "Reload peek_for_session({}) = {:?}",
+                sid,
+                result.as_ref().map(|r| r.is_some())
+            ));
+            result.ok().flatten()
+        })
+        .is_some();
+
+    let has_client_reload_marker = session_to_resume
+        .and_then(|sid| {
+            let jcode_dir = crate::storage::jcode_dir().ok()?;
+            let marker = jcode_dir.join(format!("client-reload-pending-{}", sid));
+            if marker.exists() {
+                let info = std::fs::read_to_string(&marker).ok()?;
+                let _ = std::fs::remove_file(&marker);
+                crate::logging::info(&format!(
+                    "Found client-reload-pending marker for {}, injecting reload info",
+                    sid
+                ));
+                if app.reload_info.is_empty() {
+                    for line in info.lines() {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            app.reload_info.push(trimmed.to_string());
+                        }
+                    }
+                }
+                Some(())
+            } else {
+                None
+            }
+        })
+        .is_some();
+
+    ReloadReconnectHints {
+        has_reload_ctx_for_session,
+        has_client_reload_marker,
+    }
+}
+
+pub(super) fn finalize_reload_reconnect(
+    app: &mut App,
+    session_to_resume: Option<&str>,
+    hints: ReloadReconnectHints,
+    reconnected_after_disconnect: bool,
+) {
+    let should_queue_reload_continuation = hints.has_reload_ctx_for_session;
+    crate::logging::info(&format!(
+        "Reload continuation check: should_queue={}, reload_info_empty={}, has_ctx={}, has_marker={}",
+        should_queue_reload_continuation,
+        app.reload_info.is_empty(),
+        hints.has_reload_ctx_for_session,
+        hints.has_client_reload_marker
+    ));
+    if should_queue_reload_continuation {
+        let reload_ctx = session_to_resume.and_then(|sid| {
+            let result = ReloadContext::load_for_session(sid);
+            crate::logging::info(&format!(
+                "Reload load_for_session({}) = {:?}",
+                sid,
+                result.as_ref().map(|r| r.is_some())
+            ));
+            result.ok().flatten()
+        });
+
+        if let Some(ctx) = reload_ctx {
+            let task_info = ctx
+                .task_context
+                .map(|t| format!("\nTask context: {}", t))
+                .unwrap_or_default();
+
+            let continuation_msg = format!(
+                "Reload succeeded ({} → {}).{} Continue immediately from where you left off. Do not ask the user what to do next. Do not summarize the reload.",
+                ctx.version_before, ctx.version_after, task_info
+            );
+
+            crate::logging::info(&format!(
+                "Queuing reload continuation message ({} chars)",
+                continuation_msg.len()
+            ));
+            app.push_display_message(DisplayMessage::system("Reload complete — continuing."));
+            app.hidden_queued_system_messages.push(continuation_msg);
+        } else {
+            crate::logging::warn(
+                "Reload context missing for initiating session after reconnect; skipping selfdev continuation",
+            );
+        }
+        app.reload_info.clear();
+    } else if hints.has_client_reload_marker {
+        // A client re-exec marker only tells us to surface reload status to the UI.
+        // It does not imply that this session initiated a selfdev reload or that a
+        // persisted ReloadContext exists. Non-initiating clients rely on the History
+        // payload's `was_interrupted` flag for generic continuation handling.
+        if !reconnected_after_disconnect && !app.reload_info.is_empty() {
+            app.push_display_message(DisplayMessage::system(app.reload_info.join("\n")));
+        }
+        app.reload_info.clear();
+    }
 }
 
 pub(super) async fn handle_remote_event(
@@ -1390,6 +1240,7 @@ pub(super) fn handle_server_event(
                 app.streaming_tps_start = Some(Instant::now());
             }
             remote.handle_tool_start(&id, &name);
+            app.commit_pending_streaming_assistant_message();
             if matches!(name.as_str(), "memory") {
                 crate::memory::set_state(crate::tui::info_widget::MemoryState::Embedding);
             }
@@ -1431,20 +1282,7 @@ pub(super) fn handle_server_event(
                 .find(|tc| tc.id == id)
                 .map(|tc| tc.input.clone())
                 .unwrap_or(serde_json::Value::Null);
-            if let Some(chunk) = app.stream_buffer.flush() {
-                app.streaming_text.push_str(&chunk);
-            }
-            if !app.streaming_text.is_empty() {
-                let content = app.take_streaming_text();
-                app.push_display_message(DisplayMessage {
-                    role: "assistant".to_string(),
-                    content,
-                    tool_calls: vec![],
-                    duration_secs: None,
-                    title: None,
-                    tool_data: None,
-                });
-            }
+            app.commit_pending_streaming_assistant_message();
             crate::tui::mermaid::clear_streaming_preview_diagram();
             let is_batch = name == "batch";
             app.push_display_message(DisplayMessage {
@@ -1873,10 +1711,7 @@ pub(super) fn handle_server_event(
                 );
             }
 
-            if should_apply_history_payload
-                && was_interrupted == Some(true)
-                && !app.display_messages.is_empty()
-            {
+            if was_interrupted == Some(true) && !app.display_messages.is_empty() {
                 crate::logging::info(
                     "Session was interrupted mid-generation, queuing continuation",
                 );
@@ -2612,7 +2447,7 @@ pub(super) async fn handle_remote_key(
 
     if code == KeyCode::BackTab {
         app.diff_mode = app.diff_mode.cycle();
-        if !app.diff_mode.has_side_pane() {
+        if !app.diff_pane_visible() {
             app.diff_pane_focus = false;
         }
         let status = format!("Diffs: {}", app.diff_mode.label());

@@ -49,6 +49,20 @@ fn message_cache() -> &'static Mutex<MessageCacheState> {
 
 const MESSAGE_CACHE_LIMIT: usize = 2048;
 
+fn left_pad_lines_for_centered_mode(lines: &mut [Line<'static>], width: u16) {
+    let max_line_width = lines.iter().map(Line::width).max().unwrap_or(0);
+    let pad = (width as usize).saturating_sub(max_line_width) / 2;
+    if pad == 0 {
+        return;
+    }
+
+    let pad_str = " ".repeat(pad);
+    for line in lines {
+        line.spans.insert(0, Span::raw(pad_str.clone()));
+        line.alignment = Some(ratatui::layout::Alignment::Left);
+    }
+}
+
 pub(super) fn get_cached_message_lines<F>(
     msg: &DisplayMessage,
     width: u16,
@@ -104,7 +118,11 @@ pub(crate) fn render_system_message(
     width: u16,
     _diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
+    let centered = markdown::center_code_blocks();
     let mut lines = markdown::render_markdown_with_width(&msg.content, Some(width as usize));
+    if centered {
+        left_pad_lines_for_centered_mode(&mut lines, width);
+    }
     for line in &mut lines {
         for span in &mut line.spans {
             span.style.fg = Some(system_message_color());
@@ -186,15 +204,7 @@ pub(crate) fn render_swarm_message(
     }
 
     if centered {
-        let max_line_width = lines.iter().map(Line::width).max().unwrap_or(0);
-        let pad = (width as usize).saturating_sub(max_line_width) / 2;
-        if pad > 0 {
-            let pad_str = " ".repeat(pad);
-            for line in &mut lines {
-                line.spans.insert(0, Span::raw(pad_str.clone()));
-                line.alignment = Some(ratatui::layout::Alignment::Left);
-            }
-        }
+        left_pad_lines_for_centered_mode(&mut lines, width);
     }
 
     lines
@@ -512,24 +522,7 @@ pub(crate) fn render_tool_message(
     }
 
     if centered {
-        let max_line_width = lines
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
-                    .sum::<usize>()
-            })
-            .max()
-            .unwrap_or(0);
-        let pad = (width as usize).saturating_sub(max_line_width) / 2;
-        if pad > 0 {
-            let pad_str: String = " ".repeat(pad);
-            for line in &mut lines {
-                line.spans.insert(0, Span::raw(pad_str.clone()));
-                line.alignment = Some(ratatui::layout::Alignment::Left);
-            }
-        }
+        left_pad_lines_for_centered_mode(&mut lines, width);
     }
 
     lines
@@ -551,6 +544,31 @@ mod tests {
                 assert_eq!(span.style.fg, Some(system_message_color()));
             }
         }
+    }
+
+    #[test]
+    fn render_system_message_centered_mode_left_aligns_with_padding() {
+        crate::tui::markdown::set_center_code_blocks(true);
+        let msg = DisplayMessage::system("Reload complete — continuing.");
+
+        let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
+
+        assert!(!lines.is_empty(), "expected rendered system message lines");
+        for line in &lines {
+            assert_eq!(
+                line.alignment,
+                Some(ratatui::layout::Alignment::Left),
+                "centered system lines should be left-aligned with padding"
+            );
+            assert!(
+                line.spans
+                    .first()
+                    .is_some_and(|span| span.content.starts_with(' ')),
+                "centered system lines should start with padding"
+            );
+        }
+
+        crate::tui::markdown::set_center_code_blocks(false);
     }
 }
 

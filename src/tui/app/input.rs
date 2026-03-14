@@ -318,7 +318,7 @@ pub(super) fn handle_navigation_shortcuts(
 
     if code == KeyCode::BackTab {
         app.diff_mode = app.diff_mode.cycle();
-        if !app.diff_mode.has_side_pane() {
+        if !app.diff_pane_visible() {
             app.diff_pane_focus = false;
         }
         let status = format!("Diffs: {}", app.diff_mode.label());
@@ -995,6 +995,22 @@ impl App {
         self.streaming_md_renderer.borrow_mut().reset();
         crate::tui::mermaid::clear_streaming_preview_diagram();
         content
+    }
+
+    pub(super) fn commit_pending_streaming_assistant_message(&mut self) -> bool {
+        if let Some(chunk) = self.stream_buffer.flush() {
+            self.streaming_text.push_str(&chunk);
+        }
+
+        if self.streaming_text.is_empty() {
+            self.stream_buffer.clear();
+            return false;
+        }
+
+        let content = self.take_streaming_text();
+        self.push_display_message(DisplayMessage::assistant(content));
+        self.stream_buffer.clear();
+        true
     }
 
     pub(super) fn accumulate_streaming_output_tokens(

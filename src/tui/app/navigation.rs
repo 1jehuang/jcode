@@ -62,7 +62,7 @@ impl App {
     }
 
     pub(super) fn diff_pane_visible(&self) -> bool {
-        self.diff_mode.has_side_pane()
+        self.diff_mode.has_side_pane() || self.side_panel.focused_page().is_some()
     }
 
     pub(super) fn set_diff_pane_focus(&mut self, focus: bool) {
@@ -72,7 +72,7 @@ impl App {
         self.diff_pane_focus = focus;
         self.diagram_focus = false;
         if focus {
-            self.set_status_notice("Focus: diffs (j/k scroll, Esc to return)");
+            self.set_status_notice("Focus: side pane (j/k scroll, Esc to return)");
         } else {
             self.set_status_notice("Focus: chat");
         }

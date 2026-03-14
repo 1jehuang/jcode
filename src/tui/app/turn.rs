@@ -114,6 +114,7 @@ impl App {
                         if self.streaming_tps_start.is_none() {
                             self.streaming_tps_start = Some(Instant::now());
                         }
+                        self.commit_pending_streaming_assistant_message();
                         current_tool = Some(ToolCall {
                             id,
                             name,
@@ -132,25 +133,7 @@ impl App {
                         if let Some(mut tool) = current_tool.take() {
                             tool.input = serde_json::from_str(&current_tool_input)
                                 .unwrap_or(serde_json::Value::Null);
-
-                            // Flush stream buffer before committing
-                            if let Some(chunk) = self.stream_buffer.flush() {
-                                self.streaming_text.push_str(&chunk);
-                            }
-
-                            // Commit any pending text as a partial assistant message
-                            if !self.streaming_text.is_empty() {
-                                self.push_display_message(DisplayMessage {
-                                    role: "assistant".to_string(),
-                                    content: self.streaming_text.clone(),
-                                    tool_calls: vec![],
-                                    duration_secs: None,
-                                    title: None,
-                                    tool_data: None,
-                                });
-                                self.clear_streaming_render_state();
-                                self.stream_buffer.clear();
-                            }
+                            self.commit_pending_streaming_assistant_message();
 
                             // Add tool call as its own display message
                             self.push_display_message(DisplayMessage {
@@ -912,6 +895,7 @@ impl App {
                                             id: id.clone(),
                                             name: name.clone(),
                                         });
+                                        self.commit_pending_streaming_assistant_message();
                                         // Update status to show tool in progress
                                         self.status = ProcessingStatus::RunningTool(name.clone());
                                         if matches!(name.as_str(), "memory") {
@@ -950,25 +934,7 @@ impl App {
                                                 id: tool.id.clone(),
                                                 name: tool.name.clone(),
                                             });
-
-                                            // Flush stream buffer before committing
-                                            if let Some(chunk) = self.stream_buffer.flush() {
-                                                self.streaming_text.push_str(&chunk);
-                                            }
-
-                                            // Commit any pending text as a partial assistant message
-                                            if !self.streaming_text.is_empty() {
-                                                self.push_display_message(DisplayMessage {
-                                                    role: "assistant".to_string(),
-                                                    content: self.streaming_text.clone(),
-                                                    tool_calls: vec![],
-                                                    duration_secs: None,
-                                                    title: None,
-                                                    tool_data: None,
-                                                });
-                                                self.clear_streaming_render_state();
-                                                self.stream_buffer.clear();
-                                            }
+                                            self.commit_pending_streaming_assistant_message();
 
                                             // Add tool call as its own display message
                                             self.push_display_message(DisplayMessage {

@@ -645,6 +645,75 @@ fn test_mouse_scroll_over_diff_pane_scrolls_side_panel() {
 }
 
 #[test]
+fn test_mouse_scroll_over_tool_side_panel_scrolls_shared_right_pane() {
+    let mut app = create_test_app();
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.diff_pane_scroll = 5;
+    app.diff_pane_focus = false;
+    app.diff_pane_auto_scroll = true;
+    app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focused_page_id: Some("plan".to_string()),
+        pages: vec![crate::side_panel::SidePanelPage {
+            id: "plan".to_string(),
+            title: "Plan".to_string(),
+            file_path: "".to_string(),
+            format: crate::side_panel::SidePanelPageFormat::Markdown,
+            content: "hello".to_string(),
+            updated_at_ms: 1,
+        }],
+    };
+
+    crate::tui::ui::record_layout_snapshot(
+        Rect::new(0, 0, 40, 20),
+        None,
+        Some(Rect::new(40, 0, 20, 20)),
+    );
+
+    let scroll_only = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 45,
+        row: 5,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(scroll_only, "right-pane wheel scroll should be deferrable");
+    assert_eq!(app.diff_pane_scroll, 8);
+    assert!(app.diff_pane_focus);
+    assert!(!app.diff_pane_auto_scroll);
+}
+
+#[test]
+fn test_tool_side_panel_uses_shared_right_pane_keyboard_focus() {
+    let mut app = create_test_app();
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focused_page_id: Some("plan".to_string()),
+        pages: vec![crate::side_panel::SidePanelPage {
+            id: "plan".to_string(),
+            title: "Plan".to_string(),
+            file_path: "".to_string(),
+            format: crate::side_panel::SidePanelPageFormat::Markdown,
+            content: "hello".to_string(),
+            updated_at_ms: 1,
+        }],
+    };
+
+    assert!(app.diff_pane_visible());
+    assert!(app.handle_diagram_ctrl_key(KeyCode::Char('l'), false));
+    assert!(app.diff_pane_focus);
+
+    assert!(super::input::handle_navigation_shortcuts(
+        &mut app,
+        KeyCode::BackTab,
+        KeyModifiers::empty()
+    ));
+    assert!(
+        app.diff_pane_focus,
+        "cycling diff display should not drop focus when tool side panel is still visible"
+    );
+}
+
+#[test]
 fn test_mouse_scroll_events_are_classified_as_scroll_only() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::File;
@@ -1990,6 +2059,65 @@ fn test_handle_server_event_history_preserves_connection_type_for_same_session_w
 }
 
 #[test]
+fn test_handle_post_connect_marker_without_reload_context_does_not_queue_selfdev_continuation() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("create temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _enter = rt.enter();
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    let session_id = "session_marker_only";
+    let jcode_dir = crate::storage::jcode_dir().expect("jcode dir");
+    std::fs::write(
+        jcode_dir.join(format!("client-reload-pending-{}", session_id)),
+        "Reloaded with build test123\n",
+    )
+    .expect("write client reload marker");
+
+    let mut state = super::remote::RemoteRunState {
+        reconnect_attempts: 1,
+        ..Default::default()
+    };
+
+    rt.block_on(super::remote::handle_post_connect(
+        &mut app,
+        &mut terminal,
+        &mut remote,
+        &mut state,
+        Some(session_id),
+    ))
+    .expect("post connect should succeed");
+
+    assert!(app.hidden_queued_system_messages.is_empty());
+    assert!(
+        !app.display_messages()
+            .iter()
+            .any(|m| m.content == "Reload complete — continuing."),
+        "marker-only reconnect should not queue selfdev continuation"
+    );
+    assert!(app.reload_info.is_empty());
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|m| m.content.contains("✓ Reconnected successfully.")),
+        "reconnect success message should still be shown"
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
 fn test_handle_server_event_token_usage_uses_per_call_deltas() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -2071,6 +2199,37 @@ fn test_handle_server_event_interrupted_clears_stream_state_and_sets_idle() {
         .expect("missing interrupted message");
     assert_eq!(last.role, "system");
     assert_eq!(last.content, "Interrupted");
+}
+
+#[test]
+fn test_handle_server_event_tool_start_flushes_streaming_text_before_tool_message() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.streaming_text = "Let me inspect those files first.".to_string();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ToolStart {
+            id: "tool_batch".to_string(),
+            name: "batch".to_string(),
+        },
+        &mut remote,
+    );
+
+    assert!(app.streaming_text.is_empty());
+    assert_eq!(app.display_messages().len(), 1);
+    assert_eq!(app.display_messages()[0].role, "assistant");
+    assert_eq!(
+        app.display_messages()[0].content,
+        "Let me inspect those files first."
+    );
+    assert_eq!(app.streaming_tool_calls.len(), 1);
+    assert_eq!(app.streaming_tool_calls[0].name, "batch");
+    assert!(matches!(app.status, ProcessingStatus::RunningTool(ref name) if name == "batch"));
 }
 
 #[test]
@@ -2269,32 +2428,7 @@ fn test_handle_server_event_service_tier_changed_mentions_next_request_when_stre
 }
 
 #[test]
-fn test_reload_socket_wait_enabled_only_during_recent_reload_disconnect() {
-    let _guard = crate::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().expect("create temp dir");
-    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
-    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
-
-    let mut state = remote::RemoteRunState {
-        server_reload_in_progress: true,
-        disconnect_start: Some(std::time::Instant::now()),
-        ..Default::default()
-    };
-
-    assert!(remote::should_wait_for_reload_socket(&state));
-
-    state.server_reload_in_progress = false;
-    assert!(!remote::should_wait_for_reload_socket(&state));
-
-    if let Some(prev_runtime) = prev_runtime {
-        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
-    } else {
-        crate::env::remove_var("JCODE_RUNTIME_DIR");
-    }
-}
-
-#[test]
-fn test_reload_socket_wait_disabled_for_old_disconnects() {
+fn test_reload_handoff_active_when_server_reload_flag_set() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("create temp dir");
     let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
@@ -2302,11 +2436,10 @@ fn test_reload_socket_wait_disabled_for_old_disconnects() {
 
     let state = remote::RemoteRunState {
         server_reload_in_progress: true,
-        disconnect_start: Some(std::time::Instant::now() - std::time::Duration::from_secs(31)),
         ..Default::default()
     };
 
-    assert!(!remote::should_wait_for_reload_socket(&state));
+    assert!(remote::reload_handoff_active(&state));
 
     if let Some(prev_runtime) = prev_runtime {
         crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
@@ -2316,7 +2449,25 @@ fn test_reload_socket_wait_disabled_for_old_disconnects() {
 }
 
 #[test]
-fn test_reload_socket_wait_enabled_by_reload_marker() {
+fn test_reload_handoff_inactive_without_flag_or_marker() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+
+    let state = remote::RemoteRunState::default();
+
+    assert!(!remote::reload_handoff_active(&state));
+
+    if let Some(prev_runtime) = prev_runtime {
+        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+    } else {
+        crate::env::remove_var("JCODE_RUNTIME_DIR");
+    }
+}
+
+#[test]
+fn test_reload_handoff_active_when_reload_marker_present() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("create temp dir");
     let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
@@ -2330,11 +2481,10 @@ fn test_reload_socket_wait_enabled_by_reload_marker() {
     );
 
     let state = remote::RemoteRunState {
-        disconnect_start: Some(std::time::Instant::now()),
         ..Default::default()
     };
 
-    assert!(remote::should_wait_for_reload_socket(&state));
+    assert!(remote::reload_handoff_active(&state));
 
     crate::server::clear_reload_marker();
     if let Some(prev_runtime) = prev_runtime {
@@ -2453,6 +2603,31 @@ fn test_handle_server_event_history_without_interruption_does_not_queue() {
         !app.display_messages()
             .iter()
             .any(|m| m.content.contains("interrupted"))
+    );
+}
+
+#[test]
+fn test_finalize_reload_reconnect_marker_only_does_not_queue_selfdev_continuation() {
+    let mut app = create_test_app();
+    app.reload_info
+        .push("Reloaded with build abc1234".to_string());
+
+    remote::finalize_reload_reconnect(
+        &mut app,
+        Some("ses_test_marker_only"),
+        remote::ReloadReconnectHints {
+            has_reload_ctx_for_session: false,
+            has_client_reload_marker: true,
+        },
+        false,
+    );
+
+    assert!(app.hidden_queued_system_messages.is_empty());
+    assert!(app.reload_info.is_empty());
+    assert!(
+        !app.display_messages()
+            .iter()
+            .any(|m| m.role == "system" && m.content == "Reload complete — continuing.")
     );
 }
 
@@ -2614,6 +2789,13 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
     assert_eq!(assistant_messages[0].content, "local restored state");
     assert_eq!(app.connection_type.as_deref(), Some("websocket"));
     assert!(app.queued_messages().is_empty());
+    assert_eq!(app.hidden_queued_system_messages.len(), 1);
+    assert!(app.hidden_queued_system_messages[0].contains("interrupted by a server reload"));
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|m| m.role == "system" && m.content == "Reload complete — continuing.")
+    );
 }
 
 #[test]

@@ -3490,6 +3490,64 @@ mod tests {
     }
 
     #[test]
+    fn test_prepare_messages_places_live_batch_after_committed_assistant_text() {
+        let state = TestState {
+            display_messages: vec![
+                DisplayMessage::user("build it"),
+                DisplayMessage::assistant("Let me inspect the relevant files first."),
+            ],
+            status: ProcessingStatus::RunningTool("batch".to_string()),
+            anim_elapsed: 0.0,
+            batch_progress: Some(crate::bus::BatchProgress {
+                session_id: "s".to_string(),
+                tool_call_id: "tc".to_string(),
+                total: 1,
+                completed: 0,
+                last_completed: None,
+                running: vec![ToolCall {
+                    id: "batch-1-read".to_string(),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"file_path": "src/main.rs"}),
+                    intent: None,
+                }],
+                subcalls: vec![crate::bus::BatchSubcallProgress {
+                    index: 1,
+                    tool_call: ToolCall {
+                        id: "batch-1-read".to_string(),
+                        name: "read".to_string(),
+                        input: serde_json::json!({"file_path": "src/main.rs"}),
+                        intent: None,
+                    },
+                    state: crate::bus::BatchSubcallState::Running,
+                }],
+            }),
+            ..Default::default()
+        };
+
+        let prepared = prepare::prepare_messages(&state, 100, 30);
+        let rendered: Vec<String> = prepared
+            .wrapped_lines
+            .iter()
+            .map(extract_line_text)
+            .collect();
+
+        let assistant_idx = rendered
+            .iter()
+            .position(|line| line.contains("Let me inspect the relevant files first."))
+            .expect("missing assistant text");
+        let batch_idx = rendered
+            .iter()
+            .position(|line| line.contains("batch 1 calls · 0/1 done"))
+            .expect("missing live batch progress");
+
+        assert!(
+            assistant_idx < batch_idx,
+            "assistant text should render before live batch block in {:?}",
+            rendered
+        );
+    }
+
+    #[test]
     fn test_prepare_messages_live_batch_spinner_advances_between_frames() {
         let batch_progress = crate::bus::BatchProgress {
             session_id: "s".to_string(),

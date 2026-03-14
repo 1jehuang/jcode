@@ -680,11 +680,16 @@ pub(super) fn draw_side_panel_markdown(
                 width: inner.width,
                 height: avail_rows,
             };
+            let img_area = mermaid::get_cached_png(placement.hash)
+                .map(|(_, width, height)| {
+                    fit_side_panel_image_area(img_area, width, height, centered)
+                })
+                .unwrap_or(img_area);
             mermaid::render_image_widget_fit(
                 placement.hash,
                 img_area,
                 frame.buffer_mut(),
-                centered,
+                false,
                 false,
             );
         }
@@ -799,22 +804,114 @@ fn estimate_side_panel_image_rows(
         );
     };
 
-    let diagram = info_widget::DiagramInfo {
-        hash,
+    let needed = estimate_side_panel_image_rows_with_font(
         width,
         height,
-        label: None,
-    };
-    let needed = super::diagram_pane::estimate_pinned_diagram_pane_height(&diagram, inner.width, 4);
+        inner.width,
+        mermaid::get_font_size(),
+    );
     clamp_side_panel_image_rows(
         needed
-            .saturating_sub(2)
             .max(SIDE_PANEL_INLINE_IMAGE_MIN_ROWS)
             .min(inner.height.max(SIDE_PANEL_INLINE_IMAGE_MIN_ROWS)),
         inner.height,
         lines_before_image,
         has_following_content,
     )
+}
+
+fn estimate_side_panel_image_rows_with_font(
+    width: u32,
+    height: u32,
+    available_width: u16,
+    font_size: Option<(u16, u16)>,
+) -> u16 {
+    if width == 0 || height == 0 || available_width == 0 {
+        return 0;
+    }
+
+    let (cell_w, cell_h) = font_size.unwrap_or((8, 16));
+    let cell_w = cell_w.max(1) as u32;
+    let cell_h = cell_h.max(1) as u32;
+
+    let image_w_cells = super::diagram_pane::div_ceil_u32(width.max(1), cell_w).max(1);
+    let image_h_cells = super::diagram_pane::div_ceil_u32(height.max(1), cell_h).max(1);
+    let available_width = available_width.max(1) as u32;
+
+    let fitted_h_cells = if image_w_cells > available_width {
+        super::diagram_pane::div_ceil_u32(
+            image_h_cells.saturating_mul(available_width),
+            image_w_cells,
+        )
+    } else {
+        image_h_cells
+    }
+    .max(1);
+
+    fitted_h_cells.min(u16::MAX as u32) as u16
+}
+
+fn fit_side_panel_image_area(area: Rect, img_w_px: u32, img_h_px: u32, centered: bool) -> Rect {
+    fit_image_area_with_font(
+        area,
+        img_w_px,
+        img_h_px,
+        mermaid::get_font_size(),
+        centered,
+        false,
+    )
+}
+
+fn fit_image_area_with_font(
+    area: Rect,
+    img_w_px: u32,
+    img_h_px: u32,
+    font_size: Option<(u16, u16)>,
+    centered: bool,
+    vcenter: bool,
+) -> Rect {
+    if area.width == 0 || area.height == 0 || img_w_px == 0 || img_h_px == 0 {
+        return area;
+    }
+
+    let (font_w, font_h) = match font_size {
+        Some(fs) => (fs.0.max(1) as f64, fs.1.max(1) as f64),
+        None => return area,
+    };
+
+    let area_w_px = area.width as f64 * font_w;
+    let area_h_px = area.height as f64 * font_h;
+    let scale = (area_w_px / img_w_px as f64).min(area_h_px / img_h_px as f64);
+    if !scale.is_finite() || scale <= 0.0 {
+        return area;
+    }
+
+    let fitted_w_cells = ((img_w_px as f64 * scale) / font_w)
+        .ceil()
+        .max(1.0)
+        .min(area.width as f64) as u16;
+    let fitted_h_cells = ((img_h_px as f64 * scale) / font_h)
+        .ceil()
+        .max(1.0)
+        .min(area.height as f64) as u16;
+
+    let x_offset = if centered {
+        area.width.saturating_sub(fitted_w_cells) / 2
+    } else {
+        0
+    };
+    let y_offset = if vcenter {
+        area.height.saturating_sub(fitted_h_cells) / 2
+    } else {
+        0
+    };
+
+    Rect {
+        x: area.x + x_offset,
+        y: area.y + y_offset,
+        width: fitted_w_cells,
+        height: fitted_h_cells,
+    }
 }
 
 fn clamp_side_panel_image_rows(
@@ -865,6 +962,85 @@ mod tests {
     fn clamp_side_panel_image_rows_keeps_minimum_image_presence() {
         let rows = clamp_side_panel_image_rows(10, 5, 1, true);
         assert_eq!(rows, 4);
+    }
+
+    #[test]
+    fn estimate_side_panel_image_rows_uses_actual_inner_width() {
+        let rows = estimate_side_panel_image_rows_with_font(999, 1454, 36, Some((8, 16)));
+        assert_eq!(rows, 27);
+    }
+
+    #[test]
+    fn fit_side_panel_image_area_centers_constrained_image_horizontally() {
+        let area = Rect::new(10, 4, 36, 12);
+        let fitted = fit_image_area_with_font(area, 999, 1454, Some((8, 16)), true, false);
+
+        assert!(fitted.width < area.width);
+        assert!(
+            fitted.x > area.x,
+            "expected horizontal centering: {:?} within {:?}",
+            fitted,
+            area
+        );
+        assert_eq!(
+            fitted.y, area.y,
+            "inline side-panel images should remain top-aligned"
+        );
+        assert_eq!(fitted.height, area.height);
+    }
+
+    #[test]
+    fn fit_side_panel_image_area_preserves_full_width_when_width_constrained() {
+        let area = Rect::new(0, 0, 36, 30);
+        let fitted = fit_image_area_with_font(area, 999, 1454, Some((8, 16)), true, false);
+
+        assert_eq!(fitted.x, area.x);
+        assert_eq!(fitted.width, area.width);
+        assert!(fitted.height < area.height);
+    }
+
+    #[test]
+    fn render_side_panel_markdown_keeps_text_after_mermaid_block() {
+        let page = crate::side_panel::SidePanelPage {
+            id: "mermaid_demo".to_string(),
+            title: "Mermaid Demo".to_string(),
+            file_path: "mermaid_demo.md".to_string(),
+            format: crate::side_panel::SidePanelPageFormat::Markdown,
+            content: "This is some text above the diagram.\n\n```mermaid\nflowchart TD\n    A[Start] --> B[Do the thing]\n    B --> C[Done]\n```\n\nThis is some text below the diagram.".to_string(),
+            updated_at_ms: 1,
+        };
+
+        let rendered =
+            render_side_panel_markdown_cached(&page, Rect::new(0, 0, 36, 30), true, true);
+        let text: Vec<String> = rendered
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+
+        assert!(
+            text.iter()
+                .any(|line| line.contains("This is some text above the diagram.")),
+            "expected text above mermaid block in rendered lines: {:?}",
+            text
+        );
+        assert!(
+            text.iter()
+                .any(|line| line.contains("This is some text below the diagram.")),
+            "expected text below mermaid block in rendered lines: {:?}",
+            text
+        );
+        if let Some(placement) = rendered.image_placements.first() {
+            assert!(
+                placement.rows < 30,
+                "image should not consume the full side-panel height when trailing text exists"
+            );
+        }
     }
 }
 
