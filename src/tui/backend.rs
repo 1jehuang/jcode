@@ -461,6 +461,22 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Inject externally transcribed text into the active remote TUI session.
+    pub async fn send_transcript(
+        &mut self,
+        text: String,
+        mode: crate::protocol::TranscriptMode,
+    ) -> Result<()> {
+        let request = Request::Transcript {
+            id: self.next_request_id,
+            text,
+            mode,
+            session_id: self.session_id.clone(),
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await
+    }
+
     /// Send stdin input back to a running command
     pub async fn send_stdin_response(&mut self, request_id: &str, input: &str) -> Result<()> {
         let request = Request::StdinResponse {

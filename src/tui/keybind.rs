@@ -386,6 +386,12 @@ pub struct CenteredToggleKeys {
     pub toggle_label: String,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct OptionalBinding {
+    pub binding: Option<KeyBinding>,
+    pub label: Option<String>,
+}
+
 impl EffortSwitchKeys {
     pub fn direction_for(&self, code: KeyCode, modifiers: KeyModifiers) -> Option<i8> {
         if self.increase.matches(code, modifiers) {
@@ -443,6 +449,21 @@ pub fn load_centered_toggle_key() -> CenteredToggleKeys {
     CenteredToggleKeys {
         toggle,
         toggle_label,
+    }
+}
+
+pub fn load_dictation_key() -> OptionalBinding {
+    let cfg = config();
+    let raw = cfg.dictation.key.trim();
+    if raw.is_empty() || is_disabled(raw) {
+        return OptionalBinding::default();
+    }
+    match parse_keybinding(raw) {
+        Some(binding) => OptionalBinding {
+            label: Some(format_binding(&binding)),
+            binding: Some(binding),
+        },
+        None => OptionalBinding::default(),
     }
 }
 

@@ -401,6 +401,10 @@ impl crate::tui::TuiState for App {
         })
     }
 
+    fn dictation_key_label(&self) -> Option<String> {
+        self.dictation_key_label().map(|s| s.to_string())
+    }
+
     fn animation_elapsed(&self) -> f32 {
         self.app_started.elapsed().as_secs_f32()
     }
@@ -974,6 +978,36 @@ impl crate::tui::TuiState for App {
 
     fn copy_badge_ui(&self) -> crate::tui::CopyBadgeUiState {
         self.copy_badge_ui.clone()
+    }
+
+    fn copy_selection_mode(&self) -> bool {
+        self.copy_selection_mode
+    }
+
+    fn copy_selection_range(&self) -> Option<crate::tui::CopySelectionRange> {
+        self.normalized_copy_selection()
+    }
+
+    fn copy_selection_status(&self) -> Option<crate::tui::CopySelectionStatus> {
+        if !self.copy_selection_mode {
+            return None;
+        }
+
+        let text = self.current_copy_selection_text().unwrap_or_default();
+        let has_selection = !text.is_empty();
+        Some(crate::tui::CopySelectionStatus {
+            pane: self
+                .current_copy_selection_pane()
+                .unwrap_or(crate::tui::CopySelectionPane::Chat),
+            has_selection,
+            selected_chars: text.chars().count(),
+            selected_lines: if has_selection {
+                text.lines().count().max(1)
+            } else {
+                0
+            },
+            dragging: self.copy_selection_dragging,
+        })
     }
 
     fn suggestion_prompts(&self) -> Vec<(String, String)> {

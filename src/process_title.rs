@@ -1,5 +1,18 @@
 use crate::cli::args::{AmbientCommand, Args, Command};
 
+const LINUX_PROCESS_TITLE_LIMIT: usize = 15;
+
+fn compact_process_title(prefix: &str, name: Option<&str>) -> String {
+    let mut title = prefix.to_string();
+    if let Some(name) = name.filter(|name| !name.is_empty()) {
+        let remaining = LINUX_PROCESS_TITLE_LIMIT.saturating_sub(title.len());
+        if remaining > 0 {
+            title.push_str(&name.chars().take(remaining).collect::<String>());
+        }
+    }
+    title
+}
+
 fn session_name(session_id: &str) -> String {
     crate::id::extract_session_name(session_id)
         .map(|name| name.to_string())
@@ -11,12 +24,16 @@ pub(crate) fn set_title(title: impl AsRef<str>) {
 }
 
 pub(crate) fn set_server_title(server_name: &str) {
-    set_title(format!("jcode server {}", server_name));
+    set_title(compact_process_title("jcode:s:", Some(server_name)));
 }
 
 pub(crate) fn set_client_generic_title(is_selfdev: bool) {
-    let role = if is_selfdev { "selfdev" } else { "client" };
-    set_title(format!("jcode {}", role));
+    let prefix = if is_selfdev {
+        "jcode:selfdev"
+    } else {
+        "jcode:client"
+    };
+    set_title(compact_process_title(prefix, None));
 }
 
 pub(crate) fn set_client_session_title(session_id: &str, is_selfdev: bool) {
@@ -24,19 +41,19 @@ pub(crate) fn set_client_session_title(session_id: &str, is_selfdev: bool) {
 }
 
 pub(crate) fn set_client_display_title(session_name: &str, is_selfdev: bool) {
-    let role = if is_selfdev { "selfdev" } else { "client" };
-    set_title(format!("jcode {} {}", role, session_name));
+    let prefix = if is_selfdev { "jcode:d:" } else { "jcode:c:" };
+    set_title(compact_process_title(prefix, Some(session_name)));
 }
 
 pub(crate) fn initial_title(args: &Args) -> String {
     match &args.command {
-        Some(Command::Serve) => "jcode server".to_string(),
-        Some(Command::Connect) => "jcode client".to_string(),
+        Some(Command::Serve) => "jcode:server".to_string(),
+        Some(Command::Connect) => "jcode:client".to_string(),
         Some(Command::Run { .. }) => "jcode run".to_string(),
         Some(Command::Login { .. }) => "jcode login".to_string(),
         Some(Command::Repl) => "jcode repl".to_string(),
         Some(Command::Update) => "jcode update".to_string(),
-        Some(Command::SelfDev { .. }) => "jcode selfdev".to_string(),
+        Some(Command::SelfDev { .. }) => "jcode:selfdev".to_string(),
         Some(Command::Debug { .. }) => "jcode debug".to_string(),
         Some(Command::Memory(_)) => "jcode memory".to_string(),
         Some(Command::Ambient(subcommand)) => match subcommand {
@@ -45,6 +62,8 @@ pub(crate) fn initial_title(args: &Args) -> String {
         },
         Some(Command::Pair { .. }) => "jcode pair".to_string(),
         Some(Command::Permissions) => "jcode permissions".to_string(),
+        Some(Command::Transcript { .. }) => "jcode transcript".to_string(),
+        Some(Command::Dictate) => "jcode dictate".to_string(),
         Some(Command::SetupHotkey {
             listen_macos_hotkey,
         }) => {
@@ -58,16 +77,16 @@ pub(crate) fn initial_title(args: &Args) -> String {
         Some(Command::Replay { .. }) => "jcode replay".to_string(),
         None => {
             if let Some(resume) = args.resume.as_deref().filter(|resume| !resume.is_empty()) {
-                let role = if crate::cli::selfdev::client_selfdev_requested() {
-                    "selfdev"
+                let prefix = if crate::cli::selfdev::client_selfdev_requested() {
+                    "jcode:d:"
                 } else {
-                    "client"
+                    "jcode:c:"
                 };
-                format!("jcode {} {}", role, session_name(resume))
+                compact_process_title(prefix, Some(&session_name(resume)))
             } else if crate::cli::selfdev::client_selfdev_requested() {
-                "jcode selfdev".to_string()
+                "jcode:selfdev".to_string()
             } else {
-                "jcode client".to_string()
+                "jcode:client".to_string()
             }
         }
     }
@@ -101,7 +120,7 @@ mod tests {
     fn initial_title_labels_server() {
         with_selfdev_env_removed(|| {
             let args = Args::parse_from(["jcode", "serve"]);
-            assert_eq!(initial_title(&args), "jcode server");
+            assert_eq!(initial_title(&args), "jcode:server");
         });
     }
 
@@ -109,7 +128,7 @@ mod tests {
     fn initial_title_labels_resume_client_with_short_name() {
         with_selfdev_env_removed(|| {
             let args = Args::parse_from(["jcode", "--resume", "session_fox_123"]);
-            assert_eq!(initial_title(&args), "jcode client fox");
+            assert_eq!(initial_title(&args), "jcode:c:fox");
         });
     }
 
@@ -117,7 +136,7 @@ mod tests {
     fn initial_title_labels_selfdev_command() {
         with_selfdev_env_removed(|| {
             let args = Args::parse_from(["jcode", "self-dev"]);
-            assert_eq!(initial_title(&args), "jcode selfdev");
+            assert_eq!(initial_title(&args), "jcode:selfdev");
         });
     }
 }

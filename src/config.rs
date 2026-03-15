@@ -106,6 +106,9 @@ pub struct Config {
     /// Keybinding configuration
     pub keybindings: KeybindingsConfig,
 
+    /// External dictation / speech-to-text integration
+    pub dictation: DictationConfig,
+
     /// Display/UI configuration
     pub display: DisplayConfig,
 
@@ -179,6 +182,31 @@ impl Default for KeybindingsConfig {
             scroll_bookmark: "ctrl+g".to_string(),
             scroll_up_fallback: "cmd+k".to_string(),
             scroll_down_fallback: "cmd+j".to_string(),
+        }
+    }
+}
+
+/// External dictation / speech-to-text integration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DictationConfig {
+    /// Shell command to run. Must print the transcript to stdout.
+    pub command: String,
+    /// How to apply the resulting transcript.
+    pub mode: crate::protocol::TranscriptMode,
+    /// Optional in-app hotkey to trigger dictation.
+    pub key: String,
+    /// Maximum time to wait for the command to finish (0 = no timeout).
+    pub timeout_secs: u64,
+}
+
+impl Default for DictationConfig {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            mode: crate::protocol::TranscriptMode::Send,
+            key: "off".to_string(),
+            timeout_secs: 90,
         }
     }
 }
@@ -642,6 +670,27 @@ impl Config {
             self.keybindings.scroll_down_fallback = v;
         }
 
+        // Dictation
+        if let Ok(v) = std::env::var("JCODE_DICTATION_COMMAND") {
+            self.dictation.command = v;
+        }
+        if let Ok(v) = std::env::var("JCODE_DICTATION_MODE") {
+            if let Ok(mode) = toml::from_str::<crate::protocol::TranscriptMode>(&format!(
+                "\"{}\"",
+                v.trim().to_ascii_lowercase()
+            )) {
+                self.dictation.mode = mode;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_DICTATION_KEY") {
+            self.dictation.key = v;
+        }
+        if let Ok(v) = std::env::var("JCODE_DICTATION_TIMEOUT_SECS") {
+            if let Ok(parsed) = v.trim().parse::<u64>() {
+                self.dictation.timeout_secs = parsed;
+            }
+        }
+
         // Display
         if let Ok(v) = std::env::var("JCODE_DIFF_MODE") {
             match v.to_lowercase().as_str() {
@@ -1003,6 +1052,23 @@ scroll_bookmark = "ctrl+g"
 scroll_up_fallback = "cmd+k"
 scroll_down_fallback = "cmd+j"
 
+[dictation]
+# External speech-to-text command.
+# The command should record/transcribe speech and print the final transcript to stdout.
+# Example:
+# command = "~/.local/bin/my-whisper-script"
+command = ""
+
+# How to apply the transcript inside jcode: insert|append|replace|send
+mode = "send"
+
+# Optional in-app hotkey to trigger dictation. Set to "off" to disable.
+# Example: "alt+;"
+key = "off"
+
+# Max seconds to wait for the dictation command to finish (0 = no timeout)
+timeout_secs = 90
+
 [display]
 # Diff display mode: "off", "inline" (default), or "pinned" (dedicated pane)
 diff_mode = "inline"
@@ -1186,6 +1252,12 @@ desktop_notifications = true
 - Prompt down: `{}`
 - Scroll bookmark: `{}`
 
+**Dictation:**
+- Command: `{}`
+- Mode: `{}`
+- Hotkey: `{}`
+- Timeout: {}s
+
 **Display:**
 - Diff mode: {}
 - Markdown spacing: {}
@@ -1256,6 +1328,19 @@ desktop_notifications = true
             self.keybindings.scroll_prompt_up,
             self.keybindings.scroll_prompt_down,
             self.keybindings.scroll_bookmark,
+            if self.dictation.command.trim().is_empty() {
+                "(disabled)"
+            } else {
+                self.dictation.command.as_str()
+            },
+            match self.dictation.mode {
+                crate::protocol::TranscriptMode::Insert => "insert",
+                crate::protocol::TranscriptMode::Append => "append",
+                crate::protocol::TranscriptMode::Replace => "replace",
+                crate::protocol::TranscriptMode::Send => "send",
+            },
+            self.dictation.key,
+            self.dictation.timeout_secs,
             self.display.diff_mode.label(),
             self.display.markdown_spacing.label(),
             self.display.pin_images,

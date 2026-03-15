@@ -344,6 +344,10 @@ impl TuiState for BenchState {
         None
     }
 
+    fn dictation_key_label(&self) -> Option<String> {
+        None
+    }
+
     fn animation_elapsed(&self) -> f32 {
         let elapsed = self.started_at.elapsed().as_secs_f32();
         if elapsed > 2.0 { 2.0 } else { elapsed }
@@ -484,6 +488,18 @@ impl TuiState for BenchState {
 
     fn copy_badge_ui(&self) -> jcode::tui::CopyBadgeUiState {
         jcode::tui::CopyBadgeUiState::default()
+    }
+
+    fn copy_selection_mode(&self) -> bool {
+        false
+    }
+
+    fn copy_selection_range(&self) -> Option<jcode::tui::CopySelectionRange> {
+        None
+    }
+
+    fn copy_selection_status(&self) -> Option<jcode::tui::CopySelectionStatus> {
+        None
     }
 
     fn suggestion_prompts(&self) -> Vec<(String, String)> {

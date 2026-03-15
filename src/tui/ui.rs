@@ -1467,6 +1467,319 @@ pub fn last_layout_snapshot() -> Option<LayoutSnapshot> {
         .and_then(|snapshot| *snapshot)
 }
 
+#[derive(Clone, Debug)]
+struct CopyViewportSnapshot {
+    pane: crate::tui::CopySelectionPane,
+    wrapped_plain_lines: Vec<String>,
+    scroll: usize,
+    visible_end: usize,
+    content_area: Rect,
+    left_margins: Vec<u16>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CopyViewportSnapshots {
+    chat: Option<CopyViewportSnapshot>,
+    side: Option<CopyViewportSnapshot>,
+}
+
+static LAST_COPY_VIEWPORT: OnceLock<Mutex<CopyViewportSnapshots>> = OnceLock::new();
+
+fn copy_viewport_state() -> &'static Mutex<CopyViewportSnapshots> {
+    LAST_COPY_VIEWPORT.get_or_init(|| Mutex::new(CopyViewportSnapshots::default()))
+}
+
+fn copy_snapshot_slot_mut(
+    snapshots: &mut CopyViewportSnapshots,
+    pane: crate::tui::CopySelectionPane,
+) -> &mut Option<CopyViewportSnapshot> {
+    match pane {
+        crate::tui::CopySelectionPane::Chat => &mut snapshots.chat,
+        crate::tui::CopySelectionPane::SidePane => &mut snapshots.side,
+    }
+}
+
+fn copy_snapshot_for_pane(pane: crate::tui::CopySelectionPane) -> Option<CopyViewportSnapshot> {
+    let snapshots = copy_viewport_state().lock().ok()?.clone();
+    match pane {
+        crate::tui::CopySelectionPane::Chat => snapshots.chat,
+        crate::tui::CopySelectionPane::SidePane => snapshots.side,
+    }
+}
+
+pub(crate) fn clear_copy_viewport_snapshot() {
+    if let Ok(mut state) = copy_viewport_state().lock() {
+        *state = CopyViewportSnapshots::default();
+    }
+}
+
+fn line_plain_text(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
+}
+
+fn record_copy_pane_snapshot(
+    pane: crate::tui::CopySelectionPane,
+    wrapped_lines: &[Line<'static>],
+    scroll: usize,
+    visible_end: usize,
+    content_area: Rect,
+    left_margins: &[u16],
+) {
+    if let Ok(mut state) = copy_viewport_state().lock() {
+        *copy_snapshot_slot_mut(&mut state, pane) = Some(CopyViewportSnapshot {
+            pane,
+            wrapped_plain_lines: wrapped_lines.iter().map(line_plain_text).collect(),
+            scroll,
+            visible_end,
+            content_area,
+            left_margins: left_margins.to_vec(),
+        });
+    }
+}
+
+pub(crate) fn record_copy_viewport_snapshot(
+    wrapped_lines: &[Line<'static>],
+    scroll: usize,
+    visible_end: usize,
+    content_area: Rect,
+    left_margins: &[u16],
+) {
+    record_copy_pane_snapshot(
+        crate::tui::CopySelectionPane::Chat,
+        wrapped_lines,
+        scroll,
+        visible_end,
+        content_area,
+        left_margins,
+    );
+}
+
+pub(crate) fn line_left_margins_for_area(lines: &[Line<'static>], area_width: u16) -> Vec<u16> {
+    lines
+        .iter()
+        .map(|line| {
+            let used = line.width().min(area_width as usize) as u16;
+            let total_margin = area_width.saturating_sub(used);
+            match line.alignment.unwrap_or(Alignment::Left) {
+                Alignment::Left => 0,
+                Alignment::Center => total_margin / 2,
+                Alignment::Right => total_margin,
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn record_side_pane_snapshot(
+    wrapped_lines: &[Line<'static>],
+    scroll: usize,
+    visible_end: usize,
+    content_area: Rect,
+) {
+    let left_margins = line_left_margins_for_area(wrapped_lines, content_area.width);
+    record_copy_pane_snapshot(
+        crate::tui::CopySelectionPane::SidePane,
+        wrapped_lines,
+        scroll,
+        visible_end,
+        content_area,
+        &left_margins,
+    );
+}
+
+fn line_display_width(text: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(text)
+}
+
+fn display_col_to_byte_offset(text: &str, display_col: usize) -> usize {
+    let mut width = 0usize;
+    for (idx, ch) in text.char_indices() {
+        if width >= display_col {
+            return idx;
+        }
+        let next_width =
+            width.saturating_add(unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0));
+        if next_width > display_col {
+            return idx;
+        }
+        width = next_width;
+    }
+    text.len()
+}
+
+fn clamp_display_col(text: &str, display_col: usize) -> usize {
+    display_col.min(line_display_width(text))
+}
+
+fn copy_point_from_snapshot(
+    snapshot: &CopyViewportSnapshot,
+    column: u16,
+    row: u16,
+) -> Option<crate::tui::CopySelectionPoint> {
+    let area = snapshot.content_area;
+    if row < area.y
+        || row >= area.y.saturating_add(area.height)
+        || column < area.x
+        || column >= area.x.saturating_add(area.width)
+    {
+        return None;
+    }
+
+    let rel_row = row.saturating_sub(area.y) as usize;
+    let abs_line = snapshot.scroll.saturating_add(rel_row);
+    if abs_line >= snapshot.visible_end || abs_line >= snapshot.wrapped_plain_lines.len() {
+        return None;
+    }
+
+    let left_margin = snapshot.left_margins.get(rel_row).copied().unwrap_or(0);
+    let content_x = area.x.saturating_add(left_margin);
+    let rel_col = column.saturating_sub(content_x) as usize;
+    let text = &snapshot.wrapped_plain_lines[abs_line];
+    Some(crate::tui::CopySelectionPoint {
+        pane: snapshot.pane,
+        abs_line,
+        column: clamp_display_col(text, rel_col),
+    })
+}
+
+pub(crate) fn copy_point_from_screen(
+    column: u16,
+    row: u16,
+) -> Option<crate::tui::CopySelectionPoint> {
+    let snapshots = copy_viewport_state().lock().ok()?.clone();
+    snapshots
+        .chat
+        .as_ref()
+        .and_then(|snapshot| copy_point_from_snapshot(snapshot, column, row))
+        .or_else(|| {
+            snapshots
+                .side
+                .as_ref()
+                .and_then(|snapshot| copy_point_from_snapshot(snapshot, column, row))
+        })
+}
+
+pub(crate) fn copy_viewport_point_from_screen(
+    column: u16,
+    row: u16,
+) -> Option<crate::tui::CopySelectionPoint> {
+    let point = copy_point_from_screen(column, row)?;
+    (point.pane == crate::tui::CopySelectionPane::Chat).then_some(point)
+}
+
+pub(crate) fn side_pane_point_from_screen(
+    column: u16,
+    row: u16,
+) -> Option<crate::tui::CopySelectionPoint> {
+    let point = copy_point_from_screen(column, row)?;
+    (point.pane == crate::tui::CopySelectionPane::SidePane).then_some(point)
+}
+
+fn copy_pane_line_text(pane: crate::tui::CopySelectionPane, abs_line: usize) -> Option<String> {
+    copy_snapshot_for_pane(pane)?
+        .wrapped_plain_lines
+        .get(abs_line)
+        .cloned()
+}
+
+pub(crate) fn copy_viewport_line_text(abs_line: usize) -> Option<String> {
+    copy_pane_line_text(crate::tui::CopySelectionPane::Chat, abs_line)
+}
+
+pub(crate) fn side_pane_line_text(abs_line: usize) -> Option<String> {
+    copy_pane_line_text(crate::tui::CopySelectionPane::SidePane, abs_line)
+}
+
+fn copy_pane_line_count(pane: crate::tui::CopySelectionPane) -> Option<usize> {
+    Some(copy_snapshot_for_pane(pane)?.wrapped_plain_lines.len())
+}
+
+pub(crate) fn copy_viewport_line_count() -> Option<usize> {
+    copy_pane_line_count(crate::tui::CopySelectionPane::Chat)
+}
+
+pub(crate) fn side_pane_line_count() -> Option<usize> {
+    copy_pane_line_count(crate::tui::CopySelectionPane::SidePane)
+}
+
+pub(crate) fn copy_viewport_visible_range() -> Option<(usize, usize)> {
+    let snapshot = copy_snapshot_for_pane(crate::tui::CopySelectionPane::Chat)?;
+    Some((snapshot.scroll, snapshot.visible_end))
+}
+
+pub(crate) fn side_pane_visible_range() -> Option<(usize, usize)> {
+    let snapshot = copy_snapshot_for_pane(crate::tui::CopySelectionPane::SidePane)?;
+    Some((snapshot.scroll, snapshot.visible_end))
+}
+
+pub(crate) fn copy_pane_first_visible_point(
+    pane: crate::tui::CopySelectionPane,
+) -> Option<crate::tui::CopySelectionPoint> {
+    let snapshot = copy_snapshot_for_pane(pane)?;
+    if snapshot.scroll >= snapshot.visible_end
+        || snapshot.scroll >= snapshot.wrapped_plain_lines.len()
+    {
+        return None;
+    }
+    Some(crate::tui::CopySelectionPoint {
+        pane,
+        abs_line: snapshot.scroll,
+        column: 0,
+    })
+}
+
+pub(crate) fn copy_viewport_first_visible_point() -> Option<crate::tui::CopySelectionPoint> {
+    copy_pane_first_visible_point(crate::tui::CopySelectionPane::Chat)
+}
+
+pub(crate) fn copy_selection_text(range: crate::tui::CopySelectionRange) -> Option<String> {
+    if range.start.pane != range.end.pane {
+        return None;
+    }
+    let snapshot = copy_snapshot_for_pane(range.start.pane)?;
+    let (start, end) =
+        if (range.start.abs_line, range.start.column) <= (range.end.abs_line, range.end.column) {
+            (range.start, range.end)
+        } else {
+            (range.end, range.start)
+        };
+
+    if start.abs_line >= snapshot.wrapped_plain_lines.len()
+        || end.abs_line >= snapshot.wrapped_plain_lines.len()
+    {
+        return None;
+    }
+
+    let mut out = Vec::new();
+    for abs_line in start.abs_line..=end.abs_line {
+        let text = &snapshot.wrapped_plain_lines[abs_line];
+        let line_width = line_display_width(text);
+        let start_col = if abs_line == start.abs_line {
+            clamp_display_col(text, start.column)
+        } else {
+            0
+        };
+        let end_col = if abs_line == end.abs_line {
+            clamp_display_col(text, end.column)
+        } else {
+            line_width
+        };
+
+        if end_col < start_col {
+            out.push(String::new());
+            continue;
+        }
+
+        let start_byte = display_col_to_byte_offset(text, start_col);
+        let end_byte = display_col_to_byte_offset(text, end_col);
+        out.push(text[start_byte..end_byte].to_string());
+    }
+
+    Some(out.join("\n"))
+}
+
 fn profile_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("JCODE_TUI_PROFILE").is_ok())
@@ -1551,6 +1864,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+
+    clear_copy_viewport_snapshot();
 
     // Clear full frame to prevent stale cells from prior layouts.
     // This is critical on macOS terminals where ratatui's diff-based updates
@@ -1778,13 +2093,13 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // (max 10 lines visible, scrolls if more).
     let base_input_height =
         input_ui::wrapped_input_line_count(app, chat_area.width, next_prompt).min(10) as u16;
-    // Add 1 line for command suggestions when typing /, or for Shift+Enter hint when processing
+    // Add 1 line for command suggestions when typing /, or for the Ctrl+Enter hint when processing
     let suggestions = app.command_suggestions();
     let has_slash_input = app.input().trim_start().starts_with('/');
     let hint_line_height = if !suggestions.is_empty() && (has_slash_input || !app.is_processing()) {
         1 // Command suggestions (shown even during streaming when typing /commands)
     } else if app.is_processing() && !app.input().is_empty() {
-        1 // Shift+Enter hint
+        1 // Ctrl+Enter hint
     } else {
         0
     };
@@ -1966,6 +2281,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             draw_side_panel_markdown(
                 frame,
                 diff_area,
+                app,
                 app.side_panel(),
                 app.diff_pane_scroll(),
                 app.diff_pane_focus(),
@@ -1990,6 +2306,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             draw_pinned_content_cached(
                 frame,
                 diff_area,
+                app,
                 app.diff_pane_scroll(),
                 app.diff_line_wrap(),
                 app.diff_pane_focus(),
@@ -2784,6 +3101,9 @@ mod tests {
         fn status_notice(&self) -> Option<String> {
             None
         }
+        fn dictation_key_label(&self) -> Option<String> {
+            None
+        }
         fn animation_elapsed(&self) -> f32 {
             self.anim_elapsed
         }
@@ -2892,6 +3212,15 @@ mod tests {
         }
         fn copy_badge_ui(&self) -> crate::tui::CopyBadgeUiState {
             Default::default()
+        }
+        fn copy_selection_mode(&self) -> bool {
+            false
+        }
+        fn copy_selection_range(&self) -> Option<crate::tui::CopySelectionRange> {
+            None
+        }
+        fn copy_selection_status(&self) -> Option<crate::tui::CopySelectionStatus> {
+            None
         }
         fn suggestion_prompts(&self) -> Vec<(String, String)> {
             Vec::new()

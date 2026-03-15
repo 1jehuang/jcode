@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use super::keybind::{CenteredToggleKeys, ModelSwitchKeys, ScrollKeys};
+use super::keybind::{CenteredToggleKeys, ModelSwitchKeys, OptionalBinding, ScrollKeys};
 use super::markdown::IncrementalMarkdownRenderer;
 use super::stream_buffer::StreamBuffer;
 use crate::bus::{Bus, BusEvent, LoginCompleted, ToolEvent, ToolStatus};
@@ -37,7 +37,9 @@ use tokio::time::interval;
 mod auth;
 mod commands;
 mod conversation_state;
+mod copy_selection;
 mod debug;
+mod dictation;
 mod event_wrappers;
 mod helpers;
 mod input;
@@ -283,6 +285,13 @@ pub struct App {
     pending_images: Vec<(String, String)>,
     // Inline UI state for copy badges ([Alt] [⇧] [S])
     copy_badge_ui: CopyBadgeUiState,
+    // Modal in-app selection/copy state for the chat viewport.
+    copy_selection_mode: bool,
+    copy_selection_anchor: Option<crate::tui::CopySelectionPoint>,
+    copy_selection_cursor: Option<crate::tui::CopySelectionPoint>,
+    copy_selection_pending_anchor: Option<crate::tui::CopySelectionPoint>,
+    copy_selection_dragging: bool,
+    copy_selection_goal_column: Option<usize>,
     // Debug socket broadcast channel (if enabled)
     debug_tx: Option<tokio::sync::broadcast::Sender<super::backend::DebugEvent>>,
     // Remote provider info (set when running in remote mode)
@@ -401,6 +410,10 @@ pub struct App {
     scroll_keys: ScrollKeys,
     // Keybinding for centered-mode toggle
     centered_toggle_keys: CenteredToggleKeys,
+    // Optional configured keybinding for external dictation
+    dictation_key: OptionalBinding,
+    // Whether an external dictation command is currently running
+    dictation_in_flight: bool,
     // Keep the current chat viewport while typing instead of snapping to bottom.
     typing_scroll_lock: bool,
     // Scroll bookmark: stashed scroll position for quick teleport back
@@ -409,7 +422,7 @@ pub struct App {
     stashed_input: Option<(String, usize)>,
     // Short-lived notice for status feedback (model switch, cycle diff mode, etc.)
     status_notice: Option<(String, Instant)>,
-    // Message to interleave during processing (set via Shift+Enter)
+    // Message to interleave during processing (set via Ctrl+Enter in queue mode)
     interleave_message: Option<String>,
     // Message sent as soft interrupt but not yet injected (shown in queue preview until injected)
     pending_soft_interrupts: Vec<String>,

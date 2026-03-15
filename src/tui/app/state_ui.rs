@@ -304,6 +304,10 @@ impl App {
                 "Compact context (summarize old messages)",
             ),
             ("/fix".into(), "Recover when the model cannot continue"),
+            (
+                "/dictate".into(),
+                "Run configured external dictation command",
+            ),
             ("/memory".into(), "Toggle memory feature (on/off/status)"),
             ("/swarm".into(), "Toggle swarm feature (on/off/status)"),
             ("/version".into(), "Show current version"),

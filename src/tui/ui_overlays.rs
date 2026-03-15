@@ -141,6 +141,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(help_entry("/config", "Show active configuration"));
     lines.push(help_entry("/config init", "Create default config file"));
     lines.push(help_entry("/config edit", "Open config in $EDITOR"));
+    lines.push(help_entry("/dictate", "Run configured external dictation"));
     lines.push(help_entry("/info", "Show session info and token usage"));
     lines.push(help_entry("/usage", "Show subscription usage limits"));
     lines.push(help_entry("/version", "Show version and build details"));
@@ -274,7 +275,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(key_entry("Alt+M", "Toggle diagram pane"));
     lines.push(key_entry("Alt+T", "Toggle diagram position (side/top)"));
     lines.push(key_entry("Ctrl+H / Ctrl+L", "Focus chat / diagram / diffs"));
-    lines.push(key_entry("Ctrl+Left / Right", "Cycle diagrams in pane"));
+    lines.push(key_entry(
+        "Ctrl+Left / Right",
+        "Cycle diagrams (when diagram focused)",
+    ));
     lines.push(key_entry("h/j/k/l / arrows", "Pan diagram (when focused)"));
     lines.push(key_entry("[ / ]", "Zoom diagram (when focused)"));
     lines.push(key_entry("+ / -", "Resize diagram pane"));
@@ -296,13 +300,25 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(key_entry("Ctrl+X", "Cut entire input line to clipboard"));
     lines.push(key_entry("Ctrl+U", "Clear input line"));
     lines.push(key_entry("Ctrl+S", "Stash / pop input (save for later)"));
+    lines.push(key_entry("Ctrl+Backspace", "Delete previous word in input"));
+    lines.push(key_entry("Ctrl+B / Ctrl+F", "Move by word left / right"));
+    lines.push(key_entry("Ctrl+Left / Right", "Move by word left / right"));
+    lines.push(key_entry("Shift+Enter", "Insert newline in input"));
+    lines.push(key_entry(
+        "Ctrl+Enter",
+        "Use opposite send mode while processing",
+    ));
     lines.push(key_entry("Ctrl+Up", "Retrieve pending message for editing"));
     lines.push(key_entry("Ctrl+Tab / Ctrl+T", "Toggle queue mode"));
     lines.push(key_entry("Ctrl+R", "Recover from missing tool outputs"));
     lines.push(key_entry("Ctrl+V", "Paste clipboard (text or image)"));
     lines.push(key_entry("Alt+V", "Paste image from clipboard"));
+    lines.push(key_entry("Alt+Y", "Toggle chat selection/copy mode"));
     lines.push(key_entry("Alt+S", "Toggle typing scroll lock"));
     lines.push(key_entry("Alt+Left / Right", "Cycle reasoning effort"));
+    if let Some(label) = app.dictation_key_label() {
+        lines.push(key_entry(&label, "Run configured dictation"));
+    }
 
     lines.push(Line::from(""));
 

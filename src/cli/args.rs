@@ -1,6 +1,14 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use super::provider_init::ProviderChoice;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum TranscriptModeArg {
+    Insert,
+    Append,
+    Replace,
+    Send,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "jcode")]
@@ -138,6 +146,23 @@ pub(crate) enum Command {
 
     /// Review and respond to pending ambient permission requests
     Permissions,
+
+    /// Inject externally transcribed text into the active Jcode TUI
+    Transcript {
+        /// Transcript text. If omitted, reads from stdin.
+        text: Option<String>,
+
+        /// How to apply the transcript inside Jcode
+        #[arg(long, value_enum, default_value = "send")]
+        mode: TranscriptModeArg,
+
+        /// Target a specific live session instead of the active TUI
+        #[arg(short = 'S', long)]
+        session: Option<String>,
+    },
+
+    /// Run configured dictation: inject into focused jcode window, else type normally
+    Dictate,
 
     /// Set up a global hotkey (Alt+;) to launch jcode
     SetupHotkey {

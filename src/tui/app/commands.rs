@@ -362,6 +362,23 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
     false
 }
 
+pub(super) fn handle_dictation_command(app: &mut App, trimmed: &str) -> bool {
+    if trimmed == "/dictate" || trimmed == "/dictation" {
+        app.handle_dictation_trigger();
+        return true;
+    }
+
+    if trimmed.starts_with("/dictate ") || trimmed.starts_with("/dictation ") {
+        app.push_display_message(DisplayMessage::error(
+            "Usage: `/dictate`\nConfigure `[dictation]` in `~/.jcode/config.toml` to customize command, mode, hotkey, and timeout."
+                .to_string(),
+        ));
+        return true;
+    }
+
+    false
+}
+
 pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
     use crate::bus::{Bus, BusEvent};
 

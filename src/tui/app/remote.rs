@@ -4,7 +4,7 @@ use super::{
 };
 use crate::bus::BusEvent;
 use crate::message::ToolCall;
-use crate::protocol::{NotificationType, ServerEvent};
+use crate::protocol::{NotificationType, ServerEvent, TranscriptMode};
 use crate::tool::selfdev::ReloadContext;
 use crate::tui::backend::{RemoteConnection, RemoteDisconnectReason, RemoteEventState, RemoteRead};
 use crate::tui::ui::capitalize;
@@ -398,6 +398,15 @@ pub(super) async fn handle_bus_event(
         }
         Ok(BusEvent::UpdateStatus(status)) => {
             app.handle_update_status(status);
+        }
+        Ok(BusEvent::DictationCompleted { text, mode }) => {
+            match remote.send_transcript(text, mode).await {
+                Ok(()) => app.mark_dictation_delivered(),
+                Err(error) => app.handle_dictation_failure(error.to_string()),
+            }
+        }
+        Ok(BusEvent::DictationFailed { message }) => {
+            app.handle_dictation_failure(message);
         }
         _ => {}
     }
@@ -1218,6 +1227,64 @@ pub(super) async fn begin_remote_send(
     });
     remote.reset_call_output_tokens_seen();
     Ok(msg_id)
+}
+
+fn set_transcript_input(app: &mut App, text: String) {
+    app.input = text;
+    app.cursor_pos = app.input.len();
+    app.reset_tab_completion();
+    app.sync_model_picker_preview_from_input();
+}
+
+fn queue_transcript_input(app: &mut App) {
+    input::queue_message(app);
+    let count = app.queued_messages.len();
+    app.set_status_notice(format!(
+        "Transcript queued ({} message{})",
+        count,
+        if count == 1 { "" } else { "s" }
+    ));
+}
+
+fn submit_transcript_input(app: &mut App) {
+    match app.send_action(false) {
+        SendAction::Submit => app.submit_input(),
+        SendAction::Queue => queue_transcript_input(app),
+        SendAction::Interleave => {
+            let prepared = input::take_prepared_input(app);
+            input::stage_local_interleave(app, prepared.expanded);
+        }
+    }
+}
+
+pub(super) fn apply_transcript_event(app: &mut App, text: String, mode: TranscriptMode) {
+    if text.trim().is_empty() {
+        app.set_status_notice("Transcript was empty");
+        return;
+    }
+
+    match mode {
+        TranscriptMode::Insert => {
+            input::insert_input_text(app, &text);
+            app.set_status_notice("Transcript inserted");
+        }
+        TranscriptMode::Append => {
+            let mut combined = app.input.clone();
+            combined.push_str(&text);
+            set_transcript_input(app, combined);
+            app.set_status_notice("Transcript appended");
+        }
+        TranscriptMode::Replace => {
+            set_transcript_input(app, text);
+            app.set_status_notice("Transcript replaced input");
+        }
+        TranscriptMode::Send => {
+            input::insert_input_text(app, &text);
+            submit_transcript_input(app);
+        }
+    }
+
+    app.follow_chat_bottom_for_typing();
 }
 
 pub(super) fn handle_server_event(
@@ -2045,6 +2112,10 @@ pub(super) fn handle_server_event(
             app.set_status_notice(status_notice);
             false
         }
+        ServerEvent::Transcript { text, mode } => {
+            apply_transcript_event(app, text, mode);
+            false
+        }
         ServerEvent::Compaction {
             trigger,
             pre_tokens,
@@ -2134,11 +2205,8 @@ pub(super) fn handle_remote_char_input(app: &mut App, c: char) {
             }
         }
     }
-    app.input.insert(app.cursor_pos, c);
-    app.cursor_pos += c.len_utf8();
+    input::insert_input_text(app, &c.to_string());
     app.follow_chat_bottom_for_typing();
-    app.reset_tab_completion();
-    app.sync_model_picker_preview_from_input();
 }
 
 fn handle_disconnected_local_command(app: &mut App, trimmed: &str) -> bool {
@@ -2219,8 +2287,13 @@ pub(super) fn handle_disconnected_key(
         return Ok(());
     }
 
-    if code == KeyCode::Enter && modifiers.contains(KeyModifiers::SHIFT) {
+    if code == KeyCode::Enter && modifiers.contains(KeyModifiers::CONTROL) {
         queue_message_for_reconnect(app);
+        return Ok(());
+    }
+
+    if code == KeyCode::Enter && modifiers.contains(KeyModifiers::SHIFT) {
+        input::insert_input_text(app, "\n");
         return Ok(());
     }
 
@@ -2405,6 +2478,11 @@ pub(super) async fn handle_remote_key(
         return Ok(());
     }
 
+    if app.dictation_key_matches(code, modifiers) {
+        app.handle_dictation_trigger();
+        return Ok(());
+    }
+
     if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('m')) {
         app.toggle_diagram_pane();
         return Ok(());
@@ -2563,6 +2641,10 @@ pub(super) async fn handle_remote_key(
                     app.set_status_notice("Moving tool to background...");
                     return Ok(());
                 }
+                if app.cursor_pos > 0 {
+                    app.cursor_pos = app.find_word_boundary_back();
+                }
+                return Ok(());
             }
             KeyCode::Char('c') | KeyCode::Char('d') => {
                 if app.is_processing {
@@ -2601,10 +2683,29 @@ pub(super) async fn handle_remote_key(
                 app.cursor_pos = app.input.len();
                 return Ok(());
             }
-            KeyCode::Char('w') => {
+            KeyCode::Char('f') => {
+                if app.cursor_pos < app.input.len() {
+                    app.cursor_pos = app.find_word_boundary_forward();
+                }
+                return Ok(());
+            }
+            KeyCode::Left => {
+                if app.cursor_pos > 0 {
+                    app.cursor_pos = app.find_word_boundary_back();
+                }
+                return Ok(());
+            }
+            KeyCode::Right => {
+                if app.cursor_pos < app.input.len() {
+                    app.cursor_pos = app.find_word_boundary_forward();
+                }
+                return Ok(());
+            }
+            KeyCode::Char('w') | KeyCode::Backspace => {
                 let start = app.find_word_boundary_back();
                 app.input.drain(start..app.cursor_pos);
                 app.cursor_pos = start;
+                app.sync_model_picker_preview_from_input();
                 return Ok(());
             }
             KeyCode::Char('s') => {
@@ -2636,7 +2737,14 @@ pub(super) async fn handle_remote_key(
         }
     }
 
-    if code == KeyCode::Enter && modifiers.contains(KeyModifiers::SHIFT) {
+    if code == KeyCode::Enter
+        && modifiers.contains(KeyModifiers::CONTROL)
+        && !app.input.trim().starts_with('/')
+    {
+        if app.activate_model_picker_from_preview() {
+            return Ok(());
+        }
+
         if !app.input.is_empty() {
             let prepared = input::take_prepared_input(app);
 
@@ -2662,6 +2770,12 @@ pub(super) async fn handle_remote_key(
                 }
             }
         }
+        return Ok(());
+    }
+
+    if code == KeyCode::Enter && modifiers.contains(KeyModifiers::SHIFT) {
+        input::insert_input_text(app, "\n");
+        app.follow_chat_bottom_for_typing();
         return Ok(());
     }
 
@@ -2744,6 +2858,10 @@ pub(super) async fn handle_remote_key(
 
                 if trimmed == "/help" || trimmed == "/?" || trimmed == "/commands" {
                     app.help_scroll = Some(0);
+                    return Ok(());
+                }
+
+                if super::commands::handle_dictation_command(app, trimmed) {
                     return Ok(());
                 }
 
@@ -3031,22 +3149,71 @@ pub(super) async fn handle_remote_key(
                         if let Some(label) =
                             parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty())
                         {
-                            if let Err(e) = crate::auth::claude::set_active_account(label) {
-                                app.push_display_message(DisplayMessage::error(format!(
-                                    "Failed to switch account: {}",
-                                    e
-                                )));
-                                return Ok(());
+                            let has_anthropic = crate::auth::claude::list_accounts()
+                                .unwrap_or_default()
+                                .iter()
+                                .any(|account| account.label == label);
+                            let has_openai = crate::auth::codex::list_accounts()
+                                .unwrap_or_default()
+                                .iter()
+                                .any(|account| account.label == label);
+
+                            match (has_anthropic, has_openai) {
+                                (true, false) => {
+                                    if let Err(e) = crate::auth::claude::set_active_account(label) {
+                                        app.push_display_message(DisplayMessage::error(format!(
+                                            "Failed to switch account: {}",
+                                            e
+                                        )));
+                                        return Ok(());
+                                    }
+                                    crate::auth::AuthStatus::invalidate_cache();
+                                    app.context_limit = app.provider.context_window() as u64;
+                                    app.context_warning_shown = false;
+                                    remote.switch_anthropic_account(label).await?;
+                                    app.push_display_message(DisplayMessage::system(format!(
+                                        "Switched to Anthropic account `{}`.",
+                                        label
+                                    )));
+                                    app.set_status_notice(&format!(
+                                        "Account: switched to {}",
+                                        label
+                                    ));
+                                }
+                                (false, true) => {
+                                    if let Err(e) = crate::auth::codex::set_active_account(label) {
+                                        app.push_display_message(DisplayMessage::error(format!(
+                                            "Failed to switch OpenAI account: {}",
+                                            e
+                                        )));
+                                        return Ok(());
+                                    }
+                                    crate::auth::AuthStatus::invalidate_cache();
+                                    app.context_limit = app.provider.context_window() as u64;
+                                    app.context_warning_shown = false;
+                                    remote.switch_openai_account(label).await?;
+                                    app.push_display_message(DisplayMessage::system(format!(
+                                        "Switched to OpenAI account `{}`.",
+                                        label
+                                    )));
+                                    app.set_status_notice(&format!(
+                                        "OpenAI account: switched to {}",
+                                        label
+                                    ));
+                                }
+                                (true, true) => {
+                                    app.push_display_message(DisplayMessage::error(format!(
+                                        "Account label `{}` exists for both Anthropic and OpenAI. Use `/account switch {}` or `/account openai switch {}` explicitly.",
+                                        label, label, label
+                                    )));
+                                }
+                                (false, false) => {
+                                    app.push_display_message(DisplayMessage::error(format!(
+                                        "No Anthropic or OpenAI account with label `{}` found.",
+                                        label
+                                    )));
+                                }
                             }
-                            crate::auth::AuthStatus::invalidate_cache();
-                            app.context_limit = app.provider.context_window() as u64;
-                            app.context_warning_shown = false;
-                            remote.switch_anthropic_account(label).await?;
-                            app.push_display_message(DisplayMessage::system(format!(
-                                "Switched to Anthropic account `{}`.",
-                                label
-                            )));
-                            app.set_status_notice(&format!("Account: switched to {}", label));
                             return Ok(());
                         }
                         app.push_display_message(DisplayMessage::error(

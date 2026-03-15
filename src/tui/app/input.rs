@@ -103,8 +103,7 @@ pub(super) fn handle_paste(app: &mut App, text: String) {
 
     let line_count = text.lines().count().max(1);
     if line_count < 5 {
-        app.input.insert_str(app.cursor_pos, &text);
-        app.cursor_pos += text.len();
+        insert_input_text(app, &text);
     } else {
         app.pasted_contents.push(text);
         let placeholder = format!(
@@ -112,9 +111,18 @@ pub(super) fn handle_paste(app: &mut App, text: String) {
             line_count,
             if line_count == 1 { "" } else { "s" }
         );
-        app.input.insert_str(app.cursor_pos, &placeholder);
-        app.cursor_pos += placeholder.len();
+        insert_input_text(app, &placeholder);
     }
+}
+
+pub(super) fn insert_input_text(app: &mut App, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+
+    app.input.insert_str(app.cursor_pos, text);
+    app.cursor_pos += text.len();
+    app.reset_tab_completion();
     app.sync_model_picker_preview_from_input();
 }
 
@@ -167,14 +175,14 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
     had_pending
 }
 
-pub(super) fn send_action(app: &App, shift: bool) -> SendAction {
+pub(super) fn send_action(app: &App, alternate_shortcut: bool) -> SendAction {
     if !app.is_processing {
         return SendAction::Submit;
     }
     if app.input.trim().starts_with('/') {
         return SendAction::Submit;
     }
-    if shift {
+    if alternate_shortcut {
         if app.queue_mode {
             SendAction::Interleave
         } else {
@@ -188,9 +196,18 @@ pub(super) fn send_action(app: &App, shift: bool) -> SendAction {
 }
 
 pub(super) fn handle_shift_enter(app: &mut App) {
+    insert_input_text(app, "\n");
+}
+
+pub(super) fn handle_alternate_enter(app: &mut App) {
+    if app.activate_model_picker_from_preview() {
+        return;
+    }
+
     if app.input.is_empty() {
         return;
     }
+
     match send_action(app, true) {
         SendAction::Submit => app.submit_input(),
         SendAction::Queue => queue_message(app),
@@ -223,17 +240,17 @@ pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
         }
         KeyCode::Char('b') => {
             if app.cursor_pos > 0 {
-                app.cursor_pos = crate::tui::core::prev_char_boundary(&app.input, app.cursor_pos);
+                app.cursor_pos = app.find_word_boundary_back();
             }
             true
         }
         KeyCode::Char('f') => {
             if app.cursor_pos < app.input.len() {
-                app.cursor_pos = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
+                app.cursor_pos = app.find_word_boundary_forward();
             }
             true
         }
-        KeyCode::Char('w') => {
+        KeyCode::Char('w') | KeyCode::Backspace => {
             let start = app.find_word_boundary_back();
             app.input.drain(start..app.cursor_pos);
             app.cursor_pos = start;
@@ -256,6 +273,18 @@ pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
                 "Immediate mode: messages send next (no interrupt)"
             };
             app.set_status_notice(mode_str);
+            true
+        }
+        KeyCode::Left => {
+            if app.cursor_pos > 0 {
+                app.cursor_pos = app.find_word_boundary_back();
+            }
+            true
+        }
+        KeyCode::Right => {
+            if app.cursor_pos < app.input.len() {
+                app.cursor_pos = app.find_word_boundary_forward();
+            }
             true
         }
         KeyCode::Up => {
@@ -440,6 +469,11 @@ pub(super) fn handle_pre_control_shortcuts(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> bool {
+    if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('y')) {
+        app.toggle_copy_selection_mode();
+        return true;
+    }
+
     if handle_visible_copy_shortcut(app, code, modifiers) {
         return true;
     }
@@ -454,6 +488,10 @@ pub(super) fn handle_pre_control_shortcuts(
     }
     if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('s')) {
         app.toggle_typing_scroll_lock();
+        return true;
+    }
+    if app.dictation_key_matches(code, modifiers) {
+        app.handle_dictation_trigger();
         return true;
     }
     if let Some(direction) = app.model_switch_keys.direction_for(code, modifiers) {
@@ -548,6 +586,18 @@ pub(super) fn handle_modal_key(
         return Ok(true);
     }
 
+    if app.copy_selection_mode {
+        if modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(code, KeyCode::Char('c') | KeyCode::Char('d'))
+        {
+            return Ok(false);
+        }
+
+        let handled = app.handle_copy_selection_key(code, modifiers)
+            || handle_navigation_shortcuts(app, code, modifiers);
+        return Ok(handled || true);
+    }
+
     if let Some(ref picker) = app.picker_state {
         if !picker.preview {
             app.handle_picker_key(code, modifiers)?;
@@ -632,10 +682,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                     }
                 }
             }
-            app.input.insert(app.cursor_pos, c);
-            app.cursor_pos += c.len_utf8();
-            app.reset_tab_completion();
-            app.sync_model_picker_preview_from_input();
+            insert_input_text(app, &c.to_string());
             true
         }
         KeyCode::Backspace => {
@@ -809,7 +856,13 @@ impl App {
             return Ok(());
         }
 
-        // Shift+Enter: does opposite of queue_mode during processing
+        // Ctrl+Enter: does opposite of queue_mode during processing
+        if code == KeyCode::Enter && modifiers.contains(KeyModifiers::CONTROL) {
+            handle_alternate_enter(self);
+            return Ok(());
+        }
+
+        // Shift+Enter inserts a newline in the input box
         if code == KeyCode::Enter && modifiers.contains(KeyModifiers::SHIFT) {
             handle_shift_enter(self);
             return Ok(());
@@ -1094,6 +1147,9 @@ impl App {
             }
             "memory" => "`/memory [on|off|status]`\nToggle memory features for this session.",
             "swarm" => "`/swarm [on|off|status]`\nToggle swarm features for this session.",
+            "dictate" | "dictation" => {
+                "`/dictate`\nRun the configured external speech-to-text command and inject the transcript into jcode.\n\nConfigure `[dictation]` in `~/.jcode/config.toml`:\n- `command`: shell command that prints transcript to stdout\n- `mode`: `insert|append|replace|send`\n- `key`: optional hotkey (for example `alt+;`)\n- `timeout_secs`: max wait time"
+            }
             "poke" => {
                 "`/poke`\nPoke the model to resume when it has stopped with incomplete todos.\n\
                 Injects a reminder listing all pending/in-progress tasks and prompts the model to either\n\
@@ -1169,6 +1225,7 @@ impl App {
         let trimmed = input.trim();
         if commands::handle_help_command(self, trimmed)
             || commands::handle_session_command(self, trimmed)
+            || commands::handle_dictation_command(self, trimmed)
             || commands::handle_config_command(self, trimmed)
             || super::debug::handle_debug_command(self, trimmed)
             || super::model_context::handle_model_command(self, trimmed)

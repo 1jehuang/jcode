@@ -1721,6 +1721,20 @@ fn unregister_active_pid(session_id: &str) {
     }
 }
 
+/// Find the active session ID currently owned by the given process ID.
+pub fn find_active_session_id_by_pid(pid: u32) -> Option<String> {
+    let dir = active_pids_dir()?;
+    for entry in std::fs::read_dir(dir).ok()? {
+        let entry = entry.ok()?;
+        let session_id = entry.file_name().to_string_lossy().to_string();
+        let stored = std::fs::read_to_string(entry.path()).ok()?;
+        if stored.trim().parse::<u32>().ok()? == pid {
+            return Some(session_id);
+        }
+    }
+    None
+}
+
 /// Find a session by ID or memorable name
 /// If the input doesn't look like a full session ID (doesn't contain underscore followed by digits),
 /// try to find a session whose short name matches.

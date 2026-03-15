@@ -572,6 +572,7 @@ fn test_diagram_cycle_ctrl_arrows() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     app.diagram_mode = crate::config::DiagramDisplayMode::Pinned;
+    app.diagram_focus = true;
     crate::tui::mermaid::clear_active_diagrams();
     crate::tui::mermaid::register_active_diagram(0x1, 100, 80, None);
     crate::tui::mermaid::register_active_diagram(0x2, 120, 90, None);
@@ -1431,6 +1432,29 @@ fn test_handle_key_cursor_movement() {
 }
 
 #[test]
+fn test_handle_key_ctrl_word_movement_and_delete() {
+    let mut app = create_test_app();
+    app.set_input_for_test("hello world again");
+
+    app.handle_key(KeyCode::Left, KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.cursor_pos(), "hello world ".len());
+
+    app.handle_key(KeyCode::Left, KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.cursor_pos(), "hello ".len());
+
+    app.handle_key(KeyCode::Right, KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.cursor_pos(), "hello world ".len());
+
+    app.handle_key(KeyCode::Backspace, KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input(), "hello again");
+    assert_eq!(app.cursor_pos(), "hello ".len());
+}
+
+#[test]
 fn test_handle_key_escape_clears_input() {
     let mut app = create_test_app();
 
@@ -2252,6 +2276,24 @@ fn test_handle_server_event_transcript_replace_updates_input() {
         app.status_notice(),
         Some("Transcript replaced input".to_string())
     );
+}
+
+#[test]
+fn test_local_bus_dictation_completion_applies_transcript() {
+    let mut app = create_test_app();
+    app.input = "draft".to_string();
+    app.cursor_pos = app.input.len();
+
+    crate::tui::app::local::handle_bus_event(
+        &mut app,
+        Ok(crate::bus::BusEvent::DictationCompleted {
+            text: " dictated text".to_string(),
+            mode: crate::protocol::TranscriptMode::Append,
+        }),
+    );
+
+    assert_eq!(app.input, "draft dictated text");
+    assert_eq!(app.status_notice(), Some("Transcript appended".to_string()));
 }
 
 #[test]
@@ -4073,7 +4115,8 @@ fn test_copy_selection_mouse_drag_extracts_expected_multiline_range() {
 
     let (fn_line_idx, fn_text) = fn_line.expect("fn line");
     let (print_line_idx, print_text) = print_line.expect("println line");
-    let fn_col = fn_text.find("fn main() {").expect("fn column") as u16;
+    let fn_byte = fn_text.find("fn main() {").expect("fn column");
+    let fn_col = unicode_width::UnicodeWidthStr::width(&fn_text[..fn_byte]) as u16;
     let _print_end_col = (print_text.find(");").expect("print end") + 2) as u16;
 
     let base_y = layout.messages_area.y;
@@ -4110,12 +4153,6 @@ fn test_copy_selection_mouse_drag_extracts_expected_multiline_range() {
         row: end_row,
         modifiers: KeyModifiers::empty(),
     });
-    app.handle_mouse_event(MouseEvent {
-        kind: MouseEventKind::Up(MouseButton::Left),
-        column: end_x,
-        row: end_row,
-        modifiers: KeyModifiers::empty(),
-    });
 
     let selected = app
         .current_copy_selection_text()
@@ -4131,7 +4168,253 @@ fn test_copy_selection_mouse_drag_extracts_expected_multiline_range() {
         selected.contains("println!(\"hello\");"),
         "selection missing println line: {selected}"
     );
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: end_x,
+        row: end_row,
+        modifiers: KeyModifiers::empty(),
+    });
+    assert!(app.copy_selection_mode);
     assert!(!app.copy_selection_dragging);
+}
+
+#[test]
+fn test_copy_selection_mouse_click_does_not_enter_mode() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_copy_test_app();
+
+    render_and_snap(&app, &mut terminal);
+
+    let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
+    let (visible_start, visible_end) =
+        crate::tui::ui::copy_viewport_visible_range().expect("visible copy range");
+
+    let target = (visible_start..visible_end)
+        .find_map(|abs_line| {
+            let text = crate::tui::ui::copy_viewport_line_text(abs_line)?;
+            let byte = text.find("println!(\"hello\");")?;
+            let col = unicode_width::UnicodeWidthStr::width(&text[..byte]) as u16;
+            Some((abs_line, col))
+        })
+        .expect("println line");
+
+    let row = layout.messages_area.y + (target.0 - visible_start) as u16;
+    let col = (layout.messages_area.x..layout.messages_area.x + layout.messages_area.width)
+        .find(|&column| {
+            crate::tui::ui::copy_viewport_point_from_screen(column, row)
+                .map(|point| point.abs_line == target.0 && point.column == target.1 as usize)
+                .unwrap_or(false)
+        })
+        .expect("screen x for println");
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: col,
+        row,
+        modifiers: KeyModifiers::empty(),
+    });
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: col,
+        row,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(!app.copy_selection_mode);
+    assert!(app.copy_selection_anchor.is_none());
+    assert!(app.copy_selection_cursor.is_none());
+}
+
+#[test]
+fn test_copy_selection_mouse_drag_auto_copies_and_exits_mode() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_copy_test_app();
+    let copied = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let copied_for_closure = copied.clone();
+
+    render_and_snap(&app, &mut terminal);
+
+    let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
+    let (visible_start, visible_end) =
+        crate::tui::ui::copy_viewport_visible_range().expect("visible copy range");
+
+    let mut fn_line = None;
+    let mut print_line = None;
+    for abs_line in visible_start..visible_end {
+        let text = crate::tui::ui::copy_viewport_line_text(abs_line).unwrap_or_default();
+        if text.contains("fn main() {") {
+            fn_line = Some((abs_line, text.clone()));
+        }
+        if text.contains("println!(\"hello\");") {
+            print_line = Some((abs_line, text));
+        }
+    }
+
+    let (fn_line_idx, fn_text) = fn_line.expect("fn line");
+    let (print_line_idx, _print_text) = print_line.expect("println line");
+    let fn_byte = fn_text.find("fn main() {").expect("fn column");
+    let fn_col = unicode_width::UnicodeWidthStr::width(&fn_text[..fn_byte]) as u16;
+
+    let base_y = layout.messages_area.y;
+    let start_row = base_y + (fn_line_idx - visible_start) as u16;
+    let end_row = base_y + (print_line_idx - visible_start) as u16;
+
+    let start_x = (layout.messages_area.x..layout.messages_area.x + layout.messages_area.width)
+        .find(|&column| {
+            crate::tui::ui::copy_viewport_point_from_screen(column, start_row)
+                .map(|point| point.abs_line == fn_line_idx && point.column == fn_col as usize)
+                .unwrap_or(false)
+        })
+        .expect("screen x for selection start");
+
+    let end_x = (layout.messages_area.x..layout.messages_area.x + layout.messages_area.width)
+        .filter_map(|column| {
+            crate::tui::ui::copy_viewport_point_from_screen(column, end_row)
+                .filter(|point| point.abs_line == print_line_idx)
+                .map(|point| (column, point.column))
+        })
+        .max_by_key(|(_, mapped_col)| *mapped_col)
+        .map(|(column, _)| column)
+        .expect("screen x for selection end");
+
+    app.handle_copy_selection_mouse_with(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: start_x,
+            row: start_row,
+            modifiers: KeyModifiers::empty(),
+        },
+        |_| true,
+    );
+    app.handle_copy_selection_mouse_with(
+        MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: end_x,
+            row: end_row,
+            modifiers: KeyModifiers::empty(),
+        },
+        |_| true,
+    );
+    app.handle_copy_selection_mouse_with(
+        MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: end_x,
+            row: end_row,
+            modifiers: KeyModifiers::empty(),
+        },
+        |text| {
+            *copied_for_closure.lock().unwrap() = text.to_string();
+            true
+        },
+    );
+
+    assert!(!app.copy_selection_mode);
+    assert!(app.copy_selection_anchor.is_none());
+    assert!(app.copy_selection_cursor.is_none());
+    assert!(copied.lock().unwrap().contains("println!(\"hello\");"));
+    assert_eq!(app.status_notice(), Some("Copied selection".to_string()));
+}
+
+#[test]
+fn test_side_panel_mouse_drag_extracts_expected_text() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    let copied = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let copied_for_closure = copied.clone();
+    app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focused_page_id: Some("plan".to_string()),
+        pages: vec![crate::side_panel::SidePanelPage {
+            id: "plan".to_string(),
+            title: "Plan".to_string(),
+            file_path: "".to_string(),
+            format: crate::side_panel::SidePanelPageFormat::Markdown,
+            content: "alpha\nbeta highlight target\ngamma".to_string(),
+            updated_at_ms: 1,
+        }],
+    };
+
+    let backend = ratatui::backend::TestBackend::new(100, 20);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
+    render_and_snap(&app, &mut terminal);
+
+    let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
+    let diff_area = layout.diff_pane_area.expect("side pane area");
+    let (visible_start, visible_end) =
+        crate::tui::ui::side_pane_visible_range().expect("side pane visible range");
+
+    let (line_idx, _line_text) = (visible_start..visible_end)
+        .find_map(|abs_line| {
+            let text = crate::tui::ui::side_pane_line_text(abs_line)?;
+            text.contains("beta highlight target")
+                .then_some((abs_line, text))
+        })
+        .expect("target side pane line");
+    let (row, column) = (diff_area.y..diff_area.y + diff_area.height)
+        .find_map(|screen_y| {
+            (diff_area.x..diff_area.x + diff_area.width)
+                .find(|&screen_x| {
+                    crate::tui::ui::side_pane_point_from_screen(screen_x, screen_y)
+                        .map(|point| point.abs_line == line_idx)
+                        .unwrap_or(false)
+                })
+                .map(|screen_x| (screen_y, screen_x))
+        })
+        .expect("screen x for side selection start");
+    let end_column = (diff_area.x..diff_area.x + diff_area.width)
+        .filter_map(|screen_x| {
+            crate::tui::ui::side_pane_point_from_screen(screen_x, row)
+                .filter(|point| point.abs_line == line_idx)
+                .map(|point| (screen_x, point.column))
+        })
+        .max_by_key(|(_, mapped)| *mapped)
+        .map(|(screen_x, _)| screen_x)
+        .expect("screen x for side selection end");
+
+    app.handle_copy_selection_mouse_with(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        },
+        |_| true,
+    );
+    app.handle_copy_selection_mouse_with(
+        MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: end_column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        },
+        |_| true,
+    );
+
+    let selected = app
+        .current_copy_selection_text()
+        .expect("expected side pane selection");
+    assert!(
+        selected.contains("beta highlight target"),
+        "selected={selected}"
+    );
+    assert_eq!(
+        app.current_copy_selection_pane(),
+        Some(crate::tui::CopySelectionPane::SidePane)
+    );
+
+    app.handle_copy_selection_mouse_with(
+        MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: end_column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        },
+        |text| {
+            *copied_for_closure.lock().unwrap() = text.to_string();
+            true
+        },
+    );
+    assert!(copied.lock().unwrap().contains("beta highlight target"));
+    assert!(!app.copy_selection_mode);
 }
 
 #[test]

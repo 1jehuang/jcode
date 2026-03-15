@@ -88,6 +88,12 @@ pub(super) fn handle_bus_event(app: &mut App, bus_event: std::result::Result<Bus
         Ok(BusEvent::UpdateStatus(status)) => {
             app.handle_update_status(status);
         }
+        Ok(BusEvent::DictationCompleted { text, mode }) => {
+            app.handle_local_dictation_completed(text, mode);
+        }
+        Ok(BusEvent::DictationFailed { message }) => {
+            app.handle_dictation_failure(message);
+        }
         Ok(BusEvent::CompactionFinished) => {
             app.poll_compaction_completion();
         }

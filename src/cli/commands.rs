@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::io::Read;
 use std::net::ToSocketAddrs;
 
 use crate::{browser, gateway, memory, storage, tui};
@@ -30,6 +31,48 @@ pub async fn run_ambient_command(cmd: AmbientSubcommand) -> Result<()> {
     };
 
     super::debug::run_debug_command(debug_cmd, "", None, None, false).await
+}
+
+pub async fn run_transcript_command(
+    text: Option<String>,
+    mode: crate::protocol::TranscriptMode,
+    session: Option<String>,
+) -> Result<()> {
+    let text = if let Some(text) = text {
+        text
+    } else {
+        let mut stdin = String::new();
+        std::io::stdin().read_to_string(&mut stdin)?;
+        let trimmed = stdin.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            anyhow::bail!("Provide transcript text as an argument or pipe it via stdin")
+        }
+        trimmed.to_string()
+    };
+
+    let mut client = crate::server::Client::connect_debug().await?;
+    let request_id = client.send_transcript(&text, mode, session).await?;
+
+    loop {
+        match client.read_event().await? {
+            crate::protocol::ServerEvent::Ack { id } if id == request_id => {}
+            crate::protocol::ServerEvent::Done { id } if id == request_id => return Ok(()),
+            crate::protocol::ServerEvent::Error { id, message, .. } if id == request_id => {
+                anyhow::bail!(message)
+            }
+            _ => {}
+        }
+    }
+}
+
+pub async fn run_dictate_command() -> Result<()> {
+    let run = crate::dictation::run_configured().await?;
+
+    if let Some(session_id) = crate::dictation::focused_jcode_session()? {
+        run_transcript_command(Some(run.text), run.mode, Some(session_id)).await
+    } else {
+        crate::dictation::type_text(&run.text)
+    }
 }
 
 async fn run_ambient_visible() -> Result<()> {

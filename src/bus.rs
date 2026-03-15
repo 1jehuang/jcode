@@ -187,6 +187,15 @@ pub enum BusEvent {
     LoginCompleted(LoginCompleted),
     /// Update check status from background thread
     UpdateStatus(UpdateStatus),
+    /// External dictation command completed with transcript text
+    DictationCompleted {
+        text: String,
+        mode: crate::protocol::TranscriptMode,
+    },
+    /// External dictation command failed
+    DictationFailed {
+        message: String,
+    },
     /// Background compaction task finished (check_and_apply should be called)
     CompactionFinished,
     /// Provider's available models list may have changed

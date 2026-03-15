@@ -13,6 +13,7 @@ pub mod cli;
 pub mod compaction;
 pub mod config;
 pub mod copilot_usage;
+pub mod dictation;
 #[cfg(feature = "embeddings")]
 pub mod embedding;
 #[cfg(not(feature = "embeddings"))]
@@ -36,8 +37,8 @@ pub mod notifications;
 pub mod perf;
 pub mod plan;
 pub mod platform;
-pub mod prompt;
 pub mod process_title;
+pub mod prompt;
 pub mod protocol;
 pub mod provider;
 pub mod provider_catalog;

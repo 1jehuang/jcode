@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::process::{Command as ProcessCommand, Stdio};
 
-use super::args::{AmbientCommand, Args, Command, MemoryCommand};
+use super::args::{AmbientCommand, Args, Command, MemoryCommand, TranscriptModeArg};
 use crate::{
     agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
     tui,
@@ -67,6 +67,16 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         }
         Some(Command::Permissions) => {
             tui::permissions::run_permissions()?;
+        }
+        Some(Command::Transcript {
+            text,
+            mode,
+            session,
+        }) => {
+            commands::run_transcript_command(text, map_transcript_mode(mode), session).await?;
+        }
+        Some(Command::Dictate) => {
+            commands::run_dictate_command().await?;
         }
         Some(Command::SetupHotkey {
             listen_macos_hotkey,
@@ -169,6 +179,15 @@ fn map_ambient_subcommand(subcmd: AmbientCommand) -> commands::AmbientSubcommand
         AmbientCommand::Trigger => commands::AmbientSubcommand::Trigger,
         AmbientCommand::Stop => commands::AmbientSubcommand::Stop,
         AmbientCommand::RunVisible => commands::AmbientSubcommand::RunVisible,
+    }
+}
+
+fn map_transcript_mode(mode: TranscriptModeArg) -> crate::protocol::TranscriptMode {
+    match mode {
+        TranscriptModeArg::Insert => crate::protocol::TranscriptMode::Insert,
+        TranscriptModeArg::Append => crate::protocol::TranscriptMode::Append,
+        TranscriptModeArg::Replace => crate::protocol::TranscriptMode::Replace,
+        TranscriptModeArg::Send => crate::protocol::TranscriptMode::Send,
     }
 }
 
@@ -419,8 +438,6 @@ pub(crate) async fn spawn_server(
     model: Option<&str>,
 ) -> Result<()> {
     let socket_path = server::socket_path();
-    let debug_socket_path = server::debug_socket_path();
-
     if server_is_running_at(&socket_path).await {
         startup_profile::mark("server_ready");
         return Ok(());
@@ -443,9 +460,6 @@ pub(crate) async fn spawn_server(
         startup_profile::mark("server_ready");
         return Ok(());
     }
-
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_file(&debug_socket_path);
 
     startup_profile::mark("server_spawn_start");
     eprintln!("Starting server...");
