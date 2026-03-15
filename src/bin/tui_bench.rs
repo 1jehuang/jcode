@@ -468,6 +468,12 @@ impl TuiState for BenchState {
         None
     }
 
+    fn account_picker_overlay(
+        &self,
+    ) -> Option<&std::cell::RefCell<jcode::tui::account_picker::AccountPicker>> {
+        None
+    }
+
     fn working_dir(&self) -> Option<String> {
         None
     }

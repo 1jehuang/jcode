@@ -439,6 +439,8 @@ pub struct App {
     ambient_system_prompt: Option<String>,
     /// Pending login flow: if set, next input is intercepted as OAuth code or API key
     pending_login: Option<PendingLogin>,
+    /// Pending label prompt for creating a new named account
+    pending_account_label: Option<auth::PendingAccountLabel>,
     /// Last mouse scroll event timestamp (for trackpad velocity detection)
     last_mouse_scroll: Option<Instant>,
     /// Scroll offset for changelog overlay (None = not visible)
@@ -446,6 +448,8 @@ pub struct App {
     help_scroll: Option<usize>,
     /// Session picker overlay (None = not visible)
     session_picker_overlay: Option<RefCell<super::session_picker::SessionPicker>>,
+    /// Account picker overlay (None = not visible)
+    account_picker_overlay: Option<RefCell<super::account_picker::AccountPicker>>,
 }
 
 /// A placeholder provider for remote mode (never actually called)

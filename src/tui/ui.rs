@@ -1576,6 +1576,12 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         return;
     }
 
+    if let Some(picker_cell) = app.account_picker_overlay() {
+        let picker = picker_cell.borrow();
+        picker.render(frame);
+        return;
+    }
+
     // Initialize visual debug capture if enabled
     let mut debug_capture = if visual_debug::is_enabled() {
         Some(FrameCaptureBuilder::new(area.width, area.height))
@@ -2871,6 +2877,11 @@ mod tests {
         fn session_picker_overlay(
             &self,
         ) -> Option<&std::cell::RefCell<session_picker::SessionPicker>> {
+            None
+        }
+        fn account_picker_overlay(
+            &self,
+        ) -> Option<&std::cell::RefCell<crate::tui::account_picker::AccountPicker>> {
             None
         }
         fn working_dir(&self) -> Option<String> {

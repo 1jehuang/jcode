@@ -259,10 +259,12 @@ impl App {
             streaming_md_renderer: RefCell::new(IncrementalMarkdownRenderer::new(None)),
             ambient_system_prompt: None,
             pending_login: None,
+            pending_account_label: None,
             last_mouse_scroll: None,
             changelog_scroll: None,
             help_scroll: None,
             session_picker_overlay: None,
+            account_picker_overlay: None,
         };
 
         for notice in app.provider.drain_startup_notices() {

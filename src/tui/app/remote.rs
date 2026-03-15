@@ -2301,6 +2301,66 @@ pub(super) async fn send_interleave_now(
     }
 }
 
+impl App {
+    pub(super) async fn handle_account_picker_command_remote(
+        &mut self,
+        remote: &mut RemoteConnection,
+        command: crate::tui::account_picker::AccountPickerCommand,
+    ) -> Result<()> {
+        use crate::tui::account_picker::{AccountPickerCommand, AccountProviderKind};
+
+        match command {
+            AccountPickerCommand::Switch { provider, label } => match provider {
+                AccountProviderKind::Anthropic => {
+                    if let Err(e) = crate::auth::claude::set_active_account(&label) {
+                        self.push_display_message(DisplayMessage::error(format!(
+                            "Failed to switch account: {}",
+                            e
+                        )));
+                        return Ok(());
+                    }
+                    crate::auth::AuthStatus::invalidate_cache();
+                    self.context_limit = self.provider.context_window() as u64;
+                    self.context_warning_shown = false;
+                    remote.switch_anthropic_account(&label).await?;
+                    self.push_display_message(DisplayMessage::system(format!(
+                        "Switched to Anthropic account `{}`.",
+                        label
+                    )));
+                    self.set_status_notice(&format!("Account: switched to {}", label));
+                }
+                AccountProviderKind::OpenAi => {
+                    if let Err(e) = crate::auth::codex::set_active_account(&label) {
+                        self.push_display_message(DisplayMessage::error(format!(
+                            "Failed to switch OpenAI account: {}",
+                            e
+                        )));
+                        return Ok(());
+                    }
+                    crate::auth::AuthStatus::invalidate_cache();
+                    self.context_limit = self.provider.context_window() as u64;
+                    self.context_warning_shown = false;
+                    remote.switch_openai_account(&label).await?;
+                    self.push_display_message(DisplayMessage::system(format!(
+                        "Switched to OpenAI account `{}`.",
+                        label
+                    )));
+                    self.set_status_notice(&format!("OpenAI account: switched to {}", label));
+                }
+            },
+            AccountPickerCommand::PromptNew { provider } => self.prompt_new_account_label(provider),
+            other => {
+                if let Some(command) = Self::account_command_for_picker(&other) {
+                    self.input = command;
+                    self.cursor_pos = self.input.len();
+                    self.submit_input();
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 pub(super) async fn handle_remote_key(
     app: &mut App,
     code: KeyCode,
@@ -2321,6 +2381,14 @@ pub(super) async fn handle_remote_key(
 
     if app.session_picker_overlay.is_some() {
         return app.handle_session_picker_key(code, modifiers);
+    }
+
+    if app.account_picker_overlay.is_some() {
+        if let Some(command) = app.next_account_picker_action(code, modifiers)? {
+            app.handle_account_picker_command_remote(remote, command)
+                .await?;
+        }
+        return Ok(());
     }
 
     if let Some(ref picker) = app.picker_state {
@@ -2900,9 +2968,7 @@ pub(super) async fn handle_remote_key(
                 }
 
                 if trimmed == "/account" || trimmed == "/accounts" {
-                    app.input = trimmed.to_string();
-                    app.cursor_pos = app.input.len();
-                    app.submit_input();
+                    app.show_accounts();
                     return Ok(());
                 }
 
@@ -2910,13 +2976,15 @@ pub(super) async fn handle_remote_key(
                     if let Some(openai_sub) = sub.trim().strip_prefix("openai") {
                         let openai_sub = openai_sub.trim();
                         if openai_sub.is_empty() {
-                            app.input = trimmed.to_string();
-                            app.cursor_pos = app.input.len();
-                            app.submit_input();
+                            app.show_openai_accounts();
                             return Ok(());
                         }
 
                         let parts: Vec<&str> = openai_sub.splitn(2, ' ').collect();
+                        if matches!(parts[0], "list" | "ls") {
+                            app.show_openai_accounts();
+                            return Ok(());
+                        }
                         if matches!(parts[0], "switch" | "use") {
                             if let Some(label) =
                                 parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty())
@@ -2955,6 +3023,10 @@ pub(super) async fn handle_remote_key(
                     }
 
                     let parts: Vec<&str> = sub.trim().splitn(2, ' ').collect();
+                    if matches!(parts[0], "list" | "ls") {
+                        app.show_accounts();
+                        return Ok(());
+                    }
                     if matches!(parts[0], "switch" | "use") {
                         if let Some(label) =
                             parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty())

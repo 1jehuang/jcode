@@ -302,7 +302,7 @@ fn test_show_accounts_includes_masked_email_column() {
 }
 
 #[test]
-fn test_account_openai_command_lists_openai_accounts() {
+fn test_account_openai_command_opens_account_picker() {
     let _guard = crate::storage::lock_test_env();
     let now_ms = chrono::Utc::now().timestamp_millis();
 
@@ -321,19 +321,14 @@ fn test_account_openai_command_lists_openai_accounts() {
     app.input = "/account openai".to_string();
     app.submit_input();
 
-    let msg = app
-        .display_messages()
-        .last()
-        .expect("missing /account openai response");
-    assert_eq!(msg.role, "system");
-    assert!(msg.content.contains("**OpenAI Accounts:**"));
-    assert!(msg.content.contains("work"));
-    assert!(msg.content.contains("u***r@example.com"));
-    assert!(msg.content.contains("acct_work"));
+    assert!(
+        app.account_picker_overlay.is_some(),
+        "/account openai should open the account picker"
+    );
 }
 
 #[test]
-fn test_account_command_includes_openai_accounts() {
+fn test_account_command_opens_account_picker() {
     let _guard = crate::storage::lock_test_env();
     let now_ms = chrono::Utc::now().timestamp_millis();
 
@@ -352,16 +347,27 @@ fn test_account_command_includes_openai_accounts() {
     app.input = "/account".to_string();
     app.submit_input();
 
-    let msg = app
-        .display_messages()
-        .last()
-        .expect("missing /account response");
-    assert_eq!(msg.role, "system");
-    assert!(msg.content.contains("**Anthropic Accounts:**"));
-    assert!(msg.content.contains("**OpenAI Accounts:**"));
-    assert!(msg.content.contains("work"));
-    assert!(msg.content.contains("u***r@example.com"));
-    assert!(msg.content.contains("acct_work"));
+    assert!(
+        app.account_picker_overlay.is_some(),
+        "/account should open the account picker"
+    );
+}
+
+#[test]
+fn test_account_picker_prompt_new_openai_label_cancel_clears_prompt() {
+    let mut app = create_test_app();
+    app.prompt_new_account_label(crate::tui::account_picker::AccountProviderKind::OpenAi);
+
+    assert!(matches!(
+        app.pending_account_label,
+        Some(super::auth::PendingAccountLabel::OpenAi)
+    ));
+
+    app.input = "/cancel".to_string();
+    app.submit_input();
+
+    assert!(app.pending_account_label.is_none());
+    assert!(app.pending_login.is_none());
 }
 
 #[test]

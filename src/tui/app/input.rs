@@ -541,6 +541,13 @@ pub(super) fn handle_modal_key(
         return Ok(true);
     }
 
+    if app.account_picker_overlay.is_some() {
+        if let Some(command) = app.next_account_picker_action(code, modifiers)? {
+            app.handle_account_picker_command(command);
+        }
+        return Ok(true);
+    }
+
     if let Some(ref picker) = app.picker_state {
         if !picker.preview {
             app.handle_picker_key(code, modifiers)?;
@@ -1120,7 +1127,7 @@ impl App {
                 "`/auth`\nShow authentication status for all providers.\n\n`/login`\nInteractive provider selection - pick a provider to log into.\n\n`/login <provider>`\nStart login flow directly for any provider shown by `/login` or the `/login ` completions.\n\nUse `/login jcode` for curated jcode subscription access via your router, not OpenRouter BYOK."
             }
             "account" | "accounts" => {
-                "`/account`\nList Anthropic and OpenAI OAuth accounts.\n\n`/account add <label>`\nAdd a new Anthropic account via OAuth login.\n\n`/account switch <label>`\nSwitch the active Anthropic account.\n\n`/account remove <label>`\nRemove an Anthropic account.\n\n`/account openai`\nList only OpenAI OAuth accounts.\n\n`/account openai add <label>`\nAdd a new OpenAI account via OAuth login.\n\n`/account openai switch <label>`\nSwitch the active OpenAI account.\n\n`/account openai remove <label>`\nRemove an OpenAI account."
+                "`/account`\nOpen the interactive account picker for Anthropic and OpenAI logins.\n\n`/account add <label>`\nAdd a new Anthropic account via OAuth login.\n\n`/account switch <label>`\nSwitch the active Anthropic account.\n\n`/account remove <label>`\nRemove an Anthropic account.\n\n`/account openai`\nOpen the interactive picker focused on OpenAI accounts.\n\n`/account openai add <label>`\nAdd a new OpenAI account via OAuth login.\n\n`/account openai switch <label>`\nSwitch the active OpenAI account.\n\n`/account openai remove <label>`\nRemove an OpenAI account."
             }
             "save" => {
                 "`/save`\nBookmark the current session so it appears at the top of `/resume`.\n\n`/save <label>`\nBookmark with a custom label for easy identification.\n\nSaved sessions are shown in a dedicated \"Saved\" section in the session picker."
@@ -1151,6 +1158,11 @@ impl App {
 
         if let Some(pending) = self.pending_login.take() {
             self.handle_login_input(pending, input);
+            return;
+        }
+
+        if let Some(pending) = self.pending_account_label.take() {
+            self.handle_pending_account_label_input(pending, input);
             return;
         }
 

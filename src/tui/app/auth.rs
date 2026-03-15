@@ -1,4 +1,5 @@
 use super::*;
+use crossterm::event::{KeyCode, KeyModifiers};
 
 #[derive(Debug, Clone)]
 pub(super) enum PendingLogin {
@@ -46,6 +47,12 @@ pub(super) enum PendingLogin {
     Copilot,
     /// Interactive provider selection (user picks a number)
     ProviderSelection,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum PendingAccountLabel {
+    Anthropic,
+    OpenAi,
 }
 
 impl App {
@@ -442,12 +449,7 @@ impl App {
     }
 
     pub(super) fn show_accounts(&mut self) {
-        let anthropic = self.render_anthropic_accounts_markdown();
-        let openai = self.render_openai_accounts_markdown();
-        self.push_display_message(DisplayMessage::system(format!(
-            "{}\n\n{}",
-            anthropic, openai
-        )));
+        self.open_account_picker(false);
     }
 
     fn render_anthropic_accounts_markdown(&self) -> String {
@@ -492,9 +494,209 @@ impl App {
     }
 
     pub(super) fn show_openai_accounts(&mut self) {
-        self.push_display_message(DisplayMessage::system(
-            self.render_openai_accounts_markdown(),
-        ));
+        self.open_account_picker(true);
+    }
+
+    pub(super) fn open_account_picker(&mut self, openai_only: bool) {
+        use crate::tui::account_picker::{
+            AccountPicker, AccountPickerItem, AccountPickerItemKind, AccountProviderKind,
+        };
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut items = Vec::new();
+
+        if !openai_only {
+            let active_label = crate::auth::claude::active_account_label();
+            for account in crate::auth::claude::list_accounts().unwrap_or_default() {
+                let label = account.label.clone();
+                let status = if account.expires > now_ms {
+                    "valid".to_string()
+                } else {
+                    "expired".to_string()
+                };
+                let detail = account
+                    .subscription_type
+                    .as_deref()
+                    .map(|sub| format!("plan: {}", sub))
+                    .unwrap_or_else(|| "plan: unknown".to_string());
+                items.push(AccountPickerItem {
+                    provider: AccountProviderKind::Anthropic,
+                    kind: AccountPickerItemKind::Existing {
+                        label: label.clone(),
+                        masked_email: account
+                            .email
+                            .as_deref()
+                            .map(mask_email)
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        status,
+                        detail,
+                        is_active: active_label.as_deref() == Some(label.as_str()),
+                    },
+                });
+            }
+            items.push(AccountPickerItem {
+                provider: AccountProviderKind::Anthropic,
+                kind: AccountPickerItemKind::NewAccount,
+            });
+        }
+
+        let active_label = crate::auth::codex::active_account_label();
+        for account in crate::auth::codex::list_accounts().unwrap_or_default() {
+            let label = account.label.clone();
+            let status = match account.expires_at {
+                Some(expires_at) if expires_at > now_ms => "valid".to_string(),
+                Some(_) => "expired".to_string(),
+                None => "valid".to_string(),
+            };
+            let detail = account
+                .account_id
+                .as_deref()
+                .map(|id| format!("acct: {}", id))
+                .unwrap_or_else(|| "acct: unknown".to_string());
+            items.push(AccountPickerItem {
+                provider: AccountProviderKind::OpenAi,
+                kind: AccountPickerItemKind::Existing {
+                    label: label.clone(),
+                    masked_email: account
+                        .email
+                        .as_deref()
+                        .map(mask_email)
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    status,
+                    detail,
+                    is_active: active_label.as_deref() == Some(label.as_str()),
+                },
+            });
+        }
+        items.push(AccountPickerItem {
+            provider: AccountProviderKind::OpenAi,
+            kind: AccountPickerItemKind::NewAccount,
+        });
+
+        let title = if openai_only {
+            " OpenAI Accounts "
+        } else {
+            " Accounts "
+        };
+        self.account_picker_overlay =
+            Some(std::cell::RefCell::new(AccountPicker::new(title, items)));
+    }
+
+    pub(super) fn handle_account_picker_command(
+        &mut self,
+        command: crate::tui::account_picker::AccountPickerCommand,
+    ) {
+        use crate::tui::account_picker::{AccountPickerCommand, AccountProviderKind};
+
+        match command {
+            AccountPickerCommand::Switch { provider, label } => match provider {
+                AccountProviderKind::Anthropic => self.switch_account(&label),
+                AccountProviderKind::OpenAi => self.switch_openai_account(&label),
+            },
+            AccountPickerCommand::Login { provider, label } => match provider {
+                AccountProviderKind::Anthropic => self.start_claude_login_for_account(&label),
+                AccountProviderKind::OpenAi => self.start_openai_login_for_account(&label),
+            },
+            AccountPickerCommand::Remove { provider, label } => match provider {
+                AccountProviderKind::Anthropic => self.remove_account(&label),
+                AccountProviderKind::OpenAi => self.remove_openai_account(&label),
+            },
+            AccountPickerCommand::PromptNew { provider } => self.prompt_new_account_label(provider),
+        }
+    }
+
+    pub(super) fn prompt_new_account_label(
+        &mut self,
+        provider: crate::tui::account_picker::AccountProviderKind,
+    ) {
+        let (display, pending) = match provider {
+            crate::tui::account_picker::AccountProviderKind::Anthropic => {
+                ("Anthropic", PendingAccountLabel::Anthropic)
+            }
+            crate::tui::account_picker::AccountProviderKind::OpenAi => {
+                ("OpenAI", PendingAccountLabel::OpenAi)
+            }
+        };
+        self.push_display_message(DisplayMessage::system(format!(
+            "Enter a label for the new {} account, then press Enter. Use `/cancel` to abort.",
+            display
+        )));
+        self.set_status_notice(&format!("Account: new {} label...", display));
+        self.pending_account_label = Some(pending);
+    }
+
+    pub(super) fn handle_pending_account_label_input(
+        &mut self,
+        pending: PendingAccountLabel,
+        input: String,
+    ) {
+        let trimmed = input.trim();
+        if trimmed == "/cancel" {
+            self.push_display_message(DisplayMessage::system(
+                "New account creation cancelled.".to_string(),
+            ));
+            self.set_status_notice("Account: cancelled");
+            return;
+        }
+        if trimmed.is_empty() {
+            self.push_display_message(DisplayMessage::error(
+                "Account label cannot be empty.".to_string(),
+            ));
+            self.pending_account_label = Some(pending);
+            return;
+        }
+
+        match pending {
+            PendingAccountLabel::Anthropic => self.start_claude_login_for_account(trimmed),
+            PendingAccountLabel::OpenAi => self.start_openai_login_for_account(trimmed),
+        }
+    }
+
+    pub(super) fn account_command_for_picker(
+        command: &crate::tui::account_picker::AccountPickerCommand,
+    ) -> Option<String> {
+        use crate::tui::account_picker::{AccountPickerCommand, AccountProviderKind};
+
+        match command {
+            AccountPickerCommand::Switch { .. } => None,
+            AccountPickerCommand::Login { provider, label } => Some(match provider {
+                AccountProviderKind::Anthropic => format!("/account add {}", label),
+                AccountProviderKind::OpenAi => format!("/account openai add {}", label),
+            }),
+            AccountPickerCommand::Remove { provider, label } => Some(match provider {
+                AccountProviderKind::Anthropic => format!("/account remove {}", label),
+                AccountProviderKind::OpenAi => format!("/account openai remove {}", label),
+            }),
+            AccountPickerCommand::PromptNew { .. } => None,
+        }
+    }
+
+    pub(super) fn next_account_picker_action(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> anyhow::Result<Option<crate::tui::account_picker::AccountPickerCommand>> {
+        use crate::tui::account_picker::OverlayAction;
+
+        let action = {
+            let Some(picker_cell) = self.account_picker_overlay.as_ref() else {
+                return Ok(None);
+            };
+            let mut picker = picker_cell.borrow_mut();
+            picker.handle_overlay_key(code, modifiers)?
+        };
+
+        match action {
+            OverlayAction::Continue => Ok(None),
+            OverlayAction::Close => {
+                self.account_picker_overlay = None;
+                Ok(None)
+            }
+            OverlayAction::Execute(command) => {
+                self.account_picker_overlay = None;
+                Ok(Some(command))
+            }
+        }
     }
 
     fn render_openai_accounts_markdown(&self) -> String {
@@ -671,7 +873,12 @@ impl App {
 
         let port = crate::auth::oauth::openai::DEFAULT_PORT;
         let redirect_uri = crate::auth::oauth::openai::redirect_uri(port);
-        let auth_url = crate::auth::oauth::openai_auth_url_with_prompt(&redirect_uri, &challenge, &state, Some("login"));
+        let auth_url = crate::auth::oauth::openai_auth_url_with_prompt(
+            &redirect_uri,
+            &challenge,
+            &state,
+            Some("login"),
+        );
         let qr_section = crate::login_qr::markdown_section(
             &auth_url,
             "Scan this on another device if this machine has no browser, then paste the full callback URL here:",

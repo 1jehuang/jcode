@@ -1,3 +1,4 @@
+pub mod account_picker;
 mod app;
 pub mod backend;
 pub(crate) mod color_support;
@@ -178,6 +179,8 @@ pub trait TuiState {
     fn help_scroll(&self) -> Option<usize>;
     /// Session picker overlay for /resume command
     fn session_picker_overlay(&self) -> Option<&std::cell::RefCell<session_picker::SessionPicker>>;
+    /// Account picker overlay for /account command
+    fn account_picker_overlay(&self) -> Option<&std::cell::RefCell<account_picker::AccountPicker>>;
     /// Working directory for this session
     fn working_dir(&self) -> Option<String>;
     /// Monotonic clock for viewport animations
