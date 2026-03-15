@@ -10,7 +10,8 @@ Credentials are stored locally:
 - J-Code Claude OAuth (if logged in via `jcode login --provider claude`): `~/.jcode/auth.json`
 - Claude Code CLI: `~/.claude/.credentials.json`
 - OpenCode (optional): `~/.local/share/opencode/auth.json`
-- OpenAI/Codex: `~/.codex/auth.json`
+- J-Code OpenAI/Codex OAuth: `~/.jcode/openai-auth.json`
+- Codex CLI import/migration source: `~/.codex/auth.json`
 - Gemini native OAuth: `~/.jcode/gemini_oauth.json`
 - Gemini CLI import fallback: `~/.gemini/oauth_creds.json`
 
@@ -87,7 +88,16 @@ Notes:
 1. Run `jcode login --provider openai`.
 2. Your browser opens to the OpenAI OAuth page. The local callback listens on
    `http://localhost:9876/callback`.
-3. After login, tokens are saved to `~/.codex/auth.json`.
+3. After login, tokens are saved to `~/.jcode/openai-auth.json`.
+
+Credential discovery order is:
+1. `~/.jcode/openai-auth.json`
+2. `~/.codex/auth.json`
+3. `OPENAI_API_KEY`
+
+If jcode imports OAuth tokens from `~/.codex/auth.json`, it moves those tokens
+into `~/.jcode/openai-auth.json` and clears the legacy OAuth token from the
+Codex file. A legacy `OPENAI_API_KEY` entry, if present, is preserved.
 
 ### Request details
 J-Code uses the Responses API. If you have a ChatGPT subscription (refresh

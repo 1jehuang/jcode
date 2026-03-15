@@ -24,7 +24,8 @@ pub mod openai {
     pub const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
     pub const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
     pub const DEFAULT_PORT: u16 = 1455;
-    pub const SCOPES: &str = "openid profile email offline_access api.connectors.read api.connectors.invoke";
+    pub const SCOPES: &str =
+        "openid profile email offline_access api.connectors.read api.connectors.invoke";
 
     pub fn redirect_uri(port: u16) -> String {
         format!("http://localhost:{}/auth/callback", port)
@@ -1314,9 +1315,7 @@ mod tests {
 
         let auth_path = temp
             .path()
-            .join("external")
-            .join(".codex")
-            .join("auth.json");
+            .join("openai-auth.json");
         assert!(auth_path.exists(), "expected {}", auth_path.display());
 
         let creds = crate::auth::codex::load_credentials().unwrap();

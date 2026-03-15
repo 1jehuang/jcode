@@ -91,7 +91,7 @@ pub fn load_auth_file() -> Result<JcodeOpenAiAuthFile> {
         && !legacy.access_token.is_empty()
     {
         crate::logging::info(
-            "Migrating legacy .codex/auth.json to jcode multi-account OpenAI auth format",
+            "Migrating legacy .codex/auth.json OAuth tokens to jcode multi-account OpenAI auth format",
         );
         auth.openai_accounts.push(account_from_credentials(
             "default",
@@ -99,7 +99,9 @@ pub fn load_auth_file() -> Result<JcodeOpenAiAuthFile> {
             legacy.id_token.as_deref().and_then(extract_email),
         ));
         auth.active_openai_account = Some("default".to_string());
-        let _ = save_auth_file(&auth);
+        if save_auth_file(&auth).is_ok() {
+            let _ = clear_legacy_oauth_tokens();
+        }
     }
 
     Ok(auth)
@@ -121,8 +123,6 @@ pub fn save_auth_file(auth: &JcodeOpenAiAuthFile) -> Result<()> {
     let json = serde_json::to_string_pretty(&clean)?;
     std::fs::write(&auth_path, json)?;
     crate::platform::set_permissions_owner_only(&auth_path)?;
-
-    sync_legacy_auth_file(&clean)?;
     Ok(())
 }
 
@@ -351,56 +351,6 @@ fn load_jcode_credentials() -> Result<CodexCredentials> {
     Ok(credentials_from_account(account))
 }
 
-fn sync_legacy_auth_file(auth: &JcodeOpenAiAuthFile) -> Result<()> {
-    let Some(active_label) = auth.active_openai_account.clone().or_else(|| {
-        auth.openai_accounts
-            .first()
-            .map(|account| account.label.clone())
-    }) else {
-        return Ok(());
-    };
-
-    let Some(active_account) = auth
-        .openai_accounts
-        .iter()
-        .find(|account| account.label == active_label)
-        .or_else(|| auth.openai_accounts.first())
-    else {
-        return Ok(());
-    };
-
-    save_legacy_oauth_credentials(&credentials_from_account(active_account))
-}
-
-fn save_legacy_oauth_credentials(credentials: &CodexCredentials) -> Result<()> {
-    let auth_path = legacy_auth_path()?;
-    let auth_dir = auth_path
-        .parent()
-        .context("OpenAI legacy auth path has no parent directory")?;
-    std::fs::create_dir_all(auth_dir)?;
-    crate::platform::set_directory_permissions_owner_only(auth_dir)?;
-
-    let existing_api_key = load_legacy_auth_file().ok().and_then(|auth| auth.api_key);
-    let auth = LegacyAuthFile {
-        tokens: Some(LegacyTokens {
-            access_token: credentials.access_token.clone(),
-            refresh_token: credentials.refresh_token.clone(),
-            id_token: credentials.id_token.clone(),
-            account_id: credentials
-                .account_id
-                .clone()
-                .or_else(|| credentials.id_token.as_deref().and_then(extract_account_id)),
-            expires_at: credentials.expires_at,
-        }),
-        api_key: existing_api_key,
-    };
-
-    let json = serde_json::to_string_pretty(&auth)?;
-    std::fs::write(&auth_path, json)?;
-    crate::platform::set_permissions_owner_only(&auth_path)?;
-    Ok(())
-}
-
 fn load_legacy_oauth_credentials() -> Result<CodexCredentials> {
     let file = load_legacy_auth_file()?;
     let tokens = file
@@ -430,6 +380,26 @@ fn load_legacy_auth_file() -> Result<LegacyAuthFile> {
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Could not read credentials from {:?}", path))?;
     serde_json::from_str(&content).context("Could not parse Codex credentials")
+}
+
+fn clear_legacy_oauth_tokens() -> Result<()> {
+    let path = legacy_auth_path()?;
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let mut auth = load_legacy_auth_file()?;
+    auth.tokens = None;
+
+    if auth.api_key.is_some() {
+        let json = serde_json::to_string_pretty(&auth)?;
+        std::fs::write(&path, json)?;
+        crate::platform::set_permissions_owner_only(&path)?;
+    } else {
+        std::fs::remove_file(&path)?;
+    }
+
+    Ok(())
 }
 
 fn credentials_from_account(account: &OpenAiAccount) -> CodexCredentials {
@@ -713,5 +683,44 @@ mod tests {
         assert_eq!(auth.openai_accounts.len(), 1);
         assert_eq!(auth.openai_accounts[0].label, "default");
         assert_eq!(auth.active_openai_account.as_deref(), Some("default"));
+        assert!(
+            !legacy_path.exists(),
+            "expected legacy OAuth file to be removed after migration"
+        );
+    }
+
+    #[test]
+    fn load_auth_file_clears_legacy_oauth_tokens_but_keeps_api_key() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::TempDir::new().unwrap();
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+        let legacy_path = temp
+            .path()
+            .join("external")
+            .join(".codex")
+            .join("auth.json");
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &legacy_path,
+            r#"{
+                "tokens": {
+                    "access_token": "at_legacy",
+                    "refresh_token": "rt_legacy",
+                    "account_id": "acct_legacy",
+                    "expires_at": 1234
+                },
+                "OPENAI_API_KEY": "sk-legacy"
+            }"#,
+        )
+        .unwrap();
+
+        let auth = load_auth_file().unwrap();
+        assert_eq!(auth.openai_accounts.len(), 1);
+
+        let legacy: LegacyAuthFile =
+            serde_json::from_str(&std::fs::read_to_string(&legacy_path).unwrap()).unwrap();
+        assert!(legacy.tokens.is_none());
+        assert_eq!(legacy.api_key.as_deref(), Some("sk-legacy"));
     }
 }
