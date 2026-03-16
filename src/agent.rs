@@ -265,6 +265,16 @@ pub struct Agent {
 }
 
 impl Agent {
+    fn should_track_client_cache(&self) -> bool {
+        match std::env::var("JCODE_TRACK_CLIENT_CACHE") {
+            Ok(value) => {
+                let value = value.trim();
+                !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+            }
+            Err(_) => false,
+        }
+    }
+
     fn build_base(
         provider: Arc<dyn Provider>,
         registry: Registry,
@@ -2017,11 +2027,13 @@ impl Agent {
             // Check for client-side cache violations before memory injection.
             // Memory is an ephemeral suffix that changes each turn; tracking it would cause
             // false-positive violations every turn (prior turn's memory ≠ current history prefix).
-            if let Some(violation) = self.cache_tracker.record_request(&messages) {
-                logging::warn(&format!(
-                    "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
-                    violation.reason, violation.turn, violation.message_count
-                ));
+            if self.should_track_client_cache() {
+                if let Some(violation) = self.cache_tracker.record_request(&messages) {
+                    logging::warn(&format!(
+                        "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
+                        violation.reason, violation.turn, violation.message_count
+                    ));
+                }
             }
 
             // Inject memory as a user message at the end (preserves cache prefix)
@@ -2518,6 +2530,7 @@ impl Agent {
             }
 
             // Execute tools and add results
+            let mut tool_results_dirty = false;
             for tc in tool_calls {
                 self.validate_tool_allowed(&tc.name)?;
 
@@ -2576,7 +2589,7 @@ impl Agent {
                                 is_error: if sdk_is_error { Some(true) } else { None },
                             }],
                         );
-                        self.session.save()?;
+                        tool_results_dirty = true;
                         continue;
                     }
                 }
@@ -2660,7 +2673,7 @@ impl Agent {
                             blocks,
                             Some(tool_elapsed.as_millis() as u64),
                         );
-                        self.session.save()?;
+                        tool_results_dirty = true;
                     }
                     Err(e) => {
                         crate::telemetry::record_tool_failure();
@@ -2692,9 +2705,13 @@ impl Agent {
                             }],
                             Some(tool_elapsed.as_millis() as u64),
                         );
-                        self.session.save()?;
+                        tool_results_dirty = true;
                     }
                 }
+            }
+
+            if tool_results_dirty {
+                self.session.save()?;
             }
 
             if print_output {
@@ -2760,11 +2777,13 @@ impl Agent {
             // Check for client-side cache violations before memory injection.
             // Memory is an ephemeral suffix that changes each turn; tracking it would cause
             // false-positive violations every turn (prior turn's memory ≠ current history prefix).
-            if let Some(violation) = self.cache_tracker.record_request(&messages) {
-                logging::warn(&format!(
-                    "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
-                    violation.reason, violation.turn, violation.message_count
-                ));
+            if self.should_track_client_cache() {
+                if let Some(violation) = self.cache_tracker.record_request(&messages) {
+                    logging::warn(&format!(
+                        "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
+                        violation.reason, violation.turn, violation.message_count
+                    ));
+                }
             }
 
             // Inject memory as a user message at the end (preserves cache prefix)
@@ -3267,6 +3286,7 @@ impl Agent {
 
             // Execute tools and add results
             let tool_count = tool_calls.len();
+            let mut tool_results_dirty = false;
             for tool_index in 0..tool_count {
                 // === INJECTION POINT C (before): Check for urgent abort before each tool (except first) ===
                 if tool_index > 0 && self.has_urgent_interrupt() {
@@ -3326,7 +3346,7 @@ impl Agent {
                                 is_error: if sdk_is_error { Some(true) } else { None },
                             }],
                         );
-                        self.session.save()?;
+                        tool_results_dirty = true;
 
                         // NOTE: No injection here - wait for Point D after all tools
 
@@ -3377,7 +3397,7 @@ impl Agent {
                             blocks,
                             Some(tool_elapsed.as_millis() as u64),
                         );
-                        self.session.save()?;
+                        tool_results_dirty = true;
                     }
                     Err(e) => {
                         let error_msg = format!("Error: {}", e);
@@ -3397,13 +3417,17 @@ impl Agent {
                             }],
                             Some(tool_elapsed.as_millis() as u64),
                         );
-                        self.session.save()?;
+                        tool_results_dirty = true;
                     }
                 }
 
                 // NOTE: We do NOT inject between tools (non-urgent) because that would
                 // place user text between tool_results, which may violate API constraints.
                 // All non-urgent injection happens at Point D after all tools are done.
+            }
+
+            if tool_results_dirty {
+                self.session.save()?;
             }
 
             // === INJECTION POINT D: All tools done, before next API call ===
@@ -3468,11 +3492,13 @@ impl Agent {
             // Check for client-side cache violations before memory injection.
             // Memory is an ephemeral suffix that changes each turn; tracking it would cause
             // false-positive violations every turn (prior turn's memory ≠ current history prefix).
-            if let Some(violation) = self.cache_tracker.record_request(&messages) {
-                logging::warn(&format!(
-                    "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
-                    violation.reason, violation.turn, violation.message_count
-                ));
+            if self.should_track_client_cache() {
+                if let Some(violation) = self.cache_tracker.record_request(&messages) {
+                    logging::warn(&format!(
+                        "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
+                        violation.reason, violation.turn, violation.message_count
+                    ));
+                }
             }
 
             // Inject memory as a user message at the end (preserves cache prefix)
@@ -4003,6 +4029,7 @@ impl Agent {
 
             // Execute tools and add results
             let tool_count = tool_calls.len();
+            let mut tool_results_dirty = false;
             for tool_index in 0..tool_count {
                 // === INJECTION POINT C (before): Check for urgent abort before each tool (except first) ===
                 if tool_index > 0 && self.has_urgent_interrupt() {
@@ -4061,7 +4088,7 @@ impl Agent {
                                 is_error: if sdk_is_error { Some(true) } else { None },
                             }],
                         );
-                        self.session.save()?;
+                        tool_results_dirty = true;
 
                         // NOTE: No injection here - wait for Point D after all tools
 
@@ -4149,7 +4176,7 @@ impl Agent {
                                 blocks,
                                 Some(tool_elapsed.as_millis() as u64),
                             );
-                            self.session.save()?;
+                            tool_results_dirty = true;
                         }
                         Err(e) => {
                             let error_msg = format!("Error: {}", e);
@@ -4169,7 +4196,7 @@ impl Agent {
                                 }],
                                 Some(tool_elapsed.as_millis() as u64),
                             );
-                            self.session.save()?;
+                            tool_results_dirty = true;
                         }
                     }
                 } else if self.is_graceful_shutdown() {
@@ -4272,6 +4299,10 @@ impl Agent {
                 // NOTE: We do NOT inject between tools (non-urgent) because that would
                 // place user text between tool_results, which may violate API constraints.
                 // All non-urgent injection happens at Point D after all tools are done.
+            }
+
+            if tool_results_dirty {
+                self.session.save()?;
             }
 
             // === INJECTION POINT D: All tools done, before next API call ===
