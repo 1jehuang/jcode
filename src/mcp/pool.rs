@@ -14,7 +14,13 @@ use super::protocol::{McpConfig, McpServerConfig, McpToolDef};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
+
+enum ConnectAttempt {
+    Connected,
+    Leader(Arc<Notify>),
+    Wait(Arc<Notify>),
+}
 
 /// Global shared pool of MCP server processes.
 ///
@@ -25,6 +31,8 @@ pub struct SharedMcpPool {
     handles: RwLock<HashMap<String, McpHandle>>,
     config: RwLock<McpConfig>,
     ref_counts: Mutex<HashMap<String, usize>>,
+    connecting: Mutex<HashMap<String, Arc<Notify>>>,
+    last_errors: RwLock<HashMap<String, String>>,
 }
 
 impl SharedMcpPool {
@@ -35,6 +43,8 @@ impl SharedMcpPool {
             handles: RwLock::new(HashMap::new()),
             config: RwLock::new(config),
             ref_counts: Mutex::new(HashMap::new()),
+            connecting: Mutex::new(HashMap::new()),
+            last_errors: RwLock::new(HashMap::new()),
         }
     }
 
@@ -47,54 +57,40 @@ impl SharedMcpPool {
     /// Returns (successes, failures).
     pub async fn connect_all(&self) -> (usize, Vec<(String, String)>) {
         let config = self.config.read().await;
-        let mut spawn_tasks = Vec::new();
+        let mut connect_futures = Vec::new();
 
         for (name, server_config) in &config.servers {
-            // Skip if already connected
-            let handles = self.handles.read().await;
-            if handles.contains_key(name) {
-                continue;
-            }
-            drop(handles);
-
             let name = name.clone();
-            let config = server_config.clone();
-            let handle = tokio::spawn(async move {
-                let result = McpClient::connect(name.clone(), &config).await;
+            let server_config = server_config.clone();
+            connect_futures.push(async move {
+                let result = self.ensure_connected(name.clone(), server_config).await;
                 (name, result)
             });
-            spawn_tasks.push(handle);
         }
+        drop(config);
 
         let mut successes = 0;
         let mut failures = Vec::new();
 
-        for task in spawn_tasks {
-            match task.await {
-                Ok((name, Ok(client))) => {
-                    let handle = client.handle();
-                    {
-                        let mut handles = self.handles.write().await;
-                        handles.insert(name.clone(), handle);
+        for (name, result) in futures::future::join_all(connect_futures).await {
+            match result {
+                Ok(new_connection) => {
+                    if new_connection {
+                        successes += 1;
                     }
-                    {
-                        let mut clients = self.clients.lock().await;
-                        clients.insert(name, client);
-                    }
-                    successes += 1;
                 }
-                Ok((name, Err(e))) => {
-                    let error_msg = format!("{:#}", e);
+                Err(error_msg) => {
                     crate::logging::error(&format!(
                         "Failed to connect to MCP server '{}': {}",
                         name, error_msg
                     ));
                     failures.push((name, error_msg));
                 }
-                Err(e) => {
-                    crate::logging::error(&format!("MCP connection task panicked: {}", e));
-                }
             }
+        }
+
+        if successes == 0 {
+            successes = self.handles.read().await.len();
         }
 
         (successes, failures)
@@ -102,20 +98,11 @@ impl SharedMcpPool {
 
     /// Connect to a specific server by name and config
     pub async fn connect_server(&self, name: &str, config: &McpServerConfig) -> Result<()> {
-        let client = McpClient::connect(name.to_string(), config)
+        self.ensure_connected(name.to_string(), config.clone())
             .await
-            .with_context(|| format!("Failed to connect to MCP server '{}'", name))?;
-
-        let handle = client.handle();
-        {
-            let mut handles = self.handles.write().await;
-            handles.insert(name.to_string(), handle);
-        }
-        {
-            let mut clients = self.clients.lock().await;
-            clients.insert(name.to_string(), client);
-        }
-        Ok(())
+            .map(|_| ())
+            .map_err(|error_msg| anyhow::anyhow!(error_msg))
+            .with_context(|| format!("Failed to connect to MCP server '{}'", name))
     }
 
     /// Disconnect a specific server
@@ -134,6 +121,10 @@ impl SharedMcpPool {
             let mut refs = self.ref_counts.lock().await;
             refs.remove(name);
         }
+        {
+            let mut errors = self.last_errors.write().await;
+            errors.remove(name);
+        }
     }
 
     /// Disconnect all servers
@@ -151,6 +142,10 @@ impl SharedMcpPool {
         {
             let mut refs = self.ref_counts.lock().await;
             refs.clear();
+        }
+        {
+            let mut errors = self.last_errors.write().await;
+            errors.clear();
         }
     }
 
@@ -255,6 +250,94 @@ impl SharedMcpPool {
     pub async fn ref_counts(&self) -> HashMap<String, usize> {
         self.ref_counts.lock().await.clone()
     }
+
+    async fn begin_connect(&self, name: &str) -> ConnectAttempt {
+        let mut connecting = self.connecting.lock().await;
+        if let Some(notify) = connecting.get(name) {
+            return ConnectAttempt::Wait(Arc::clone(notify));
+        }
+
+        if self.handles.read().await.contains_key(name) {
+            return ConnectAttempt::Connected;
+        }
+
+        let notify = Arc::new(Notify::new());
+        connecting.insert(name.to_string(), Arc::clone(&notify));
+        ConnectAttempt::Leader(notify)
+    }
+
+    async fn finish_connect(&self, name: &str, notify: Arc<Notify>, result: Result<McpClient>) {
+        match result {
+            Ok(client) => {
+                let handle = client.handle();
+                {
+                    let mut handles = self.handles.write().await;
+                    handles.insert(name.to_string(), handle);
+                }
+                {
+                    let mut clients = self.clients.lock().await;
+                    clients.insert(name.to_string(), client);
+                }
+                {
+                    let mut errors = self.last_errors.write().await;
+                    errors.remove(name);
+                }
+            }
+            Err(error) => {
+                let mut errors = self.last_errors.write().await;
+                errors.insert(name.to_string(), format!("{:#}", error));
+            }
+        }
+
+        {
+            let mut connecting = self.connecting.lock().await;
+            if connecting
+                .get(name)
+                .map(|current| Arc::ptr_eq(current, &notify))
+                .unwrap_or(false)
+            {
+                connecting.remove(name);
+            }
+        }
+
+        notify.notify_waiters();
+    }
+
+    async fn ensure_connected(
+        &self,
+        name: String,
+        config: McpServerConfig,
+    ) -> std::result::Result<bool, String> {
+        match self.begin_connect(&name).await {
+            ConnectAttempt::Connected => Ok(false),
+            ConnectAttempt::Wait(notify) => {
+                notify.notified().await;
+                if self.handles.read().await.contains_key(&name) {
+                    Ok(false)
+                } else {
+                    let error = self
+                        .last_errors
+                        .read()
+                        .await
+                        .get(&name)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            "Connection attempt did not produce a handle".to_string()
+                        });
+                    Err(error)
+                }
+            }
+            ConnectAttempt::Leader(notify) => {
+                let result = McpClient::connect(name.clone(), &config).await;
+                let outcome = match &result {
+                    Ok(_) => Ok(true),
+                    Err(error) => Err(format!("{:#}", error)),
+                };
+                self.finish_connect(&name, notify, result).await;
+                outcome
+            }
+        }
+    }
 }
 
 /// Global pool singleton
@@ -274,4 +357,30 @@ pub async fn init_shared_pool() -> Arc<SharedMcpPool> {
 /// Get the global shared pool, if initialized.
 pub fn get_shared_pool() -> Option<Arc<SharedMcpPool>> {
     SHARED_POOL.get().cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConnectAttempt, SharedMcpPool};
+    use crate::mcp::protocol::McpConfig;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn begin_connect_deduplicates_concurrent_attempts() {
+        let pool = Arc::new(SharedMcpPool::new(McpConfig::default()));
+
+        let first = pool.begin_connect("demo").await;
+        let second = pool.begin_connect("demo").await;
+
+        let first_notify = match first {
+            ConnectAttempt::Leader(notify) => notify,
+            _ => panic!("first attempt should lead"),
+        };
+        let second_notify = match second {
+            ConnectAttempt::Wait(notify) => notify,
+            _ => panic!("second attempt should wait"),
+        };
+
+        assert!(Arc::ptr_eq(&first_notify, &second_notify));
+    }
 }

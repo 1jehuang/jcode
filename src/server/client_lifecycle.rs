@@ -121,6 +121,7 @@ pub(super) async fn handle_client(
             ClientConnectionInfo {
                 client_id: client_connection_id.clone(),
                 session_id: client_session_id.clone(),
+                debug_client_id: None,
                 connected_at,
                 last_seen: connected_at,
             },
@@ -284,6 +285,12 @@ pub(super) async fn handle_client(
     {
         let mut debug_state = client_debug_state.write().await;
         debug_state.register(client_debug_id.clone(), debug_cmd_tx);
+    }
+    {
+        let mut connections = client_connections.write().await;
+        if let Some(info) = connections.get_mut(&client_connection_id) {
+            info.debug_client_id = Some(client_debug_id.clone());
+        }
     }
 
     let stdin_responses: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>> =

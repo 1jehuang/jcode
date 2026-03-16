@@ -1,4 +1,4 @@
-use super::client_state::send_history;
+use super::client_state::{send_history, spawn_model_prefetch_update};
 use super::{
     ClientConnectionInfo, SessionInterruptQueues, SwarmEvent, SwarmMember, VersionedPlan,
     broadcast_swarm_status, register_session_interrupt_queue, remove_plan_participant,
@@ -510,7 +510,6 @@ pub(super) async fn handle_resume_session(
                 rename_plan_participant(&swarm_id, &old_session_id, &session_id, swarm_plans).await;
             }
 
-            let _ = provider.prefetch_models().await;
             send_history(
                 id,
                 &session_id,
@@ -523,6 +522,11 @@ pub(super) async fn handle_resume_session(
                 if was_interrupted { Some(true) } else { None },
             )
             .await?;
+            spawn_model_prefetch_update(
+                Arc::clone(provider),
+                Arc::clone(agent),
+                Arc::clone(writer),
+            );
         }
         Err(error) => {
             let _ = client_event_tx.send(ServerEvent::Error {

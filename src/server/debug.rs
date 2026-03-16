@@ -16,7 +16,7 @@ use super::{
 };
 use crate::agent::Agent;
 use crate::ambient_runner::AmbientRunnerHandle;
-use crate::protocol::{Request, ServerEvent, decode_request, encode_event};
+use crate::protocol::{Request, ServerEvent, TranscriptMode, decode_request, encode_event};
 use crate::provider::Provider;
 use crate::transport::Stream;
 use anyhow::Result;
@@ -37,6 +37,7 @@ pub(super) struct ClientDebugState {
 pub(super) struct ClientConnectionInfo {
     pub(super) client_id: String,
     pub(super) session_id: String,
+    pub(super) debug_client_id: Option<String>,
     pub(super) connected_at: Instant,
     pub(super) last_seen: Instant,
 }
@@ -69,6 +70,75 @@ impl ClientDebugState {
         }
         None
     }
+}
+
+async fn resolve_transcript_target_session(
+    requested_session: Option<String>,
+    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
+    client_debug_state: &Arc<RwLock<ClientDebugState>>,
+) -> Result<String> {
+    if let Some(session_id) = requested_session.filter(|value| !value.trim().is_empty()) {
+        let has_connected_tui =
+            client_connections.read().await.values().any(|info| {
+                info.session_id == session_id && info.debug_client_id.as_deref().is_some()
+            });
+        if !has_connected_tui {
+            anyhow::bail!(
+                "Session '{}' does not have a connected TUI client for transcript injection",
+                session_id
+            );
+        }
+        return Ok(session_id);
+    }
+
+    let active_debug_id = client_debug_state
+        .read()
+        .await
+        .active_id
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("No active TUI client connected"))?;
+
+    client_connections
+        .read()
+        .await
+        .values()
+        .filter(|info| info.debug_client_id.as_deref() == Some(active_debug_id.as_str()))
+        .max_by_key(|info| info.last_seen)
+        .map(|info| info.session_id.clone())
+        .ok_or_else(|| anyhow::anyhow!("Active TUI client session could not be resolved"))
+}
+
+async fn inject_transcript(
+    id: u64,
+    text: String,
+    mode: TranscriptMode,
+    requested_session: Option<String>,
+    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
+    client_debug_state: &Arc<RwLock<ClientDebugState>>,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> Result<ServerEvent> {
+    let session_id = resolve_transcript_target_session(
+        requested_session,
+        client_connections,
+        client_debug_state,
+    )
+    .await?;
+
+    let delivered = {
+        let members = swarm_members.read().await;
+        members
+            .get(&session_id)
+            .ok_or_else(|| anyhow::anyhow!("Session '{}' is not live", session_id))?
+            .event_tx
+            .send(ServerEvent::Transcript { text, mode })
+            .is_ok()
+    };
+
+    if !delivered {
+        anyhow::bail!("Failed to deliver transcript to session '{}'", session_id);
+    }
+
+    Ok(ServerEvent::Done { id })
 }
 
 pub(super) async fn handle_debug_client(
@@ -139,6 +209,34 @@ pub(super) async fn handle_debug_client(
                     session_id: current_session_id,
                     message_count,
                     is_processing: *is_processing.read().await,
+                };
+                let json = encode_event(&event);
+                writer.write_all(json.as_bytes()).await?;
+            }
+
+            Request::Transcript {
+                id,
+                text,
+                mode,
+                session_id: requested_session,
+            } => {
+                let event = match inject_transcript(
+                    id,
+                    text,
+                    mode,
+                    requested_session,
+                    &client_connections,
+                    &client_debug_state,
+                    &swarm_members,
+                )
+                .await
+                {
+                    Ok(event) => event,
+                    Err(err) => ServerEvent::Error {
+                        id,
+                        message: err.to_string(),
+                        retry_after_secs: None,
+                    },
                 };
                 let json = encode_event(&event);
                 writer.write_all(json.as_bytes()).await?;
@@ -473,6 +571,59 @@ mod tests {
         assert_eq!(
             parse_namespaced_command("server:state"),
             ("server", "state")
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_transcript_target_session_uses_requested_connected_session() {
+        let client_connections = Arc::new(RwLock::new(HashMap::from([(
+            "conn-1".to_string(),
+            ClientConnectionInfo {
+                client_id: "conn-1".to_string(),
+                session_id: "session_abc".to_string(),
+                debug_client_id: Some("debug-1".to_string()),
+                connected_at: Instant::now(),
+                last_seen: Instant::now(),
+            },
+        )])));
+        let client_debug_state = Arc::new(RwLock::new(ClientDebugState::default()));
+
+        let resolved = resolve_transcript_target_session(
+            Some("session_abc".to_string()),
+            &client_connections,
+            &client_debug_state,
+        )
+        .await
+        .expect("resolve connected requested session");
+
+        assert_eq!(resolved, "session_abc");
+    }
+
+    #[tokio::test]
+    async fn resolve_transcript_target_session_rejects_requested_session_without_connected_tui() {
+        let client_connections = Arc::new(RwLock::new(HashMap::from([(
+            "conn-1".to_string(),
+            ClientConnectionInfo {
+                client_id: "conn-1".to_string(),
+                session_id: "session_abc".to_string(),
+                debug_client_id: None,
+                connected_at: Instant::now(),
+                last_seen: Instant::now(),
+            },
+        )])));
+        let client_debug_state = Arc::new(RwLock::new(ClientDebugState::default()));
+
+        let err = resolve_transcript_target_session(
+            Some("session_abc".to_string()),
+            &client_connections,
+            &client_debug_state,
+        )
+        .await
+        .expect_err("requested session without connected tui should error");
+
+        assert!(
+            err.to_string()
+                .contains("does not have a connected TUI client")
         );
     }
 }

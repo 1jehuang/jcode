@@ -46,7 +46,7 @@ use crate::bus::{Bus, BusEvent, FileOp};
 use crate::plan::PlanItem;
 #[allow(unused_imports)]
 use crate::protocol::ContextEntry;
-use crate::protocol::{HistoryMessage, NotificationType, Request, ServerEvent};
+use crate::protocol::{HistoryMessage, NotificationType, Request, ServerEvent, TranscriptMode};
 use crate::provider::Provider;
 use crate::transport::{Listener, ReadHalf, Stream, WriteHalf};
 use anyhow::Result;
@@ -649,6 +649,61 @@ pub async fn has_live_listener(path: &std::path::Path) -> bool {
 }
 
 #[cfg(unix)]
+fn daemon_lock_path() -> PathBuf {
+    crate::storage::runtime_dir().join("jcode-daemon.lock")
+}
+
+#[cfg(unix)]
+struct DaemonLockGuard {
+    _file: std::fs::File,
+    path: PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for DaemonLockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(unix)]
+fn try_acquire_daemon_lock(path: &std::path::Path) -> Result<Option<DaemonLockGuard>> {
+    use std::fs::OpenOptions;
+    use std::os::fd::AsRawFd;
+
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    let fd = file.as_raw_fd();
+    let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if ret == 0 {
+        Ok(Some(DaemonLockGuard {
+            _file: file,
+            path: path.to_path_buf(),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(unix)]
+fn acquire_daemon_lock() -> Result<DaemonLockGuard> {
+    let path = daemon_lock_path();
+    try_acquire_daemon_lock(&path)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Another jcode server process is already running for runtime dir {}",
+            crate::storage::runtime_dir().display()
+        )
+    })
+}
+
+#[cfg(unix)]
 fn mark_close_on_exec<T: std::os::fd::AsRawFd>(io: &T) {
     let fd = io.as_raw_fd();
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
@@ -661,9 +716,10 @@ fn mark_close_on_exec<T: std::os::fd::AsRawFd>(io: &T) {
 mod socket_tests {
     use super::{
         ReloadPhase, ReloadState, ReloadWaitStatus, await_reload_handoff, cleanup_socket_pair,
-        clear_reload_marker, inspect_reload_wait_status, publish_reload_socket_ready,
-        reload_marker_active, reload_marker_path, reload_process_alive, sibling_socket_path,
-        write_reload_state,
+        clear_reload_marker, daemon_lock_path, inspect_reload_wait_status,
+        publish_reload_socket_ready, reload_marker_active, reload_marker_path,
+        reload_process_alive, server_start_matches_existing_server, sibling_socket_path,
+        try_acquire_daemon_lock, write_reload_state,
     };
     use std::time::Duration;
 
@@ -697,6 +753,48 @@ mod socket_tests {
 
         assert!(!main.exists(), "main socket file should be removed");
         assert!(!debug.exists(), "debug socket file should be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_lock_serializes_server_processes() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+        crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+
+        let lock_path = daemon_lock_path();
+        let first = try_acquire_daemon_lock(&lock_path)
+            .expect("acquire first daemon lock")
+            .expect("first daemon lock should succeed");
+        let second = try_acquire_daemon_lock(&lock_path).expect("acquire second daemon lock");
+        assert!(second.is_none(), "second daemon lock should fail");
+        drop(first);
+
+        let third = try_acquire_daemon_lock(&lock_path)
+            .expect("acquire third daemon lock")
+            .expect("third daemon lock should succeed after release");
+        drop(third);
+
+        if let Some(prev_runtime) = prev_runtime {
+            crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+        } else {
+            crate::env::remove_var("JCODE_RUNTIME_DIR");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_server_start_errors_are_detected() {
+        assert!(server_start_matches_existing_server(
+            "Error: Another jcode server process is already running for runtime dir /run/user/1000"
+        ));
+        assert!(server_start_matches_existing_server(
+            "Error: Refusing to replace active server socket at /run/user/1000/jcode.sock"
+        ));
+        assert!(!server_start_matches_existing_server(
+            "Error: failed to bind socket: permission denied"
+        ));
     }
 
     #[test]
@@ -942,7 +1040,7 @@ mod socket_tests {
 
 #[cfg(test)]
 mod startup_tests {
-    use super::{Server, is_server_ready};
+    use super::{Server, is_server_ready, wait_for_existing_server};
     use crate::message::{Message, ToolDefinition};
     use crate::provider::{EventStream, Provider};
     use crate::transport::Listener;
@@ -978,6 +1076,8 @@ mod startup_tests {
     async fn server_run_refuses_to_replace_live_socket() {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir().expect("tempdir");
+        let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+        crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
         let socket_path = temp.path().join("jcode.sock");
         let debug_socket_path = temp.path().join("jcode-debug.sock");
         let _listener = Listener::bind(&socket_path).expect("bind existing live socket");
@@ -994,6 +1094,12 @@ mod startup_tests {
                 .contains("Refusing to replace active server socket"),
             "unexpected error: {error:#}"
         );
+
+        if let Some(prev_runtime) = prev_runtime {
+            crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+        } else {
+            crate::env::remove_var("JCODE_RUNTIME_DIR");
+        }
     }
 
     #[tokio::test]
@@ -1007,6 +1113,26 @@ mod startup_tests {
             .expect("missing socket probe should return quickly");
 
         assert!(!ready, "missing socket should not report ready");
+    }
+
+    #[tokio::test]
+    async fn wait_for_existing_server_tolerates_delayed_listener() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("jcode.sock");
+        let bind_path = socket_path.clone();
+
+        let bind_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let listener = Listener::bind(&bind_path).expect("bind delayed listener");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            drop(listener);
+        });
+
+        let ready = wait_for_existing_server(&socket_path, Duration::from_secs(1)).await;
+        assert!(ready, "delayed live listener should be detected");
+
+        bind_task.await.expect("bind task should complete");
     }
 }
 
@@ -1270,7 +1396,7 @@ pub async fn spawn_server_notify(cmd: &mut std::process::Command) -> Result<std:
         }
         Ok(Ok(_)) => {
             if let Some(status) = child.try_wait()? {
-                anyhow::bail!(server_start_error(&mut child, status));
+                handle_server_start_exit(&mut child, status).await?;
             }
             crate::logging::info(
                 "Server closed ready pipe without signalling; falling back to poll",
@@ -1343,10 +1469,10 @@ pub async fn is_server_ready(path: &std::path::Path) -> bool {
 }
 
 #[cfg(unix)]
-fn server_start_error(child: &mut std::process::Child, status: std::process::ExitStatus) -> String {
+fn take_server_start_stderr(child: &mut std::process::Child) -> String {
     use std::io::Read;
 
-    let stderr_output = child
+    child
         .stderr
         .take()
         .and_then(|mut stderr| {
@@ -1354,7 +1480,28 @@ fn server_start_error(child: &mut std::process::Child, status: std::process::Exi
             stderr.read_to_string(&mut buf).ok()?;
             Some(buf)
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+#[cfg(unix)]
+fn server_start_matches_existing_server(stderr_output: &str) -> bool {
+    stderr_output.contains("Another jcode server process is already running")
+        || stderr_output.contains("Refusing to replace active server socket")
+}
+
+async fn wait_for_existing_server(path: &std::path::Path, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if is_server_ready(path).await || has_live_listener(path).await {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+#[cfg(unix)]
+fn format_server_start_error(status: std::process::ExitStatus, stderr_output: &str) -> String {
     if stderr_output.trim().is_empty() {
         format!(
             "Server exited before signalling ready ({}). Check logs at ~/.jcode/logs/",
@@ -1367,6 +1514,25 @@ fn server_start_error(child: &mut std::process::Child, status: std::process::Exi
             stderr_output.trim()
         )
     }
+}
+
+#[cfg(unix)]
+async fn handle_server_start_exit(
+    child: &mut std::process::Child,
+    status: std::process::ExitStatus,
+) -> Result<()> {
+    let stderr_output = take_server_start_stderr(child);
+    if server_start_matches_existing_server(&stderr_output) {
+        let socket_path = socket_path();
+        if wait_for_existing_server(&socket_path, Duration::from_secs(5)).await {
+            crate::logging::info(
+                "Server spawn raced with an existing daemon; treating startup as successful",
+            );
+            return Ok(());
+        }
+    }
+
+    anyhow::bail!(format_server_start_error(status, &stderr_output));
 }
 
 /// Idle timeout for the shared server when no clients are connected (5 minutes)
@@ -2090,6 +2256,9 @@ impl Server {
         if let Some(parent) = self.socket_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+
+        #[cfg(unix)]
+        let _daemon_lock = acquire_daemon_lock()?;
 
         if socket_has_live_listener(&self.socket_path).await {
             anyhow::bail!(
@@ -2897,6 +3066,26 @@ impl Client {
             id,
             session_id: session_id.to_string(),
             message: message.to_string(),
+        };
+        let json = serde_json::to_string(&request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
+        Ok(id)
+    }
+
+    pub async fn send_transcript(
+        &mut self,
+        text: &str,
+        mode: TranscriptMode,
+        session_id: Option<String>,
+    ) -> Result<u64> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let request = Request::Transcript {
+            id,
+            text: text.to_string(),
+            mode,
+            session_id,
         };
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;

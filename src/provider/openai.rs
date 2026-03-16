@@ -474,11 +474,12 @@ fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
     tools
         .iter()
         .map(|t| {
-            let supports_strict = schema_supports_strict(&t.input_schema);
+            let compatible_schema = openai_compatible_schema(&t.input_schema);
+            let supports_strict = schema_supports_strict(&compatible_schema);
             let parameters = if supports_strict {
-                strict_normalize_schema(&t.input_schema)
+                strict_normalize_schema(&compatible_schema)
             } else {
-                t.input_schema.clone()
+                compatible_schema
             };
             serde_json::json!({
                 "type": "function",
@@ -489,6 +490,21 @@ fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn openai_compatible_schema(schema: &Value) -> Value {
+    match schema {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (key, value) in map {
+                let normalized_key = if key == "oneOf" { "anyOf" } else { key };
+                out.insert(normalized_key.to_string(), openai_compatible_schema(value));
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(openai_compatible_schema).collect()),
+        _ => schema.clone(),
+    }
 }
 
 fn schema_supports_strict(schema: &Value) -> bool {
@@ -4877,6 +4893,40 @@ mod tests {
         assert_eq!(
             api_tools[0]["parameters"]["properties"]["description"]["type"],
             serde_json::json!(["string", "null"])
+        );
+    }
+
+    #[test]
+    fn test_build_tools_rewrites_oneof_to_anyof_for_openai() {
+        let defs = vec![ToolDefinition {
+            name: "batch".to_string(),
+            description: "batch calls".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["tool_calls"],
+                "properties": {
+                    "tool_calls": {
+                        "type": "array",
+                        "items": {
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "required": ["tool"],
+                                    "properties": {
+                                        "tool": { "type": "string" }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }),
+        }];
+        let api_tools = build_tools(&defs);
+        assert!(api_tools[0]["parameters"]["properties"]["tool_calls"]["items"]["oneOf"].is_null());
+        assert_eq!(
+            api_tools[0]["parameters"]["properties"]["tool_calls"]["items"]["anyOf"][0]["type"],
+            serde_json::json!("object")
         );
     }
 

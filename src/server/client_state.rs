@@ -44,7 +44,6 @@ pub(super) async fn handle_get_history(
     server_name: &str,
     server_icon: &str,
 ) -> Result<()> {
-    let _ = provider.prefetch_models().await;
     send_history(
         id,
         client_session_id,
@@ -56,7 +55,10 @@ pub(super) async fn handle_get_history(
         server_icon,
         None,
     )
-    .await
+    .await?;
+
+    spawn_model_prefetch_update(Arc::clone(provider), Arc::clone(agent), Arc::clone(writer));
+    Ok(())
 }
 
 pub(super) async fn send_history(
@@ -171,4 +173,33 @@ async fn write_event(writer: &Arc<Mutex<WriteHalf>>, event: &ServerEvent) -> Res
     let mut writer = writer.lock().await;
     writer.write_all(json.as_bytes()).await?;
     Ok(())
+}
+
+pub(super) fn spawn_model_prefetch_update(
+    provider: Arc<dyn Provider>,
+    agent: Arc<Mutex<Agent>>,
+    writer: Arc<Mutex<WriteHalf>>,
+) {
+    tokio::spawn(async move {
+        if provider.prefetch_models().await.is_err() {
+            return;
+        }
+
+        let (available_models, available_model_routes) = {
+            let agent_guard = agent.lock().await;
+            (
+                agent_guard.available_models_display(),
+                agent_guard.model_routes(),
+            )
+        };
+
+        let _ = write_event(
+            &writer,
+            &ServerEvent::AvailableModelsUpdated {
+                available_models,
+                available_model_routes,
+            },
+        )
+        .await;
+    });
 }

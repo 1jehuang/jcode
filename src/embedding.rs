@@ -591,6 +591,9 @@ mod tests {
 
     #[test]
     fn test_idle_unload_noop_when_not_loaded() {
+        if let Ok(mut cache) = embedder_cache().lock() {
+            *cache = EmbedderCache::default();
+        }
         assert!(!maybe_unload_if_idle(Duration::from_secs(1)));
     }
 }

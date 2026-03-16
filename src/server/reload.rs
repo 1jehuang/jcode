@@ -3,6 +3,7 @@ use crate::server::{SwarmEvent, SwarmEventType, SwarmMember};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
 
@@ -11,6 +12,15 @@ fn prepare_server_exec(cmd: &mut std::process::Command, socket_path: &std::path:
     // before exec so we never inherit a stale on-disk endpoint through reload.
     crate::server::cleanup_socket_pair(socket_path);
     cmd.env_remove("JCODE_READY_FD");
+
+    // The shared daemon may have inherited stderr from the client process that
+    // originally spawned it. Once that client exits, later reload execs can hit
+    // SIGPIPE during boot when they emit provider/model notices to stderr,
+    // killing the replacement server before it binds the socket. The daemon
+    // logs to the file logger, so detach stdio for exec-based reloads.
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
 }
 
 pub(super) fn get_repo_dir() -> Option<PathBuf> {
