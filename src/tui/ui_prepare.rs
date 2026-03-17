@@ -9,6 +9,17 @@ fn content_prefers_display_as_logical_lines(content: &str) -> bool {
     })
 }
 
+fn semantic_swarm_line_text(plain: &str) -> (String, usize) {
+    let trimmed = plain.trim_start_matches(' ');
+    if let Some(rest) = trimmed.strip_prefix("│ ") {
+        let prefix_width = unicode_width::UnicodeWidthStr::width(plain)
+            .saturating_sub(unicode_width::UnicodeWidthStr::width(rest));
+        (rest.to_string(), prefix_width)
+    } else {
+        (plain.to_string(), 0)
+    }
+}
+
 fn map_display_lines_to_logical_lines(
     display_lines: &[Line<'static>],
     logical_plain_lines: &[String],
@@ -84,6 +95,7 @@ fn empty_prepared_messages() -> PreparedMessages {
     PreparedMessages {
         wrapped_lines: Vec::new(),
         wrapped_plain_lines: Arc::new(Vec::new()),
+        wrapped_copy_offsets: Arc::new(Vec::new()),
         raw_plain_lines: Arc::new(Vec::new()),
         wrapped_line_map: Arc::new(Vec::new()),
         wrapped_user_indices: Vec::new(),
@@ -215,7 +227,7 @@ fn prepare_active_batch_progress(
         pad_lines_for_centered_mode(&mut lines, width);
     }
 
-    wrap_lines_with_map(lines, &[], &[], &[], &[], width, &[], &[])
+    wrap_lines_with_map(lines, &[], &[], &[], &[], &[], width, &[], &[])
 }
 
 pub(super) fn prepare_messages(
@@ -275,10 +287,11 @@ fn prepare_messages_inner(
 ) -> PreparedMessages {
     let mut all_header_lines = header::build_persistent_header(app, width);
     all_header_lines.extend(build_header_lines(app, width));
-    let header_prepared = wrap_lines(all_header_lines, &[], &[], width);
+    let header_prepared = wrap_lines(all_header_lines, &[], &[], &[], width);
     let startup_prepared = if startup_active {
         wrap_lines(
             animations::build_startup_animation_lines(app, width),
+            &[],
             &[],
             &[],
             width,
@@ -287,6 +300,7 @@ fn prepare_messages_inner(
         PreparedMessages {
             wrapped_lines: Vec::new(),
             wrapped_plain_lines: Arc::new(Vec::new()),
+            wrapped_copy_offsets: Arc::new(Vec::new()),
             raw_plain_lines: Arc::new(Vec::new()),
             wrapped_line_map: Arc::new(Vec::new()),
             wrapped_user_indices: Vec::new(),
@@ -320,6 +334,7 @@ fn prepare_messages_inner(
     let mut wrapped_lines: Vec<Line<'static>>;
     let raw_plain_lines;
     let wrapped_line_map;
+    let wrapped_copy_offsets;
     let wrapped_user_indices;
     let wrapped_user_prompt_starts;
     let wrapped_user_prompt_ends;
@@ -366,6 +381,7 @@ fn prepare_messages_inner(
         wrapped_user_indices = Vec::new();
         raw_plain_lines = Vec::new();
         wrapped_line_map = Vec::new();
+        wrapped_copy_offsets = vec![0; wrapped_lines.len()];
         wrapped_user_prompt_starts = Vec::new();
         wrapped_user_prompt_ends = Vec::new();
         user_prompt_texts = Vec::new();
@@ -447,6 +463,7 @@ fn prepare_messages_inner(
         if is_initial_empty {
             raw_plain_lines = Vec::new();
             wrapped_line_map = Vec::new();
+            wrapped_copy_offsets = vec![0; wrapped_lines.len()];
         } else {
             let header_raw_len = header_prepared.raw_plain_lines.len();
             let startup_raw_len = startup_prepared.raw_plain_lines.len();
@@ -504,8 +521,25 @@ fn prepare_messages_inner(
                 }
             }));
 
+            let mut all_wrapped_copy_offsets = Vec::with_capacity(
+                header_prepared.wrapped_copy_offsets.len()
+                    + startup_prepared.wrapped_copy_offsets.len()
+                    + body_prepared.wrapped_copy_offsets.len()
+                    + batch_progress_prepared.wrapped_copy_offsets.len()
+                    + streaming_prepared.wrapped_copy_offsets.len(),
+            );
+            all_wrapped_copy_offsets.extend(header_prepared.wrapped_copy_offsets.iter().copied());
+            all_wrapped_copy_offsets
+                .extend(startup_prepared.wrapped_copy_offsets.iter().copied());
+            all_wrapped_copy_offsets.extend(body_prepared.wrapped_copy_offsets.iter().copied());
+            all_wrapped_copy_offsets
+                .extend(batch_progress_prepared.wrapped_copy_offsets.iter().copied());
+            all_wrapped_copy_offsets
+                .extend(streaming_prepared.wrapped_copy_offsets.iter().copied());
+
             raw_plain_lines = all_raw_plain_lines;
             wrapped_line_map = all_wrapped_line_map;
+            wrapped_copy_offsets = all_wrapped_copy_offsets;
         }
 
         let header_len = wrapped_lines.len();
@@ -584,6 +618,7 @@ fn prepare_messages_inner(
     PreparedMessages {
         wrapped_lines,
         wrapped_plain_lines,
+        wrapped_copy_offsets: Arc::new(wrapped_copy_offsets),
         raw_plain_lines: Arc::new(raw_plain_lines),
         wrapped_line_map: Arc::new(wrapped_line_map),
         wrapped_user_indices,
@@ -671,12 +706,17 @@ fn prepare_body_incremental(
     let mut new_user_prompt_texts: Vec<String> = Vec::new();
     let mut new_edit_tool_line_ranges: Vec<(usize, String, usize, usize)> = Vec::new();
     let mut new_copy_targets: Vec<RawCopyTarget> = Vec::new();
+    let mut new_raw_plain_lines: Vec<String> = Vec::new();
+    let mut new_line_raw_overrides: Vec<Option<WrappedLineMap>> = Vec::new();
+    let mut new_line_copy_offsets: Vec<usize> = Vec::new();
 
     let body_has_content = !prev.wrapped_lines.is_empty();
 
     for (new_msg_offset, msg) in new_messages.iter().enumerate() {
         if (body_has_content || !new_lines.is_empty()) && msg.role != "tool" && msg.role != "meta" {
             new_lines.push(Line::from(""));
+            new_line_raw_overrides.push(None);
+            new_line_copy_offsets.push(0);
         }
 
         match msg.role.as_str() {
@@ -686,6 +726,11 @@ fn prepare_body_incremental(
                 new_user_prompt_texts.push(msg.content.clone());
                 let distance = total_prompts + pending_count + 1 - prompt_num;
                 let num_color = rainbow_prompt_color(distance);
+                let raw_line = new_raw_plain_lines.len();
+                new_raw_plain_lines.push(msg.content.clone());
+                let prompt_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());
+                let prefix_width = unicode_width::UnicodeWidthStr::width(prompt_num.to_string().as_str())
+                    + unicode_width::UnicodeWidthStr::width("› ");
                 new_lines.push(
                     Line::from(vec![
                         Span::styled(format!("{}", prompt_num), Style::default().fg(num_color)),
@@ -694,6 +739,12 @@ fn prepare_body_incremental(
                     ])
                     .alignment(align),
                 );
+                new_line_raw_overrides.push(Some(WrappedLineMap {
+                    raw_line,
+                    start_col: 0,
+                    end_col: prompt_width,
+                }));
+                new_line_copy_offsets.push(prefix_width);
             }
             "assistant" => {
                 let content_width = width.saturating_sub(4);
@@ -715,9 +766,19 @@ fn prepare_body_incremental(
                 }
                 for line in cached {
                     new_lines.push(align_if_unset(line, align));
+                    new_line_raw_overrides.push(None);
+                    new_line_copy_offsets.push(0);
                 }
             }
             "meta" => {
+                let raw_line = new_raw_plain_lines.len();
+                new_raw_plain_lines.push(msg.content.clone());
+                let raw_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());
+                let prefix_width = if centered {
+                    0
+                } else {
+                    unicode_width::UnicodeWidthStr::width("  ")
+                };
                 new_lines.push(
                     Line::from(vec![
                         Span::raw(if centered { "" } else { "  " }),
@@ -725,6 +786,12 @@ fn prepare_body_incremental(
                     ])
                     .alignment(align),
                 );
+                new_line_raw_overrides.push(Some(WrappedLineMap {
+                    raw_line,
+                    start_col: 0,
+                    end_col: raw_width,
+                }));
+                new_line_copy_offsets.push(prefix_width);
             }
             "tool" => {
                 let tool_start_line = new_lines.len();
@@ -732,6 +799,8 @@ fn prepare_body_incremental(
                     get_cached_message_lines(msg, width, app.diff_mode(), render_tool_message);
                 for line in cached {
                     new_lines.push(align_if_unset(line, align));
+                    new_line_raw_overrides.push(None);
+                    new_line_copy_offsets.push(0);
                 }
                 if let Some(ref tc) = msg.tool_data {
                     let is_edit_tool = matches!(
@@ -785,6 +854,8 @@ fn prepare_body_incremental(
                 );
                 for line in cached {
                     new_lines.push(align_if_unset(line, align));
+                    new_line_raw_overrides.push(None);
+                    new_line_copy_offsets.push(0);
                 }
             }
             "swarm" => {
@@ -796,7 +867,19 @@ fn prepare_body_incremental(
                     render_swarm_message,
                 );
                 for line in cached {
-                    new_lines.push(align_if_unset(line, align));
+                    let line = align_if_unset(line, align);
+                    let plain = ui::line_plain_text(&line);
+                    let (semantic, prefix_width) = semantic_swarm_line_text(plain.as_str());
+                    let raw_line = new_raw_plain_lines.len();
+                    let raw_width = unicode_width::UnicodeWidthStr::width(semantic.as_str());
+                    new_raw_plain_lines.push(semantic);
+                    new_lines.push(line);
+                    new_line_raw_overrides.push(Some(WrappedLineMap {
+                        raw_line,
+                        start_col: 0,
+                        end_col: raw_width,
+                    }));
+                    new_line_copy_offsets.push(prefix_width);
                 }
             }
             "memory" => {
@@ -861,9 +944,19 @@ fn prepare_body_incremental(
                 );
                 for line in tile_lines {
                     new_lines.push(align_if_unset(line, align));
+                    new_line_raw_overrides.push(None);
+                    new_line_copy_offsets.push(0);
                 }
             }
             "usage" => {
+                let raw_line = new_raw_plain_lines.len();
+                new_raw_plain_lines.push(msg.content.clone());
+                let raw_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());
+                let prefix_width = if centered {
+                    0
+                } else {
+                    unicode_width::UnicodeWidthStr::width("  ")
+                };
                 new_lines.push(
                     Line::from(vec![
                         Span::styled(if centered { "" } else { "  " }, Style::default()),
@@ -871,8 +964,18 @@ fn prepare_body_incremental(
                     ])
                     .alignment(align),
                 );
+                new_line_raw_overrides.push(Some(WrappedLineMap {
+                    raw_line,
+                    start_col: 0,
+                    end_col: raw_width,
+                }));
+                new_line_copy_offsets.push(prefix_width);
             }
             "error" => {
+                let raw_line = new_raw_plain_lines.len();
+                new_raw_plain_lines.push(msg.content.clone());
+                let raw_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());
+                let prefix_width = unicode_width::UnicodeWidthStr::width(if centered { "✗ " } else { "  ✗ " });
                 new_lines.push(
                     Line::from(vec![
                         Span::styled(
@@ -883,6 +986,12 @@ fn prepare_body_incremental(
                     ])
                     .alignment(align),
                 );
+                new_line_raw_overrides.push(Some(WrappedLineMap {
+                    raw_line,
+                    start_col: 0,
+                    end_col: raw_width,
+                }));
+                new_line_copy_offsets.push(prefix_width);
             }
             _ => {}
         }
@@ -890,8 +999,9 @@ fn prepare_body_incremental(
 
     let new_wrapped = wrap_lines_with_map(
         new_lines,
-        &[],
-        &[],
+        &new_raw_plain_lines,
+        &new_line_raw_overrides,
+        &new_line_copy_offsets,
         &new_user_line_indices,
         &new_user_prompt_texts,
         width,
@@ -903,6 +1013,8 @@ fn prepare_body_incremental(
     let mut wrapped_lines = Vec::with_capacity(prev_len + new_wrapped.wrapped_lines.len());
     wrapped_lines.extend_from_slice(&prev.wrapped_lines);
     wrapped_lines.extend(new_wrapped.wrapped_lines);
+    let mut wrapped_copy_offsets = prev.wrapped_copy_offsets.as_ref().clone();
+    wrapped_copy_offsets.extend(new_wrapped.wrapped_copy_offsets.iter().copied());
 
     let prev_raw_len = prev.raw_plain_lines.len();
     let mut raw_plain_lines = prev.raw_plain_lines.as_ref().clone();
@@ -969,6 +1081,7 @@ fn prepare_body_incremental(
     Arc::new(PreparedMessages {
         wrapped_lines,
         wrapped_plain_lines,
+        wrapped_copy_offsets: Arc::new(wrapped_copy_offsets),
         raw_plain_lines: Arc::new(raw_plain_lines),
         wrapped_line_map: Arc::new(wrapped_line_map),
         wrapped_user_indices,
@@ -991,6 +1104,7 @@ fn prepare_streaming_cached(
         return PreparedMessages {
             wrapped_lines: Vec::new(),
             wrapped_plain_lines: Arc::new(Vec::new()),
+            wrapped_copy_offsets: Arc::new(Vec::new()),
             raw_plain_lines: Arc::new(Vec::new()),
             wrapped_line_map: Arc::new(Vec::new()),
             wrapped_user_indices: Vec::new(),
@@ -1022,13 +1136,14 @@ fn prepare_streaming_cached(
         lines.push(align_if_unset(line, align));
     }
 
-    wrap_lines(lines, &[], &[], width)
+    wrap_lines(lines, &[], &[], &[], width)
 }
 
 fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> PreparedMessages {
     let mut lines: Vec<Line> = Vec::new();
     let mut raw_plain_lines: Vec<String> = Vec::new();
     let mut line_raw_overrides: Vec<Option<WrappedLineMap>> = Vec::new();
+    let mut line_copy_offsets: Vec<usize> = Vec::new();
     let mut user_line_indices: Vec<usize> = Vec::new();
     let mut user_prompt_texts: Vec<String> = Vec::new();
     let mut edit_tool_line_ranges: Vec<(usize, String, usize, usize)> = Vec::new();
@@ -1053,6 +1168,7 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
         if !lines.is_empty() && msg.role != "tool" && msg.role != "meta" && msg.role != "swarm" {
             lines.push(Line::from(""));
             line_raw_overrides.push(None);
+            line_copy_offsets.push(0);
         }
 
         match msg.role.as_str() {
@@ -1062,6 +1178,11 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 user_prompt_texts.push(msg.content.clone());
                 let distance = total_prompts + pending_count + 1 - prompt_num;
                 let num_color = rainbow_prompt_color(distance);
+                let raw_line = raw_plain_lines.len();
+                raw_plain_lines.push(msg.content.clone());
+                let prompt_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());
+                let prefix_width = unicode_width::UnicodeWidthStr::width(prompt_num.to_string().as_str())
+                    + unicode_width::UnicodeWidthStr::width("› ");
                 lines.push(
                     Line::from(vec![
                         Span::styled(
@@ -1073,7 +1194,12 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                     ])
                     .alignment(align),
                 );
-                line_raw_overrides.push(None);
+                line_raw_overrides.push(Some(WrappedLineMap {
+                    raw_line,
+                    start_col: 0,
+                    end_col: prompt_width,
+                }));
+                line_copy_offsets.push(prefix_width);
             }
             "assistant" => {
                 let content_width = width.saturating_sub(4);
@@ -1130,9 +1256,18 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                     } else {
                         line_raw_overrides.push(None);
                     }
+                    line_copy_offsets.push(0);
                 }
             }
             "meta" => {
+                let raw_line = raw_plain_lines.len();
+                raw_plain_lines.push(msg.content.clone());
+                let raw_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());
+                let prefix_width = if centered {
+                    0
+                } else {
+                    unicode_width::UnicodeWidthStr::width("  ")
+                };
                 lines.push(
                     Line::from(vec![
                         Span::raw(if centered { "" } else { "  " }),
@@ -1140,7 +1275,12 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                     ])
                     .alignment(align),
                 );
-                line_raw_overrides.push(None);
+                line_raw_overrides.push(Some(WrappedLineMap {
+                    raw_line,
+                    start_col: 0,
+                    end_col: raw_width,
+                }));
+                line_copy_offsets.push(prefix_width);
             }
             "tool" => {
                 let tool_start_line = lines.len();
@@ -1149,6 +1289,7 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 for line in cached {
                     lines.push(align_if_unset(line, align));
                     line_raw_overrides.push(None);
+                    line_copy_offsets.push(0);
                 }
                 if let Some(ref tc) = msg.tool_data {
                     let is_edit_tool = matches!(
@@ -1203,6 +1344,31 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 for line in cached {
                     lines.push(align_if_unset(line, align));
                     line_raw_overrides.push(None);
+                    line_copy_offsets.push(0);
+                }
+            }
+            "swarm" => {
+                let content_width = width.saturating_sub(4);
+                let cached = get_cached_message_lines(
+                    msg,
+                    content_width,
+                    app.diff_mode(),
+                    render_swarm_message,
+                );
+                for line in cached {
+                    let line = align_if_unset(line, align);
+                    let plain = ui::line_plain_text(&line);
+                    let (semantic, prefix_width) = semantic_swarm_line_text(plain.as_str());
+                    let raw_line = raw_plain_lines.len();
+                    let raw_width = unicode_width::UnicodeWidthStr::width(semantic.as_str());
+                    raw_plain_lines.push(semantic);
+                    lines.push(line);
+                    line_raw_overrides.push(Some(WrappedLineMap {
+                        raw_line,
+                        start_col: 0,
+                        end_col: raw_width,
+                    }));
+                    line_copy_offsets.push(prefix_width);
                 }
             }
             "memory" => {
@@ -1269,9 +1435,18 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                 for line in tile_lines {
                     lines.push(align_if_unset(line, align));
                     line_raw_overrides.push(None);
+                    line_copy_offsets.push(0);
                 }
             }
             "usage" => {
+                let raw_line = raw_plain_lines.len();
+                raw_plain_lines.push(msg.content.clone());
+                let raw_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());
+                let prefix_width = if centered {
+                    0
+                } else {
+                    unicode_width::UnicodeWidthStr::width("  ")
+                };
                 lines.push(
                     Line::from(vec![
                         Span::styled(if centered { "" } else { "  " }, Style::default()),
@@ -1279,9 +1454,18 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                     ])
                     .alignment(align),
                 );
-                line_raw_overrides.push(None);
+                line_raw_overrides.push(Some(WrappedLineMap {
+                    raw_line,
+                    start_col: 0,
+                    end_col: raw_width,
+                }));
+                line_copy_offsets.push(prefix_width);
             }
             "error" => {
+                let raw_line = raw_plain_lines.len();
+                raw_plain_lines.push(msg.content.clone());
+                let raw_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());
+                let prefix_width = unicode_width::UnicodeWidthStr::width(if centered { "✗ " } else { "  ✗ " });
                 lines.push(
                     Line::from(vec![
                         Span::styled(
@@ -1292,7 +1476,12 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
                     ])
                     .alignment(align),
                 );
-                line_raw_overrides.push(None);
+                line_raw_overrides.push(Some(WrappedLineMap {
+                    raw_line,
+                    start_col: 0,
+                    end_col: raw_width,
+                }));
+                line_copy_offsets.push(prefix_width);
             }
             _ => {}
         }
@@ -1302,12 +1491,14 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
         if !lines.is_empty() {
             lines.push(Line::from(""));
             line_raw_overrides.push(None);
+            line_copy_offsets.push(0);
         }
         let content_width = width.saturating_sub(4) as usize;
         let md_lines = app.render_streaming_markdown(content_width);
         for line in md_lines {
             lines.push(align_if_unset(line, align));
             line_raw_overrides.push(None);
+            line_copy_offsets.push(0);
         }
     }
 
@@ -1315,6 +1506,7 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
         lines,
         &raw_plain_lines,
         &line_raw_overrides,
+        &line_copy_offsets,
         &user_line_indices,
         &user_prompt_texts,
         width,
@@ -1325,6 +1517,7 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
 
 fn wrap_lines(
     lines: Vec<Line<'static>>,
+    line_copy_offsets: &[usize],
     user_line_indices: &[usize],
     user_prompt_texts: &[String],
     width: u16,
@@ -1336,6 +1529,7 @@ fn wrap_lines(
     let mut wrapped_user_prompt_ends: Vec<usize> = Vec::new();
     let mut raw_plain_lines: Vec<String> = Vec::with_capacity(lines.len());
     let mut wrapped_line_map: Vec<WrappedLineMap> = Vec::new();
+    let mut wrapped_copy_offsets: Vec<usize> = Vec::new();
     let mut user_line_mask = vec![false; lines.len()];
     for &idx in user_line_indices {
         if idx < user_line_mask.len() {
@@ -1353,6 +1547,7 @@ fn wrap_lines(
         let wrap_width = if is_user_line { user_width } else { full_width };
         let new_lines = markdown::wrap_line(line, wrap_width);
         let count = new_lines.len();
+        let mut remaining_copy_offset = line_copy_offsets.get(orig_idx).copied().unwrap_or(0);
         let mut start_col = 0usize;
 
         for wrapped_line in &new_lines {
@@ -1363,6 +1558,8 @@ fn wrap_lines(
                 start_col,
                 end_col,
             });
+            wrapped_copy_offsets.push(remaining_copy_offset.min(width));
+            remaining_copy_offset = remaining_copy_offset.saturating_sub(width);
             start_col = end_col;
         }
 
@@ -1405,6 +1602,7 @@ fn wrap_lines(
     PreparedMessages {
         wrapped_lines,
         wrapped_plain_lines,
+        wrapped_copy_offsets: Arc::new(wrapped_copy_offsets),
         raw_plain_lines: Arc::new(raw_plain_lines),
         wrapped_line_map: Arc::new(wrapped_line_map),
         wrapped_user_indices,
@@ -1421,6 +1619,7 @@ fn wrap_lines_with_map(
     lines: Vec<Line<'static>>,
     seeded_raw_plain_lines: &[String],
     line_raw_overrides: &[Option<WrappedLineMap>],
+    line_copy_offsets: &[usize],
     user_line_indices: &[usize],
     user_prompt_texts: &[String],
     width: u16,
@@ -1434,6 +1633,7 @@ fn wrap_lines_with_map(
     let mut wrapped_user_prompt_ends: Vec<usize> = Vec::new();
     let mut raw_plain_lines: Vec<String> = seeded_raw_plain_lines.to_vec();
     let mut wrapped_line_map: Vec<WrappedLineMap> = Vec::new();
+    let mut wrapped_copy_offsets: Vec<usize> = Vec::new();
     let mut user_line_mask = vec![false; lines.len()];
     for &idx in user_line_indices {
         if idx < user_line_mask.len() {
@@ -1461,6 +1661,7 @@ fn wrap_lines_with_map(
         let wrap_width = if is_user_line { user_width } else { full_width };
         let new_lines = markdown::wrap_line(line, wrap_width);
         let count = new_lines.len();
+        let mut remaining_copy_offset = line_copy_offsets.get(orig_idx).copied().unwrap_or(0);
         let mut segment_start = start_col;
 
         for wrapped_line in &new_lines {
@@ -1471,6 +1672,8 @@ fn wrap_lines_with_map(
                 start_col: segment_start,
                 end_col: segment_end,
             });
+            wrapped_copy_offsets.push(remaining_copy_offset.min(width));
+            remaining_copy_offset = remaining_copy_offset.saturating_sub(width);
             segment_start = segment_end;
         }
 
@@ -1553,6 +1756,7 @@ fn wrap_lines_with_map(
     PreparedMessages {
         wrapped_lines,
         wrapped_plain_lines,
+        wrapped_copy_offsets: Arc::new(wrapped_copy_offsets),
         raw_plain_lines: Arc::new(raw_plain_lines),
         wrapped_line_map: Arc::new(wrapped_line_map),
         wrapped_user_indices,

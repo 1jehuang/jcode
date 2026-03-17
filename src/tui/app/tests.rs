@@ -4293,6 +4293,84 @@ fn test_copy_selection_select_all_uses_rendered_chat_text_without_copy_badges() 
 }
 
 #[test]
+fn test_copy_selection_full_user_prompt_line_skips_prompt_chrome() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_copy_test_app();
+
+    render_and_snap(&app, &mut terminal);
+    let (visible_start, visible_end) =
+        crate::tui::ui::copy_viewport_visible_range().expect("visible copy range");
+
+    let (prompt_idx, prompt_text) = (visible_start..visible_end)
+        .find_map(|abs_line| {
+            let text = crate::tui::ui::copy_viewport_line_text(abs_line)?;
+            text.contains("Show me some code").then_some((abs_line, text))
+        })
+        .expect("expected visible user prompt line");
+
+    app.copy_selection_anchor = Some(crate::tui::CopySelectionPoint {
+        pane: crate::tui::CopySelectionPane::Chat,
+        abs_line: prompt_idx,
+        column: 0,
+    });
+    app.copy_selection_cursor = Some(crate::tui::CopySelectionPoint {
+        pane: crate::tui::CopySelectionPane::Chat,
+        abs_line: prompt_idx,
+        column: unicode_width::UnicodeWidthStr::width(prompt_text.as_str()),
+    });
+
+    let selected = app
+        .current_copy_selection_text()
+        .expect("expected user prompt selection text");
+    assert_eq!(selected, "Show me some code");
+}
+
+#[test]
+fn test_copy_selection_swarm_message_skips_rail_chrome() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_copy_test_app();
+    app.display_messages = vec![DisplayMessage::swarm("Broadcast", "hello team")];
+    app.bump_display_messages_version();
+
+    render_and_snap(&app, &mut terminal);
+    let (visible_start, visible_end) =
+        crate::tui::ui::copy_viewport_visible_range().expect("visible copy range");
+    let (start_idx, _start_text) = (visible_start..visible_end)
+        .find_map(|abs_line| {
+            let text = crate::tui::ui::copy_viewport_line_text(abs_line)?;
+            text.contains("Broadcast").then_some((abs_line, text))
+        })
+        .expect("expected visible swarm header line");
+    let (end_idx, end_text) = (visible_start..visible_end)
+        .find_map(|abs_line| {
+            let text = crate::tui::ui::copy_viewport_line_text(abs_line)?;
+            text.contains("hello team").then_some((abs_line, text))
+        })
+        .expect("expected visible swarm body line");
+
+    app.copy_selection_anchor = Some(crate::tui::CopySelectionPoint {
+        pane: crate::tui::CopySelectionPane::Chat,
+        abs_line: start_idx,
+        column: 0,
+    });
+    app.copy_selection_cursor = Some(crate::tui::CopySelectionPoint {
+        pane: crate::tui::CopySelectionPane::Chat,
+        abs_line: end_idx,
+        column: unicode_width::UnicodeWidthStr::width(end_text.as_str()),
+    });
+
+    let selected = app
+        .current_copy_selection_text()
+        .expect("expected selected swarm text");
+    assert!(selected.contains("Broadcast"));
+    assert!(selected.contains("hello team"));
+    assert!(
+        !selected.contains('│'),
+        "selection should omit swarm rail chrome: {selected:?}"
+    );
+}
+
+#[test]
 fn test_copy_selection_reconstructs_wrapped_chat_lines_without_hard_wraps() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();

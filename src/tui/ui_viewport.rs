@@ -231,6 +231,7 @@ pub(super) fn draw_messages(
 
     record_copy_viewport_snapshot(
         prepared.wrapped_plain_lines.clone(),
+        prepared.wrapped_copy_offsets.clone(),
         prepared.raw_plain_lines.clone(),
         prepared.wrapped_line_map.clone(),
         scroll,
@@ -418,13 +419,18 @@ pub(super) fn draw_messages(
         {
             let rel_idx = abs_idx.saturating_sub(scroll);
             if let Some(line) = visible_lines.get_mut(rel_idx) {
+                let copy_start = prepared
+                    .wrapped_copy_offsets
+                    .get(abs_idx)
+                    .copied()
+                    .unwrap_or(0);
                 let start_col = if abs_idx == start.abs_line {
-                    start.column
+                    start.column.max(copy_start)
                 } else {
-                    0
+                    copy_start
                 };
                 let end_col = if abs_idx == end.abs_line {
-                    end.column
+                    end.column.max(copy_start)
                 } else {
                     copy_viewport_line_text(abs_idx)
                         .map(|text| UnicodeWidthStr::width(text.as_str()))

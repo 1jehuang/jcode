@@ -18,6 +18,7 @@ use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use unicode_width::UnicodeWidthStr;
 
 #[path = "ui_animations.rs"]
 mod animations;
@@ -1151,6 +1152,7 @@ struct CopyTarget {
 struct PreparedMessages {
     wrapped_lines: Vec<Line<'static>>,
     wrapped_plain_lines: Arc<Vec<String>>,
+    wrapped_copy_offsets: Arc<Vec<usize>>,
     raw_plain_lines: Arc<Vec<String>>,
     wrapped_line_map: Arc<Vec<WrappedLineMap>>,
     wrapped_user_indices: Vec<usize>,
@@ -1481,6 +1483,7 @@ pub fn last_layout_snapshot() -> Option<LayoutSnapshot> {
 struct CopyViewportSnapshot {
     pane: crate::tui::CopySelectionPane,
     wrapped_plain_lines: Arc<Vec<String>>,
+    wrapped_copy_offsets: Arc<Vec<usize>>,
     raw_plain_lines: Arc<Vec<String>>,
     wrapped_line_map: Arc<Vec<WrappedLineMap>>,
     scroll: usize,
@@ -1535,6 +1538,7 @@ pub(crate) fn line_plain_text(line: &Line<'_>) -> String {
 fn record_copy_pane_snapshot(
     pane: crate::tui::CopySelectionPane,
     wrapped_plain_lines: Arc<Vec<String>>,
+    wrapped_copy_offsets: Arc<Vec<usize>>,
     raw_plain_lines: Arc<Vec<String>>,
     wrapped_line_map: Arc<Vec<WrappedLineMap>>,
     scroll: usize,
@@ -1546,6 +1550,7 @@ fn record_copy_pane_snapshot(
         *copy_snapshot_slot_mut(&mut state, pane) = Some(CopyViewportSnapshot {
             pane,
             wrapped_plain_lines,
+            wrapped_copy_offsets,
             raw_plain_lines,
             wrapped_line_map,
             scroll,
@@ -1558,6 +1563,7 @@ fn record_copy_pane_snapshot(
 
 pub(crate) fn record_copy_viewport_snapshot(
     wrapped_plain_lines: Arc<Vec<String>>,
+    wrapped_copy_offsets: Arc<Vec<usize>>,
     raw_plain_lines: Arc<Vec<String>>,
     wrapped_line_map: Arc<Vec<WrappedLineMap>>,
     scroll: usize,
@@ -1568,6 +1574,7 @@ pub(crate) fn record_copy_viewport_snapshot(
     record_copy_pane_snapshot(
         crate::tui::CopySelectionPane::Chat,
         wrapped_plain_lines,
+        wrapped_copy_offsets,
         raw_plain_lines,
         wrapped_line_map,
         scroll,
@@ -1602,6 +1609,7 @@ pub(crate) fn record_side_pane_snapshot(
     record_copy_pane_snapshot(
         crate::tui::CopySelectionPane::SidePane,
         Arc::new(wrapped_lines.iter().map(line_plain_text).collect()),
+        Arc::new(vec![0; wrapped_lines.len()]),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
         scroll,
@@ -1659,10 +1667,15 @@ fn copy_point_from_snapshot(
     let content_x = area.x.saturating_add(left_margin);
     let rel_col = column.saturating_sub(content_x) as usize;
     let text = &snapshot.wrapped_plain_lines[abs_line];
+    let copy_start = snapshot
+        .wrapped_copy_offsets
+        .get(abs_line)
+        .copied()
+        .unwrap_or(0);
     Some(crate::tui::CopySelectionPoint {
         pane: snapshot.pane,
         abs_line,
-        column: clamp_display_col(text, rel_col),
+        column: clamp_display_col(text, rel_col).max(copy_start),
     })
 }
 
@@ -1706,12 +1719,27 @@ fn copy_pane_line_text(pane: crate::tui::CopySelectionPane, abs_line: usize) -> 
         .cloned()
 }
 
+fn copy_pane_line_copy_start(pane: crate::tui::CopySelectionPane, abs_line: usize) -> Option<usize> {
+    copy_snapshot_for_pane(pane)?
+        .wrapped_copy_offsets
+        .get(abs_line)
+        .copied()
+}
+
 pub(crate) fn copy_viewport_line_text(abs_line: usize) -> Option<String> {
     copy_pane_line_text(crate::tui::CopySelectionPane::Chat, abs_line)
 }
 
 pub(crate) fn side_pane_line_text(abs_line: usize) -> Option<String> {
     copy_pane_line_text(crate::tui::CopySelectionPane::SidePane, abs_line)
+}
+
+pub(crate) fn copy_viewport_line_copy_start(abs_line: usize) -> Option<usize> {
+    copy_pane_line_copy_start(crate::tui::CopySelectionPane::Chat, abs_line)
+}
+
+pub(crate) fn side_pane_line_copy_start(abs_line: usize) -> Option<usize> {
+    copy_pane_line_copy_start(crate::tui::CopySelectionPane::SidePane, abs_line)
 }
 
 fn copy_pane_line_count(pane: crate::tui::CopySelectionPane) -> Option<usize> {
@@ -1782,13 +1810,18 @@ pub(crate) fn copy_selection_text(range: crate::tui::CopySelectionRange) -> Opti
     for abs_line in start.abs_line..=end.abs_line {
         let text = &snapshot.wrapped_plain_lines[abs_line];
         let line_width = line_display_width(text);
+        let copy_start = snapshot
+            .wrapped_copy_offsets
+            .get(abs_line)
+            .copied()
+            .unwrap_or(0);
         let start_col = if abs_line == start.abs_line {
-            clamp_display_col(text, start.column)
+            clamp_display_col(text, start.column).max(copy_start)
         } else {
-            0
+            copy_start
         };
         let end_col = if abs_line == end.abs_line {
-            clamp_display_col(text, end.column)
+            clamp_display_col(text, end.column).max(copy_start)
         } else {
             line_width
         };
@@ -1863,11 +1896,20 @@ fn raw_selection_point(
 ) -> Option<RawSelectionPoint> {
     let wrapped_text = snapshot.wrapped_plain_lines.get(point.abs_line)?;
     let map = snapshot.wrapped_line_map.get(point.abs_line)?;
-    let local_col = clamp_display_col(wrapped_text, point.column);
+    let display_copy_start = snapshot
+        .wrapped_copy_offsets
+        .get(point.abs_line)
+        .copied()
+        .unwrap_or(0)
+        .min(wrapped_text.width());
+    let local_col = clamp_display_col(wrapped_text, point.column).max(display_copy_start);
     let segment_width = map.end_col.saturating_sub(map.start_col);
     Some(RawSelectionPoint {
         raw_line: map.raw_line,
-        column: map.start_col + local_col.min(segment_width),
+        column: map.start_col
+            + local_col
+                .saturating_sub(display_copy_start)
+                .min(segment_width),
     })
 }
 
@@ -3405,6 +3447,7 @@ mod tests {
         let prepared = PreparedMessages {
             wrapped_lines: vec![Line::from("a"); 20],
             wrapped_plain_lines: Arc::new(vec!["a".to_string(); 20]),
+            wrapped_copy_offsets: Arc::new(vec![0; 20]),
             raw_plain_lines: Arc::new(Vec::new()),
             wrapped_line_map: Arc::new(Vec::new()),
             wrapped_user_indices: Vec::new(),
@@ -3454,6 +3497,7 @@ mod tests {
         let prepared_a = Arc::new(PreparedMessages {
             wrapped_lines: vec![Line::from("a")],
             wrapped_plain_lines: Arc::new(vec!["a".to_string()]),
+            wrapped_copy_offsets: Arc::new(vec![0]),
             raw_plain_lines: Arc::new(Vec::new()),
             wrapped_line_map: Arc::new(Vec::new()),
             wrapped_user_indices: Vec::new(),
@@ -3467,6 +3511,7 @@ mod tests {
         let prepared_b = Arc::new(PreparedMessages {
             wrapped_lines: vec![Line::from("b")],
             wrapped_plain_lines: Arc::new(vec!["b".to_string()]),
+            wrapped_copy_offsets: Arc::new(vec![0]),
             raw_plain_lines: Arc::new(Vec::new()),
             wrapped_line_map: Arc::new(Vec::new()),
             wrapped_user_indices: Vec::new(),
@@ -3509,6 +3554,7 @@ mod tests {
             let prepared = Arc::new(PreparedMessages {
                 wrapped_lines: vec![Line::from(format!("{idx}"))],
                 wrapped_plain_lines: Arc::new(vec![format!("{idx}")]),
+                wrapped_copy_offsets: Arc::new(vec![0]),
                 raw_plain_lines: Arc::new(Vec::new()),
                 wrapped_line_map: Arc::new(Vec::new()),
                 wrapped_user_indices: Vec::new(),
