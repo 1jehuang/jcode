@@ -234,7 +234,7 @@ pub async fn login() -> Result<GeminiTokens> {
         if let Ok(listener) = super::oauth::bind_callback_listener(0) {
             let port = listener.local_addr()?.port();
             let redirect_uri = format!("http://127.0.0.1:{port}/oauth2callback");
-            let auth_url = build_web_auth_url(&redirect_uri, &state)?;
+            let auth_url = build_web_auth_url(&redirect_uri, &challenge, &state)?;
 
             eprintln!("\nOpening browser for Gemini login...\n");
             eprintln!("If the browser didn't open, visit:\n{}\n", auth_url);
@@ -252,6 +252,9 @@ pub async fn login() -> Result<GeminiTokens> {
                     "Waiting up to 300s for automatic callback on {}",
                     redirect_uri
                 );
+                eprintln!(
+                    "If the page says sign-in succeeded but jcode does not continue within a few seconds, press Ctrl+C and retry with NO_BROWSER=true to use the manual code flow."
+                );
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(300),
                     super::oauth::wait_for_callback_async_on_listener(listener, &state),
@@ -259,9 +262,10 @@ pub async fn login() -> Result<GeminiTokens> {
                 .await
                 {
                     Ok(Ok(code)) => {
-                        let tokens = exchange_authorization_code(&code, None, &redirect_uri)
-                            .await
-                            .context("Gemini token exchange failed")?;
+                        let tokens =
+                            exchange_authorization_code(&code, Some(&verifier), &redirect_uri)
+                                .await
+                                .context("Gemini token exchange failed")?;
                         save_tokens(&tokens)?;
                         return Ok(tokens);
                     }
@@ -425,15 +429,16 @@ pub async fn fetch_email(access_token: &str) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("Google profile did not include an email address"))
 }
 
-pub fn build_web_auth_url(redirect_uri: &str, state: &str) -> Result<String> {
+pub fn build_web_auth_url(redirect_uri: &str, challenge: &str, state: &str) -> Result<String> {
     let scope = GEMINI_SCOPES.join(" ");
     let client_id = gemini_client_id();
     Ok(format!(
-        "{base}?response_type=code&client_id={client_id}&redirect_uri={redirect_uri}&scope={scope}&state={state}&access_type=offline",
+        "{base}?response_type=code&client_id={client_id}&redirect_uri={redirect_uri}&scope={scope}&code_challenge={challenge}&code_challenge_method=S256&state={state}&access_type=offline&prompt=consent",
         base = GOOGLE_AUTHORIZE_URL,
         client_id = urlencoding::encode(&client_id),
         redirect_uri = urlencoding::encode(redirect_uri),
         scope = urlencoding::encode(&scope),
+        challenge = urlencoding::encode(challenge),
         state = urlencoding::encode(state),
     ))
 }
@@ -631,14 +636,19 @@ mod tests {
     }
 
     #[test]
-    fn build_web_auth_url_omits_pkce_parameters() {
+    fn build_web_auth_url_includes_pkce_parameters() {
         let _guard = lock_test_env();
         let _env = set_test_gemini_oauth_env();
-        let url = build_web_auth_url("http://127.0.0.1:45619/oauth2callback", "state-123")
-            .expect("web auth url");
+        let url = build_web_auth_url(
+            "http://127.0.0.1:45619/oauth2callback",
+            "challenge-123",
+            "state-123",
+        )
+        .expect("web auth url");
         assert!(url.contains("127.0.0.1%3A45619%2Foauth2callback"));
         assert!(url.contains("state=state-123"));
-        assert!(!url.contains("code_challenge="));
+        assert!(url.contains("code_challenge=challenge-123"));
+        assert!(url.contains("code_challenge_method=S256"));
         assert!(!url.contains("code_verifier="));
     }
 

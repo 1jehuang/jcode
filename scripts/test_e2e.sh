@@ -60,6 +60,13 @@ if [[ "${JCODE_REAL_PROVIDER:-0}" == "1" ]]; then
     echo "✓ Real provider smoke passed"
 fi
 
+if [[ "${JCODE_REAL_AUTH_TEST:-0}" == "1" ]]; then
+    echo ""
+    echo "Test 8: Auth E2E validation (JCODE_REAL_AUTH_TEST=1)..."
+    scripts/test_auth_e2e.sh
+    echo "✓ Auth E2E validation passed"
+fi
+
 echo ""
 echo "=== All tests passed! ==="
 echo ""

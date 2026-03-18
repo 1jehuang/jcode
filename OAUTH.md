@@ -182,6 +182,27 @@ The Azure env file may contain:
 - If entitlement or onboarding fails for a Workspace account, set `GOOGLE_CLOUD_PROJECT` and retry.
 - If login succeeds but requests fail later, re-run `jcode login --provider gemini` to refresh the stored session.
 
+### Auth verification
+Use the built-in auth verifier to test the full local auth/runtime path after login:
+
+```bash
+# Run Gemini login now, then verify token refresh + provider smoke
+jcode --provider gemini auth-test --login
+
+# Verify existing Gemini auth without re-running login
+jcode --provider gemini auth-test
+
+# Check every currently configured supported auth provider
+jcode auth-test --all-configured
+```
+
+For model providers, `auth-test` attempts:
+1. credential discovery
+2. refresh/auth probe
+3. a real provider smoke prompt expecting `AUTH_TEST_OK`
+
+For Gmail/Google it verifies credential discovery and token refresh, but skips model smoke because it is not a model provider.
+
 ## Experimental CLI Providers
 
 J-Code also supports experimental CLI-backed providers:

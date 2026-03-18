@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::process::{Command as ProcessCommand, Stdio};
 
-use super::args::{AmbientCommand, Args, Command, MemoryCommand, TranscriptModeArg};
+use super::args::{AmbientCommand, Args, Command, MemoryCommand, ModelCommand, TranscriptModeArg};
 use crate::{
     agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
     tui,
@@ -119,6 +119,31 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 rows,
                 fps,
                 centered_override,
+            )
+            .await?;
+        }
+        Some(Command::Model(subcmd)) => match subcmd {
+            ModelCommand::List { json } => {
+                commands::run_model_command(&args.provider, args.model.as_deref(), json).await?;
+            }
+        },
+        Some(Command::AuthTest {
+            login,
+            all_configured,
+            no_smoke,
+            prompt,
+            json,
+            output,
+        }) => {
+            commands::run_auth_test_command(
+                &args.provider,
+                args.model.as_deref(),
+                login,
+                all_configured,
+                no_smoke,
+                prompt.as_deref(),
+                json,
+                output.as_deref(),
             )
             .await?;
         }

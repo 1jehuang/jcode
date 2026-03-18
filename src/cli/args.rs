@@ -231,6 +231,47 @@ pub(crate) enum Command {
         #[arg(long, conflicts_with = "centered")]
         no_centered: bool,
     },
+
+    /// Model management commands
+    #[command(subcommand)]
+    Model(ModelCommand),
+
+    /// Test authentication end-to-end: login (optional), credential probe, refresh, and provider smoke
+    AuthTest {
+        /// Run the provider login flow before validation (interactive/browser-based)
+        #[arg(long)]
+        login: bool,
+
+        /// Test all currently configured supported auth providers instead of just --provider
+        #[arg(long)]
+        all_configured: bool,
+
+        /// Skip the provider runtime smoke prompt
+        #[arg(long)]
+        no_smoke: bool,
+
+        /// Custom smoke prompt (default asks for AUTH_TEST_OK)
+        #[arg(long)]
+        prompt: Option<String>,
+
+        /// Emit JSON report instead of human-readable output
+        #[arg(long)]
+        json: bool,
+
+        /// Write the full auth-test report JSON to a file
+        #[arg(long)]
+        output: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum ModelCommand {
+    /// List model names you can pass to -m/--model
+    List {
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -322,5 +363,14 @@ mod tests {
         let args =
             Args::try_parse_from(["jcode", "--provider", "bailian", "run", "smoke"]).unwrap();
         assert_eq!(args.provider, ProviderChoice::AlibabaCodingPlan);
+    }
+
+    #[test]
+    fn model_list_subcommand_parses() {
+        let args = Args::try_parse_from(["jcode", "model", "list", "--json"]).unwrap();
+        match args.command {
+            Some(Command::Model(ModelCommand::List { json })) => assert!(json),
+            other => panic!("unexpected command: {:?}", other),
+        }
     }
 }

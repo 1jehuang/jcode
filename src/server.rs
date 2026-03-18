@@ -625,9 +625,7 @@ pub fn cleanup_socket_pair(path: &std::path::Path) {
 pub async fn connect_socket(path: &std::path::Path) -> Result<Stream> {
     match Stream::connect(path).await {
         Ok(stream) => Ok(stream),
-        Err(err)
-            if err.kind() == std::io::ErrorKind::ConnectionRefused && path.exists() =>
-        {
+        Err(err) if err.kind() == std::io::ErrorKind::ConnectionRefused && path.exists() => {
             anyhow::bail!(
                 "Socket exists but refused the connection at {}. Retry, or remove it after confirming no jcode server is running.",
                 path.display()

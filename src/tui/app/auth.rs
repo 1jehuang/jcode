@@ -1057,7 +1057,7 @@ impl App {
 
         let auth_setup: anyhow::Result<(String, Option<String>, String)> =
             if let Some(redirect_uri) = maybe_redirect_uri {
-                crate::auth::gemini::build_web_auth_url(&redirect_uri, &state)
+                crate::auth::gemini::build_web_auth_url(&redirect_uri, &challenge, &state)
                     .map(|auth_url| (auth_url, Some(state.clone()), redirect_uri))
             } else {
                 crate::auth::gemini::build_manual_auth_url(

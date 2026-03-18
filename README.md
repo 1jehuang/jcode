@@ -797,11 +797,26 @@ jcode runs natively on macOS (Apple Silicon & Intel). Key differences:
 cargo test                          # All tests
 cargo test --test e2e               # End-to-end only
 cargo run --bin jcode-harness       # Tool harness (--include-network for web)
+./scripts/test_auth_e2e.sh          # Auth verification + provider smoke
 scripts/agent_trace.sh              # Full agent smoke test
 scripts/check_warning_budget.sh     # Ensure warning count does not regress
 scripts/security_preflight.sh       # Secret scan + advisory checks (when available)
 scripts/refactor_phase1_verify.sh   # Refactor safety suite (check + security + tests + e2e)
 ```
+
+Auth-focused validation:
+
+```bash
+jcode --provider gemini auth-test --login
+jcode --provider gemini auth-test
+jcode auth-test --all-configured
+```
+
+`auth-test` is designed to validate the real auth stack end-to-end:
+- optional interactive login/browser flow
+- credential file discovery
+- token refresh / auth probe
+- real provider smoke prompt for model providers
 
 ---
 
