@@ -6,7 +6,7 @@ use super::{
     remove_session_interrupt_queue, truncate_detail, update_member_status,
 };
 use crate::agent::Agent;
-use crate::protocol::ServerEvent;
+use crate::protocol::{NotificationType, ServerEvent};
 use crate::provider::Provider;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -33,12 +33,13 @@ pub(super) async fn handle_comm_spawn(
     mcp_pool: &Arc<crate::mcp::SharedMcpPool>,
     soft_interrupt_queues: &SessionInterruptQueues,
 ) {
-    let swarm_id = match require_coordinator_swarm(
+    let swarm_id = match ensure_spawn_coordinator_swarm(
         id,
         &req_session_id,
         "Only the coordinator can spawn new agents.",
         client_event_tx,
         swarm_members,
+        swarms_by_id,
         swarm_coordinators,
     )
     .await
@@ -325,6 +326,95 @@ pub(super) async fn handle_comm_stop(
     }
 }
 
+async fn ensure_spawn_coordinator_swarm(
+    id: u64,
+    req_session_id: &str,
+    permission_error: &str,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
+) -> Option<String> {
+    let (swarm_id, from_name, coordinator_id) = {
+        let members = swarm_members.read().await;
+        let swarm_id = members
+            .get(req_session_id)
+            .and_then(|member| member.swarm_id.clone());
+        let from_name = members
+            .get(req_session_id)
+            .and_then(|member| member.friendly_name.clone());
+        let coordinator_id = if let Some(ref swarm_id) = swarm_id {
+            let coordinators = swarm_coordinators.read().await;
+            coordinators.get(swarm_id).cloned()
+        } else {
+            None
+        };
+        (swarm_id, from_name, coordinator_id)
+    };
+
+    let Some(swarm_id) = swarm_id else {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: "Not in a swarm.".to_string(),
+            retry_after_secs: None,
+        });
+        return None;
+    };
+
+    if coordinator_id.as_deref() == Some(req_session_id) {
+        return Some(swarm_id);
+    }
+
+    if coordinator_id.is_some() {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: permission_error.to_string(),
+            retry_after_secs: None,
+        });
+        return None;
+    }
+
+    let promoted = {
+        let mut coordinators = swarm_coordinators.write().await;
+        match coordinators.get(&swarm_id) {
+            Some(existing) if existing == req_session_id => false,
+            Some(_) => {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: permission_error.to_string(),
+                    retry_after_secs: None,
+                });
+                return None;
+            }
+            None => {
+                coordinators.insert(swarm_id.clone(), req_session_id.to_string());
+                true
+            }
+        }
+    };
+
+    if promoted {
+        {
+            let mut members = swarm_members.write().await;
+            if let Some(member) = members.get_mut(req_session_id) {
+                member.role = "coordinator".to_string();
+            }
+        }
+        broadcast_swarm_status(&swarm_id, swarm_members, swarms_by_id).await;
+        let _ = client_event_tx.send(ServerEvent::Notification {
+            from_session: req_session_id.to_string(),
+            from_name,
+            notification_type: NotificationType::Message {
+                scope: Some("swarm".to_string()),
+                channel: None,
+            },
+            message: "You are the coordinator for this swarm.".to_string(),
+        });
+    }
+
+    Some(swarm_id)
+}
+
 async fn require_coordinator_swarm(
     id: u64,
     req_session_id: &str,
@@ -369,5 +459,140 @@ async fn require_coordinator_swarm(
             });
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_spawn_coordinator_swarm;
+    use crate::protocol::{NotificationType, ServerEvent};
+    use crate::server::SwarmMember;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+    use std::time::Instant;
+    use tokio::sync::{RwLock, mpsc};
+
+    fn member(
+        session_id: &str,
+        swarm_id: Option<&str>,
+        role: &str,
+    ) -> (SwarmMember, mpsc::UnboundedReceiver<ServerEvent>) {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        (
+            SwarmMember {
+                session_id: session_id.to_string(),
+                event_tx,
+                working_dir: None,
+                swarm_id: swarm_id.map(|id| id.to_string()),
+                swarm_enabled: true,
+                status: "ready".to_string(),
+                detail: None,
+                friendly_name: Some(session_id.to_string()),
+                role: role.to_string(),
+                joined_at: Instant::now(),
+                last_status_change: Instant::now(),
+                is_headless: false,
+            },
+            event_rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn spawn_bootstraps_coordinator_when_swarm_has_none() {
+        let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+            "swarm-1".to_string(),
+            HashSet::from(["req".to_string()]),
+        )])));
+        let swarm_coordinators = Arc::new(RwLock::new(HashMap::new()));
+        let (req_member, _req_rx) = member("req", Some("swarm-1"), "agent");
+        swarm_members
+            .write()
+            .await
+            .insert("req".to_string(), req_member);
+        let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+
+        let swarm_id = ensure_spawn_coordinator_swarm(
+            1,
+            "req",
+            "Only the coordinator can spawn new agents.",
+            &client_event_tx,
+            &swarm_members,
+            &swarms_by_id,
+            &swarm_coordinators,
+        )
+        .await;
+
+        assert_eq!(swarm_id.as_deref(), Some("swarm-1"));
+        assert_eq!(
+            swarm_coordinators
+                .read()
+                .await
+                .get("swarm-1")
+                .map(String::as_str),
+            Some("req")
+        );
+        assert_eq!(
+            swarm_members
+                .read()
+                .await
+                .get("req")
+                .map(|member| member.role.as_str()),
+            Some("coordinator")
+        );
+        assert!(matches!(
+            client_event_rx.recv().await,
+            Some(ServerEvent::Notification {
+                notification_type: NotificationType::Message { .. },
+                message,
+                ..
+            }) if message == "You are the coordinator for this swarm."
+        ));
+    }
+
+    #[tokio::test]
+    async fn spawn_requires_existing_coordinator_when_one_is_set() {
+        let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+            "swarm-1".to_string(),
+            HashSet::from(["req".to_string(), "coord".to_string()]),
+        )])));
+        let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(
+            "swarm-1".to_string(),
+            "coord".to_string(),
+        )])));
+        let (req_member, _req_rx) = member("req", Some("swarm-1"), "agent");
+        let (coord_member, _coord_rx) = member("coord", Some("swarm-1"), "coordinator");
+        let mut members = swarm_members.write().await;
+        members.insert("req".to_string(), req_member);
+        members.insert("coord".to_string(), coord_member);
+        drop(members);
+        let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+
+        let swarm_id = ensure_spawn_coordinator_swarm(
+            2,
+            "req",
+            "Only the coordinator can spawn new agents.",
+            &client_event_tx,
+            &swarm_members,
+            &swarms_by_id,
+            &swarm_coordinators,
+        )
+        .await;
+
+        assert!(swarm_id.is_none());
+        assert!(matches!(
+            client_event_rx.recv().await,
+            Some(ServerEvent::Error { message, .. })
+                if message == "Only the coordinator can spawn new agents."
+        ));
+        assert_eq!(
+            swarm_members
+                .read()
+                .await
+                .get("req")
+                .map(|member| member.role.as_str()),
+            Some("agent")
+        );
     }
 }

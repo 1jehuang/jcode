@@ -179,7 +179,7 @@ pub(super) async fn handle_subscribe(
     selfdev: Option<bool>,
     client_selfdev: &mut bool,
     client_session_id: &str,
-    friendly_name: &Option<String>,
+    _friendly_name: &Option<String>,
     agent: &Arc<Mutex<Agent>>,
     registry: &Registry,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
@@ -235,6 +235,13 @@ pub(super) async fn handle_subscribe(
                 .insert(client_session_id.to_string());
         }
 
+        if updated_swarm_id != old_swarm_id {
+            let mut members = swarm_members.write().await;
+            if let Some(member) = members.get_mut(client_session_id) {
+                member.role = "agent".to_string();
+            }
+        }
+
         if let Some(old_id) = old_swarm_id.clone() {
             let was_coordinator = {
                 let coordinators = swarm_coordinators.read().await;
@@ -272,22 +279,6 @@ pub(super) async fn handle_subscribe(
                         });
                     }
                 }
-            }
-        }
-
-        if let Some(new_id) = updated_swarm_id.clone() {
-            let mut coordinators = swarm_coordinators.write().await;
-            if coordinators.get(&new_id).is_none() {
-                coordinators.insert(new_id.clone(), client_session_id.to_string());
-                let _ = client_event_tx.send(ServerEvent::Notification {
-                    from_session: client_session_id.to_string(),
-                    from_name: friendly_name.clone(),
-                    notification_type: NotificationType::Message {
-                        scope: Some("swarm".to_string()),
-                        channel: None,
-                    },
-                    message: "You are the coordinator for this swarm.".to_string(),
-                });
             }
         }
 

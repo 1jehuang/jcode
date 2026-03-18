@@ -184,7 +184,7 @@ pub(super) async fn handle_set_feature(
     enabled: bool,
     agent: &Arc<Mutex<Agent>>,
     client_session_id: &str,
-    friendly_name: &Option<String>,
+    _friendly_name: &Option<String>,
     swarm_enabled: &mut bool,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
@@ -251,40 +251,15 @@ pub(super) async fn handle_set_feature(
                             .insert(client_session_id.to_string());
                     }
 
-                    let mut is_new_coordinator = false;
-                    {
-                        let mut coordinators = swarm_coordinators.write().await;
-                        if coordinators.get(id).is_none() {
-                            coordinators.insert(id.clone(), client_session_id.to_string());
-                            is_new_coordinator = true;
-                        }
-                    }
-
                     {
                         let mut members = swarm_members.write().await;
                         if let Some(member) = members.get_mut(client_session_id) {
                             member.swarm_id = Some(id.clone());
-                            member.role = if is_new_coordinator {
-                                "coordinator".to_string()
-                            } else {
-                                "agent".to_string()
-                            };
+                            member.role = "agent".to_string();
                         }
                     }
 
                     broadcast_swarm_status(id, swarm_members, swarms_by_id).await;
-
-                    if is_new_coordinator {
-                        let _ = client_event_tx.send(ServerEvent::Notification {
-                            from_session: client_session_id.to_string(),
-                            from_name: friendly_name.clone(),
-                            notification_type: NotificationType::Message {
-                                scope: Some("swarm".to_string()),
-                                channel: None,
-                            },
-                            message: "You are the coordinator for this swarm.".to_string(),
-                        });
-                    }
                 } else {
                     let _ = client_event_tx.send(ServerEvent::SwarmStatus {
                         members: Vec::new(),
@@ -368,8 +343,42 @@ pub(super) async fn handle_split(
 
 #[cfg(test)]
 mod tests {
-    use super::clone_split_session;
+    use super::{clone_split_session, handle_set_feature};
+    use crate::agent::Agent;
     use crate::message::{ContentBlock, Role};
+    use crate::protocol::{FeatureToggle, ServerEvent};
+    use crate::provider::{EventStream, Provider};
+    use crate::tool::Registry;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use std::collections::{HashMap, HashSet};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::Instant;
+    use tokio::sync::{Mutex, RwLock, mpsc};
+
+    struct MockProvider;
+
+    #[async_trait]
+    impl Provider for MockProvider {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<EventStream> {
+            unimplemented!("Mock provider")
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(MockProvider)
+        }
+    }
 
     #[test]
     fn clone_split_session_uses_persisted_session_state() {
@@ -420,6 +429,87 @@ mod tests {
         } else {
             crate::env::remove_var("JCODE_HOME");
         }
+    }
+
+    #[tokio::test]
+    async fn enabling_swarm_does_not_auto_elect_coordinator() {
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+        let registry = Registry::new(provider.clone()).await;
+        let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+        let (member_event_tx, _member_event_rx) = mpsc::unbounded_channel();
+        let now = Instant::now();
+        let session_id = "session_test_swarm_toggle";
+        let swarm_members = Arc::new(RwLock::new(HashMap::from([(
+            session_id.to_string(),
+            crate::server::SwarmMember {
+                session_id: session_id.to_string(),
+                event_tx: member_event_tx,
+                working_dir: Some(PathBuf::from("/tmp/jcode-passive-swarm")),
+                swarm_id: None,
+                swarm_enabled: false,
+                status: "ready".to_string(),
+                detail: None,
+                friendly_name: Some("duck".to_string()),
+                role: "agent".to_string(),
+                joined_at: now,
+                last_status_change: now,
+                is_headless: false,
+            },
+        )])));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::<String, HashSet<String>>::new()));
+        let swarm_coordinators = Arc::new(RwLock::new(HashMap::<String, String>::new()));
+        let channel_subscriptions =
+            Arc::new(RwLock::new(HashMap::<String, HashMap<String, HashSet<String>>>::new()));
+        let swarm_plans = Arc::new(RwLock::new(HashMap::new()));
+        let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+        let mut swarm_enabled = false;
+
+        handle_set_feature(
+            42,
+            FeatureToggle::Swarm,
+            true,
+            &agent,
+            session_id,
+            &Some("duck".to_string()),
+            &mut swarm_enabled,
+            &swarm_members,
+            &swarms_by_id,
+            &swarm_coordinators,
+            &channel_subscriptions,
+            &swarm_plans,
+            &client_event_tx,
+        )
+        .await;
+
+        assert!(swarm_enabled);
+        assert!(swarm_coordinators.read().await.is_empty());
+        assert_eq!(
+            swarm_members
+                .read()
+                .await
+                .get(session_id)
+                .and_then(|member| member.swarm_id.clone())
+                .as_deref(),
+            Some("/tmp/jcode-passive-swarm")
+        );
+        assert_eq!(
+            swarm_members
+                .read()
+                .await
+                .get(session_id)
+                .map(|member| member.role.as_str()),
+            Some("agent")
+        );
+
+        let events: Vec<_> = std::iter::from_fn(|| client_event_rx.try_recv().ok()).collect();
+        assert!(events.iter().any(|event| matches!(event, ServerEvent::Done { id: 42 })));
+        assert!(events.iter().all(|event| {
+            !matches!(
+                event,
+                ServerEvent::Notification { message, .. }
+                    if message == "You are the coordinator for this swarm."
+            )
+        }));
     }
 }
 

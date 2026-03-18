@@ -34,7 +34,7 @@ use super::{
 use crate::agent::{Agent, InterruptSignal, SoftInterruptQueue, SoftInterruptSource, StreamError};
 use crate::bus::{Bus, BusEvent};
 use crate::id;
-use crate::protocol::{NotificationType, Request, ServerEvent, decode_request, encode_event};
+use crate::protocol::{Request, ServerEvent, decode_request, encode_event};
 use crate::provider::Provider;
 use crate::tool::Registry;
 use crate::transport::Stream;
@@ -220,21 +220,6 @@ pub(super) async fn handle_client(
         )
         .await;
     }
-    let mut is_new_coordinator = false;
-    if let Some(ref swarm_id_ref) = swarm_id {
-        let mut coordinators = swarm_coordinators.write().await;
-        if coordinators.get(swarm_id_ref.as_str()).is_none() {
-            coordinators.insert(swarm_id_ref.to_string(), client_session_id.clone());
-            is_new_coordinator = true;
-        }
-    }
-    // Update role separately to avoid nested lock
-    if is_new_coordinator {
-        let mut members = swarm_members.write().await;
-        if let Some(m) = members.get_mut(&client_session_id) {
-            m.role = "coordinator".to_string();
-        }
-    }
     if let Some(ref swarm_id_ref) = swarm_id {
         broadcast_swarm_status(swarm_id_ref, &swarm_members, &swarms_by_id).await;
     }
@@ -249,19 +234,6 @@ pub(super) async fn handle_client(
         Some(&swarm_event_tx),
     )
     .await;
-    if is_new_coordinator {
-        let msg = "You are the coordinator for this swarm.".to_string();
-        let _ = client_event_tx.send(ServerEvent::Notification {
-            from_session: client_session_id.clone(),
-            from_name: friendly_name.clone(),
-            notification_type: NotificationType::Message {
-                scope: Some("swarm".to_string()),
-                channel: None,
-            },
-            message: msg.clone(),
-        });
-    }
-
     // Spawn event forwarder for this client only
     let writer_clone = Arc::clone(&writer);
     let event_handle = tokio::spawn(async move {
