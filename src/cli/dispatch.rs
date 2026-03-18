@@ -656,7 +656,8 @@ mod tests {
         let bind_path = env.socket_path.clone();
         let bind_task = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let listener = Listener::bind(&bind_path).expect("bind replacement listener");
+            #[allow(unused_mut)]
+            let mut listener = Listener::bind(&bind_path).expect("bind replacement listener");
             let (stream, _) = listener.accept().await.expect("accept ping probe");
             let (reader, mut writer) = stream.into_split();
             let mut reader = BufReader::new(reader);

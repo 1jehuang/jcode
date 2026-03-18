@@ -1256,7 +1256,8 @@ impl App {
             // Clean up old socket
             let _ = std::fs::remove_file(&socket_path);
 
-            let listener = match Listener::bind(&socket_path) {
+            #[allow(unused_mut)]
+            let mut listener = match Listener::bind(&socket_path) {
                 Ok(l) => l,
                 Err(e) => {
                     crate::logging::error(&format!("Failed to bind debug socket: {}", e));

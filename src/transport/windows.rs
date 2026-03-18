@@ -322,6 +322,14 @@ impl SyncStream {
         let file = OpenOptions::new().read(true).write(true).open(&pipe_name)?;
         Ok(Self { handle: file })
     }
+
+    pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {
+        let _ = timeout;
+        // std::fs::File-backed named pipes do not expose socket-style read timeouts.
+        // The communicate tool only uses this to avoid hanging forever; on Windows
+        // we currently rely on the server side to respond promptly.
+        Ok(())
+    }
 }
 
 impl io::Read for SyncStream {
