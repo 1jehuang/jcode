@@ -133,6 +133,10 @@ pub(crate) enum Command {
         wait: bool,
     },
 
+    /// Authentication status and validation helpers
+    #[command(subcommand)]
+    Auth(AuthCommand),
+
     /// Memory management commands
     #[command(subcommand)]
     Memory(MemoryCommand),
@@ -291,6 +295,16 @@ pub(crate) enum ModelCommand {
 }
 
 #[derive(Subcommand, Debug)]
+pub(crate) enum AuthCommand {
+    /// Show configured authentication status for model/tool providers
+    Status {
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub(crate) enum AmbientCommand {
     /// Show ambient mode status
     Status,
@@ -407,6 +421,15 @@ mod tests {
                 assert!(json);
                 assert_eq!(message, "hello");
             }
+            other => panic!("unexpected command: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn auth_status_subcommand_parses() {
+        let args = Args::try_parse_from(["jcode", "auth", "status", "--json"]).unwrap();
+        match args.command {
+            Some(Command::Auth(AuthCommand::Status { json })) => assert!(json),
             other => panic!("unexpected command: {:?}", other),
         }
     }

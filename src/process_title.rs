@@ -68,6 +68,7 @@ pub(crate) fn initial_title(args: &Args) -> String {
         Some(Command::Update) => "jcode update".to_string(),
         Some(Command::SelfDev { .. }) => "jcode:selfdev".to_string(),
         Some(Command::Debug { .. }) => "jcode debug".to_string(),
+        Some(Command::Auth(_)) => "jcode auth".to_string(),
         Some(Command::Memory(_)) => "jcode memory".to_string(),
         Some(Command::Ambient(subcommand)) => match subcommand {
             AmbientCommand::RunVisible => "jcode ambient visible".to_string(),

@@ -562,6 +562,63 @@ struct RunCommandReport {
     usage: crate::agent::TokenUsage,
 }
 
+#[derive(Debug, Serialize)]
+struct AuthStatusProviderReport {
+    id: String,
+    display_name: String,
+    status: String,
+    method: String,
+    auth_kind: String,
+    recommended: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthStatusReport {
+    any_available: bool,
+    providers: Vec<AuthStatusProviderReport>,
+}
+
+pub fn run_auth_status_command(emit_json: bool) -> Result<()> {
+    let status = crate::auth::AuthStatus::check();
+    let providers = crate::provider_catalog::auth_status_login_providers();
+    let reports = providers
+        .into_iter()
+        .map(|provider| AuthStatusProviderReport {
+            id: provider.id.to_string(),
+            display_name: provider.display_name.to_string(),
+            status: auth_state_label(status.state_for_provider(provider)).to_string(),
+            method: status.method_detail_for_provider(provider),
+            auth_kind: provider.auth_kind.label().to_string(),
+            recommended: provider.recommended,
+        })
+        .collect::<Vec<_>>();
+
+    if emit_json {
+        let report = AuthStatusReport {
+            any_available: status.has_any_available(),
+            providers: reports,
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for provider in reports {
+            println!(
+                "{}\t{}\t{}\t{}",
+                provider.id, provider.status, provider.auth_kind, provider.method
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn auth_state_label(state: crate::auth::AuthState) -> &'static str {
+    match state {
+        crate::auth::AuthState::Available => "available",
+        crate::auth::AuthState::Expired => "expired",
+        crate::auth::AuthState::NotConfigured => "not_configured",
+    }
+}
+
 pub async fn run_single_message_command(
     choice: &super::provider_init::ProviderChoice,
     model: Option<&str>,

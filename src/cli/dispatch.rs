@@ -1,7 +1,9 @@
 use anyhow::Result;
 use std::process::{Command as ProcessCommand, Stdio};
 
-use super::args::{AmbientCommand, Args, Command, MemoryCommand, ModelCommand, TranscriptModeArg};
+use super::args::{
+    AmbientCommand, Args, AuthCommand, Command, MemoryCommand, ModelCommand, TranscriptModeArg,
+};
 use crate::{
     agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
     tui,
@@ -60,6 +62,9 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         }) => {
             debug::run_debug_command(&command, &arg, session, socket, wait).await?;
         }
+        Some(Command::Auth(subcmd)) => match subcmd {
+            AuthCommand::Status { json } => commands::run_auth_status_command(json)?,
+        },
         Some(Command::Memory(subcmd)) => {
             commands::run_memory_command(map_memory_subcommand(subcmd))?;
         }
