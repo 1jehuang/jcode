@@ -65,13 +65,30 @@ pub(super) enum PendingAccountInput {
 
 #[derive(Debug, Clone)]
 pub(super) enum AccountCommand {
-    OpenOverlay { provider_filter: Option<String> },
-    ShowSettings { provider_id: String },
-    Login { provider_id: String },
-    Add { provider_id: String, label: Option<String> },
-    Switch { provider_id: String, label: String },
-    SwitchShorthand { label: String },
-    Remove { provider_id: String, label: String },
+    OpenOverlay {
+        provider_filter: Option<String>,
+    },
+    ShowSettings {
+        provider_id: String,
+    },
+    Login {
+        provider_id: String,
+    },
+    Add {
+        provider_id: String,
+        label: Option<String>,
+    },
+    Switch {
+        provider_id: String,
+        label: String,
+    },
+    SwitchShorthand {
+        label: String,
+    },
+    Remove {
+        provider_id: String,
+        label: String,
+    },
     SetDefaultProvider(Option<String>),
     SetDefaultModel(Option<String>),
     SetOpenAiTransport(Option<String>),
@@ -486,7 +503,9 @@ impl App {
     }
 
     pub(super) fn open_account_picker(&mut self, provider_filter: Option<&str>) {
-        use crate::tui::account_picker::{AccountPicker, AccountPickerCommand, AccountPickerItem};
+        use crate::tui::account_picker::{
+            AccountPicker, AccountPickerCommand, AccountPickerItem, AccountPickerSummary,
+        };
 
         let status = crate::auth::AuthStatus::check();
         let cfg = crate::config::Config::load();
@@ -494,6 +513,11 @@ impl App {
             crate::provider_catalog::OPENAI_COMPAT_PROFILE,
         );
         let mut items = Vec::new();
+        let mut summary = AccountPickerSummary {
+            default_provider: cfg.provider.default_provider.clone(),
+            default_model: cfg.provider.default_model.clone(),
+            ..AccountPickerSummary::default()
+        };
 
         let allow_provider = |provider_id: &str| {
             provider_filter
@@ -546,6 +570,12 @@ impl App {
             }
             let provider_status = status.state_for_provider(*provider);
             let method_detail = status.method_detail_for_provider(*provider);
+            summary.provider_count += 1;
+            match provider_status {
+                crate::auth::AuthState::Available => summary.ready_count += 1,
+                crate::auth::AuthState::Expired => summary.attention_count += 1,
+                crate::auth::AuthState::NotConfigured => summary.setup_count += 1,
+            }
             let status_label = match provider_status {
                 crate::auth::AuthState::Available => "configured",
                 crate::auth::AuthState::Expired => "needs attention",
@@ -574,6 +604,9 @@ impl App {
 
             match provider.id {
                 "claude" => {
+                    summary.named_account_count += crate::auth::claude::list_accounts()
+                        .unwrap_or_default()
+                        .len();
                     items.push(AccountPickerItem::action(
                         provider.id,
                         provider.display_name,
@@ -584,6 +617,9 @@ impl App {
                     self.append_anthropic_account_picker_items(&mut items, *provider);
                 }
                 "openai" => {
+                    summary.named_account_count += crate::auth::codex::list_accounts()
+                        .unwrap_or_default()
+                        .len();
                     items.push(AccountPickerItem::action(
                         provider.id,
                         provider.display_name,
@@ -690,8 +726,9 @@ impl App {
                             compat.api_key_env
                         ),
                         AccountPickerCommand::PromptValue {
-                            prompt: "Enter OpenAI-compatible API key env var name (`clear` resets)."
-                                .to_string(),
+                            prompt:
+                                "Enter OpenAI-compatible API key env var name (`clear` resets)."
+                                    .to_string(),
                             command_prefix: "/account openai-compatible api-key-name".to_string(),
                             empty_value: Some("clear".to_string()),
                             status_notice: "Account: editing API key variable...".to_string(),
@@ -701,7 +738,10 @@ impl App {
                         provider.id,
                         provider.display_name,
                         "Env file",
-                        format!("Current: {} — enter a safe file name like `groq.env`", compat.env_file),
+                        format!(
+                            "Current: {} — enter a safe file name like `groq.env`",
+                            compat.env_file
+                        ),
                         AccountPickerCommand::PromptValue {
                             prompt: "Enter OpenAI-compatible env file name (`clear` resets)."
                                 .to_string(),
@@ -735,8 +775,9 @@ impl App {
             .and_then(crate::provider_catalog::resolve_login_provider)
             .map(|provider| format!(" {} Settings ", provider.display_name))
             .unwrap_or_else(|| " Accounts & Providers ".to_string());
-        self.account_picker_overlay =
-            Some(std::cell::RefCell::new(AccountPicker::new(title, items)));
+        self.account_picker_overlay = Some(std::cell::RefCell::new(AccountPicker::with_summary(
+            title, items, summary,
+        )));
     }
 
     pub(super) fn handle_account_picker_command(
@@ -2500,7 +2541,9 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
         }
         "default-model" => {
             if remainder.is_empty() {
-                return Some(Err("Usage: `/account default-model <model|clear>`".to_string()));
+                return Some(Err(
+                    "Usage: `/account default-model <model|clear>`".to_string()
+                ));
             }
             return Some(Ok(AccountCommand::SetDefaultModel(
                 normalize_clearish_value(remainder),
@@ -2562,7 +2605,9 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
             }
             "transport" if provider.id == "openai" => {
                 if value.is_empty() {
-                    return Some(Err("Usage: `/account openai transport <auto|https|websocket>`".to_string()));
+                    return Some(Err(
+                        "Usage: `/account openai transport <auto|https|websocket>`".to_string(),
+                    ));
                 }
                 AccountCommand::SetOpenAiTransport(normalize_clearish_value(value))
             }
@@ -2585,7 +2630,7 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
             "premium" if provider.id == "copilot" => {
                 if value.is_empty() {
                     return Some(Err(
-                        "Usage: `/account copilot premium <normal|one|zero>`".to_string(),
+                        "Usage: `/account copilot premium <normal|one|zero>`".to_string()
                     ));
                 }
                 AccountCommand::SetCopilotPremium(normalize_normal_mode_value(value))
@@ -2610,8 +2655,7 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
             "env-file" if provider.id == "openai-compatible" => {
                 if value.is_empty() {
                     return Some(Err(
-                        "Usage: `/account openai-compatible env-file <file.env|clear>`"
-                            .to_string(),
+                        "Usage: `/account openai-compatible env-file <file.env|clear>`".to_string(),
                     ));
                 }
                 AccountCommand::SetOpenAiCompatEnvFile(normalize_clearish_value(value))
@@ -2655,14 +2699,15 @@ fn execute_account_command_local(app: &mut App, command: AccountCommand) {
         AccountCommand::ShowSettings { provider_id } => app.push_display_message(
             DisplayMessage::system(render_provider_settings_markdown(app, &provider_id)),
         ),
-        AccountCommand::Login { provider_id } => match resolve_account_provider_descriptor(&provider_id)
-        {
-            Some(provider) => app.start_login_provider(provider),
-            None => app.push_display_message(DisplayMessage::error(format!(
-                "Unknown provider `{}`.",
-                provider_id
-            ))),
-        },
+        AccountCommand::Login { provider_id } => {
+            match resolve_account_provider_descriptor(&provider_id) {
+                Some(provider) => app.start_login_provider(provider),
+                None => app.push_display_message(DisplayMessage::error(format!(
+                    "Unknown provider `{}`.",
+                    provider_id
+                ))),
+            }
+        }
         AccountCommand::Add { provider_id, label } => {
             execute_account_add_local(app, &provider_id, label.as_deref())
         }
@@ -2706,11 +2751,9 @@ fn execute_account_command_local(app: &mut App, command: AccountCommand) {
         AccountCommand::SetOpenAiCompatEnvFile(value) => {
             save_openai_compat_setting(app, OpenAiCompatSetting::EnvFile, value.as_deref())
         }
-        AccountCommand::SetOpenAiCompatDefaultModel(value) => save_openai_compat_setting(
-            app,
-            OpenAiCompatSetting::DefaultModel,
-            value.as_deref(),
-        ),
+        AccountCommand::SetOpenAiCompatDefaultModel(value) => {
+            save_openai_compat_setting(app, OpenAiCompatSetting::DefaultModel, value.as_deref())
+        }
     }
 }
 
@@ -2810,7 +2853,9 @@ async fn execute_account_command_remote(
         }
         AccountCommand::SetOpenAiTransport(value) => {
             save_openai_transport_setting_local(app, value.as_deref());
-            remote.set_transport(value.as_deref().unwrap_or("auto")).await?;
+            remote
+                .set_transport(value.as_deref().unwrap_or("auto"))
+                .await?;
         }
         AccountCommand::SetOpenAiEffort(value) => {
             save_openai_effort_setting_local(app, value.as_deref());
@@ -3052,18 +3097,12 @@ enum OpenAiCompatSetting {
     DefaultModel,
 }
 
-fn save_openai_compat_setting(
-    app: &mut App,
-    setting: OpenAiCompatSetting,
-    value: Option<&str>,
-) {
+fn save_openai_compat_setting(app: &mut App, setting: OpenAiCompatSetting, value: Option<&str>) {
     let old = crate::provider_catalog::resolve_openai_compatible_profile(
         crate::provider_catalog::OPENAI_COMPAT_PROFILE,
     );
-    let current_key = crate::provider_catalog::load_api_key_from_env_or_config(
-        &old.api_key_env,
-        &old.env_file,
-    );
+    let current_key =
+        crate::provider_catalog::load_api_key_from_env_or_config(&old.api_key_env, &old.env_file);
     let (env_key, normalized_value) = match setting {
         OpenAiCompatSetting::ApiBase => {
             let normalized = match value {
@@ -3236,13 +3275,9 @@ fn render_provider_settings_markdown(app: &App, provider_id: &str) -> String {
                 compat.default_model.as_deref().unwrap_or("(unset)")
             ));
             lines.push("- `/account openai-compatible api-base <url|clear>`".to_string());
-            lines.push(
-                "- `/account openai-compatible api-key-name <ENV_VAR|clear>`".to_string(),
-            );
+            lines.push("- `/account openai-compatible api-key-name <ENV_VAR|clear>`".to_string());
             lines.push("- `/account openai-compatible env-file <file.env|clear>`".to_string());
-            lines.push(
-                "- `/account openai-compatible default-model <model|clear>`".to_string(),
-            );
+            lines.push("- `/account openai-compatible default-model <model|clear>`".to_string());
         }
         _ => {
             lines.push("No provider-specific settings are exposed here yet. Use `/login` to configure credentials.".to_string());
@@ -3258,7 +3293,10 @@ fn render_provider_settings_markdown(app: &App, provider_id: &str) -> String {
         ));
         lines.push(format!(
             "- Default model: `{}`",
-            cfg.provider.default_model.as_deref().unwrap_or("(provider default)")
+            cfg.provider
+                .default_model
+                .as_deref()
+                .unwrap_or("(provider default)")
         ));
         lines.push(
             "- `/account default-provider <claude|openai|copilot|gemini|openrouter|auto>`"
