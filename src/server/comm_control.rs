@@ -567,29 +567,31 @@ pub(super) async fn handle_comm_await_members(
                     return;
                 }
 
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    let pending: Vec<String> = member_statuses
-                        .iter()
-                        .filter(|member| !member.done)
-                        .map(|member| {
-                            let name = member.friendly_name.clone().unwrap_or_else(|| {
-                                member.session_id[..8.min(member.session_id.len())].to_string()
-                            });
-                            format!("{} ({})", name, member.status)
-                        })
-                        .collect();
-                    let _ = client_tx.send(ServerEvent::CommAwaitMembersResponse {
-                        id,
-                        completed: false,
-                        members: member_statuses,
-                        summary: format!("Timed out. Still waiting on: {}", pending.join(", ")),
-                    });
-                    return;
-                }
-
-                match tokio::time::timeout(remaining, event_rx.recv()).await {
-                    Ok(Ok(event)) => {
+                tokio::select! {
+                    _ = client_tx.closed() => {
+                        return;
+                    }
+                    _ = tokio::time::sleep_until(deadline) => {
+                        let pending: Vec<String> = member_statuses
+                            .iter()
+                            .filter(|member| !member.done)
+                            .map(|member| {
+                                let name = member.friendly_name.clone().unwrap_or_else(|| {
+                                    member.session_id[..8.min(member.session_id.len())].to_string()
+                                });
+                                format!("{} ({})", name, member.status)
+                            })
+                            .collect();
+                        let _ = client_tx.send(ServerEvent::CommAwaitMembersResponse {
+                            id,
+                            completed: false,
+                            members: member_statuses,
+                            summary: format!("Timed out. Still waiting on: {}", pending.join(", ")),
+                        });
+                        return;
+                    }
+                    recv_result = event_rx.recv() => match recv_result {
+                        Ok(event) => {
                         if event.swarm_id.as_deref() != Some(swarm_id_clone.as_str()) {
                             continue;
                         }
@@ -602,8 +604,8 @@ pub(super) async fn handle_comm_await_members(
                             _ => {}
                         }
                     }
-                    Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
-                    Ok(Err(broadcast::error::RecvError::Closed)) => {
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => {
                         let _ = client_tx.send(ServerEvent::CommAwaitMembersResponse {
                             id,
                             completed: false,
@@ -612,7 +614,7 @@ pub(super) async fn handle_comm_await_members(
                         });
                         return;
                     }
-                    Err(_) => continue,
+                    }
                 }
             }
         });
@@ -766,6 +768,54 @@ mod tests {
             }
             other => panic!("expected CommAwaitMembersResponse, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn await_members_stops_when_requesting_client_disconnects() {
+        let swarm_id = "swarm-b";
+        let requester = "req";
+        let peer = "peer-1";
+
+        let (client_tx, client_rx) = mpsc::unbounded_channel();
+        let swarm_members = Arc::new(RwLock::new(HashMap::from([
+            (requester.to_string(), member(requester, swarm_id, "ready")),
+            (peer.to_string(), member(peer, swarm_id, "running")),
+        ])));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+            swarm_id.to_string(),
+            HashSet::from([requester.to_string(), peer.to_string()]),
+        )])));
+        let (swarm_event_tx, swarm_event_rx) = broadcast::channel(32);
+        drop(swarm_event_rx);
+        let baseline_receivers = swarm_event_tx.receiver_count();
+
+        handle_comm_await_members(
+            1,
+            requester.to_string(),
+            vec!["completed".to_string()],
+            vec![],
+            Some(60),
+            &client_tx,
+            &swarm_members,
+            &swarms_by_id,
+            &swarm_event_tx,
+        )
+        .await;
+
+        assert_eq!(swarm_event_tx.receiver_count(), baseline_receivers + 1);
+
+        drop(client_rx);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if swarm_event_tx.receiver_count() == baseline_receivers {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("await task should unsubscribe promptly after client disconnect");
     }
 }
 
