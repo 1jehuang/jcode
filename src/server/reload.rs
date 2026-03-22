@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
+
+const RELOAD_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn prepare_server_exec(cmd: &mut std::process::Command, socket_path: &std::path::Path) {
     // The replacement daemon must own the published socket paths. Unlink them
@@ -266,7 +269,10 @@ pub(super) async fn await_reload_signal(
             None => return,
         };
 
-        crate::logging::info("Server: reload signal received via channel");
+        crate::logging::info(&format!(
+            "Server: reload signal received via channel request={} hash={} triggering_session={:?} prefer_selfdev_binary={}",
+            signal.request_id, signal.hash, signal.triggering_session, signal.prefer_selfdev_binary
+        ));
         let reload_started = std::time::Instant::now();
         crate::server::write_reload_state(
             &signal.request_id,
@@ -296,6 +302,12 @@ pub(super) async fn await_reload_signal(
             &swarm_event_tx,
         )
         .await;
+        crate::logging::info(&format!(
+            "Server: graceful shutdown completed for reload request={} after {}ms state={}",
+            signal.request_id,
+            reload_started.elapsed().as_millis(),
+            crate::server::reload_state_summary(std::time::Duration::from_secs(60))
+        ));
 
         let prefers_selfdev = signal.prefer_selfdev_binary;
 
@@ -303,11 +315,12 @@ pub(super) async fn await_reload_signal(
             if binary.exists() {
                 let socket = super::socket_path();
                 crate::logging::info(&format!(
-                    "Server: exec'ing into {} binary {:?} (socket: {:?}, prep={}ms)",
+                    "Server: exec'ing into {} binary {:?} (socket: {:?}, prep={}ms, state={})",
                     label,
                     binary,
                     socket,
-                    reload_started.elapsed().as_millis()
+                    reload_started.elapsed().as_millis(),
+                    crate::server::reload_state_summary(std::time::Duration::from_secs(60))
                 ));
                 let mut cmd = ProcessCommand::new(&binary);
                 cmd.arg("serve").arg("--socket").arg(socket.as_os_str());
@@ -348,6 +361,23 @@ pub(super) async fn graceful_shutdown_sessions(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     shutdown_signals: &Arc<RwLock<HashMap<String, crate::agent::InterruptSignal>>>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+) {
+    graceful_shutdown_sessions_with_timeout(
+        _sessions,
+        swarm_members,
+        shutdown_signals,
+        swarm_event_tx,
+        RELOAD_GRACEFUL_SHUTDOWN_TIMEOUT,
+    )
+    .await;
+}
+
+async fn graceful_shutdown_sessions_with_timeout(
+    _sessions: &Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    shutdown_signals: &Arc<RwLock<HashMap<String, crate::agent::InterruptSignal>>>,
+    swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+    timeout: Duration,
 ) {
     let actively_generating: Vec<String> = {
         let members = swarm_members.read().await;
@@ -402,6 +432,7 @@ pub(super) async fn graceful_shutdown_sessions(
 
     let watched: std::collections::HashSet<String> = signalable_sessions.into_iter().collect();
     let mut event_rx = swarm_event_tx.subscribe();
+    let deadline = Instant::now() + timeout;
 
     loop {
         let still_running: Vec<String> = {
@@ -429,18 +460,35 @@ pub(super) async fn graceful_shutdown_sessions(
             still_running
         ));
 
-        match event_rx.recv().await {
-            Ok(event) => match &event.event {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            crate::logging::warn(&format!(
+                "Server: reload graceful shutdown timed out after {}ms; proceeding with still-running sessions: {:?}",
+                timeout.as_millis(),
+                still_running
+            ));
+            break;
+        }
+
+        match tokio::time::timeout(remaining, event_rx.recv()).await {
+            Ok(Ok(event)) => match &event.event {
                 SwarmEventType::StatusChange { .. } if watched.contains(&event.session_id) => {}
                 SwarmEventType::MemberChange { action }
                     if action == "left" && watched.contains(&event.session_id) => {}
                 _ => continue,
             },
-            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(broadcast::error::RecvError::Closed) => {
+            Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(broadcast::error::RecvError::Closed)) => {
                 crate::logging::warn(
                     "Server: swarm event channel closed while waiting for reload checkpoint",
                 );
+                break;
+            }
+            Err(_) => {
+                crate::logging::warn(&format!(
+                    "Server: reload graceful shutdown timed out after {}ms; proceeding without waiting for remaining checkpoint events",
+                    timeout.as_millis()
+                ));
                 break;
             }
         }
@@ -449,7 +497,9 @@ pub(super) async fn graceful_shutdown_sessions(
 
 #[cfg(test)]
 mod tests {
-    use super::{graceful_shutdown_sessions, receive_reload_signal};
+    use super::{
+        graceful_shutdown_sessions, graceful_shutdown_sessions_with_timeout, receive_reload_signal,
+    };
     use crate::agent::InterruptSignal;
     use crate::server::{ReloadSignal, SwarmEvent, SwarmEventType, SwarmMember};
     use std::collections::HashMap;
@@ -839,5 +889,40 @@ mod tests {
             .await
             .expect("waiter should complete after member leaves")
             .expect("waiter task should succeed");
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_sessions_times_out_and_proceeds() {
+        let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let swarm_members = Arc::new(RwLock::new(HashMap::from([(
+            "target".to_string(),
+            member("target", "running"),
+        )])));
+        let signal = InterruptSignal::new();
+        let shutdown_signals = Arc::new(RwLock::new(HashMap::from([(
+            "target".to_string(),
+            signal.clone(),
+        )])));
+        let (swarm_event_tx, _) = broadcast::channel(8);
+
+        let started = Instant::now();
+        graceful_shutdown_sessions_with_timeout(
+            &sessions,
+            &swarm_members,
+            &shutdown_signals,
+            &swarm_event_tx,
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+
+        assert!(
+            signal.is_set(),
+            "running target should still be signaled promptly"
+        );
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(50)
+                && started.elapsed() < std::time::Duration::from_millis(250),
+            "graceful shutdown should honor the timeout instead of waiting indefinitely"
+        );
     }
 }

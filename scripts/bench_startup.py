@@ -30,12 +30,14 @@ PROFILE_TOTAL_RE = re.compile(r"Startup Profile \(([0-9.]+)ms total\)")
 PROFILE_LINE_RE = re.compile(
     r"\[INFO\]\s+([0-9.]+)ms\s+([0-9.]+)ms\s+[0-9.]+%\s+([a-zA-Z0-9_]+)"
 )
+REMOTE_HISTORY_RE = re.compile(r"remote bootstrap: history after ([0-9.]+)ms")
 
 
 @dataclass
 class StartupProfile:
     total_ms: float
     deltas_ms: dict[str, float]
+    remote_history_ms: float | None = None
 
 
 @dataclass
@@ -61,6 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-cold-server-check-ms", type=float, default=20.0)
     parser.add_argument("--max-cold-server-spawn-ms", type=float, default=20.0)
     parser.add_argument("--max-cold-app-new-ms", type=float, default=20.0)
+    parser.add_argument("--max-remote-bootstrap-history-ms", type=float, default=250.0)
     return parser.parse_args()
 
 
@@ -97,6 +100,7 @@ def isolated_env(root: str) -> dict[str, str]:
     env = os.environ.copy()
     env["JCODE_HOME"] = os.path.join(root, "home")
     env["JCODE_RUNTIME_DIR"] = os.path.join(root, "run")
+    env["JCODE_SOCKET"] = os.path.join(env["JCODE_RUNTIME_DIR"], "jcode.sock")
     env["JCODE_NO_TELEMETRY"] = "1"
     os.makedirs(env["JCODE_HOME"], exist_ok=True)
     os.makedirs(env["JCODE_RUNTIME_DIR"], exist_ok=True)
@@ -123,7 +127,7 @@ def measure_server_startup(binary: str, runs: int) -> list[float]:
     for _ in range(runs):
         root = tempfile.mkdtemp(prefix="jcode-server-bench-")
         env = isolated_env(root)
-        socket_path = os.path.join(env["JCODE_RUNTIME_DIR"], "jcode.sock")
+        socket_path = env["JCODE_SOCKET"]
         proc = None
         try:
             start = time.perf_counter()
@@ -157,9 +161,13 @@ def require_script_binary() -> str:
 def parse_startup_profile(log_path: Path) -> StartupProfile:
     lines = log_path.read_text().splitlines()
     last_block: list[str] = []
+    remote_history_ms = None
     for i, line in enumerate(lines):
         if "=== Startup Profile (" in line:
             last_block = lines[i : i + 40]
+        remote_match = REMOTE_HISTORY_RE.search(line)
+        if remote_match:
+            remote_history_ms = float(remote_match.group(1))
 
     if not last_block:
         raise RuntimeError(f"no startup profile found in {log_path}")
@@ -178,7 +186,11 @@ def parse_startup_profile(log_path: Path) -> StartupProfile:
     if total_ms is None:
         raise RuntimeError(f"could not parse startup profile total from {log_path}")
 
-    return StartupProfile(total_ms=total_ms, deltas_ms=deltas)
+    return StartupProfile(
+        total_ms=total_ms,
+        deltas_ms=deltas,
+        remote_history_ms=remote_history_ms,
+    )
 
 
 def measure_cold_client_startup(binary: str, runs: int) -> list[StartupProfile]:
@@ -190,7 +202,10 @@ def measure_cold_client_startup(binary: str, runs: int) -> list[StartupProfile]:
         env = isolated_env(root)
         log_path = Path(env["JCODE_HOME"]) / "logs" / f"jcode-{time.strftime('%Y-%m-%d')}.log"
         try:
-            command = f"{binary} --no-update --debug-socket"
+            command = (
+                f"{binary} --no-update --debug-socket "
+                f"--socket {env['JCODE_SOCKET']}"
+            )
             subprocess.run(
                 ["timeout", "3s", script_bin, "-qefc", command, "/dev/null"],
                 stdout=subprocess.DEVNULL,
@@ -213,6 +228,9 @@ def print_cold_profile_stats(profiles: list[StartupProfile]) -> None:
         values = [p.deltas_ms[phase] for p in profiles if phase in p.deltas_ms]
         print_stats(f"Cold client phase: {phase}", values)
 
+    remote_history = [p.remote_history_ms for p in profiles if p.remote_history_ms is not None]
+    print_stats("Cold client phase: remote bootstrap history", remote_history)
+
 
 def collect_budgets(
     help_times: list[float],
@@ -225,8 +243,11 @@ def collect_budgets(
     cold_server_check = [p.deltas_ms.get("server_check", 0.0) for p in cold_profiles]
     cold_server_spawn = [p.deltas_ms.get("server_spawn_start", 0.0) for p in cold_profiles]
     cold_app_new = [p.deltas_ms.get("app_new_for_remote", 0.0) for p in cold_profiles]
+    cold_remote_history = [
+        p.remote_history_ms for p in cold_profiles if p.remote_history_ms is not None
+    ]
 
-    return [
+    budgets = [
         Budget("--help median", median(help_times), args.max_help_ms),
         Budget("--version median", median(version_times), args.max_version_ms),
         Budget("server ready median", median(server_times), args.max_server_ready_ms),
@@ -247,6 +268,23 @@ def collect_budgets(
             args.max_cold_app_new_ms,
         ),
     ]
+    cold_remote_history_median = median_or_none(cold_remote_history)
+    if cold_remote_history_median is not None:
+        budgets.append(
+            Budget(
+                "cold startup remote bootstrap history median",
+                cold_remote_history_median,
+                args.max_remote_bootstrap_history_ms,
+            )
+        )
+    server_ready_median = median_or_none(server_times)
+    if server_ready_median is not None:
+        budgets[2] = Budget(
+            "server ready median",
+            server_ready_median,
+            args.max_server_ready_ms,
+        )
+    return budgets
 
 
 def main() -> int:
@@ -279,9 +317,32 @@ def main() -> int:
 
     print("\n" + "=" * 60)
     print("Summary:")
-    print(f"  Binary load median:      ~{median(help_times):.1f} ms")
-    print(f"  Server ready median:     ~{median(server_times):.1f} ms")
-    print(f"  Cold client total median:~{median(p.total_ms for p in cold_profiles):.1f} ms")
+    help_median = median_or_none(help_times)
+    server_median = median_or_none(server_times)
+    cold_median = median_or_none(p.total_ms for p in cold_profiles)
+    remote_history_median = median_or_none(
+        p.remote_history_ms for p in cold_profiles if p.remote_history_ms is not None
+    )
+    print(
+        f"  Binary load median:      ~{help_median:.1f} ms"
+        if help_median is not None
+        else "  Binary load median:      n/a"
+    )
+    print(
+        f"  Server ready median:     ~{server_median:.1f} ms"
+        if server_median is not None
+        else "  Server ready median:     n/a"
+    )
+    print(
+        f"  Cold client total median:~{cold_median:.1f} ms"
+        if cold_median is not None
+        else "  Cold client total median:n/a"
+    )
+    print(
+        f"  Remote history median:   ~{remote_history_median:.1f} ms"
+        if remote_history_median is not None
+        else "  Remote history median:   n/a"
+    )
 
     budgets = collect_budgets(help_times, version_times, server_times, cold_profiles, args)
     if args.check:

@@ -14,7 +14,16 @@ use super::protocol::{McpConfig, McpServerConfig, McpToolDef};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify, RwLock};
+
+const FAILED_CONNECT_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
+
+#[derive(Clone)]
+struct FailedConnectRecord {
+    message: String,
+    failed_at: Instant,
+}
 
 enum ConnectAttempt {
     Connected,
@@ -32,7 +41,7 @@ pub struct SharedMcpPool {
     config: RwLock<McpConfig>,
     ref_counts: Mutex<HashMap<String, usize>>,
     connecting: Mutex<HashMap<String, Arc<Notify>>>,
-    last_errors: RwLock<HashMap<String, String>>,
+    last_errors: RwLock<HashMap<String, FailedConnectRecord>>,
 }
 
 impl SharedMcpPool {
@@ -285,7 +294,13 @@ impl SharedMcpPool {
             }
             Err(error) => {
                 let mut errors = self.last_errors.write().await;
-                errors.insert(name.to_string(), format!("{:#}", error));
+                errors.insert(
+                    name.to_string(),
+                    FailedConnectRecord {
+                        message: format!("{:#}", error),
+                        failed_at: Instant::now(),
+                    },
+                );
             }
         }
 
@@ -308,6 +323,21 @@ impl SharedMcpPool {
         name: String,
         config: McpServerConfig,
     ) -> std::result::Result<bool, String> {
+        if let Some(record) = self.recent_failure(&name).await {
+            let retry_after = FAILED_CONNECT_RETRY_COOLDOWN
+                .saturating_sub(record.failed_at.elapsed())
+                .as_secs()
+                .max(1);
+            crate::logging::info(&format!(
+                "MCP: Skipping reconnect to '{}' for {}s after recent failure",
+                name, retry_after
+            ));
+            return Err(format!(
+                "{} (retry suppressed for ~{}s after recent failure)",
+                record.message, retry_after
+            ));
+        }
+
         match self.begin_connect(&name).await {
             ConnectAttempt::Connected => Ok(false),
             ConnectAttempt::Wait(notify) => {
@@ -320,7 +350,7 @@ impl SharedMcpPool {
                         .read()
                         .await
                         .get(&name)
-                        .cloned()
+                        .map(|record| record.message.clone())
                         .unwrap_or_else(|| {
                             "Connection attempt did not produce a handle".to_string()
                         });
@@ -337,6 +367,19 @@ impl SharedMcpPool {
                 outcome
             }
         }
+    }
+
+    async fn recent_failure(&self, name: &str) -> Option<FailedConnectRecord> {
+        if self.handles.read().await.contains_key(name) {
+            return None;
+        }
+
+        self.last_errors
+            .read()
+            .await
+            .get(name)
+            .filter(|record| record.failed_at.elapsed() < FAILED_CONNECT_RETRY_COOLDOWN)
+            .cloned()
     }
 }
 

@@ -304,6 +304,14 @@ async fn run_default_command(args: Args) -> Result<()> {
         server_running = wait_for_existing_reload_server("client startup").await;
     }
 
+    if !server_running && std::env::var("JCODE_RESUMING").is_ok() {
+        server_running = wait_for_resuming_server(
+            "client startup without reload marker",
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+    }
+
     if server_running && (args.provider != ProviderChoice::Auto || args.model.is_some()) {
         output::stderr_info(
             "Server already running; provider/model flags only apply when starting a new server.",
@@ -357,6 +365,36 @@ async fn wait_for_existing_reload_server(context: &str) -> bool {
             }
             server::ReloadPhase::SocketReady => {}
         }
+    }
+
+    false
+}
+
+pub(crate) async fn wait_for_resuming_server(context: &str, timeout: std::time::Duration) -> bool {
+    let socket_path = server::socket_path();
+    let start = std::time::Instant::now();
+    let mut announced = false;
+
+    while start.elapsed() < timeout {
+        if server_is_running_at(&socket_path).await {
+            crate::logging::info(&format!(
+                "Server became available during resume wait for {} after {}ms",
+                context,
+                start.elapsed().as_millis()
+            ));
+            return true;
+        }
+
+        if !announced {
+            crate::logging::info(&format!(
+                "Server not ready during {}; waiting up to {}ms for a resumed/reloading server before spawning a replacement",
+                context,
+                timeout.as_millis()
+            ));
+            announced = true;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
     false
@@ -692,6 +730,42 @@ mod tests {
         );
 
         assert!(!wait_for_existing_reload_server("test").await);
+    }
+
+    #[tokio::test]
+    async fn wait_for_resuming_server_detects_delayed_listener_without_marker() {
+        let _guard = crate::storage::lock_test_env();
+        let env = ReloadTestEnv::new();
+
+        let bind_path = env.socket_path.clone();
+        let bind_task = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            #[allow(unused_mut)]
+            let mut listener = Listener::bind(&bind_path).expect("bind delayed listener");
+            let (stream, _) = listener.accept().await.expect("accept ping probe");
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            let n = reader
+                .read_line(&mut line)
+                .await
+                .expect("read ping request");
+            assert!(n > 0, "expected ping request");
+            let request: Request = serde_json::from_str(&line).expect("parse ping request");
+            let id = match request {
+                Request::Ping { id } => id,
+                other => panic!("expected ping request, got {other:?}"),
+            };
+            let pong = encode_event(&ServerEvent::Pong { id });
+            writer.write_all(pong.as_bytes()).await.expect("write pong");
+        });
+
+        assert!(
+            wait_for_resuming_server("test", std::time::Duration::from_secs(1)).await,
+            "resume wait should detect a delayed server without requiring a reload marker"
+        );
+
+        bind_task.await.expect("bind task");
     }
 
     #[tokio::test]

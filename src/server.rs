@@ -385,6 +385,9 @@ pub fn write_reload_state(
 
 pub fn publish_reload_socket_ready() {
     let Some(state) = ReloadState::load() else {
+        crate::logging::warn(
+            "Server reached socket-ready publish point, but no reload marker was present",
+        );
         return;
     };
 
@@ -400,7 +403,16 @@ pub fn publish_reload_socket_ready() {
             "Published reload socket-ready state for request {}",
             state.request_id
         ));
+    } else if state.phase != ReloadPhase::Starting {
+        crate::logging::warn(&format!(
+            "Server reached socket-ready publish point, but reload marker phase was {:?} (pid={}, current_pid={})",
+            state.phase, state.pid, current_pid
+        ));
     } else if state.pid != current_pid {
+        crate::logging::warn(&format!(
+            "Server reached socket-ready publish point, but reload marker pid {} did not match current pid {}; clearing stale marker",
+            state.pid, current_pid
+        ));
         clear_reload_marker();
     }
 }
@@ -441,11 +453,19 @@ pub async fn inspect_reload_wait_status(
     last_known_pid: Option<u32>,
 ) -> ReloadWaitStatus {
     if is_server_ready(socket_path).await || has_live_listener(socket_path).await {
+        if recent_reload_state(max_age).is_some() || last_known_pid.is_some() {
+            crate::logging::info(&format!(
+                "inspect_reload_wait_status: socket {} is ready/live (last_known_pid={:?}, state={})",
+                socket_path.display(),
+                last_known_pid,
+                reload_state_summary(max_age)
+            ));
+        }
         return ReloadWaitStatus::Ready;
     }
 
     if let Some(state) = recent_reload_state(max_age) {
-        return match state.phase {
+        let status = match state.phase {
             ReloadPhase::SocketReady => ReloadWaitStatus::Ready,
             ReloadPhase::Failed => ReloadWaitStatus::Failed(state.detail),
             ReloadPhase::Starting => {
@@ -461,14 +481,38 @@ pub async fn inspect_reload_wait_status(
                 }
             }
         };
+        crate::logging::info(&format!(
+            "inspect_reload_wait_status: socket {} marker-driven status={:?} (last_known_pid={:?}, state={})",
+            socket_path.display(),
+            status,
+            last_known_pid,
+            reload_state_summary(max_age)
+        ));
+        return status;
     }
 
     if let Some(pid) = last_known_pid {
         if reload_process_alive(pid) {
+            crate::logging::info(&format!(
+                "inspect_reload_wait_status: socket {} waiting on last known pid {} without marker",
+                socket_path.display(),
+                pid
+            ));
             return ReloadWaitStatus::Waiting { pid: Some(pid) };
         }
+        crate::logging::warn(&format!(
+            "inspect_reload_wait_status: socket {} last known pid {} is no longer alive and no reload marker remains",
+            socket_path.display(),
+            pid
+        ));
     }
 
+    if last_known_pid.is_some() {
+        crate::logging::info(&format!(
+            "inspect_reload_wait_status: socket {} is idle after previous reload wait state",
+            socket_path.display()
+        ));
+    }
     ReloadWaitStatus::Idle
 }
 
@@ -477,14 +521,33 @@ pub async fn await_reload_handoff(
     max_age: Duration,
 ) -> ReloadWaitStatus {
     let mut last_known_pid = None;
+    crate::logging::info(&format!(
+        "await_reload_handoff: begin socket={} max_age_ms={} state={}",
+        socket_path.display(),
+        max_age.as_millis(),
+        reload_state_summary(max_age)
+    ));
 
     loop {
         match inspect_reload_wait_status(socket_path, max_age, last_known_pid).await {
             ReloadWaitStatus::Waiting { pid } => {
                 last_known_pid = pid;
+                crate::logging::info(&format!(
+                    "await_reload_handoff: waiting for reload event socket={} pid={:?}",
+                    socket_path.display(),
+                    pid
+                ));
                 wait_for_reload_handoff_event(pid, socket_path).await;
             }
-            other => return other,
+            other => {
+                crate::logging::info(&format!(
+                    "await_reload_handoff: completed socket={} result={:?} state={}",
+                    socket_path.display(),
+                    other,
+                    reload_state_summary(max_age)
+                ));
+                return other;
+            }
         }
     }
 }
@@ -493,6 +556,11 @@ pub async fn wait_for_reload_handoff_event(
     reloading_pid: Option<u32>,
     socket_path: &std::path::Path,
 ) {
+    crate::logging::info(&format!(
+        "wait_for_reload_handoff_event: start socket={} pid={:?}",
+        socket_path.display(),
+        reloading_pid
+    ));
     #[cfg(target_os = "linux")]
     {
         let marker_path = reload_marker_path();
@@ -508,6 +576,11 @@ pub async fn wait_for_reload_handoff_event(
         let _ = (reloading_pid, socket_path);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    crate::logging::info(&format!(
+        "wait_for_reload_handoff_event: wake socket={} pid={:?}",
+        socket_path.display(),
+        reloading_pid
+    ));
 }
 
 #[cfg(target_os = "linux")]
@@ -535,8 +608,17 @@ fn wait_for_reload_handoff_event_blocking(
     }
 
     if watch_paths.is_empty() {
+        crate::logging::warn("wait_for_reload_handoff_event_blocking: no watch paths available");
         return;
     }
+
+    crate::logging::info(&format!(
+        "wait_for_reload_handoff_event_blocking: marker={} socket={} pid={:?} watch_paths={:?}",
+        marker_path.display(),
+        socket_path.display(),
+        reloading_pid,
+        watch_paths
+    ));
 
     unsafe {
         let fd = libc::inotify_init1(libc::IN_CLOEXEC);
@@ -564,6 +646,9 @@ fn wait_for_reload_handoff_event_blocking(
         }
 
         if !has_watch {
+            crate::logging::warn(
+                "wait_for_reload_handoff_event_blocking: failed to register any inotify watches",
+            );
             let _ = libc::close(fd);
             return;
         }
@@ -579,6 +664,9 @@ fn wait_for_reload_handoff_event_blocking(
             if ready > 0 && (poll_fd.revents & libc::POLLIN) != 0 {
                 let mut buf = [0u8; 512];
                 let _ = libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len());
+                crate::logging::info(
+                    "wait_for_reload_handoff_event_blocking: observed filesystem/process event",
+                );
                 break;
             }
             if ready < 0 {
@@ -586,6 +674,10 @@ fn wait_for_reload_handoff_event_blocking(
                 if err.kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
+                crate::logging::warn(&format!(
+                    "wait_for_reload_handoff_event_blocking: poll failed: {}",
+                    err
+                ));
                 break;
             }
         }
@@ -829,6 +921,11 @@ mod socket_tests {
 
     #[test]
     fn reload_marker_active_expires_stale_marker() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+        crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+
         let marker = reload_marker_path();
         if let Some(parent) = marker.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -838,6 +935,12 @@ mod socket_tests {
         std::thread::sleep(Duration::from_millis(5));
         assert!(!reload_marker_active(Duration::ZERO));
         assert!(!marker.exists(), "stale reload marker should be cleaned up");
+
+        if let Some(prev_runtime) = prev_runtime {
+            crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+        } else {
+            crate::env::remove_var("JCODE_RUNTIME_DIR");
+        }
     }
 
     #[test]
@@ -1650,6 +1753,20 @@ impl ReloadState {
     }
 }
 
+pub fn reload_state_summary(max_age: Duration) -> String {
+    match recent_reload_state(max_age) {
+        Some(state) => format!(
+            "request={} hash={} phase={:?} pid={} detail={}",
+            state.request_id,
+            state.hash,
+            state.phase,
+            state.pid,
+            state.detail.unwrap_or_else(|| "<none>".to_string())
+        ),
+        None => "no recent reload state".to_string(),
+    }
+}
+
 /// Global reload signal channel. The selfdev tool and debug commands fire this;
 /// the server awaits it instead of polling the filesystem.
 static RELOAD_SIGNAL: std::sync::OnceLock<(
@@ -1689,6 +1806,14 @@ pub fn send_reload_signal(
     prefer_selfdev_binary: bool,
 ) -> String {
     let request_id = crate::id::new_id("reload");
+    crate::logging::info(&format!(
+        "send_reload_signal: request={} hash={} triggering_session={:?} prefer_selfdev_binary={} current_pid={}",
+        request_id,
+        hash,
+        triggering_session,
+        prefer_selfdev_binary,
+        std::process::id()
+    ));
     let (tx, _) = reload_signal();
     let _ = tx.send(Some(ReloadSignal {
         hash,
@@ -1700,6 +1825,10 @@ pub fn send_reload_signal(
 }
 
 pub fn acknowledge_reload_signal(signal: &ReloadSignal) {
+    crate::logging::info(&format!(
+        "acknowledge_reload_signal: request={} hash={} triggering_session={:?} prefer_selfdev_binary={}",
+        signal.request_id, signal.hash, signal.triggering_session, signal.prefer_selfdev_binary
+    ));
     let (tx, _) = reload_ack();
     let _ = tx.send(Some(ReloadAck {
         hash: signal.hash.clone(),
@@ -1712,9 +1841,20 @@ pub async fn wait_for_reload_ack(
     timeout: std::time::Duration,
 ) -> anyhow::Result<ReloadAck> {
     let mut rx = reload_ack().1.clone();
+    let started = std::time::Instant::now();
+    crate::logging::info(&format!(
+        "wait_for_reload_ack: waiting request={} timeout_ms={}",
+        request_id,
+        timeout.as_millis()
+    ));
 
     if let Some(ack) = rx.borrow_and_update().clone() {
         if ack.request_id == request_id {
+            crate::logging::info(&format!(
+                "wait_for_reload_ack: immediate ack request={} after {}ms",
+                request_id,
+                started.elapsed().as_millis()
+            ));
             return Ok(ack);
         }
     }
@@ -1727,13 +1867,24 @@ pub async fn wait_for_reload_ack(
                 .map_err(|_| anyhow::anyhow!("reload acknowledgement channel closed"))?;
             if let Some(ack) = rx.borrow_and_update().clone() {
                 if ack.request_id == request_id {
+                    crate::logging::info(&format!(
+                        "wait_for_reload_ack: received ack request={} after {}ms",
+                        request_id,
+                        started.elapsed().as_millis()
+                    ));
                     return Ok(ack);
                 }
             }
         }
     })
     .await
-    .map_err(|_| anyhow::anyhow!("timed out waiting for reload acknowledgement"))?
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "timed out waiting for reload acknowledgement after {}ms (state={})",
+            started.elapsed().as_millis(),
+            reload_state_summary(Duration::from_secs(60))
+        )
+    })?
 }
 
 fn debug_control_allowed() -> bool {

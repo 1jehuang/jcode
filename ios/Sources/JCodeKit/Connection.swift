@@ -19,10 +19,12 @@ public actor JCodeConnection {
     private var nextId: UInt64 = 1
     private var eventContinuation: AsyncStream<Event>.Continuation?
     private var expectingReloadDisconnect = false
+    private var keepaliveTask: Task<Void, Never>?
     private let authToken: String
     private let serverURL: URL
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+    private static let keepaliveIntervalNanos: UInt64 = 20_000_000_000
 
     public init(host: String, port: UInt16 = 7643, authToken: String) {
         var components = URLComponents()
@@ -54,6 +56,7 @@ public actor JCodeConnection {
         task.resume()
 
         startReceiving()
+        startKeepaliveLoop()
 
         let id = nextId
         nextId += 1
@@ -64,6 +67,8 @@ public actor JCodeConnection {
 
     public func disconnect() {
         expectingReloadDisconnect = false
+        keepaliveTask?.cancel()
+        keepaliveTask = nil
         webSocket?.cancel(with: .normalClosure, reason: nil)
         webSocket = nil
         urlSession = nil
@@ -138,6 +143,56 @@ public actor JCodeConnection {
         }
     }
 
+    private func startKeepaliveLoop() {
+        keepaliveTask?.cancel()
+        keepaliveTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: Self.keepaliveIntervalNanos)
+                if Task.isCancelled {
+                    break
+                }
+                do {
+                    try await self.sendWebSocketPing()
+                } catch {
+                    await self.handleKeepaliveFailure(error)
+                    break
+                }
+            }
+        }
+    }
+
+    private func sendWebSocketPing() async throws {
+        guard let webSocket else {
+            throw ConnectionError.notConnected
+        }
+
+        try await withCheckedThrowingContinuation { continuation in
+            webSocket.sendPing { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: ())
+                }
+            }
+        }
+    }
+
+    private func handleKeepaliveFailure(_ error: Error) {
+        keepaliveTask?.cancel()
+        keepaliveTask = nil
+        if expectingReloadDisconnect {
+            expectingReloadDisconnect = false
+            setState(.disconnected)
+            eventContinuation?.yield(.stateChanged(.disconnected))
+            return
+        }
+
+        let message = error.localizedDescription
+        setState(.error(message))
+        eventContinuation?.yield(.stateChanged(.error(message)))
+    }
+
     private func handleReceive(_ result: Result<URLSessionWebSocketTask.Message, Error>) {
         switch result {
         case .success(let message):
@@ -161,6 +216,8 @@ public actor JCodeConnection {
             startReceiving()
 
         case .failure(let error):
+            keepaliveTask?.cancel()
+            keepaliveTask = nil
             if expectingReloadDisconnect {
                 expectingReloadDisconnect = false
                 setState(.disconnected)

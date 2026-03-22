@@ -3559,6 +3559,7 @@ async fn stream_response_websocket_persistent(
             ws_stream,
             last_response_id: resp_id,
             connected_at,
+            last_activity_at: Instant::now(),
             message_count: 1,
             last_input_item_count: input_item_count,
         });

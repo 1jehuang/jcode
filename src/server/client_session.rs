@@ -345,11 +345,11 @@ pub(super) async fn handle_reload(
     };
     let hash = env!("JCODE_GIT_HASH").to_string();
     let signal_request_id =
-        crate::server::send_reload_signal(hash, triggering_session, prefer_selfdev_binary);
+        crate::server::send_reload_signal(hash, triggering_session.clone(), prefer_selfdev_binary);
 
     crate::logging::info(&format!(
-        "Queued reload signal {} from remote client request {}",
-        signal_request_id, request_id
+        "handle_reload: queued reload signal {} from remote client request {} (triggering_session={:?}, prefer_selfdev_binary={})",
+        signal_request_id, request_id, triggering_session, prefer_selfdev_binary
     ));
 
     let _ = client_event_tx.send(ServerEvent::Done { id });

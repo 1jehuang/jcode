@@ -274,8 +274,13 @@ impl SelfDevTool {
         // Signal the server via in-process channel (replaces filesystem-based rebuild-signal)
         let request_id =
             server::send_reload_signal(hash.clone(), Some(session_id.to_string()), true);
+        crate::logging::info(&format!(
+            "selfdev reload: request={} session_id={} hash={} execution_mode={:?}",
+            request_id, session_id, hash, execution_mode
+        ));
 
         let timeout = std::time::Duration::from_secs(SelfDevTool::reload_timeout_secs());
+        let ack_wait_started = std::time::Instant::now();
         let ack = server::wait_for_reload_ack(&request_id, timeout)
             .await
             .map_err(|error| {
@@ -287,8 +292,11 @@ impl SelfDevTool {
             })?;
 
         crate::logging::info(&format!(
-            "Reload acknowledged by server for request {} ({})",
-            ack.request_id, ack.hash
+            "selfdev reload: acked request={} hash={} after {}ms state={}",
+            ack.request_id,
+            ack.hash,
+            ack_wait_started.elapsed().as_millis(),
+            server::reload_state_summary(std::time::Duration::from_secs(60))
         ));
 
         match execution_mode {
@@ -305,11 +313,20 @@ impl SelfDevTool {
 
                 match tokio::time::timeout(timeout, sleep_forever).await {
                     Ok(_) => unreachable!("infinite wait future unexpectedly completed"),
-                    Err(_) => Err(anyhow::anyhow!(
-                        "Reload was acknowledged by the server for build {}, but this tool execution was not interrupted within {}s. The server restart may be stuck; inspect logs and active sessions.",
-                        ack.hash,
-                        timeout.as_secs()
-                    )),
+                    Err(_) => {
+                        crate::logging::warn(&format!(
+                            "selfdev reload: request={} not interrupted after {}ms state={} ",
+                            ack.request_id,
+                            timeout.as_millis(),
+                            server::reload_state_summary(std::time::Duration::from_secs(60))
+                        ));
+                        Err(anyhow::anyhow!(
+                            "Reload was acknowledged by the server for build {}, but this tool execution was not interrupted within {}s. The server restart may be stuck; inspect logs and active sessions. Current reload state: {}",
+                            ack.hash,
+                            timeout.as_secs(),
+                            server::reload_state_summary(std::time::Duration::from_secs(60))
+                        ))
+                    }
                 }
             }
         }

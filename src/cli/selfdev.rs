@@ -119,6 +119,14 @@ pub async fn run_self_dev(should_build: bool, resume_session: Option<String>) ->
                 crate::server::ReloadPhase::SocketReady => {}
             }
         }
+
+        if !server_running {
+            server_running = super::dispatch::wait_for_resuming_server(
+                "self-dev resume without reload marker",
+                std::time::Duration::from_secs(5),
+            )
+            .await;
+        }
     }
 
     if !server_running {

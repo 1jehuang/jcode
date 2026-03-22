@@ -870,13 +870,31 @@ pub(super) async fn handle_client(
                 .await;
             }
 
-            Request::Transcript { id, .. } => {
-                let _ = client_event_tx.send(ServerEvent::Error {
-                    id,
-                    message: "Transcript injection is only supported on the debug socket."
-                        .to_string(),
-                    retry_after_secs: None,
-                });
+            Request::Transcript {
+                id,
+                text,
+                mode,
+                session_id,
+            } => {
+                let target_matches = session_id
+                    .as_deref()
+                    .map(|target| target == client_session_id.as_str())
+                    .unwrap_or(true);
+
+                if target_matches {
+                    let _ = client_event_tx.send(ServerEvent::Transcript { text, mode });
+                    let _ = client_event_tx.send(ServerEvent::Done { id });
+                } else {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message: format!(
+                            "Transcript target '{}' does not match current client session '{}'.",
+                            session_id.unwrap_or_default(),
+                            client_session_id
+                        ),
+                        retry_after_secs: None,
+                    });
+                }
             }
 
             Request::InputShell { id, command } => {

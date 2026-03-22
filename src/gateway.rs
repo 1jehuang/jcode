@@ -18,6 +18,7 @@ use futures::stream::StreamExt;
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -27,6 +28,7 @@ use crate::storage;
 
 /// Default gateway port ("jc" on phone keypad = 52, but we use 7643)
 pub const DEFAULT_PORT: u16 = 7643;
+const WEBSOCKET_KEEPALIVE_INTERVAL_SECS: u64 = 20;
 
 /// Gateway configuration
 #[derive(Debug, Clone)]
@@ -363,6 +365,7 @@ async fn handle_ws_connection(
     let writer_for_ws = Arc::clone(&bridge_writer);
     let sink_for_ping = Arc::clone(&ws_sink);
     let sink_for_unix = Arc::clone(&ws_sink);
+    let sink_for_keepalive = Arc::clone(&ws_sink);
     let ws_to_unix = tokio::spawn(async move {
         let mut ws_source = ws_source;
         while let Some(msg) = ws_source.next().await {
@@ -396,6 +399,23 @@ async fn handle_ws_connection(
         }
     });
 
+    let keepalive_device_name = device_name.clone();
+    let keepalive = tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(WEBSOCKET_KEEPALIVE_INTERVAL_SECS));
+        loop {
+            interval.tick().await;
+            let mut sink = sink_for_keepalive.lock().await;
+            if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
+                logging::info(&format!(
+                    "Gateway: stopping keepalive for {} after ping send failure",
+                    keepalive_device_name
+                ));
+                break;
+            }
+        }
+    });
+
     // Task 2: Unix socket → WebSocket (server events)
     let unix_to_ws = tokio::spawn(async move {
         let mut line = String::new();
@@ -418,10 +438,19 @@ async fn handle_ws_connection(
     });
 
     // Wait for either direction to finish
+    tokio::pin!(ws_to_unix);
+    tokio::pin!(unix_to_ws);
+    tokio::pin!(keepalive);
+
     tokio::select! {
-        _ = ws_to_unix => {}
-        _ = unix_to_ws => {}
+        _ = &mut ws_to_unix => {}
+        _ = &mut unix_to_ws => {}
+        _ = &mut keepalive => {}
     }
+
+    ws_to_unix.abort();
+    unix_to_ws.abort();
+    keepalive.abort();
 
     logging::info(&format!("Gateway: {} disconnected", device_name));
     Ok(())

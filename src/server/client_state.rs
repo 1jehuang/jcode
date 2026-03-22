@@ -6,6 +6,7 @@ use crate::transport::WriteHalf;
 use anyhow::Result;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, RwLock};
 
@@ -72,8 +73,10 @@ pub(super) async fn send_history(
     server_icon: &str,
     was_interrupted: Option<bool>,
 ) -> Result<()> {
+    let history_start = Instant::now();
     let (
         messages,
+        images,
         is_canary,
         provider_name,
         provider_model,
@@ -85,26 +88,53 @@ pub(super) async fn send_history(
         reasoning_effort,
         service_tier,
         compaction_mode,
-        side_panel,
+        history_snapshot_ms,
+        image_render_ms,
+        tool_names_ms,
+        compaction_mode_ms,
     ) = {
         let agent_guard = agent.lock().await;
         let provider = agent_guard.provider_handle();
+        let history_snapshot_start = Instant::now();
+        let messages = agent_guard.get_history();
+        let history_snapshot_ms = history_snapshot_start.elapsed().as_millis();
+
+        let image_render_start = Instant::now();
+        let images = agent_guard.get_rendered_images();
+        let image_render_ms = image_render_start.elapsed().as_millis();
+
+        let tool_names_start = Instant::now();
+        let tool_names = agent_guard.tool_names().await;
+        let tool_names_ms = tool_names_start.elapsed().as_millis();
+
+        let compaction_mode_start = Instant::now();
+        let compaction_mode = agent_guard.compaction_mode().await;
+        let compaction_mode_ms = compaction_mode_start.elapsed().as_millis();
+
         (
-            agent_guard.get_history(),
+            messages,
+            images,
             agent_guard.is_canary(),
             agent_guard.provider_name(),
             agent_guard.provider_model(),
             agent_guard.available_models_display(),
             agent_guard.model_routes(),
-            agent_guard.tool_names().await,
+            tool_names,
             agent_guard.last_upstream_provider(),
             agent_guard.last_connection_type(),
             provider.reasoning_effort(),
             provider.service_tier(),
-            agent_guard.compaction_mode().await,
-            crate::side_panel::snapshot_for_session(session_id).unwrap_or_default(),
+            compaction_mode,
+            history_snapshot_ms,
+            image_render_ms,
+            tool_names_ms,
+            compaction_mode_ms,
         )
     };
+
+    let side_panel_start = Instant::now();
+    let side_panel = crate::side_panel::snapshot_for_session(session_id).unwrap_or_default();
+    let side_panel_ms = side_panel_start.elapsed().as_millis();
 
     let mut mcp_map: BTreeMap<String, usize> = BTreeMap::new();
     for name in &tool_names {
@@ -130,13 +160,30 @@ pub(super) async fn send_history(
         .unwrap_or_default();
 
     let (all_sessions, current_client_count) = {
+        let sessions_snapshot_start = Instant::now();
         let sessions_guard = sessions.read().await;
         let all: Vec<String> = sessions_guard.keys().cloned().collect();
         let count = *client_count.read().await;
+        let sessions_snapshot_ms = sessions_snapshot_start.elapsed().as_millis();
+        crate::logging::info(&format!(
+            "[TIMING] send_history prep: session={}, messages={}, images={}, mcp_servers={}, history={}ms, images={}ms, tool_names={}ms, compaction={}ms, side_panel={}ms, sessions={}ms, total={}ms",
+            session_id,
+            messages.len(),
+            images.len(),
+            mcp_servers.len(),
+            history_snapshot_ms,
+            image_render_ms,
+            tool_names_ms,
+            compaction_mode_ms,
+            side_panel_ms,
+            sessions_snapshot_ms,
+            history_start.elapsed().as_millis(),
+        ));
         (all, count)
     };
 
-    write_event(
+    let write_start = Instant::now();
+    let result = write_event(
         writer,
         &ServerEvent::History {
             id,
@@ -165,7 +212,16 @@ pub(super) async fn send_history(
             side_panel,
         },
     )
-    .await
+    .await;
+
+    crate::logging::info(&format!(
+        "[TIMING] send_history write: session={}, write={}ms, total={}ms",
+        session_id,
+        write_start.elapsed().as_millis(),
+        history_start.elapsed().as_millis(),
+    ));
+
+    result
 }
 
 async fn write_event(writer: &Arc<Mutex<WriteHalf>>, event: &ServerEvent) -> Result<()> {

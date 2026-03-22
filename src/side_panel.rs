@@ -18,6 +18,23 @@ impl SidePanelPageFormat {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SidePanelPageSource {
+    #[default]
+    Managed,
+    LinkedFile,
+}
+
+impl SidePanelPageSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Managed => "managed",
+            Self::LinkedFile => "linked_file",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SidePanelPage {
     pub id: String,
@@ -25,6 +42,8 @@ pub struct SidePanelPage {
     pub file_path: String,
     #[serde(default)]
     pub format: SidePanelPageFormat,
+    #[serde(default)]
+    pub source: SidePanelPageSource,
     #[serde(default)]
     pub content: String,
     #[serde(default)]
@@ -69,6 +88,8 @@ struct PersistedSidePanelPage {
     file_path: String,
     #[serde(default)]
     format: SidePanelPageFormat,
+    #[serde(default)]
+    source: SidePanelPageSource,
     updated_at_ms: u64,
 }
 
@@ -95,6 +116,42 @@ pub fn append_markdown_page(
     focus: bool,
 ) -> Result<SidePanelSnapshot> {
     write_page(session_id, page_id, title, content, focus, true)
+}
+
+pub fn load_markdown_file(
+    session_id: &str,
+    page_id: &str,
+    title: Option<&str>,
+    source_path: &Path,
+    focus: bool,
+) -> Result<SidePanelSnapshot> {
+    validate_page_id(page_id)?;
+    validate_markdown_source_path(source_path)?;
+
+    let content = std::fs::read_to_string(source_path)
+        .with_context(|| format!("failed to read {}", source_path.display()))?;
+    let source_path =
+        std::fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
+
+    let mut state = load_state(session_id)?;
+    let now = now_ms();
+
+    upsert_page_record(
+        &mut state,
+        page_id,
+        title,
+        &source_path,
+        SidePanelPageSource::LinkedFile,
+        now,
+        focus,
+    );
+    save_state(session_id, &state)?;
+
+    let mut snapshot = hydrate_snapshot(state)?;
+    if let Some(page) = snapshot.pages.iter_mut().find(|page| page.id == page_id) {
+        page.content = content;
+    }
+    Ok(snapshot)
 }
 
 pub fn focus_page(session_id: &str, page_id: &str) -> Result<SidePanelSnapshot> {
@@ -156,11 +213,12 @@ pub fn status_output(snapshot: &SidePanelSnapshot) -> String {
             " "
         };
         out.push_str(&format!(
-            "{} {} ({})\n  title: {}\n  file: {}\n",
+            "{} {} ({})\n  title: {}\n  source: {}\n  file: {}\n",
             focus_marker,
             page.id,
             page.format.as_str(),
             page.title,
+            page.source.as_str(),
             page.file_path
         ));
     }
@@ -199,15 +257,40 @@ fn write_page(
     std::fs::write(&page_path, &combined_content)
         .with_context(|| format!("failed to write {}", page_path.display()))?;
 
+    upsert_page_record(
+        &mut state,
+        page_id,
+        title,
+        &page_path,
+        SidePanelPageSource::Managed,
+        now,
+        focus,
+    );
+
+    save_state(session_id, &state)?;
+    hydrate_snapshot(state)
+}
+
+fn upsert_page_record(
+    state: &mut PersistedSidePanelState,
+    page_id: &str,
+    title: Option<&str>,
+    file_path: &Path,
+    source: SidePanelPageSource,
+    updated_at_ms: u64,
+    focus: bool,
+) {
+    let file_path = file_path.display().to_string();
     if let Some(existing) = state.pages.iter_mut().find(|page| page.id == page_id) {
         existing.title = title
             .map(str::trim)
             .filter(|t| !t.is_empty())
             .unwrap_or(existing.title.as_str())
             .to_string();
-        existing.file_path = page_path.display().to_string();
+        existing.file_path = file_path;
         existing.format = SidePanelPageFormat::Markdown;
-        existing.updated_at_ms = now;
+        existing.source = source;
+        existing.updated_at_ms = updated_at_ms;
     } else {
         state.pages.push(PersistedSidePanelPage {
             id: page_id.to_string(),
@@ -216,9 +299,10 @@ fn write_page(
                 .filter(|t| !t.is_empty())
                 .unwrap_or(page_id)
                 .to_string(),
-            file_path: page_path.display().to_string(),
+            file_path,
             format: SidePanelPageFormat::Markdown,
-            updated_at_ms: now,
+            source,
+            updated_at_ms,
         });
     }
 
@@ -231,9 +315,6 @@ fn write_page(
     if focus || state.focused_page_id.is_none() {
         state.focused_page_id = Some(page_id.to_string());
     }
-
-    save_state(session_id, &state)?;
-    hydrate_snapshot(state)
 }
 
 fn hydrate_snapshot(state: PersistedSidePanelState) -> Result<SidePanelSnapshot> {
@@ -247,6 +328,7 @@ fn hydrate_snapshot(state: PersistedSidePanelState) -> Result<SidePanelSnapshot>
                 title: page.title,
                 file_path: page.file_path,
                 format: page.format,
+                source: page.source,
                 content,
                 updated_at_ms: page.updated_at_ms,
             }
@@ -301,6 +383,27 @@ fn validate_page_id(page_id: &str) -> Result<()> {
     if Path::new(page_id).components().count() != 1 {
         anyhow::bail!("page_id cannot contain path separators");
     }
+    Ok(())
+}
+
+fn validate_markdown_source_path(path: &Path) -> Result<()> {
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase());
+
+    let is_markdown = matches!(
+        ext.as_deref(),
+        Some("md") | Some("markdown") | Some("mdown") | Some("mkd") | Some("mkdn")
+    );
+
+    if !is_markdown {
+        anyhow::bail!(
+            "side_panel load only supports markdown files (.md, .markdown, .mdown, .mkd, .mkdn): {}",
+            path.display()
+        );
+    }
+
     Ok(())
 }
 
@@ -381,5 +484,101 @@ mod tests {
         } else {
             crate::env::remove_var("JCODE_HOME");
         }
+    }
+
+    #[test]
+    fn load_markdown_file_uses_source_path_content() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let source = temp.path().join("guide.md");
+        std::fs::write(&source, "# Guide\n\nHello").expect("write source file");
+
+        let snapshot =
+            load_markdown_file("ses_side_panel_load", "guide", Some("Guide"), &source, true)
+                .expect("load markdown file");
+
+        assert_eq!(snapshot.focused_page_id.as_deref(), Some("guide"));
+        let page = snapshot
+            .pages
+            .iter()
+            .find(|page| page.id == "guide")
+            .expect("guide page");
+        assert_eq!(page.title, "Guide");
+        assert_eq!(page.source, SidePanelPageSource::LinkedFile);
+        assert_eq!(page.content, "# Guide\n\nHello");
+        assert_eq!(
+            Path::new(&page.file_path),
+            source.canonicalize().expect("canonical path")
+        );
+
+        std::fs::write(&source, "# Guide\n\nUpdated").expect("update source file");
+        let reloaded = snapshot_for_session("ses_side_panel_load").expect("reload snapshot");
+        let page = reloaded
+            .pages
+            .iter()
+            .find(|page| page.id == "guide")
+            .expect("guide page");
+        assert_eq!(page.content, "# Guide\n\nUpdated");
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn load_markdown_file_rejects_non_markdown_extensions() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let source = temp.path().join("notes.txt");
+        std::fs::write(&source, "not markdown").expect("write source file");
+
+        let err = load_markdown_file("ses_side_panel_load", "notes", Some("Notes"), &source, true)
+            .expect_err("non-markdown load should fail");
+        assert!(err.to_string().contains("only supports markdown files"));
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn status_output_marks_linked_and_managed_pages() {
+        let snapshot = SidePanelSnapshot {
+            focused_page_id: Some("linked".to_string()),
+            pages: vec![
+                SidePanelPage {
+                    id: "linked".to_string(),
+                    title: "Linked".to_string(),
+                    file_path: "/tmp/linked.md".to_string(),
+                    format: SidePanelPageFormat::Markdown,
+                    source: SidePanelPageSource::LinkedFile,
+                    content: String::new(),
+                    updated_at_ms: 2,
+                },
+                SidePanelPage {
+                    id: "managed".to_string(),
+                    title: "Managed".to_string(),
+                    file_path: "/tmp/managed.md".to_string(),
+                    format: SidePanelPageFormat::Markdown,
+                    source: SidePanelPageSource::Managed,
+                    content: String::new(),
+                    updated_at_ms: 1,
+                },
+            ],
+        };
+
+        let output = status_output(&snapshot);
+        assert!(output.contains("source: linked_file"));
+        assert!(output.contains("source: managed"));
     }
 }
