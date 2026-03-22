@@ -507,7 +507,7 @@ impl Agent {
     fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
         // Convert session messages to provider messages (single allocation)
         let all_messages = self.session.messages_for_provider();
-        if self.provider.supports_compaction() {
+        if self.provider.uses_jcode_compaction() {
             let compaction = self.registry.compaction();
             match compaction.try_write() {
                 Ok(mut manager) => {
@@ -588,7 +588,7 @@ impl Agent {
         cache_read_input_tokens: Option<u64>,
         cache_creation_input_tokens: Option<u64>,
     ) {
-        if !self.provider.supports_compaction() || input_tokens == 0 {
+        if !self.provider.uses_jcode_compaction() || input_tokens == 0 {
             return;
         }
         let observed = self.effective_context_tokens_from_usage(
@@ -1280,6 +1280,9 @@ impl Agent {
                     ContentBlock::Image { .. } => {
                         transcript.push_str("[Image]\n");
                     }
+                    ContentBlock::OpenAICompaction { .. } => {
+                        transcript.push_str("[OpenAI native compaction]\n");
+                    }
                 }
             }
             transcript.push('\n');
@@ -1453,6 +1456,9 @@ impl Agent {
                     }
                     ContentBlock::Image { .. } => {
                         md.push_str("[Image]\n\n");
+                    }
+                    ContentBlock::OpenAICompaction { .. } => {
+                        md.push_str("[OpenAI native compaction]\n\n");
                     }
                 }
             }
@@ -1941,6 +1947,9 @@ impl Agent {
                     ContentBlock::Image { .. } => {
                         transcript.push_str("[Image]\n");
                     }
+                    ContentBlock::OpenAICompaction { .. } => {
+                        transcript.push_str("[OpenAI native compaction]\n");
+                    }
                 }
             }
             transcript.push('\n');
@@ -2296,6 +2305,7 @@ impl Agent {
                         if trace {
                             eprintln!("[trace] connection_type={}", connection);
                         }
+                        crate::telemetry::record_connection_type(&connection);
                         self.last_connection_type = Some(connection);
                     }
                     StreamEvent::ConnectionPhase { phase } => {
@@ -3075,6 +3085,7 @@ impl Agent {
                         }
                     }
                     StreamEvent::ConnectionType { connection } => {
+                        crate::telemetry::record_connection_type(&connection);
                         self.last_connection_type = Some(connection.clone());
                         let _ = event_tx.send(ServerEvent::ConnectionType { connection });
                     }
@@ -3824,6 +3835,7 @@ impl Agent {
                         }
                     }
                     StreamEvent::ConnectionType { connection } => {
+                        crate::telemetry::record_connection_type(&connection);
                         self.last_connection_type = Some(connection.clone());
                         let _ = event_tx.send(ServerEvent::ConnectionType { connection });
                     }

@@ -58,6 +58,12 @@ struct SessionLifecycleEvent {
     assistant_responses: u32,
     tool_calls: u32,
     tool_failures: u32,
+    transport_https: u32,
+    transport_persistent_ws_fresh: u32,
+    transport_persistent_ws_reuse: u32,
+    transport_cli_subprocess: u32,
+    transport_native_http2: u32,
+    transport_other: u32,
     resumed_session: bool,
     end_reason: &'static str,
     errors: ErrorCounts,
@@ -82,7 +88,14 @@ struct SessionTelemetry {
     assistant_responses: u32,
     tool_calls: u32,
     tool_failures: u32,
+    transport_https: u32,
+    transport_persistent_ws_fresh: u32,
+    transport_persistent_ws_reuse: u32,
+    transport_cli_subprocess: u32,
+    transport_native_http2: u32,
+    transport_other: u32,
     resumed_session: bool,
+    start_event_sent: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -186,6 +199,101 @@ fn current_error_counts() -> ErrorCounts {
     }
 }
 
+fn sanitize_telemetry_label(value: &str) -> String {
+    let mut cleaned = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            if matches!(chars.peek(), Some('[')) {
+                let _ = chars.next();
+                while let Some(next) = chars.next() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+                continue;
+            }
+            continue;
+        }
+        if ch.is_control() {
+            continue;
+        }
+        cleaned.push(ch);
+    }
+    cleaned.trim().to_string()
+}
+
+fn has_any_errors(errors: &ErrorCounts) -> bool {
+    errors.provider_timeout > 0
+        || errors.auth_failed > 0
+        || errors.tool_error > 0
+        || errors.mcp_error > 0
+        || errors.rate_limited > 0
+}
+
+fn session_has_meaningful_activity(state: &SessionTelemetry, errors: &ErrorCounts) -> bool {
+    state.had_user_prompt
+        || state.had_assistant_response
+        || state.assistant_responses > 0
+        || state.tool_calls > 0
+        || state.tool_failures > 0
+        || PROVIDER_SWITCHES.load(Ordering::Relaxed) > 0
+        || MODEL_SWITCHES.load(Ordering::Relaxed) > 0
+        || has_any_errors(errors)
+}
+
+fn maybe_emit_session_start() {
+    if !is_enabled() {
+        return;
+    }
+    let event = {
+        let mut guard = match SESSION_STATE.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        let state = match guard.as_mut() {
+            Some(state) => state,
+            None => return,
+        };
+        if state.start_event_sent {
+            return;
+        }
+        state.start_event_sent = true;
+        SessionStartEvent {
+            id: match get_or_create_id() {
+                Some(id) => id,
+                None => return,
+            },
+            event: "session_start",
+            version: version(),
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            provider_start: state.provider_start.clone(),
+            model_start: state.model_start.clone(),
+            resumed_session: state.resumed_session,
+        }
+    };
+    if let Ok(payload) = serde_json::to_value(&event) {
+        fire_and_forget(payload);
+    }
+}
+
+fn emit_session_start_for_state(id: String, state: &SessionTelemetry) {
+    let event = SessionStartEvent {
+        id,
+        event: "session_start",
+        version: version(),
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        provider_start: state.provider_start.clone(),
+        model_start: state.model_start.clone(),
+        resumed_session: state.resumed_session,
+    };
+    if let Ok(payload) = serde_json::to_value(&event) {
+        fire_and_forget(payload);
+    }
+}
+
 pub fn record_install_if_first_run() {
     if !is_enabled() {
         return;
@@ -222,39 +330,29 @@ fn begin_session_with_mode(provider: &str, model: &str, resumed_session: bool) {
     if !is_enabled() {
         return;
     }
-    let id = match get_or_create_id() {
-        Some(id) => id,
-        None => return,
-    };
     let state = SessionTelemetry {
         started_at: Instant::now(),
-        provider_start: provider.to_string(),
-        model_start: model.to_string(),
+        provider_start: sanitize_telemetry_label(provider),
+        model_start: sanitize_telemetry_label(model),
         turns: 0,
         had_user_prompt: false,
         had_assistant_response: false,
         assistant_responses: 0,
         tool_calls: 0,
         tool_failures: 0,
+        transport_https: 0,
+        transport_persistent_ws_fresh: 0,
+        transport_persistent_ws_reuse: 0,
+        transport_cli_subprocess: 0,
+        transport_native_http2: 0,
+        transport_other: 0,
         resumed_session,
+        start_event_sent: false,
     };
     if let Ok(mut guard) = SESSION_STATE.lock() {
         *guard = Some(state);
     }
     reset_counters();
-    let event = SessionStartEvent {
-        id,
-        event: "session_start",
-        version: version(),
-        os: std::env::consts::OS,
-        arch: std::env::consts::ARCH,
-        provider_start: provider.to_string(),
-        model_start: model.to_string(),
-        resumed_session,
-    };
-    if let Ok(payload) = serde_json::to_value(&event) {
-        fire_and_forget(payload);
-    }
 }
 
 pub fn record_turn() {
@@ -264,6 +362,7 @@ pub fn record_turn() {
             state.had_user_prompt = true;
         }
     }
+    maybe_emit_session_start();
 }
 
 pub fn record_assistant_response() {
@@ -273,6 +372,7 @@ pub fn record_assistant_response() {
             state.assistant_responses += 1;
         }
     }
+    maybe_emit_session_start();
 }
 
 pub fn record_tool_call() {
@@ -281,6 +381,7 @@ pub fn record_tool_call() {
             state.tool_calls += 1;
         }
     }
+    maybe_emit_session_start();
 }
 
 pub fn record_tool_failure() {
@@ -289,6 +390,31 @@ pub fn record_tool_failure() {
             state.tool_failures += 1;
         }
     }
+    maybe_emit_session_start();
+}
+
+pub fn record_connection_type(connection: &str) {
+    if let Ok(mut guard) = SESSION_STATE.lock() {
+        if let Some(ref mut state) = *guard {
+            let normalized = sanitize_telemetry_label(connection).to_ascii_lowercase();
+            if normalized.contains("websocket/persistent-reuse") {
+                state.transport_persistent_ws_reuse += 1;
+            } else if normalized.contains("websocket/persistent-fresh")
+                || normalized.contains("websocket/persistent")
+            {
+                state.transport_persistent_ws_fresh += 1;
+            } else if normalized.contains("native http2") {
+                state.transport_native_http2 += 1;
+            } else if normalized.contains("cli subprocess") {
+                state.transport_cli_subprocess += 1;
+            } else if normalized.starts_with("https") {
+                state.transport_https += 1;
+            } else {
+                state.transport_other += 1;
+            }
+        }
+    }
+    maybe_emit_session_start();
 }
 
 pub fn record_error(category: ErrorCategory) {
@@ -309,14 +435,17 @@ pub fn record_error(category: ErrorCategory) {
             ERROR_RATE_LIMITED.fetch_add(1, Ordering::Relaxed);
         }
     }
+    maybe_emit_session_start();
 }
 
 pub fn record_provider_switch() {
     PROVIDER_SWITCHES.fetch_add(1, Ordering::Relaxed);
+    maybe_emit_session_start();
 }
 
 pub fn record_model_switch() {
     MODEL_SWITCHES.fetch_add(1, Ordering::Relaxed);
+    maybe_emit_session_start();
 }
 
 pub fn end_session(provider_end: &str, model_end: &str) {
@@ -369,7 +498,14 @@ fn emit_lifecycle_event(
                 assistant_responses: s.assistant_responses,
                 tool_calls: s.tool_calls,
                 tool_failures: s.tool_failures,
+                transport_https: s.transport_https,
+                transport_persistent_ws_fresh: s.transport_persistent_ws_fresh,
+                transport_persistent_ws_reuse: s.transport_persistent_ws_reuse,
+                transport_cli_subprocess: s.transport_cli_subprocess,
+                transport_native_http2: s.transport_native_http2,
+                transport_other: s.transport_other,
                 resumed_session: s.resumed_session,
+                start_event_sent: s.start_event_sent,
             },
             None => return,
         };
@@ -378,6 +514,14 @@ fn emit_lifecycle_event(
         }
         state
     };
+    let errors = current_error_counts();
+    if !session_has_meaningful_activity(&state, &errors) {
+        reset_counters();
+        return;
+    }
+    if !state.start_event_sent {
+        emit_session_start_for_state(id.clone(), &state);
+    }
     let duration = state.started_at.elapsed();
     let event = SessionLifecycleEvent {
         id,
@@ -386,9 +530,9 @@ fn emit_lifecycle_event(
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
         provider_start: state.provider_start,
-        provider_end: provider_end.to_string(),
+        provider_end: sanitize_telemetry_label(provider_end),
         model_start: state.model_start,
-        model_end: model_end.to_string(),
+        model_end: sanitize_telemetry_label(model_end),
         provider_switches: PROVIDER_SWITCHES.load(Ordering::Relaxed),
         model_switches: MODEL_SWITCHES.load(Ordering::Relaxed),
         duration_mins: duration.as_secs() / 60,
@@ -398,13 +542,20 @@ fn emit_lifecycle_event(
         assistant_responses: state.assistant_responses,
         tool_calls: state.tool_calls,
         tool_failures: state.tool_failures,
+        transport_https: state.transport_https,
+        transport_persistent_ws_fresh: state.transport_persistent_ws_fresh,
+        transport_persistent_ws_reuse: state.transport_persistent_ws_reuse,
+        transport_cli_subprocess: state.transport_cli_subprocess,
+        transport_native_http2: state.transport_native_http2,
+        transport_other: state.transport_other,
         resumed_session: state.resumed_session,
         end_reason: reason.as_str(),
-        errors: current_error_counts(),
+        errors,
     };
     if let Ok(payload) = serde_json::to_value(&event) {
         fire_and_forget(payload);
     }
+    reset_counters();
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -499,6 +650,12 @@ mod tests {
             assistant_responses: 3,
             tool_calls: 4,
             tool_failures: 1,
+            transport_https: 2,
+            transport_persistent_ws_fresh: 1,
+            transport_persistent_ws_reuse: 5,
+            transport_cli_subprocess: 0,
+            transport_native_http2: 0,
+            transport_other: 0,
             resumed_session: false,
             end_reason: "normal_exit",
             errors: ErrorCounts {
@@ -512,7 +669,37 @@ mod tests {
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["event"], "session_end");
         assert_eq!(json["assistant_responses"], 3);
+        assert_eq!(json["transport_https"], 2);
+        assert_eq!(json["transport_persistent_ws_reuse"], 5);
         assert_eq!(json["end_reason"], "normal_exit");
         assert_eq!(json["errors"]["provider_timeout"], 2);
+    }
+
+    #[test]
+    fn test_record_connection_type_buckets_transport() {
+        begin_session_with_mode("openai", "gpt-5.4", false);
+        record_connection_type("websocket/persistent-fresh");
+        record_connection_type("websocket/persistent-reuse");
+        record_connection_type("https/sse");
+        record_connection_type("native http2");
+        record_connection_type("cli subprocess");
+        record_connection_type("weird-transport");
+
+        let guard = SESSION_STATE.lock().unwrap();
+        let state = guard.as_ref().expect("session telemetry state");
+        assert_eq!(state.transport_persistent_ws_fresh, 1);
+        assert_eq!(state.transport_persistent_ws_reuse, 1);
+        assert_eq!(state.transport_https, 1);
+        assert_eq!(state.transport_native_http2, 1);
+        assert_eq!(state.transport_cli_subprocess, 1);
+        assert_eq!(state.transport_other, 1);
+    }
+
+    #[test]
+    fn test_sanitize_telemetry_label_strips_ansi_and_controls() {
+        assert_eq!(
+            sanitize_telemetry_label("\u{1b}[1mclaude-opus-4-6\u{1b}[0m\n"),
+            "claude-opus-4-6"
+        );
     }
 }

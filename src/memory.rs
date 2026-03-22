@@ -933,6 +933,9 @@ fn format_content_block(block: &crate::message::ContentBlock) -> Option<String> 
         }
         crate::message::ContentBlock::Reasoning { .. } => None,
         crate::message::ContentBlock::Image { .. } => Some("[Image]".to_string()),
+        crate::message::ContentBlock::OpenAICompaction { .. } => {
+            Some("[OpenAI native compaction]".to_string())
+        }
     }
 }
 

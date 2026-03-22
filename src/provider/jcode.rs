@@ -152,6 +152,14 @@ impl Provider for JcodeProvider {
         self.inner.available_efforts()
     }
 
+    fn native_compaction_mode(&self) -> Option<String> {
+        self.inner.native_compaction_mode()
+    }
+
+    fn native_compaction_threshold_tokens(&self) -> Option<usize> {
+        self.inner.native_compaction_threshold_tokens()
+    }
+
     fn transport(&self) -> Option<String> {
         self.inner.transport()
     }
@@ -182,6 +190,25 @@ impl Provider for JcodeProvider {
 
     fn supports_compaction(&self) -> bool {
         self.inner.supports_compaction()
+    }
+
+    fn uses_jcode_compaction(&self) -> bool {
+        self.inner.uses_jcode_compaction()
+    }
+
+    async fn native_compact(
+        &self,
+        messages: &[Message],
+        existing_summary_text: Option<&str>,
+        existing_openai_encrypted_content: Option<&str>,
+    ) -> Result<crate::provider::NativeCompactionResult> {
+        self.inner
+            .native_compact(
+                messages,
+                existing_summary_text,
+                existing_openai_encrypted_content,
+            )
+            .await
     }
 
     fn context_window(&self) -> usize {

@@ -397,6 +397,33 @@ impl GeminiProvider {
         })
     }
 
+    async fn refresh_available_models(&self) -> Result<Vec<String>> {
+        let project_id_env = google_cloud_project_from_env();
+        let load_req = load_code_assist_request(
+            project_id_env.clone(),
+            client_metadata(project_id_env.clone()),
+        );
+        let response: Value = match self.post_json("loadCodeAssist", &load_req).await {
+            Ok(response) => response,
+            Err(err) if is_vpc_sc_error(&err) => Value::Null,
+            Err(err) => {
+                return Err(err).context("Gemini model discovery failed during loadCodeAssist");
+            }
+        };
+
+        let models = extract_gemini_model_ids(&response);
+        if !models.is_empty() {
+            crate::logging::info(&format!(
+                "Discovered Gemini Code Assist models: {}",
+                models.join(", ")
+            ));
+            if let Ok(mut guard) = self.fetched_models.write() {
+                *guard = models.clone();
+            }
+        }
+        Ok(models)
+    }
+
     async fn post_json<T: DeserializeOwned>(
         &self,
         method: &str,
@@ -1025,6 +1052,7 @@ fn build_contents(messages: &[Message]) -> Vec<GeminiContent> {
                             ..Default::default()
                         });
                     }
+                    crate::message::ContentBlock::OpenAICompaction { .. } => {}
                 }
             }
             if parts.is_empty() {

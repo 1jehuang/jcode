@@ -49,6 +49,12 @@ jcode collects **anonymous, minimal usage statistics** to help understand how ma
 | `assistant_responses` | `6` | Number of assistant responses |
 | `tool_calls` | `8` | Number of tool executions |
 | `tool_failures` | `1` | Number of tool execution failures |
+| `transport_https` | `2` | Number of provider requests sent over HTTPS/SSE |
+| `transport_persistent_ws_fresh` | `1` | Number of fresh persistent WebSocket requests |
+| `transport_persistent_ws_reuse` | `5` | Number of turns that reused an existing persistent WebSocket |
+| `transport_cli_subprocess` | `0` | Number of requests sent through a CLI subprocess transport |
+| `transport_native_http2` | `0` | Number of requests sent through native HTTP/2 transports |
+| `transport_other` | `0` | Number of requests using any other transport |
 | `resumed_session` | `false` | Whether this session was resumed |
 | `end_reason` | `"normal_exit"` | Coarse end reason |
 | `errors` | `{"provider_timeout": 0, ...}` | Count of errors by category |

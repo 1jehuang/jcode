@@ -1,3 +1,5 @@
+let cachedEventColumns = null;
+
 export default {
   async fetch(request, env) {
     if (request.method === "OPTIONS") {
@@ -36,73 +38,7 @@ export default {
     }
 
     try {
-      if (body.event === "install") {
-        await env.DB.prepare(
-          `INSERT INTO events (telemetry_id, event, version, os, arch)
-           VALUES (?, ?, ?, ?, ?)`
-        )
-          .bind(body.id, body.event, body.version, body.os, body.arch)
-          .run();
-      } else if (body.event === "session_start") {
-        await env.DB.prepare(
-          `INSERT INTO events (
-            telemetry_id, event, version, os, arch,
-            provider_start, model_start, resumed_session
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-        )
-          .bind(
-            body.id,
-            body.event,
-            body.version,
-            body.os,
-            body.arch,
-            body.provider_start || null,
-            body.model_start || null,
-            boolToInt(body.resumed_session)
-          )
-          .run();
-      } else if (["session_end", "session_crash"].includes(body.event)) {
-        const errors = body.errors || {};
-        await env.DB.prepare(
-          `INSERT INTO events (
-            telemetry_id, event, version, os, arch,
-            provider_start, provider_end, model_start, model_end,
-            provider_switches, model_switches, duration_mins, turns,
-            had_user_prompt, had_assistant_response, assistant_responses,
-            tool_calls, tool_failures, resumed_session, end_reason,
-            error_provider_timeout, error_auth_failed, error_tool_error,
-            error_mcp_error, error_rate_limited
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        )
-          .bind(
-            body.id,
-            body.event,
-            body.version,
-            body.os,
-            body.arch,
-            body.provider_start || null,
-            body.provider_end || null,
-            body.model_start || null,
-            body.model_end || null,
-            body.provider_switches || 0,
-            body.model_switches || 0,
-            body.duration_mins || 0,
-            body.turns || 0,
-            boolToInt(body.had_user_prompt),
-            boolToInt(body.had_assistant_response),
-            body.assistant_responses || 0,
-            body.tool_calls || 0,
-            body.tool_failures || 0,
-            boolToInt(body.resumed_session),
-            body.end_reason || null,
-            errors.provider_timeout || 0,
-            errors.auth_failed || 0,
-            errors.tool_error || 0,
-            errors.mcp_error || 0,
-            errors.rate_limited || 0
-          )
-          .run();
-      }
+      await insertEvent(env, body);
 
       return jsonResponse({ ok: true });
     } catch (err) {
@@ -110,6 +46,91 @@ export default {
     }
   },
 };
+
+async function insertEvent(env, body) {
+  const columns = await getEventColumns(env);
+
+  if (body.event === "install") {
+    return insertDynamic(env, [
+      ["telemetry_id", body.id],
+      ["event", body.event],
+      ["version", body.version],
+      ["os", body.os],
+      ["arch", body.arch],
+    ]);
+  }
+
+  if (body.event === "session_start") {
+    const values = [
+      ["telemetry_id", body.id],
+      ["event", body.event],
+      ["version", body.version],
+      ["os", body.os],
+      ["arch", body.arch],
+      ["provider_start", body.provider_start || null],
+      ["model_start", body.model_start || null],
+    ];
+    if (columns.has("resumed_session")) {
+      values.push(["resumed_session", boolToInt(body.resumed_session)]);
+    }
+    return insertDynamic(env, values);
+  }
+
+  if (["session_end", "session_crash"].includes(body.event)) {
+    const errors = body.errors || {};
+    const values = [
+      ["telemetry_id", body.id],
+      ["event", body.event],
+      ["version", body.version],
+      ["os", body.os],
+      ["arch", body.arch],
+      ["provider_start", body.provider_start || null],
+      ["provider_end", body.provider_end || null],
+      ["model_start", body.model_start || null],
+      ["model_end", body.model_end || null],
+      ["provider_switches", body.provider_switches || 0],
+      ["model_switches", body.model_switches || 0],
+      ["duration_mins", body.duration_mins || 0],
+      ["turns", body.turns || 0],
+      ["had_user_prompt", boolToInt(body.had_user_prompt)],
+      ["had_assistant_response", boolToInt(body.had_assistant_response)],
+      ["assistant_responses", body.assistant_responses || 0],
+      ["tool_calls", body.tool_calls || 0],
+      ["tool_failures", body.tool_failures || 0],
+      ["transport_https", body.transport_https || 0],
+      ["transport_persistent_ws_fresh", body.transport_persistent_ws_fresh || 0],
+      ["transport_persistent_ws_reuse", body.transport_persistent_ws_reuse || 0],
+      ["transport_cli_subprocess", body.transport_cli_subprocess || 0],
+      ["transport_native_http2", body.transport_native_http2 || 0],
+      ["transport_other", body.transport_other || 0],
+      ["resumed_session", boolToInt(body.resumed_session)],
+      ["end_reason", body.end_reason || null],
+      ["error_provider_timeout", errors.provider_timeout || 0],
+      ["error_auth_failed", errors.auth_failed || 0],
+      ["error_tool_error", errors.tool_error || 0],
+      ["error_mcp_error", errors.mcp_error || 0],
+      ["error_rate_limited", errors.rate_limited || 0],
+    ].filter(([name]) => columns.has(name));
+    return insertDynamic(env, values);
+  }
+}
+
+async function getEventColumns(env) {
+  if (cachedEventColumns) {
+    return cachedEventColumns;
+  }
+  const result = await env.DB.prepare("PRAGMA table_info(events)").all();
+  cachedEventColumns = new Set((result.results || []).map((row) => row.name));
+  return cachedEventColumns;
+}
+
+async function insertDynamic(env, entries) {
+  const columns = entries.map(([name]) => name);
+  const placeholders = columns.map(() => "?").join(", ");
+  const sql = `INSERT INTO events (${columns.join(", ")}) VALUES (${placeholders})`;
+  const values = entries.map(([, value]) => value);
+  await env.DB.prepare(sql).bind(...values).run();
+}
 
 function boolToInt(value) {
   return value ? 1 : 0;

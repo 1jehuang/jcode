@@ -308,7 +308,7 @@ async fn init_provider_with_options(
             disable_subscription_runtime_mode();
             init_notice("Using Claude (provider locked)");
             lock_model_provider("claude");
-            Arc::new(provider::MultiProvider::with_preference(false))
+            Arc::new(provider::MultiProvider::with_preference_fast(false))
         }
         ProviderChoice::ClaudeSubprocess => {
             disable_subscription_runtime_mode();
@@ -320,13 +320,13 @@ async fn init_provider_with_options(
                 "Using deprecated Claude subprocess transport (legacy compatibility mode; provider locked)",
             );
             lock_model_provider("claude");
-            Arc::new(provider::MultiProvider::with_preference(false))
+            Arc::new(provider::MultiProvider::with_preference_fast(false))
         }
         ProviderChoice::Openai => {
             disable_subscription_runtime_mode();
             init_notice("Using OpenAI (provider locked)");
             lock_model_provider("openai");
-            Arc::new(provider::MultiProvider::with_preference(true))
+            Arc::new(provider::MultiProvider::with_preference_fast(true))
         }
         ProviderChoice::Cursor => {
             disable_subscription_runtime_mode();
@@ -339,7 +339,7 @@ async fn init_provider_with_options(
             disable_subscription_runtime_mode();
             init_notice("Using GitHub Copilot API provider (provider locked)");
             lock_model_provider("copilot");
-            Arc::new(provider::MultiProvider::new())
+            Arc::new(provider::MultiProvider::new_fast())
         }
         ProviderChoice::Gemini => {
             disable_subscription_runtime_mode();
@@ -352,14 +352,14 @@ async fn init_provider_with_options(
             disable_subscription_runtime_mode();
             init_notice("Using OpenRouter provider (provider locked)");
             lock_model_provider("openrouter");
-            Arc::new(provider::MultiProvider::new())
+            Arc::new(provider::MultiProvider::new_fast())
         }
         ProviderChoice::Azure => {
             disable_subscription_runtime_mode();
             crate::auth::azure::apply_runtime_env()?;
             init_notice("Using Azure OpenAI provider (provider locked)");
             lock_model_provider("openrouter");
-            let multi = provider::MultiProvider::new();
+            let multi = provider::MultiProvider::new_fast();
             if let Some(model) = crate::auth::azure::load_model() {
                 let _ = multi.set_model(&model);
             }
@@ -381,7 +381,7 @@ async fn init_provider_with_options(
                 resolved.display_name
             ));
             lock_model_provider("openrouter");
-            Arc::new(provider::MultiProvider::new())
+            Arc::new(provider::MultiProvider::new_fast())
         }
         ProviderChoice::Antigravity => {
             disable_subscription_runtime_mode();
@@ -397,7 +397,7 @@ async fn init_provider_with_options(
             );
             init_notice("Gmail tool is available if you've run `jcode login google`.");
             unlock_model_provider();
-            Arc::new(provider::MultiProvider::new())
+            Arc::new(provider::MultiProvider::new_fast())
         }
         ProviderChoice::Auto => {
             disable_subscription_runtime_mode();
@@ -408,13 +408,13 @@ async fn init_provider_with_options(
             );
             let has_claude = has_claude.unwrap_or(false);
             let has_openai = has_openai.unwrap_or(false);
-            let auth_status = auth::AuthStatus::check();
+            let auth_status = auth::AuthStatus::check_fast();
             let has_copilot = auth_status.copilot_has_api_token;
             let has_gemini = auth_status.gemini == auth::AuthState::Available;
             let has_openrouter = provider::openrouter::OpenRouterProvider::has_credentials();
 
             if has_claude || has_openai || has_copilot || has_gemini || has_openrouter {
-                let multi = provider::MultiProvider::new();
+                let multi = provider::MultiProvider::new_fast();
                 init_notice(&format!(
                     "Using {} (use /model to switch models)",
                     multi.name()
@@ -433,7 +433,7 @@ async fn init_provider_with_options(
                     &crate::provider_catalog::auto_init_login_providers(),
                     "No credentials found. Let's log in!\n\nChoose a provider:",
                 )?;
-                login_and_bootstrap_provider(provider_desc, Some("default")).await?
+                login_and_bootstrap_provider(provider_desc, None).await?
             }
         }
     };
