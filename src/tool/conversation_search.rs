@@ -196,6 +196,9 @@ impl Tool for ConversationSearchTool {
                             crate::message::ContentBlock::Image { .. } => {
                                 output.push_str("[Image]\n");
                             }
+                            crate::message::ContentBlock::OpenAICompaction { .. } => {
+                                output.push_str("[OpenAI native compaction]\n");
+                            }
                         }
                     }
                     output.push('\n');
@@ -256,6 +259,9 @@ fn message_to_text(msg: &Message) -> String {
         .filter_map(|block| match block {
             crate::message::ContentBlock::Text { text, .. } => Some(text.clone()),
             crate::message::ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+            crate::message::ContentBlock::OpenAICompaction { .. } => {
+                Some("[OpenAI native compaction]".to_string())
+            }
             _ => None,
         })
         .collect::<Vec<_>>()

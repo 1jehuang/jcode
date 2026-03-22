@@ -158,6 +158,8 @@ pub struct StoredTokenUsage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredCompactionState {
     pub summary_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_encrypted_content: Option<String>,
     pub covers_up_to_turn: usize,
     pub original_turn_count: usize,
     pub compacted_count: usize,
@@ -829,6 +831,7 @@ impl Session {
                     }
                     ContentBlock::ToolUse { input, .. } => redact_json_value(input),
                     ContentBlock::Image { .. } => {}
+                    ContentBlock::OpenAICompaction { .. } => {}
                 }
             }
         }
@@ -1169,6 +1172,7 @@ pub fn render_images(session: &Session) -> Vec<RenderedImage> {
                     }
                 }
                 ContentBlock::Reasoning { .. } => {}
+                ContentBlock::OpenAICompaction { .. } => {}
             }
         }
     }
@@ -1200,6 +1204,7 @@ pub fn summarize_tool_calls(
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::Text { text, .. } => Some(text.as_str()),
+                ContentBlock::OpenAICompaction { .. } => Some("[OpenAI native compaction]"),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -1295,6 +1300,7 @@ pub fn render_messages(session: &Session) -> Vec<RenderedMessage> {
                 }
                 ContentBlock::Reasoning { .. } => {}
                 ContentBlock::Image { .. } => {}
+                ContentBlock::OpenAICompaction { .. } => {}
             }
         }
 
@@ -1535,6 +1541,7 @@ mod tests {
         );
         session.compaction = Some(StoredCompactionState {
             summary_text: "saved summary".to_string(),
+            openai_encrypted_content: None,
             covers_up_to_turn: 8,
             original_turn_count: 8,
             compacted_count: 8,

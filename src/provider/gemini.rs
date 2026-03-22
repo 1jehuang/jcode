@@ -411,8 +411,7 @@ impl GeminiProvider {
             Ok(response) => response,
             Err(err) if is_vpc_sc_error(&err) => Value::Null,
             Err(err) => {
-                return Err(err)
-                    .context("Gemini model discovery failed during loadCodeAssist");
+                return Err(err).context("Gemini model discovery failed during loadCodeAssist");
             }
         };
 
@@ -1165,6 +1164,7 @@ fn build_contents(messages: &[Message]) -> Vec<GeminiContent> {
                             ..Default::default()
                         });
                     }
+                    crate::message::ContentBlock::OpenAICompaction { .. } => {}
                 }
             }
             if parts.is_empty() {

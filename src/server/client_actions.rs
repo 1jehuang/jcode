@@ -570,6 +570,7 @@ mod tests {
         );
         parent.compaction = Some(crate::session::StoredCompactionState {
             summary_text: "summary".to_string(),
+            openai_encrypted_content: None,
             covers_up_to_turn: 1,
             original_turn_count: 1,
             compacted_count: 1,

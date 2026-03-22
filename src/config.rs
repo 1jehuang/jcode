@@ -451,6 +451,10 @@ pub struct ProviderConfig {
     pub openai_transport: Option<String>,
     /// OpenAI service tier override (priority|flex)
     pub openai_service_tier: Option<String>,
+    /// OpenAI native compaction mode: "auto", "explicit", or "off".
+    pub openai_native_compaction_mode: String,
+    /// Token threshold at which OpenAI auto native compaction should trigger.
+    pub openai_native_compaction_threshold_tokens: usize,
     /// Copilot premium request mode: "normal", "one", or "zero"
     /// "zero" means all requests are free (no premium requests consumed)
     pub copilot_premium: Option<String>,
@@ -464,6 +468,8 @@ impl Default for ProviderConfig {
             openai_reasoning_effort: Some("high".to_string()),
             openai_transport: None,
             openai_service_tier: None,
+            openai_native_compaction_mode: "auto".to_string(),
+            openai_native_compaction_threshold_tokens: 200_000,
             copilot_premium: None,
         }
     }
@@ -940,6 +946,19 @@ impl Config {
                 self.provider.openai_service_tier = Some(trimmed);
             }
         }
+        if let Ok(v) = std::env::var("JCODE_OPENAI_NATIVE_COMPACTION_MODE") {
+            let trimmed = v.trim().to_ascii_lowercase();
+            if !trimmed.is_empty() {
+                self.provider.openai_native_compaction_mode = trimmed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_OPENAI_NATIVE_COMPACTION_THRESHOLD_TOKENS") {
+            if let Ok(parsed) = v.trim().parse::<usize>() {
+                if parsed > 0 {
+                    self.provider.openai_native_compaction_threshold_tokens = parsed;
+                }
+            }
+        }
 
         // Copilot premium mode: env var overrides config
         // If set in config but not in env, propagate config -> env
@@ -1334,6 +1353,8 @@ desktop_notifications = true
 - OpenAI reasoning effort: {}
 - OpenAI transport: {}
 - OpenAI service tier: {}
+- OpenAI native compaction: {}
+- OpenAI native compaction threshold ratio: {:.2}
 
 **Gateway:**
 - Enabled: {}
@@ -1435,6 +1456,8 @@ desktop_notifications = true
                 .openai_service_tier
                 .as_deref()
                 .unwrap_or("(default)"),
+            self.provider.openai_native_compaction_mode.as_str(),
+            self.provider.openai_native_compaction_threshold_tokens,
             self.gateway.enabled,
             self.gateway.bind_addr,
             self.gateway.port,

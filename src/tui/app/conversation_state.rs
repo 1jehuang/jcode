@@ -154,7 +154,7 @@ impl App {
 
     pub(super) fn add_provider_message(&mut self, message: Message) {
         self.messages.push(message);
-        if self.is_remote || !self.provider.supports_compaction() {
+        if self.is_remote || !self.provider.uses_jcode_compaction() {
             return;
         }
         let compaction = self.registry.compaction();
@@ -191,7 +191,7 @@ impl App {
     }
 
     pub(super) fn reseed_compaction_from_provider_messages(&mut self) {
-        if self.is_remote || !self.provider.supports_compaction() {
+        if self.is_remote || !self.provider.uses_jcode_compaction() {
             return;
         }
         let compaction = self.registry.compaction();
@@ -223,7 +223,7 @@ impl App {
     }
 
     pub(super) fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
-        if self.is_remote || !self.provider.supports_compaction() {
+        if self.is_remote || !self.provider.uses_jcode_compaction() {
             return (self.messages.clone(), None);
         }
         let compaction = self.registry.compaction();
@@ -253,7 +253,7 @@ impl App {
     }
 
     pub(super) fn poll_compaction_completion(&mut self) {
-        if self.is_remote || !self.provider.supports_compaction() {
+        if self.is_remote || !self.provider.uses_jcode_compaction() {
             return;
         }
         let compaction = self.registry.compaction();

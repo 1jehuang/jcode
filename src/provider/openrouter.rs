@@ -2246,7 +2246,12 @@ impl Provider for OpenRouterProvider {
             return cache_entry.models.into_iter().map(|m| m.id).collect();
         }
 
-        Vec::new()
+        let model = self.model();
+        if model.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![model]
+        }
     }
 
     async fn prefetch_models(&self) -> Result<()> {

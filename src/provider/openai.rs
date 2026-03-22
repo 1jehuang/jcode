@@ -144,6 +144,38 @@ enum OpenAITransport {
     HTTPS,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenAINativeCompactionMode {
+    Auto,
+    Explicit,
+    Off,
+}
+
+impl OpenAINativeCompactionMode {
+    fn from_config(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" | "" => Self::Auto,
+            "explicit" | "manual" => Self::Explicit,
+            "off" | "disabled" | "none" => Self::Off,
+            other => {
+                crate::logging::warn(&format!(
+                    "Unknown OpenAI native compaction mode '{}'; using auto. Use: auto, explicit, or off.",
+                    other
+                ));
+                Self::Auto
+            }
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Explicit => "explicit",
+            Self::Off => "off",
+        }
+    }
+}
+
 impl OpenAITransport {
     fn as_str(self) -> &'static str {
         match self {
@@ -215,6 +247,83 @@ fn persistent_ws_idle_requires_reconnect(idle_for: Duration) -> bool {
     idle_for >= Duration::from_secs(WEBSOCKET_PERSISTENT_IDLE_RECONNECT_SECS)
 }
 
+async fn ensure_persistent_ws_is_healthy(state: &mut PersistentWsState) -> Result<bool, String> {
+    let idle_for = state.last_activity_at.elapsed();
+    if persistent_ws_idle_requires_reconnect(idle_for) {
+        crate::logging::info(&format!(
+            "Persistent WS idle for {}s; reconnecting before reuse",
+            idle_for.as_secs()
+        ));
+        return Ok(false);
+    }
+
+    if !persistent_ws_idle_needs_healthcheck(idle_for) {
+        return Ok(true);
+    }
+
+    crate::logging::info(&format!(
+        "Persistent WS idle for {}ms; sending healthcheck ping before reuse",
+        idle_for.as_millis()
+    ));
+
+    state
+        .ws_stream
+        .send(WsMessage::Ping(Vec::new()))
+        .await
+        .map_err(|err| format!("healthcheck ping send error: {}", err))?;
+
+    let started_at = Instant::now();
+    let timeout = Duration::from_millis(WEBSOCKET_PERSISTENT_HEALTHCHECK_TIMEOUT_MS);
+
+    while started_at.elapsed() < timeout {
+        let remaining = timeout.saturating_sub(started_at.elapsed());
+        let next_item = tokio::time::timeout(remaining, state.ws_stream.next())
+            .await
+            .map_err(|_| {
+                format!(
+                    "healthcheck pong timeout after {}ms",
+                    WEBSOCKET_PERSISTENT_HEALTHCHECK_TIMEOUT_MS
+                )
+            })?;
+
+        match next_item {
+            Some(Ok(WsMessage::Pong(_))) => {
+                state.last_activity_at = Instant::now();
+                crate::logging::info(&format!(
+                    "Persistent WS healthcheck pong after {}ms",
+                    started_at.elapsed().as_millis()
+                ));
+                return Ok(true);
+            }
+            Some(Ok(WsMessage::Ping(payload))) => {
+                state
+                    .ws_stream
+                    .send(WsMessage::Pong(payload))
+                    .await
+                    .map_err(|err| format!("healthcheck pong send error: {}", err))?;
+                state.last_activity_at = Instant::now();
+            }
+            Some(Ok(WsMessage::Close(_))) => {
+                return Ok(false);
+            }
+            Some(Ok(other)) => {
+                return Err(format!(
+                    "unexpected websocket frame during healthcheck: {:?}",
+                    other
+                ));
+            }
+            Some(Err(err)) => {
+                return Err(format!("healthcheck receive error: {}", err));
+            }
+            None => {
+                return Ok(false);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
 pub struct OpenAIProvider {
     client: Client,
     credentials: Arc<RwLock<CodexCredentials>>,
@@ -224,6 +333,8 @@ pub struct OpenAIProvider {
     max_output_tokens: Option<u32>,
     reasoning_effort: Arc<RwLock<Option<String>>>,
     service_tier: Arc<StdRwLock<Option<String>>>,
+    native_compaction_mode: OpenAINativeCompactionMode,
+    native_compaction_threshold_tokens: usize,
     transport_mode: Arc<RwLock<OpenAITransportMode>>,
     websocket_cooldowns: Arc<RwLock<HashMap<String, Instant>>>,
     websocket_failure_streaks: Arc<RwLock<HashMap<String, u32>>>,
@@ -281,6 +392,15 @@ impl OpenAIProvider {
         let transport_mode = OpenAITransportMode::from_config(
             crate::config::config().provider.openai_transport.as_deref(),
         );
+        let native_compaction_mode = OpenAINativeCompactionMode::from_config(
+            &crate::config::config()
+                .provider
+                .openai_native_compaction_mode,
+        );
+        let native_compaction_threshold_tokens = crate::config::config()
+            .provider
+            .openai_native_compaction_threshold_tokens
+            .max(1000);
 
         Self {
             client: crate::provider::shared_http_client(),
@@ -291,6 +411,8 @@ impl OpenAIProvider {
             max_output_tokens,
             reasoning_effort: Arc::new(RwLock::new(reasoning_effort)),
             service_tier: Arc::new(StdRwLock::new(service_tier)),
+            native_compaction_mode,
+            native_compaction_threshold_tokens,
             transport_mode: Arc::new(RwLock::new(transport_mode)),
             websocket_cooldowns: Arc::clone(&WEBSOCKET_COOLDOWNS),
             websocket_failure_streaks: Arc::clone(&WEBSOCKET_FAILURE_STREAKS),
@@ -329,6 +451,20 @@ impl OpenAIProvider {
                 Some("xhigh".to_string())
             }
         }
+    }
+
+    fn native_compaction_threshold_for_context_window(
+        &self,
+        context_window: usize,
+    ) -> Option<usize> {
+        if self.native_compaction_mode != OpenAINativeCompactionMode::Auto {
+            return None;
+        }
+        Some(
+            self.native_compaction_threshold_tokens
+                .max(1000)
+                .min(context_window.max(1000)),
+        )
     }
 
     fn parse_max_output_tokens(raw: Option<&str>) -> Option<u32> {
@@ -417,6 +553,10 @@ impl OpenAIProvider {
             .replace("http://", "ws://")
     }
 
+    fn responses_compact_url(credentials: &CodexCredentials) -> String {
+        format!("{}/compact", Self::responses_url(credentials))
+    }
+
     fn build_response_request(
         model_id: &str,
         instructions: String,
@@ -428,6 +568,7 @@ impl OpenAIProvider {
         service_tier: Option<&str>,
         prompt_cache_key: Option<&str>,
         prompt_cache_retention: Option<&str>,
+        native_compaction_threshold: Option<usize>,
     ) -> Value {
         let mut request = serde_json::json!({
             "model": model_id,
@@ -453,6 +594,15 @@ impl OpenAIProvider {
 
         if let Some(service_tier) = service_tier {
             request["service_tier"] = serde_json::json!(service_tier);
+        }
+
+        if let Some(compact_threshold) = native_compaction_threshold {
+            request["context_management"] = serde_json::json!([
+                {
+                    "type": "compaction",
+                    "compact_threshold": compact_threshold,
+                }
+            ]);
         }
 
         if !is_chatgpt_mode {
@@ -903,6 +1053,19 @@ fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
                             content_parts.push(serde_json::json!({
                                 "type": "input_text",
                                 "text": text
+                            }));
+                        }
+                        ContentBlock::OpenAICompaction { encrypted_content } => {
+                            if !content_parts.is_empty() {
+                                items.push(serde_json::json!({
+                                    "type": "message",
+                                    "role": "user",
+                                    "content": std::mem::take(&mut content_parts)
+                                }));
+                            }
+                            items.push(serde_json::json!({
+                                "type": "compaction",
+                                "encrypted_content": encrypted_content,
                             }));
                         }
                         ContentBlock::ToolResult {
@@ -1753,6 +1916,8 @@ impl Provider for OpenAIProvider {
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+        let native_compaction_threshold =
+            self.native_compaction_threshold_for_context_window(self.context_window());
         let request = Self::build_response_request(
             &model_id,
             instructions,
@@ -1764,6 +1929,7 @@ impl Provider for OpenAIProvider {
             service_tier.as_deref(),
             self.prompt_cache_key.as_deref(),
             self.prompt_cache_retention.as_deref(),
+            native_compaction_threshold,
         );
 
         // --- Persistent WebSocket continuation path ---
@@ -2061,6 +2227,15 @@ impl Provider for OpenAIProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
     }
 
+    fn native_compaction_mode(&self) -> Option<String> {
+        Some(self.native_compaction_mode.as_str().to_string())
+    }
+
+    fn native_compaction_threshold_tokens(&self) -> Option<usize> {
+        (self.native_compaction_mode != OpenAINativeCompactionMode::Off)
+            .then_some(self.native_compaction_threshold_tokens)
+    }
+
     fn set_service_tier(&self, service_tier: &str) -> Result<()> {
         let normalized = Self::normalize_service_tier(service_tier)?;
         let mut guard = self
@@ -2111,6 +2286,103 @@ impl Provider for OpenAIProvider {
         true
     }
 
+    fn uses_jcode_compaction(&self) -> bool {
+        self.native_compaction_mode != OpenAINativeCompactionMode::Auto
+    }
+
+    async fn native_compact(
+        &self,
+        messages: &[ChatMessage],
+        existing_summary_text: Option<&str>,
+        existing_openai_encrypted_content: Option<&str>,
+    ) -> Result<crate::provider::NativeCompactionResult> {
+        if self.native_compaction_mode != OpenAINativeCompactionMode::Explicit {
+            anyhow::bail!(
+                "OpenAI native explicit compaction is disabled (mode={})",
+                self.native_compaction_mode.as_str()
+            );
+        }
+
+        let access_token = openai_access_token(&self.credentials).await?;
+        let creds = self.credentials.read().await;
+        let is_chatgpt_mode = Self::is_chatgpt_mode(&creds);
+        let account_id = creds.account_id.clone();
+        let url = Self::responses_compact_url(&creds);
+        drop(creds);
+
+        let mut input = Vec::new();
+        if let Some(encrypted_content) = existing_openai_encrypted_content {
+            input.push(serde_json::json!({
+                "type": "compaction",
+                "encrypted_content": encrypted_content,
+            }));
+        } else if let Some(summary_text) = existing_summary_text {
+            input.push(serde_json::json!({
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": format!("## Previous Conversation Summary\n\n{}\n", summary_text),
+                }]
+            }));
+        }
+        input.extend(build_responses_input(messages));
+
+        let mut builder = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .header("Content-Type", "application/json");
+
+        if is_chatgpt_mode {
+            builder = builder.header("originator", ORIGINATOR);
+            if let Some(account_id) = account_id.as_ref() {
+                builder = builder.header("chatgpt-account-id", account_id);
+            }
+        }
+
+        let response = builder
+            .json(&serde_json::json!({
+                "model": self.model_id().await,
+                "input": input,
+                "store": false,
+            }))
+            .send()
+            .await
+            .context("Failed to send OpenAI compact request")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("OpenAI compact error {}: {}", status, body);
+        }
+
+        let body: Value = response
+            .json()
+            .await
+            .context("Failed to parse OpenAI compact response")?;
+        let encrypted_content = body
+            .get("output")
+            .and_then(|v| v.as_array())
+            .and_then(|items| {
+                items.iter().find_map(|item| {
+                    if item.get("type").and_then(|v| v.as_str()) == Some("compaction") {
+                        item.get("encrypted_content")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .ok_or_else(|| anyhow::anyhow!("OpenAI compact response missing compaction item"))?;
+
+        Ok(crate::provider::NativeCompactionResult {
+            summary_text: None,
+            openai_encrypted_content: Some(encrypted_content),
+        })
+    }
+
     fn context_window(&self) -> usize {
         let model = self.model();
         crate::provider::context_limit_for_model_with_provider(&model, Some(self.name()))
@@ -2128,6 +2400,8 @@ impl Provider for OpenAIProvider {
             max_output_tokens: self.max_output_tokens,
             reasoning_effort: Arc::new(RwLock::new(self.reasoning_effort())),
             service_tier: Arc::new(StdRwLock::new(self.service_tier())),
+            native_compaction_mode: self.native_compaction_mode,
+            native_compaction_threshold_tokens: self.native_compaction_threshold_tokens,
             transport_mode: Arc::clone(&self.transport_mode),
             websocket_cooldowns: Arc::clone(&self.websocket_cooldowns),
             websocket_failure_streaks: Arc::clone(&self.websocket_failure_streaks),
@@ -2679,6 +2953,23 @@ async fn try_persistent_ws_continuation(
         return PersistentWsResult::NotAvailable;
     }
 
+    match ensure_persistent_ws_is_healthy(state).await {
+        Ok(true) => {}
+        Ok(false) => {
+            crate::logging::info("Persistent WS healthcheck requested reconnect before reuse");
+            *guard = None;
+            return PersistentWsResult::NotAvailable;
+        }
+        Err(err) => {
+            crate::logging::warn(&format!(
+                "Persistent WS healthcheck failed: {}; forcing reconnect",
+                err
+            ));
+            *guard = None;
+            return PersistentWsResult::NotAvailable;
+        }
+    }
+
     // The input array must be strictly growing for continuation to make sense.
     // If the input_item_count is less than or equal to last time, the conversation
     // was reset (e.g., after compaction) - we need a fresh connection.
@@ -2736,6 +3027,9 @@ async fn try_persistent_ws_continuation(
     if let Some(reasoning) = request.get("reasoning") {
         continuation_request["reasoning"] = reasoning.clone();
     }
+    if let Some(context_management) = request.get("context_management") {
+        continuation_request["context_management"] = context_management.clone();
+    }
     if let Some(include) = request.get("include") {
         continuation_request["include"] = include.clone();
     }
@@ -2749,7 +3043,7 @@ async fn try_persistent_ws_continuation(
 
     let _ = tx
         .send(Ok(StreamEvent::ConnectionType {
-            connection: "websocket/persistent".to_string(),
+            connection: "websocket/persistent-reuse".to_string(),
         }))
         .await;
 
@@ -2758,6 +3052,7 @@ async fn try_persistent_ws_continuation(
     if let Err(e) = state.ws_stream.send(WsMessage::Text(request_text)).await {
         return PersistentWsResult::Failed(format!("send error: {}", e));
     }
+    state.last_activity_at = Instant::now();
     crate::logging::info(&format!(
         "Persistent WS continuation request sent in {}ms ({})",
         send_started_at.elapsed().as_millis(),
@@ -2902,7 +3197,9 @@ async fn try_persistent_ws_continuation(
                 }
                 if made_api_activity {
                     saw_api_activity = true;
-                    last_api_activity_at = Instant::now();
+                    let now = Instant::now();
+                    last_api_activity_at = now;
+                    state.last_activity_at = now;
                 }
                 if saw_response_completed {
                     break;
@@ -2910,6 +3207,7 @@ async fn try_persistent_ws_continuation(
             }
             Ok(WsMessage::Ping(payload)) => {
                 let _ = state.ws_stream.send(WsMessage::Pong(payload)).await;
+                state.last_activity_at = Instant::now();
             }
             Ok(WsMessage::Close(_)) => {
                 if saw_response_completed {
@@ -2929,6 +3227,7 @@ async fn try_persistent_ws_continuation(
         state.last_response_id = resp_id;
         state.last_input_item_count = input_item_count;
         state.message_count += 1;
+        state.last_activity_at = Instant::now();
         crate::logging::info(&format!(
             "Persistent WS continuation success after {}ms (chain length: {}, {})",
             stream_started.elapsed().as_millis(),
@@ -3042,7 +3341,7 @@ async fn stream_response_websocket_persistent(
 
     let _ = tx
         .send(Ok(StreamEvent::ConnectionType {
-            connection: "websocket/persistent".to_string(),
+            connection: "websocket/persistent-fresh".to_string(),
         }))
         .await;
 
@@ -4219,6 +4518,7 @@ mod tests {
             Some("unused"),
             Some("unused"),
             None,
+            None,
         );
 
         assert_eq!(request["model"], serde_json::json!("gpt-5.4"));
@@ -4237,6 +4537,7 @@ mod tests {
             &[],
             true,
             Some(DEFAULT_MAX_OUTPUT_TOKENS),
+            None,
             None,
             None,
             None,
@@ -4652,6 +4953,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(request["stream"], serde_json::json!(true));
         assert_eq!(request["store"], serde_json::json!(false));
@@ -4666,6 +4968,7 @@ mod tests {
             &[],
             false,
             Some(DEFAULT_MAX_OUTPUT_TOKENS),
+            None,
             None,
             None,
             None,
@@ -4708,6 +5011,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         let obj = request.as_object_mut().expect("request is object");
@@ -4741,6 +5045,7 @@ mod tests {
             None,
             None,
             None,
+            Some(160_000),
         );
 
         let mut continuation = serde_json::json!({
@@ -4758,6 +5063,9 @@ mod tests {
         if let Some(instructions) = base_request.get("instructions") {
             continuation["instructions"] = instructions.clone();
         }
+        if let Some(context_management) = base_request.get("context_management") {
+            continuation["context_management"] = context_management.clone();
+        }
         continuation["store"] = serde_json::json!(false);
         continuation["parallel_tool_calls"] = serde_json::json!(false);
 
@@ -4772,6 +5080,15 @@ mod tests {
         assert_eq!(continuation["type"], "response.create");
         assert_eq!(continuation["previous_response_id"], "resp_abc123");
         assert_eq!(continuation["model"], "gpt-5.4");
+        assert_eq!(
+            continuation["context_management"],
+            serde_json::json!([
+                {
+                    "type": "compaction",
+                    "compact_threshold": 160_000,
+                }
+            ])
+        );
     }
 
     #[test]

@@ -89,6 +89,9 @@ pub fn build_cli_prompt(system: &str, messages: &[Message]) -> String {
                 ContentBlock::Image { .. } => {
                     out.push_str("[image]\n");
                 }
+                ContentBlock::OpenAICompaction { .. } => {
+                    out.push_str("[openai native compaction]\n");
+                }
             }
         }
         out.push('\n');

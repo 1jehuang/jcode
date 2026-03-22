@@ -143,6 +143,11 @@ pub enum ContentBlock {
         media_type: String,
         data: String,
     },
+    /// Hidden OpenAI Responses compaction item used to preserve native
+    /// compaction state across turns/saves when jcode explicitly triggers it.
+    OpenAICompaction {
+        encrypted_content: String,
+    },
 }
 
 impl Message {

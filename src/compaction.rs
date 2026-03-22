@@ -82,6 +82,7 @@ Be concise but preserve important details. You can search the full conversation 
 #[derive(Debug, Clone)]
 pub struct Summary {
     pub text: String,
+    pub openai_encrypted_content: Option<String>,
     pub covers_up_to_turn: usize,
     pub original_turn_count: usize,
 }
@@ -114,7 +115,8 @@ pub enum CompactionAction {
 
 /// Result from background compaction task
 struct CompactionResult {
-    summary: String,
+    summary_text: String,
+    openai_encrypted_content: Option<String>,
     covers_up_to_turn: usize,
     duration_ms: u64,
     summarized_messages: usize,
@@ -269,6 +271,7 @@ impl CompactionManager {
         self.compacted_count = state.compacted_count.min(total_messages);
         self.active_summary = Some(Summary {
             text: state.summary_text.clone(),
+            openai_encrypted_content: state.openai_encrypted_content.clone(),
             covers_up_to_turn: state.covers_up_to_turn,
             original_turn_count: state.original_turn_count,
         });
@@ -281,6 +284,7 @@ impl CompactionManager {
             .as_ref()
             .map(|summary| crate::session::StoredCompactionState {
                 summary_text: summary.text.clone(),
+                openai_encrypted_content: summary.openai_encrypted_content.clone(),
                 covers_up_to_turn: summary.covers_up_to_turn,
                 original_turn_count: summary.original_turn_count,
                 compacted_count: self.compacted_count,
@@ -584,7 +588,11 @@ impl CompactionManager {
         let mut total_chars = 0;
 
         if let Some(ref summary) = self.active_summary {
-            total_chars += summary.text.len();
+            total_chars += summary
+                .openai_encrypted_content
+                .as_ref()
+                .map(|s| s.len())
+                .unwrap_or_else(|| summary.text.len());
         }
 
         for msg in self.active_messages(all_messages) {
@@ -607,7 +615,11 @@ impl CompactionManager {
     pub fn token_estimate(&self) -> usize {
         let mut total_chars = 0;
         if let Some(ref summary) = self.active_summary {
-            total_chars += summary.text.len();
+            total_chars += summary
+                .openai_encrypted_content
+                .as_ref()
+                .map(|s| s.len())
+                .unwrap_or_else(|| summary.text.len());
         }
         let msg_tokens = total_chars / CHARS_PER_TOKEN;
         let overhead = if self.token_budget >= DEFAULT_TOKEN_BUDGET / 2 {
@@ -715,7 +727,9 @@ impl CompactionManager {
         // Spawn background task that notifies via Bus when done
         self.pending_task = Some(tokio::spawn(async move {
             let start = std::time::Instant::now();
-            let result = generate_summary(provider, messages_to_summarize, existing_summary).await;
+            let result =
+                generate_compaction_artifact(provider, messages_to_summarize, existing_summary)
+                    .await;
             let duration_ms = start.elapsed().as_millis() as u64;
             crate::logging::info(&format!(
                 "Compaction ({}) finished in {:.2}s ({} messages summarized)",
@@ -724,11 +738,10 @@ impl CompactionManager {
                 msg_count,
             ));
             crate::bus::Bus::global().publish(crate::bus::BusEvent::CompactionFinished);
-            result.map(|result| CompactionResult {
-                summary: result.summary,
-                covers_up_to_turn: result.covers_up_to_turn,
-                duration_ms,
-                summarized_messages: msg_count,
+            result.map(|mut result| {
+                result.duration_ms = duration_ms;
+                result.summarized_messages = msg_count;
+                result
             })
         }));
     }
@@ -838,7 +851,9 @@ impl CompactionManager {
 
         self.pending_task = Some(tokio::spawn(async move {
             let start = std::time::Instant::now();
-            let result = generate_summary(provider, messages_to_summarize, existing_summary).await;
+            let result =
+                generate_compaction_artifact(provider, messages_to_summarize, existing_summary)
+                    .await;
             let duration_ms = start.elapsed().as_millis() as u64;
             crate::logging::info(&format!(
                 "Compaction finished in {:.2}s ({} messages summarized)",
@@ -846,11 +861,10 @@ impl CompactionManager {
                 msg_count,
             ));
             crate::bus::Bus::global().publish(crate::bus::BusEvent::CompactionFinished);
-            result.map(|result| CompactionResult {
-                summary: result.summary,
-                covers_up_to_turn: result.covers_up_to_turn,
-                duration_ms,
-                summarized_messages: msg_count,
+            result.map(|mut result| {
+                result.duration_ms = duration_ms;
+                result.summarized_messages = msg_count;
+                result
             })
         }));
 
@@ -947,7 +961,8 @@ impl CompactionManager {
             Ok(Ok(result)) => {
                 let pre_tokens = self.effective_token_count() as u64;
                 let summary = Summary {
-                    text: result.summary,
+                    text: result.summary_text,
+                    openai_encrypted_content: result.openai_encrypted_content,
                     covers_up_to_turn: result.covers_up_to_turn,
                     original_turn_count: self.pending_cutoff,
                 };
@@ -1010,13 +1025,19 @@ impl CompactionManager {
 
         match &self.active_summary {
             Some(summary) => {
-                let summary_block = ContentBlock::Text {
-                    text: format!(
-                        "## Previous Conversation Summary\n\n{}\n\n---\n\n",
-                        summary.text
-                    ),
-                    cache_control: None,
-                };
+                let summary_block = summary
+                    .openai_encrypted_content
+                    .as_ref()
+                    .map(|encrypted_content| ContentBlock::OpenAICompaction {
+                        encrypted_content: encrypted_content.clone(),
+                    })
+                    .unwrap_or_else(|| ContentBlock::Text {
+                        text: format!(
+                            "## Previous Conversation Summary\n\n{}\n\n---\n\n",
+                            summary.text
+                        ),
+                        cache_control: None,
+                    });
 
                 let mut result = Vec::with_capacity(active.len() + 1);
 
@@ -1044,13 +1065,19 @@ impl CompactionManager {
         // Without caller messages, we can only return the summary
         match &self.active_summary {
             Some(summary) => {
-                let summary_block = ContentBlock::Text {
-                    text: format!(
-                        "## Previous Conversation Summary\n\n{}\n\n---\n\n",
-                        summary.text
-                    ),
-                    cache_control: None,
-                };
+                let summary_block = summary
+                    .openai_encrypted_content
+                    .as_ref()
+                    .map(|encrypted_content| ContentBlock::OpenAICompaction {
+                        encrypted_content: encrypted_content.clone(),
+                    })
+                    .unwrap_or_else(|| ContentBlock::Text {
+                        text: format!(
+                            "## Previous Conversation Summary\n\n{}\n\n---\n\n",
+                            summary.text
+                        ),
+                        cache_control: None,
+                    });
                 vec![Message {
                     role: Role::User,
                     content: vec![summary_block],
@@ -1091,7 +1118,12 @@ impl CompactionManager {
     pub fn summary_chars(&self) -> usize {
         self.active_summary
             .as_ref()
-            .map(|s| s.text.len())
+            .map(|s| {
+                s.openai_encrypted_content
+                    .as_ref()
+                    .map(|value| value.len())
+                    .unwrap_or_else(|| s.text.len())
+            })
             .unwrap_or(0)
     }
 
@@ -1138,6 +1170,7 @@ impl CompactionManager {
                 ContentBlock::ToolUse { input, .. } => input.to_string().len() + 50,
                 ContentBlock::ToolResult { content, .. } => content.len() + 20,
                 ContentBlock::Image { data, .. } => data.len(),
+                ContentBlock::OpenAICompaction { encrypted_content } => encrypted_content.len(),
             })
             .sum()
     }
@@ -1262,6 +1295,7 @@ impl CompactionManager {
 
         let summary = Summary {
             text: summary_parts.join("\n\n"),
+            openai_encrypted_content: None,
             covers_up_to_turn: cutoff,
             original_turn_count: cutoff,
         };
@@ -1379,12 +1413,32 @@ fn mean_embedding(embeddings: &[&Vec<f32>], dim: usize) -> Vec<f32> {
 }
 
 /// Generate summary using the provider
-async fn generate_summary(
+async fn generate_compaction_artifact(
     provider: Arc<dyn Provider>,
     messages: Vec<Message>,
     existing_summary: Option<Summary>,
 ) -> Result<CompactionResult> {
     let start = Instant::now();
+    if let Ok(native) = provider
+        .native_compact(
+            &messages,
+            existing_summary
+                .as_ref()
+                .map(|summary| summary.text.as_str()),
+            existing_summary
+                .as_ref()
+                .and_then(|summary| summary.openai_encrypted_content.as_deref()),
+        )
+        .await
+    {
+        return Ok(CompactionResult {
+            summary_text: native.summary_text.unwrap_or_default(),
+            openai_encrypted_content: native.openai_encrypted_content,
+            covers_up_to_turn: messages.len(),
+            duration_ms: start.elapsed().as_millis() as u64,
+            summarized_messages: messages.len(),
+        });
+    }
 
     // Build the conversation text for summarization
     let mut conversation_text = String::new();
@@ -1426,6 +1480,9 @@ async fn generate_summary(
                 ContentBlock::Image { .. } => {
                     conversation_text.push_str("[Image]\n");
                 }
+                ContentBlock::OpenAICompaction { .. } => {
+                    conversation_text.push_str("[OpenAI native compaction]\n");
+                }
             }
         }
         conversation_text.push('\n');
@@ -1451,7 +1508,8 @@ async fn generate_summary(
         .await?;
 
     Ok(CompactionResult {
-        summary,
+        summary_text: summary,
+        openai_encrypted_content: None,
         covers_up_to_turn: messages.len(),
         duration_ms: start.elapsed().as_millis() as u64,
         summarized_messages: messages.len(),

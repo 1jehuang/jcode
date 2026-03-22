@@ -134,6 +134,7 @@ impl ClaudeProvider {
                     ContentBlock::ToolUse { .. } => {}
                     ContentBlock::Reasoning { .. } => {}
                     ContentBlock::Image { .. } => {}
+                    ContentBlock::OpenAICompaction { .. } => {}
                 }
             }
             if !parts.is_empty() {
