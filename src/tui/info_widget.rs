@@ -772,6 +772,8 @@ pub struct InfoWidgetData {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
+    pub native_compaction_mode: Option<String>,
+    pub native_compaction_threshold_tokens: Option<usize>,
     pub session_count: Option<usize>,
     pub session_name: Option<String>,
     pub client_count: Option<usize>,
@@ -4553,6 +4555,16 @@ fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
             format!("({})", effort_short),
             Style::default().fg(rgb(255, 200, 100)),
         ));
+    }
+
+    if let Some(mode) = &data.native_compaction_mode {
+        let label = if let Some(tokens) = data.native_compaction_threshold_tokens {
+            format!("native {} @ {}k", mode, tokens / 1000)
+        } else {
+            format!("native {}", mode)
+        };
+        spans.push(Span::styled(" ", Style::default()));
+        spans.push(Span::styled(label, Style::default().fg(rgb(120, 210, 230))));
     }
 
     let mut lines = vec![Line::from(spans)];

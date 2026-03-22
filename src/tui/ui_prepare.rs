@@ -206,7 +206,10 @@ fn prepare_active_batch_progress(
             Style::default().fg(dim_color()),
         ));
     }
-    lines.push(Line::from(header));
+    lines.push(super::truncate_line_with_ellipsis_to_width(
+        &Line::from(header),
+        width.saturating_sub(1) as usize,
+    ));
 
     for subcall in &progress.subcalls {
         let (icon, icon_color) = match subcall.state {
@@ -220,6 +223,7 @@ fn prepare_active_batch_progress(
             icon,
             icon_color,
             50,
+            Some(width.saturating_sub(1) as usize),
         ));
     }
 

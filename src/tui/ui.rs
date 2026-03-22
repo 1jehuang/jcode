@@ -13,6 +13,7 @@ use super::visual_debug::{
 use super::{DisplayMessage, ProcessingStatus, TuiState, is_unexpected_cache_miss};
 use crate::message::ToolCall;
 use ratatui::{prelude::*, widgets::Paragraph};
+use regex::Regex;
 use std::collections::{HashMap, VecDeque, hash_map::DefaultHasher};
 use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -733,6 +734,56 @@ fn truncate_line_to_width(line: &Line<'static>, width: usize) -> Line<'static> {
     } else {
         Line::from(spans)
     }
+}
+
+fn truncate_line_with_ellipsis_to_width(line: &Line<'static>, width: usize) -> Line<'static> {
+    if width == 0 {
+        return Line::from("");
+    }
+    if line.width() <= width {
+        return line.clone();
+    }
+    if width == 1 {
+        return Line::from(Span::raw("…"));
+    }
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut remaining = width.saturating_sub(1);
+    let mut ellipsis_style = Style::default();
+
+    for span in &line.spans {
+        if remaining == 0 {
+            break;
+        }
+        let text = span.content.as_ref();
+        let span_width = unicode_width::UnicodeWidthStr::width(text);
+        if span_width <= remaining {
+            spans.push(span.clone());
+            remaining -= span_width;
+            ellipsis_style = span.style;
+        } else {
+            let mut clipped = String::new();
+            let mut used = 0;
+            for ch in text.chars() {
+                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if used + cw > remaining {
+                    break;
+                }
+                clipped.push(ch);
+                used += cw;
+            }
+            if !clipped.is_empty() {
+                spans.push(Span::styled(clipped, span.style));
+                ellipsis_style = span.style;
+            }
+            break;
+        }
+    }
+
+    spans.push(Span::styled("…", ellipsis_style));
+    let mut truncated = Line::from(spans);
+    truncated.alignment = line.alignment;
+    truncated
 }
 
 /// Calculate rainbow color for prompt index with exponential decay to gray.
@@ -1499,9 +1550,17 @@ struct CopyViewportSnapshots {
 }
 
 static LAST_COPY_VIEWPORT: OnceLock<Mutex<CopyViewportSnapshots>> = OnceLock::new();
+static URL_REGEX: OnceLock<Regex> = OnceLock::new();
 
 fn copy_viewport_state() -> &'static Mutex<CopyViewportSnapshots> {
     LAST_COPY_VIEWPORT.get_or_init(|| Mutex::new(CopyViewportSnapshots::default()))
+}
+
+fn url_regex() -> &'static Regex {
+    URL_REGEX.get_or_init(|| {
+        Regex::new(r#"(?i)(?:https?://|mailto:|file://)[^\s<>'\"]+"#)
+            .expect("URL regex should compile")
+    })
 }
 
 fn copy_snapshot_slot_mut(
@@ -1606,12 +1665,22 @@ pub(crate) fn record_side_pane_snapshot(
     content_area: Rect,
 ) {
     let left_margins = line_left_margins_for_area(wrapped_lines, content_area.width);
+    let raw_plain_lines: Vec<String> = wrapped_lines.iter().map(line_plain_text).collect();
+    let wrapped_line_map: Vec<WrappedLineMap> = raw_plain_lines
+        .iter()
+        .enumerate()
+        .map(|(raw_line, text)| WrappedLineMap {
+            raw_line,
+            start_col: 0,
+            end_col: line_display_width(text),
+        })
+        .collect();
     record_copy_pane_snapshot(
         crate::tui::CopySelectionPane::SidePane,
-        Arc::new(wrapped_lines.iter().map(line_plain_text).collect()),
+        Arc::new(raw_plain_lines.clone()),
         Arc::new(vec![0; wrapped_lines.len()]),
-        Arc::new(Vec::new()),
-        Arc::new(Vec::new()),
+        Arc::new(raw_plain_lines),
+        Arc::new(wrapped_line_map),
         scroll,
         visible_end,
         content_area,
@@ -1916,6 +1985,66 @@ fn raw_selection_point(
     })
 }
 
+fn trim_url_candidate(candidate: &str) -> &str {
+    let mut trimmed = candidate;
+    loop {
+        let next = if trimmed.ends_with(['.', ',', ';', ':', '!', '?']) {
+            &trimmed[..trimmed.len() - 1]
+        } else if trimmed.ends_with(')')
+            && trimmed.matches(')').count() > trimmed.matches('(').count()
+        {
+            &trimmed[..trimmed.len() - 1]
+        } else if trimmed.ends_with(']')
+            && trimmed.matches(']').count() > trimmed.matches('[').count()
+        {
+            &trimmed[..trimmed.len() - 1]
+        } else if trimmed.ends_with('}')
+            && trimmed.matches('}').count() > trimmed.matches('{').count()
+        {
+            &trimmed[..trimmed.len() - 1]
+        } else {
+            trimmed
+        };
+
+        if next.len() == trimmed.len() {
+            return trimmed;
+        }
+        trimmed = next;
+    }
+}
+
+fn link_target_from_snapshot(
+    snapshot: &CopyViewportSnapshot,
+    point: crate::tui::CopySelectionPoint,
+) -> Option<String> {
+    let raw_point = raw_selection_point(snapshot, point)?;
+    let raw_text = snapshot.raw_plain_lines.get(raw_point.raw_line)?;
+
+    for mat in url_regex().find_iter(raw_text) {
+        let matched = &raw_text[mat.start()..mat.end()];
+        let trimmed = trim_url_candidate(matched);
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let start_col = line_display_width(&raw_text[..mat.start()]);
+        let end_col = start_col + line_display_width(trimmed);
+        if raw_point.column >= start_col && raw_point.column < end_col {
+            if url::Url::parse(trimmed).is_ok() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+pub(crate) fn link_target_from_screen(column: u16, row: u16) -> Option<String> {
+    let point = copy_point_from_screen(column, row)?;
+    let snapshot = copy_snapshot_for_pane(point.pane)?;
+    link_target_from_snapshot(&snapshot, point)
+}
+
 fn profile_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("JCODE_TUI_PROFILE").is_ok())
@@ -2023,6 +2152,12 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     if let Some(picker_cell) = app.session_picker_overlay() {
         let mut picker = picker_cell.borrow_mut();
+        picker.render(frame);
+        return;
+    }
+
+    if let Some(picker_cell) = app.login_picker_overlay() {
+        let picker = picker_cell.borrow();
         picker.render(frame);
         return;
     }
@@ -3111,6 +3246,14 @@ fn rect_within_bounds(rect: Rect, bounds: Rect) -> bool {
 mod tests {
     use super::*;
     use crate::tui::session_picker;
+    use std::sync::{Mutex, OnceLock};
+
+    fn viewport_snapshot_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[derive(Clone, Default)]
     struct TestState {
@@ -3348,6 +3491,11 @@ mod tests {
         ) -> Option<&std::cell::RefCell<session_picker::SessionPicker>> {
             None
         }
+        fn login_picker_overlay(
+            &self,
+        ) -> Option<&std::cell::RefCell<crate::tui::login_picker::LoginPicker>> {
+            None
+        }
         fn account_picker_overlay(
             &self,
         ) -> Option<&std::cell::RefCell<crate::tui::account_picker::AccountPicker>> {
@@ -3387,9 +3535,63 @@ mod tests {
         *state = PromptViewportState::default();
     }
 
+    fn record_test_chat_snapshot(text: &str) {
+        clear_copy_viewport_snapshot();
+        let width = line_display_width(text);
+        record_copy_viewport_snapshot(
+            Arc::new(vec![text.to_string()]),
+            Arc::new(vec![0]),
+            Arc::new(vec![text.to_string()]),
+            Arc::new(vec![WrappedLineMap {
+                raw_line: 0,
+                start_col: 0,
+                end_col: width,
+            }]),
+            0,
+            1,
+            Rect::new(0, 0, 80, 5),
+            &[0],
+        );
+    }
+
     #[test]
     fn test_calculate_input_lines_empty() {
         assert_eq!(calculate_input_lines("", 80), 1);
+    }
+
+    #[test]
+    fn test_link_target_from_screen_detects_chat_url() {
+        let _lock = viewport_snapshot_test_lock();
+        record_test_chat_snapshot("Docs: https://example.com/docs).");
+
+        assert_eq!(
+            link_target_from_screen(10, 0),
+            Some("https://example.com/docs".to_string())
+        );
+    }
+
+    #[test]
+    fn test_link_target_from_screen_detects_side_pane_url() {
+        let _lock = viewport_snapshot_test_lock();
+        clear_copy_viewport_snapshot();
+        record_side_pane_snapshot(
+            &[Line::from("See https://example.com/side for details")],
+            0,
+            1,
+            Rect::new(40, 0, 40, 5),
+        );
+
+        assert_eq!(
+            link_target_from_screen(45, 0),
+            Some("https://example.com/side".to_string())
+        );
+    }
+
+    #[test]
+    fn test_link_target_from_screen_returns_none_without_url() {
+        let _lock = viewport_snapshot_test_lock();
+        record_test_chat_snapshot("No links here");
+        assert_eq!(link_target_from_screen(3, 0), None);
     }
 
     #[test]
@@ -3903,6 +4105,317 @@ mod tests {
                 .any(|line| line.contains("read src/main.rs:2320-2540")),
             "missing second read summary in {:?}",
             rendered
+        );
+    }
+
+    #[test]
+    fn test_tool_summary_path_truncation_keeps_filename_tail() {
+        let tool = ToolCall {
+            id: "call_read_tail".to_string(),
+            name: "read".to_string(),
+            input: serde_json::json!({
+                "file_path": "src/tui/really/long/nested/location/ui_messages.rs",
+                "offset": 120,
+                "limit": 40
+            }),
+            intent: None,
+        };
+
+        let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(28));
+
+        assert!(summary.contains("ui_messages.rs"), "summary={summary:?}");
+        assert!(summary.contains(":120-160"), "summary={summary:?}");
+        assert!(summary.contains('…'), "summary={summary:?}");
+        assert!(unicode_width::UnicodeWidthStr::width(summary.as_str()) <= 28);
+    }
+
+    #[test]
+    fn test_tool_summary_grep_truncation_prefers_middle() {
+        let tool = ToolCall {
+            id: "call_grep_middle".to_string(),
+            name: "grep".to_string(),
+            input: serde_json::json!({
+                "pattern": "prefix_[A-Z0-9]+_important_middle_token_[a-z]+_suffix",
+                "path": "src/some/really/long/module"
+            }),
+            intent: None,
+        };
+
+        let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(34));
+
+        assert!(
+            summary.contains("importan") || summary.contains("token"),
+            "summary={summary:?}"
+        );
+        assert!(
+            summary.contains("suffix") || summary.contains("module"),
+            "summary={summary:?}"
+        );
+        assert!(summary.contains('…'), "summary={summary:?}");
+        assert!(unicode_width::UnicodeWidthStr::width(summary.as_str()) <= 34);
+    }
+
+    #[test]
+    fn test_tool_summary_bash_truncation_keeps_start_and_end() {
+        let tool = ToolCall {
+            id: "call_bash_middle".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({
+                "command": "cargo test --package jcode --lib tui::ui::tests::render_tool_message_batch_flat_subcall_params_include_read_details -- --nocapture"
+            }),
+            intent: None,
+        };
+
+        let summary = tools_ui::get_tool_summary_with_budget(&tool, 32, Some(34));
+
+        assert!(summary.starts_with("$ cargo"), "summary={summary:?}");
+        assert!(
+            summary.contains("nocapture") || summary.contains("read_details"),
+            "summary={summary:?}"
+        );
+        assert!(summary.contains('…'), "summary={summary:?}");
+        assert!(unicode_width::UnicodeWidthStr::width(summary.as_str()) <= 34);
+    }
+
+    #[test]
+    fn test_tool_summary_bash_keeps_full_command_when_width_fits() {
+        let tool = ToolCall {
+            id: "call_bash_full".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({
+                "command": "cargo test --package jcode --lib tui::ui::tests::render_tool_message_batch_rows_do_not_soft_wrap_on_narrow_width -- --nocapture"
+            }),
+            intent: None,
+        };
+
+        let summary = tools_ui::get_tool_summary_with_budget(&tool, 32, Some(160));
+
+        assert_eq!(
+            summary,
+            "$ cargo test --package jcode --lib tui::ui::tests::render_tool_message_batch_rows_do_not_soft_wrap_on_narrow_width -- --nocapture"
+        );
+        assert!(!summary.contains('…'), "summary={summary:?}");
+    }
+
+    #[test]
+    fn test_render_batch_subcall_line_keeps_full_bash_summary_when_row_fits() {
+        let tool = ToolCall {
+            id: "batch-1-bash".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({
+                "command": "cargo test --package jcode --lib tui::ui::tests::render_tool_message_batch_rows_do_not_soft_wrap_on_narrow_width -- --nocapture"
+            }),
+            intent: None,
+        };
+
+        let line =
+            tools_ui::render_batch_subcall_line(&tool, "✓", rgb(100, 180, 100), 32, Some(160));
+        let rendered = extract_line_text(&line);
+
+        assert!(
+            rendered.contains("bash $ cargo test --package jcode"),
+            "rendered={rendered:?}"
+        );
+        assert!(rendered.contains("-- --nocapture"), "rendered={rendered:?}");
+        assert!(!rendered.contains('…'), "rendered={rendered:?}");
+    }
+
+    #[test]
+    fn test_common_tool_summaries_keep_full_text_when_row_budget_fits() {
+        let cases = vec![
+            (
+                ToolCall {
+                    id: "read-wide".to_string(),
+                    name: "read".to_string(),
+                    input: serde_json::json!({
+                        "file_path": "src/tui/ui_messages.rs",
+                        "offset": 120,
+                        "limit": 40
+                    }),
+                    intent: None,
+                },
+                "src/tui/ui_messages.rs:120-160",
+            ),
+            (
+                ToolCall {
+                    id: "grep-wide".to_string(),
+                    name: "grep".to_string(),
+                    input: serde_json::json!({
+                        "pattern": "render_batch_subcall_line",
+                        "path": "src/tui"
+                    }),
+                    intent: None,
+                },
+                "'render_batch_subcall_line' in src/tui",
+            ),
+            (
+                ToolCall {
+                    id: "glob-wide".to_string(),
+                    name: "glob".to_string(),
+                    input: serde_json::json!({
+                        "pattern": "src/tui/**/*.rs"
+                    }),
+                    intent: None,
+                },
+                "'src/tui/**/*.rs'",
+            ),
+            (
+                ToolCall {
+                    id: "webfetch-wide".to_string(),
+                    name: "webfetch".to_string(),
+                    input: serde_json::json!({
+                        "url": "https://example.com/docs/api/reference"
+                    }),
+                    intent: None,
+                },
+                "https://example.com/docs/api/reference",
+            ),
+            (
+                ToolCall {
+                    id: "open-wide".to_string(),
+                    name: "open".to_string(),
+                    input: serde_json::json!({
+                        "mode": "open",
+                        "target": "src/tui/ui.rs"
+                    }),
+                    intent: None,
+                },
+                "open src/tui/ui.rs",
+            ),
+            (
+                ToolCall {
+                    id: "memory-wide".to_string(),
+                    name: "memory".to_string(),
+                    input: serde_json::json!({
+                        "action": "recall",
+                        "query": "tool summary truncation"
+                    }),
+                    intent: None,
+                },
+                "recall 'tool summary truncation'",
+            ),
+            (
+                ToolCall {
+                    id: "codesearch-wide".to_string(),
+                    name: "codesearch".to_string(),
+                    input: serde_json::json!({
+                        "query": "rust unicode width truncation examples"
+                    }),
+                    intent: None,
+                },
+                "'rust unicode width truncation examples'",
+            ),
+            (
+                ToolCall {
+                    id: "debug-wide".to_string(),
+                    name: "debug_socket".to_string(),
+                    input: serde_json::json!({
+                        "command": "tester:list"
+                    }),
+                    intent: None,
+                },
+                "tester:list",
+            ),
+        ];
+
+        for (tool, expected) in cases {
+            let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(200));
+            assert_eq!(summary, expected, "tool={tool:?} summary={summary:?}");
+            assert!(!summary.contains('…'), "tool={tool:?} summary={summary:?}");
+        }
+    }
+
+    #[test]
+    fn test_render_tool_message_batch_rows_do_not_soft_wrap_on_narrow_width() {
+        let msg = DisplayMessage {
+            role: "tool".to_string(),
+            content: "--- [1] read ---\nok\n\nCompleted: 1 succeeded, 0 failed".to_string(),
+            tool_calls: vec![],
+            duration_secs: None,
+            title: None,
+            tool_data: Some(ToolCall {
+                id: "call_batch_narrow".to_string(),
+                name: "batch".to_string(),
+                input: serde_json::json!({
+                    "tool_calls": [
+                        {
+                            "tool": "read",
+                            "file_path": "src/tui/really/long/nested/location/ui_messages.rs",
+                            "offset": 120,
+                            "limit": 40
+                        }
+                    ]
+                }),
+                intent: None,
+            }),
+        };
+
+        let lines = render_tool_message(&msg, 32, crate::config::DiffDisplayMode::Off);
+        let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
+
+        assert_eq!(rendered.len(), 2, "rendered={rendered:?}");
+        assert!(
+            rendered.iter().all(|line| line.width() <= 31),
+            "rendered={rendered:?}"
+        );
+        assert!(rendered[1].contains('…'), "rendered={rendered:?}");
+    }
+
+    #[test]
+    fn test_prepare_messages_live_batch_rows_do_not_soft_wrap_on_narrow_width() {
+        let state = TestState {
+            display_messages: vec![DisplayMessage::user("build it")],
+            status: ProcessingStatus::RunningTool("batch".to_string()),
+            anim_elapsed: 0.0,
+            batch_progress: Some(crate::bus::BatchProgress {
+                session_id: "s".to_string(),
+                tool_call_id: "tc".to_string(),
+                total: 1,
+                completed: 0,
+                last_completed: None,
+                running: vec![ToolCall {
+                    id: "batch-1-bash".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({
+                        "command": "cargo test --package jcode --lib tui::ui::tests::render_tool_message_batch_rows_do_not_soft_wrap_on_narrow_width -- --nocapture"
+                    }),
+                    intent: None,
+                }],
+                subcalls: vec![crate::bus::BatchSubcallProgress {
+                    index: 1,
+                    tool_call: ToolCall {
+                        id: "batch-1-bash".to_string(),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({
+                            "command": "cargo test --package jcode --lib tui::ui::tests::render_tool_message_batch_rows_do_not_soft_wrap_on_narrow_width -- --nocapture"
+                        }),
+                        intent: None,
+                    },
+                    state: crate::bus::BatchSubcallState::Running,
+                }],
+            }),
+            ..Default::default()
+        };
+
+        let prepared = prepare::prepare_messages(&state, 34, 20);
+        let rendered: Vec<String> = prepared
+            .wrapped_lines
+            .iter()
+            .map(extract_line_text)
+            .collect();
+
+        let batch_rows: Vec<&String> = rendered
+            .iter()
+            .filter(|line| line.contains("batch") || line.contains("bash $ cargo"))
+            .collect();
+        assert!(batch_rows.len() >= 2, "rendered={rendered:?}");
+        assert!(
+            batch_rows.iter().all(|line| line.width() <= 33),
+            "rendered={rendered:?}"
+        );
+        assert!(
+            batch_rows.iter().any(|line| line.contains('…')),
+            "rendered={rendered:?}"
         );
     }
 

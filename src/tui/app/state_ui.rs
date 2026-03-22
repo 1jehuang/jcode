@@ -1,6 +1,17 @@
 use super::*;
 use crate::tui::{backend, core, is_unexpected_cache_miss, ui};
 
+pub(super) struct RestoredReloadInput {
+    pub input: String,
+    pub cursor: usize,
+    pub queued_messages: Vec<String>,
+    pub hidden_queued_system_messages: Vec<String>,
+    pub interleave_message: Option<String>,
+    pub pending_soft_interrupts: Vec<String>,
+    pub rate_limit_pending_message: Option<super::PendingRemoteMessage>,
+    pub rate_limit_reset: Option<Instant>,
+}
+
 impl App {
     pub(super) fn active_client_session_id(&self) -> Option<&str> {
         if self.is_remote {
@@ -208,102 +219,17 @@ impl App {
             .collect()
     }
 
-    /// Get command suggestions based on current input (or base input for cycling)
-    pub(super) fn get_suggestions_for(&self, input: &str) -> Vec<(String, &'static str)> {
-        let input = input.trim();
-
-        // Only show suggestions when input starts with /
-        if !input.starts_with('/') {
-            return vec![];
-        }
-
-        let prefix = input.to_lowercase();
-
-        // /model opens the interactive picker — don't list individual models in autocomplete
-        if prefix == "/model" || prefix.starts_with("/model ") || prefix.starts_with("/models") {
-            return vec![("/model".into(), "Open model picker")];
-        }
-
-        if prefix.starts_with("/effort ") {
-            let efforts = ["none", "low", "medium", "high", "xhigh"];
-            return efforts
-                .iter()
-                .map(|e| (format!("/effort {}", e), effort_display_label(e)))
-                .collect();
-        }
-
-        if prefix.starts_with("/fast ") {
-            let modes = ["on", "off", "status"];
-            return modes.iter().map(|m| (format!("/fast {}", m), *m)).collect();
-        }
-
-        if prefix.starts_with("/transport ") {
-            let transports = ["auto", "https", "websocket"];
-            return transports
-                .iter()
-                .map(|t| (format!("/transport {}", t), *t))
-                .collect();
-        }
-
-        if prefix.starts_with("/compact mode ") {
-            let modes = ["reactive", "proactive", "semantic"];
-            return modes
-                .iter()
-                .map(|mode| (format!("/compact mode {}", mode), *mode))
-                .collect();
-        }
-
-        if prefix.starts_with("/login ") || prefix.starts_with("/auth ") {
-            return crate::provider_catalog::tui_login_providers()
-                .iter()
-                .map(|provider| (format!("/login {}", provider.id), provider.menu_detail))
-                .collect();
-        }
-
-        if prefix.starts_with("/account ") || prefix.starts_with("/accounts ") {
-            let mut suggestions = vec![
-                ("/account list".into(), "List Anthropic and OpenAI accounts"),
-                (
-                    "/account add".into(),
-                    "Add a new account (start OAuth login)",
-                ),
-                ("/account switch".into(), "Switch active account"),
-                ("/account remove".into(), "Remove an account"),
-                ("/account openai".into(), "List all OpenAI accounts"),
-                (
-                    "/account openai add".into(),
-                    "Add a new OpenAI account (start OAuth login)",
-                ),
-                (
-                    "/account openai switch".into(),
-                    "Switch active OpenAI account",
-                ),
-                ("/account openai remove".into(), "Remove an OpenAI account"),
-            ];
-            if let Ok(accounts) = crate::auth::claude::list_accounts() {
-                for account in accounts {
-                    suggestions.push((
-                        format!("/account switch {}", account.label),
-                        "Switch to this account",
-                    ));
-                }
-            }
-            if let Ok(accounts) = crate::auth::codex::list_accounts() {
-                for account in accounts {
-                    suggestions.push((
-                        format!("/account openai switch {}", account.label),
-                        "Switch to this OpenAI account",
-                    ));
-                }
-            }
-            return suggestions;
-        }
-
-        // Built-in commands
+    fn command_candidates(&self) -> Vec<(String, &'static str)> {
         let mut commands: Vec<(String, &'static str)> = vec![
             ("/help".into(), "Show help and keyboard shortcuts"),
+            ("/?".into(), "Alias for /help"),
             ("/commands".into(), "Alias for /help"),
             ("/model".into(), "List or switch models"),
+            ("/subagent".into(), "Launch a subagent manually"),
+            (
+                "/subagent-model".into(),
+                "Show/change subagent model policy",
+            ),
             ("/effort".into(), "Show/change reasoning effort (Alt+←/→)"),
             ("/fast".into(), "Toggle OpenAI/Codex fast mode"),
             (
@@ -332,6 +258,11 @@ impl App {
             ("/changelog".into(), "Show recent changes in this build"),
             ("/info".into(), "Show session info and tokens"),
             ("/usage".into(), "Show subscription usage limits"),
+            (
+                "/subscription".into(),
+                "Show jcode subscription status and account details",
+            ),
+            ("/config".into(), "Show or edit configuration"),
             ("/reload".into(), "Smart reload (if newer binary exists)"),
             ("/restart".into(), "Restart with current binary (no build)"),
             ("/rebuild".into(), "Full rebuild (git pull + build + tests)"),
@@ -349,24 +280,382 @@ impl App {
             ),
             (
                 "/account".into(),
-                "Manage Anthropic/OpenAI accounts (list/add/switch/remove)",
+                "Open the combined Claude/OpenAI account picker",
             ),
         ];
 
-        // Add client-reload and server-reload commands in remote mode
         if self.is_remote {
             commands.push(("/client-reload".into(), "Force reload client binary"));
             commands.push(("/server-reload".into(), "Force reload server binary"));
         }
 
-        // Add skills as commands
-        let skills = self.skills.list();
-        for skill in skills {
+        for skill in self.skills.list() {
             commands.push((format!("/{}", skill.name), "Activate skill"));
         }
 
-        // Filter by prefix match
-        self.rank_suggestions(&prefix, commands)
+        commands
+    }
+
+    fn model_suggestion_candidates(&self) -> Vec<(String, &'static str)> {
+        fn push_unique(
+            seen: &mut std::collections::HashSet<String>,
+            models: &mut Vec<String>,
+            model: String,
+        ) {
+            if !model.is_empty() && seen.insert(model.clone()) {
+                models.push(model);
+            }
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        let mut models = Vec::new();
+
+        if self.is_remote {
+            if let Some(current) = self.remote_provider_model.clone() {
+                push_unique(&mut seen, &mut models, current);
+            }
+
+            let routes = if !self.remote_model_routes.is_empty() {
+                self.remote_model_routes.clone()
+            } else {
+                self.build_remote_model_routes_fallback()
+            };
+
+            for route in routes {
+                push_unique(&mut seen, &mut models, route.model);
+            }
+
+            for model in &self.remote_available_models {
+                push_unique(&mut seen, &mut models, model.clone());
+            }
+        } else {
+            push_unique(&mut seen, &mut models, self.provider.model());
+            for model in self.provider.available_models_display() {
+                push_unique(&mut seen, &mut models, model);
+            }
+        }
+
+        models
+            .into_iter()
+            .map(|model| (format!("/model {}", model), "Switch to model"))
+            .collect()
+    }
+
+    /// Get command suggestions based on current input (or base input for cycling)
+    pub(super) fn get_suggestions_for(&self, input: &str) -> Vec<(String, &'static str)> {
+        let input = input.trim_start();
+
+        // Only show suggestions when input starts with /
+        if !input.starts_with('/') {
+            return vec![];
+        }
+
+        let prefix = input.to_lowercase();
+        let prefix_trimmed = prefix.trim_end();
+
+        if prefix.starts_with("/model ") || prefix.starts_with("/models ") {
+            let suggestions = self.model_suggestion_candidates();
+            if suggestions.is_empty() {
+                return vec![("/model".into(), "Open model picker")];
+            }
+            return self.rank_suggestions(input, suggestions);
+        }
+
+        if prefix.starts_with("/subagent-model ") {
+            let mut suggestions = vec![
+                (
+                    "/subagent-model inherit".into(),
+                    "Use the current active model",
+                ),
+                (
+                    "/subagent-model show".into(),
+                    "Show the current subagent model policy",
+                ),
+            ];
+            suggestions.extend(
+                self.model_suggestion_candidates()
+                    .into_iter()
+                    .map(|(cmd, _)| {
+                        (
+                            cmd.replacen("/model ", "/subagent-model ", 1),
+                            "Pin this subagent model",
+                        )
+                    }),
+            );
+            return self.rank_suggestions(input, suggestions);
+        }
+
+        if prefix_trimmed == "/subagent-model" {
+            return vec![
+                (
+                    "/subagent-model show".into(),
+                    "Show the current subagent model policy",
+                ),
+                (
+                    "/subagent-model inherit".into(),
+                    "Use the current active model",
+                ),
+            ];
+        }
+
+        if prefix.starts_with("/subagent ") {
+            return self.rank_suggestions(
+                input,
+                vec![
+                    (
+                        "/subagent --type general ".into(),
+                        "Launch a general-purpose subagent",
+                    ),
+                    (
+                        "/subagent --model ".into(),
+                        "Launch a subagent with an explicit model",
+                    ),
+                    (
+                        "/subagent --continue ".into(),
+                        "Resume an existing subagent session",
+                    ),
+                ],
+            );
+        }
+
+        if prefix_trimmed == "/subagent" {
+            return vec![("/subagent ".into(), "Launch a subagent with a prompt")];
+        }
+
+        // /model opens the interactive picker, and `/model <name>` supports direct completion.
+        if prefix_trimmed == "/model" || prefix_trimmed == "/models" {
+            return vec![("/model".into(), "Open model picker or type `/model <name>`")];
+        }
+
+        if prefix.starts_with("/help ") || prefix.starts_with("/? ") {
+            let base = if prefix.starts_with("/? ") {
+                "/?"
+            } else {
+                "/help"
+            };
+            let topics = self
+                .command_candidates()
+                .into_iter()
+                .map(|(cmd, help)| (format!("{} {}", base, cmd.trim_start_matches('/')), help))
+                .collect();
+            return self.rank_suggestions(input, topics);
+        }
+
+        if prefix.starts_with("/effort ") {
+            let efforts = ["none", "low", "medium", "high", "xhigh"];
+            return self.rank_suggestions(
+                input,
+                efforts
+                    .iter()
+                    .map(|e| (format!("/effort {}", e), effort_display_label(e)))
+                    .collect(),
+            );
+        }
+
+        if prefix.starts_with("/fast ") {
+            let modes = [
+                "on",
+                "off",
+                "status",
+                "default on",
+                "default off",
+                "default status",
+            ];
+            return self.rank_suggestions(
+                input,
+                modes.iter().map(|m| (format!("/fast {}", m), *m)).collect(),
+            );
+        }
+
+        if prefix.starts_with("/transport ") {
+            let transports = ["auto", "https", "websocket"];
+            return self.rank_suggestions(
+                input,
+                transports
+                    .iter()
+                    .map(|t| (format!("/transport {}", t), *t))
+                    .collect(),
+            );
+        }
+
+        if prefix.starts_with("/compact ") {
+            let suggestions = vec![
+                ("/compact mode".into(), "Show/change compaction mode"),
+                (
+                    "/compact mode status".into(),
+                    "Show the current compaction mode",
+                ),
+                ("/compact mode reactive".into(), "Use reactive compaction"),
+                ("/compact mode proactive".into(), "Use proactive compaction"),
+                ("/compact mode semantic".into(), "Use semantic compaction"),
+            ];
+            return self.rank_suggestions(input, suggestions);
+        }
+
+        if prefix.starts_with("/compact mode ") {
+            let modes = ["reactive", "proactive", "semantic"];
+            let mut suggestions: Vec<(String, &'static str)> = vec![(
+                "/compact mode status".into(),
+                "Show the current compaction mode",
+            )];
+            suggestions.extend(
+                modes
+                    .iter()
+                    .map(|mode| (format!("/compact mode {}", mode), *mode)),
+            );
+            return self.rank_suggestions(input, suggestions);
+        }
+
+        if prefix.starts_with("/login ") || prefix.starts_with("/auth ") {
+            let base = if prefix.starts_with("/auth ") {
+                "/auth"
+            } else {
+                "/login"
+            };
+            let suggestions = crate::provider_catalog::tui_login_providers()
+                .iter()
+                .map(|provider| (format!("{} {}", base, provider.id), provider.menu_detail))
+                .collect();
+            return self.rank_suggestions(input, suggestions);
+        }
+
+        if prefix.starts_with("/account ") || prefix.starts_with("/accounts ") {
+            let mut suggestions = vec![
+                ("/account list".into(), "Open all provider/account actions"),
+                ("/account switch".into(), "Switch active account by label"),
+                (
+                    "/account default-provider".into(),
+                    "Set preferred default provider",
+                ),
+                (
+                    "/account default-model".into(),
+                    "Set preferred default model",
+                ),
+                (
+                    "/account openai-compatible settings".into(),
+                    "Inspect custom OpenAI-compatible settings",
+                ),
+                (
+                    "/account openai-compatible api-base".into(),
+                    "Set custom OpenAI-compatible API base",
+                ),
+            ];
+            for provider in crate::provider_catalog::login_providers() {
+                suggestions.push((
+                    format!("/account {}", provider.id),
+                    "Open this provider's account/settings actions",
+                ));
+                suggestions.push((
+                    format!("/account {} settings", provider.id),
+                    "Show provider-specific settings",
+                ));
+                suggestions.push((
+                    format!("/account {} login", provider.id),
+                    "Start or refresh login for this provider",
+                ));
+            }
+            suggestions.push(("/account claude add".into(), "Add a new Claude account"));
+            suggestions.push(("/account openai add".into(), "Add a new OpenAI account"));
+            suggestions.push((
+                "/account openai transport".into(),
+                "Set OpenAI transport preference",
+            ));
+            suggestions.push((
+                "/account openai effort".into(),
+                "Set OpenAI reasoning effort preference",
+            ));
+            if let Ok(accounts) = crate::auth::claude::list_accounts() {
+                for account in accounts {
+                    suggestions.push((
+                        format!("/account claude switch {}", account.label),
+                        "Switch to this Claude account",
+                    ));
+                }
+            }
+            if let Ok(accounts) = crate::auth::codex::list_accounts() {
+                for account in accounts {
+                    suggestions.push((
+                        format!("/account openai switch {}", account.label),
+                        "Switch to this OpenAI account",
+                    ));
+                }
+            }
+            return self.rank_suggestions(input, suggestions);
+        }
+
+        if prefix.starts_with("/memory ") {
+            return self.rank_suggestions(
+                input,
+                vec![
+                    ("/memory on".into(), "Enable memory for this session"),
+                    ("/memory off".into(), "Disable memory for this session"),
+                    ("/memory status".into(), "Show memory feature status"),
+                ],
+            );
+        }
+
+        if prefix.starts_with("/swarm ") {
+            return self.rank_suggestions(
+                input,
+                vec![
+                    ("/swarm on".into(), "Enable swarm for this session"),
+                    ("/swarm off".into(), "Disable swarm for this session"),
+                    ("/swarm status".into(), "Show swarm feature status"),
+                ],
+            );
+        }
+
+        if prefix.starts_with("/subscription ") {
+            return self.rank_suggestions(
+                input,
+                vec![("/subscription status".into(), "Show subscription status")],
+            );
+        }
+
+        if prefix.starts_with("/config ") {
+            return self.rank_suggestions(
+                input,
+                vec![
+                    ("/config init".into(), "Create a default config file"),
+                    ("/config create".into(), "Alias for /config init"),
+                    ("/config edit".into(), "Open the config file in $EDITOR"),
+                ],
+            );
+        }
+
+        if prefix.starts_with("/goals show ") {
+            let relevant_goals = crate::goal::list_relevant_goals(
+                self.session
+                    .working_dir
+                    .as_deref()
+                    .map(std::path::Path::new),
+            )
+            .unwrap_or_default();
+            let suggestions = relevant_goals
+                .into_iter()
+                .map(|goal| (format!("/goals show {}", goal.id), "Open this goal"))
+                .collect();
+            return self.rank_suggestions(input, suggestions);
+        }
+
+        if prefix.starts_with("/goals ") {
+            return self.rank_suggestions(
+                input,
+                vec![
+                    ("/goals resume".into(), "Resume the current goal"),
+                    ("/goals show".into(), "Open a specific goal by id"),
+                ],
+            );
+        }
+
+        if prefix.starts_with("/rewind ") {
+            let suggestions = (1..=self.session.messages.len())
+                .map(|n| (format!("/rewind {}", n), "Rewind to this message"))
+                .collect();
+            return self.rank_suggestions(input, suggestions);
+        }
+
+        self.rank_suggestions(&prefix, self.command_candidates())
     }
 
     /// Get command suggestions based on current input
@@ -386,7 +675,7 @@ impl App {
             return Vec::new();
         }
 
-        let auth = crate::auth::AuthStatus::check();
+        let auth = crate::auth::AuthStatus::check_fast();
         if !auth.has_any_available() {
             return vec![("Log in to get started".to_string(), "/login".to_string())];
         }
@@ -519,6 +808,7 @@ impl App {
         matches!(
             cmd.trim(),
             "/help"
+                | "/?"
                 | "/model"
                 | "/effort"
                 | "/fast"
@@ -526,11 +816,24 @@ impl App {
                 | "/login"
                 | "/auth"
                 | "/account"
+                | "/account claude"
+                | "/account switch"
+                | "/account openai"
+                | "/account openai-compatible"
+                | "/account default-provider"
+                | "/account default-model"
+                | "/account claude switch"
+                | "/account claude remove"
+                | "/account openai switch"
+                | "/account openai remove"
                 | "/subscription"
                 | "/memory"
                 | "/goals"
+                | "/goals show"
                 | "/swarm"
                 | "/rewind"
+                | "/compact"
+                | "/compact mode"
                 | "/config"
                 | "/save"
                 | "/cache"
@@ -865,24 +1168,48 @@ impl App {
         if self.input.is_empty()
             && self.queued_messages.is_empty()
             && self.hidden_queued_system_messages.is_empty()
+            && self.interleave_message.is_none()
+            && self.pending_soft_interrupts.is_empty()
+            && self.rate_limit_pending_message.is_none()
         {
             return;
         }
         if let Ok(jcode_dir) = crate::storage::jcode_dir() {
             let path = jcode_dir.join(format!("client-input-{}", session_id));
+            let rate_limit_reset_in_ms = self.rate_limit_reset.and_then(|reset| {
+                let now = Instant::now();
+                if reset <= now {
+                    Some(0)
+                } else {
+                    Some((reset - now).as_millis().min(u64::MAX as u128) as u64)
+                }
+            });
+            let rate_limit_pending_message =
+                self.rate_limit_pending_message.as_ref().map(|pending| {
+                    serde_json::json!({
+                        "content": pending.content,
+                        "images": pending.images,
+                        "is_system": pending.is_system,
+                        "system_reminder": pending.system_reminder,
+                        "auto_retry": pending.auto_retry,
+                        "retry_attempts": pending.retry_attempts,
+                    })
+                });
             let data = serde_json::json!({
                 "cursor": self.cursor_pos,
                 "input": self.input,
                 "queued_messages": self.queued_messages,
                 "hidden_queued_system_messages": self.hidden_queued_system_messages,
+                "interleave_message": self.interleave_message,
+                "pending_soft_interrupts": self.pending_soft_interrupts,
+                "rate_limit_pending_message": rate_limit_pending_message,
+                "rate_limit_reset_in_ms": rate_limit_reset_in_ms,
             });
             let _ = std::fs::write(&path, data.to_string());
         }
     }
 
-    pub(super) fn restore_input_for_reload(
-        session_id: &str,
-    ) -> Option<(String, usize, Vec<String>, Vec<String>)> {
+    pub(super) fn restore_input_for_reload(session_id: &str) -> Option<RestoredReloadInput> {
         let jcode_dir = crate::storage::jcode_dir().ok()?;
         let path = jcode_dir.join(format!("client-input-{}", session_id));
         if !path.exists() {
@@ -918,19 +1245,99 @@ impl App {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+            let interleave_message = value
+                .get("interleave_message")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty());
+            let pending_soft_interrupts = value
+                .get("pending_soft_interrupts")
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let rate_limit_pending_message = value
+                .get("rate_limit_pending_message")
+                .and_then(|pending| pending.as_object())
+                .map(|pending| super::PendingRemoteMessage {
+                    content: pending
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    images: pending
+                        .get("images")
+                        .and_then(|v| v.as_array())
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|item| {
+                                    let pair = item.as_array()?;
+                                    let first = pair.first()?.as_str()?;
+                                    let second = pair.get(1)?.as_str()?;
+                                    Some((first.to_string(), second.to_string()))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
+                    is_system: pending
+                        .get("is_system")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    system_reminder: pending
+                        .get("system_reminder")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    auto_retry: pending
+                        .get("auto_retry")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    retry_attempts: pending
+                        .get("retry_attempts")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u8,
+                    retry_at: None,
+                });
+            let rate_limit_reset = value
+                .get("rate_limit_reset_in_ms")
+                .and_then(|v| v.as_u64())
+                .map(|delay_ms| Instant::now() + Duration::from_millis(delay_ms));
+            let mut rate_limit_pending_message = rate_limit_pending_message;
+            if let (Some(pending), Some(reset)) =
+                (&mut rate_limit_pending_message, rate_limit_reset)
+            {
+                pending.retry_at = Some(reset);
+            }
             let cursor = cursor.min(input.len());
-            return Some((
+            return Some(RestoredReloadInput {
                 input,
                 cursor,
                 queued_messages,
                 hidden_queued_system_messages,
-            ));
+                interleave_message,
+                pending_soft_interrupts,
+                rate_limit_pending_message,
+                rate_limit_reset,
+            });
         }
 
         let (cursor_str, input) = data.split_once('\n')?;
         let cursor = cursor_str.parse::<usize>().unwrap_or(0);
         let cursor = cursor.min(input.len());
-        Some((input.to_string(), cursor, Vec::new(), Vec::new()))
+        Some(RestoredReloadInput {
+            input: input.to_string(),
+            cursor,
+            queued_messages: Vec::new(),
+            hidden_queued_system_messages: Vec::new(),
+            interleave_message: None,
+            pending_soft_interrupts: Vec::new(),
+            rate_limit_pending_message: None,
+            rate_limit_reset: None,
+        })
     }
 
     /// Toggle scroll bookmark: stash current position and jump to bottom,
@@ -1067,7 +1474,8 @@ impl App {
             // Clean up old socket
             let _ = std::fs::remove_file(&socket_path);
 
-            let listener = match Listener::bind(&socket_path) {
+            #[allow(unused_mut)]
+            let mut listener = match Listener::bind(&socket_path) {
                 Ok(l) => l,
                 Err(e) => {
                     crate::logging::error(&format!("Failed to bind debug socket: {}", e));

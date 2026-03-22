@@ -9,6 +9,7 @@ mod info_widget_layout;
 mod info_widget_overview;
 mod keybind;
 mod layout_utils;
+pub mod login_picker;
 pub mod markdown;
 pub mod mermaid;
 pub mod permissions;
@@ -218,6 +219,8 @@ pub trait TuiState {
     fn help_scroll(&self) -> Option<usize>;
     /// Session picker overlay for /resume command
     fn session_picker_overlay(&self) -> Option<&std::cell::RefCell<session_picker::SessionPicker>>;
+    /// Login picker overlay for /login command
+    fn login_picker_overlay(&self) -> Option<&std::cell::RefCell<login_picker::LoginPicker>>;
     /// Account picker overlay for /account command
     fn account_picker_overlay(&self) -> Option<&std::cell::RefCell<account_picker::AccountPicker>>;
     /// Working directory for this session
@@ -297,9 +300,30 @@ pub fn cache_ttl_for_provider(provider: &str) -> Option<u64> {
     }
 }
 
-/// Unified model/provider picker with three columns
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickerKind {
+    Model,
+    Account,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountPickerSelection {
+    Switch { provider_id: String, label: String },
+    Add { provider_id: String },
+    Replace { provider_id: String, label: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickerSelection {
+    Model,
+    Account(AccountPickerSelection),
+}
+
+/// Unified inline picker with three columns.
 #[derive(Debug, Clone)]
 pub struct PickerState {
+    /// Which inline picker is currently active.
+    pub kind: PickerKind,
     /// All unique model entries with their routes
     pub models: Vec<ModelEntry>,
     /// Filtered indices into `models` (by model filter)
@@ -319,6 +343,7 @@ pub struct PickerState {
 pub struct ModelEntry {
     pub name: String,
     pub routes: Vec<RouteOption>,
+    pub selection: PickerSelection,
     pub selected_route: usize,
     pub is_current: bool,
     pub is_default: bool,

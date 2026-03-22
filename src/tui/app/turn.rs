@@ -647,6 +647,7 @@ impl App {
                                         self.clear_streaming_render_state();
                                         self.stream_buffer.clear();
                                         self.streaming_tool_calls.clear();
+                                        self.schedule_queued_dispatch_after_interrupt();
                                         self.push_display_message(DisplayMessage::system("Interrupted"));
                                         return Ok(());
                                     }
@@ -781,6 +782,7 @@ impl App {
                                         self.clear_streaming_render_state();
                                         self.stream_buffer.clear();
                                         self.streaming_tool_calls.clear();
+                                        self.schedule_queued_dispatch_after_interrupt();
                                         self.push_display_message(DisplayMessage::system("Interrupted"));
                                         return Ok(());
                                     }
@@ -1383,6 +1385,7 @@ impl App {
                                             self.stream_buffer.clear();
                                             self.streaming_tool_calls.clear();
                                             self.batch_progress = None;
+                                            self.schedule_queued_dispatch_after_interrupt();
                                             self.push_display_message(DisplayMessage::system("Interrupted"));
                                             return Ok(());
                                         }
@@ -1662,6 +1665,9 @@ impl App {
                     ContentBlock::Reasoning { .. } => {}
                     ContentBlock::Image { .. } => {
                         transcript.push_str("[Image]\n");
+                    }
+                    ContentBlock::OpenAICompaction { .. } => {
+                        transcript.push_str("[OpenAI native compaction]\n");
                     }
                 }
             }

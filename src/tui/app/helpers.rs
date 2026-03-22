@@ -3,6 +3,15 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[derive(Clone)]
+pub(super) struct CachedContextInfo {
+    pub session_key: String,
+    pub is_remote: bool,
+    pub display_messages_version: u64,
+    pub message_count: usize,
+    pub context_info: crate::prompt::ContextInfo,
+}
+
 pub(super) fn extract_bracketed_system_message(message: &str) -> Option<String> {
     let trimmed = message.trim();
     let body = trimmed.strip_prefix("[SYSTEM:")?.trim_start();
@@ -291,6 +300,29 @@ pub(super) fn fast_mode_status_notice(enabled: bool, applies_next_request: bool)
     } else {
         format!("Fast: {}", status)
     }
+}
+
+pub(super) fn fast_mode_overview_message(
+    enabled: bool,
+    current_label: &str,
+    default_enabled: bool,
+    default_label: &str,
+) -> String {
+    format!(
+        "Fast mode is {}.\nCurrent tier: {}\nSaved default: {} ({})\nUse `/fast on`, `/fast off`, or `/fast default on|off`.",
+        if enabled { "on" } else { "off" },
+        current_label,
+        if default_enabled { "on" } else { "off" },
+        default_label
+    )
+}
+
+pub(super) fn fast_mode_default_message(default_enabled: bool, default_label: &str) -> String {
+    format!(
+        "Saved default fast mode is {}.\nDefault tier: {}\nUse `/fast default on` or `/fast default off`.",
+        if default_enabled { "on" } else { "off" },
+        default_label
+    )
 }
 
 pub(super) fn mask_email(email: &str) -> String {

@@ -28,6 +28,11 @@ pub(super) async fn process_turn_with_input(
         }
     }
 
+    if app.pending_queued_dispatch {
+        finish_turn(app);
+        return;
+    }
+
     app.process_queued_messages(terminal, event_stream).await;
     finish_turn(app);
 }
@@ -212,7 +217,7 @@ fn handle_input_shell_completed(app: &mut App, shell: InputShellCompleted) {
     app.set_status_notice(crate::message::input_shell_status_notice(&shell.result));
 }
 
-fn finish_turn(app: &mut App) {
+pub(super) fn finish_turn(app: &mut App) {
     app.total_input_tokens += app.streaming_input_tokens;
     app.total_output_tokens += app.streaming_output_tokens;
     app.update_cost_impl();

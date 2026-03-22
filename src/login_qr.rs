@@ -16,6 +16,10 @@ fn qr_rendering_enabled() -> bool {
     env_truthy("JCODE_SHOW_LOGIN_QR") || env_truthy("JCODE_LOGIN_QR")
 }
 
+fn tui_qr_rendering_enabled() -> bool {
+    env_truthy("JCODE_SHOW_TUI_LOGIN_QR") || env_truthy("JCODE_TUI_LOGIN_QR")
+}
+
 pub fn render_unicode_qr(data: &str) -> Result<String, qr2term::QrError> {
     let mut matrix = qr2term::qr::Qr::from(data)?.to_matrix();
     matrix.surround(QUIET_ZONE_WIDTH, QrLight);
@@ -51,6 +55,14 @@ pub fn render_unicode_qr(data: &str) -> Result<String, qr2term::QrError> {
 
 pub fn markdown_section(data: &str, heading: &str) -> Option<String> {
     if !qr_rendering_enabled() {
+        return None;
+    }
+    let qr = render_unicode_qr(data).ok()?;
+    Some(format!("{heading}\n\n```text\n{qr}\n```"))
+}
+
+pub fn markdown_section_for_tui(data: &str, heading: &str) -> Option<String> {
+    if !tui_qr_rendering_enabled() {
         return None;
     }
     let qr = render_unicode_qr(data).ok()?;
@@ -95,6 +107,27 @@ mod tests {
         assert!(section.starts_with("Scan this on another device:\n\n```text\n"));
         assert!(section.ends_with("\n```"));
         crate::env::remove_var("JCODE_SHOW_LOGIN_QR");
+    }
+
+    #[test]
+    fn tui_markdown_section_is_opt_in_even_when_general_qr_is_enabled() {
+        let _guard = lock_test_env();
+        crate::env::set_var("JCODE_SHOW_LOGIN_QR", "1");
+        crate::env::remove_var("JCODE_SHOW_TUI_LOGIN_QR");
+        crate::env::remove_var("JCODE_TUI_LOGIN_QR");
+        assert!(markdown_section_for_tui("https://example.com/login", "Scan:").is_none());
+        crate::env::remove_var("JCODE_SHOW_LOGIN_QR");
+    }
+
+    #[test]
+    fn tui_markdown_section_uses_dedicated_env_flag() {
+        let _guard = lock_test_env();
+        crate::env::set_var("JCODE_SHOW_TUI_LOGIN_QR", "1");
+        let section = markdown_section_for_tui("https://example.com/login", "Scan:")
+            .expect("tui qr should be enabled");
+        assert!(section.starts_with("Scan:\n\n```text\n"));
+        assert!(section.ends_with("\n```"));
+        crate::env::remove_var("JCODE_SHOW_TUI_LOGIN_QR");
     }
 
     #[test]

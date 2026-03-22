@@ -402,6 +402,8 @@ pub struct App {
     picker_state: Option<super::PickerState>,
     // Pending model switch from picker (for remote mode async processing)
     pending_model_switch: Option<String>,
+    // Pending account switch from inline picker (for remote mode async processing)
+    pending_account_picker_selection: Option<crate::tui::AccountPickerSelection>,
     // Keybindings for model switching
     model_switch_keys: ModelSwitchKeys,
     // Keybindings for effort switching
@@ -412,6 +414,8 @@ pub struct App {
     centered_toggle_keys: CenteredToggleKeys,
     // Optional configured keybinding for external dictation
     dictation_key: OptionalBinding,
+    // Active external dictation session, if one is running
+    dictation_session: Option<dictation::ActiveDictation>,
     // Whether an external dictation command is currently running
     dictation_in_flight: bool,
     // Keep the current chat viewport while typing instead of snapping to bottom.
@@ -431,6 +435,9 @@ pub struct App {
     // Queue mode: if true, Enter during processing queues; if false, Enter queues to send next
     // Toggle with Ctrl+Tab or Ctrl+T
     queue_mode: bool,
+    // After an interrupt, wait one redraw before auto-dispatching queued followups so
+    // the queued preview can render in the interrupted state first.
+    pending_queued_dispatch: bool,
     // Tab completion state: (base_input, suggestion_index)
     // base_input is the original input before cycling, suggestion_index is current position
     tab_completion_state: Option<(String, usize)>,

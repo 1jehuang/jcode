@@ -316,6 +316,18 @@ pub(super) fn handle_shift_enter(app: &mut App) {
     insert_input_text(app, "\n");
 }
 
+impl App {
+    pub(super) fn has_queued_followups(&self) -> bool {
+        !self.queued_messages.is_empty() || !self.hidden_queued_system_messages.is_empty()
+    }
+
+    pub(super) fn schedule_queued_dispatch_after_interrupt(&mut self) {
+        if self.has_queued_followups() {
+            self.pending_queued_dispatch = true;
+        }
+    }
+}
+
 pub(super) fn handle_alternate_enter(app: &mut App) {
     if app.activate_model_picker_from_preview() {
         return;
@@ -463,6 +475,10 @@ pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
         }
         KeyCode::Char('v') => {
             paste_image_from_clipboard(app);
+            true
+        }
+        KeyCode::Char('a') if app.input.is_empty() => {
+            app.copy_chat_viewport_context_to_clipboard();
             true
         }
         _ => false,

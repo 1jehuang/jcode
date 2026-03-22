@@ -1,5 +1,6 @@
 use super::*;
 use std::cell::RefCell;
+use std::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WidgetProviderKind {
@@ -31,9 +32,35 @@ struct WidgetRouteInfo {
 }
 
 impl App {
+    fn remote_header_provider_model(&self) -> Option<String> {
+        self.remote_provider_model
+            .clone()
+            .or_else(|| self.session.model.clone())
+            .filter(|model| {
+                let trimmed = model.trim();
+                !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("unknown")
+            })
+    }
+
+    fn remote_header_provider_name(&self) -> Option<String> {
+        self.remote_provider_name
+            .clone()
+            .or_else(|| {
+                self.remote_header_provider_model().and_then(|model| {
+                    crate::provider::provider_for_model_with_hint(&model, None).map(str::to_string)
+                })
+            })
+            .filter(|provider| !provider.trim().is_empty())
+    }
+
     fn widget_route_info(&self, model: Option<&str>) -> WidgetRouteInfo {
+        let remote_provider_name = if self.is_remote || self.is_replay {
+            self.remote_header_provider_name()
+        } else {
+            None
+        };
         let provider_name = if self.is_remote || self.is_replay {
-            self.remote_provider_name.as_deref()
+            remote_provider_name.as_deref()
         } else {
             Some(self.provider.name())
         };
@@ -57,32 +84,31 @@ impl App {
             return crate::tui::info_widget::AuthMethod::Unknown;
         }
 
+        let auth_status = crate::auth::AuthStatus::check_fast();
+
         match route.provider {
             WidgetProviderKind::Anthropic => {
-                if crate::auth::claude::has_credentials() {
+                if auth_status.anthropic.has_oauth {
                     crate::tui::info_widget::AuthMethod::AnthropicOAuth
-                } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+                } else if auth_status.anthropic.has_api_key {
                     crate::tui::info_widget::AuthMethod::AnthropicApiKey
                 } else {
                     crate::tui::info_widget::AuthMethod::Unknown
                 }
             }
-            WidgetProviderKind::OpenAI => match crate::auth::codex::load_credentials() {
-                Ok(creds) if !creds.refresh_token.is_empty() => {
+            WidgetProviderKind::OpenAI => {
+                if auth_status.openai_has_oauth {
                     crate::tui::info_widget::AuthMethod::OpenAIOAuth
+                } else if auth_status.openai_has_api_key {
+                    crate::tui::info_widget::AuthMethod::OpenAIApiKey
+                } else {
+                    crate::tui::info_widget::AuthMethod::Unknown
                 }
-                _ => {
-                    if std::env::var("OPENAI_API_KEY").is_ok() {
-                        crate::tui::info_widget::AuthMethod::OpenAIApiKey
-                    } else {
-                        crate::tui::info_widget::AuthMethod::Unknown
-                    }
-                }
-            },
+            }
             WidgetProviderKind::OpenRouter => crate::tui::info_widget::AuthMethod::OpenRouterApiKey,
             WidgetProviderKind::Copilot => crate::tui::info_widget::AuthMethod::CopilotOAuth,
             WidgetProviderKind::Gemini => {
-                if crate::auth::gemini::has_cached_auth() {
+                if auth_status.gemini == crate::auth::AuthState::Available {
                     crate::tui::info_widget::AuthMethod::GeminiOAuth
                 } else {
                     crate::tui::info_widget::AuthMethod::Unknown
@@ -242,15 +268,25 @@ impl crate::tui::TuiState for App {
     }
 
     fn provider_name(&self) -> String {
-        self.remote_provider_name
-            .clone()
-            .unwrap_or_else(|| self.provider.name().to_string())
+        if self.is_remote {
+            self.remote_header_provider_name()
+                .unwrap_or_else(|| self.provider.name().to_string())
+        } else {
+            self.remote_provider_name
+                .clone()
+                .unwrap_or_else(|| self.provider.name().to_string())
+        }
     }
 
     fn provider_model(&self) -> String {
-        self.remote_provider_model
-            .clone()
-            .unwrap_or_else(|| self.provider.model().to_string())
+        if self.is_remote {
+            self.remote_header_provider_model()
+                .unwrap_or_else(|| "connecting…".to_string())
+        } else {
+            self.remote_provider_model
+                .clone()
+                .unwrap_or_else(|| self.provider.model().to_string())
+        }
     }
 
     fn upstream_provider(&self) -> Option<String> {
@@ -368,6 +404,8 @@ impl crate::tui::TuiState for App {
         if self.is_remote {
             self.remote_session_id
                 .as_ref()
+                .or(self.resume_session_id.as_ref())
+                .as_ref()
                 .and_then(|id| crate::id::extract_session_name(id))
                 .map(|s| s.to_string())
         } else {
@@ -430,6 +468,33 @@ impl crate::tui::TuiState for App {
 
     fn context_info(&self) -> crate::prompt::ContextInfo {
         use crate::message::{ContentBlock, Role};
+        use std::time::Instant;
+
+        static CACHE: Mutex<Option<(Instant, CachedContextInfo)>> = Mutex::new(None);
+        const TTL: Duration = Duration::from_millis(250);
+
+        let session_key = if self.is_remote {
+            self.remote_session_id
+                .clone()
+                .unwrap_or_else(|| self.session.id.clone())
+        } else {
+            self.session.id.clone()
+        };
+        let message_count = if self.is_remote {
+            self.display_messages.len()
+        } else {
+            self.messages.len()
+        };
+        if let Ok(cache) = CACHE.lock()
+            && let Some((ts, cached)) = &*cache
+            && ts.elapsed() < TTL
+            && cached.session_key == session_key
+            && cached.is_remote == self.is_remote
+            && cached.display_messages_version == self.display_messages_version
+            && cached.message_count == message_count
+        {
+            return cached.context_info.clone();
+        }
 
         let mut info = self.context_info.clone();
 
@@ -466,7 +531,7 @@ impl crate::tui::TuiState for App {
                 }
             }
         } else {
-            let skip = if self.provider.supports_compaction() {
+            let skip = if self.provider.uses_jcode_compaction() {
                 let compaction = self.registry.compaction();
                 let result = compaction
                     .try_read()
@@ -511,6 +576,9 @@ impl crate::tui::TuiState for App {
                         ContentBlock::Image { data, .. } => {
                             user_chars += data.len();
                         }
+                        ContentBlock::OpenAICompaction { encrypted_content } => {
+                            user_chars += encrypted_content.len();
+                        }
                     }
                 }
             }
@@ -548,6 +616,19 @@ impl crate::tui::TuiState for App {
             + info.assistant_messages_chars
             + info.tool_calls_chars
             + info.tool_results_chars;
+
+        if let Ok(mut cache) = CACHE.lock() {
+            *cache = Some((
+                Instant::now(),
+                CachedContextInfo {
+                    session_key,
+                    is_remote: self.is_remote,
+                    display_messages_version: self.display_messages_version,
+                    message_count,
+                    context_info: info.clone(),
+                },
+            ));
+        }
 
         info
     }
@@ -600,17 +681,27 @@ impl crate::tui::TuiState for App {
             None
         };
 
-        let (model, reasoning_effort, service_tier) = if self.is_remote || self.is_replay {
+        let (
+            model,
+            reasoning_effort,
+            service_tier,
+            native_compaction_mode,
+            native_compaction_threshold_tokens,
+        ) = if self.is_remote || self.is_replay {
             (
                 self.remote_provider_model.clone(),
                 self.remote_reasoning_effort.clone(),
                 self.remote_service_tier.clone(),
+                None,
+                None,
             )
         } else {
             (
                 Some(self.provider.model()),
                 self.provider.reasoning_effort(),
                 self.provider.service_tier(),
+                self.provider.native_compaction_mode(),
+                self.provider.native_compaction_threshold_tokens(),
             )
         };
 
@@ -813,6 +904,8 @@ impl crate::tui::TuiState for App {
             model,
             reasoning_effort,
             service_tier,
+            native_compaction_mode,
+            native_compaction_threshold_tokens,
             session_count,
             session_name,
             client_count,
@@ -865,7 +958,7 @@ impl crate::tui::TuiState for App {
                 None
             },
             observed_context_tokens: self.current_stream_context_tokens(),
-            is_compacting: if !self.is_remote && self.provider.supports_compaction() {
+            is_compacting: if !self.is_remote && self.provider.uses_jcode_compaction() {
                 let compaction = self.registry.compaction();
                 compaction
                     .try_read()
@@ -889,7 +982,7 @@ impl crate::tui::TuiState for App {
     }
 
     fn auth_status(&self) -> crate::auth::AuthStatus {
-        crate::auth::AuthStatus::check()
+        crate::auth::AuthStatus::check_fast()
     }
 
     fn diagram_mode(&self) -> crate::config::DiagramDisplayMode {
@@ -960,6 +1053,10 @@ impl crate::tui::TuiState for App {
         &self,
     ) -> Option<&RefCell<crate::tui::session_picker::SessionPicker>> {
         self.session_picker_overlay.as_ref()
+    }
+
+    fn login_picker_overlay(&self) -> Option<&RefCell<crate::tui::login_picker::LoginPicker>> {
+        self.login_picker_overlay.as_ref()
     }
 
     fn account_picker_overlay(

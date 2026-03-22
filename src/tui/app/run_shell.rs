@@ -30,6 +30,11 @@ impl App {
                 // Process turn while still handling input
                 self.process_turn_with_input(&mut terminal, &mut event_stream)
                     .await;
+            } else if self.pending_queued_dispatch {
+                self.pending_queued_dispatch = false;
+                self.process_queued_messages(&mut terminal, &mut event_stream)
+                    .await;
+                local::finish_turn(&mut self);
             } else {
                 // Wait for input or redraw tick
                 tokio::select! {
@@ -69,7 +74,7 @@ impl App {
         'outer: loop {
             let session_to_resume = self.reconnect_target_session_id();
 
-            let mut remote = match remote::connect_with_retry(
+            let mut remote_conn = match remote::connect_with_retry(
                 &mut self,
                 &mut terminal,
                 &mut event_stream,
@@ -86,7 +91,7 @@ impl App {
             match remote::handle_post_connect(
                 &mut self,
                 &mut terminal,
-                &mut remote,
+                &mut remote_conn,
                 &mut remote_state,
                 session_to_resume.as_deref(),
             )
@@ -112,15 +117,21 @@ impl App {
                     break 'outer;
                 }
 
+                if self.pending_queued_dispatch {
+                    self.pending_queued_dispatch = false;
+                    remote::process_remote_followups(&mut self, &mut remote_conn).await;
+                    continue;
+                }
+
                 tokio::select! {
                     _ = redraw_interval.tick() => {
-                        remote::handle_tick(&mut self, &mut remote).await;
+                        remote::handle_tick(&mut self, &mut remote_conn).await;
                     }
-                    event = remote.next_event() => {
+                    event = remote_conn.next_event() => {
                         match remote::handle_remote_event(
                             &mut self,
                             &mut terminal,
-                            &mut remote,
+                            &mut remote_conn,
                             &mut remote_state,
                             event,
                         )
@@ -131,10 +142,10 @@ impl App {
                         }
                     }
                     event = event_stream.next() => {
-                        remote::handle_terminal_event(&mut self, &mut terminal, &mut remote, event).await?;
+                        remote::handle_terminal_event(&mut self, &mut terminal, &mut remote_conn, event).await?;
                     }
                     bus_event = bus_receiver_remote.recv() => {
-                        remote::handle_bus_event(&mut self, &mut remote, bus_event).await;
+                        remote::handle_bus_event(&mut self, &mut remote_conn, bus_event).await;
                     }
                 }
             }

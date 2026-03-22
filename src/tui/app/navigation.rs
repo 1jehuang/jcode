@@ -2,6 +2,31 @@ use super::*;
 use ratatui::layout::Rect;
 
 impl App {
+    pub(super) fn try_open_link_at(&mut self, column: u16, row: u16) -> bool {
+        self.try_open_link_at_with(column, row, |url| open::that_detached(url))
+    }
+
+    pub(super) fn try_open_link_at_with<F, E>(
+        &mut self,
+        column: u16,
+        row: u16,
+        mut open_url: F,
+    ) -> bool
+    where
+        F: FnMut(&str) -> Result<(), E>,
+        E: std::fmt::Display,
+    {
+        let Some(url) = super::super::ui::link_target_from_screen(column, row) else {
+            return false;
+        };
+
+        match open_url(&url) {
+            Ok(()) => self.set_status_notice(format!("Opened link: {}", url)),
+            Err(e) => self.set_status_notice(format!("Failed to open link: {}", e)),
+        }
+        true
+    }
+
     pub(super) fn scroll_max_estimate(&self) -> usize {
         let renderer_max = super::super::ui::last_max_scroll();
         if renderer_max > 0 {
@@ -87,21 +112,24 @@ impl App {
             return false;
         }
 
+        let line_amount = self.side_pane_line_scroll_amount();
+        let page_amount = self.side_pane_page_scroll_amount();
+
         match code {
             KeyCode::Char('j') | KeyCode::Down => {
-                self.diff_pane_scroll = self.diff_pane_scroll.saturating_add(3);
+                self.diff_pane_scroll = self.diff_pane_scroll.saturating_add(line_amount);
                 self.diff_pane_auto_scroll = false;
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.diff_pane_scroll = self.diff_pane_scroll.saturating_sub(3);
+                self.diff_pane_scroll = self.diff_pane_scroll.saturating_sub(line_amount);
                 self.diff_pane_auto_scroll = false;
             }
             KeyCode::Char('d') | KeyCode::PageDown => {
-                self.diff_pane_scroll = self.diff_pane_scroll.saturating_add(20);
+                self.diff_pane_scroll = self.diff_pane_scroll.saturating_add(page_amount);
                 self.diff_pane_auto_scroll = false;
             }
             KeyCode::Char('u') | KeyCode::PageUp => {
-                self.diff_pane_scroll = self.diff_pane_scroll.saturating_sub(20);
+                self.diff_pane_scroll = self.diff_pane_scroll.saturating_sub(page_amount);
                 self.diff_pane_auto_scroll = false;
             }
             KeyCode::Char('g') | KeyCode::Home => {
@@ -119,6 +147,40 @@ impl App {
         }
 
         true
+    }
+
+    fn side_pane_has_visual_images(&self) -> bool {
+        if !self.pin_images || self.side_panel.focused_page().is_some() || self.diff_mode.is_file()
+        {
+            return false;
+        }
+
+        if self.is_remote {
+            !self.remote_side_pane_images.is_empty()
+        } else {
+            crate::session::has_rendered_images(&self.session)
+        }
+    }
+
+    fn side_pane_line_scroll_amount(&self) -> usize {
+        if self.side_pane_has_visual_images() {
+            1
+        } else {
+            3
+        }
+    }
+
+    fn side_pane_page_scroll_amount(&self) -> usize {
+        if self.side_pane_has_visual_images() {
+            8
+        } else {
+            20
+        }
+    }
+
+    fn side_pane_mouse_scroll_amount(&mut self) -> usize {
+        self.last_mouse_scroll = Some(Instant::now());
+        self.side_pane_line_scroll_amount()
     }
 
     pub(super) fn cycle_diagram(&mut self, direction: i32) {
@@ -563,7 +625,7 @@ impl App {
         {
             // Treat wheel scrolling over the shared right pane as hover-only.
             // Users often want to keep typing in chat while inspecting pinned content.
-            let amt = self.mouse_scroll_amount();
+            let amt = self.side_pane_mouse_scroll_amount();
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
                     let current = if self.diff_pane_scroll == usize::MAX {
@@ -588,6 +650,12 @@ impl App {
 
         if handled_scroll {
             return true;
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+            && self.try_open_link_at(mouse.column, mouse.row)
+        {
+            return false;
         }
 
         match mouse.kind {

@@ -130,7 +130,6 @@ fn render_assistant_tool_call_lines(
         "tools:"
     };
     let prefix = format!("  {} ", label);
-    let continuation_prefix = " ".repeat(prefix.width());
     let prefix_width = prefix.width();
     let available_width = width.max(prefix_width.saturating_add(1));
 
@@ -138,48 +137,58 @@ fn render_assistant_tool_call_lines(
     let separator_style = Style::default().fg(dim_color()).dim();
     let name_style = Style::default().fg(accent_color()).dim();
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut current_spans = vec![Span::styled(prefix.clone(), prefix_style)];
+    let max_width = available_width.saturating_sub(1).max(prefix_width + 1);
+    let mut spans = vec![Span::styled(prefix.clone(), prefix_style)];
     let mut current_width = prefix_width;
-    let mut first_on_line = true;
+    let mut shown = 0usize;
 
-    let flush_line = |lines: &mut Vec<Line<'static>>, spans: &mut Vec<Span<'static>>| {
-        if !spans.is_empty() {
-            lines.push(Line::from(std::mem::take(spans)));
-        }
-    };
-
-    for tool_name in tool_calls {
-        let tool_width = tool_name.width();
-        let separator_width = if first_on_line {
+    for (idx, tool_name) in tool_calls.iter().enumerate() {
+        let separator_width = if shown == 0 {
             0
         } else {
             TOOL_SEPARATOR.width()
         };
+        let more_remaining = tool_calls.len().saturating_sub(idx + 1);
+        let more_label = if more_remaining > 0 {
+            format!("{}+{} more", TOOL_SEPARATOR, more_remaining)
+        } else {
+            String::new()
+        };
+        let required = separator_width + tool_name.width() + more_label.width();
 
-        if !first_on_line
-            && current_width.saturating_add(separator_width + tool_width) > available_width
-        {
-            flush_line(&mut lines, &mut current_spans);
-            current_spans.push(Span::styled(continuation_prefix.clone(), prefix_style));
-            current_width = prefix_width;
-            first_on_line = true;
+        if current_width.saturating_add(required) <= max_width {
+            if shown > 0 {
+                spans.push(Span::styled(TOOL_SEPARATOR, separator_style));
+                current_width = current_width.saturating_add(separator_width);
+            }
+            spans.push(Span::styled(tool_name.clone(), name_style));
+            current_width = current_width.saturating_add(tool_name.width());
+            shown += 1;
+        } else {
+            break;
         }
-
-        if !first_on_line {
-            current_spans.push(Span::styled(TOOL_SEPARATOR, separator_style));
-            current_width = current_width.saturating_add(separator_width);
-        }
-
-        current_spans.push(Span::styled(tool_name.clone(), name_style));
-        current_width = current_width.saturating_add(tool_width);
-        first_on_line = false;
     }
 
-    flush_line(&mut lines, &mut current_spans);
+    if shown < tool_calls.len() {
+        let remaining = tool_calls.len() - shown;
+        let more_text = if shown == 0 {
+            format!("+{} more", remaining)
+        } else {
+            format!("{}+{} more", TOOL_SEPARATOR, remaining)
+        };
+        spans.push(Span::styled(more_text, separator_style));
+    }
+
+    let mut lines = vec![super::truncate_line_with_ellipsis_to_width(
+        &Line::from(spans),
+        max_width,
+    )];
 
     if centered {
         left_pad_lines_for_centered_mode(&mut lines, width as u16);
+        if let Some(line) = lines.first_mut() {
+            *line = super::truncate_line_with_ellipsis_to_width(line, max_width);
+        }
     }
 
     lines
@@ -371,7 +380,6 @@ pub(crate) fn render_tool_message(
         }
     }
 
-    let summary = tools_ui::get_tool_summary(tc);
     let is_error = msg.content.starts_with("Error:")
         || msg.content.starts_with("error:")
         || msg.content.starts_with("Failed:");
@@ -380,6 +388,28 @@ pub(crate) fn render_tool_message(
         ("✗", rgb(220, 100, 100))
     } else {
         ("✓", rgb(100, 180, 100))
+    };
+
+    let row_width = width.saturating_sub(1) as usize;
+    let reserved_summary_width = row_width.saturating_sub(UnicodeWidthStr::width(
+        format!("  {} {} ", icon, tc.name).as_str(),
+    ));
+
+    let summary = if tc.name == "subagent" {
+        msg.title
+            .as_deref()
+            .filter(|title| !title.trim().is_empty())
+            .map(|title| {
+                super::line_plain_text(&super::truncate_line_with_ellipsis_to_width(
+                    &Line::from(title.to_string()),
+                    reserved_summary_width,
+                ))
+            })
+            .unwrap_or_else(|| {
+                tools_ui::get_tool_summary_with_budget(tc, 50, Some(reserved_summary_width))
+            })
+    } else {
+        tools_ui::get_tool_summary_with_budget(tc, 50, Some(reserved_summary_width))
     };
 
     let is_edit_tool = matches!(
@@ -411,7 +441,10 @@ pub(crate) fn render_tool_message(
         tool_line.push(Span::styled(")", Style::default().fg(dim_color())));
     }
 
-    lines.push(Line::from(tool_line));
+    lines.push(super::truncate_line_with_ellipsis_to_width(
+        &Line::from(tool_line),
+        row_width,
+    ));
 
     if tc.name == "batch" {
         if let Some(calls) = tc.input.get("tool_calls").and_then(|v| v.as_array()) {
@@ -444,6 +477,7 @@ pub(crate) fn render_tool_message(
                     sub_icon,
                     sub_icon_color,
                     50,
+                    Some(row_width),
                 ));
             }
         }
@@ -644,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn render_assistant_message_wraps_tool_calls_with_hanging_indent() {
+    fn render_assistant_message_truncates_tool_calls_to_single_line() {
         let saved = crate::tui::markdown::center_code_blocks();
         crate::tui::markdown::set_center_code_blocks(false);
         let msg = DisplayMessage {
@@ -674,26 +708,22 @@ mod tests {
             .collect();
 
         assert!(
-            tool_lines.len() >= 2,
-            "expected wrapped tool-call lines: {tool_lines:?}"
+            tool_lines.len() == 1,
+            "expected single-line tool-call summary: {tool_lines:?}"
         );
         assert!(
             tool_lines[0].contains("tools:"),
             "expected tool summary label on first line: {tool_lines:?}"
         );
         assert!(
-            tool_lines[1].starts_with("         "),
-            "expected continuation line to use hanging indent: {tool_lines:?}"
-        );
-        assert!(
             tool_lines.iter().all(|line| line.width() <= 20),
-            "wrapped tool-call lines should respect available width: {tool_lines:?}"
+            "tool-call summary line should respect available width: {tool_lines:?}"
         );
         crate::tui::markdown::set_center_code_blocks(saved);
     }
 
     #[test]
-    fn render_assistant_message_centers_tool_summary_as_a_block() {
+    fn render_assistant_message_centers_single_line_tool_summary() {
         let saved = crate::tui::markdown::center_code_blocks();
         crate::tui::markdown::set_center_code_blocks(true);
         let msg = DisplayMessage {
@@ -723,21 +753,45 @@ mod tests {
             .collect();
 
         assert!(
-            tool_lines.len() >= 2,
-            "expected wrapped tool-call lines: {tool_lines:?}"
+            tool_lines.len() == 1,
+            "expected single-line tool-call summary: {tool_lines:?}"
         );
         let first_pad = tool_lines[0].chars().take_while(|c| *c == ' ').count();
-        let second_pad = tool_lines[1].chars().take_while(|c| *c == ' ').count();
         assert!(
             first_pad > 0,
-            "tool summary should be centered as a block: {tool_lines:?}"
-        );
-        assert!(
-            second_pad > first_pad,
-            "continuation line should keep hanging indent inside centered block: {tool_lines:?}"
+            "tool summary should still be padded/centered as a block: {tool_lines:?}"
         );
 
         crate::tui::markdown::set_center_code_blocks(saved);
+    }
+
+    #[test]
+    fn render_tool_message_prefers_subagent_title_with_model() {
+        let msg = DisplayMessage {
+            role: "tool".to_string(),
+            content: "done".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: Some("Verify subagent model (general · gpt-5.4)".to_string()),
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_1".to_string(),
+                name: "subagent".to_string(),
+                input: serde_json::json!({
+                    "description": "Verify subagent model",
+                    "subagent_type": "general"
+                }),
+                intent: None,
+            }),
+        };
+
+        let lines = render_tool_message(&msg, 80, crate::config::DiffDisplayMode::Off);
+        let rendered: String = lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+
+        assert!(rendered.contains("subagent Verify subagent model (general · gpt-5.4)"));
     }
 }
 

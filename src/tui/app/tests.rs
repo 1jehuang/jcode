@@ -3,6 +3,19 @@ use crate::bus::{BusEvent, InputShellCompleted};
 use crate::tui::TuiState;
 use ratatui::layout::Rect;
 use std::sync::{Arc as StdArc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
+
+fn cleanup_background_task_files(task_id: &str) {
+    let task_dir = std::env::temp_dir().join("jcode-bg-tasks");
+    let _ = std::fs::remove_file(task_dir.join(format!("{}.status.json", task_id)));
+    let _ = std::fs::remove_file(task_dir.join(format!("{}.output", task_id)));
+}
+
+fn cleanup_reload_context_file(session_id: &str) {
+    if let Ok(path) = crate::tool::selfdev::ReloadContext::path_for_session(session_id) {
+        let _ = std::fs::remove_file(path);
+    }
+}
 
 // Mock provider for testing
 struct MockProvider;
@@ -36,6 +49,28 @@ fn create_test_app() -> App {
     app.queue_mode = false;
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app
+}
+
+fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::auth::claude::set_active_account_override(None);
+    crate::auth::codex::set_active_account_override(None);
+    crate::auth::AuthStatus::invalidate_cache();
+
+    let result = f();
+
+    crate::auth::claude::set_active_account_override(None);
+    crate::auth::codex::set_active_account_override(None);
+    crate::auth::AuthStatus::invalidate_cache();
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    result
 }
 
 #[derive(Clone)]
@@ -125,6 +160,17 @@ fn create_gemini_test_app() -> App {
     app.queue_mode = false;
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app
+}
+
+#[test]
+fn test_resize_redraw_is_debounced() {
+    let mut app = create_test_app();
+
+    assert!(app.should_redraw_after_resize());
+    assert!(!app.should_redraw_after_resize());
+
+    app.last_resize_redraw = Some(Instant::now() - Duration::from_millis(40));
+    assert!(app.should_redraw_after_resize());
 }
 
 #[test]
@@ -309,6 +355,61 @@ fn test_fast_on_while_processing_mentions_next_request_locally() {
 }
 
 #[test]
+fn test_fast_default_on_saves_config_and_updates_session() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let mut app = create_fast_test_app();
+    app.input = "/fast default on".to_string();
+
+    app.submit_input();
+
+    let cfg = crate::config::Config::load();
+    assert_eq!(
+        cfg.provider.openai_service_tier.as_deref(),
+        Some("priority")
+    );
+    assert_eq!(app.provider.service_tier().as_deref(), Some("priority"));
+    assert_eq!(app.status_notice(), Some("Fast mode: on".to_string()));
+    let last = app.display_messages().last().expect("missing response");
+    assert_eq!(last.content, "Saved OpenAI fast mode: **on**.");
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn test_fast_status_shows_saved_default() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::config::Config::set_openai_service_tier(Some("priority")).expect("save fast default");
+
+    let mut app = create_fast_test_app();
+    app.input = "/fast status".to_string();
+
+    app.submit_input();
+
+    let last = app.display_messages().last().expect("missing response");
+    assert_eq!(
+        last.content,
+        "Fast mode is off.\nCurrent tier: Standard\nSaved default: on (Fast)\nUse `/fast on`, `/fast off`, or `/fast default on|off`."
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
 fn test_help_topic_shows_fix_command_details() {
     let mut app = create_test_app();
     app.input = "/help fix".to_string();
@@ -413,82 +514,320 @@ fn test_show_accounts_includes_masked_email_column() {
 
 #[test]
 fn test_account_openai_command_opens_account_picker() {
-    let _guard = crate::storage::lock_test_env();
-    let now_ms = chrono::Utc::now().timestamp_millis();
+    with_temp_jcode_home(|| {
+        let now_ms = chrono::Utc::now().timestamp_millis();
 
-    crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
-        label: "work".to_string(),
-        access_token: "acc".to_string(),
-        refresh_token: "ref".to_string(),
-        id_token: None,
-        account_id: Some("acct_work".to_string()),
-        expires_at: Some(now_ms + 60_000),
-        email: Some("user@example.com".to_string()),
-    })
-    .unwrap();
+        crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            label: "work".to_string(),
+            access_token: "acc".to_string(),
+            refresh_token: "ref".to_string(),
+            id_token: None,
+            account_id: Some("acct_work".to_string()),
+            expires_at: Some(now_ms + 60_000),
+            email: Some("user@example.com".to_string()),
+        })
+        .unwrap();
 
-    let mut app = create_test_app();
-    app.input = "/account openai".to_string();
-    app.submit_input();
+        let mut app = create_test_app();
+        app.input = "/account openai".to_string();
+        app.submit_input();
 
-    assert!(
-        app.account_picker_overlay.is_some(),
-        "/account openai should open the account picker"
-    );
+        let picker = app
+            .account_picker_overlay
+            .as_ref()
+            .expect("/account openai should open the account center")
+            .borrow();
+        let titles = picker.debug_filtered_titles();
+        assert!(titles.iter().any(|title| title == "Add or replace account"));
+        assert!(
+            titles.iter().any(|title| title == "Switch account `work`"),
+            "account center should include saved OpenAI account entries"
+        );
+        assert!(!titles.iter().any(|title| title == "new account"));
+        assert!(!titles.iter().any(|title| title == "replace account"));
+    });
 }
 
 #[test]
 fn test_account_command_opens_account_picker() {
-    let _guard = crate::storage::lock_test_env();
-    let now_ms = chrono::Utc::now().timestamp_millis();
+    with_temp_jcode_home(|| {
+        let now_ms = chrono::Utc::now().timestamp_millis();
 
-    crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
-        label: "work".to_string(),
-        access_token: "acc".to_string(),
-        refresh_token: "ref".to_string(),
-        id_token: None,
-        account_id: Some("acct_work".to_string()),
-        expires_at: Some(now_ms + 60_000),
-        email: Some("user@example.com".to_string()),
-    })
-    .unwrap();
+        crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+            label: "claude-1".to_string(),
+            access: "claude_acc".to_string(),
+            refresh: "claude_ref".to_string(),
+            expires: now_ms + 60_000,
+            email: Some("claude@example.com".to_string()),
+            subscription_type: Some("pro".to_string()),
+        })
+        .unwrap();
 
-    let mut app = create_test_app();
-    app.input = "/account".to_string();
-    app.submit_input();
+        crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            label: "work".to_string(),
+            access_token: "acc".to_string(),
+            refresh_token: "ref".to_string(),
+            id_token: None,
+            account_id: Some("acct_work".to_string()),
+            expires_at: Some(now_ms + 60_000),
+            email: Some("user@example.com".to_string()),
+        })
+        .unwrap();
 
-    assert!(
-        app.account_picker_overlay.is_some(),
-        "/account should open the account picker"
-    );
+        let mut app = create_test_app();
+        app.input = "/account".to_string();
+        app.submit_input();
+
+        let picker = app
+            .account_picker_overlay
+            .as_ref()
+            .expect("/account should open the account center")
+            .borrow();
+        let titles = picker.debug_filtered_titles();
+        assert!(titles.iter().any(|title| title == "Add or replace account"));
+        assert!(
+            titles
+                .iter()
+                .any(|title| title == "Switch account `claude-1`")
+        );
+        assert!(titles.iter().any(|title| title == "Switch account `work`"));
+        assert!(!titles.iter().any(|title| title == "new Claude account"));
+        assert!(!titles.iter().any(|title| title == "new OpenAI account"));
+    });
+}
+
+#[test]
+fn test_account_picker_supports_arrow_and_vim_navigation() {
+    with_temp_jcode_home(|| {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            label: "first".to_string(),
+            access_token: "acc1".to_string(),
+            refresh_token: "ref1".to_string(),
+            id_token: None,
+            account_id: Some("acct_1".to_string()),
+            expires_at: Some(now_ms + 60_000),
+            email: Some("first@example.com".to_string()),
+        })
+        .unwrap();
+        crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            label: "second".to_string(),
+            access_token: "acc2".to_string(),
+            refresh_token: "ref2".to_string(),
+            id_token: None,
+            account_id: Some("acct_2".to_string()),
+            expires_at: Some(now_ms + 60_000),
+            email: Some("second@example.com".to_string()),
+        })
+        .unwrap();
+
+        let mut app = create_test_app();
+        app.input = "/account openai".to_string();
+        app.submit_input();
+
+        let initial_selected = app
+            .account_picker_overlay
+            .as_ref()
+            .expect("account center should open")
+            .borrow()
+            .debug_selected_index();
+
+        app.handle_key(KeyCode::Down, KeyModifiers::empty())
+            .unwrap();
+        let after_arrow = app
+            .account_picker_overlay
+            .as_ref()
+            .unwrap()
+            .borrow()
+            .debug_selected_index();
+        assert_eq!(after_arrow, initial_selected + 1);
+
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::empty())
+            .unwrap();
+        let after_vim = app
+            .account_picker_overlay
+            .as_ref()
+            .unwrap()
+            .borrow()
+            .debug_selected_index();
+        assert_eq!(after_vim, after_arrow + 1);
+
+        app.handle_key(KeyCode::Char('k'), KeyModifiers::empty())
+            .unwrap();
+        assert_eq!(
+            app.account_picker_overlay
+                .as_ref()
+                .unwrap()
+                .borrow()
+                .debug_selected_index(),
+            after_arrow
+        );
+    });
+}
+
+#[test]
+fn test_account_picker_preview_from_input_filters_accounts() {
+    with_temp_jcode_home(|| {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            label: "first".to_string(),
+            access_token: "acc1".to_string(),
+            refresh_token: "ref1".to_string(),
+            id_token: None,
+            account_id: Some("acct_1".to_string()),
+            expires_at: Some(now_ms + 60_000),
+            email: Some("first@example.com".to_string()),
+        })
+        .unwrap();
+        crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            label: "second".to_string(),
+            access_token: "acc2".to_string(),
+            refresh_token: "ref2".to_string(),
+            id_token: None,
+            account_id: Some("acct_2".to_string()),
+            expires_at: Some(now_ms + 60_000),
+            email: Some("second@example.com".to_string()),
+        })
+        .unwrap();
+
+        let mut app = create_test_app();
+        for c in "/account openai 2".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+                .unwrap();
+        }
+
+        assert!(
+            app.picker_state.is_none(),
+            "account preview should stay disabled"
+        );
+        assert!(app.account_picker_overlay.is_none());
+        assert_eq!(app.input(), "/account openai 2");
+    });
+}
+
+#[test]
+fn test_account_command_combines_claude_and_openai_accounts() {
+    with_temp_jcode_home(|| {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+            label: "claude-1".to_string(),
+            access: "claude_acc".to_string(),
+            refresh: "claude_ref".to_string(),
+            expires: now_ms + 60_000,
+            email: Some("claude@example.com".to_string()),
+            subscription_type: Some("pro".to_string()),
+        })
+        .unwrap();
+        crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            label: "openai-1".to_string(),
+            access_token: "acc".to_string(),
+            refresh_token: "ref".to_string(),
+            id_token: None,
+            account_id: Some("acct_openai_1".to_string()),
+            expires_at: Some(now_ms + 60_000),
+            email: Some("openai@example.com".to_string()),
+        })
+        .unwrap();
+
+        let mut app = create_test_app();
+        app.input = "/account".to_string();
+        app.submit_input();
+
+        let picker = app
+            .account_picker_overlay
+            .as_ref()
+            .expect("account center should open")
+            .borrow();
+        let titles = picker.debug_filtered_titles();
+        assert!(
+            titles
+                .iter()
+                .any(|title| title == "Switch account `claude-1`")
+        );
+        assert!(
+            titles
+                .iter()
+                .any(|title| title == "Switch account `openai-1`")
+        );
+        assert!(titles.iter().any(|title| title == "Add or replace account"));
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn test_account_command_uses_fast_auth_snapshot_without_running_cursor_status() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_temp_jcode_home(|| {
+        let prev_cursor_cli_path = std::env::var_os("JCODE_CURSOR_CLI_PATH");
+        let temp = tempfile::TempDir::new().expect("create temp dir");
+        let marker = temp.path().join("cursor-status-ran");
+        let script = temp.path().join("cursor-agent-mock");
+
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\necho ran > \"{}\"\nexit 0\n", marker.display()),
+        )
+        .expect("write mock cursor agent");
+        let mut permissions = std::fs::metadata(&script)
+            .expect("stat mock cursor agent")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("chmod mock cursor agent");
+
+        let mut app = create_test_app();
+
+        crate::env::set_var("JCODE_CURSOR_CLI_PATH", &script);
+        crate::auth::AuthStatus::invalidate_cache();
+        let _ = std::fs::remove_file(&marker);
+
+        app.input = "/account".to_string();
+        app.submit_input();
+
+        assert!(app.account_picker_overlay.is_some());
+        assert!(
+            !marker.exists(),
+            "/account should not execute `cursor-agent status` on open"
+        );
+
+        match prev_cursor_cli_path {
+            Some(value) => crate::env::set_var("JCODE_CURSOR_CLI_PATH", value),
+            None => crate::env::remove_var("JCODE_CURSOR_CLI_PATH"),
+        }
+        crate::auth::AuthStatus::invalidate_cache();
+    });
 }
 
 #[test]
 fn test_account_switch_shorthand_switches_openai_account_by_label() {
-    let _guard = crate::storage::lock_test_env();
-    let now_ms = chrono::Utc::now().timestamp_millis();
+    with_temp_jcode_home(|| {
+        let now_ms = chrono::Utc::now().timestamp_millis();
 
-    crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
-        label: "openai2".to_string(),
-        access_token: "acc".to_string(),
-        refresh_token: "ref".to_string(),
-        id_token: None,
-        account_id: Some("acct_openai2".to_string()),
-        expires_at: Some(now_ms + 60_000),
-        email: Some("user2@example.com".to_string()),
-    })
-    .unwrap();
+        crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            label: "openai2".to_string(),
+            access_token: "acc".to_string(),
+            refresh_token: "ref".to_string(),
+            id_token: None,
+            account_id: Some("acct_openai2".to_string()),
+            expires_at: Some(now_ms + 60_000),
+            email: Some("user2@example.com".to_string()),
+        })
+        .unwrap();
 
-    let mut app = create_test_app();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        app.input = "/account switch openai2".to_string();
-        app.submit_input();
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            app.input = "/account switch openai2".to_string();
+            app.submit_input();
 
-        assert_eq!(
-            crate::auth::codex::active_account_label().as_deref(),
-            Some("openai2")
-        );
+            assert_eq!(
+                crate::auth::codex::active_account_label().as_deref(),
+                Some("openai-1")
+            );
+        });
     });
 }
 
@@ -498,15 +837,52 @@ fn test_account_picker_prompt_new_openai_label_cancel_clears_prompt() {
     app.prompt_new_account_label(crate::tui::account_picker::AccountProviderKind::OpenAi);
 
     assert!(matches!(
-        app.pending_account_label,
-        Some(super::auth::PendingAccountLabel::OpenAi)
+        app.pending_account_input,
+        Some(super::auth::PendingAccountInput::NewAccountLabel { ref provider_id, .. }) if provider_id == "openai"
     ));
 
     app.input = "/cancel".to_string();
     app.submit_input();
 
-    assert!(app.pending_account_label.is_none());
+    assert!(app.pending_account_input.is_none());
     assert!(app.pending_login.is_none());
+}
+
+#[test]
+fn test_login_command_opens_login_picker_overlay() {
+    let mut app = create_test_app();
+    app.input = "/login".to_string();
+    app.submit_input();
+
+    assert!(app.login_picker_overlay.is_some());
+    assert!(app.pending_login.is_none());
+}
+
+#[test]
+fn test_account_openai_compatible_settings_renders_provider_settings() {
+    let mut app = create_test_app();
+    app.input = "/account openai-compatible settings".to_string();
+    app.submit_input();
+
+    let msg = app
+        .display_messages()
+        .last()
+        .expect("missing settings output");
+    assert_eq!(msg.role, "system");
+    assert!(msg.content.contains("OpenAI-compatible"));
+    assert!(msg.content.contains("API base"));
+    assert!(msg.content.contains("default-model"));
+}
+
+#[test]
+fn test_account_default_provider_command_saves_config() {
+    let _guard = crate::storage::lock_test_env();
+    let mut app = create_test_app();
+    app.input = "/account default-provider openai".to_string();
+    app.submit_input();
+
+    let cfg = crate::config::Config::load();
+    assert_eq!(cfg.provider.default_provider.as_deref(), Some("openai"));
 }
 
 #[test]
@@ -887,6 +1263,7 @@ fn test_mouse_scroll_over_tool_side_panel_scrolls_shared_right_pane_without_chan
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
         }],
@@ -925,6 +1302,7 @@ fn test_mouse_scroll_over_tool_side_panel_keeps_typing_in_chat() {
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
         }],
@@ -967,6 +1345,7 @@ fn test_mouse_scroll_over_tool_side_panel_updates_visible_render() {
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            source: crate::side_panel::SidePanelPageSource::Managed,
             content: (1..=30)
                 .map(|i| format!("- side-scroll-{i:02}"))
                 .collect::<Vec<_>>()
@@ -1021,6 +1400,7 @@ fn test_tool_side_panel_uses_shared_right_pane_keyboard_focus() {
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
         }],
@@ -1072,6 +1452,64 @@ fn test_mouse_scroll_events_are_classified_as_scroll_only() {
     });
 
     assert!(!non_scroll, "clicks should still redraw immediately");
+}
+
+#[test]
+fn test_mouse_scroll_help_overlay_updates_help_scroll() {
+    let mut app = create_test_app();
+    app.help_scroll = Some(5);
+
+    let scroll_only = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(
+        scroll_only,
+        "help overlay mouse wheel should be scroll-only"
+    );
+    assert_eq!(app.help_scroll, Some(8));
+
+    let scroll_only = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(scroll_only);
+    assert_eq!(app.help_scroll, Some(5));
+}
+
+#[test]
+fn test_mouse_scroll_changelog_overlay_updates_changelog_scroll() {
+    let mut app = create_test_app();
+    app.changelog_scroll = Some(2);
+
+    let scroll_only = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(
+        scroll_only,
+        "changelog overlay mouse wheel should be scroll-only"
+    );
+    assert_eq!(app.changelog_scroll, Some(0));
+
+    let scroll_only = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(scroll_only);
+    assert_eq!(app.changelog_scroll, Some(3));
 }
 
 #[test]
@@ -1194,6 +1632,95 @@ fn test_fuzzy_command_suggestions() {
     assert!(suggestions.iter().any(|(cmd, _)| cmd == "/model"));
 }
 
+#[test]
+fn test_top_level_command_suggestions_include_config_and_subscription() {
+    let app = create_test_app();
+    let suggestions = app.get_suggestions_for("/con");
+    assert!(suggestions.iter().any(|(cmd, _)| cmd == "/config"));
+
+    let suggestions = app.get_suggestions_for("/sub");
+    assert!(suggestions.iter().any(|(cmd, _)| cmd == "/subscription"));
+}
+
+#[test]
+fn test_help_topic_suggestions_are_contextual() {
+    let app = create_test_app();
+    let suggestions = app.get_suggestions_for("/help fi");
+    assert_eq!(
+        suggestions.first().map(|(cmd, _)| cmd.as_str()),
+        Some("/help fix")
+    );
+}
+
+#[test]
+fn test_nested_command_suggestions_filter_partial_suffixes() {
+    let app = create_test_app();
+
+    let suggestions = app.get_suggestions_for("/config ed");
+    assert_eq!(
+        suggestions.first().map(|(cmd, _)| cmd.as_str()),
+        Some("/config edit")
+    );
+
+    let suggestions = app.get_suggestions_for("/compact mo se");
+    assert_eq!(
+        suggestions.first().map(|(cmd, _)| cmd.as_str()),
+        Some("/compact mode semantic")
+    );
+
+    let suggestions = app.get_suggestions_for("/memory st");
+    assert_eq!(
+        suggestions.first().map(|(cmd, _)| cmd.as_str()),
+        Some("/memory status")
+    );
+}
+
+#[test]
+fn test_autocomplete_adds_space_for_nested_argument_commands() {
+    let mut app = create_test_app();
+    app.input = "/goals sh".to_string();
+    app.cursor_pos = app.input.len();
+
+    assert!(app.autocomplete());
+    assert_eq!(app.input(), "/goals show ");
+}
+
+#[test]
+fn test_goals_show_suggestions_include_goal_ids() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = temp.path().join("repo");
+    std::fs::create_dir_all(&project).expect("project dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let goal = crate::goal::create_goal(
+        crate::goal::GoalCreateInput {
+            title: "Ship mobile MVP".to_string(),
+            scope: crate::goal::GoalScope::Project,
+            ..crate::goal::GoalCreateInput::default()
+        },
+        Some(&project),
+    )
+    .expect("create goal");
+
+    let mut app = create_test_app();
+    app.session.working_dir = Some(project.display().to_string());
+
+    let suggestions = app.get_suggestions_for("/goals show ");
+    assert!(
+        suggestions
+            .iter()
+            .any(|(cmd, _)| cmd == &format!("/goals show {}", goal.id))
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
 fn configure_test_remote_models(app: &mut App) {
     app.is_remote = true;
     app.remote_provider_model = Some("gpt-5.3-codex".to_string());
@@ -1242,6 +1769,42 @@ fn test_model_picker_preview_filter_parsing() {
     );
     assert_eq!(App::model_picker_preview_filter("/modelx"), None);
     assert_eq!(App::model_picker_preview_filter("hello /model"), None);
+}
+
+#[test]
+fn test_model_command_suggestions_include_matching_models() {
+    let mut app = create_test_app();
+    configure_test_remote_models(&mut app);
+
+    let suggestions = app.get_suggestions_for("/model g52c");
+    assert_eq!(
+        suggestions.first().map(|(cmd, _)| cmd.as_str()),
+        Some("/model gpt-5.2-codex")
+    );
+}
+
+#[test]
+fn test_model_command_trailing_space_shows_model_suggestions() {
+    let mut app = create_test_app();
+    configure_test_remote_models(&mut app);
+
+    let suggestions = app.get_suggestions_for("/model ");
+    assert!(
+        suggestions
+            .iter()
+            .any(|(cmd, _)| cmd == "/model gpt-5.3-codex")
+    );
+}
+
+#[test]
+fn test_model_autocomplete_completes_unique_match() {
+    let mut app = create_test_app();
+    configure_test_remote_models(&mut app);
+    app.input = "/model g52c".to_string();
+    app.cursor_pos = app.input.len();
+
+    assert!(app.autocomplete());
+    assert_eq!(app.input(), "/model gpt-5.2-codex");
 }
 
 #[test]
@@ -1330,6 +1893,38 @@ fn test_model_picker_preview_arrow_keys_navigate() {
     assert_eq!(app.input(), "/model");
 }
 
+#[test]
+fn test_subagent_model_command_sets_and_resets_session_preference() {
+    let mut app = create_test_app();
+
+    assert!(super::commands::handle_session_command(
+        &mut app,
+        "/subagent-model gpt-5.4"
+    ));
+    assert_eq!(app.session.subagent_model.as_deref(), Some("gpt-5.4"));
+
+    assert!(super::commands::handle_session_command(
+        &mut app,
+        "/subagent-model inherit"
+    ));
+    assert_eq!(app.session.subagent_model, None);
+}
+
+#[test]
+fn test_subagent_command_suggestions_include_manual_launch_and_model_policy() {
+    let app = create_test_app();
+
+    let subagent = app.get_suggestions_for("/subagent");
+    assert!(subagent.iter().any(|(cmd, _)| cmd == "/subagent "));
+
+    let model = app.get_suggestions_for("/subagent-model ");
+    assert!(
+        model
+            .iter()
+            .any(|(cmd, _)| cmd == "/subagent-model inherit")
+    );
+}
+
 fn configure_test_remote_models_with_copilot(app: &mut App) {
     app.is_remote = true;
     app.remote_provider_model = Some("claude-sonnet-4".to_string());
@@ -1340,6 +1935,30 @@ fn configure_test_remote_models_with_copilot(app: &mut App) {
         "gemini-3-pro-preview".to_string(),
         "grok-code-fast-1".to_string(),
     ];
+}
+
+fn configure_test_remote_models_with_cursor(app: &mut App) {
+    app.is_remote = true;
+    app.remote_provider_name = Some("cursor".to_string());
+    app.remote_provider_model = Some("composer-1.5".to_string());
+    app.remote_available_models = vec![
+        "composer-2-fast".to_string(),
+        "composer-2".to_string(),
+        "composer-1.5".to_string(),
+    ];
+    app.remote_model_routes = app
+        .remote_available_models
+        .iter()
+        .cloned()
+        .map(|model| crate::provider::ModelRoute {
+            model,
+            provider: "Cursor".to_string(),
+            api_method: "cursor".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        })
+        .collect();
 }
 
 #[test]
@@ -1537,6 +2156,70 @@ fn test_model_picker_copilot_selection_prefixes_model() {
 }
 
 #[test]
+fn test_model_picker_cursor_models_have_cursor_route() {
+    let mut app = create_test_app();
+    configure_test_remote_models_with_cursor(&mut app);
+
+    app.open_model_picker();
+
+    let picker = app
+        .picker_state
+        .as_ref()
+        .expect("model picker should be open");
+
+    let composer_entry = picker
+        .models
+        .iter()
+        .find(|m| m.name == "composer-2-fast")
+        .expect("composer-2-fast should be in picker");
+
+    assert!(
+        composer_entry
+            .routes
+            .iter()
+            .any(|r| r.api_method == "cursor"),
+        "composer-2-fast should have a cursor route, got: {:?}",
+        composer_entry.routes
+    );
+}
+
+#[test]
+fn test_model_picker_cursor_selection_prefixes_model() {
+    let mut app = create_test_app();
+    configure_test_remote_models_with_cursor(&mut app);
+
+    app.open_model_picker();
+
+    let picker = app
+        .picker_state
+        .as_ref()
+        .expect("model picker should be open");
+
+    let composer_idx = picker
+        .models
+        .iter()
+        .position(|m| m.name == "composer-2-fast")
+        .expect("composer-2-fast should be in picker");
+
+    let filtered_pos = picker
+        .filtered
+        .iter()
+        .position(|&i| i == composer_idx)
+        .expect("composer-2-fast should be in filtered list");
+
+    app.picker_state.as_mut().unwrap().selected = filtered_pos;
+
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+
+    assert_eq!(
+        app.pending_model_switch.as_deref(),
+        Some("cursor:composer-2-fast")
+    );
+    assert!(app.picker_state.is_none());
+}
+
+#[test]
 fn test_handle_key_cursor_movement() {
     let mut app = create_test_app();
 
@@ -1692,6 +2375,7 @@ fn test_submit_input_adds_message() {
     // Check processing state
     assert!(app.is_processing());
     assert!(app.pending_turn);
+    assert!(app.session_save_pending);
     assert!(matches!(app.status(), ProcessingStatus::Sending));
     assert!(app.elapsed().is_some());
 
@@ -1880,6 +2564,19 @@ fn test_ctrl_x_preserves_input_when_clipboard_copy_fails() {
         app.status_notice(),
         Some("Failed to copy input line".to_string())
     );
+}
+
+#[test]
+fn test_ctrl_a_keeps_home_behavior_when_input_present() {
+    let mut app = create_test_app();
+    app.input = "hello world".to_string();
+    app.cursor_pos = app.input.len();
+
+    app.handle_key(KeyCode::Char('a'), KeyModifiers::CONTROL)
+        .unwrap();
+
+    assert_eq!(app.input(), "hello world");
+    assert_eq!(app.cursor_pos(), 0);
 }
 
 #[test]
@@ -2432,12 +3129,65 @@ fn test_save_and_restore_reload_state_preserves_queued_messages() {
     app.save_input_for_reload(&session_id);
 
     let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
-    assert_eq!(restored.0, "draft");
-    assert_eq!(restored.1, 3);
-    assert_eq!(restored.2, vec!["queued one", "queued two"]);
-    assert_eq!(restored.3, vec!["continue silently"]);
+    assert_eq!(restored.input, "draft");
+    assert_eq!(restored.cursor, 3);
+    assert_eq!(restored.queued_messages, vec!["queued one", "queued two"]);
+    assert_eq!(
+        restored.hidden_queued_system_messages,
+        vec!["continue silently"]
+    );
 
     assert!(App::restore_input_for_reload(&session_id).is_none());
+}
+
+#[test]
+fn test_save_and_restore_reload_state_preserves_interleave_and_pending_retry() {
+    let mut app = create_test_app();
+    let session_id = format!("test-reload-pending-{}", std::process::id());
+
+    app.input = "draft".to_string();
+    app.cursor_pos = 5;
+    app.interleave_message = Some("urgent now".to_string());
+    app.pending_soft_interrupts = vec![
+        "already sent one".to_string(),
+        "already sent two".to_string(),
+    ];
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "retry me".to_string(),
+        images: vec![("image/png".to_string(), "abc123".to_string())],
+        is_system: true,
+        system_reminder: Some("continue silently".to_string()),
+        auto_retry: true,
+        retry_attempts: 2,
+        retry_at: None,
+    });
+    app.rate_limit_reset = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+    app.save_input_for_reload(&session_id);
+
+    let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
+    assert_eq!(restored.interleave_message.as_deref(), Some("urgent now"));
+    assert_eq!(
+        restored.pending_soft_interrupts,
+        vec!["already sent one", "already sent two"]
+    );
+
+    let pending = restored
+        .rate_limit_pending_message
+        .expect("pending retry should restore");
+    assert_eq!(pending.content, "retry me");
+    assert_eq!(
+        pending.images,
+        vec![("image/png".to_string(), "abc123".to_string())]
+    );
+    assert!(pending.is_system);
+    assert_eq!(
+        pending.system_reminder.as_deref(),
+        Some("continue silently")
+    );
+    assert!(pending.auto_retry);
+    assert_eq!(pending.retry_attempts, 2);
+    assert!(pending.retry_at.is_some());
+    assert!(restored.rate_limit_reset.is_some());
 }
 
 #[test]
@@ -2449,9 +3199,30 @@ fn test_restore_reload_state_supports_legacy_input_format() {
 
     let restored =
         App::restore_input_for_reload(&session_id).expect("legacy reload state should restore");
-    assert_eq!(restored.0, "hello");
-    assert_eq!(restored.1, 2);
-    assert!(restored.2.is_empty());
+    assert_eq!(restored.input, "hello");
+    assert_eq!(restored.cursor, 2);
+    assert!(restored.queued_messages.is_empty());
+}
+
+#[test]
+fn test_new_for_remote_requeues_restored_pending_soft_interrupts() {
+    let mut app = create_test_app();
+    let session_id = format!("test-remote-restore-{}", std::process::id());
+
+    app.interleave_message = Some("local interleave".to_string());
+    app.pending_soft_interrupts = vec!["sent one".to_string(), "sent two".to_string()];
+    app.queued_messages.push("queued later".to_string());
+    app.save_input_for_reload(&session_id);
+
+    let restored = App::new_for_remote(Some(session_id));
+    assert_eq!(
+        restored.interleave_message.as_deref(),
+        Some("local interleave")
+    );
+    assert_eq!(
+        restored.queued_messages(),
+        &["sent one", "sent two", "queued later"]
+    );
 }
 
 #[test]
@@ -2570,8 +3341,10 @@ fn test_handle_server_event_history_clears_connection_type_on_session_change_whe
             id: 1,
             session_id: "session_new".to_string(),
             messages: vec![],
+            images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            subagent_model: None,
             available_models: vec![],
             available_model_routes: vec![],
             mcp_servers: vec![],
@@ -2614,8 +3387,10 @@ fn test_handle_server_event_history_preserves_connection_type_for_same_session_w
             id: 1,
             session_id: "session_same".to_string(),
             messages: vec![],
+            images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            subagent_model: None,
             available_models: vec![],
             available_model_routes: vec![],
             mcp_servers: vec![],
@@ -2784,6 +3559,37 @@ fn test_handle_server_event_interrupted_clears_stream_state_and_sets_idle() {
         .expect("missing interrupted message");
     assert_eq!(last.role, "system");
     assert_eq!(last.content, "Interrupted");
+}
+
+#[test]
+fn test_remote_interrupted_defers_queued_followup_dispatch_by_one_cycle() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(42);
+    app.queued_messages.push("queued later".to_string());
+
+    app.handle_server_event(crate::protocol::ServerEvent::Interrupted, &mut remote);
+
+    assert!(app.pending_queued_dispatch);
+    assert_eq!(app.queued_messages(), &["queued later"]);
+    assert!(!app.is_processing);
+
+    rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+    assert_eq!(app.queued_messages(), &["queued later"]);
+    assert!(!app.is_processing);
+
+    app.pending_queued_dispatch = false;
+    rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+    assert!(app.queued_messages().is_empty());
+    assert!(app.is_processing);
+    assert!(matches!(app.status, ProcessingStatus::Sending));
+    assert!(app.current_message_id.is_some());
 }
 
 #[test]
@@ -3102,8 +3908,10 @@ fn test_handle_server_event_history_with_interruption_queues_continuation() {
                 tool_calls: None,
                 tool_data: None,
             }],
+            images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            subagent_model: None,
             available_models: vec![],
             available_model_routes: vec![],
             mcp_servers: vec![],
@@ -3163,8 +3971,10 @@ fn test_handle_server_event_history_without_interruption_does_not_queue() {
                 tool_calls: None,
                 tool_data: None,
             }],
+            images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            subagent_model: None,
             available_models: vec![],
             available_model_routes: vec![],
             mcp_servers: vec![],
@@ -3223,6 +4033,79 @@ fn test_finalize_reload_reconnect_marker_only_does_not_queue_selfdev_continuatio
 }
 
 #[test]
+fn test_reload_persisted_background_tasks_note_mentions_running_task() {
+    let session_id = crate::id::new_id("ses_bg_note");
+    let manager = crate::background::global();
+    let info = manager.reserve_task_info();
+    let started_at = chrono::Utc::now().to_rfc3339();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    rt.block_on(manager.register_detached_task(
+        &info,
+        "bash",
+        &session_id,
+        std::process::id(),
+        &started_at,
+        true,
+    ));
+
+    let note = reload_persisted_background_tasks_note(&session_id);
+
+    assert!(note.contains(&info.task_id));
+    assert!(note.contains("Do not rerun those commands"));
+    assert!(note.contains("bg action=\"status\""));
+
+    cleanup_background_task_files(&info.task_id);
+}
+
+#[test]
+fn test_finalize_reload_reconnect_mentions_persisted_background_task() {
+    let mut app = create_test_app();
+    let session_id = crate::id::new_id("ses_reload_bg");
+    let reload_ctx = crate::tool::selfdev::ReloadContext {
+        task_context: Some("Waiting for cargo build --release".to_string()),
+        version_before: "v0.1.100".to_string(),
+        version_after: "abc1234".to_string(),
+        session_id: session_id.clone(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    reload_ctx.save().expect("save reload context");
+
+    let manager = crate::background::global();
+    let info = manager.reserve_task_info();
+    let started_at = chrono::Utc::now().to_rfc3339();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(manager.register_detached_task(
+        &info,
+        "bash",
+        &session_id,
+        std::process::id(),
+        &started_at,
+        true,
+    ));
+
+    remote::finalize_reload_reconnect(
+        &mut app,
+        Some(session_id.as_str()),
+        remote::ReloadReconnectHints {
+            has_reload_ctx_for_session: true,
+            has_client_reload_marker: false,
+        },
+        false,
+    );
+
+    assert_eq!(app.hidden_queued_system_messages.len(), 1);
+    let continuation = &app.hidden_queued_system_messages[0];
+    assert!(continuation.contains("Persisted background task(s)"));
+    assert!(continuation.contains(&info.task_id));
+    assert!(continuation.contains("Do not rerun those commands"));
+    assert!(continuation.contains("bg action=\"output\""));
+
+    cleanup_background_task_files(&info.task_id);
+    cleanup_reload_context_file(&session_id);
+}
+
+#[test]
 fn test_handle_server_event_history_restores_side_panel_snapshot() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -3236,6 +4119,7 @@ fn test_handle_server_event_history_restores_side_panel_snapshot() {
             title: "Plan".to_string(),
             file_path: "/tmp/plan.md".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            source: crate::side_panel::SidePanelPageSource::Managed,
             content: "# Plan\n```mermaid\nflowchart LR\nA-->B\n```".to_string(),
             updated_at_ms: 1,
         }],
@@ -3246,8 +4130,10 @@ fn test_handle_server_event_history_restores_side_panel_snapshot() {
             id: 1,
             session_id: "ses_side_panel_history".to_string(),
             messages: vec![],
+            images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            subagent_model: None,
             available_models: vec![],
             available_model_routes: vec![],
             mcp_servers: vec![],
@@ -3295,6 +4181,7 @@ fn test_handle_server_event_side_panel_state_updates_snapshot() {
             title: "Old".to_string(),
             file_path: "/tmp/old.md".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            source: crate::side_panel::SidePanelPageSource::Managed,
             content: "old".to_string(),
             updated_at_ms: 1,
         }],
@@ -3310,6 +4197,7 @@ fn test_handle_server_event_side_panel_state_updates_snapshot() {
                     title: "New".to_string(),
                     file_path: "/tmp/new.md".to_string(),
                     format: crate::side_panel::SidePanelPageFormat::Markdown,
+                    source: crate::side_panel::SidePanelPageSource::Managed,
                     content: "# New".to_string(),
                     updated_at_ms: 2,
                 }],
@@ -3418,8 +4306,10 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
                 tool_calls: None,
                 tool_data: None,
             }],
+            images: vec![],
             provider_name: Some("claude".to_string()),
             provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            subagent_model: None,
             available_models: vec![],
             available_model_routes: vec![],
             mcp_servers: vec![],
@@ -3611,6 +4501,46 @@ fn test_info_widget_data_includes_connection_type() {
     app.connection_type = Some("https".to_string());
     let data = crate::tui::TuiState::info_widget_data(&app);
     assert_eq!(data.connection_type.as_deref(), Some("https"));
+}
+
+#[test]
+fn test_remote_tui_state_uses_cached_session_model_before_history() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("create temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    let session_id = "session_otter_123";
+    let mut session = crate::session::Session::create_with_id(
+        session_id.to_string(),
+        None,
+        Some("remote cached model".to_string()),
+    );
+    session.model = Some("gpt-5.4".to_string());
+    session.save().expect("save remote session");
+
+    let app = App::new_for_remote(Some(session_id.to_string()));
+
+    assert_eq!(crate::tui::TuiState::provider_model(&app), "gpt-5.4");
+    assert_eq!(crate::tui::TuiState::provider_name(&app), "openai");
+    assert_eq!(
+        crate::tui::TuiState::session_display_name(&app).as_deref(),
+        Some("otter")
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn test_remote_tui_state_shows_connecting_placeholder_without_cached_model() {
+    let app = App::new_for_remote(None);
+
+    assert_eq!(crate::tui::TuiState::provider_model(&app), "connecting…");
+    assert_eq!(crate::tui::TuiState::provider_name(&app), "remote");
 }
 
 #[test]
@@ -4812,6 +5742,7 @@ fn test_side_panel_mouse_drag_extracts_expected_text() {
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            source: crate::side_panel::SidePanelPageSource::Managed,
             content: "alpha\nbeta highlight target\ngamma".to_string(),
             updated_at_ms: 1,
         }],
@@ -4927,6 +5858,110 @@ fn test_copy_selection_copy_action_uses_clipboard_hook_and_exits_mode() {
 }
 
 #[test]
+fn test_ctrl_a_copies_chat_viewport_with_context_when_input_empty() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    let copied = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let copied_for_closure = copied.clone();
+
+    let lines = (1..=40)
+        .map(|idx| format!("line {idx:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.display_messages = vec![DisplayMessage {
+        role: "assistant".to_string(),
+        content: lines,
+        tool_calls: vec![],
+        duration_secs: None,
+        title: None,
+        tool_data: None,
+    }];
+    app.bump_display_messages_version();
+    app.scroll_offset = 12;
+    app.auto_scroll_paused = true;
+
+    let backend = ratatui::backend::TestBackend::new(40, 8);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    render_and_snap(&app, &mut terminal);
+
+    let (visible_start, visible_end) =
+        crate::tui::ui::copy_viewport_visible_range().expect("visible copy range");
+    let line_count = crate::tui::ui::copy_viewport_line_count().expect("line count");
+    let context = 4usize;
+    let expected_start = visible_start.saturating_sub(context);
+    let expected_end = visible_end
+        .saturating_add(context)
+        .saturating_sub(1)
+        .min(line_count.saturating_sub(1));
+    assert!(app.select_chat_viewport_context());
+    let range = app
+        .normalized_copy_selection()
+        .expect("expected viewport context range");
+    assert_eq!(range.start.pane, crate::tui::CopySelectionPane::Chat);
+    assert_eq!(range.end.pane, crate::tui::CopySelectionPane::Chat);
+    assert_eq!(range.start.abs_line, expected_start);
+    assert_eq!(range.end.abs_line, expected_end);
+    let preselected_text = app
+        .current_copy_selection_text()
+        .expect("expected viewport context text");
+    assert!(
+        !preselected_text.trim().is_empty(),
+        "viewport context selection should not be empty"
+    );
+
+    let success = app.copy_current_selection_to_clipboard_with(|text| {
+        *copied_for_closure.lock().unwrap() = text.to_string();
+        true
+    });
+
+    assert!(success);
+    let copied_text = copied.lock().unwrap().clone();
+    assert!(
+        copied_text == preselected_text,
+        "copied text should match selected viewport context: {copied_text:?}"
+    );
+    assert_eq!(app.status_notice(), Some("Copied selection".to_string()));
+    assert!(!app.copy_selection_mode);
+    assert!(app.copy_selection_anchor.is_none());
+    assert!(app.copy_selection_cursor.is_none());
+}
+
+#[test]
+fn test_alt_a_copies_chat_viewport_with_context_when_input_empty() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+
+    let lines = (1..=20)
+        .map(|idx| format!("line {idx:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.display_messages = vec![DisplayMessage {
+        role: "assistant".to_string(),
+        content: lines,
+        tool_calls: vec![],
+        duration_secs: None,
+        title: None,
+        tool_data: None,
+    }];
+    app.bump_display_messages_version();
+    app.scroll_offset = 4;
+    app.auto_scroll_paused = true;
+
+    let backend = ratatui::backend::TestBackend::new(40, 8);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    render_and_snap(&app, &mut terminal);
+
+    let handled = super::input::handle_alt_key(&mut app, KeyCode::Char('a'));
+    assert!(handled);
+    assert!(matches!(
+        app.status_notice().as_deref(),
+        Some("Copied viewport context")
+            | Some("Failed to copy viewport context")
+            | Some("Nothing visible to copy")
+    ));
+}
+
+#[test]
 fn test_copy_badge_modifier_highlights_while_held() {
     let _render_lock = scroll_render_test_lock();
     let (mut app, mut terminal) = create_copy_test_app();
@@ -4990,6 +6025,44 @@ fn test_copy_badge_requires_prior_combo_progress() {
     assert!(
         state.key_is_active('s', now),
         "final key should light once alt+shift are active"
+    );
+}
+
+#[test]
+fn test_try_open_link_at_opens_clicked_url_and_sets_notice() {
+    crate::tui::ui::clear_copy_viewport_snapshot();
+    crate::tui::ui::record_copy_viewport_snapshot(
+        std::sync::Arc::new(vec!["Docs: https://example.com/docs".to_string()]),
+        std::sync::Arc::new(vec![0]),
+        std::sync::Arc::new(vec!["Docs: https://example.com/docs".to_string()]),
+        std::sync::Arc::new(vec![crate::tui::ui::WrappedLineMap {
+            raw_line: 0,
+            start_col: 0,
+            end_col: 30,
+        }]),
+        0,
+        1,
+        Rect::new(0, 0, 80, 5),
+        &[0],
+    );
+
+    let mut app = create_test_app();
+    let opened = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let opened_for_closure = opened.clone();
+
+    let handled = app.try_open_link_at_with(8, 0, |url| {
+        *opened_for_closure.lock().unwrap() = Some(url.to_string());
+        Ok::<(), &'static str>(())
+    });
+
+    assert!(handled);
+    assert_eq!(
+        *opened.lock().unwrap(),
+        Some("https://example.com/docs".to_string())
+    );
+    assert_eq!(
+        app.status_notice(),
+        Some("Opened link: https://example.com/docs".to_string())
     );
 }
 

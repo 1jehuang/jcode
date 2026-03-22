@@ -270,6 +270,10 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) {
         }
     }
 
+    if app.pending_queued_dispatch {
+        return;
+    }
+
     if !app.is_processing && !app.queued_messages.is_empty() {
         let queued_messages = std::mem::take(&mut app.queued_messages);
         let hidden_reminders = std::mem::take(&mut app.hidden_queued_system_messages);
@@ -324,11 +328,10 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) {
 
 pub(super) async fn handle_terminal_event(
     app: &mut App,
-    terminal: &mut DefaultTerminal,
+    _terminal: &mut DefaultTerminal,
     remote: &mut RemoteConnection,
     event: Option<std::result::Result<Event, std::io::Error>>,
 ) -> Result<()> {
-    let mut needs_redraw = false;
     match event {
         Some(Ok(Event::FocusGained)) => {
             app.note_client_focus();
@@ -341,28 +344,79 @@ pub(super) async fn handle_terminal_event(
                 if let Some(spec) = app.pending_model_switch.take() {
                     let _ = remote.set_model(&spec).await;
                 }
-                needs_redraw = true;
+                if let Some(selection) = app.pending_account_picker_selection.take() {
+                    match selection {
+                        crate::tui::AccountPickerSelection::Switch { provider_id, label } => {
+                            match provider_id.as_str() {
+                                "claude" => {
+                                    if let Err(e) = crate::auth::claude::set_active_account(&label)
+                                    {
+                                        app.push_display_message(DisplayMessage::error(format!(
+                                            "Failed to switch account: {}",
+                                            e
+                                        )));
+                                    } else {
+                                        crate::auth::AuthStatus::invalidate_cache();
+                                        app.context_limit = app.provider.context_window() as u64;
+                                        app.context_warning_shown = false;
+                                        let _ = remote.switch_anthropic_account(&label).await;
+                                        app.push_display_message(DisplayMessage::system(format!(
+                                            "Switched to Anthropic account `{}`.",
+                                            label
+                                        )));
+                                        app.set_status_notice(format!(
+                                            "Account: switched to {}",
+                                            label
+                                        ));
+                                    }
+                                }
+                                "openai" => {
+                                    if let Err(e) = crate::auth::codex::set_active_account(&label) {
+                                        app.push_display_message(DisplayMessage::error(format!(
+                                            "Failed to switch OpenAI account: {}",
+                                            e
+                                        )));
+                                    } else {
+                                        crate::auth::AuthStatus::invalidate_cache();
+                                        app.context_limit = app.provider.context_window() as u64;
+                                        app.context_warning_shown = false;
+                                        let _ = remote.switch_openai_account(&label).await;
+                                        app.push_display_message(DisplayMessage::system(format!(
+                                            "Switched to OpenAI account `{}`.",
+                                            label
+                                        )));
+                                        app.set_status_notice(format!(
+                                            "OpenAI account: switched to {}",
+                                            label
+                                        ));
+                                    }
+                                }
+                                _ => app.push_display_message(DisplayMessage::error(format!(
+                                    "Provider `{}` does not support account switching.",
+                                    provider_id
+                                ))),
+                            }
+                        }
+                        crate::tui::AccountPickerSelection::Add { .. }
+                        | crate::tui::AccountPickerSelection::Replace { .. } => {}
+                    }
+                }
             }
         }
         Some(Ok(Event::Paste(text))) => {
             app.note_client_focus();
             app.handle_paste(text);
-            needs_redraw = true;
         }
         Some(Ok(Event::Mouse(mouse))) => {
             app.note_client_focus();
             handle_mouse_event(app, mouse);
-            needs_redraw = true;
         }
-        Some(Ok(Event::Resize(_, _))) => {
-            let _ = terminal.clear();
-            needs_redraw = true;
-        }
+        Some(Ok(Event::Resize(_, _))) => {}
         _ => {}
     }
-    if needs_redraw {
-        terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
-    }
+    // The active remote loop redraws at the top of the next iteration, so an
+    // immediate draw here would duplicate the same full-frame render for every
+    // keypress.
     Ok(())
 }
 
@@ -445,6 +499,12 @@ pub(super) async fn connect_with_retry(
 ) -> Result<ConnectOutcome> {
     match RemoteConnection::connect_with_session(session_to_resume).await {
         Ok(remote) => {
+            crate::logging::info(&format!(
+                "[TIMING] remote bootstrap: connected after {}ms (resume={:?}, reconnect_attempts={})",
+                app.app_started.elapsed().as_millis(),
+                session_to_resume,
+                state.reconnect_attempts
+            ));
             if let Some(idx) = state.disconnect_msg_idx.take() {
                 if idx < app.display_messages.len() {
                     app.display_messages.remove(idx);
@@ -514,9 +574,18 @@ pub(super) async fn connect_with_retry(
                 .await
                 {
                     crate::server::ReloadWaitStatus::Ready => {
+                        crate::logging::info(&format!(
+                            "Reconnect reload handoff: ready immediately (state={})",
+                            crate::server::reload_state_summary(RELOAD_MARKER_MAX_AGE)
+                        ));
                         return Ok(ConnectOutcome::Retry);
                     }
                     crate::server::ReloadWaitStatus::Failed(detail) => {
+                        crate::logging::warn(&format!(
+                            "Reconnect reload handoff: failed detail={:?} state={}",
+                            detail,
+                            crate::server::reload_state_summary(RELOAD_MARKER_MAX_AGE)
+                        ));
                         let detail = detail.unwrap_or_else(|| {
                             "reload failed before the replacement server became ready; starting replacement server"
                                 .to_string()
@@ -526,6 +595,10 @@ pub(super) async fn connect_with_retry(
                         }
                     }
                     crate::server::ReloadWaitStatus::Idle => {
+                        crate::logging::warn(&format!(
+                            "Reconnect reload handoff: idle without ready server state={}",
+                            crate::server::reload_state_summary(RELOAD_MARKER_MAX_AGE)
+                        ));
                         if recover_reloading_server(
                             app,
                             terminal,
@@ -540,8 +613,9 @@ pub(super) async fn connect_with_retry(
                     crate::server::ReloadWaitStatus::Waiting { pid } => {
                         state.last_reload_pid = pid;
                         crate::logging::info(&format!(
-                            "Reconnect wait: awaiting reload lifecycle event (pid={:?})",
-                            pid
+                            "Reconnect wait: awaiting reload lifecycle event (pid={:?}, state={})",
+                            pid,
+                            crate::server::reload_state_summary(RELOAD_MARKER_MAX_AGE)
                         ));
                         let wait = crate::server::wait_for_reload_handoff_event(pid, &socket_path);
                         tokio::pin!(wait);
@@ -628,8 +702,7 @@ fn handle_terminal_event_while_disconnected(
             needs_redraw = true;
         }
         Some(Ok(Event::Resize(_, _))) => {
-            let _ = terminal.clear();
-            needs_redraw = true;
+            needs_redraw = app.should_redraw_after_resize();
         }
         _ => {}
     }
@@ -739,26 +812,13 @@ pub(super) async fn handle_post_connect<B: ratatui::backend::Backend>(
     state.reconnect_attempts = 0;
     state.initial_server_start = false;
 
-    if !same_session_reload_fast_path {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
-        while !remote.has_loaded_history() {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                crate::logging::warn("Timed out waiting for History event from server");
-                break;
-            }
-            match tokio::time::timeout(remaining, remote.next_event()).await {
-                Ok(RemoteRead::Event(event)) => {
-                    handle_server_event(app, event, remote);
-                }
-                _ => break,
-            }
-        }
-    } else {
+    if same_session_reload_fast_path {
         crate::logging::info(
             "Same-session reload fast path: skipping blocking History wait and reusing local display state",
         );
         remote.mark_history_loaded();
+    } else if !remote.has_loaded_history() {
+        app.set_status_notice("Loading session...");
     }
 
     if remote.has_loaded_history() && !app.is_processing && !app.queued_messages.is_empty() {
@@ -849,10 +909,13 @@ pub(super) fn finalize_reload_reconnect(
                 .task_context
                 .map(|t| format!("\nTask context: {}", t))
                 .unwrap_or_default();
+            let background_task_note = session_to_resume
+                .map(super::reload_persisted_background_tasks_note)
+                .unwrap_or_default();
 
             let continuation_msg = format!(
-                "Reload succeeded ({} → {}).{} Continue immediately from where you left off. Do not ask the user what to do next. Do not summarize the reload.",
-                ctx.version_before, ctx.version_after, task_info
+                "Reload succeeded ({} → {}).{}{} Continue immediately from where you left off. Do not ask the user what to do next. Do not summarize the reload.",
+                ctx.version_before, ctx.version_after, task_info, background_task_note
             );
 
             crate::logging::info(&format!(
@@ -975,12 +1038,20 @@ pub(super) fn handle_disconnect(
     state.reconnect_attempts = 1;
 }
 
-async fn process_remote_followups(app: &mut App, remote: &mut RemoteConnection) {
+pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteConnection) {
+    if app.pending_queued_dispatch {
+        return;
+    }
+
+    if !remote.has_loaded_history() {
+        return;
+    }
+
     if app.pending_server_reload && !app.is_processing {
         app.pending_server_reload = false;
         app.push_display_message(DisplayMessage::system(
             "ℹ Newer server binary detected. Automatic reload is disabled to avoid interrupting other attached clients. Use `/reload` manually when you're ready.".to_string(),
-        ));
+            ));
         app.set_status_notice("Server update available — manual /reload recommended");
     }
 
@@ -1531,6 +1602,7 @@ pub(super) fn handle_server_event(
             app.thought_line_inserted = false;
             app.thinking_prefix_emitted = false;
             app.thinking_buffer.clear();
+            app.schedule_queued_dispatch_after_interrupt();
             app.push_display_message(DisplayMessage::system("Interrupted"));
             app.is_processing = false;
             app.status = ProcessingStatus::Idle;
@@ -1725,9 +1797,11 @@ pub(super) fn handle_server_event(
         }
         ServerEvent::History {
             messages,
+            images,
             session_id,
             provider_name,
             provider_model,
+            subagent_model,
             available_models,
             available_model_routes,
             mcp_servers,
@@ -1749,6 +1823,9 @@ pub(super) fn handle_server_event(
             ..
         } => {
             let prev_session_id = app.remote_session_id.clone();
+            let history_message_count = messages.len();
+            let history_mcp_count = mcp_servers.len();
+            let history_model = provider_model.clone();
             remote.set_session_id(session_id.clone());
             app.remote_session_id = Some(session_id.clone());
             crate::set_current_session(&session_id);
@@ -1785,6 +1862,7 @@ pub(super) fn handle_server_event(
                 app.interleave_message = None;
                 app.pending_soft_interrupts.clear();
                 app.remote_total_tokens = None;
+                app.remote_side_pane_images.clear();
                 app.remote_swarm_members.clear();
                 app.swarm_plan_items.clear();
                 app.swarm_plan_version = None;
@@ -1798,6 +1876,7 @@ pub(super) fn handle_server_event(
                 app.update_context_limit_for_model(&model);
                 app.remote_provider_model = Some(model);
             }
+            app.session.subagent_model = subagent_model;
             if upstream_provider.is_some() {
                 app.upstream_provider = upstream_provider;
             }
@@ -1808,6 +1887,7 @@ pub(super) fn handle_server_event(
             app.remote_service_tier = service_tier;
             app.remote_compaction_mode = Some(compaction_mode);
             app.set_side_panel_snapshot(side_panel);
+            app.remote_side_pane_images = images;
             app.remote_available_models = available_models;
             app.remote_model_routes = available_model_routes;
             app.remote_skills = skills;
@@ -1841,6 +1921,15 @@ pub(super) fn handle_server_event(
 
             let should_apply_history_payload = session_changed || !remote.has_loaded_history();
             if should_apply_history_payload {
+                crate::logging::info(&format!(
+                    "[TIMING] remote bootstrap: history after {}ms (session={}, resumed={}, messages={}, mcp_servers={}, model={})",
+                    app.app_started.elapsed().as_millis(),
+                    session_id,
+                    app.resume_session_id.is_some(),
+                    history_message_count,
+                    history_mcp_count,
+                    history_model.as_deref().unwrap_or("<none>")
+                ));
                 remote.mark_history_loaded();
                 for msg in messages {
                     app.push_display_message(DisplayMessage {
@@ -2450,53 +2539,29 @@ impl App {
         remote: &mut RemoteConnection,
         command: crate::tui::account_picker::AccountPickerCommand,
     ) -> Result<()> {
-        use crate::tui::account_picker::{AccountPickerCommand, AccountProviderKind};
-
         match command {
-            AccountPickerCommand::Switch { provider, label } => match provider {
-                AccountProviderKind::Anthropic => {
-                    if let Err(e) = crate::auth::claude::set_active_account(&label) {
-                        self.push_display_message(DisplayMessage::error(format!(
-                            "Failed to switch account: {}",
-                            e
-                        )));
-                        return Ok(());
-                    }
-                    crate::auth::AuthStatus::invalidate_cache();
-                    self.context_limit = self.provider.context_window() as u64;
-                    self.context_warning_shown = false;
-                    remote.switch_anthropic_account(&label).await?;
-                    self.push_display_message(DisplayMessage::system(format!(
-                        "Switched to Anthropic account `{}`.",
-                        label
-                    )));
-                    self.set_status_notice(&format!("Account: switched to {}", label));
-                }
-                AccountProviderKind::OpenAi => {
-                    if let Err(e) = crate::auth::codex::set_active_account(&label) {
-                        self.push_display_message(DisplayMessage::error(format!(
-                            "Failed to switch OpenAI account: {}",
-                            e
-                        )));
-                        return Ok(());
-                    }
-                    crate::auth::AuthStatus::invalidate_cache();
-                    self.context_limit = self.provider.context_window() as u64;
-                    self.context_warning_shown = false;
-                    remote.switch_openai_account(&label).await?;
-                    self.push_display_message(DisplayMessage::system(format!(
-                        "Switched to OpenAI account `{}`.",
-                        label
-                    )));
-                    self.set_status_notice(&format!("OpenAI account: switched to {}", label));
-                }
-            },
-            AccountPickerCommand::PromptNew { provider } => self.prompt_new_account_label(provider),
+            crate::tui::account_picker::AccountPickerCommand::OpenAccountCenter {
+                provider_filter,
+            } => self.open_account_center(provider_filter.as_deref()),
+            crate::tui::account_picker::AccountPickerCommand::OpenAddReplaceFlow {
+                provider_filter,
+            } => self.open_account_add_replace_flow(provider_filter.as_deref()),
+            crate::tui::account_picker::AccountPickerCommand::SubmitInput(input) => {
+                crate::tui::app::auth::handle_account_command_remote(self, &input, remote).await?;
+            }
+            crate::tui::account_picker::AccountPickerCommand::PromptValue {
+                prompt,
+                command_prefix,
+                empty_value,
+                status_notice,
+            } => self.prompt_account_value(prompt, command_prefix, empty_value, status_notice),
+            crate::tui::account_picker::AccountPickerCommand::PromptNew { provider } => {
+                self.prompt_new_account_label(provider)
+            }
             other => {
-                if let Some(command) = Self::account_command_for_picker(&other) {
-                    self.input = command;
-                    self.cursor_pos = self.input.len();
-                    self.submit_input();
+                if let Some(input) = Self::account_command_for_picker(&other) {
+                    crate::tui::app::auth::handle_account_command_remote(self, &input, remote)
+                        .await?;
                 }
             }
         }
@@ -2524,6 +2589,10 @@ pub(super) async fn handle_remote_key(
 
     if app.session_picker_overlay.is_some() {
         return app.handle_session_picker_key(code, modifiers);
+    }
+
+    if app.login_picker_overlay.is_some() {
+        return app.handle_login_picker_key(code, modifiers);
     }
 
     if app.account_picker_overlay.is_some() {
@@ -3051,6 +3120,81 @@ pub(super) async fn handle_remote_key(
                     return Ok(());
                 }
 
+                if trimmed.starts_with("/subagent-model") {
+                    let rest = trimmed
+                        .strip_prefix("/subagent-model")
+                        .unwrap_or_default()
+                        .trim();
+                    if rest.is_empty() || matches!(rest, "show" | "status") {
+                        let current_model = app
+                            .remote_provider_model
+                            .clone()
+                            .unwrap_or_else(|| app.provider.model());
+                        let summary = match app.session.subagent_model.as_deref() {
+                            Some(model) => format!("fixed `{}`", model),
+                            None => format!("inherit current (`{}`)", current_model),
+                        };
+                        app.push_display_message(DisplayMessage::system(format!(
+                            "Subagent model for this session: {}\n\nUse `/subagent-model <name>` to pin a model, or `/subagent-model inherit` to use the current model.",
+                            summary
+                        )));
+                        return Ok(());
+                    }
+                    if matches!(rest, "inherit" | "reset" | "clear") {
+                        let current_model = app
+                            .remote_provider_model
+                            .clone()
+                            .unwrap_or_else(|| app.provider.model());
+                        remote.set_subagent_model(None).await?;
+                        app.session.subagent_model = None;
+                        app.push_display_message(DisplayMessage::system(format!(
+                            "Subagent model reset to inherit the current model (`{}`).",
+                            current_model
+                        )));
+                        app.set_status_notice("Subagent model: inherit");
+                        return Ok(());
+                    }
+                    remote.set_subagent_model(Some(rest.to_string())).await?;
+                    app.session.subagent_model = Some(rest.to_string());
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "Subagent model pinned to `{}` for this session.",
+                        rest
+                    )));
+                    app.set_status_notice(format!("Subagent model → {}", rest));
+                    return Ok(());
+                }
+
+                if trimmed.starts_with("/subagent") {
+                    let rest = trimmed.strip_prefix("/subagent").unwrap_or_default().trim();
+                    if rest.is_empty() {
+                        app.push_display_message(DisplayMessage::error(
+                            "Usage: `/subagent [--type <kind>] [--model <name>] [--continue <session_id>] <prompt>`",
+                        ));
+                        return Ok(());
+                    }
+                    match super::commands::parse_manual_subagent_spec(rest) {
+                        Ok(spec) => {
+                            remote
+                                .run_subagent(
+                                    spec.prompt,
+                                    spec.subagent_type,
+                                    spec.model,
+                                    spec.session_id,
+                                )
+                                .await?;
+                            app.subagent_status = Some("starting subagent".to_string());
+                            app.set_status_notice("Running subagent");
+                        }
+                        Err(error) => {
+                            app.push_display_message(DisplayMessage::error(format!(
+                                "{}\nUsage: `/subagent [--type <kind>] [--model <name>] [--continue <session_id>] <prompt>`",
+                                error
+                            )));
+                        }
+                    }
+                    return Ok(());
+                }
+
                 if let Some(model_name) = trimmed.strip_prefix("/model ") {
                     let model_name = model_name.trim();
                     if model_name.is_empty() {
@@ -3096,20 +3240,71 @@ pub(super) async fn handle_remote_key(
                     return Ok(());
                 }
 
+                if matches!(trimmed, "/fast default" | "/fast default status") {
+                    let default_tier = crate::config::Config::load().provider.openai_service_tier;
+                    let default_enabled = default_tier.as_deref() == Some("priority");
+                    let default_label = default_tier
+                        .as_deref()
+                        .map(super::service_tier_display_label)
+                        .unwrap_or("Standard");
+                    app.push_display_message(DisplayMessage::system(
+                        super::fast_mode_default_message(default_enabled, default_label),
+                    ));
+                    return Ok(());
+                }
+
+                if let Some(mode) = trimmed.strip_prefix("/fast default ") {
+                    let mode = mode.trim().to_ascii_lowercase();
+                    match mode.as_str() {
+                        "on" => {
+                            super::auth::save_openai_fast_setting_local(app, true);
+                            remote.set_service_tier("priority").await?;
+                        }
+                        "off" => {
+                            super::auth::save_openai_fast_setting_local(app, false);
+                            remote.set_service_tier("off").await?;
+                        }
+                        "status" => {
+                            let default_tier =
+                                crate::config::Config::load().provider.openai_service_tier;
+                            let default_enabled = default_tier.as_deref() == Some("priority");
+                            let default_label = default_tier
+                                .as_deref()
+                                .map(super::service_tier_display_label)
+                                .unwrap_or("Standard");
+                            app.push_display_message(DisplayMessage::system(
+                                super::fast_mode_default_message(default_enabled, default_label),
+                            ));
+                        }
+                        _ => {
+                            app.push_display_message(DisplayMessage::error(
+                                "Usage: /fast default [on|off|status]",
+                            ));
+                        }
+                    }
+                    return Ok(());
+                }
+
                 if matches!(trimmed, "/fast" | "/fast status") {
                     let current = app.remote_service_tier.as_deref();
-                    let status = if current == Some("priority") {
-                        "on"
-                    } else {
-                        "off"
-                    };
+                    let enabled = current == Some("priority");
                     let current_label = current
                         .map(super::service_tier_display_label)
                         .unwrap_or("Standard");
-                    app.push_display_message(DisplayMessage::system(format!(
-                        "Fast mode is {}.\nCurrent tier: {}\nUse `/fast on` or `/fast off`.",
-                        status, current_label
-                    )));
+                    let default_tier = crate::config::Config::load().provider.openai_service_tier;
+                    let default_enabled = default_tier.as_deref() == Some("priority");
+                    let default_label = default_tier
+                        .as_deref()
+                        .map(super::service_tier_display_label)
+                        .unwrap_or("Standard");
+                    app.push_display_message(DisplayMessage::system(
+                        super::fast_mode_overview_message(
+                            enabled,
+                            current_label,
+                            default_enabled,
+                            default_label,
+                        ),
+                    ));
                     return Ok(());
                 }
 
@@ -3120,23 +3315,30 @@ pub(super) async fn handle_remote_key(
                         "off" => "off",
                         "status" => {
                             let current = app.remote_service_tier.as_deref();
-                            let status = if current == Some("priority") {
-                                "on"
-                            } else {
-                                "off"
-                            };
+                            let enabled = current == Some("priority");
                             let current_label = current
                                 .map(super::service_tier_display_label)
                                 .unwrap_or("Standard");
-                            app.push_display_message(DisplayMessage::system(format!(
-                                "Fast mode is {}.\nCurrent tier: {}",
-                                status, current_label
-                            )));
+                            let default_tier =
+                                crate::config::Config::load().provider.openai_service_tier;
+                            let default_enabled = default_tier.as_deref() == Some("priority");
+                            let default_label = default_tier
+                                .as_deref()
+                                .map(super::service_tier_display_label)
+                                .unwrap_or("Standard");
+                            app.push_display_message(DisplayMessage::system(
+                                super::fast_mode_overview_message(
+                                    enabled,
+                                    current_label,
+                                    default_enabled,
+                                    default_label,
+                                ),
+                            ));
                             return Ok(());
                         }
                         _ => {
                             app.push_display_message(DisplayMessage::error(
-                                "Usage: /fast [on|off|status]",
+                                "Usage: /fast [on|off|status|default ...]",
                             ));
                             return Ok(());
                         }
@@ -3176,146 +3378,9 @@ pub(super) async fn handle_remote_key(
                     return Ok(());
                 }
 
-                if trimmed == "/account" || trimmed == "/accounts" {
-                    app.show_accounts();
-                    return Ok(());
-                }
-
-                if let Some(sub) = trimmed.strip_prefix("/account ") {
-                    if let Some(openai_sub) = sub.trim().strip_prefix("openai") {
-                        let openai_sub = openai_sub.trim();
-                        if openai_sub.is_empty() {
-                            app.show_openai_accounts();
-                            return Ok(());
-                        }
-
-                        let parts: Vec<&str> = openai_sub.splitn(2, ' ').collect();
-                        if matches!(parts[0], "list" | "ls") {
-                            app.show_openai_accounts();
-                            return Ok(());
-                        }
-                        if matches!(parts[0], "switch" | "use") {
-                            if let Some(label) =
-                                parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty())
-                            {
-                                if let Err(e) = crate::auth::codex::set_active_account(label) {
-                                    app.push_display_message(DisplayMessage::error(format!(
-                                        "Failed to switch OpenAI account: {}",
-                                        e
-                                    )));
-                                    return Ok(());
-                                }
-                                crate::auth::AuthStatus::invalidate_cache();
-                                app.context_limit = app.provider.context_window() as u64;
-                                app.context_warning_shown = false;
-                                remote.switch_openai_account(label).await?;
-                                app.push_display_message(DisplayMessage::system(format!(
-                                    "Switched to OpenAI account `{}`.",
-                                    label
-                                )));
-                                app.set_status_notice(&format!(
-                                    "OpenAI account: switched to {}",
-                                    label
-                                ));
-                                return Ok(());
-                            }
-                            app.push_display_message(DisplayMessage::error(
-                                "Usage: `/account openai switch <label>`".to_string(),
-                            ));
-                            return Ok(());
-                        }
-
-                        app.input = trimmed.to_string();
-                        app.cursor_pos = app.input.len();
-                        app.submit_input();
-                        return Ok(());
-                    }
-
-                    let parts: Vec<&str> = sub.trim().splitn(2, ' ').collect();
-                    if matches!(parts[0], "list" | "ls") {
-                        app.show_accounts();
-                        return Ok(());
-                    }
-                    if matches!(parts[0], "switch" | "use") {
-                        if let Some(label) =
-                            parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty())
-                        {
-                            let has_anthropic = crate::auth::claude::list_accounts()
-                                .unwrap_or_default()
-                                .iter()
-                                .any(|account| account.label == label);
-                            let has_openai = crate::auth::codex::list_accounts()
-                                .unwrap_or_default()
-                                .iter()
-                                .any(|account| account.label == label);
-
-                            match (has_anthropic, has_openai) {
-                                (true, false) => {
-                                    if let Err(e) = crate::auth::claude::set_active_account(label) {
-                                        app.push_display_message(DisplayMessage::error(format!(
-                                            "Failed to switch account: {}",
-                                            e
-                                        )));
-                                        return Ok(());
-                                    }
-                                    crate::auth::AuthStatus::invalidate_cache();
-                                    app.context_limit = app.provider.context_window() as u64;
-                                    app.context_warning_shown = false;
-                                    remote.switch_anthropic_account(label).await?;
-                                    app.push_display_message(DisplayMessage::system(format!(
-                                        "Switched to Anthropic account `{}`.",
-                                        label
-                                    )));
-                                    app.set_status_notice(&format!(
-                                        "Account: switched to {}",
-                                        label
-                                    ));
-                                }
-                                (false, true) => {
-                                    if let Err(e) = crate::auth::codex::set_active_account(label) {
-                                        app.push_display_message(DisplayMessage::error(format!(
-                                            "Failed to switch OpenAI account: {}",
-                                            e
-                                        )));
-                                        return Ok(());
-                                    }
-                                    crate::auth::AuthStatus::invalidate_cache();
-                                    app.context_limit = app.provider.context_window() as u64;
-                                    app.context_warning_shown = false;
-                                    remote.switch_openai_account(label).await?;
-                                    app.push_display_message(DisplayMessage::system(format!(
-                                        "Switched to OpenAI account `{}`.",
-                                        label
-                                    )));
-                                    app.set_status_notice(&format!(
-                                        "OpenAI account: switched to {}",
-                                        label
-                                    ));
-                                }
-                                (true, true) => {
-                                    app.push_display_message(DisplayMessage::error(format!(
-                                        "Account label `{}` exists for both Anthropic and OpenAI. Use `/account switch {}` or `/account openai switch {}` explicitly.",
-                                        label, label, label
-                                    )));
-                                }
-                                (false, false) => {
-                                    app.push_display_message(DisplayMessage::error(format!(
-                                        "No Anthropic or OpenAI account with label `{}` found.",
-                                        label
-                                    )));
-                                }
-                            }
-                            return Ok(());
-                        }
-                        app.push_display_message(DisplayMessage::error(
-                            "Usage: `/account switch <label>`".to_string(),
-                        ));
-                        return Ok(());
-                    }
-
-                    app.input = trimmed.to_string();
-                    app.cursor_pos = app.input.len();
-                    app.submit_input();
+                if crate::tui::app::auth::handle_account_command_remote(app, trimmed, remote)
+                    .await?
+                {
                     return Ok(());
                 }
 

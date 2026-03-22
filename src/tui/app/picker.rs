@@ -1,6 +1,18 @@
 use super::*;
 use crate::tui::session_picker::{self, OverlayAction, PickerResult, SessionPicker};
-use crate::tui::{ModelEntry, PickerState, RouteOption};
+use crate::tui::{
+    AccountPickerSelection, ModelEntry, PickerKind, PickerSelection, PickerState, RouteOption,
+};
+
+enum InlinePickerPreviewRequest {
+    Model {
+        filter: String,
+    },
+    Account {
+        provider_filter: Option<String>,
+        filter: String,
+    },
+}
 
 impl App {
     pub(super) fn model_picker_preview_filter(input: &str) -> Option<String> {
@@ -23,8 +35,19 @@ impl App {
         None
     }
 
+    fn account_picker_preview_request(input: &str) -> Option<InlinePickerPreviewRequest> {
+        let _ = input;
+        None
+    }
+
+    fn inline_picker_preview_request(input: &str) -> Option<InlinePickerPreviewRequest> {
+        Self::model_picker_preview_filter(input)
+            .map(|filter| InlinePickerPreviewRequest::Model { filter })
+            .or_else(|| Self::account_picker_preview_request(input))
+    }
+
     pub(super) fn sync_model_picker_preview_from_input(&mut self) {
-        let Some(filter) = Self::model_picker_preview_filter(&self.input) else {
+        let Some(request) = Self::inline_picker_preview_request(&self.input) else {
             if self
                 .picker_state
                 .as_ref()
@@ -36,10 +59,49 @@ impl App {
             return;
         };
 
-        if self.picker_state.is_none() {
+        let should_open = match (&request, self.picker_state.as_ref()) {
+            (_, None) => true,
+            (InlinePickerPreviewRequest::Model { .. }, Some(picker)) => {
+                picker.preview && picker.kind != PickerKind::Model
+            }
+            (
+                InlinePickerPreviewRequest::Account {
+                    provider_filter, ..
+                },
+                Some(picker),
+            ) => {
+                let desired_provider =
+                    self.inline_account_picker_provider_id(provider_filter.as_deref());
+                !picker.preview
+                    || picker.kind != PickerKind::Account
+                    || desired_provider.as_deref()
+                        != picker
+                            .models
+                            .first()
+                            .and_then(|entry| match entry.selection {
+                                PickerSelection::Account(
+                                    AccountPickerSelection::Switch {
+                                        ref provider_id, ..
+                                    }
+                                    | AccountPickerSelection::Add { ref provider_id }
+                                    | AccountPickerSelection::Replace {
+                                        ref provider_id, ..
+                                    },
+                                ) => Some(provider_id.as_str()),
+                                PickerSelection::Model => None,
+                            })
+            }
+        };
+
+        if should_open {
             let saved_input = self.input.clone();
             let saved_cursor = self.cursor_pos;
-            self.open_model_picker();
+            match &request {
+                InlinePickerPreviewRequest::Model { .. } => self.open_model_picker(),
+                InlinePickerPreviewRequest::Account {
+                    provider_filter, ..
+                } => self.open_account_picker(provider_filter.as_deref()),
+            }
             if let Some(ref mut picker) = self.picker_state {
                 picker.preview = true;
             }
@@ -50,7 +112,10 @@ impl App {
 
         if let Some(ref mut picker) = self.picker_state {
             if picker.preview {
-                picker.filter = filter;
+                picker.filter = match request {
+                    InlinePickerPreviewRequest::Model { filter }
+                    | InlinePickerPreviewRequest::Account { filter, .. } => filter,
+                };
                 Self::apply_picker_filter(picker);
             }
         }
@@ -94,6 +159,7 @@ impl App {
                 None => false,
                 Some(default) => {
                     let bare = default.strip_prefix("copilot:").unwrap_or(default);
+                    let bare = bare.strip_prefix("cursor:").unwrap_or(bare);
                     let bare = bare.split('@').next().unwrap_or(bare);
                     name == default || name == bare
                 }
@@ -154,9 +220,10 @@ impl App {
             let method = match r.api_method.as_str() {
                 "claude-oauth" | "openai-oauth" => 0,
                 "copilot" => 1,
-                "api-key" => 2,
-                "openrouter" => 3,
-                _ => 4,
+                "cursor" => 2,
+                "api-key" => 3,
+                "openrouter" => 4,
+                _ => 5,
             };
             let cheapness = r.estimated_reference_cost_micros.unwrap_or(u64::MAX);
             (avail, method, cheapness, r.provider.clone())
@@ -236,6 +303,7 @@ impl App {
                     models.push(ModelEntry {
                         name: display_name,
                         routes: entry_routes.clone(),
+                        selection: PickerSelection::Model,
                         selected_route: 0,
                         is_current: is_this_current,
                         recommended: RECOMMENDED_MODELS.contains(&name.as_str())
@@ -274,6 +342,7 @@ impl App {
                 models.push(ModelEntry {
                     name: name.clone(),
                     routes: entry_routes,
+                    selection: PickerSelection::Model,
                     selected_route: 0,
                     is_current: *name == current_model,
                     recommended: is_recommended,
@@ -323,6 +392,7 @@ impl App {
         });
 
         self.picker_state = Some(PickerState {
+            kind: PickerKind::Model,
             filtered: (0..models.len()).collect(),
             models,
             selected: 0,
@@ -335,7 +405,7 @@ impl App {
     }
 
     pub(super) fn build_remote_model_routes_fallback(&self) -> Vec<crate::provider::ModelRoute> {
-        let auth = crate::auth::AuthStatus::check();
+        let auth = crate::auth::AuthStatus::check_fast();
         let mut routes = Vec::new();
         for model in &self.remote_available_models {
             if model.contains('/') {
@@ -535,7 +605,11 @@ impl App {
                         return Ok(true);
                     }
                     picker.preview = false;
-                    picker.column = 2;
+                    picker.column = if picker.kind == PickerKind::Account {
+                        0
+                    } else {
+                        2
+                    };
                 }
                 self.input.clear();
                 self.cursor_pos = 0;
@@ -549,6 +623,58 @@ impl App {
                 Ok(true)
             }
             _ => Ok(false),
+        }
+    }
+
+    fn handle_account_picker_selection(&mut self, selection: AccountPickerSelection) {
+        match selection {
+            AccountPickerSelection::Switch { provider_id, label } => {
+                if self.is_remote {
+                    self.pending_account_picker_selection = Some(AccountPickerSelection::Switch {
+                        provider_id: provider_id.clone(),
+                        label: label.clone(),
+                    });
+                    self.set_status_notice(format!("Account → {} ({})", label, provider_id));
+                    return;
+                }
+
+                match provider_id.as_str() {
+                    "claude" => self.switch_account(&label),
+                    "openai" => self.switch_openai_account(&label),
+                    _ => self.push_display_message(DisplayMessage::error(format!(
+                        "Provider `{}` does not support account switching.",
+                        provider_id
+                    ))),
+                }
+            }
+            AccountPickerSelection::Add { provider_id } => match provider_id.as_str() {
+                "claude" => match crate::auth::claude::next_account_label() {
+                    Ok(label) => self.start_claude_login_for_account(&label),
+                    Err(e) => self.push_display_message(DisplayMessage::error(format!(
+                        "Failed to prepare Claude account: {}",
+                        e
+                    ))),
+                },
+                "openai" => match crate::auth::codex::next_account_label() {
+                    Ok(label) => self.start_openai_login_for_account(&label),
+                    Err(e) => self.push_display_message(DisplayMessage::error(format!(
+                        "Failed to prepare OpenAI account: {}",
+                        e
+                    ))),
+                },
+                _ => self.push_display_message(DisplayMessage::error(format!(
+                    "Provider `{}` does not support multiple accounts.",
+                    provider_id
+                ))),
+            },
+            AccountPickerSelection::Replace { provider_id, label } => match provider_id.as_str() {
+                "claude" => self.start_claude_login_for_account(&label),
+                "openai" => self.start_openai_login_for_account(&label),
+                _ => self.push_display_message(DisplayMessage::error(format!(
+                    "Provider `{}` does not support account replacement.",
+                    provider_id
+                ))),
+            },
         }
     }
 
@@ -727,7 +853,14 @@ impl App {
                 self.picker_state = None;
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                if matches!(code, KeyCode::Char('k')) && !modifiers.contains(KeyModifiers::CONTROL)
+                let vim_nav = self
+                    .picker_state
+                    .as_ref()
+                    .map(|picker| picker.kind == PickerKind::Account)
+                    .unwrap_or(false);
+                if matches!(code, KeyCode::Char('k'))
+                    && !modifiers.contains(KeyModifiers::CONTROL)
+                    && !vim_nav
                 {
                     if let Some(ref mut picker) = self.picker_state {
                         picker.filter.push('k');
@@ -745,7 +878,14 @@ impl App {
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if matches!(code, KeyCode::Char('j')) && !modifiers.contains(KeyModifiers::CONTROL)
+                let vim_nav = self
+                    .picker_state
+                    .as_ref()
+                    .map(|picker| picker.kind == PickerKind::Account)
+                    .unwrap_or(false);
+                if matches!(code, KeyCode::Char('j'))
+                    && !modifiers.contains(KeyModifiers::CONTROL)
+                    && !vim_nav
                 {
                     if let Some(ref mut picker) = self.picker_state {
                         picker.filter.push('j');
@@ -766,6 +906,9 @@ impl App {
             }
             KeyCode::Right => {
                 if let Some(ref mut picker) = self.picker_state {
+                    if picker.kind == PickerKind::Account {
+                        return Ok(());
+                    }
                     if picker.column < 2 {
                         if let Some(&idx) = picker.filtered.get(picker.selected) {
                             if picker.models[idx].routes.len() > 1 || picker.column > 0 {
@@ -777,6 +920,9 @@ impl App {
             }
             KeyCode::Left | KeyCode::BackTab => {
                 if let Some(ref mut picker) = self.picker_state {
+                    if picker.kind == PickerKind::Account {
+                        return Ok(());
+                    }
                     if picker.column > 0 {
                         picker.column -= 1;
                     }
@@ -784,6 +930,9 @@ impl App {
             }
             KeyCode::Tab => {
                 if let Some(ref mut picker) = self.picker_state {
+                    if picker.kind == PickerKind::Account {
+                        return Ok(());
+                    }
                     if picker.column == 0 && !picker.filter.is_empty() {
                         Self::tab_complete_filter(picker);
                     } else if picker.column < 2 {
@@ -797,6 +946,9 @@ impl App {
             }
             KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(ref picker) = self.picker_state {
+                    if picker.kind == PickerKind::Account {
+                        return Ok(());
+                    }
                     if picker.filtered.is_empty() {
                         return Ok(());
                     }
@@ -817,6 +969,8 @@ impl App {
                     let (model_spec, provider_key) = if let Some(r) = route {
                         let spec = if r.api_method == "copilot" {
                             format!("copilot:{}", bare_name)
+                        } else if r.api_method == "cursor" {
+                            format!("cursor:{}", bare_name)
                         } else if r.api_method == "openrouter" && r.provider != "auto" {
                             if bare_name.contains('/') {
                                 format!("{}@{}", bare_name, r.provider)
@@ -837,6 +991,7 @@ impl App {
                             }
                             "openai-oauth" => Some("openai"),
                             "copilot" => Some("copilot"),
+                            "cursor" => Some("cursor"),
                             "openrouter" => Some("openrouter"),
                             _ => None,
                         };
@@ -860,13 +1015,16 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                if let Some(ref mut picker) = self.picker_state {
-                    if picker.filtered.is_empty() {
-                        return Ok(());
-                    }
-                    let idx = picker.filtered[picker.selected];
-                    let entry = &picker.models[idx];
+                let Some(ref mut picker) = self.picker_state else {
+                    return Ok(());
+                };
+                if picker.filtered.is_empty() {
+                    return Ok(());
+                }
+                let idx = picker.filtered[picker.selected];
+                let entry = picker.models[idx].clone();
 
+                if matches!(entry.selection, PickerSelection::Model) {
                     if picker.column == 0 && entry.routes.len() > 1 {
                         picker.column = 1;
                         return Ok(());
@@ -875,62 +1033,71 @@ impl App {
                         picker.column = 2;
                         return Ok(());
                     }
+                }
 
-                    let route = &entry.routes[entry.selected_route];
+                let route = &entry.routes[entry.selected_route];
 
-                    if !route.available {
-                        let name = entry.name.clone();
-                        let detail = if route.detail.is_empty() {
-                            "not available".to_string()
-                        } else {
-                            route.detail.clone()
-                        };
-                        self.picker_state = None;
-                        self.set_status_notice(format!("{} — {}", name, detail));
-                        return Ok(());
-                    }
-
-                    let bare_name = if entry.effort.is_some() {
-                        entry
-                            .name
-                            .rsplit_once(" (")
-                            .map(|(base, _)| base.to_string())
-                            .unwrap_or_else(|| entry.name.clone())
+                if !route.available {
+                    let detail = if route.detail.is_empty() {
+                        "not available".to_string()
                     } else {
-                        entry.name.clone()
+                        route.detail.clone()
                     };
-
-                    let spec = if route.api_method == "openrouter" && route.provider != "auto" {
-                        if entry.name.contains('/') {
-                            format!("{}@{}", entry.name, route.provider)
-                        } else {
-                            format!("anthropic/{}@{}", entry.name, route.provider)
-                        }
-                    } else if route.api_method == "openrouter" {
-                        entry.name.clone()
-                    } else if route.provider == "Copilot" {
-                        format!("copilot:{}", bare_name)
-                    } else {
-                        bare_name.clone()
-                    };
-
-                    let effort = entry.effort.clone();
-                    let notice = format!(
-                        "Model → {} via {} ({})",
-                        entry.name, route.provider, route.api_method
-                    );
-
                     self.picker_state = None;
-                    self.upstream_provider = None;
-                    if self.is_remote {
-                        self.pending_model_switch = Some(spec);
-                    } else {
-                        let _ = self.provider.set_model(&spec);
+                    self.set_status_notice(format!("{} — {}", entry.name, detail));
+                    return Ok(());
+                }
+
+                match entry.selection {
+                    PickerSelection::Account(selection) => {
+                        self.picker_state = None;
+                        self.handle_account_picker_selection(selection);
                     }
-                    if let Some(effort) = effort {
-                        let _ = self.provider.set_reasoning_effort(&effort);
+                    PickerSelection::Model => {
+                        let bare_name = if entry.effort.is_some() {
+                            entry
+                                .name
+                                .rsplit_once(" (")
+                                .map(|(base, _)| base.to_string())
+                                .unwrap_or_else(|| entry.name.clone())
+                        } else {
+                            entry.name.clone()
+                        };
+
+                        let spec = if route.api_method == "openrouter" && route.provider != "auto" {
+                            if entry.name.contains('/') {
+                                format!("{}@{}", entry.name, route.provider)
+                            } else {
+                                format!("anthropic/{}@{}", entry.name, route.provider)
+                            }
+                        } else if route.api_method == "openrouter" {
+                            entry.name.clone()
+                        } else if route.api_method == "cursor" {
+                            format!("cursor:{}", bare_name)
+                        } else if route.provider == "Copilot" {
+                            format!("copilot:{}", bare_name)
+                        } else {
+                            bare_name.clone()
+                        };
+
+                        let effort = entry.effort.clone();
+                        let notice = format!(
+                            "Model → {} via {} ({})",
+                            entry.name, route.provider, route.api_method
+                        );
+
+                        self.picker_state = None;
+                        self.upstream_provider = None;
+                        if self.is_remote {
+                            self.pending_model_switch = Some(spec);
+                        } else {
+                            let _ = self.provider.set_model(&spec);
+                        }
+                        if let Some(effort) = effort {
+                            let _ = self.provider.set_reasoning_effort(&effort);
+                        }
+                        self.set_status_notice(notice);
                     }
-                    self.set_status_notice(notice);
                 }
             }
             KeyCode::Backspace => {

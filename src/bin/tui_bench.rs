@@ -472,6 +472,12 @@ impl TuiState for BenchState {
         None
     }
 
+    fn login_picker_overlay(
+        &self,
+    ) -> Option<&std::cell::RefCell<jcode::tui::login_picker::LoginPicker>> {
+        None
+    }
+
     fn account_picker_overlay(
         &self,
     ) -> Option<&std::cell::RefCell<jcode::tui::account_picker::AccountPicker>> {
