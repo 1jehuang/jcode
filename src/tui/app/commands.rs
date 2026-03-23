@@ -84,10 +84,7 @@ pub(super) fn parse_improve_command(trimmed: &str) -> Option<Result<ImproveComma
         });
     }
 
-    if rest.starts_with("status ")
-        || rest.starts_with("resume ")
-        || rest.starts_with("stop ")
-    {
+    if rest.starts_with("status ") || rest.starts_with("resume ") || rest.starts_with("stop ") {
         return Some(Err(improve_usage().to_string()));
     }
 
@@ -151,9 +148,7 @@ pub(super) fn session_improve_mode_for(mode: ImproveMode) -> crate::session::Ses
     }
 }
 
-pub(super) fn restore_improve_mode(
-    mode: crate::session::SessionImproveMode,
-) -> ImproveMode {
+pub(super) fn restore_improve_mode(mode: crate::session::SessionImproveMode) -> ImproveMode {
     match mode {
         crate::session::SessionImproveMode::Run => ImproveMode::Run,
         crate::session::SessionImproveMode::Plan => ImproveMode::Plan,
@@ -170,7 +165,11 @@ pub(super) fn improve_launch_notice(
     } else {
         "improvement loop"
     };
-    let prefix = if interrupted { "👉 Interrupting and starting" } else { "🚀 Starting" };
+    let prefix = if interrupted {
+        "👉 Interrupting and starting"
+    } else {
+        "🚀 Starting"
+    };
     match focus.map(str::trim).filter(|focus| !focus.is_empty()) {
         Some(focus) => format!("{} {} focused on **{}**...", prefix, action, focus),
         None => format!("{} {}...", prefix, action),
@@ -202,8 +201,15 @@ pub(super) fn build_improve_resume_prompt(
 
     let mut todo_list = String::new();
     for todo in incomplete {
-        let icon = if todo.status == "in_progress" { "🔄" } else { "⬜" };
-        todo_list.push_str(&format!("  {} [{}] {}\n", icon, todo.priority, todo.content));
+        let icon = if todo.status == "in_progress" {
+            "🔄"
+        } else {
+            "⬜"
+        };
+        todo_list.push_str(&format!(
+            "  {} [{}] {}\n",
+            icon, todo.priority, todo.content
+        ));
     }
 
     match mode {
@@ -319,7 +325,11 @@ pub(super) fn format_improve_status(app: &App) -> String {
         lines.push(String::new());
         lines.push("Current improve batch:".to_string());
         for todo in incomplete.iter().take(5) {
-            let icon = if todo.status == "in_progress" { "🔄" } else { "⬜" };
+            let icon = if todo.status == "in_progress" {
+                "🔄"
+            } else {
+                "⬜"
+            };
             lines.push(format!("- {} [{}] {}", icon, todo.priority, todo.content));
         }
         if incomplete.len() > 5 {
@@ -345,11 +355,9 @@ fn handle_improve_command_local(app: &mut App, command: ImproveCommand) {
                 .filter(|todo| todo.status != "completed" && todo.status != "cancelled")
                 .collect();
 
-            let mode = app.improve_mode.or_else(|| {
-                app.session
-                    .improve_mode
-                    .map(restore_improve_mode)
-            });
+            let mode = app
+                .improve_mode
+                .or_else(|| app.session.improve_mode.map(restore_improve_mode));
             let Some(mode) = mode else {
                 app.push_display_message(DisplayMessage::system(
                     "No saved improve run found for this session. Use `/improve` or `/improve plan` to start one."

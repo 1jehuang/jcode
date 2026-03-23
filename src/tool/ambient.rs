@@ -3,6 +3,7 @@ use crate::ambient::{
     AmbientCycleResult, AmbientManager, AmbientState, CycleStatus, Priority, ScheduleRequest,
     ScheduleTarget,
 };
+use crate::ambient_runner::AmbientRunnerHandle;
 use crate::safety::{self, PermissionRequest, PermissionResult, SafetySystem, Urgency};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -41,11 +42,20 @@ pub fn take_cycle_result() -> Option<AmbientCycleResult> {
 
 /// Global SafetySystem instance shared with ambient tools.
 static SAFETY_SYSTEM: OnceLock<Arc<SafetySystem>> = OnceLock::new();
+/// Shared schedule/ambient runner handle used to wake the background loop after
+/// queue changes.
+static SCHEDULE_RUNNER: OnceLock<Mutex<Option<AmbientRunnerHandle>>> = OnceLock::new();
 /// Session IDs currently allowed to use ambient-only permission workflows.
 static AMBIENT_SESSION_IDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 pub fn init_safety_system(system: Arc<SafetySystem>) {
     let _ = SAFETY_SYSTEM.set(system);
+}
+
+pub fn init_schedule_runner(handle: AmbientRunnerHandle) {
+    if let Ok(mut slot) = SCHEDULE_RUNNER.get_or_init(|| Mutex::new(None)).lock() {
+        *slot = Some(handle);
+    }
 }
 
 fn get_safety_system() -> Arc<SafetySystem> {
@@ -333,6 +343,7 @@ impl Tool for ScheduleAmbientTool {
 
         let mut manager = AmbientManager::new()?;
         let id = manager.schedule(request)?;
+        nudge_schedule_runner();
 
         let when = if let Some(ref ts) = params.wake_at {
             ts.clone()
@@ -710,9 +721,9 @@ impl Tool for ScheduleTool {
 
     fn description(&self) -> &str {
         "Schedule work to happen later. By default this wakes the ambient agent. You can also \
-         target the current session so the reminder is delivered back into this conversation: if \
-         the session is still live, the reminder is injected there; if it is no longer live, jcode \
-         restores that saved session headlessly and resumes it with the reminder."
+         target the current session so the scheduled task is delivered back into this conversation: if \
+         the session is still live, the scheduled task is injected there; if it is no longer live, jcode \
+         restores that saved session headlessly and resumes it with the scheduled task."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -875,6 +886,17 @@ fn parse_schedule_target(s: Option<&str>, session_id: &str) -> ScheduleTarget {
             session_id: session_id.to_string(),
         },
         _ => ScheduleTarget::Ambient,
+    }
+}
+
+fn nudge_schedule_runner() {
+    let runner = SCHEDULE_RUNNER
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone());
+    if let Some(runner) = runner {
+        runner.nudge();
     }
 }
 

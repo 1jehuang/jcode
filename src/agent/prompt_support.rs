@@ -92,10 +92,19 @@ impl Agent {
         let session_id = &self.session.id;
         let pending = crate::memory::take_pending_memory(session_id);
 
-        let manager = crate::memory::MemoryManager::new();
+        let manager = self
+            .session
+            .working_dir
+            .as_deref()
+            .map(|dir| crate::memory::MemoryManager::new().with_project_dir(dir))
+            .unwrap_or_else(crate::memory::MemoryManager::new);
         manager.spawn_relevance_check(session_id, messages.to_vec());
 
-        crate::memory_agent::update_context_sync(session_id, messages.to_vec());
+        crate::memory_agent::update_context_sync_with_dir(
+            session_id,
+            messages.to_vec(),
+            self.session.working_dir.clone(),
+        );
 
         pending
     }
@@ -103,7 +112,12 @@ impl Agent {
     /// Legacy blocking memory prompt - kept for fallback
     #[allow(dead_code)]
     pub(super) async fn build_memory_prompt(&self, messages: &[Message]) -> Option<String> {
-        let manager = crate::memory::MemoryManager::new();
+        let manager = self
+            .session
+            .working_dir
+            .as_deref()
+            .map(|dir| crate::memory::MemoryManager::new().with_project_dir(dir))
+            .unwrap_or_else(crate::memory::MemoryManager::new);
         match manager.relevant_prompt_for_messages(messages).await {
             Ok(prompt) => prompt,
             Err(error) => {

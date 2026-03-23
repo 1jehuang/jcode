@@ -938,7 +938,11 @@ fn test_improve_plan_command_is_plan_only_and_accepts_focus() {
     );
     assert!(app.is_processing());
 
-    let msg = app.session.messages.last().expect("missing improve plan prompt");
+    let msg = app
+        .session
+        .messages
+        .last()
+        .expect("missing improve plan prompt");
     assert!(matches!(
         &msg.content[0],
         ContentBlock::Text { text, .. }
@@ -984,7 +988,10 @@ fn test_improve_status_summarizes_current_todos() {
             .last()
             .expect("missing improve status");
         assert!(msg.content.contains("Improve status"));
-        assert!(msg.content.contains("1 incomplete · 1 completed · 0 cancelled"));
+        assert!(
+            msg.content
+                .contains("1 incomplete · 1 completed · 0 cancelled")
+        );
         assert!(msg.content.contains("Profile startup path"));
     });
 }
@@ -1015,7 +1022,11 @@ fn test_improve_stop_queues_stop_prompt_and_clears_mode() {
     assert_eq!(app.session.improve_mode, None);
     assert!(app.is_processing());
 
-    let msg = app.session.messages.last().expect("missing improve stop prompt");
+    let msg = app
+        .session
+        .messages
+        .last()
+        .expect("missing improve stop prompt");
     assert!(matches!(
         &msg.content[0],
         ContentBlock::Text { text, .. }
@@ -1065,7 +1076,11 @@ fn test_improve_resume_uses_saved_mode_and_current_todos() {
         );
         assert!(app.is_processing());
 
-        let msg = app.session.messages.last().expect("missing improve resume prompt");
+        let msg = app
+            .session
+            .messages
+            .last()
+            .expect("missing improve resume prompt");
         assert!(matches!(
             &msg.content[0],
             ContentBlock::Text { text, .. }
@@ -1870,9 +1885,7 @@ fn test_nested_command_suggestions_filter_partial_suffixes() {
 
     let suggestions = app.get_suggestions_for("/improve st");
     assert!(
-        suggestions
-            .iter()
-            .any(|(cmd, _)| cmd == "/improve status"),
+        suggestions.iter().any(|(cmd, _)| cmd == "/improve status"),
         "expected /improve status suggestion"
     );
 }

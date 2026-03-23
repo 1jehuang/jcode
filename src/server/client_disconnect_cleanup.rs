@@ -87,9 +87,14 @@ pub(super) async fn cleanup_client_connection(
                         None
                     };
                     let sid = client_session_id.to_string();
+                    let working_dir = agent.working_dir().map(|dir| dir.to_string());
                     drop(agent);
                     if let Some(transcript) = transcript {
-                        crate::memory_agent::trigger_final_extraction(transcript, sid);
+                        crate::memory_agent::trigger_final_extraction_with_dir(
+                            transcript,
+                            sid,
+                            working_dir,
+                        );
                     }
                 }
                 Err(_) => {

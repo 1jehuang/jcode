@@ -3856,10 +3856,8 @@ pub(super) async fn handle_remote_key(
                                     Some(super::commands::session_improve_mode_for(mode));
                             })?;
                             app.improve_mode = Some(mode);
-                            let prompt = super::commands::build_improve_prompt(
-                                plan_only,
-                                focus.as_deref(),
-                            );
+                            let prompt =
+                                super::commands::build_improve_prompt(plan_only, focus.as_deref());
                             if app.is_processing {
                                 remote.cancel().await?;
                                 app.set_status_notice(if plan_only {

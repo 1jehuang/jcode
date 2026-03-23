@@ -457,13 +457,17 @@ pub(super) async fn handle_trigger_memory_extraction(
             if transcript.len() < 200 {
                 None
             } else {
-                Some((transcript, agent_guard.session_id().to_string()))
+                Some((
+                    transcript,
+                    agent_guard.session_id().to_string(),
+                    agent_guard.working_dir().map(|dir| dir.to_string()),
+                ))
             }
         }
     };
 
-    if let Some((transcript, session_id)) = extraction {
-        crate::memory_agent::trigger_final_extraction(transcript, session_id);
+    if let Some((transcript, session_id, working_dir)) = extraction {
+        crate::memory_agent::trigger_final_extraction_with_dir(transcript, session_id, working_dir);
     }
 
     let _ = client_event_tx.send(ServerEvent::Done { id });
@@ -510,11 +514,12 @@ pub(super) async fn handle_split(
 
 #[cfg(test)]
 mod tests {
-    use super::{clone_split_session, handle_set_feature};
+    use super::{clone_split_session, handle_notify_session, handle_set_feature};
     use crate::agent::Agent;
     use crate::message::{ContentBlock, Role};
-    use crate::protocol::{FeatureToggle, ServerEvent};
+    use crate::protocol::{FeatureToggle, NotificationType, ServerEvent};
     use crate::provider::{EventStream, Provider};
+    use crate::server::{ClientConnectionInfo, SwarmMember};
     use crate::tool::Registry;
     use anyhow::Result;
     use async_trait::async_trait;
@@ -684,6 +689,87 @@ mod tests {
                     if message == "You are the coordinator for this swarm."
             )
         }));
+    }
+
+    #[tokio::test]
+    async fn notify_session_sends_scheduled_notification_to_live_member() {
+        let sessions = Arc::new(RwLock::new(HashMap::<String, Arc<Mutex<Agent>>>::new()));
+        let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
+        let client_connections = Arc::new(RwLock::new(HashMap::from([(
+            "client-1".to_string(),
+            ClientConnectionInfo {
+                client_id: "client-1".to_string(),
+                session_id: "session-live".to_string(),
+                debug_client_id: Some("debug-1".to_string()),
+                connected_at: Instant::now(),
+                last_seen: Instant::now(),
+            },
+        )])));
+        let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();
+        let swarm_members = Arc::new(RwLock::new(HashMap::from([(
+            "session-live".to_string(),
+            SwarmMember {
+                session_id: "session-live".to_string(),
+                event_tx: member_event_tx,
+                working_dir: None,
+                swarm_id: None,
+                swarm_enabled: false,
+                status: "ready".to_string(),
+                detail: None,
+                friendly_name: Some("otter".to_string()),
+                role: "agent".to_string(),
+                joined_at: Instant::now(),
+                last_status_change: Instant::now(),
+                is_headless: false,
+            },
+        )])));
+        let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+
+        handle_notify_session(
+            77,
+            "session-live".to_string(),
+            "[Scheduled task]\nTask: Follow up".to_string(),
+            &sessions,
+            &soft_interrupt_queues,
+            &client_connections,
+            &swarm_members,
+            &client_event_tx,
+        )
+        .await;
+
+        let member_event = member_event_rx
+            .recv()
+            .await
+            .expect("live member should receive notification");
+        match member_event {
+            ServerEvent::Notification {
+                from_session,
+                from_name,
+                notification_type,
+                message,
+            } => {
+                assert_eq!(from_session, "schedule");
+                assert_eq!(from_name.as_deref(), Some("scheduled task"));
+                assert!(matches!(
+                    notification_type,
+                    NotificationType::Message {
+                        scope: Some(ref scope),
+                        channel: None,
+                    } if scope == "scheduled"
+                ));
+                assert!(message.contains("[Scheduled task]"));
+                assert!(message.contains("Task: Follow up"));
+            }
+            other => panic!("expected notification event, got {other:?}"),
+        }
+
+        let client_events: Vec<_> =
+            std::iter::from_fn(|| client_event_rx.try_recv().ok()).collect();
+        assert!(
+            client_events
+                .iter()
+                .any(|event| matches!(event, ServerEvent::Done { id } if *id == 77))
+        );
     }
 }
 

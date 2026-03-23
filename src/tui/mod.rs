@@ -29,6 +29,22 @@ use ratatui::prelude::Frame;
 use ratatui::text::Line;
 use std::time::Duration;
 
+pub(crate) fn scheduled_notification_text(
+    info: Option<&info_widget::AmbientWidgetData>,
+) -> Option<String> {
+    let info = info?;
+    if info.reminder_count == 0 {
+        return None;
+    }
+    let next = info.next_reminder_wake.as_deref()?;
+    let suffix = if info.reminder_count > 1 {
+        format!(" · {} queued", info.reminder_count)
+    } else {
+        String::new()
+    };
+    Some(format!("⏰ next scheduled task {}{}", next, suffix))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CopySelectionPane {
     Chat,
@@ -253,6 +269,10 @@ pub trait TuiState {
             return true;
         }
         if !self.is_processing() {
+            let info = self.info_widget_data();
+            if scheduled_notification_text(info.ambient_info.as_ref()).is_some() {
+                return true;
+            }
             if let Some(cache_info) = self.cache_ttl_status() {
                 if cache_info.is_cold || cache_info.remaining_secs <= 60 {
                     return true;
@@ -494,7 +514,9 @@ pub fn render_frame(frame: &mut Frame<'_>, state: &dyn TuiState) {
 
 #[cfg(test)]
 mod tests {
-    use super::{connection_type_icon, is_unexpected_cache_miss};
+    use super::{connection_type_icon, is_unexpected_cache_miss, scheduled_notification_text};
+    use crate::ambient::AmbientStatus;
+    use crate::tui::info_widget::AmbientWidgetData;
 
     #[test]
     fn cache_creation_only_on_turn_two_is_expected() {
@@ -525,5 +547,27 @@ mod tests {
         assert_eq!(connection_type_icon(Some("http")), Some("🌐"));
         assert_eq!(connection_type_icon(Some("unknown")), None);
         assert_eq!(connection_type_icon(None), None);
+    }
+
+    #[test]
+    fn scheduled_notification_text_uses_session_reminder_count_only() {
+        let info = AmbientWidgetData {
+            show_widget: false,
+            status: AmbientStatus::Disabled,
+            queue_count: 88,
+            next_queue_preview: Some("ambient backlog".to_string()),
+            reminder_count: 2,
+            next_reminder_preview: Some("follow up".to_string()),
+            last_run_ago: None,
+            last_summary: None,
+            next_wake: Some("in 0s".to_string()),
+            next_reminder_wake: Some("in 5m".to_string()),
+            budget_percent: None,
+        };
+
+        assert_eq!(
+            scheduled_notification_text(Some(&info)).as_deref(),
+            Some("⏰ next scheduled task in 5m · 2 queued")
+        );
     }
 }

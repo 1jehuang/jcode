@@ -1024,8 +1024,8 @@ pub fn build_ambient_system_prompt(
 
 pub fn format_scheduled_session_message(item: &ScheduledItem) -> String {
     let mut lines = vec![
-        "[Scheduled reminder]".to_string(),
-        "A scheduled reminder for this session is now due.".to_string(),
+        "[Scheduled task]".to_string(),
+        "A scheduled task for this session is now due.".to_string(),
         String::new(),
         format!(
             "Task: {}",
@@ -1228,7 +1228,7 @@ mod tests {
         queue.push(ScheduledItem {
             id: "session_due".into(),
             scheduled_for: past,
-            context: "session reminder".into(),
+            context: "scheduled session task".into(),
             priority: Priority::Normal,
             target: ScheduleTarget::Session {
                 session_id: "session_123".into(),
@@ -1245,7 +1245,7 @@ mod tests {
         queue.push(ScheduledItem {
             id: "ambient_due".into(),
             scheduled_for: past,
-            context: "ambient reminder".into(),
+            context: "scheduled ambient task".into(),
             priority: Priority::High,
             target: ScheduleTarget::Ambient,
             created_by_session: "ambient".into(),

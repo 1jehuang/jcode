@@ -718,6 +718,17 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
     }
 
     if !app.is_processing() {
+        let info = app.info_widget_data();
+        if let Some(schedule_notice) =
+            crate::tui::scheduled_notification_text(info.ambient_info.as_ref())
+        {
+            push_sep(&mut spans);
+            spans.push(Span::styled(
+                schedule_notice,
+                Style::default().fg(rgb(140, 180, 255)),
+            ));
+        }
+
         if let Some(cache_info) = app.cache_ttl_status() {
             if cache_info.is_cold {
                 let tokens_str = cache_info

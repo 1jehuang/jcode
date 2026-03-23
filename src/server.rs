@@ -1268,6 +1268,17 @@ mod startup_tests {
 
         bind_task.await.expect("bind task should complete");
     }
+
+    #[test]
+    fn server_initializes_schedule_runner_even_when_ambient_disabled() {
+        let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+        let server = Server::new(provider);
+
+        assert!(
+            server.ambient_runner.is_some(),
+            "schedule/session tasks need the runner even when ambient is disabled"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2121,12 +2132,13 @@ impl Server {
         };
         crate::process_title::set_server_title(&identity.name);
 
-        // Initialize ambient runner if enabled
-        let ambient_runner = if crate::config::config().ambient.enabled {
+        // Initialize the background runner even when ambient mode is disabled so
+        // session-targeted scheduled tasks still have a live delivery loop.
+        let ambient_runner = {
             let safety = Arc::new(crate::safety::SafetySystem::new());
-            Some(AmbientRunnerHandle::new(safety))
-        } else {
-            None
+            let handle = AmbientRunnerHandle::new(safety);
+            crate::tool::ambient::init_schedule_runner(handle.clone());
+            Some(handle)
         };
 
         Self {
@@ -2597,11 +2609,11 @@ impl Server {
             });
         }
 
-        // Spawn ambient mode background loop if enabled
+        // Spawn the background ambient/schedule loop.
         if let Some(ref runner) = self.ambient_runner {
             let ambient_handle = runner.clone();
             let ambient_provider = Arc::clone(&self.provider);
-            crate::logging::info("Ambient mode enabled - starting background loop");
+            crate::logging::info("Starting ambient/schedule background loop");
             tokio::spawn(async move {
                 ambient_handle.run_loop(ambient_provider).await;
             });

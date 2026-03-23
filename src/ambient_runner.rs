@@ -23,6 +23,8 @@ use chrono::Utc;
 use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
 
+const MAX_IDLE_POLL_SECS: u64 = 30;
+
 /// Shared ambient runner state, accessible from the server, debug socket, and TUI.
 #[derive(Clone)]
 pub struct AmbientRunnerHandle {
@@ -187,10 +189,65 @@ impl AmbientRunnerHandle {
     /// Get status JSON for debug socket.
     pub async fn status_json(&self) -> String {
         let state = self.inner.state.read().await;
-        let queue_count = *self.inner.queue_count.read().await;
-        let next_preview = self.inner.next_queue_preview.read().await.clone();
         let running = *self.inner.running.read().await;
         let active_sessions = *self.inner.active_user_sessions.read().await;
+
+        let (
+            queue_count,
+            next_preview,
+            next_due,
+            overdue_queue_count,
+            reminder_count,
+            next_reminder_preview,
+            next_reminder_due,
+            overdue_reminder_count,
+        ) = match AmbientManager::new() {
+            Ok(mgr) => {
+                let now = Utc::now();
+                let items = mgr.queue().items();
+                let queue_count = items.len();
+                let next_item = items.iter().min_by_key(|item| item.scheduled_for);
+                let overdue_queue_count = items
+                    .iter()
+                    .filter(|item| item.scheduled_for <= now)
+                    .count();
+                let reminder_items: Vec<_> = items
+                    .iter()
+                    .filter(|item| matches!(item.target, ScheduleTarget::Session { .. }))
+                    .collect();
+                let reminder_count = reminder_items.len();
+                let next_reminder = reminder_items
+                    .iter()
+                    .min_by_key(|item| item.scheduled_for)
+                    .copied();
+                let overdue_reminder_count = reminder_items
+                    .iter()
+                    .filter(|item| item.scheduled_for <= now)
+                    .count();
+
+                (
+                    queue_count,
+                    next_item.map(|item| {
+                        item.task_description
+                            .as_deref()
+                            .unwrap_or(&item.context)
+                            .to_string()
+                    }),
+                    next_item.map(|item| item.scheduled_for.to_rfc3339()),
+                    overdue_queue_count,
+                    reminder_count,
+                    next_reminder.map(|item| {
+                        item.task_description
+                            .as_deref()
+                            .unwrap_or(&item.context)
+                            .to_string()
+                    }),
+                    next_reminder.map(|item| item.scheduled_for.to_rfc3339()),
+                    overdue_reminder_count,
+                )
+            }
+            Err(_) => (0, None, None, 0, 0, None, None, 0),
+        };
 
         let status_str = match &state.status {
             AmbientStatus::Idle => "idle".to_string(),
@@ -218,6 +275,16 @@ impl AmbientRunnerHandle {
             "last_compactions": state.last_compactions,
             "queue_count": queue_count,
             "next_queue_preview": next_preview,
+            "next_queue_due": next_due,
+            "overdue_queue_count": overdue_queue_count,
+            "reminder_count": reminder_count,
+            "next_reminder_preview": next_reminder_preview,
+            "next_reminder_due": next_reminder_due,
+            "overdue_reminder_count": overdue_reminder_count,
+            "scheduled_task_count": reminder_count,
+            "next_scheduled_task_preview": next_reminder_preview,
+            "next_scheduled_task_due": next_reminder_due,
+            "overdue_scheduled_task_count": overdue_reminder_count,
             "active_user_sessions": active_sessions,
         })
         .to_string()
@@ -232,12 +299,28 @@ impl AmbientRunnerHandle {
                     .items()
                     .iter()
                     .map(|item| {
+                        let (target_kind, target_session_id) = match &item.target {
+                            ScheduleTarget::Ambient => ("ambient", None),
+                            ScheduleTarget::Session { session_id } => {
+                                ("session", Some(session_id.clone()))
+                            }
+                        };
+                        let overdue_seconds =
+                            (Utc::now() - item.scheduled_for).num_seconds().max(0);
                         serde_json::json!({
                             "id": item.id,
                             "scheduled_for": item.scheduled_for.to_rfc3339(),
                             "context": item.context,
+                            "task_description": item.task_description,
                             "priority": format!("{:?}", item.priority),
                             "created_at": item.created_at.to_rfc3339(),
+                            "target_kind": target_kind,
+                            "target_session_id": target_session_id,
+                            "working_dir": item.working_dir,
+                            "relevant_files": item.relevant_files,
+                            "git_branch": item.git_branch,
+                            "overdue": item.scheduled_for <= Utc::now(),
+                            "overdue_seconds": overdue_seconds,
                         })
                     })
                     .collect();
@@ -343,7 +426,7 @@ impl AmbientRunnerHandle {
         match self.notify_live_session(session_id, &reminder).await {
             Ok(()) => {
                 logging::info(&format!(
-                    "Ambient runner: delivered scheduled reminder {} to live session {}",
+                    "Ambient runner: delivered scheduled task {} to live session {}",
                     item.id, session_id
                 ));
                 Ok(())
@@ -382,22 +465,29 @@ impl AmbientRunnerHandle {
         }
         logging::info("Ambient runner: starting background loop");
 
-        // Spawn IMAP reply poller if email replies are enabled
-        let safety_config = config().safety.clone();
-        if safety_config.email_reply_enabled
-            && safety_config.email_imap_host.is_some()
-            && safety_config.email_enabled
-        {
-            let imap_config = safety_config.clone();
-            tokio::spawn(async move {
-                crate::notifications::imap_reply_loop(imap_config).await;
-            });
-            logging::info("Ambient runner: IMAP reply poller spawned");
-        }
+        let ambient_enabled = config().ambient.enabled;
 
-        // Spawn reply pollers for all configured message channels (Telegram, Discord, etc.)
-        let channel_registry = crate::channel::ChannelRegistry::from_config(&safety_config);
-        channel_registry.spawn_reply_loops(&self);
+        // Spawn reply pollers only when ambient mode is enabled; scheduled
+        // session-targeted scheduled tasks should still work without the ambient-only reply
+        // infrastructure.
+        if ambient_enabled {
+            let safety_config = config().safety.clone();
+            if safety_config.email_reply_enabled
+                && safety_config.email_imap_host.is_some()
+                && safety_config.email_enabled
+            {
+                let imap_config = safety_config.clone();
+                tokio::spawn(async move {
+                    crate::notifications::imap_reply_loop(imap_config).await;
+                });
+                logging::info("Ambient runner: IMAP reply poller spawned");
+            }
+
+            // Spawn reply pollers for all configured message channels
+            // (Telegram, Discord, etc.)
+            let channel_registry = crate::channel::ChannelRegistry::from_config(&safety_config);
+            channel_registry.spawn_reply_loops(&self);
+        }
 
         let amb_config = &config().ambient;
         let scheduler_config = AmbientSchedulerConfig {
@@ -412,65 +502,66 @@ impl AmbientRunnerHandle {
         ambient_tools::init_safety_system(Arc::clone(&self.inner.safety));
 
         loop {
-            // Check if ambient is still enabled
-            if !config().ambient.enabled {
-                logging::info("Ambient runner: ambient mode disabled, exiting loop");
-                break;
-            }
-
             // Check state
             let state = { self.inner.state.read().await.clone() };
 
-            if matches!(state.status, AmbientStatus::Disabled) {
-                logging::info("Ambient runner: status is Disabled, exiting loop");
-                break;
-            }
+            let ambient_allowed =
+                ambient_enabled && !matches!(state.status, AmbientStatus::Disabled);
 
-            // Update scheduler's user-active state
-            let active_sessions = *self.inner.active_user_sessions.read().await;
-            scheduler.set_user_active(active_sessions > 0);
+            if ambient_allowed {
+                // Update scheduler's user-active state
+                let active_sessions = *self.inner.active_user_sessions.read().await;
+                scheduler.set_user_active(active_sessions > 0);
 
-            // Check if we should pause
-            if scheduler.should_pause() {
-                let mut s = self.inner.state.write().await;
-                s.status = AmbientStatus::Paused {
-                    reason: "user session active".to_string(),
-                };
-                drop(s);
+                // Check if we should pause
+                if scheduler.should_pause() {
+                    let mut s = self.inner.state.write().await;
+                    s.status = AmbientStatus::Paused {
+                        reason: "user session active".to_string(),
+                    };
+                    drop(s);
 
-                // Sleep until nudged or 60s
-                tokio::select! {
-                    _ = self.inner.wake_notify.notified() => {},
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {},
+                    // Sleep until nudged or 60s
+                    tokio::select! {
+                        _ = self.inner.wake_notify.notified() => {},
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {},
+                    }
+                    continue;
                 }
-                continue;
-            }
 
-            // Drop stale permission requests whose originating session is no longer active.
-            match self
-                .inner
-                .safety
-                .expire_dead_session_requests("ambient_runner_gc")
-            {
-                Ok(expired) if !expired.is_empty() => {
-                    logging::info(&format!(
-                        "Ambient runner: expired {} stale permission request(s)",
-                        expired.len()
-                    ));
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    logging::warn(&format!(
-                        "Ambient runner: failed to expire stale permission requests: {}",
-                        e
-                    ));
+                // Drop stale permission requests whose originating session is no longer active.
+                match self
+                    .inner
+                    .safety
+                    .expire_dead_session_requests("ambient_runner_gc")
+                {
+                    Ok(expired) if !expired.is_empty() => {
+                        logging::info(&format!(
+                            "Ambient runner: expired {} stale permission request(s)",
+                            expired.len()
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        logging::warn(&format!(
+                            "Ambient runner: failed to expire stale permission requests: {}",
+                            e
+                        ));
+                    }
                 }
             }
 
             // Load manager to check should_run and update queue info
-            let (should_run, ready_session_items) = match AmbientManager::new() {
+            let (should_run, ready_session_items, next_session_due) = match AmbientManager::new() {
                 Ok(mut mgr) => {
                     let ready_session_items = mgr.take_ready_session_items();
+                    let next_session_due = mgr
+                        .queue()
+                        .items()
+                        .iter()
+                        .filter(|item| matches!(item.target, ScheduleTarget::Session { .. }))
+                        .map(|item| item.scheduled_for)
+                        .min();
                     // Update queue info for widget
                     {
                         let mut qc = self.inner.queue_count.write().await;
@@ -482,13 +573,14 @@ impl AmbientRunnerHandle {
                     }
                     // Also run if there are pending email reply directives
                     (
-                        mgr.should_run() || ambient::has_pending_directives(),
+                        ambient_allowed && (mgr.should_run() || ambient::has_pending_directives()),
                         ready_session_items,
+                        next_session_due,
                     )
                 }
                 Err(e) => {
                     logging::error(&format!("Ambient runner: failed to load manager: {}", e));
-                    (false, Vec::new())
+                    (false, Vec::new(), None)
                 }
             };
 
@@ -498,9 +590,21 @@ impl AmbientRunnerHandle {
             }
 
             if !should_run {
-                // Calculate sleep interval
-                let interval = scheduler.calculate_interval(None);
-                let sleep_secs = interval.as_secs().max(30);
+                let sleep_secs = if ambient_allowed {
+                    let interval = scheduler
+                        .calculate_interval(None)
+                        .as_secs()
+                        .max(MAX_IDLE_POLL_SECS);
+                    let next_session_secs = next_session_due
+                        .map(|next| (next - Utc::now()).num_seconds().max(0) as u64)
+                        .unwrap_or(interval);
+                    interval.min(next_session_secs.max(1))
+                } else {
+                    next_session_due
+                        .map(|next| (next - Utc::now()).num_seconds().max(0) as u64)
+                        .map(|secs| secs.max(1).min(MAX_IDLE_POLL_SECS))
+                        .unwrap_or(MAX_IDLE_POLL_SECS)
+                };
 
                 logging::info(&format!(
                     "Ambient runner: not time to run, sleeping {}s",
@@ -647,12 +751,6 @@ impl AmbientRunnerHandle {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)) => {},
             }
         }
-
-        {
-            let mut running = self.inner.running.write().await;
-            *running = false;
-        }
-        logging::info("Ambient runner: loop exited");
     }
 
     /// Update the running status detail and persist to disk for waybar.
@@ -900,3 +998,80 @@ impl AmbientRunnerHandle {
 }
 
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::AmbientRunnerHandle;
+    use crate::message::{Message, ToolDefinition};
+    use crate::provider::{EventStream, Provider};
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+            let prev = std::env::var_os(key);
+            crate::env::set_var(key, value);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = self.prev.take() {
+                crate::env::set_var(self.key, prev);
+            } else {
+                crate::env::remove_var(self.key);
+            }
+        }
+    }
+
+    struct TestProvider;
+
+    #[async_trait]
+    impl Provider for TestProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<EventStream> {
+            unimplemented!("test provider")
+        }
+
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(TestProvider)
+        }
+    }
+
+    #[tokio::test]
+    async fn runner_stays_alive_to_service_schedules_when_ambient_disabled() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+        let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+        let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+        let task = tokio::spawn(runner.clone().run_loop(provider));
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            runner.is_running().await,
+            "runner should remain active for scheduled tasks even with ambient disabled"
+        );
+
+        task.abort();
+        let _ = task.await;
+    }
+}

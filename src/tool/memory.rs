@@ -1,7 +1,7 @@
 //! Memory tool for storing and recalling information across sessions
 
 use super::{Tool, ToolContext, ToolOutput};
-use crate::memory::{MemoryCategory, MemoryEntry, MemoryManager};
+use crate::memory::{MemoryCategory, MemoryEntry, MemoryManager, MemoryScope};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -28,6 +28,22 @@ impl MemoryTool {
     /// Check if running in test mode
     pub fn is_test_mode(&self) -> bool {
         self.manager.is_test_mode()
+    }
+
+    fn parse_scope(scope: Option<&str>, default: MemoryScope) -> Result<MemoryScope> {
+        match scope.unwrap_or(match default {
+            MemoryScope::Project => "project",
+            MemoryScope::Global => "global",
+            MemoryScope::All => "all",
+        }) {
+            "project" => Ok(MemoryScope::Project),
+            "global" => Ok(MemoryScope::Global),
+            "all" => Ok(MemoryScope::All),
+            other => Err(anyhow::anyhow!(
+                "Unknown scope: {}. Use project, global, or all",
+                other
+            )),
+        }
     }
 }
 
@@ -147,6 +163,7 @@ impl Tool for MemoryTool {
             }
             "recall" => {
                 let limit = input.limit.unwrap_or(10);
+                let scope = Self::parse_scope(input.scope.as_deref(), MemoryScope::All)?;
                 let mode = input.mode.as_deref().unwrap_or_else(|| {
                     if input.query.is_some() {
                         "cascade"
@@ -161,7 +178,7 @@ impl Tool for MemoryTool {
                             action: "recall".into(),
                             detail: "recent".into(),
                         });
-                        let result = match self.manager.get_prompt_memories(limit) {
+                        let result = match self.manager.get_prompt_memories_scoped(limit, scope) {
                             Some(memories) => {
                                 let count =
                                     memories.lines().filter(|l| l.starts_with("- ")).count();
@@ -197,9 +214,11 @@ impl Tool for MemoryTool {
                         });
 
                         let results = if mode == "cascade" {
-                            self.manager.find_similar_with_cascade(&query, 0.5, limit)?
+                            self.manager
+                                .find_similar_with_cascade_scoped(&query, 0.5, limit, scope)?
                         } else {
-                            self.manager.find_similar(&query, 0.5, limit)?
+                            self.manager
+                                .find_similar_scoped(&query, 0.5, limit, scope)?
                         };
 
                         memory::add_event(MemoryEventKind::ToolRecalled {
@@ -247,11 +266,12 @@ impl Tool for MemoryTool {
                 let query = input
                     .query
                     .ok_or_else(|| anyhow::anyhow!("query required"))?;
+                let scope = Self::parse_scope(input.scope.as_deref(), MemoryScope::All)?;
                 memory::set_state(MemoryState::ToolAction {
                     action: "search".into(),
                     detail: truncate_for_widget(&query, 40),
                 });
-                let results = self.manager.search(&query)?;
+                let results = self.manager.search_scoped(&query, scope)?;
                 memory::add_event(MemoryEventKind::ToolRecalled {
                     query: truncate_for_widget(&query, 40),
                     count: results.len(),
@@ -271,11 +291,12 @@ impl Tool for MemoryTool {
                 }
             }
             "list" => {
+                let scope = Self::parse_scope(input.scope.as_deref(), MemoryScope::All)?;
                 memory::set_state(MemoryState::ToolAction {
                     action: "list".into(),
                     detail: String::new(),
                 });
-                let all = self.manager.list_all()?;
+                let all = self.manager.list_all_scoped(scope)?;
                 memory::add_event(MemoryEventKind::ToolListed { count: all.len() });
                 memory::set_state(MemoryState::Idle);
                 if all.is_empty() {

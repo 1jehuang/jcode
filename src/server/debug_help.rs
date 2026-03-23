@@ -71,8 +71,8 @@ SWARM COMMANDS (swarm: prefix):
   swarm:help               - Full swarm command reference
 
 AMBIENT COMMANDS (ambient: prefix):
-  ambient:status              - Current ambient state, cycle count, last run
-  ambient:queue               - Scheduled queue contents
+  ambient:status              - Ambient + schedule runner state, counts, next due items
+  ambient:queue               - Scheduled queue contents with target/session metadata
   ambient:trigger             - Manually trigger an ambient cycle
   ambient:log                 - Recent transcript summaries
   ambient:permissions         - List pending permission requests
