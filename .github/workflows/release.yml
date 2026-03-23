@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 concurrency:
   group: release-${{ github.ref }}
@@ -170,6 +171,7 @@ jobs:
 
   release:
     name: Create Release
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: [build-linux-macos, build-windows]
     runs-on: ubuntu-latest
     timeout-minutes: 15
