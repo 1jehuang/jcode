@@ -250,6 +250,7 @@ pub(super) fn prepare_messages(
         centered: app.centered_mode(),
         is_processing: app.is_processing(),
         streaming_text_len: app.streaming_text().len(),
+        streaming_text_hash: super::hash_text_for_cache(app.streaming_text()),
         batch_progress_hash: active_batch_progress_hash(app),
         startup_active,
     };

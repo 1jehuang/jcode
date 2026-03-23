@@ -124,6 +124,12 @@ fn update_user_prompt_positions(positions: &[usize]) {
     }
 }
 
+pub(super) fn hash_text_for_cache(text: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    std::hash::Hasher::finish(&hasher)
+}
+
 use super::color_support::rgb;
 
 fn clear_area(frame: &mut Frame, area: Rect) {
@@ -1465,6 +1471,7 @@ struct FullPrepCacheKey {
     centered: bool,
     is_processing: bool,
     streaming_text_len: usize,
+    streaming_text_hash: u64,
     batch_progress_hash: u64,
     startup_active: bool,
 }
@@ -3261,6 +3268,7 @@ mod tests {
         input: String,
         cursor_pos: usize,
         display_messages: Vec<DisplayMessage>,
+        streaming_text: String,
         batch_progress: Option<crate::bus::BatchProgress>,
         queued_messages: Vec<String>,
         pending_soft_interrupts: Vec<String>,
@@ -3284,7 +3292,7 @@ mod tests {
             0
         }
         fn streaming_text(&self) -> &str {
-            ""
+            &self.streaming_text
         }
         fn input(&self) -> &str {
             &self.input
@@ -3428,7 +3436,7 @@ mod tests {
             Default::default()
         }
         fn render_streaming_markdown(&self, _width: usize) -> Vec<Line<'static>> {
-            Vec::new()
+            markdown::render_markdown_with_width(&self.streaming_text, Some(_width))
         }
         fn centered_mode(&self) -> bool {
             self.centered_mode
@@ -4695,6 +4703,48 @@ mod tests {
                 "centered live batch lines should start with padding"
             );
         }
+    }
+
+    #[test]
+    fn test_prepare_messages_recomputes_when_streaming_text_changes_same_length() {
+        let first = TestState {
+            status: ProcessingStatus::Streaming,
+            streaming_text: "alpha".to_string(),
+            anim_elapsed: 10.0,
+            ..Default::default()
+        };
+        let second = TestState {
+            status: ProcessingStatus::Streaming,
+            streaming_text: "omega".to_string(),
+            anim_elapsed: 10.0,
+            ..Default::default()
+        };
+
+        let first_rendered: Vec<String> = prepare::prepare_messages(&first, 80, 20)
+            .wrapped_lines
+            .iter()
+            .map(extract_line_text)
+            .collect();
+        let second_rendered: Vec<String> = prepare::prepare_messages(&second, 80, 20)
+            .wrapped_lines
+            .iter()
+            .map(extract_line_text)
+            .collect();
+
+        assert!(
+            first_rendered.iter().any(|line| line.contains("alpha")),
+            "expected first streaming text in {:?}",
+            first_rendered
+        );
+        assert!(
+            second_rendered.iter().any(|line| line.contains("omega")),
+            "expected second streaming text in {:?}",
+            second_rendered
+        );
+        assert_ne!(
+            first_rendered, second_rendered,
+            "prepared frame cache should invalidate on same-length streaming text changes"
+        );
     }
 
     #[test]
