@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main, master]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   SCCACHE_GHA_ENABLED: "true"
@@ -14,6 +18,7 @@ jobs:
   build:
     name: Build & Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -70,10 +75,23 @@ jobs:
           fi
           cargo build --release --target ${{ matrix.target }}
 
-      - name: Run tests
+      - name: Run library and binary tests
         shell: bash
         run: |
-          cargo test --target ${{ matrix.target }}
+          python3 .github/scripts/run_with_timeout.py 900 \
+            cargo test --target ${{ matrix.target }} --lib --bins
+
+      - name: Run provider matrix tests
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            cargo test --target ${{ matrix.target }} --test provider_matrix
+
+      - name: Run e2e tests
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 900 \
+            cargo test --target ${{ matrix.target }} --test e2e
 
       - name: Check PowerShell script syntax (Windows)
         if: runner.os == 'Windows'
@@ -97,6 +115,7 @@ jobs:
   fmt:
     name: Format
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -110,6 +129,7 @@ jobs:
   powershell-syntax:
     name: PowerShell Syntax
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
