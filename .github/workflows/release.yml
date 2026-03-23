@@ -144,21 +144,31 @@ jobs:
           cache-all-crates: "true"
 
       - name: Build release binary
-        shell: bash
+        shell: pwsh
         run: |
-          if command -v sccache &>/dev/null && sccache --start-server 2>/dev/null; then
-            export RUSTC_WRAPPER=sccache
-          fi
-          cargo build --release --target ${{ matrix.target }} ${{ matrix.cargo_args }}
+          if (Get-Command sccache -ErrorAction SilentlyContinue) {
+            sccache --start-server *> $null
+            if ($LASTEXITCODE -eq 0) {
+              $env:RUSTC_WRAPPER = "sccache"
+            }
+          }
+
+          $cargoArgs = @("build", "--release", "--target", "${{ matrix.target }}")
+          $extraArgs = "${{ matrix.cargo_args }}"
+          if (-not [string]::IsNullOrWhiteSpace($extraArgs)) {
+            $cargoArgs += $extraArgs -split ' '
+          }
+
+          & cargo @cargoArgs
         env:
           JCODE_RELEASE_BUILD: "1"
 
       - name: Package binary
-        shell: bash
+        shell: pwsh
         run: |
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/jcode.exe dist/${{ matrix.artifact }}.exe
-          cd dist && tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}.exe
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/jcode.exe" "dist/${{ matrix.artifact }}.exe"
+          tar -czf "dist/${{ matrix.artifact }}.tar.gz" -C dist "${{ matrix.artifact }}.exe"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
