@@ -35,12 +35,13 @@ pub(super) enum ImproveCommand {
         plan_only: bool,
         focus: Option<String>,
     },
+    Resume,
     Status,
     Stop,
 }
 
 pub(super) fn improve_usage() -> &'static str {
-    "Usage: `/improve [focus]`, `/improve plan [focus]`, `/improve status`, or `/improve stop`"
+    "Usage: `/improve [focus]`, `/improve plan [focus]`, `/improve resume`, `/improve status`, or `/improve stop`"
 }
 
 pub(super) fn parse_improve_command(trimmed: &str) -> Option<Result<ImproveCommand, String>> {
@@ -54,6 +55,10 @@ pub(super) fn parse_improve_command(trimmed: &str) -> Option<Result<ImproveComma
 
     if rest == "status" {
         return Some(Ok(ImproveCommand::Status));
+    }
+
+    if rest == "resume" {
+        return Some(Ok(ImproveCommand::Resume));
     }
 
     if rest == "stop" {
@@ -79,7 +84,10 @@ pub(super) fn parse_improve_command(trimmed: &str) -> Option<Result<ImproveComma
         });
     }
 
-    if rest.starts_with("status ") || rest.starts_with("stop ") {
+    if rest.starts_with("status ")
+        || rest.starts_with("resume ")
+        || rest.starts_with("stop ")
+    {
         return Some(Err(improve_usage().to_string()));
     }
 
@@ -136,6 +144,22 @@ pub(super) fn improve_mode_for(plan_only: bool) -> ImproveMode {
     }
 }
 
+pub(super) fn session_improve_mode_for(mode: ImproveMode) -> crate::session::SessionImproveMode {
+    match mode {
+        ImproveMode::Run => crate::session::SessionImproveMode::Run,
+        ImproveMode::Plan => crate::session::SessionImproveMode::Plan,
+    }
+}
+
+pub(super) fn restore_improve_mode(
+    mode: crate::session::SessionImproveMode,
+) -> ImproveMode {
+    match mode {
+        crate::session::SessionImproveMode::Run => ImproveMode::Run,
+        crate::session::SessionImproveMode::Plan => ImproveMode::Plan,
+    }
+}
+
 pub(super) fn improve_launch_notice(
     plan_only: bool,
     focus: Option<&str>,
@@ -163,6 +187,45 @@ pub(super) fn improve_stop_notice(interrupted: bool) -> String {
 
 pub(super) fn improve_stop_prompt() -> String {
     "Stop improvement mode after the current safe point. Do not start a new improve batch. Update the todo list so it accurately reflects what is completed, cancelled, or still pending, and then summarize what remains plus why you stopped.".to_string()
+}
+
+pub(super) fn build_improve_resume_prompt(
+    mode: ImproveMode,
+    incomplete: &[&crate::todo::TodoItem],
+) -> String {
+    if incomplete.is_empty() {
+        return match mode {
+            ImproveMode::Run => "Resume improvement mode for this repository. Start by inspecting the current repo state, writing or refreshing a ranked todo list with `todowrite`, then continue implementing the highest-leverage safe improvements until the next ideas have diminishing returns.".to_string(),
+            ImproveMode::Plan => "Resume improvement planning mode for this repository. Reinspect the current repo state, refresh the ranked improve todo list with `todowrite`, and stop after presenting the updated plan without editing files.".to_string(),
+        };
+    }
+
+    let mut todo_list = String::new();
+    for todo in incomplete {
+        let icon = if todo.status == "in_progress" { "🔄" } else { "⬜" };
+        todo_list.push_str(&format!("  {} [{}] {}\n", icon, todo.priority, todo.content));
+    }
+
+    match mode {
+        ImproveMode::Run => format!(
+            "Resume improvement mode. Your current improve todo list still has {} incomplete item{}:\n\n{}\nContinue the highest-leverage work, keep the todo list accurate with `todowrite`, validate meaningful changes, and once this batch is done reassess whether another batch is still worth doing.",
+            incomplete.len(),
+            if incomplete.len() == 1 { "" } else { "s" },
+            todo_list,
+        ),
+        ImproveMode::Plan => format!(
+            "Resume improvement planning mode. The current improve todo list has {} pending item{}:\n\n{}\nRefresh or tighten this plan using `todowrite`, keeping it ranked and concrete, then stop without editing files.",
+            incomplete.len(),
+            if incomplete.len() == 1 { "" } else { "s" },
+            todo_list,
+        ),
+    }
+}
+
+fn persist_improve_mode_local(app: &mut App, mode: Option<ImproveMode>) {
+    app.improve_mode = mode;
+    app.session.improve_mode = mode.map(session_improve_mode_for);
+    let _ = app.session.save();
 }
 
 fn start_synthetic_user_turn(app: &mut App, content: String) {
@@ -237,8 +300,9 @@ pub(super) fn format_improve_status(app: &App) -> String {
 
     let mode = app
         .improve_mode
+        .or_else(|| app.session.improve_mode.map(restore_improve_mode))
         .map(|mode| mode.status_label())
-        .unwrap_or("not yet started in this client session");
+        .unwrap_or("not yet started in this session");
 
     let mut lines = vec![
         format!("Improve status: **{}**", phase),
@@ -267,12 +331,50 @@ pub(super) fn format_improve_status(app: &App) -> String {
     }
 
     lines.push(String::new());
-    lines.push("Use `/improve` to start/continue, `/improve plan` to plan only, or `/improve stop` to halt after a safe point.".to_string());
+    lines.push("Use `/improve` to start/continue, `/improve resume` to continue the last saved mode, `/improve plan` for plan-only mode, or `/improve stop` to halt after a safe point.".to_string());
     lines.join("\n")
 }
 
 fn handle_improve_command_local(app: &mut App, command: ImproveCommand) {
     match command {
+        ImproveCommand::Resume => {
+            let session_id = active_session_id(app);
+            let todos = crate::todo::load_todos(&session_id).unwrap_or_default();
+            let incomplete: Vec<_> = todos
+                .iter()
+                .filter(|todo| todo.status != "completed" && todo.status != "cancelled")
+                .collect();
+
+            let mode = app.improve_mode.or_else(|| {
+                app.session
+                    .improve_mode
+                    .map(restore_improve_mode)
+            });
+            let Some(mode) = mode else {
+                app.push_display_message(DisplayMessage::system(
+                    "No saved improve run found for this session. Use `/improve` or `/improve plan` to start one."
+                        .to_string(),
+                ));
+                return;
+            };
+
+            persist_improve_mode_local(app, Some(mode));
+            let prompt = build_improve_resume_prompt(mode, &incomplete);
+            if app.is_processing {
+                interrupt_and_queue_synthetic_message(
+                    app,
+                    prompt,
+                    "Interrupting for /improve resume...",
+                    improve_launch_notice(matches!(mode, ImproveMode::Plan), None, true),
+                );
+            } else {
+                app.push_display_message(DisplayMessage::system(format!(
+                    "♻️ Resuming {}...",
+                    mode.status_label()
+                )));
+                start_synthetic_user_turn(app, prompt);
+            }
+        }
         ImproveCommand::Status => {
             app.push_display_message(DisplayMessage::system(format_improve_status(app)));
         }
@@ -290,7 +392,7 @@ fn handle_improve_command_local(app: &mut App, command: ImproveCommand) {
                 return;
             }
 
-            app.improve_mode = None;
+            persist_improve_mode_local(app, None);
             let stop_prompt = improve_stop_prompt();
             if app.is_processing {
                 interrupt_and_queue_synthetic_message(
@@ -305,7 +407,8 @@ fn handle_improve_command_local(app: &mut App, command: ImproveCommand) {
             }
         }
         ImproveCommand::Run { plan_only, focus } => {
-            app.improve_mode = Some(improve_mode_for(plan_only));
+            let mode = improve_mode_for(plan_only);
+            persist_improve_mode_local(app, Some(mode));
             let prompt = build_improve_prompt(plan_only, focus.as_deref());
             if app.is_processing {
                 interrupt_and_queue_synthetic_message(

@@ -31,6 +31,13 @@ pub enum SessionStatus {
     Error { message: String },
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionImproveMode {
+    Run,
+    Plan,
+}
+
 impl SessionStatus {
     /// Get a short display string for the status
     pub fn display(&self) -> &'static str {
@@ -223,6 +230,9 @@ pub struct Session {
     /// Optional fixed model to use for subagents launched from this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_model: Option<String>,
+    /// Last requested `/improve` mode for this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub improve_mode: Option<SessionImproveMode>,
     /// Whether this session is a canary session (testing new builds)
     #[serde(default)]
     pub is_canary: bool,
@@ -275,6 +285,7 @@ struct SessionJournalMeta {
     provider_session_id: Option<String>,
     model: Option<String>,
     subagent_model: Option<String>,
+    improve_mode: Option<SessionImproveMode>,
     is_canary: bool,
     testing_build: Option<String>,
     working_dir: Option<String>,
@@ -381,6 +392,7 @@ impl Session {
             provider_session_id: self.provider_session_id.clone(),
             model: self.model.clone(),
             subagent_model: self.subagent_model.clone(),
+            improve_mode: self.improve_mode,
             is_canary: self.is_canary,
             testing_build: self.testing_build.clone(),
             working_dir: self.working_dir.clone(),
@@ -453,6 +465,7 @@ impl Session {
         prev.parent_id != current.parent_id
             || prev.title != current.title
             || prev.subagent_model != current.subagent_model
+            || prev.improve_mode != current.improve_mode
             || prev.is_canary != current.is_canary
             || prev.testing_build != current.testing_build
             || prev.working_dir != current.working_dir
@@ -471,6 +484,7 @@ impl Session {
         self.provider_session_id = meta.provider_session_id;
         self.model = meta.model;
         self.subagent_model = meta.subagent_model;
+        self.improve_mode = meta.improve_mode;
         self.is_canary = meta.is_canary;
         self.testing_build = meta.testing_build;
         self.working_dir = meta.working_dir;
@@ -551,6 +565,7 @@ impl Session {
             provider_session_id: None,
             model: None,
             subagent_model: None,
+            improve_mode: None,
             is_canary: false,
             testing_build: None,
             working_dir: std::env::current_dir()
@@ -587,6 +602,7 @@ impl Session {
             provider_session_id: None,
             model: None,
             subagent_model: None,
+            improve_mode: None,
             is_canary: false,
             testing_build: None,
             working_dir: std::env::current_dir()
@@ -1891,6 +1907,7 @@ pub fn recover_crashed_sessions() -> Result<Vec<String>> {
             Session::create_with_id(new_id.clone(), Some(old.id.clone()), old.title.clone());
         new_session.working_dir = old.working_dir.clone();
         new_session.model = old.model.clone();
+        new_session.improve_mode = old.improve_mode;
         new_session.is_canary = old.is_canary;
         new_session.is_debug = old.is_debug;
         new_session.testing_build = old.testing_build.clone();

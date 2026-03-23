@@ -177,6 +177,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "/improve",
         "Autonomously improve the repo until returns diminish",
     ));
+    lines.push(help_entry(
+        "/improve resume",
+        "Resume the last saved improve loop/plan",
+    ));
     lines.push(help_entry("/split", "Clone session into a new window"));
     lines.push(help_entry("/resume", "Browse and resume previous sessions"));
     lines.push(help_entry("/save [label]", "Bookmark session for /resume"));

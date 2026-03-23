@@ -904,6 +904,10 @@ fn test_improve_command_starts_improvement_loop() {
     app.submit_input();
 
     assert_eq!(app.improve_mode, Some(ImproveMode::Run));
+    assert_eq!(
+        app.session.improve_mode,
+        Some(crate::session::SessionImproveMode::Run)
+    );
     assert!(app.is_processing());
 
     let msg = app.session.messages.last().expect("missing improve prompt");
@@ -928,6 +932,10 @@ fn test_improve_plan_command_is_plan_only_and_accepts_focus() {
     app.submit_input();
 
     assert_eq!(app.improve_mode, Some(ImproveMode::Plan));
+    assert_eq!(
+        app.session.improve_mode,
+        Some(crate::session::SessionImproveMode::Plan)
+    );
     assert!(app.is_processing());
 
     let msg = app.session.messages.last().expect("missing improve plan prompt");
@@ -984,6 +992,7 @@ fn test_improve_status_summarizes_current_todos() {
 #[test]
 fn test_improve_stop_without_active_run_reports_idle() {
     let mut app = create_test_app();
+    app.session.improve_mode = None;
     app.input = "/improve stop".to_string();
     app.submit_input();
 
@@ -998,10 +1007,12 @@ fn test_improve_stop_without_active_run_reports_idle() {
 fn test_improve_stop_queues_stop_prompt_and_clears_mode() {
     let mut app = create_test_app();
     app.improve_mode = Some(ImproveMode::Run);
+    app.session.improve_mode = Some(crate::session::SessionImproveMode::Run);
     app.input = "/improve stop".to_string();
     app.submit_input();
 
     assert_eq!(app.improve_mode, None);
+    assert_eq!(app.session.improve_mode, None);
     assert!(app.is_processing());
 
     let msg = app.session.messages.last().expect("missing improve stop prompt");
@@ -1010,6 +1021,74 @@ fn test_improve_stop_queues_stop_prompt_and_clears_mode() {
         ContentBlock::Text { text, .. }
             if text.contains("Stop improvement mode after the current safe point")
     ));
+}
+
+#[test]
+fn test_improve_resume_requires_saved_mode() {
+    let mut app = create_test_app();
+    app.input = "/improve resume".to_string();
+    app.submit_input();
+
+    let msg = app
+        .display_messages()
+        .last()
+        .expect("missing improve resume idle message");
+    assert!(msg.content.contains("No saved improve run found"));
+}
+
+#[test]
+fn test_improve_resume_uses_saved_mode_and_current_todos() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.session.improve_mode = Some(crate::session::SessionImproveMode::Run);
+        app.session.save().expect("save session");
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "resume1".to_string(),
+                content: "Refactor command parsing".to_string(),
+                status: "in_progress".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+            }],
+        )
+        .expect("save todos");
+
+        app.input = "/improve resume".to_string();
+        app.submit_input();
+
+        assert_eq!(app.improve_mode, Some(ImproveMode::Run));
+        assert_eq!(
+            app.session.improve_mode,
+            Some(crate::session::SessionImproveMode::Run)
+        );
+        assert!(app.is_processing());
+
+        let msg = app.session.messages.last().expect("missing improve resume prompt");
+        assert!(matches!(
+            &msg.content[0],
+            ContentBlock::Text { text, .. }
+                if text.contains("Resume improvement mode")
+                    && text.contains("Refactor command parsing")
+        ));
+    });
+}
+
+#[test]
+fn test_improve_mode_persists_in_session_file() {
+    with_temp_jcode_home(|| {
+        let mut session = crate::session::Session::create(None, None);
+        session.improve_mode = Some(crate::session::SessionImproveMode::Plan);
+        let session_id = session.id.clone();
+        session.save().expect("save session");
+
+        let loaded = crate::session::Session::load(&session_id).expect("load session");
+        assert_eq!(
+            loaded.improve_mode,
+            Some(crate::session::SessionImproveMode::Plan)
+        );
+    });
 }
 
 #[test]

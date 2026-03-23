@@ -3737,6 +3737,66 @@ pub(super) async fn handle_remote_key(
                 if let Some(command) = super::commands::parse_improve_command(trimmed) {
                     match command {
                         Err(error) => app.push_display_message(DisplayMessage::error(error)),
+                        Ok(super::commands::ImproveCommand::Resume) => {
+                            let session_id = app
+                                .remote_session_id
+                                .clone()
+                                .unwrap_or_else(|| app.session.id.clone());
+                            let todos = crate::todo::load_todos(&session_id).unwrap_or_default();
+                            let incomplete: Vec<_> = todos
+                                .iter()
+                                .filter(|todo| {
+                                    todo.status != "completed" && todo.status != "cancelled"
+                                })
+                                .collect();
+
+                            let mode = app.improve_mode.or_else(|| {
+                                app.session
+                                    .improve_mode
+                                    .map(super::commands::restore_improve_mode)
+                            });
+                            let Some(mode) = mode else {
+                                app.push_display_message(DisplayMessage::system(
+                                    "No saved improve run found for this session. Use `/improve` or `/improve plan` to start one."
+                                        .to_string(),
+                                ));
+                                return Ok(());
+                            };
+
+                            persist_remote_session_metadata(app, |session| {
+                                session.improve_mode =
+                                    Some(super::commands::session_improve_mode_for(mode));
+                            })?;
+                            app.improve_mode = Some(mode);
+                            let prompt =
+                                super::commands::build_improve_resume_prompt(mode, &incomplete);
+
+                            if app.is_processing {
+                                remote.cancel().await?;
+                                app.set_status_notice("Interrupting for /improve resume...");
+                                app.push_display_message(DisplayMessage::system(format!(
+                                    "♻️ Interrupting and resuming {}...",
+                                    mode.status_label()
+                                )));
+                                app.queued_messages.push(prompt);
+                            } else {
+                                app.push_display_message(DisplayMessage::system(format!(
+                                    "♻️ Resuming {}...",
+                                    mode.status_label()
+                                )));
+                                let _ = super::remote::begin_remote_send(
+                                    app,
+                                    remote,
+                                    prompt,
+                                    vec![],
+                                    true,
+                                    None,
+                                    true,
+                                    0,
+                                )
+                                .await;
+                            }
+                        }
                         Ok(super::commands::ImproveCommand::Status) => {
                             app.push_display_message(DisplayMessage::system(
                                 super::commands::format_improve_status(app),
@@ -3760,6 +3820,9 @@ pub(super) async fn handle_remote_key(
                                 return Ok(());
                             }
 
+                            persist_remote_session_metadata(app, |session| {
+                                session.improve_mode = None;
+                            })?;
                             app.improve_mode = None;
                             let stop_prompt = super::commands::improve_stop_prompt();
                             if app.is_processing {
@@ -3787,7 +3850,12 @@ pub(super) async fn handle_remote_key(
                             }
                         }
                         Ok(super::commands::ImproveCommand::Run { plan_only, focus }) => {
-                            app.improve_mode = Some(super::commands::improve_mode_for(plan_only));
+                            let mode = super::commands::improve_mode_for(plan_only);
+                            persist_remote_session_metadata(app, |session| {
+                                session.improve_mode =
+                                    Some(super::commands::session_improve_mode_for(mode));
+                            })?;
+                            app.improve_mode = Some(mode);
                             let prompt = super::commands::build_improve_prompt(
                                 plan_only,
                                 focus.as_deref(),

@@ -629,6 +629,10 @@ impl App {
                         "Generate a ranked improve todo list without editing",
                     ),
                     (
+                        "/improve resume".into(),
+                        "Resume the last saved improve mode for this session",
+                    ),
+                    (
                         "/improve status".into(),
                         "Show current improve batch and inferred status",
                     ),

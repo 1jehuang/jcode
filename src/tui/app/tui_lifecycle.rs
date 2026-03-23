@@ -108,6 +108,10 @@ impl App {
         let display = config().display.clone();
         let features = config().features.clone();
         let context_limit = provider.context_window() as u64;
+        let improve_mode = session.improve_mode.map(|mode| match mode {
+            crate::session::SessionImproveMode::Run => ImproveMode::Run,
+            crate::session::SessionImproveMode::Plan => ImproveMode::Plan,
+        });
 
         crate::logging::info("App::new_minimal_with_session: skipping skill/prompt bootstrap");
         crate::telemetry::begin_session(provider.name(), &provider.model());
@@ -222,7 +226,7 @@ impl App {
             resume_session_id: None,
             requested_exit_code: None,
             memory_enabled: features.memory,
-            improve_mode: None,
+            improve_mode,
             last_injected_memory_signature: None,
             swarm_enabled: features.swarm,
             diff_mode: display.diff_mode,
@@ -304,6 +308,10 @@ impl App {
         let display = config().display.clone();
         let features = config().features.clone();
         let context_limit = provider.context_window() as u64;
+        let improve_mode = session.improve_mode.map(|mode| match mode {
+            crate::session::SessionImproveMode::Run => ImproveMode::Run,
+            crate::session::SessionImproveMode::Plan => ImproveMode::Plan,
+        });
         let t_session = t0.elapsed();
 
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -448,7 +456,7 @@ impl App {
             resume_session_id: None,
             requested_exit_code: None,
             memory_enabled: features.memory,
-            improve_mode: None,
+            improve_mode,
             last_injected_memory_signature: None,
             swarm_enabled: features.swarm,
             diff_mode: display.diff_mode,
