@@ -554,8 +554,34 @@ pub(super) fn spawn_in_new_terminal(
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_bracketed_system_message, partition_queued_messages, resume_invocation_args,
+        extract_bracketed_system_message, format_countdown_until, gather_ambient_info,
+        partition_queued_messages, resume_invocation_args,
     };
+    use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget};
+    use chrono::{Duration as ChronoDuration, Utc};
+
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+            let prev = std::env::var_os(key);
+            crate::env::set_var(key, value);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = self.prev.take() {
+                crate::env::set_var(self.key, prev);
+            } else {
+                crate::env::remove_var(self.key);
+            }
+        }
+    }
 
     #[test]
     fn extract_bracketed_system_message_strips_wrapper() {
@@ -607,6 +633,93 @@ mod tests {
     fn resume_invocation_args_omits_blank_socket() {
         let args = resume_invocation_args("ses_123", Some("   "));
         assert_eq!(args, vec!["--resume".to_string(), "ses_123".to_string()]);
+    }
+
+    #[test]
+    fn format_countdown_until_handles_subminute_and_minutes() {
+        let soon = Utc::now() + ChronoDuration::seconds(25);
+        let medium = Utc::now() + ChronoDuration::minutes(2) + ChronoDuration::seconds(15);
+
+        let soon_text = format_countdown_until(soon);
+        let medium_text = format_countdown_until(medium);
+
+        assert!(soon_text.starts_with("in "));
+        assert!(soon_text.ends_with('s'));
+        assert!(medium_text.starts_with("in 2m"));
+    }
+
+    #[test]
+    fn gather_ambient_info_filters_to_session_reminders_when_ambient_disabled() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+        let mut manager = AmbientManager::new().expect("ambient manager");
+        let first_due = Utc::now() + ChronoDuration::minutes(5);
+        let second_due = Utc::now() + ChronoDuration::minutes(10);
+
+        manager
+            .schedule(ScheduleRequest {
+                wake_in_minutes: None,
+                wake_at: Some(first_due),
+                context: "ambient context".to_string(),
+                priority: Priority::Normal,
+                target: ScheduleTarget::Ambient,
+                created_by_session: "ambient".to_string(),
+                working_dir: None,
+                task_description: Some("ambient work".to_string()),
+                relevant_files: Vec::new(),
+                git_branch: None,
+                additional_context: None,
+            })
+            .expect("schedule ambient item");
+        manager
+            .schedule(ScheduleRequest {
+                wake_in_minutes: None,
+                wake_at: Some(first_due),
+                context: "first context".to_string(),
+                priority: Priority::Normal,
+                target: ScheduleTarget::Session {
+                    session_id: "session_1".to_string(),
+                },
+                created_by_session: "session_1".to_string(),
+                working_dir: None,
+                task_description: Some("first reminder".to_string()),
+                relevant_files: Vec::new(),
+                git_branch: None,
+                additional_context: None,
+            })
+            .expect("schedule first reminder");
+        manager
+            .schedule(ScheduleRequest {
+                wake_in_minutes: None,
+                wake_at: Some(second_due),
+                context: "second context".to_string(),
+                priority: Priority::Normal,
+                target: ScheduleTarget::Session {
+                    session_id: "session_1".to_string(),
+                },
+                created_by_session: "session_1".to_string(),
+                working_dir: None,
+                task_description: Some("second reminder".to_string()),
+                relevant_files: Vec::new(),
+                git_branch: None,
+                additional_context: None,
+            })
+            .expect("schedule second reminder");
+
+        let info = gather_ambient_info(false).expect("ambient info");
+        assert!(info.show_widget);
+        assert_eq!(info.queue_count, 3);
+        assert_eq!(info.reminder_count, 2);
+        assert_eq!(
+            info.next_reminder_preview.as_deref(),
+            Some("first reminder")
+        );
+        assert!(
+            info.next_reminder_wake
+                .as_deref()
+                .is_some_and(|text| text.starts_with("in 4m") || text.starts_with("in 5m"))
+        );
     }
 }
 
@@ -884,10 +997,22 @@ pub(super) fn gather_memory_info(memory_enabled: bool) -> Option<MemoryInfo> {
         return None;
     }
 
+    let activity = crate::memory::get_activity();
+
     if let Ok(guard) = CACHE.lock() {
         if let Some((ts, ref cached)) = *guard {
             if ts.elapsed() < TTL {
-                return cached.clone();
+                return match cached.clone() {
+                    Some(mut info) => {
+                        info.activity = activity.clone();
+                        Some(info)
+                    }
+                    None => activity.clone().map(|activity| MemoryInfo {
+                        sidecar_available: true,
+                        activity: Some(activity),
+                        ..Default::default()
+                    }),
+                };
             }
         }
     }
@@ -922,7 +1047,6 @@ pub(super) fn gather_memory_info(memory_enabled: bool) -> Option<MemoryInfo> {
     };
 
     let total_count = project_count + global_count;
-    let activity = crate::memory::get_activity();
     let (graph_nodes, graph_edges) = crate::tui::info_widget::build_graph_topology(
         project_graph.as_ref(),
         global_graph.as_ref(),
@@ -954,22 +1078,42 @@ pub(super) fn gather_ambient_info(ambient_enabled: bool) -> Option<AmbientWidget
     use std::sync::Mutex;
     use std::time::Instant;
 
-    static CACHE: Mutex<Option<(Instant, Option<AmbientWidgetData>)>> = Mutex::new(None);
+    static CACHE: Mutex<Option<(Instant, bool, Option<AmbientWidgetData>)>> = Mutex::new(None);
     const TTL: Duration = Duration::from_secs(2);
 
-    if !ambient_enabled {
-        return None;
-    }
-
     if let Ok(guard) = CACHE.lock() {
-        if let Some((ts, ref cached)) = *guard {
-            if ts.elapsed() < TTL {
+        if let Some((ts, cached_enabled, ref cached)) = *guard {
+            if cached_enabled == ambient_enabled && ts.elapsed() < TTL {
                 return cached.clone();
             }
         }
     }
 
     let state = crate::ambient::AmbientState::load().unwrap_or_default();
+    let manager = crate::ambient::AmbientManager::new().ok();
+    let queue_items: Vec<_> = manager
+        .as_ref()
+        .map(|m| m.queue().items().to_vec())
+        .unwrap_or_default();
+    let queue_count = queue_items.len();
+    let next_queue_item = queue_items.iter().min_by_key(|item| item.scheduled_for);
+    let reminder_items: Vec<_> = queue_items
+        .iter()
+        .filter(|item| matches!(item.target, crate::ambient::ScheduleTarget::Session { .. }))
+        .collect();
+    let reminder_count = reminder_items.len();
+    let next_reminder_item = reminder_items
+        .iter()
+        .min_by_key(|item| item.scheduled_for)
+        .copied();
+
+    if !ambient_enabled && reminder_count == 0 {
+        if let Ok(mut guard) = CACHE.lock() {
+            *guard = Some((Instant::now(), ambient_enabled, None));
+        }
+        return None;
+    }
+
     let last_run_ago = state.last_run.map(|t| {
         let ago = chrono::Utc::now() - t;
         if ago.num_hours() > 0 {
@@ -980,29 +1124,69 @@ pub(super) fn gather_ambient_info(ambient_enabled: bool) -> Option<AmbientWidget
     });
     let next_wake = match &state.status {
         crate::ambient::AmbientStatus::Scheduled { next_wake } => {
-            let until = *next_wake - chrono::Utc::now();
-            let mins = until.num_minutes().max(0);
-            Some(format!("in {}m", mins))
+            Some(format_countdown_until(*next_wake))
         }
         _ => None,
     };
+
+    let next_queue_preview = next_queue_item.map(|item| {
+        item.task_description
+            .as_deref()
+            .unwrap_or(&item.context)
+            .to_string()
+    });
+    let next_reminder_preview = next_reminder_item.map(|item| {
+        item.task_description
+            .as_deref()
+            .unwrap_or(&item.context)
+            .to_string()
+    });
+
     let result = Some(AmbientWidgetData {
+        show_widget: ambient_enabled || reminder_count > 1,
         status: state.status,
-        queue_count: crate::ambient::AmbientManager::new()
-            .map(|m| m.queue().len())
-            .unwrap_or(0),
-        next_queue_preview: None,
+        queue_count,
+        next_queue_preview,
+        reminder_count,
+        next_reminder_preview,
         last_run_ago,
         last_summary: state.last_summary,
         next_wake,
+        next_reminder_wake: next_reminder_item
+            .map(|item| format_countdown_until(item.scheduled_for)),
         budget_percent: None,
     });
 
     if let Ok(mut guard) = CACHE.lock() {
-        *guard = Some((Instant::now(), result.clone()));
+        *guard = Some((Instant::now(), ambient_enabled, result.clone()));
     }
 
     result
+}
+
+pub(crate) fn format_countdown_until(target: chrono::DateTime<chrono::Utc>) -> String {
+    let secs = (target - chrono::Utc::now()).num_seconds().max(0);
+    match secs {
+        0..=59 => format!("in {}s", secs),
+        60..=3599 => {
+            let mins = secs / 60;
+            let rem = secs % 60;
+            if rem == 0 {
+                format!("in {}m", mins)
+            } else {
+                format!("in {}m {}s", mins, rem)
+            }
+        }
+        _ => {
+            let hours = secs / 3600;
+            let mins = (secs % 3600) / 60;
+            if mins == 0 {
+                format!("in {}h", hours)
+            } else {
+                format!("in {}h {}m", hours, mins)
+            }
+        }
+    }
 }
 
 fn gather_git_info_inner() -> Option<GitInfo> {

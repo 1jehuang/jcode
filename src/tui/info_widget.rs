@@ -552,6 +552,17 @@ pub struct MemoryActivity {
     pub recent_events: Vec<MemoryEvent>,
 }
 
+impl MemoryActivity {
+    pub fn is_processing(&self) -> bool {
+        !matches!(self.state, MemoryState::Idle)
+            || self
+                .pipeline
+                .as_ref()
+                .map(PipelineState::has_running_step)
+                .unwrap_or(false)
+    }
+}
+
 /// Status of a single pipeline step
 #[derive(Debug, Clone, PartialEq)]
 pub enum StepStatus {
@@ -610,6 +621,13 @@ impl PipelineState {
                 StepStatus::Done | StepStatus::Error | StepStatus::Skipped,
             )
         )
+    }
+
+    pub fn has_running_step(&self) -> bool {
+        matches!(self.search, StepStatus::Running)
+            || matches!(self.verify, StepStatus::Running)
+            || matches!(self.inject, StepStatus::Running)
+            || matches!(self.maintain, StepStatus::Running)
     }
 }
 
@@ -750,12 +768,16 @@ impl GitInfo {
 /// Ambient mode status data for the info widget
 #[derive(Debug, Clone)]
 pub struct AmbientWidgetData {
+    pub show_widget: bool,
     pub status: AmbientStatus,
     pub queue_count: usize,
     pub next_queue_preview: Option<String>,
+    pub reminder_count: usize,
+    pub next_reminder_preview: Option<String>,
     pub last_run_ago: Option<String>,
     pub last_summary: Option<String>,
     pub next_wake: Option<String>,
+    pub next_reminder_wake: Option<String>,
     pub budget_percent: Option<f32>,
 }
 
@@ -917,8 +939,22 @@ impl InfoWidgetData {
     /// Get list of widget kinds that have data, in priority order
     /// Get effective priority for a widget, accounting for dynamic state.
     /// UsageLimits gets bumped up when usage is high.
+    /// MemoryActivity gets bumped up while memory work is actively processing.
     pub fn effective_priority(&self, kind: WidgetKind) -> u8 {
         match kind {
+            WidgetKind::MemoryActivity => {
+                if self
+                    .memory_info
+                    .as_ref()
+                    .and_then(|info| info.activity.as_ref())
+                    .map(MemoryActivity::is_processing)
+                    .unwrap_or(false)
+                {
+                    0
+                } else {
+                    kind.priority()
+                }
+            }
             WidgetKind::UsageLimits => {
                 let max_pct = self
                     .usage_info
@@ -1121,14 +1157,17 @@ pub(crate) fn calculate_widget_height(
             let Some(info) = &data.ambient_info else {
                 return 0;
             };
+            if !info.show_widget {
+                return 0;
+            }
             let mut h = 1u16; // Status line
-            if info.queue_count > 0 {
+            if info.queue_count > 0 || info.reminder_count > 0 {
                 h += 1; // Queue line
             }
             if info.last_run_ago.is_some() {
                 h += 1; // Last run line
             }
-            if info.next_wake.is_some() {
+            if info.next_wake.is_some() || info.next_reminder_wake.is_some() {
                 h += 1; // Next wake line
             }
             if info.budget_percent.is_some() {
@@ -1714,23 +1753,23 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
 
     lines.push(Line::from(vec![
         Span::styled("Memory", Style::default().fg(text_color).bold()),
-        Span::styled(" Trace", Style::default().fg(label_color)),
+        Span::styled(" Activity", Style::default().fg(label_color)),
     ]));
 
     if let Some(activity) = &info.activity {
-        if let Some(now_line) = render_memory_trace_now_line(activity, max_width) {
-            lines.push(now_line);
+        if let Some(pipeline) = &activity.pipeline {
+            lines.push(render_memory_cycle_line(pipeline));
+
+            if lines.len() < inner.height as usize {
+                if let Some(step_line) = memory_primary_step_line(pipeline, max_width) {
+                    lines.push(step_line);
+                }
+            }
         }
 
-        let remaining_for_events = inner.height.saturating_sub(lines.len() as u16 + 1) as usize;
-        if remaining_for_events > 0 {
-            for event in activity
-                .recent_events
-                .iter()
-                .filter(|event| memory_trace_event_is_interesting(event))
-                .take(remaining_for_events)
-            {
-                lines.push(render_memory_trace_event_line(event, max_width));
+        if lines.len() < inner.height as usize {
+            if let Some(active_line) = memory_active_line(activity, max_width) {
+                lines.push(active_line);
             }
         }
     }
@@ -1747,86 +1786,16 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
     lines
 }
 
-fn render_memory_trace_now_line(
-    activity: &MemoryActivity,
-    max_width: usize,
-) -> Option<Line<'static>> {
-    let status = if let Some(pipeline) = &activity.pipeline {
-        if matches!(pipeline.search, StepStatus::Running) {
-            Some("search".to_string())
-        } else if matches!(pipeline.verify, StepStatus::Running) {
-            Some(if let Some((done, total)) = pipeline.verify_progress {
-                format!("verify {}/{}", done, total)
-            } else {
-                "verify".to_string()
-            })
-        } else if matches!(pipeline.inject, StepStatus::Running) {
-            Some("inject".to_string())
-        } else if matches!(pipeline.maintain, StepStatus::Running) {
-            Some("maintain".to_string())
-        } else {
-            memory_trace_state_label(&activity.state)
-        }
-    } else {
-        memory_trace_state_label(&activity.state)
-    }?;
-
-    let age = format_age(activity.state_since.elapsed());
-    Some(Line::from(vec![
-        Span::styled("now ", Style::default().fg(rgb(140, 140, 150))),
-        Span::styled(
-            truncate_smart(&status, max_width.saturating_sub(age.len() + 1)),
-            Style::default().fg(rgb(255, 200, 100)),
-        ),
-        Span::styled(format!(" {}", age), Style::default().fg(rgb(100, 100, 110))),
-    ]))
-}
-
-fn memory_trace_state_label(state: &MemoryState) -> Option<String> {
-    match state {
-        MemoryState::Idle => None,
-        MemoryState::Embedding => Some("embedding".to_string()),
-        MemoryState::SidecarChecking { count } => Some(format!("checking {count}")),
-        MemoryState::FoundRelevant { count } => Some(format!("relevant {count}")),
-        MemoryState::Extracting { reason } => Some(if reason.trim().is_empty() {
-            "extracting".to_string()
-        } else {
-            format!("extract {}", reason)
-        }),
-        MemoryState::Maintaining { phase } => Some(if phase.trim().is_empty() {
-            "maintaining".to_string()
-        } else {
-            format!("maintain {}", phase)
-        }),
-        MemoryState::ToolAction { action, detail } => Some(if detail.trim().is_empty() {
-            action.clone()
-        } else {
-            format!("{} {}", action, detail)
-        }),
-    }
-}
-
-fn memory_trace_event_is_interesting(event: &MemoryEvent) -> bool {
-    !matches!(
-        event.kind,
-        MemoryEventKind::EmbeddingStarted
-            | MemoryEventKind::SidecarStarted
-            | MemoryEventKind::SidecarNotRelevant
-            | MemoryEventKind::SidecarComplete { .. }
-    )
-}
-
-fn render_memory_trace_event_line(event: &MemoryEvent, max_width: usize) -> Line<'static> {
-    let age = format_age(event.timestamp.elapsed());
-    let (icon, text, color) =
-        format_event_for_trace(event, max_width.saturating_sub(age.len() + 5));
+fn render_memory_cycle_line(pipeline: &PipelineState) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            format!("{:>3} ", age),
-            Style::default().fg(rgb(100, 100, 110)),
-        ),
-        Span::styled(format!("{} ", icon), Style::default().fg(color)),
-        Span::styled(text, Style::default().fg(rgb(180, 180, 190))),
+        Span::styled("Cycle  ", Style::default().fg(rgb(140, 140, 150))),
+        memory_step_badge("s", &pipeline.search),
+        Span::raw(" "),
+        memory_step_badge("v", &pipeline.verify),
+        Span::raw(" "),
+        memory_step_badge("i", &pipeline.inject),
+        Span::raw(" "),
+        memory_step_badge("m", &pipeline.maintain),
     ])
 }
 
@@ -2229,6 +2198,9 @@ fn render_ambient_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static
     let Some(info) = &data.ambient_info else {
         return Vec::new();
     };
+    if !info.show_widget {
+        return Vec::new();
+    }
 
     let mut lines: Vec<Line> = Vec::new();
     let dim = rgb(100, 100, 110);
@@ -2252,6 +2224,11 @@ fn render_ambient_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static
             ),
             rgb(255, 200, 100),
         ),
+        AmbientStatus::Disabled if info.reminder_count > 0 => (
+            "⏰",
+            "Scheduled tasks active".to_string(),
+            rgb(140, 180, 255),
+        ),
         AmbientStatus::Disabled => ("○", "Not running".to_string(), dim),
     };
 
@@ -2264,17 +2241,36 @@ fn render_ambient_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static
     ]));
 
     // Scheduled tasks count
-    if info.queue_count > 0 {
-        let count_text = if info.queue_count == 1 {
-            "1 task queued".to_string()
-        } else {
-            format!("{} tasks queued", info.queue_count)
-        };
+    let queue_count = if matches!(info.status, AmbientStatus::Disabled) && info.reminder_count > 0 {
+        info.reminder_count
+    } else {
+        info.queue_count
+    };
+    let queue_preview = if matches!(info.status, AmbientStatus::Disabled) && info.reminder_count > 0
+    {
+        info.next_reminder_preview.as_ref()
+    } else {
+        info.next_queue_preview.as_ref()
+    };
+
+    if queue_count > 0 {
+        let count_text =
+            if matches!(info.status, AmbientStatus::Disabled) && info.reminder_count > 0 {
+                if queue_count == 1 {
+                    "1 scheduled task".to_string()
+                } else {
+                    format!("{} scheduled tasks", queue_count)
+                }
+            } else if queue_count == 1 {
+                "1 task queued".to_string()
+            } else {
+                format!("{} tasks queued", queue_count)
+            };
         let mut spans = vec![
             Span::styled("  ", Style::default()),
             Span::styled(count_text, Style::default().fg(label_color)),
         ];
-        if let Some(ref preview) = info.next_queue_preview {
+        if let Some(preview) = queue_preview {
             spans.push(Span::styled(
                 truncate_smart(&format!(" ({})", preview), max_w.saturating_sub(18)),
                 Style::default().fg(dim),
@@ -2302,11 +2298,22 @@ fn render_ambient_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static
     }
 
     // Next scheduled run
-    if let Some(ref next) = info.next_wake {
+    let next_due = if matches!(info.status, AmbientStatus::Disabled) && info.reminder_count > 0 {
+        info.next_reminder_wake.as_ref()
+    } else {
+        info.next_wake.as_ref()
+    };
+
+    if let Some(next) = next_due {
+        let prefix = if matches!(info.status, AmbientStatus::Disabled) && info.reminder_count > 0 {
+            "Next scheduled task"
+        } else {
+            "Next run"
+        };
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(
-                format!("Next run {}", next),
+                format!("{} {}", prefix, next),
                 Style::default().fg(label_color),
             ),
         ]));
@@ -3141,9 +3148,9 @@ fn render_tips_widget(inner: Rect) -> Vec<Line<'static>> {
 mod tests {
     use super::{
         BackgroundInfo, GraphEdge, GraphNode, InfoWidgetData, Margins, MemoryActivity, MemoryEvent,
-        MemoryEventKind, MemoryInfo, MemoryState, SwarmInfo, UsageInfo, UsageProvider, WidgetKind,
-        calculate_placements, occasional_status_tip, render_memory_topology_lines,
-        render_memory_widget, render_model_widget, truncate_smart,
+        MemoryEventKind, MemoryInfo, MemoryState, PipelineState, StepStatus, SwarmInfo, UsageInfo,
+        UsageProvider, WidgetKind, calculate_placements, occasional_status_tip,
+        render_memory_topology_lines, render_memory_widget, render_model_widget, truncate_smart,
     };
     use ratatui::layout::Rect;
     use std::time::{Duration, Instant};
@@ -3245,7 +3252,7 @@ mod tests {
             .to_lowercase();
 
         assert!(text.contains("memory"));
-        assert!(text.contains("trace"));
+        assert!(text.contains("activity"));
         assert!(text.contains("store"));
         assert!(text.contains("3 total"));
         assert!(text.contains("2p/1g"));
@@ -3253,8 +3260,12 @@ mod tests {
     }
 
     #[test]
-    fn memory_widget_renders_recent_trace_events() {
+    fn memory_widget_renders_current_cycle_activity() {
         let now = Instant::now();
+        let mut pipeline = PipelineState::new();
+        pipeline.search = StepStatus::Done;
+        pipeline.verify = StepStatus::Running;
+        pipeline.verify_progress = Some((1, 3));
 
         let data = InfoWidgetData {
             memory_info: Some(MemoryInfo {
@@ -3262,9 +3273,9 @@ mod tests {
                 project_count: 4,
                 global_count: 3,
                 activity: Some(MemoryActivity {
-                    state: MemoryState::FoundRelevant { count: 2 },
+                    state: MemoryState::SidecarChecking { count: 3 },
                     state_since: now - Duration::from_secs(12),
-                    pipeline: None,
+                    pipeline: Some(pipeline),
                     recent_events: vec![
                         MemoryEvent {
                             kind: MemoryEventKind::MemoryInjected {
@@ -3303,11 +3314,40 @@ mod tests {
             .to_lowercase();
 
         assert!(text.contains("memory"));
-        assert!(text.contains("trace"));
-        assert!(text.contains("now"));
-        assert!(text.contains("relevant 2"));
-        assert!(text.contains("injected 2"));
-        assert!(text.contains("embed done 9"));
+        assert!(text.contains("activity"));
+        assert!(text.contains("cycle"));
+        assert!(text.contains("step"));
+        assert!(text.contains("verify 1/3"));
+        assert!(text.contains("active"));
+        assert!(text.contains("checking 3 candidate"));
+    }
+
+    #[test]
+    fn memory_activity_priority_is_elevated_while_processing() {
+        let mut idle_data = InfoWidgetData {
+            memory_info: Some(MemoryInfo {
+                total_count: 2,
+                activity: Some(MemoryActivity {
+                    state: MemoryState::Idle,
+                    state_since: Instant::now(),
+                    pipeline: None,
+                    recent_events: Vec::new(),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(idle_data.effective_priority(WidgetKind::MemoryActivity), 5);
+
+        idle_data.memory_info.as_mut().unwrap().activity = Some(MemoryActivity {
+            state: MemoryState::Embedding,
+            state_since: Instant::now(),
+            pipeline: None,
+            recent_events: Vec::new(),
+        });
+
+        assert_eq!(idle_data.effective_priority(WidgetKind::MemoryActivity), 0);
     }
 
     #[test]
@@ -3642,27 +3682,86 @@ fn render_memory_compact(info: &MemoryInfo) -> Vec<Line<'static>> {
     ];
 
     if let Some(activity) = &info.activity {
-        let icon = match &activity.state {
-            MemoryState::Embedding | MemoryState::SidecarChecking { .. } => {
-                Some(("🔍", rgb(255, 200, 100)))
-            }
-            MemoryState::FoundRelevant { count } => {
-                Some((if *count > 0 { "✓" } else { "" }, rgb(100, 200, 100)))
-            }
-            MemoryState::Extracting { .. } => Some(("🧠", rgb(200, 150, 255))),
-            MemoryState::Maintaining { .. } => Some(("🌿", rgb(120, 220, 180))),
-            MemoryState::ToolAction { .. } => Some(("💾", rgb(200, 150, 255))),
-            MemoryState::Idle => None,
-        };
-        if let Some((icon_str, color)) = icon {
-            if !icon_str.is_empty() {
+        if activity.is_processing() {
+            let status = activity
+                .pipeline
+                .as_ref()
+                .and_then(memory_compact_pipeline_status)
+                .or_else(|| memory_active_summary(&activity.state));
+
+            if let Some(status) = status {
                 spans.push(Span::styled(" · ", Style::default().fg(rgb(100, 100, 110))));
-                spans.push(Span::styled(icon_str, Style::default().fg(color)));
+                spans.push(Span::styled(
+                    truncate_with_ellipsis(&status, 18),
+                    Style::default().fg(rgb(255, 200, 100)),
+                ));
+            }
+        } else {
+            let icon = match &activity.state {
+                MemoryState::Embedding | MemoryState::SidecarChecking { .. } => {
+                    Some(("🔍", rgb(255, 200, 100)))
+                }
+                MemoryState::FoundRelevant { count } => {
+                    Some((if *count > 0 { "✓" } else { "" }, rgb(100, 200, 100)))
+                }
+                MemoryState::Extracting { .. } => Some(("🧠", rgb(200, 150, 255))),
+                MemoryState::Maintaining { .. } => Some(("🌿", rgb(120, 220, 180))),
+                MemoryState::ToolAction { .. } => Some(("💾", rgb(200, 150, 255))),
+                MemoryState::Idle => None,
+            };
+            if let Some((icon_str, color)) = icon {
+                if !icon_str.is_empty() {
+                    spans.push(Span::styled(" · ", Style::default().fg(rgb(100, 100, 110))));
+                    spans.push(Span::styled(icon_str, Style::default().fg(color)));
+                }
             }
         }
     }
 
     vec![Line::from(spans)]
+}
+
+fn memory_compact_pipeline_status(pipeline: &PipelineState) -> Option<String> {
+    [
+        ("search", &pipeline.search, None),
+        ("verify", &pipeline.verify, pipeline.verify_progress),
+        ("inject", &pipeline.inject, None),
+        ("maintain", &pipeline.maintain, None),
+    ]
+    .into_iter()
+    .find_map(|(name, status, progress)| match status {
+        StepStatus::Running => Some(if let Some((done, total)) = progress {
+            format!("{} {}/{}", name, done, total)
+        } else {
+            name.to_string()
+        }),
+        StepStatus::Error => Some(format!("{} failed", name)),
+        _ => None,
+    })
+}
+
+fn memory_active_summary(state: &MemoryState) -> Option<String> {
+    match state {
+        MemoryState::Idle => None,
+        MemoryState::Embedding => Some("searching".to_string()),
+        MemoryState::SidecarChecking { count } => Some(format!("verify {count}")),
+        MemoryState::FoundRelevant { count } => Some(format!("ready {count}")),
+        MemoryState::Extracting { reason } => Some(if reason.trim().is_empty() {
+            "extracting".to_string()
+        } else {
+            format!("extract {}", reason)
+        }),
+        MemoryState::Maintaining { phase } => Some(if phase.trim().is_empty() {
+            "maintaining".to_string()
+        } else {
+            format!("maintain {}", phase)
+        }),
+        MemoryState::ToolAction { action, detail } => Some(if detail.trim().is_empty() {
+            action.clone()
+        } else {
+            format!("{} {}", action, detail)
+        }),
+    }
 }
 
 fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> {
@@ -3994,127 +4093,6 @@ fn format_event_for_expanded(
         MemoryEventKind::ToolListed { count } => {
             ("📋", format!("{} memories", count), rgb(140, 140, 150))
         }
-        _ => ("·", String::new(), rgb(100, 100, 110)),
-    }
-}
-
-fn format_event_for_trace(event: &MemoryEvent, max_width: usize) -> (&'static str, String, Color) {
-    match &event.kind {
-        MemoryEventKind::EmbeddingComplete { latency_ms, hits } => (
-            "→",
-            truncate_with_ellipsis(
-                &format!("embed done {} hits {}ms", hits, latency_ms),
-                max_width,
-            ),
-            rgb(140, 180, 255),
-        ),
-        MemoryEventKind::SidecarRelevant { memory_preview } => (
-            "✓",
-            truncate_with_ellipsis(&format!("relevant \"{}\"", memory_preview), max_width),
-            rgb(100, 200, 100),
-        ),
-        MemoryEventKind::MemorySurfaced { memory_preview } => (
-            "★",
-            truncate_with_ellipsis(&format!("surfaced \"{}\"", memory_preview), max_width),
-            rgb(255, 220, 100),
-        ),
-        MemoryEventKind::MemoryInjected {
-            count,
-            prompt_chars,
-            ..
-        } => (
-            "↑",
-            truncate_with_ellipsis(
-                &format!("injected {} mem {}ch", count, prompt_chars),
-                max_width,
-            ),
-            rgb(140, 210, 255),
-        ),
-        MemoryEventKind::MaintenanceStarted { verified, rejected } => (
-            "🌿",
-            truncate_with_ellipsis(
-                &format!("maint start {}v {}r", verified, rejected),
-                max_width,
-            ),
-            rgb(120, 220, 180),
-        ),
-        MemoryEventKind::MaintenanceLinked { links } => (
-            "🌿",
-            truncate_with_ellipsis(&format!("links +{}", links), max_width),
-            rgb(120, 220, 180),
-        ),
-        MemoryEventKind::MaintenanceConfidence { boosted, decayed } => (
-            "🌿",
-            truncate_with_ellipsis(&format!("confidence +{} -{}", boosted, decayed), max_width),
-            rgb(120, 220, 180),
-        ),
-        MemoryEventKind::MaintenanceCluster { clusters, members } => (
-            "🌿",
-            truncate_with_ellipsis(&format!("cluster {} / {}", clusters, members), max_width),
-            rgb(120, 220, 180),
-        ),
-        MemoryEventKind::MaintenanceTagInferred { tag, applied } => (
-            "🌿",
-            truncate_with_ellipsis(&format!("tag {} +{}", tag, applied), max_width),
-            rgb(120, 220, 180),
-        ),
-        MemoryEventKind::MaintenanceGap { candidates } => (
-            "🌿",
-            truncate_with_ellipsis(&format!("gap {} cand", candidates), max_width),
-            rgb(120, 220, 180),
-        ),
-        MemoryEventKind::MaintenanceComplete { latency_ms } => (
-            "🌿",
-            truncate_with_ellipsis(&format!("maint done {}ms", latency_ms), max_width),
-            rgb(120, 220, 180),
-        ),
-        MemoryEventKind::ExtractionStarted { reason } => (
-            "🧠",
-            truncate_with_ellipsis(&format!("extract {}", reason), max_width),
-            rgb(200, 150, 255),
-        ),
-        MemoryEventKind::ExtractionComplete { count } => (
-            "+",
-            truncate_with_ellipsis(&format!("saved {} mem", count), max_width),
-            rgb(100, 200, 100),
-        ),
-        MemoryEventKind::Error { message } => (
-            "!",
-            truncate_with_ellipsis(&format!("error {}", message), max_width),
-            rgb(255, 100, 100),
-        ),
-        MemoryEventKind::ToolRemembered {
-            content, category, ..
-        } => (
-            "💾",
-            truncate_with_ellipsis(&format!("remember [{}] {}", category, content), max_width),
-            rgb(100, 200, 100),
-        ),
-        MemoryEventKind::ToolRecalled { query, count } => (
-            "🔍",
-            truncate_with_ellipsis(&format!("recall {} '{}'", count, query), max_width),
-            rgb(140, 180, 255),
-        ),
-        MemoryEventKind::ToolForgot { id } => (
-            "🗑️",
-            truncate_with_ellipsis(&format!("forget {}", id), max_width),
-            rgb(255, 170, 100),
-        ),
-        MemoryEventKind::ToolTagged { id, tags } => (
-            "🏷️",
-            truncate_with_ellipsis(&format!("tag {} +{}", id, tags), max_width),
-            rgb(140, 200, 255),
-        ),
-        MemoryEventKind::ToolLinked { from, to } => (
-            "🔗",
-            truncate_with_ellipsis(&format!("link {}→{}", from, to), max_width),
-            rgb(200, 180, 255),
-        ),
-        MemoryEventKind::ToolListed { count } => (
-            "📋",
-            truncate_with_ellipsis(&format!("list {} mem", count), max_width),
-            rgb(140, 140, 150),
-        ),
         _ => ("·", String::new(), rgb(100, 100, 110)),
     }
 }
