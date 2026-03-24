@@ -1395,6 +1395,10 @@ impl Agent {
         self.provider.available_models()
     }
 
+    pub fn available_models_for_switching(&self) -> Vec<String> {
+        self.provider.available_models_for_switching()
+    }
+
     pub fn available_models_display(&self) -> Vec<String> {
         self.provider.available_models_display()
     }

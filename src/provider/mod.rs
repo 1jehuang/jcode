@@ -613,6 +613,18 @@ pub trait Provider: Send + Sync {
             .collect()
     }
 
+    /// List models that should participate in cycle-model switching.
+    ///
+    /// Defaults to the provider's static switchable set. Providers with dynamic
+    /// model catalogs can override this to expose a cached live list without
+    /// forcing every caller to know whether the source is static or dynamic.
+    fn available_models_for_switching(&self) -> Vec<String> {
+        self.available_models()
+            .iter()
+            .map(|m| (*m).to_string())
+            .collect()
+    }
+
     /// List known providers for a model (OpenRouter-style @provider autocomplete).
     fn available_providers_for_model(&self, _model: &str) -> Vec<String> {
         Vec::new()
@@ -3366,6 +3378,53 @@ impl Provider for MultiProvider {
         models
     }
 
+    fn available_models_for_switching(&self) -> Vec<String> {
+        match self.active_provider() {
+            ActiveProvider::Claude => {
+                if let Some(ref anthropic) = self.anthropic {
+                    anthropic.available_models_for_switching()
+                } else if let Some(ref claude) = self.claude {
+                    claude.available_models_for_switching()
+                } else {
+                    Vec::new()
+                }
+            }
+            ActiveProvider::OpenAI => self
+                .openai
+                .as_ref()
+                .map(|openai| openai.available_models_for_switching())
+                .unwrap_or_default(),
+            ActiveProvider::Copilot => self
+                .copilot_api
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|copilot| copilot.available_models_for_switching())
+                .unwrap_or_default(),
+            ActiveProvider::Gemini => self
+                .gemini
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|gemini| gemini.available_models_for_switching())
+                .unwrap_or_default(),
+            ActiveProvider::Cursor => self
+                .cursor
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|cursor| cursor.available_models_for_switching())
+                .unwrap_or_default(),
+            ActiveProvider::OpenRouter => self
+                .openrouter
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|openrouter| openrouter.available_models_for_switching())
+                .unwrap_or_default(),
+        }
+    }
+
     fn available_models_display(&self) -> Vec<String> {
         let mut models = Vec::new();
         models.extend(ALL_CLAUDE_MODELS.iter().map(|m| (*m).to_string()));
@@ -3738,9 +3797,24 @@ impl Provider for MultiProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
+        if let Some(ref openai) = self.openai {
+            openai.prefetch_models().await?;
+        }
         let openrouter = { self.openrouter.read().unwrap().clone() };
         if let Some(openrouter) = openrouter {
             openrouter.prefetch_models().await?;
+        }
+        {
+            let copilot = self.copilot_api.read().unwrap().clone();
+            if let Some(copilot) = copilot {
+                copilot.prefetch_models().await?;
+            }
+        }
+        {
+            let gemini = self.gemini.read().unwrap().clone();
+            if let Some(gemini) = gemini {
+                gemini.prefetch_models().await?;
+            }
         }
         Ok(())
     }

@@ -67,30 +67,6 @@ static WEBSOCKET_COOLDOWNS: LazyLock<Arc<RwLock<HashMap<String, Instant>>>> =
 static WEBSOCKET_FAILURE_STREAKS: LazyLock<Arc<RwLock<HashMap<String, u32>>>> =
     LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
 
-/// Available OpenAI/Codex models
-const AVAILABLE_MODELS: &[&str] = &[
-    "gpt-5.4",
-    "gpt-5.4-pro",
-    "gpt-5.3-codex",
-    "gpt-5.3-codex-spark",
-    "gpt-5.2-chat-latest",
-    "gpt-5.2-codex",
-    "gpt-5.2-pro",
-    "gpt-5.1-codex-mini",
-    "gpt-5.1-codex-max",
-    "gpt-5.2",
-    "gpt-5.1-chat-latest",
-    "gpt-5.1",
-    "gpt-5.1-codex",
-    "gpt-5-chat-latest",
-    "gpt-5-codex",
-    "gpt-5-codex-mini",
-    "gpt-5-pro",
-    "gpt-5-mini",
-    "gpt-5-nano",
-    "gpt-5",
-];
-
 #[derive(Clone, Copy)]
 enum OpenAITransportMode {
     Auto,
@@ -2200,11 +2176,27 @@ impl Provider for OpenAIProvider {
     }
 
     fn available_models(&self) -> Vec<&'static str> {
-        AVAILABLE_MODELS.to_vec()
+        crate::provider::ALL_OPENAI_MODELS.to_vec()
+    }
+
+    fn available_models_for_switching(&self) -> Vec<String> {
+        crate::provider::known_openai_model_ids()
     }
 
     fn available_models_display(&self) -> Vec<String> {
         crate::provider::known_openai_model_ids()
+    }
+
+    async fn prefetch_models(&self) -> Result<()> {
+        let access_token = openai_access_token(&self.credentials).await?;
+        let catalog = crate::provider::fetch_openai_model_catalog(&access_token).await?;
+        if !catalog.context_limits.is_empty() {
+            crate::provider::populate_context_limits(catalog.context_limits);
+        }
+        if !catalog.available_models.is_empty() {
+            crate::provider::populate_account_models(catalog.available_models);
+        }
+        Ok(())
     }
 
     fn reasoning_effort(&self) -> Option<String> {
@@ -4115,6 +4107,28 @@ mod tests {
 
         provider.set_model("gpt-5.1-codex-mini").unwrap();
         assert_eq!(provider.model(), "gpt-5.1-codex-mini");
+    }
+
+    #[test]
+    fn test_openai_switching_models_include_dynamic_catalog_entries() {
+        let _guard = crate::storage::lock_test_env();
+        let dynamic_model = "gpt-5.9-switching-test";
+        crate::auth::codex::set_active_account_override(Some("switching-test".to_string()));
+        crate::provider::populate_account_models(vec![dynamic_model.to_string()]);
+
+        let provider = OpenAIProvider::new(CodexCredentials {
+            access_token: "test".to_string(),
+            refresh_token: String::new(),
+            id_token: None,
+            account_id: None,
+            expires_at: None,
+        });
+
+        let models = provider.available_models_for_switching();
+        assert!(models.contains(&"gpt-5.4".to_string()));
+        assert!(models.contains(&dynamic_model.to_string()));
+
+        crate::auth::codex::set_active_account_override(None);
     }
 
     #[test]

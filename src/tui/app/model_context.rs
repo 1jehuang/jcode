@@ -2,7 +2,7 @@ use super::*;
 
 impl App {
     pub(super) fn cycle_model(&mut self, direction: i8) {
-        let models = self.provider.available_models();
+        let models = self.provider.available_models_for_switching();
         if models.is_empty() {
             self.push_display_message(DisplayMessage::error(
                 "Model switching is not available for this provider.",
@@ -20,14 +20,14 @@ impl App {
         } else {
             (current_index + len - 1) % len
         };
-        let next_model = models[next_index];
+        let next_model = models[next_index].clone();
 
-        match self.provider.set_model(next_model) {
+        match self.provider.set_model(&next_model) {
             Ok(()) => {
                 self.provider_session_id = None;
                 self.session.provider_session_id = None;
                 self.upstream_provider = None;
-                self.update_context_limit_for_model(next_model);
+                self.update_context_limit_for_model(&next_model);
                 self.session.model = Some(self.provider.model());
                 let _ = self.session.save();
                 self.push_display_message(DisplayMessage::system(format!(

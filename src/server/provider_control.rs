@@ -7,7 +7,7 @@ use tokio::sync::{Mutex, mpsc};
 async fn model_switching_available(agent: &Arc<Mutex<Agent>>) -> Option<String> {
     let models = {
         let agent_guard = agent.lock().await;
-        agent_guard.available_models()
+        agent_guard.available_models_for_switching()
     };
     if models.is_empty() {
         let current = {
@@ -28,7 +28,7 @@ pub(super) async fn handle_cycle_model(
 ) {
     let models = {
         let agent_guard = agent.lock().await;
-        agent_guard.available_models()
+        agent_guard.available_models_for_switching()
     };
     if models.is_empty() {
         let model = {
@@ -55,11 +55,11 @@ pub(super) async fn handle_cycle_model(
     } else {
         (current_index + len - 1) % len
     };
-    let next_model = models[next_index];
+    let next_model = models[next_index].clone();
 
     let result = {
         let mut agent_guard = agent.lock().await;
-        let result = agent_guard.set_model(next_model);
+        let result = agent_guard.set_model(&next_model);
         if result.is_ok() {
             agent_guard.reset_provider_session();
         }
