@@ -28,6 +28,8 @@ Status values:
 
 ### Highest priority
 - [ ] Split `tests/e2e/main.rs` by feature area
+  - Started 2026-03-24: extracted feature modules `session_flow`, `transport`, `provider_behavior`, `binary_integration`, `safety`, and `ambient`
+  - Remaining follow-up: extract shared helpers into `tests/e2e/test_support/mod.rs`
 - [ ] Continue splitting `src/server.rs` into focused submodules
 - [ ] Split `src/agent.rs` into orchestration, stream, interrupt, and tool-exec modules
 
