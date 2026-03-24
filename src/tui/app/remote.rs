@@ -2853,7 +2853,10 @@ pub(super) async fn handle_remote_key(
                 }
                 return Ok(());
             }
-            KeyCode::Char('w') | KeyCode::Backspace => {
+            KeyCode::Char('w')
+            | KeyCode::Char('h')
+            | KeyCode::Char('\u{8}')
+            | KeyCode::Backspace => {
                 let start = app.find_word_boundary_back();
                 if start < app.cursor_pos {
                     app.remember_input_undo_state();

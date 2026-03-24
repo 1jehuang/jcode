@@ -409,7 +409,7 @@ pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
             }
             true
         }
-        KeyCode::Char('w') | KeyCode::Backspace => {
+        KeyCode::Char('w') | KeyCode::Char('h') | KeyCode::Char('\u{8}') | KeyCode::Backspace => {
             let start = app.find_word_boundary_back();
             if start < app.cursor_pos {
                 app.remember_input_undo_state();

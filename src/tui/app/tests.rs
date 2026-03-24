@@ -2594,6 +2594,30 @@ fn test_handle_key_ctrl_word_movement_and_delete() {
 }
 
 #[test]
+fn test_handle_key_ctrl_h_legacy_backspace_fallback_deletes_word() {
+    let mut app = create_test_app();
+    app.set_input_for_test("hello world again");
+
+    app.handle_key(KeyCode::Char('h'), KeyModifiers::CONTROL)
+        .unwrap();
+
+    assert_eq!(app.input(), "hello world ");
+    assert_eq!(app.cursor_pos(), "hello world ".len());
+}
+
+#[test]
+fn test_handle_key_ctrl_backspace_csi_u_char_fallback_deletes_word() {
+    let mut app = create_test_app();
+    app.set_input_for_test("hello world again");
+
+    app.handle_key(KeyCode::Char('\u{8}'), KeyModifiers::CONTROL)
+        .unwrap();
+
+    assert_eq!(app.input(), "hello world ");
+    assert_eq!(app.cursor_pos(), "hello world ".len());
+}
+
+#[test]
 fn test_handle_key_escape_clears_input() {
     let mut app = create_test_app();
 
@@ -6553,6 +6577,36 @@ fn test_remote_shift_enter_inserts_newline() {
 
     assert_eq!(app.input(), "h\ni");
     assert!(app.queued_messages().is_empty());
+}
+
+#[test]
+fn test_remote_ctrl_h_legacy_backspace_fallback_deletes_word() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    app.set_input_for_test("hello world again");
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    rt.block_on(app.handle_remote_key(KeyCode::Char('h'), KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+
+    assert_eq!(app.input(), "hello world ");
+    assert_eq!(app.cursor_pos(), "hello world ".len());
+}
+
+#[test]
+fn test_remote_ctrl_backspace_csi_u_char_fallback_deletes_word() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    app.set_input_for_test("hello world again");
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    rt.block_on(app.handle_remote_key(KeyCode::Char('\u{8}'), KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+
+    assert_eq!(app.input(), "hello world ");
+    assert_eq!(app.cursor_pos(), "hello world ".len());
 }
 
 #[test]
