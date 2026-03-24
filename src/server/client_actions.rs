@@ -72,6 +72,58 @@ fn combine_input_shell_output(stdout: &[u8], stderr: &[u8]) -> (String, bool) {
     (output, truncated)
 }
 
+async fn run_scheduled_task_in_live_session_if_idle(
+    session_id: &str,
+    message: &str,
+    sessions: &Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> bool {
+    let agent = {
+        let guard = sessions.read().await;
+        guard.get(session_id).cloned()
+    };
+    let Some(agent) = agent else {
+        return false;
+    };
+
+    let event_tx = {
+        let members = swarm_members.read().await;
+        members
+            .get(session_id)
+            .map(|member| member.event_tx.clone())
+    };
+    let Some(event_tx) = event_tx else {
+        return false;
+    };
+
+    let is_idle = match agent.try_lock() {
+        Ok(guard) => {
+            drop(guard);
+            true
+        }
+        Err(_) => false,
+    };
+
+    if !is_idle {
+        return false;
+    }
+
+    let session_id = session_id.to_string();
+    let message = message.to_string();
+    tokio::spawn(async move {
+        if let Err(err) =
+            process_message_streaming_mpsc(agent, &message, vec![], None, event_tx).await
+        {
+            crate::logging::error(&format!(
+                "Failed to run scheduled task immediately for live session {}: {}",
+                session_id, err
+            ));
+        }
+    });
+
+    true
+}
+
 pub(super) async fn handle_notify_session(
     id: u64,
     session_id: String,
@@ -89,7 +141,16 @@ pub(super) async fn handle_notify_session(
             .any(|connection| connection.session_id == session_id)
     };
 
-    let notified = {
+    let ran_immediately = if target_has_client {
+        run_scheduled_task_in_live_session_if_idle(&session_id, &message, sessions, swarm_members)
+            .await
+    } else {
+        false
+    };
+
+    let notified = if ran_immediately {
+        false
+    } else {
         let members = swarm_members.read().await;
         if let Some(member) = members.get(&session_id) {
             member
@@ -109,7 +170,7 @@ pub(super) async fn handle_notify_session(
         }
     };
 
-    let queued_interrupt = if target_has_client {
+    let queued_interrupt = if ran_immediately {
         false
     } else {
         queue_soft_interrupt_for_session(
@@ -123,7 +184,7 @@ pub(super) async fn handle_notify_session(
         .await
     };
 
-    if notified || queued_interrupt {
+    if ran_immediately || notified || queued_interrupt {
         let _ = client_event_tx.send(ServerEvent::Done { id });
     } else {
         let _ = client_event_tx.send(ServerEvent::Error {
@@ -516,20 +577,33 @@ pub(super) async fn handle_split(
 mod tests {
     use super::{clone_split_session, handle_notify_session, handle_set_feature};
     use crate::agent::Agent;
-    use crate::message::{ContentBlock, Role};
-    use crate::protocol::{FeatureToggle, NotificationType, ServerEvent};
+    use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
+    use crate::protocol::{FeatureToggle, ServerEvent};
     use crate::provider::{EventStream, Provider};
     use crate::server::{ClientConnectionInfo, SwarmMember};
     use crate::tool::Registry;
     use anyhow::Result;
+    use async_stream::stream;
     use async_trait::async_trait;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Instant;
     use tokio::sync::{Mutex, RwLock, mpsc};
+    use tokio::time::{Duration, timeout};
 
     struct MockProvider;
+
+    #[derive(Clone, Default)]
+    struct StreamingMockProvider {
+        responses: Arc<StdMutex<VecDeque<Vec<StreamEvent>>>>,
+    }
+
+    impl StreamingMockProvider {
+        fn queue_response(&self, events: Vec<StreamEvent>) {
+            self.responses.lock().unwrap().push_back(events);
+        }
+    }
 
     #[async_trait]
     impl Provider for MockProvider {
@@ -549,6 +623,38 @@ mod tests {
 
         fn fork(&self) -> Arc<dyn Provider> {
             Arc::new(MockProvider)
+        }
+    }
+
+    #[async_trait]
+    impl Provider for StreamingMockProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<EventStream> {
+            let events = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_default();
+            let stream = stream! {
+                for event in events {
+                    yield Ok(event);
+                }
+            };
+            Ok(Box::pin(stream))
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
         }
     }
 
@@ -692,14 +798,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn notify_session_sends_scheduled_notification_to_live_member() {
-        let sessions = Arc::new(RwLock::new(HashMap::<String, Arc<Mutex<Agent>>>::new()));
+    async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() {
+        let provider = Arc::new(StreamingMockProvider::default());
+        provider.queue_response(vec![
+            StreamEvent::TextDelta("Working on scheduled task.".to_string()),
+            StreamEvent::MessageEnd { stop_reason: None },
+        ]);
+        let provider_dyn: Arc<dyn Provider> = provider.clone();
+        let registry = Registry::new(provider_dyn.clone()).await;
+        let agent = Arc::new(Mutex::new(Agent::new(provider_dyn, registry)));
+        let session_id = agent.lock().await.session_id().to_string();
+        let sessions = Arc::new(RwLock::new(HashMap::<String, Arc<Mutex<Agent>>>::from([(
+            session_id.clone(),
+            agent.clone(),
+        )])));
         let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
         let client_connections = Arc::new(RwLock::new(HashMap::from([(
             "client-1".to_string(),
             ClientConnectionInfo {
                 client_id: "client-1".to_string(),
-                session_id: "session-live".to_string(),
+                session_id: session_id.clone(),
                 debug_client_id: Some("debug-1".to_string()),
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),
@@ -707,9 +825,9 @@ mod tests {
         )])));
         let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();
         let swarm_members = Arc::new(RwLock::new(HashMap::from([(
-            "session-live".to_string(),
+            session_id.clone(),
             SwarmMember {
-                session_id: "session-live".to_string(),
+                session_id: session_id.clone(),
                 event_tx: member_event_tx,
                 working_dir: None,
                 swarm_id: None,
@@ -727,7 +845,7 @@ mod tests {
 
         handle_notify_session(
             77,
-            "session-live".to_string(),
+            session_id.clone(),
             "[Scheduled task]\nTask: Follow up".to_string(),
             &sessions,
             &soft_interrupt_queues,
@@ -737,31 +855,22 @@ mod tests {
         )
         .await;
 
-        let member_event = member_event_rx
-            .recv()
-            .await
-            .expect("live member should receive notification");
-        match member_event {
-            ServerEvent::Notification {
-                from_session,
-                from_name,
-                notification_type,
-                message,
-            } => {
-                assert_eq!(from_session, "schedule");
-                assert_eq!(from_name.as_deref(), Some("scheduled task"));
-                assert!(matches!(
-                    notification_type,
-                    NotificationType::Message {
-                        scope: Some(ref scope),
-                        channel: None,
-                    } if scope == "scheduled"
-                ));
-                assert!(message.contains("[Scheduled task]"));
-                assert!(message.contains("Task: Follow up"));
+        let streamed_event = timeout(Duration::from_secs(2), async {
+            loop {
+                match member_event_rx.recv().await {
+                    Some(ServerEvent::TextDelta { text })
+                        if text.contains("Working on scheduled task.") =>
+                    {
+                        return text;
+                    }
+                    Some(_) => continue,
+                    None => panic!("live member stream closed before scheduled task ran"),
+                }
             }
-            other => panic!("expected notification event, got {other:?}"),
-        }
+        })
+        .await
+        .expect("scheduled task should start streaming promptly");
+        assert!(streamed_event.contains("Working on scheduled task."));
 
         let client_events: Vec<_> =
             std::iter::from_fn(|| client_event_rx.try_recv().ok()).collect();
@@ -769,6 +878,116 @@ mod tests {
             client_events
                 .iter()
                 .any(|event| matches!(event, ServerEvent::Done { id } if *id == 77))
+        );
+
+        let guard = agent.lock().await;
+        assert!(guard.messages().iter().any(|message| {
+            message.role == Role::User
+                && message
+                    .content_preview()
+                    .contains("[Scheduled task] Task: Follow up")
+        }));
+        assert!(guard.messages().iter().any(|message| {
+            message.role == Role::Assistant
+                && message
+                    .content_preview()
+                    .contains("Working on scheduled task.")
+        }));
+    }
+
+    #[tokio::test]
+    async fn notify_session_queues_soft_interrupt_when_live_session_is_busy() {
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+        let registry = Registry::new(provider.clone()).await;
+        let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+        let session_id = agent.lock().await.session_id().to_string();
+        let queue = agent.lock().await.soft_interrupt_queue();
+
+        let sessions = Arc::new(RwLock::new(HashMap::<String, Arc<Mutex<Agent>>>::from([(
+            session_id.clone(),
+            agent.clone(),
+        )])));
+        let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::from([(
+            session_id.clone(),
+            queue.clone(),
+        )])));
+        let client_connections = Arc::new(RwLock::new(HashMap::from([(
+            "client-1".to_string(),
+            ClientConnectionInfo {
+                client_id: "client-1".to_string(),
+                session_id: session_id.clone(),
+                debug_client_id: Some("debug-1".to_string()),
+                connected_at: Instant::now(),
+                last_seen: Instant::now(),
+            },
+        )])));
+        let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();
+        let swarm_members = Arc::new(RwLock::new(HashMap::from([(
+            session_id.clone(),
+            SwarmMember {
+                session_id: session_id.clone(),
+                event_tx: member_event_tx,
+                working_dir: None,
+                swarm_id: None,
+                swarm_enabled: false,
+                status: "running".to_string(),
+                detail: None,
+                friendly_name: Some("otter".to_string()),
+                role: "agent".to_string(),
+                joined_at: Instant::now(),
+                last_status_change: Instant::now(),
+                is_headless: false,
+            },
+        )])));
+        let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+
+        let _busy_guard = agent.lock().await;
+
+        handle_notify_session(
+            88,
+            session_id.clone(),
+            "[Scheduled task]\nTask: Follow up while busy".to_string(),
+            &sessions,
+            &soft_interrupt_queues,
+            &client_connections,
+            &swarm_members,
+            &client_event_tx,
+        )
+        .await;
+
+        let member_event = timeout(Duration::from_secs(2), member_event_rx.recv())
+            .await
+            .expect("notification should arrive promptly")
+            .expect("live member should receive notification");
+        match member_event {
+            ServerEvent::Notification {
+                from_session,
+                from_name,
+                message,
+                ..
+            } => {
+                assert_eq!(from_session, "schedule");
+                assert_eq!(from_name.as_deref(), Some("scheduled task"));
+                assert!(message.contains("Task: Follow up while busy"));
+            }
+            other => panic!("expected notification event, got {other:?}"),
+        }
+
+        let queued = queue.lock().unwrap();
+        assert_eq!(
+            queued.len(),
+            1,
+            "scheduled task should queue as soft interrupt"
+        );
+        assert!(queued[0].content.contains("Task: Follow up while busy"));
+        drop(queued);
+
+        let client_events: Vec<_> =
+            std::iter::from_fn(|| client_event_rx.try_recv().ok()).collect();
+        assert!(
+            client_events
+                .iter()
+                .any(|event| matches!(event, ServerEvent::Done { id } if *id == 88))
         );
     }
 }
