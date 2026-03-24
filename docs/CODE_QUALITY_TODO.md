@@ -34,6 +34,7 @@ Status values:
   - Progress 2026-03-24: extracted shared server/swarm state into `src/server/state.rs`
   - Progress 2026-03-24: extracted socket/bootstrap helpers into `src/server/socket.rs`
   - Progress 2026-03-24: extracted reload marker/signal state into `src/server/reload_state.rs`
+  - Progress 2026-03-24: extracted path/update/swarm identity utilities into `src/server/util.rs`
 - [ ] Split `src/agent.rs` into orchestration, stream, interrupt, and tool-exec modules
 
 ### Next wave
