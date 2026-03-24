@@ -1,8 +1,6 @@
 [build]
 # Set RUSTC_WRAPPER=sccache in your shell env; no hardcoded path needed.
 # CI overrides this file, so leaving rustc-wrapper unset here is safe.
+# Local fast-linker selection is handled by scripts/dev_cargo.sh so we don't
+# hard-force a linker mode that may be broken on a contributor machine.
 jobs = 6
-
-[target.x86_64-unknown-linux-gnu]
-linker = "clang"
-rustflags = ["-C", "link-arg=-fuse-ld=mold"]

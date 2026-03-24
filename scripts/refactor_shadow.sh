@@ -132,7 +132,7 @@ cmd_build() {
     die "unknown build argument: $1"
   fi
 
-  (cd "$repo_root" && cargo build $profile_flag)
+  (cd "$repo_root" && "$repo_root/scripts/dev_cargo.sh" build $profile_flag)
 }
 
 cmd_check() {
