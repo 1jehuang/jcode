@@ -98,18 +98,27 @@ Set up jcode on this machine for me.
    - Linux: use the install script
    - Windows: use the PowerShell install script
 2. Verify that `jcode` is on my `PATH`.
-3. Launch `jcode` once to confirm it starts successfully.
-4. Help me authenticate at least one provider:
-   - Claude: `/login claude`
-   - GitHub Copilot: `/login copilot`
-   - OpenAI: `/login openai`
-   - Gemini: `/login gemini`
+3. Launch `jcode` once in a new terminal window/session to confirm it starts successfully.
+4. Before attempting any interactive login flow, assess which providers are already available non-interactively and prefer those first. Check existing local credentials, config files, CLI sessions, and environment variables such as:
+   - Claude: `~/.jcode/auth.json`, `~/.claude/.credentials.json`, `~/.local/share/opencode/auth.json`, `ANTHROPIC_API_KEY`
+   - OpenAI: `~/.jcode/openai-auth.json`, `~/.codex/auth.json`, `OPENAI_API_KEY`
+   - Gemini: `~/.jcode/gemini_oauth.json`, `~/.gemini/oauth_creds.json`
+   - GitHub Copilot: existing auth under `~/.config/github-copilot/`
+   - Azure OpenAI: `~/.config/jcode/azure-openai.env`, `AZURE_OPENAI_*`, or an existing `az login`
+   - OpenRouter: `OPENROUTER_API_KEY`
+   - Alibaba Cloud Coding Plan: existing jcode config/env if present
+5. Prefer whichever provider is already configured and verify it with `jcode auth-test --all-configured` or a provider-specific auth test when appropriate.
+6. Only if no usable provider is already configured, guide me through the minimal manual step needed:
+   - Claude: `jcode login --provider claude`
+   - GitHub Copilot: `jcode login --provider copilot`
+   - OpenAI: `jcode login --provider openai`
+   - Gemini: `jcode login --provider gemini`
    - Azure OpenAI: `jcode login --provider azure`
    - Alibaba Cloud Coding Plan: `jcode login --provider alibaba-coding-plan`
    - OpenRouter: help me set `OPENROUTER_API_KEY`
    - Anthropic direct API: help me set `ANTHROPIC_API_KEY`
-5. After setup, run a simple smoke test with `jcode run "say hello"` and confirm it works.
-6. Explain any manual step that still needs me, especially browser OAuth or API key entry.
+7. After setup, run a simple smoke test with `jcode run "say hello"` and confirm it works.
+8. Explain any manual step that still needs me, especially browser OAuth, device login, or API key entry.
 ```
 
 This is intended to be a copy-paste bootstrap prompt for jcode itself or any other coding agent.
