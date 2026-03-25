@@ -154,6 +154,14 @@ Start with the highest-leverage cache boundaries:
 - Reason: this creates a real provider-implementation compile boundary now, without introducing a crate
   cycle through `Provider`, `EventStream`, or `message.rs`.
 
+- 2026-03-25: landed the next provider-implementation support crate with
+  `crates/jcode-provider-gemini`.
+- Boundary decision: move **Gemini Code Assist schema/types, model-list constants, and pure support helpers**
+  into a dedicated crate, while keeping the actual `Provider` trait impl, auth calls, and runtime/network orchestration
+  in `src/provider/gemini.rs`.
+- Reason: this creates another real provider-side compile boundary without forcing the `Provider` / `EventStream`
+  seam prematurely.
+
 ### Phase 5 — Reduce invalidation pressure
 
 - Continue shrinking giant hotspot files.
@@ -185,6 +193,7 @@ Touched-file `cargo check` samples gathered during this batch:
 - `src/provider_catalog.rs` after provider-metadata split: ~5.8s
 - `src/provider/mod.rs` after provider-core type split: ~50.1s
 - `src/provider/openrouter.rs` after openrouter-support crate split: ~5.6s
+- `src/provider/gemini.rs` after gemini-support crate split: ~5.5s
 
 Notes:
 
@@ -202,6 +211,8 @@ Notes:
   not claiming that the provider root is solved.
 - The `src/provider/openrouter.rs` touched-file sample is more encouraging because the heavy OpenRouter-specific
   catalog/ranking/cache support now lives in its own crate while the main module stays a thinner wrapper.
+- The `src/provider/gemini.rs` touched-file sample is similarly encouraging: the serde-heavy Code Assist schema and
+  pure model-list/support helpers now live outside the main crate while the runtime wrapper remains local.
 
 ## Dependency Hygiene Wins (2026-03-24)
 
@@ -226,7 +237,8 @@ Current provider-boundary stance:
 - **Done:** `jcode-provider-metadata` for stable login/profile catalog data and pure selection logic.
 - **Done:** `jcode-provider-core` for shared HTTP client plus route/cost/core provider value types.
 - **Done:** `jcode-provider-openrouter` for OpenRouter-specific catalog/cache/ranking/model-spec support.
-- **Not done yet:** `Provider` trait / `EventStream` extraction and a fully standalone provider impl crate.
+- **Done:** `jcode-provider-gemini` for Gemini Code Assist schema/types and pure model support helpers.
+- **Not done yet:** `Provider` trait / `EventStream` extraction and fully standalone provider impl crates.
 - **Reason:** the trait side still depends on `message.rs`, auth flows, runtime behavior, and provider-specific
   streaming logic; the current staged split avoids turning that unstable seam into a low-value high-churn crate.
 

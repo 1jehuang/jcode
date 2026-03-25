@@ -14,6 +14,7 @@ members = [
     "crates/jcode-provider-metadata",
     "crates/jcode-provider-core",
     "crates/jcode-provider-openrouter",
+    "crates/jcode-provider-gemini",
 ]
 
 [lib]
@@ -86,6 +87,7 @@ jcode-notify-email = { path = "crates/jcode-notify-email" }
 jcode-provider-metadata = { path = "crates/jcode-provider-metadata" }
 jcode-provider-core = { path = "crates/jcode-provider-core" }
 jcode-provider-openrouter = { path = "crates/jcode-provider-openrouter" }
+jcode-provider-gemini = { path = "crates/jcode-provider-gemini" }
 
 # Streaming
 tokio-stream = "0.1"
