@@ -943,6 +943,9 @@ impl crate::tui::TuiState for App {
     fn diff_pane_scroll(&self) -> usize {
         self.diff_pane_scroll
     }
+    fn diff_pane_scroll_x(&self) -> i32 {
+        self.diff_pane_scroll_x
+    }
     fn diff_pane_focus(&self) -> bool {
         self.diff_pane_focus
     }

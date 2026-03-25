@@ -444,6 +444,9 @@ impl TuiState for BenchState {
     fn diff_pane_scroll(&self) -> usize {
         self.diff_pane_scroll
     }
+    fn diff_pane_scroll_x(&self) -> i32 {
+        0
+    }
     fn diff_pane_focus(&self) -> bool {
         self.diff_pane_focus
     }

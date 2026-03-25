@@ -18,6 +18,7 @@ pub(super) fn reset_current_session(app: &mut App) {
     session.model = Some(app.provider.model());
     app.session = session;
     app.side_panel = crate::side_panel::SidePanelSnapshot::default();
+    app.diff_pane_scroll_x = 0;
     app.provider_session_id = None;
 }
 

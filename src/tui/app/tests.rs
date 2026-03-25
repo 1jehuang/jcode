@@ -1759,6 +1759,71 @@ fn test_tool_side_panel_uses_shared_right_pane_keyboard_focus() {
 }
 
 #[test]
+fn test_tool_side_panel_focus_supports_horizontal_pan_keys() {
+    let mut app = create_test_app();
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focused_page_id: Some("plan".to_string()),
+        pages: vec![crate::side_panel::SidePanelPage {
+            id: "plan".to_string(),
+            title: "Plan".to_string(),
+            file_path: "".to_string(),
+            format: crate::side_panel::SidePanelPageFormat::Markdown,
+            source: crate::side_panel::SidePanelPageSource::Managed,
+            content: "hello".to_string(),
+            updated_at_ms: 1,
+        }],
+    };
+
+    assert!(app.handle_diagram_ctrl_key(KeyCode::Char('l'), false));
+    assert!(app.diff_pane_focus);
+
+    app.handle_key(KeyCode::Right, KeyModifiers::empty()).unwrap();
+    assert_eq!(app.diff_pane_scroll_x, 4);
+    assert!(app.input.is_empty());
+
+    app.handle_key(KeyCode::Left, KeyModifiers::empty()).unwrap();
+    assert_eq!(app.diff_pane_scroll_x, 0);
+}
+
+#[test]
+fn test_mouse_horizontal_scroll_over_tool_side_panel_pans_without_focus_change() {
+    let mut app = create_test_app();
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.diff_pane_scroll_x = 0;
+    app.diff_pane_focus = false;
+    app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focused_page_id: Some("plan".to_string()),
+        pages: vec![crate::side_panel::SidePanelPage {
+            id: "plan".to_string(),
+            title: "Plan".to_string(),
+            file_path: "".to_string(),
+            format: crate::side_panel::SidePanelPageFormat::Markdown,
+            source: crate::side_panel::SidePanelPageSource::Managed,
+            content: "hello".to_string(),
+            updated_at_ms: 1,
+        }],
+    };
+
+    crate::tui::ui::record_layout_snapshot(
+        Rect::new(0, 0, 40, 20),
+        None,
+        Some(Rect::new(40, 0, 20, 20)),
+    );
+
+    let scroll_only = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollRight,
+        column: 45,
+        row: 5,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(scroll_only);
+    assert_eq!(app.diff_pane_scroll_x, 3);
+    assert!(!app.diff_pane_focus);
+}
+
+#[test]
 fn test_mouse_scroll_events_are_classified_as_scroll_only() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::File;
@@ -1975,6 +2040,7 @@ fn test_top_level_command_suggestions_include_config_and_subscription() {
     let app = create_test_app();
     let suggestions = app.get_suggestions_for("/con");
     assert!(suggestions.iter().any(|(cmd, _)| cmd == "/config"));
+    assert!(suggestions.iter().any(|(cmd, _)| cmd == "/context"));
 
     let suggestions = app.get_suggestions_for("/ali");
     assert!(suggestions.iter().any(|(cmd, _)| cmd == "/alignment"));
@@ -1991,6 +2057,62 @@ fn test_help_topic_suggestions_are_contextual() {
         suggestions.first().map(|(cmd, _)| cmd.as_str()),
         Some("/help fix")
     );
+}
+
+#[test]
+fn test_context_command_reports_session_context_snapshot() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.memory_enabled = true;
+        app.swarm_enabled = true;
+        app.queue_mode = true;
+        app.active_skill = Some("debug".to_string());
+        app.queued_messages.push("queued follow-up".to_string());
+        app.pending_images
+            .push(("image/png".to_string(), "abc".to_string()));
+        app.side_panel = crate::side_panel::SidePanelSnapshot {
+            focused_page_id: Some("goals".to_string()),
+            pages: vec![crate::side_panel::SidePanelPage {
+                id: "goals".to_string(),
+                title: "Goals".to_string(),
+                file_path: "".to_string(),
+                format: crate::side_panel::SidePanelPageFormat::Markdown,
+                source: crate::side_panel::SidePanelPageSource::Managed,
+                content: "goal details".to_string(),
+                updated_at_ms: 0,
+            }],
+        };
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "one".to_string(),
+                content: "Inspect context summary".to_string(),
+                status: "pending".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+            }],
+        )
+        .expect("save todos");
+
+        app.input = "/context".to_string();
+        app.submit_input();
+
+        let msg = app
+            .display_messages()
+            .last()
+            .expect("missing context report");
+        assert_eq!(msg.title.as_deref(), Some("Context"));
+        assert!(msg.content.contains("# Session Context"));
+        assert!(msg.content.contains("## Prompt / Context Composition"));
+        assert!(msg.content.contains("## Compaction"));
+        assert!(msg.content.contains("## Session State"));
+        assert!(msg.content.contains("## Todos"));
+        assert!(msg.content.contains("## Side Panel"));
+        assert!(msg.content.contains("Inspect context summary"));
+        assert!(msg.content.contains("active skill: debug"));
+        assert!(msg.content.contains("queue mode: on"));
+    });
 }
 
 #[test]

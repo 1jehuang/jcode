@@ -879,6 +879,9 @@ pub(super) fn draw_side_panel_markdown(
                 .add_modifier(ratatui::style::Modifier::BOLD),
         ));
         title_parts.push(Span::styled(" scroll ", Style::default().fg(dim_color())));
+        if focused {
+            title_parts.push(Span::styled(" h/l pan ", Style::default().fg(dim_color())));
+        }
     }
 
     let block = Block::default()
@@ -949,6 +952,7 @@ pub(super) fn draw_side_panel_markdown(
                 }
                 SidePanelImageRenderMode::ScrollableViewport { zoom_percent } => {
                     let scroll_y = visible_start.saturating_sub(image_start) as i32;
+                    let side_pane_scroll_x = app.diff_pane_scroll_x();
                     let scroll_x = mermaid::get_cached_png(placement.hash)
                         .map(|(_, width, _)| {
                             side_panel_viewport_scroll_x(
@@ -957,6 +961,7 @@ pub(super) fn draw_side_panel_markdown(
                                 zoom_percent,
                                 centered,
                                 mermaid::get_font_size(),
+                                side_pane_scroll_x,
                             )
                         })
                         .unwrap_or(0);
@@ -1231,8 +1236,9 @@ fn side_panel_viewport_scroll_x(
     zoom_percent: u8,
     centered: bool,
     font_size: Option<(u16, u16)>,
+    pan_x_cells: i32,
 ) -> i32 {
-    if !centered || img_w_px == 0 || area_width == 0 || zoom_percent == 0 {
+    if img_w_px == 0 || area_width == 0 || zoom_percent == 0 {
         return 0;
     }
 
@@ -1253,7 +1259,13 @@ fn side_panel_viewport_scroll_x(
         return 0;
     }
 
-    ((max_scroll_x_px / 2) / cell_w_px).min(i32::MAX as u32) as i32
+    let base_cells = if centered {
+        ((max_scroll_x_px / 2) / cell_w_px).min(i32::MAX as u32) as i32
+    } else {
+        0
+    };
+    let max_cells = (max_scroll_x_px / cell_w_px).min(i32::MAX as u32) as i32;
+    base_cells.saturating_add(pan_x_cells).clamp(0, max_cells)
 }
 
 fn fit_side_panel_image_area(area: Rect, img_w_px: u32, img_h_px: u32, centered: bool) -> Rect {
@@ -1456,6 +1468,17 @@ mod tests {
         assert_eq!(layout.render_mode, SidePanelImageRenderMode::Fit);
         assert_eq!(layout.rows, 20);
         assert!(!layout.render_mode.is_scrollable());
+    }
+
+    #[test]
+    fn side_panel_viewport_scroll_x_applies_horizontal_pan_around_center() {
+        let centered = side_panel_viewport_scroll_x(4000, 24, 70, true, Some((8, 16)), 0);
+        let panned_right = side_panel_viewport_scroll_x(4000, 24, 70, true, Some((8, 16)), 6);
+        let panned_left = side_panel_viewport_scroll_x(4000, 24, 70, true, Some((8, 16)), -6);
+
+        assert!(centered > 0, "expected oversized diagram to start centered");
+        assert!(panned_right > centered, "expected positive pan to move viewport right");
+        assert!(panned_left < centered, "expected negative pan to move viewport left");
     }
 
     #[test]

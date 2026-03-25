@@ -3602,6 +3602,9 @@ mod tests {
         fn diff_pane_scroll(&self) -> usize {
             0
         }
+        fn diff_pane_scroll_x(&self) -> i32 {
+            0
+        }
         fn diff_pane_focus(&self) -> bool {
             false
         }

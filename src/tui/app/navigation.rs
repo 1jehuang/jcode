@@ -97,10 +97,18 @@ impl App {
         self.diff_pane_focus = focus;
         self.diagram_focus = false;
         if focus {
-            self.set_status_notice("Focus: side pane (j/k scroll, Esc to return)");
+            if self.side_panel.focused_page().is_some() {
+                self.set_status_notice("Focus: side pane (j/k scroll, h/l pan diagrams, Esc to return)");
+            } else {
+                self.set_status_notice("Focus: side pane (j/k scroll, Esc to return)");
+            }
         } else {
             self.set_status_notice("Focus: chat");
         }
+    }
+
+    pub(super) fn pan_diff_pane_x(&mut self, dx: i32) {
+        self.diff_pane_scroll_x = self.diff_pane_scroll_x.saturating_add(dx).clamp(-4096, 4096);
     }
 
     pub(super) fn handle_diff_pane_focus_key(
@@ -139,6 +147,12 @@ impl App {
             KeyCode::Char('G') | KeyCode::End => {
                 self.diff_pane_scroll = usize::MAX;
                 self.diff_pane_auto_scroll = true;
+            }
+            KeyCode::Char('h') | KeyCode::Left if self.side_panel.focused_page().is_some() => {
+                self.pan_diff_pane_x(-4);
+            }
+            KeyCode::Char('l') | KeyCode::Right if self.side_panel.focused_page().is_some() => {
+                self.pan_diff_pane_x(4);
             }
             KeyCode::Esc => {
                 self.set_diff_pane_focus(false);
@@ -656,7 +670,10 @@ impl App {
             && self.diff_pane_visible()
             && matches!(
                 mouse.kind,
-                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                MouseEventKind::ScrollUp
+                    | MouseEventKind::ScrollDown
+                    | MouseEventKind::ScrollLeft
+                    | MouseEventKind::ScrollRight
             )
         {
             // Treat wheel scrolling over the shared right pane as hover-only.
@@ -678,6 +695,12 @@ impl App {
                     }
                     self.diff_pane_scroll = self.diff_pane_scroll.saturating_add(amt);
                     self.diff_pane_auto_scroll = false;
+                }
+                MouseEventKind::ScrollLeft if self.side_panel.focused_page().is_some() => {
+                    self.pan_diff_pane_x(-(amt as i32));
+                }
+                MouseEventKind::ScrollRight if self.side_panel.focused_page().is_some() => {
+                    self.pan_diff_pane_x(amt as i32);
                 }
                 _ => {}
             }

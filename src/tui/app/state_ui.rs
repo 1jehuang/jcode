@@ -1445,8 +1445,9 @@ impl App {
         let focused_before = self.side_panel.focused_page_id.clone();
         let focused_after = snapshot.focused_page_id.clone();
         self.side_panel = snapshot;
-        if focused_before != focused_after || self.diff_pane_scroll > 0 {
+        if focused_before != focused_after || self.diff_pane_scroll > 0 || self.diff_pane_scroll_x != 0 {
             self.diff_pane_scroll = 0;
+            self.diff_pane_scroll_x = 0;
             self.diff_pane_auto_scroll = true;
         }
     }

@@ -221,6 +221,8 @@ pub trait TuiState {
     fn diagram_zoom(&self) -> u8;
     /// Scroll offset for pinned diff pane (line index)
     fn diff_pane_scroll(&self) -> usize;
+    /// Horizontal pan offset for the shared right pane (side-panel diagrams)
+    fn diff_pane_scroll_x(&self) -> i32;
     /// Whether the pinned diff pane is focused
     fn diff_pane_focus(&self) -> bool;
     /// Session-scoped side panel state managed by the side_panel tool

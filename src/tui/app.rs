@@ -434,6 +434,7 @@ pub struct App {
     diagram_pane_dragging: bool,
     // Scroll offset for pinned diff pane
     diff_pane_scroll: usize,
+    diff_pane_scroll_x: i32,
     diff_pane_focus: bool,
     diff_pane_auto_scroll: bool,
     side_panel: crate::side_panel::SidePanelSnapshot,
