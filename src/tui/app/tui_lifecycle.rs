@@ -105,6 +105,9 @@ impl App {
         if session.model.is_none() {
             session.model = Some(provider.model());
         }
+        if session.provider_key.is_none() {
+            session.provider_key = crate::session::derive_session_provider_key(provider.name());
+        }
         let display = config().display.clone();
         let features = config().features.clone();
         let context_limit = provider.context_window() as u64;
@@ -305,6 +308,7 @@ impl App {
         let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
         let mut session = Session::create(None, None);
         session.model = Some(provider.model());
+        session.provider_key = crate::session::derive_session_provider_key(provider.name());
         let display = config().display.clone();
         let features = config().features.clone();
         let context_limit = provider.context_window() as u64;

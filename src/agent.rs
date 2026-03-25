@@ -388,6 +388,8 @@ impl Agent {
     pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
         let mut agent = Self::build_base(provider, registry, Session::create(None, None), None);
         agent.session.model = Some(agent.provider.model());
+        agent.session.provider_key =
+            crate::session::derive_session_provider_key(agent.provider.name());
         agent.seed_compaction_from_session();
         agent.log_env_snapshot("create");
         crate::telemetry::begin_session(&agent.provider.name(), &agent.provider.model());
@@ -401,6 +403,10 @@ impl Agent {
         allowed_tools: Option<HashSet<String>>,
     ) -> Self {
         let mut agent = Self::build_base(provider, registry, session, allowed_tools);
+        if agent.session.provider_key.is_none() {
+            agent.session.provider_key =
+                crate::session::derive_session_provider_key(agent.provider.name());
+        }
         if let Some(model) = agent.session.model.clone() {
             if let Err(e) = agent.provider.set_model(&model) {
                 logging::error(&format!(

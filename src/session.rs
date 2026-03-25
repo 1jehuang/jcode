@@ -224,6 +224,10 @@ pub struct Session {
     /// Provider-specific session ID (e.g., Claude Code CLI session for resume)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_session_id: Option<String>,
+    /// Stable provider/profile key for session-source filtering (e.g. "openai",
+    /// "opencode", "opencode-go").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_key: Option<String>,
     /// Model identifier for this session (e.g., "gpt-5.2-codex")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -283,6 +287,7 @@ struct SessionJournalMeta {
     updated_at: DateTime<Utc>,
     compaction: Option<StoredCompactionState>,
     provider_session_id: Option<String>,
+    provider_key: Option<String>,
     model: Option<String>,
     subagent_model: Option<String>,
     improve_mode: Option<SessionImproveMode>,
@@ -382,6 +387,41 @@ pub struct EnvSnapshot {
     pub working_git: Option<GitState>,
 }
 
+pub fn derive_session_provider_key(provider_name: &str) -> Option<String> {
+    let normalized_name = provider_name.trim().to_ascii_lowercase();
+    if normalized_name == "jcode" {
+        return Some("jcode".to_string());
+    }
+
+    if let Ok(namespace) = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE") {
+        let namespace = namespace.trim().to_ascii_lowercase();
+        if !namespace.is_empty() {
+            return Some(namespace);
+        }
+    }
+
+    if let Ok(active) = std::env::var("JCODE_ACTIVE_PROVIDER") {
+        let active = active.trim().to_ascii_lowercase();
+        if !active.is_empty() {
+            return Some(active);
+        }
+    }
+
+    let fallback = match normalized_name.as_str() {
+        "anthropic" | "claude" | "claude cli" => "claude",
+        "openai" => "openai",
+        "github copilot" | "copilot" => "copilot",
+        "openrouter" => "openrouter",
+        "cursor" => "cursor",
+        "gemini" => "gemini",
+        "antigravity" => "antigravity",
+        "" => return None,
+        other => other,
+    };
+
+    Some(fallback.to_string())
+}
+
 impl Session {
     fn journal_meta(&self) -> SessionJournalMeta {
         SessionJournalMeta {
@@ -390,6 +430,7 @@ impl Session {
             updated_at: self.updated_at,
             compaction: self.compaction.clone(),
             provider_session_id: self.provider_session_id.clone(),
+            provider_key: self.provider_key.clone(),
             model: self.model.clone(),
             subagent_model: self.subagent_model.clone(),
             improve_mode: self.improve_mode,
@@ -464,6 +505,7 @@ impl Session {
     fn metadata_requires_snapshot(prev: &SessionJournalMeta, current: &SessionJournalMeta) -> bool {
         prev.parent_id != current.parent_id
             || prev.title != current.title
+            || prev.provider_key != current.provider_key
             || prev.subagent_model != current.subagent_model
             || prev.improve_mode != current.improve_mode
             || prev.is_canary != current.is_canary
@@ -482,6 +524,7 @@ impl Session {
         self.updated_at = meta.updated_at;
         self.compaction = meta.compaction;
         self.provider_session_id = meta.provider_session_id;
+        self.provider_key = meta.provider_key;
         self.model = meta.model;
         self.subagent_model = meta.subagent_model;
         self.improve_mode = meta.improve_mode;
@@ -563,6 +606,7 @@ impl Session {
             messages: Vec::new(),
             compaction: None,
             provider_session_id: None,
+            provider_key: None,
             model: None,
             subagent_model: None,
             improve_mode: None,
@@ -600,6 +644,7 @@ impl Session {
             messages: Vec::new(),
             compaction: None,
             provider_session_id: None,
+            provider_key: None,
             model: None,
             subagent_model: None,
             improve_mode: None,
@@ -1570,6 +1615,31 @@ mod tests {
     }
 
     #[test]
+    fn test_save_persists_provider_key() {
+        let _env_lock = lock_env();
+        let temp_home = tempfile::Builder::new()
+            .prefix("jcode-session-provider-key-save-test-")
+            .tempdir()
+            .expect("create temp JCODE_HOME");
+        let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+        let mut session = Session::create_with_id(
+            "session_provider_key_persist_test".to_string(),
+            None,
+            Some("provider key persistence test".to_string()),
+        );
+        session.provider_key = Some("opencode".to_string());
+        session.model = Some("anthropic/claude-sonnet-4".to_string());
+
+        session.save().expect("save session with provider key");
+
+        let loaded = Session::load("session_provider_key_persist_test")
+            .expect("load saved session with provider key");
+        assert_eq!(loaded.provider_key.as_deref(), Some("opencode"));
+        assert_eq!(loaded.model.as_deref(), Some("anthropic/claude-sonnet-4"));
+    }
+
+    #[test]
     fn test_save_appends_journal_and_load_replays_it() {
         let _env_lock = lock_env();
         let temp_home = tempfile::Builder::new()
@@ -1906,6 +1976,7 @@ pub fn recover_crashed_sessions() -> Result<Vec<String>> {
         let mut new_session =
             Session::create_with_id(new_id.clone(), Some(old.id.clone()), old.title.clone());
         new_session.working_dir = old.working_dir.clone();
+        new_session.provider_key = old.provider_key.clone();
         new_session.model = old.model.clone();
         new_session.improve_mode = old.improve_mode;
         new_session.is_canary = old.is_canary;

@@ -42,6 +42,8 @@ pub struct SessionInfo {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub last_message_time: chrono::DateTime<chrono::Utc>,
     pub working_dir: Option<String>,
+    pub model: Option<String>,
+    pub provider_key: Option<String>,
     pub is_canary: bool,
     pub is_debug: bool,
     pub saved: bool,
@@ -276,6 +278,10 @@ struct SessionSummary {
     #[serde(default)]
     short_name: Option<String>,
     #[serde(default)]
+    provider_key: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
     is_canary: bool,
     #[serde(default)]
     is_debug: bool,
@@ -376,6 +382,10 @@ struct SessionJournalSummaryMeta {
     #[serde(default)]
     short_name: Option<String>,
     #[serde(default)]
+    provider_key: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
     is_canary: bool,
     #[serde(default)]
     is_debug: bool,
@@ -416,6 +426,8 @@ fn load_session_summary(path: &Path) -> Result<SessionSummary> {
                     summary.updated_at = entry.meta.updated_at;
                     summary.working_dir = entry.meta.working_dir;
                     summary.short_name = entry.meta.short_name;
+                    summary.provider_key = entry.meta.provider_key;
+                    summary.model = entry.meta.model;
                     summary.is_canary = entry.meta.is_canary;
                     summary.is_debug = entry.meta.is_debug;
                     summary.saved = entry.meta.saved;
@@ -562,6 +574,8 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
                 created_at: session.created_at,
                 last_message_time: session.updated_at,
                 working_dir: session.working_dir,
+                model: session.model,
+                provider_key: session.provider_key,
                 is_canary: session.is_canary,
                 is_debug: session.is_debug,
                 saved: session.saved,
@@ -708,6 +722,51 @@ enum PaneFocus {
     Preview,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionFilterMode {
+    All,
+    Saved,
+    ClaudeCode,
+    Codex,
+    Pi,
+    OpenCode,
+}
+
+impl SessionFilterMode {
+    fn next(self) -> Self {
+        match self {
+            Self::All => Self::Saved,
+            Self::Saved => Self::ClaudeCode,
+            Self::ClaudeCode => Self::Codex,
+            Self::Codex => Self::Pi,
+            Self::Pi => Self::OpenCode,
+            Self::OpenCode => Self::All,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::All => Self::OpenCode,
+            Self::Saved => Self::All,
+            Self::ClaudeCode => Self::Saved,
+            Self::Codex => Self::ClaudeCode,
+            Self::Pi => Self::Codex,
+            Self::OpenCode => Self::Pi,
+        }
+    }
+
+    fn label(self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            Self::Saved => Some("📌 saved"),
+            Self::ClaudeCode => Some("🧵 Claude Code"),
+            Self::Codex => Some("🧠 Codex"),
+            Self::Pi => Some("π Pi"),
+            Self::OpenCode => Some("◌ OpenCode"),
+        }
+    }
+}
+
 const PREVIEW_SCROLL_STEP: u16 = 3;
 const PREVIEW_PAGE_SCROLL: u16 = PREVIEW_SCROLL_STEP * 3;
 const SESSION_PAGE_STEP_COUNT: usize = 3;
@@ -757,8 +816,8 @@ pub struct SessionPicker {
     last_preview_area: Option<Rect>,
     /// Whether to show debug/test/canary sessions
     show_test_sessions: bool,
-    /// Whether to show only saved/bookmarked sessions
-    show_saved_only: bool,
+    /// Current list filter mode
+    filter_mode: SessionFilterMode,
     /// Search query for filtering sessions
     search_query: String,
     /// Whether we're in search input mode
@@ -799,7 +858,7 @@ impl SessionPicker {
             last_list_area: None,
             last_preview_area: None,
             show_test_sessions: false,
-            show_saved_only: false,
+            filter_mode: SessionFilterMode::All,
             search_query: String::new(),
             search_active: false,
             total_session_count,
@@ -859,7 +918,7 @@ impl SessionPicker {
             last_list_area: None,
             last_preview_area: None,
             show_test_sessions: false,
-            show_saved_only: false,
+            filter_mode: SessionFilterMode::All,
             search_query: String::new(),
             search_active: false,
             total_session_count,
@@ -1049,57 +1108,135 @@ impl SessionPicker {
         session.search_index.contains(&q)
     }
 
-    /// Rebuild the items list based on current filters (show_test_sessions, search_query, show_saved_only)
+    fn session_is_claude_code(session: &SessionInfo) -> bool {
+        session.id.starts_with("imported_cc_")
+    }
+
+    fn session_is_codex(session: &SessionInfo) -> bool {
+        session
+            .model
+            .as_deref()
+            .map(|model| model.to_ascii_lowercase().contains("codex"))
+            .unwrap_or(false)
+    }
+
+    fn session_is_pi(session: &SessionInfo) -> bool {
+        let provider_matches = session
+            .provider_key
+            .as_deref()
+            .map(|key| {
+                let key = key.to_ascii_lowercase();
+                key == "pi" || key.starts_with("pi-")
+            })
+            .unwrap_or(false);
+        let model_matches = session
+            .model
+            .as_deref()
+            .map(|model| {
+                let model = model.to_ascii_lowercase();
+                model == "pi"
+                    || model.starts_with("pi-")
+                    || model.starts_with("pi/")
+                    || model.contains("/pi-")
+            })
+            .unwrap_or(false);
+        provider_matches || model_matches
+    }
+
+    fn session_is_open_code(session: &SessionInfo) -> bool {
+        session
+            .provider_key
+            .as_deref()
+            .map(|key| {
+                let key = key.to_ascii_lowercase();
+                key == "opencode" || key == "opencode-go" || key.contains("opencode")
+            })
+            .unwrap_or(false)
+    }
+
+    fn session_matches_filter_mode(session: &SessionInfo, filter_mode: SessionFilterMode) -> bool {
+        match filter_mode {
+            SessionFilterMode::All => true,
+            SessionFilterMode::Saved => session.saved,
+            SessionFilterMode::ClaudeCode => Self::session_is_claude_code(session),
+            SessionFilterMode::Codex => Self::session_is_codex(session),
+            SessionFilterMode::Pi => Self::session_is_pi(session),
+            SessionFilterMode::OpenCode => Self::session_is_open_code(session),
+        }
+    }
+
+    fn collect_filtered_sessions(
+        &self,
+        session_visible: impl Fn(&SessionInfo) -> bool,
+    ) -> Vec<SessionInfo> {
+        let mut filtered = Vec::new();
+
+        if !self.all_server_groups.is_empty() {
+            for group in &self.all_server_groups {
+                for session in &group.sessions {
+                    if session_visible(session) {
+                        filtered.push(session.clone());
+                    }
+                }
+            }
+            for session in &self.all_orphan_sessions {
+                if session_visible(session) {
+                    filtered.push(session.clone());
+                }
+            }
+        } else {
+            for session in &self.all_sessions {
+                if session_visible(session) {
+                    filtered.push(session.clone());
+                }
+            }
+        }
+
+        filtered.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
+        filtered
+    }
+
+    /// Rebuild the items list based on current filters.
     fn rebuild_items(&mut self) {
         let show_test = self.show_test_sessions;
-        let show_saved_only = self.show_saved_only;
+        let filter_mode = self.filter_mode;
         let query = self.search_query.clone();
 
         let session_visible = |s: &SessionInfo| -> bool {
             (show_test || !s.is_debug)
                 && Self::session_matches_search(s, &query)
-                && (!show_saved_only || s.saved)
+                && Self::session_matches_filter_mode(s, filter_mode)
         };
 
         self.items.clear();
         self.sessions.clear();
         self.item_to_session.clear();
 
-        // In saved-only mode, show a flat list of saved sessions (no headers/grouping)
-        if show_saved_only {
-            let mut saved: Vec<SessionInfo> = Vec::new();
-
-            if !self.all_server_groups.is_empty() {
-                for group in &self.all_server_groups {
-                    for s in &group.sessions {
-                        if session_visible(s) {
-                            saved.push(s.clone());
-                        }
-                    }
-                }
-                for s in &self.all_orphan_sessions {
-                    if session_visible(s) {
-                        saved.push(s.clone());
-                    }
-                }
-            } else {
-                for s in &self.all_sessions {
-                    if session_visible(s) {
-                        saved.push(s.clone());
-                    }
-                }
-            }
-
-            saved.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
-
-            for session in saved {
+        if filter_mode != SessionFilterMode::All {
+            let filtered = self.collect_filtered_sessions(session_visible);
+            for session in filtered {
                 let session_idx = self.sessions.len();
                 self.sessions.push(session.clone());
                 self.items.push(PickerItem::Session(session));
                 self.item_to_session.push(Some(session_idx));
             }
 
-            self.hidden_test_count = 0;
+            self.hidden_test_count = if show_test {
+                0
+            } else {
+                self.all_server_groups
+                    .iter()
+                    .flat_map(|g| g.sessions.iter())
+                    .chain(self.all_orphan_sessions.iter())
+                    .chain(self.all_sessions.iter())
+                    .filter(|s| {
+                        s.is_debug
+                            && Self::session_matches_search(s, &query)
+                            && Self::session_matches_filter_mode(s, filter_mode)
+                    })
+                    .count()
+            };
+
             let first = self.item_to_session.iter().position(|x| x.is_some());
             self.list_state.select(first);
             self.scroll_offset = 0;
@@ -1107,7 +1244,6 @@ impl SessionPicker {
             return;
         }
 
-        // Collect all saved sessions across all sources and show them first
         let mut saved_sessions: Vec<SessionInfo> = Vec::new();
         let mut saved_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -1135,10 +1271,8 @@ impl SessionPicker {
             }
         }
 
-        // Sort saved sessions by last message time (most recent first)
         saved_sessions.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
 
-        // Insert saved section at the top
         if !saved_sessions.is_empty() {
             self.items.push(PickerItem::SavedHeader {
                 session_count: saved_sessions.len(),
@@ -1154,7 +1288,6 @@ impl SessionPicker {
         }
 
         if !self.all_server_groups.is_empty() {
-            // Grouped mode - skip saved sessions (already shown above)
             for group in &self.all_server_groups {
                 let visible: Vec<&SessionInfo> = group
                     .sessions
@@ -1201,7 +1334,6 @@ impl SessionPicker {
                 }
             }
         } else {
-            // Simple mode (no server grouping) - skip saved sessions
             for session in &self.all_sessions {
                 if session_visible(session) && !saved_ids.contains(&session.id) {
                     let session_idx = self.sessions.len();
@@ -1212,7 +1344,6 @@ impl SessionPicker {
             }
         }
 
-        // Update hidden debug count based on current search
         self.hidden_test_count = if show_test {
             0
         } else {
@@ -1225,7 +1356,6 @@ impl SessionPicker {
                 .count()
         };
 
-        // Select first selectable item
         let first = self.item_to_session.iter().position(|x| x.is_some());
         self.list_state.select(first);
         self.scroll_offset = 0;
@@ -1238,9 +1368,13 @@ impl SessionPicker {
         self.rebuild_items();
     }
 
-    /// Toggle saved-only filter
-    fn toggle_saved_only(&mut self) {
-        self.show_saved_only = !self.show_saved_only;
+    fn cycle_filter_mode(&mut self) {
+        self.filter_mode = self.filter_mode.next();
+        self.rebuild_items();
+    }
+
+    fn cycle_filter_mode_backwards(&mut self) {
+        self.filter_mode = self.filter_mode.previous();
         self.rebuild_items();
     }
 
@@ -1401,7 +1535,10 @@ impl SessionPicker {
                 self.toggle_test_sessions();
             }
             KeyCode::Char('s') => {
-                self.toggle_saved_only();
+                self.cycle_filter_mode();
+            }
+            KeyCode::Char('S') => {
+                self.cycle_filter_mode_backwards();
             }
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                 return Ok(OverlayAction::Close);
@@ -1677,9 +1814,9 @@ impl SessionPicker {
             Style::default().fg(rgb(120, 120, 120)),
         ));
 
-        if self.show_saved_only {
+        if let Some(label) = self.filter_mode.label() {
             title_parts.push(Span::styled(
-                "  📌 saved only",
+                format!("  {}", label),
                 Style::default().fg(rgb(255, 180, 100)),
             ));
         }
@@ -1703,10 +1840,8 @@ impl SessionPicker {
         // Help text on the right
         let help = if self.search_active {
             " type to filter, Esc cancel "
-        } else if self.show_saved_only {
-            " s all · / search · d show all · h/l focus · ↑↓ · Enter · q "
         } else {
-            " s saved · / search · d show all · h/l focus · ↑↓ · Enter · q "
+            " s next filter · S prev · d debug · / search · h/l focus · ↑↓ · Enter · q "
         };
 
         let BORDER_DIM: Color = rgb(70, 70, 70);
@@ -2334,7 +2469,10 @@ impl SessionPicker {
                                 self.toggle_test_sessions();
                             }
                             KeyCode::Char('s') => {
-                                self.toggle_saved_only();
+                                self.cycle_filter_mode();
+                            }
+                            KeyCode::Char('S') => {
+                                self.cycle_filter_mode_backwards();
                             }
                             code if self.handle_focus_navigation_key(code, key.modifiers) => {}
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -2455,6 +2593,8 @@ mod tests {
             created_at: now - ChronoDuration::minutes(5),
             last_message_time: now - ChronoDuration::minutes(1),
             working_dir,
+            model: None,
+            provider_key: None,
             is_canary,
             is_debug,
             saved: false,
@@ -2580,6 +2720,93 @@ mod tests {
         picker.search_query = "not-in-preview".to_string();
         picker.rebuild_items();
         assert!(picker.sessions.is_empty());
+    }
+
+    #[test]
+    fn test_filter_mode_cycles_through_requested_session_sources() {
+        let mut saved = make_session("session_saved", "saved", false, SessionStatus::Closed);
+        saved.saved = true;
+
+        let claude_code = make_session(
+            "imported_cc_demo",
+            "claude-code",
+            false,
+            SessionStatus::Closed,
+        );
+
+        let mut codex = make_session("session_codex", "codex", false, SessionStatus::Closed);
+        codex.model = Some("gpt-5.3-codex".to_string());
+
+        let mut pi = make_session("session_pi", "pi", false, SessionStatus::Closed);
+        pi.provider_key = Some("pi".to_string());
+
+        let mut opencode =
+            make_session("session_opencode", "opencode", false, SessionStatus::Closed);
+        opencode.provider_key = Some("opencode".to_string());
+
+        let mut picker = SessionPicker::new(vec![saved, claude_code, codex, pi, opencode]);
+
+        assert_eq!(picker.filter_mode, SessionFilterMode::All);
+        assert_eq!(picker.sessions.len(), 5);
+
+        picker.cycle_filter_mode();
+        assert_eq!(picker.filter_mode, SessionFilterMode::Saved);
+        assert_eq!(picker.sessions.len(), 1);
+        assert!(picker.sessions.iter().all(|session| session.saved));
+        assert_eq!(picker.items.len(), picker.sessions.len());
+
+        picker.cycle_filter_mode();
+        assert_eq!(picker.filter_mode, SessionFilterMode::ClaudeCode);
+        assert_eq!(picker.sessions.len(), 1);
+        assert!(
+            picker
+                .sessions
+                .iter()
+                .all(SessionPicker::session_is_claude_code)
+        );
+
+        picker.cycle_filter_mode();
+        assert_eq!(picker.filter_mode, SessionFilterMode::Codex);
+        assert_eq!(picker.sessions.len(), 1);
+        assert!(picker.sessions.iter().all(SessionPicker::session_is_codex));
+
+        picker.cycle_filter_mode();
+        assert_eq!(picker.filter_mode, SessionFilterMode::Pi);
+        assert_eq!(picker.sessions.len(), 1);
+        assert!(picker.sessions.iter().all(SessionPicker::session_is_pi));
+
+        picker.cycle_filter_mode();
+        assert_eq!(picker.filter_mode, SessionFilterMode::OpenCode);
+        assert_eq!(picker.sessions.len(), 1);
+        assert!(
+            picker
+                .sessions
+                .iter()
+                .all(SessionPicker::session_is_open_code)
+        );
+
+        picker.cycle_filter_mode();
+        assert_eq!(picker.filter_mode, SessionFilterMode::All);
+        assert_eq!(picker.sessions.len(), 5);
+    }
+
+    #[test]
+    fn test_filter_mode_keyboard_shortcuts_cycle_both_directions() {
+        let mut picker = SessionPicker::new(vec![make_session(
+            "session_saved",
+            "saved",
+            false,
+            SessionStatus::Closed,
+        )]);
+        picker
+            .handle_overlay_key(KeyCode::Char('s'), KeyModifiers::empty())
+            .unwrap();
+        assert_eq!(picker.filter_mode, SessionFilterMode::Saved);
+
+        picker
+            .handle_overlay_key(KeyCode::Char('S'), KeyModifiers::empty())
+            .unwrap();
+        assert_eq!(picker.filter_mode, SessionFilterMode::All);
     }
 
     #[test]
