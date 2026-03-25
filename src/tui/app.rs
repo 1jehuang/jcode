@@ -476,6 +476,8 @@ pub struct App {
     // Queue mode: if true, Enter during processing queues; if false, Enter queues to send next
     // Toggle with Ctrl+Tab or Ctrl+T
     queue_mode: bool,
+    // Automatically reload the remote server when a newer server binary is detected.
+    auto_server_reload: bool,
     // After an interrupt, wait one redraw before auto-dispatching queued followups so
     // the queued preview can render in the interrupted state first.
     pending_queued_dispatch: bool,

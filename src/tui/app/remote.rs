@@ -422,7 +422,43 @@ pub(super) async fn handle_terminal_event(
 
 #[cfg(test)]
 mod tests {
-    use super::{RemoteRunState, reload_handoff_active};
+    use super::{RemoteRunState, process_remote_followups, reload_handoff_active};
+    use crate::provider::Provider;
+    use anyhow::Result;
+    use std::sync::Arc;
+
+    struct MockProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for MockProvider {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            unimplemented!("Mock provider")
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self)
+        }
+    }
+
+    fn create_test_app() -> crate::tui::app::App {
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        let mut app = crate::tui::app::App::new(provider, registry);
+        app.queue_mode = false;
+        app.diff_mode = crate::config::DiffDisplayMode::Inline;
+        app
+    }
 
     #[test]
     fn reload_handoff_active_when_server_flag_is_set() {
@@ -437,6 +473,47 @@ mod tests {
     #[test]
     fn reload_handoff_inactive_without_flag_or_marker() {
         assert!(!reload_handoff_active(&RemoteRunState::default()));
+    }
+
+    #[test]
+    fn process_remote_followups_auto_reloads_server_by_default() {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+
+        app.pending_server_reload = true;
+        app.auto_server_reload = true;
+
+        rt.block_on(process_remote_followups(&mut app, &mut remote));
+
+        assert!(!app.pending_server_reload);
+        let last = app
+            .display_messages()
+            .last()
+            .expect("missing reload message");
+        assert_eq!(last.title.as_deref(), Some("Reload"));
+        assert!(last.content.contains("Reloading server with newer binary"));
+    }
+
+    #[test]
+    fn process_remote_followups_respects_disabled_auto_server_reload() {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+
+        app.pending_server_reload = true;
+        app.auto_server_reload = false;
+
+        rt.block_on(process_remote_followups(&mut app, &mut remote));
+
+        assert!(!app.pending_server_reload);
+        let last = app.display_messages().last().expect("missing info message");
+        assert_eq!(last.role, "system");
+        assert!(last.content.contains("display.auto_server_reload = false"));
     }
 }
 
@@ -1045,10 +1122,21 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
 
     if app.pending_server_reload && !app.is_processing {
         app.pending_server_reload = false;
-        app.push_display_message(DisplayMessage::system(
-            "ℹ Newer server binary detected. Automatic reload is disabled to avoid interrupting other attached clients. Use `/reload` manually when you're ready.".to_string(),
+        if app.auto_server_reload {
+            app.append_reload_message("Reloading server with newer binary...");
+            if let Err(err) = remote.reload().await {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to auto-reload server: {}. Use `/reload` to retry.",
+                    err
+                )));
+                app.set_status_notice("Server update available — auto reload failed");
+            }
+        } else {
+            app.push_display_message(DisplayMessage::system(
+                "ℹ Newer server binary detected. Auto-reload is disabled by `display.auto_server_reload = false`. Use `/reload` manually when you're ready.".to_string(),
             ));
-        app.set_status_notice("Server update available — manual /reload recommended");
+            app.set_status_notice("Server update available — manual /reload recommended");
+        }
     }
 
     if app.is_processing {

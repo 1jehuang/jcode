@@ -319,6 +319,8 @@ pub struct DisplayConfig {
     show_diffs: Option<bool>,
     /// Queue mode by default - wait until done before sending (default: false)
     pub queue_mode: bool,
+    /// Automatically reload the remote server when a newer server binary is detected (default: true)
+    pub auto_server_reload: bool,
     /// Capture mouse events (default: true). Enables scroll wheel but disables terminal selection.
     pub mouse_capture: bool,
     /// Enable debug socket for external control (default: false)
@@ -360,6 +362,7 @@ impl Default for DisplayConfig {
             show_diffs: None,
             pin_images: true,
             queue_mode: false,
+            auto_server_reload: true,
             mouse_capture: true,
             debug_socket: false,
             centered: true,
@@ -733,6 +736,11 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_QUEUE_MODE") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.queue_mode = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_AUTO_SERVER_RELOAD") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.auto_server_reload = parsed;
             }
         }
         if let Ok(v) = std::env::var("JCODE_MOUSE_CAPTURE") {
@@ -1167,6 +1175,9 @@ diff_line_wrap = true
 # Queue mode: wait until assistant is done before sending next message
 queue_mode = false
 
+# Automatically reload the remote server when a newer server binary is detected (default: true)
+auto_server_reload = true
+
 # Capture mouse events (enables scroll wheel; disables terminal text selection)
 mouse_capture = true
 
@@ -1349,6 +1360,7 @@ desktop_notifications = true
 - Pin images: {}
 - Diff line wrap: {}
 - Queue mode: {}
+- Auto server reload: {}
 - Mouse capture: {}
 - Debug socket: {}
 - Startup animation: {}
@@ -1434,6 +1446,7 @@ desktop_notifications = true
             self.display.pin_images,
             self.display.diff_line_wrap,
             self.display.queue_mode,
+            self.display.auto_server_reload,
             self.display.mouse_capture,
             self.display.debug_socket,
             self.display.startup_animation,
@@ -1588,10 +1601,33 @@ fn parse_env_list(raw: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::AmbientConfig;
+    use super::{AmbientConfig, Config, DisplayConfig};
 
     #[test]
     fn test_ambient_visible_defaults_to_true() {
         assert!(AmbientConfig::default().visible);
+    }
+
+    #[test]
+    fn test_display_auto_server_reload_defaults_to_true() {
+        assert!(DisplayConfig::default().auto_server_reload);
+    }
+
+    #[test]
+    fn test_env_override_auto_server_reload() {
+        let _guard = crate::storage::lock_test_env();
+        let prev = std::env::var_os("JCODE_AUTO_SERVER_RELOAD");
+        crate::env::set_var("JCODE_AUTO_SERVER_RELOAD", "false");
+
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+
+        assert!(!cfg.display.auto_server_reload);
+
+        if let Some(prev) = prev {
+            crate::env::set_var("JCODE_AUTO_SERVER_RELOAD", prev);
+        } else {
+            crate::env::remove_var("JCODE_AUTO_SERVER_RELOAD");
+        }
     }
 }
