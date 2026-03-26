@@ -17,6 +17,7 @@ Targets:
 Options:
   --cold                 Run cargo clean before timing the first run
   --touch <path>         Touch a source file before each timed run to simulate an edit
+  --edit <path>          Toggle a harmless text edit before each run (restored afterward)
   --runs <n>             Number of timed runs to execute (default: 1)
   --json                 Print per-run + summary data as JSON
   -h, --help             Show this help
@@ -24,6 +25,7 @@ Options:
 Examples:
   scripts/bench_compile.sh check
   scripts/bench_compile.sh check --runs 3 --touch src/server.rs
+  scripts/bench_compile.sh check --runs 3 --edit src/server.rs
   scripts/bench_compile.sh build -- --package jcode --bin test_api
   scripts/bench_compile.sh release-jcode --json
 USAGE
@@ -44,6 +46,7 @@ fi
 
 cold=0
 touch_path=""
+edit_path=""
 runs=1
 json_output=0
 extra_args=()
@@ -59,6 +62,14 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       touch_path="$2"
+      shift
+      ;;
+    --edit)
+      if [[ $# -lt 2 ]]; then
+        printf 'error: --edit requires a path\n' >&2
+        exit 1
+      fi
+      edit_path="$2"
       shift
       ;;
     --runs)
@@ -94,6 +105,11 @@ if ! [[ "$runs" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
+if [[ -n "$touch_path" && -n "$edit_path" ]]; then
+  printf 'error: --touch and --edit are mutually exclusive\n' >&2
+  exit 1
+fi
+
 case "$target" in
   check)
     cmd=(cargo check --quiet)
@@ -120,6 +136,25 @@ if [[ -n "$touch_path" ]] && [[ ! -e "$touch_path" ]]; then
   exit 1
 fi
 
+if [[ -n "$edit_path" ]] && [[ ! -f "$edit_path" ]]; then
+  printf 'error: edit path must be an existing file: %s\n' "$edit_path" >&2
+  exit 1
+fi
+
+edit_backup=""
+cleanup() {
+  if [[ -n "$edit_backup" && -n "$edit_path" && -f "$edit_backup" ]]; then
+    cp "$edit_backup" "$edit_path"
+    rm -f "$edit_backup"
+  fi
+}
+trap cleanup EXIT
+
+if [[ -n "$edit_path" ]]; then
+  edit_backup=$(mktemp)
+  cp "$edit_path" "$edit_backup"
+fi
+
 if [[ $cold -eq 1 ]]; then
   echo 'bench_compile: running cargo clean' >&2
   cargo clean
@@ -127,6 +162,7 @@ fi
 
 printf 'bench_compile: target=%s cold=%s runs=%s\n' "$target" "$cold" "$runs" >&2
 printf 'bench_compile: touch=%s\n' "${touch_path:-<none>}" >&2
+printf 'bench_compile: edit=%s\n' "${edit_path:-<none>}" >&2
 printf 'bench_compile: command=%s\n' "${cmd[*]}" >&2
 
 run_times=()
@@ -136,6 +172,21 @@ run_once() {
   if [[ -n "$touch_path" ]]; then
     echo "bench_compile: touching $touch_path (run $run_index/$runs)" >&2
     touch "$touch_path"
+  elif [[ -n "$edit_path" ]]; then
+    echo "bench_compile: editing $edit_path (run $run_index/$runs)" >&2
+    python3 - "$edit_backup" "$edit_path" "$run_index" <<'PY'
+from pathlib import Path
+import sys
+
+backup = Path(sys.argv[1]).read_bytes()
+target = Path(sys.argv[2])
+run_index = int(sys.argv[3])
+
+if run_index % 2 == 1:
+    target.write_bytes(backup + b"\n")
+else:
+    target.write_bytes(backup)
+PY
   fi
 
   local start_ns end_ns elapsed_ns elapsed_secs
@@ -170,7 +221,7 @@ for ((i = 1; i <= runs; i++)); do
   run_once "$i"
 done
 
-summary_json=$(python3 - "$target" "$cold" "$touch_path" "$runs" "${cmd[*]}" "${run_times[@]}" <<'PY'
+summary_json=$(python3 - "$target" "$cold" "$touch_path" "$edit_path" "$runs" "${cmd[*]}" "${run_times[@]}" <<'PY'
 import json
 import statistics
 import sys
@@ -178,13 +229,15 @@ import sys
 target = sys.argv[1]
 cold = sys.argv[2] == "1"
 touch = sys.argv[3]
-runs = int(sys.argv[4])
-command = sys.argv[5]
-times = [float(v) for v in sys.argv[6:]]
+edit = sys.argv[4]
+runs = int(sys.argv[5])
+command = sys.argv[6]
+times = [float(v) for v in sys.argv[7:]]
 summary = {
     "target": target,
     "cold": cold,
     "touch": touch or None,
+    "edit": edit or None,
     "runs": runs,
     "command": command,
     "times_seconds": times,
