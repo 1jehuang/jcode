@@ -431,6 +431,23 @@ pub fn open_goals_overview_for_session(
     )
 }
 
+pub fn refresh_goals_overview_for_session(
+    session_id: &str,
+    working_dir: Option<&Path>,
+) -> Result<Option<crate::side_panel::SidePanelSnapshot>> {
+    let snapshot = crate::side_panel::snapshot_for_session(session_id)?;
+    if !snapshot.pages.iter().any(|page| page.id == "goals") {
+        return Ok(None);
+    }
+
+    let focus = snapshot.focused_page_id.as_deref() == Some("goals");
+    Ok(Some(open_goals_overview_for_session(
+        session_id,
+        working_dir,
+        focus,
+    )?))
+}
+
 pub fn open_goal_for_session(
     session_id: &str,
     working_dir: Option<&Path>,
