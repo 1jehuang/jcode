@@ -427,8 +427,24 @@ if ($DownloadMode -eq "tar") {
     if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { Write-Err "cargo is required to build from source" }
 
     $SrcDir = Join-Path $TempDir "jcode-src"
-    git clone --depth 1 --branch $Version "https://github.com/$Repo.git" $SrcDir
-    if ($LASTEXITCODE -ne 0) { Write-Err "Failed to clone $Repo at $Version" }
+    Write-Info "Cloning $Repo at $Version..."
+    $gitCloneResult = Invoke-ProcessWithTimeout -FilePath "git" -ArgumentList @(
+        "clone",
+        "--depth", "1",
+        "--branch", $Version,
+        "https://github.com/$Repo.git",
+        $SrcDir
+    ) -TimeoutSeconds 600 -FriendlyName "git-clone" -CaptureOutput
+    if ($gitCloneResult.TimedOut) {
+        Write-LogTail -Path $gitCloneResult.StdoutPath -Label "git stdout"
+        Write-LogTail -Path $gitCloneResult.StderrPath -Label "git stderr"
+        Write-Err "git clone timed out after 600 seconds"
+    }
+    if ($gitCloneResult.ExitCode -ne 0) {
+        Write-LogTail -Path $gitCloneResult.StdoutPath -Label "git stdout"
+        Write-LogTail -Path $gitCloneResult.StderrPath -Label "git stderr"
+        Write-Err "Failed to clone $Repo at $Version (exit code: $($gitCloneResult.ExitCode))"
+    }
 
     Write-Info "Building jcode from source (this can take several minutes)..."
     $cargoResult = Invoke-ProcessWithTimeout -FilePath "cargo" -ArgumentList @("build", "--release", "--manifest-path", (Join-Path $SrcDir "Cargo.toml")) -TimeoutSeconds 1800 -FriendlyName "cargo-build" -CaptureOutput
