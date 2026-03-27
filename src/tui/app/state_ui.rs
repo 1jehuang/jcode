@@ -21,6 +21,105 @@ impl App {
         }
     }
 
+    pub(super) fn start_background_client_update(&mut self, session_id: String) {
+        if self.background_update_in_progress {
+            self.set_status_notice("Update already running");
+            self.append_reload_message("Update already running in the background...");
+            return;
+        }
+
+        self.background_update_in_progress = true;
+        self.pending_background_update_reload = None;
+        self.set_status_notice("Checking for updates...");
+        self.append_reload_message(
+            "Checking for updates in the background — jcode will reload when ready.",
+        );
+        crate::update::spawn_background_session_update(session_id);
+    }
+
+    pub(super) fn maybe_finish_background_update_reload(&mut self) {
+        if self.is_processing {
+            return;
+        }
+
+        let Some(session_id) = self.pending_background_update_reload.take() else {
+            return;
+        };
+
+        self.append_reload_message("Reloading client with updated binary...");
+        self.save_input_for_reload(&session_id);
+        self.reload_requested = Some(session_id);
+        self.should_quit = true;
+    }
+
+    pub(super) fn handle_session_update_status(&mut self, status: crate::bus::SessionUpdateStatus) {
+        use crate::bus::SessionUpdateStatus;
+
+        let Some(active_session_id) = self.active_client_session_id().map(str::to_string) else {
+            return;
+        };
+
+        match status {
+            SessionUpdateStatus::Status {
+                session_id,
+                message,
+            } => {
+                if session_id != active_session_id {
+                    return;
+                }
+                self.set_status_notice(message.clone());
+                self.append_reload_message(&message);
+            }
+            SessionUpdateStatus::NoUpdate {
+                session_id,
+                current,
+            } => {
+                if session_id != active_session_id {
+                    return;
+                }
+                self.background_update_in_progress = false;
+                self.pending_background_update_reload = None;
+                let message = format!("Already up to date ({})", current);
+                self.set_status_notice(&message);
+                self.append_reload_message(&message);
+            }
+            SessionUpdateStatus::ReadyToReload {
+                session_id,
+                version,
+            } => {
+                if session_id != active_session_id {
+                    return;
+                }
+                self.background_update_in_progress = false;
+                if self.is_processing {
+                    self.pending_background_update_reload = Some(session_id);
+                    self.set_status_notice("Update installed — will reload after current turn");
+                    self.append_reload_message(&format!(
+                        "✅ Updated to {}. Will reload after the current turn.",
+                        version
+                    ));
+                    return;
+                }
+
+                self.append_reload_message(&format!("✅ Updated to {}.", version));
+                self.pending_background_update_reload = Some(session_id);
+                self.maybe_finish_background_update_reload();
+            }
+            SessionUpdateStatus::Error {
+                session_id,
+                message,
+            } => {
+                if session_id != active_session_id {
+                    return;
+                }
+                self.background_update_in_progress = false;
+                self.pending_background_update_reload = None;
+                self.set_status_notice("Update failed");
+                self.push_display_message(DisplayMessage::error(message));
+            }
+        }
+    }
+
     pub(super) fn note_client_focus(&self) {
         if let Some(session_id) = self.active_client_session_id() {
             let _ = crate::dictation::remember_last_focused_session(session_id);
@@ -36,6 +135,9 @@ impl App {
     }
 
     pub fn push_display_message(&mut self, message: DisplayMessage) {
+        if self.try_coalesce_repeated_display_message(&message) {
+            return;
+        }
         let is_tool = message.role == "tool";
         self.display_messages.push(message);
         self.bump_display_messages_version();
@@ -92,6 +194,72 @@ impl App {
                 .title
                 .as_deref()
                 .is_some_and(|title| title == "Reload" || title.starts_with("Reload: "))
+    }
+
+    fn try_coalesce_repeated_display_message(&mut self, message: &DisplayMessage) -> bool {
+        if !Self::is_repeat_compactable_display_message(message) {
+            return false;
+        }
+
+        let Some(last) = self.display_messages.last_mut() else {
+            return false;
+        };
+        if !Self::is_repeat_compactable_display_message(last) {
+            return false;
+        }
+
+        let (last_base, last_count) = Self::split_repeat_suffix(&last.content);
+        if last.role != message.role
+            || last.title != message.title
+            || last.tool_calls != message.tool_calls
+            || last.duration_secs != message.duration_secs
+            || last_base != message.content
+        {
+            return false;
+        }
+
+        let next_count = last_count.saturating_add(1);
+        last.content = Self::format_repeated_display_content(message.content.as_str(), next_count);
+        self.bump_display_messages_version();
+        true
+    }
+
+    fn is_repeat_compactable_display_message(message: &DisplayMessage) -> bool {
+        matches!(message.role.as_str(), "system" | "error")
+            && message.title.is_none()
+            && message.tool_calls.is_empty()
+            && message.tool_data.is_none()
+            && message.duration_secs.is_none()
+            && !message.content.contains(['\n', '\r'])
+    }
+
+    fn split_repeat_suffix(content: &str) -> (&str, u32) {
+        const REPEAT_PREFIX: &str = " [×";
+
+        let Some(prefix_idx) = content.rfind(REPEAT_PREFIX) else {
+            return (content, 1);
+        };
+        if !content.ends_with(']') {
+            return (content, 1);
+        }
+
+        let digits = &content[prefix_idx + REPEAT_PREFIX.len()..content.len() - 1];
+        if digits.is_empty() || !digits.chars().all(|ch| ch.is_ascii_digit()) {
+            return (content, 1);
+        }
+
+        match digits.parse::<u32>() {
+            Ok(count) if count >= 2 => (&content[..prefix_idx], count),
+            _ => (content, 1),
+        }
+    }
+
+    fn format_repeated_display_content(content: &str, repeat_count: u32) -> String {
+        if repeat_count <= 1 {
+            content.to_string()
+        } else {
+            format!("{content} [×{repeat_count}]")
+        }
     }
 
     pub(super) fn clear_display_messages(&mut self) {
@@ -249,9 +417,19 @@ impl App {
             ("/model".into(), "List or switch models"),
             ("/subagent".into(), "Launch a subagent manually"),
             (
+                "/observe".into(),
+                "Show the latest tool context in the side panel",
+            ),
+            ("/btw".into(), "Ask a side question in the side panel"),
+            (
                 "/subagent-model".into(),
                 "Show/change subagent model policy",
             ),
+            (
+                "/autoreview".into(),
+                "Show/toggle automatic end-of-turn review",
+            ),
+            ("/review".into(), "Launch a one-shot headed review session"),
             ("/effort".into(), "Show/change reasoning effort (Alt+←/→)"),
             ("/fast".into(), "Toggle OpenAI/Codex fast mode"),
             (
@@ -415,6 +593,44 @@ impl App {
                     }),
             );
             return self.rank_suggestions(input, suggestions);
+        }
+
+        if prefix.starts_with("/autoreview ") {
+            return self.rank_suggestions(
+                input,
+                vec![
+                    (
+                        "/autoreview status".into(),
+                        "Show current autoreview status",
+                    ),
+                    ("/autoreview on".into(), "Enable end-of-turn autoreview"),
+                    ("/autoreview off".into(), "Disable end-of-turn autoreview"),
+                    ("/autoreview now".into(), "Launch a reviewer immediately"),
+                ],
+            );
+        }
+
+        if prefix_trimmed == "/autoreview" {
+            return vec![
+                (
+                    "/autoreview status".into(),
+                    "Show current autoreview status",
+                ),
+                ("/autoreview on".into(), "Enable end-of-turn autoreview"),
+                ("/autoreview off".into(), "Disable end-of-turn autoreview"),
+                ("/autoreview now".into(), "Launch a reviewer immediately"),
+            ];
+        }
+
+        if prefix.starts_with("/review ") {
+            return self.rank_suggestions(
+                input,
+                vec![("/review".into(), "Launch a one-shot review immediately")],
+            );
+        }
+
+        if prefix_trimmed == "/review" {
+            return vec![("/review".into(), "Launch a one-shot review immediately")];
         }
 
         if prefix_trimmed == "/subagent-model" {
@@ -902,6 +1118,8 @@ impl App {
             cmd.trim(),
             "/help"
                 | "/?"
+                | "/btw"
+                | "/observe"
                 | "/model"
                 | "/effort"
                 | "/fast"
@@ -943,7 +1161,7 @@ impl App {
     }
 
     pub fn is_processing(&self) -> bool {
-        self.is_processing
+        self.is_processing || self.split_launch_in_flight()
     }
 
     pub fn streaming_text(&self) -> &str {
@@ -1121,6 +1339,14 @@ impl App {
         self.last_stream_activity.map(|t| t.elapsed())
     }
 
+    pub(super) fn split_launch_in_flight(&self) -> bool {
+        self.is_remote
+            && !self.is_processing
+            && self
+                .pending_split_started_at
+                .is_some_and(|started_at| started_at.elapsed() < Duration::from_millis(350))
+    }
+
     pub fn streaming_tool_calls(&self) -> &[ToolCall] {
         &self.streaming_tool_calls
     }
@@ -1137,7 +1363,11 @@ impl App {
         if let Some(d) = self.replay_elapsed_override {
             return Some(d);
         }
-        self.processing_started.map(|t| t.elapsed())
+        self.processing_started.map(|t| t.elapsed()).or_else(|| {
+            self.split_launch_in_flight()
+                .then(|| self.pending_split_started_at.map(|t| t.elapsed()))
+                .flatten()
+        })
     }
 
     pub fn provider_name(&self) -> &str {
@@ -1303,6 +1533,26 @@ impl App {
         }
     }
 
+    pub(super) fn save_startup_message_for_session(session_id: &str, message: String) {
+        if message.trim().is_empty() {
+            return;
+        }
+        if let Ok(jcode_dir) = crate::storage::jcode_dir() {
+            let path = jcode_dir.join(format!("client-input-{}", session_id));
+            let data = serde_json::json!({
+                "cursor": 0,
+                "input": "",
+                "queued_messages": [],
+                "hidden_queued_system_messages": [message],
+                "interleave_message": serde_json::Value::Null,
+                "pending_soft_interrupts": [],
+                "rate_limit_pending_message": serde_json::Value::Null,
+                "rate_limit_reset_in_ms": serde_json::Value::Null,
+            });
+            let _ = std::fs::write(&path, data.to_string());
+        }
+    }
+
     pub(super) fn restore_input_for_reload(session_id: &str) -> Option<RestoredReloadInput> {
         let jcode_dir = crate::storage::jcode_dir().ok()?;
         let path = jcode_dir.join(format!("client-input-{}", session_id));
@@ -1461,26 +1711,77 @@ impl App {
         &mut self,
         snapshot: crate::side_panel::SidePanelSnapshot,
     ) {
+        let focus_observe = self.observe_mode_enabled
+            && self.side_panel.focused_page_id.as_deref() == Some(super::observe::OBSERVE_PAGE_ID);
+        let snapshot = if self.observe_mode_enabled {
+            self.decorate_side_panel_with_observe(snapshot, focus_observe)
+        } else {
+            snapshot
+        };
+        self.apply_side_panel_snapshot(snapshot);
+    }
+
+    pub(super) fn apply_side_panel_snapshot(
+        &mut self,
+        snapshot: crate::side_panel::SidePanelSnapshot,
+    ) {
         let focused_before = self.side_panel.focused_page_id.clone();
         let focused_after = snapshot.focused_page_id.clone();
+        let focused_changed = focused_before != focused_after;
         let focused_title_after = snapshot.focused_page().map(|page| page.title.clone());
+        if let Some(focused_after) = focused_after.as_deref() {
+            if focused_after != super::observe::OBSERVE_PAGE_ID {
+                self.last_side_panel_focus_id = Some(focused_after.to_string());
+            }
+        } else if snapshot.pages.is_empty() {
+            self.last_side_panel_focus_id = None;
+        }
+        self.last_side_panel_refresh = None;
         self.side_panel = snapshot;
-        if focused_before != focused_after
-            || self.diff_pane_scroll > 0
-            || self.diff_pane_scroll_x != 0
-        {
+        if focused_changed {
             self.diff_pane_scroll = 0;
             self.diff_pane_scroll_x = 0;
             self.diff_pane_auto_scroll = true;
         }
-        if focused_before != focused_after {
+        if focused_changed {
             match (focused_after.as_deref(), focused_title_after.as_deref()) {
+                (Some(super::observe::OBSERVE_PAGE_ID), _) => self.set_status_notice("Observe"),
                 (Some("goals"), _) => self.set_status_notice("Goals"),
                 (Some(id), Some(title)) if id.starts_with("goal.") => self.set_status_notice(title),
                 _ => {}
             }
         }
         self.sync_diagram_fit_context();
+        self.prewarm_focused_side_panel();
+    }
+
+    pub(super) fn refresh_side_panel_linked_content_if_due(&mut self) {
+        const SIDE_PANEL_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+
+        let should_refresh = self
+            .side_panel
+            .focused_page()
+            .map(|page| page.source == crate::side_panel::SidePanelPageSource::LinkedFile)
+            .unwrap_or(false);
+
+        if !should_refresh {
+            self.last_side_panel_refresh = None;
+            return;
+        }
+
+        let now = Instant::now();
+        if self
+            .last_side_panel_refresh
+            .is_some_and(|last| now.duration_since(last) < SIDE_PANEL_REFRESH_INTERVAL)
+        {
+            return;
+        }
+
+        self.last_side_panel_refresh = Some(now);
+        if crate::side_panel::refresh_linked_page_content(&mut self.side_panel, None) {
+            self.sync_diagram_fit_context();
+            self.prewarm_focused_side_panel();
+        }
     }
 
     pub(super) fn toggle_typing_scroll_lock(&mut self) {
@@ -1501,10 +1802,27 @@ impl App {
             "Left-aligned"
         };
         self.set_status_notice(format!("Layout: {}", mode));
+        self.prewarm_focused_side_panel();
     }
 
     pub fn set_centered(&mut self, centered: bool) {
         self.centered = centered;
+        self.prewarm_focused_side_panel();
+    }
+
+    fn prewarm_focused_side_panel(&self) {
+        let Ok((terminal_width, terminal_height)) = crossterm::terminal::size() else {
+            return;
+        };
+        let has_protocol = crate::tui::mermaid::protocol_type().is_some();
+        let _ = crate::tui::prewarm_focused_side_panel(
+            &self.side_panel,
+            terminal_width,
+            terminal_height,
+            self.diagram_pane_ratio,
+            has_protocol,
+            self.centered,
+        );
     }
 
     // ==================== Debug Socket Methods ====================

@@ -453,6 +453,7 @@ impl App {
             // selfdev are not known to the SDK and need to be executed locally.
             for tc in tool_calls {
                 self.status = ProcessingStatus::RunningTool(tc.name.clone());
+                self.observe_tool_call(&tc);
                 if matches!(tc.name.as_str(), "memory") {
                     crate::memory::set_state(crate::tui::info_widget::MemoryState::Embedding);
                 }
@@ -537,7 +538,7 @@ impl App {
                     .find(|dm| dm.tool_data.as_ref().map(|td| &td.id) == Some(&tc.id))
                 {
                     dm.content = output.clone();
-                    dm.title = tool_title;
+                    dm.title = tool_title.clone();
                 }
 
                 self.add_provider_message(Message::tool_result_with_duration(
@@ -555,6 +556,7 @@ impl App {
                     }],
                     tool_duration_ms,
                 );
+                self.observe_tool_result(&tc, &output, is_error, tool_title.as_deref());
                 let _ = self.session.save();
             }
         }
@@ -1294,6 +1296,7 @@ impl App {
             // SDK may have executed some tools, but custom tools need local execution
             for tc in tool_calls {
                 self.status = ProcessingStatus::RunningTool(tc.name.clone());
+                self.observe_tool_call(&tc);
                 if matches!(tc.name.as_str(), "memory") {
                     crate::memory::set_state(crate::tui::info_widget::MemoryState::Embedding);
                 }
@@ -1330,6 +1333,8 @@ impl App {
                         dm.title = None;
                     }
 
+                    self.observe_tool_result(&tc, &sdk_content, sdk_is_error, None);
+
                     self.add_provider_message(Message {
                         role: Role::User,
                         content: vec![ContentBlock::ToolResult {
@@ -1343,7 +1348,7 @@ impl App {
                     self.session.add_message(
                         Role::User,
                         vec![ContentBlock::ToolResult {
-                            tool_use_id: tc.id,
+                            tool_use_id: tc.id.clone(),
                             content: String::new(), // Already added to messages above
                             is_error: if sdk_is_error { Some(true) } else { None },
                         }],
@@ -1522,7 +1527,7 @@ impl App {
                     .find(|dm| dm.tool_data.as_ref().map(|td| &td.id) == Some(&tc.id))
                 {
                     dm.content = output.clone();
-                    dm.title = tool_title;
+                    dm.title = tool_title.clone();
                 }
 
                 self.add_provider_message(Message::tool_result_with_duration(
@@ -1540,10 +1545,12 @@ impl App {
                     }],
                     Some(tool_duration_ms),
                 );
+                self.observe_tool_result(&tc, &output, is_error, tool_title.as_deref());
                 let _ = self.session.save();
             }
         }
 
+        super::commands::maybe_trigger_autoreview_local(self);
         Ok(())
     }
 

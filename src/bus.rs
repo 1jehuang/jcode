@@ -188,6 +188,14 @@ pub enum UpdateStatus {
 }
 
 #[derive(Clone, Debug)]
+pub enum SessionUpdateStatus {
+    Status { session_id: String, message: String },
+    NoUpdate { session_id: String, current: String },
+    ReadyToReload { session_id: String, version: String },
+    Error { session_id: String, message: String },
+}
+
+#[derive(Clone, Debug)]
 pub enum BusEvent {
     ToolUpdated(ToolEvent),
     TodoUpdated(TodoEvent),
@@ -206,6 +214,8 @@ pub enum BusEvent {
     InputShellCompleted(InputShellCompleted),
     /// Update check status from background thread
     UpdateStatus(UpdateStatus),
+    /// Interactive client update status for a specific session
+    SessionUpdateStatus(SessionUpdateStatus),
     /// External dictation command completed with transcript text
     DictationCompleted {
         text: String,

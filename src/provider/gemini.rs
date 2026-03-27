@@ -16,8 +16,8 @@ pub use jcode_provider_gemini::{
     google_cloud_project_from_env, ineligible_or_project_error, is_gemini_model_id,
     load_code_assist_request, merge_gemini_model_lists, validate_load_code_assist_response,
 };
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;

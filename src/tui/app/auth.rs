@@ -801,6 +801,13 @@ impl App {
         ));
     }
 
+    fn should_open_inline_account_picker(&self, provider_filter: Option<&str>) -> bool {
+        provider_filter.is_none()
+            || self
+                .inline_account_picker_scope_key(provider_filter)
+                .is_some()
+    }
+
     pub(super) fn inline_account_picker_scope_key(
         &self,
         provider_filter: Option<&str>,
@@ -1067,6 +1074,30 @@ impl App {
             effort: None,
         });
 
+        models.push(crate::tui::ModelEntry {
+            name: "account center".to_string(),
+            routes: vec![crate::tui::RouteOption {
+                provider: "Accounts".to_string(),
+                api_method: "manage".to_string(),
+                available: true,
+                detail: "settings, defaults, and other providers".to_string(),
+                estimated_reference_cost_micros: None,
+            }],
+            selection: crate::tui::PickerSelection::Account(
+                crate::tui::AccountPickerSelection::OpenCenter {
+                    provider_filter: None,
+                },
+            ),
+            selected_route: 0,
+            is_current: false,
+            is_default: false,
+            recommended: false,
+            recommendation_rank: usize::MAX,
+            old: false,
+            created_date: None,
+            effort: None,
+        });
+
         if models.is_empty() {
             selected = 0;
         }
@@ -1189,6 +1220,30 @@ impl App {
             effort: None,
         });
 
+        models.push(crate::tui::ModelEntry {
+            name: "account center".to_string(),
+            routes: vec![crate::tui::RouteOption {
+                provider: "Claude".to_string(),
+                api_method: "manage".to_string(),
+                available: true,
+                detail: "full Claude account center and settings".to_string(),
+                estimated_reference_cost_micros: None,
+            }],
+            selection: crate::tui::PickerSelection::Account(
+                crate::tui::AccountPickerSelection::OpenCenter {
+                    provider_filter: Some("claude".to_string()),
+                },
+            ),
+            selected_route: 0,
+            is_current: false,
+            is_default: false,
+            recommended: false,
+            recommendation_rank: usize::MAX,
+            old: false,
+            created_date: None,
+            effort: None,
+        });
+
         if accounts.is_empty() {
             selected = 0;
         }
@@ -1299,6 +1354,30 @@ impl App {
                 crate::tui::AccountPickerSelection::Replace {
                     provider_id: "openai".to_string(),
                     label: replace_target,
+                },
+            ),
+            selected_route: 0,
+            is_current: false,
+            is_default: false,
+            recommended: false,
+            recommendation_rank: usize::MAX,
+            old: false,
+            created_date: None,
+            effort: None,
+        });
+
+        models.push(crate::tui::ModelEntry {
+            name: "account center".to_string(),
+            routes: vec![crate::tui::RouteOption {
+                provider: "OpenAI".to_string(),
+                api_method: "manage".to_string(),
+                available: true,
+                detail: "full OpenAI account center and settings".to_string(),
+                estimated_reference_cost_micros: None,
+            }],
+            selection: crate::tui::PickerSelection::Account(
+                crate::tui::AccountPickerSelection::OpenCenter {
+                    provider_filter: Some("openai".to_string()),
                 },
             ),
             selected_route: 0,
@@ -3488,7 +3567,11 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
 fn execute_account_command_local(app: &mut App, command: AccountCommand) {
     match command {
         AccountCommand::OpenOverlay { provider_filter } => {
-            app.open_account_center(provider_filter.as_deref())
+            if app.should_open_inline_account_picker(provider_filter.as_deref()) {
+                app.open_account_picker(provider_filter.as_deref())
+            } else {
+                app.open_account_center(provider_filter.as_deref())
+            }
         }
         AccountCommand::ShowSettings { provider_id } => app.push_display_message(
             DisplayMessage::system(render_provider_settings_markdown(app, &provider_id)),
@@ -3557,6 +3640,13 @@ async fn execute_account_command_remote(
     remote: &mut crate::tui::backend::RemoteConnection,
 ) -> anyhow::Result<()> {
     match command {
+        AccountCommand::OpenOverlay { provider_filter } => {
+            if app.should_open_inline_account_picker(provider_filter.as_deref()) {
+                app.open_account_picker(provider_filter.as_deref());
+            } else {
+                app.open_account_center(provider_filter.as_deref());
+            }
+        }
         AccountCommand::Switch { provider_id, label } => match provider_id.as_str() {
             "claude" => {
                 if let Err(e) = crate::auth::claude::set_active_account(&label) {

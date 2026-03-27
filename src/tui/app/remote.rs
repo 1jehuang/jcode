@@ -15,6 +15,7 @@ use crossterm::event::{
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use std::time::{Duration, Instant};
+use tokio::time::MissedTickBehavior;
 
 #[derive(Default)]
 pub(super) struct RemoteRunState {
@@ -82,6 +83,12 @@ fn reconnect_status_message(app: &App, state: &RemoteRunState, detail: &str) -> 
         detail,
         resume_hint,
     )
+}
+
+fn disconnected_redraw_interval() -> tokio::time::Interval {
+    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    interval
 }
 
 pub(super) enum ConnectOutcome {
@@ -400,7 +407,8 @@ pub(super) async fn handle_terminal_event(
                             }
                         }
                         crate::tui::AccountPickerSelection::Add { .. }
-                        | crate::tui::AccountPickerSelection::Replace { .. } => {}
+                        | crate::tui::AccountPickerSelection::Replace { .. }
+                        | crate::tui::AccountPickerSelection::OpenCenter { .. } => {}
                     }
                 }
             }
@@ -579,7 +587,23 @@ pub(super) async fn connect_with_retry(
     state: &mut RemoteRunState,
     session_to_resume: Option<&str>,
 ) -> Result<ConnectOutcome> {
-    match RemoteConnection::connect_with_session(session_to_resume).await {
+    let connect = RemoteConnection::connect_with_session(session_to_resume);
+    tokio::pin!(connect);
+    let mut redraw = disconnected_redraw_interval();
+
+    match loop {
+        tokio::select! {
+            result = &mut connect => break result,
+            _ = redraw.tick() => {
+                terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
+            }
+            event = event_stream.next() => {
+                if handle_terminal_event_while_disconnected(app, terminal, event)? {
+                    return Ok(ConnectOutcome::Quit);
+                }
+            }
+        }
+    } {
         Ok(remote) => {
             crate::logging::info(&format!(
                 "[TIMING] remote bootstrap: connected after {}ms (resume={:?}, reconnect_attempts={})",
@@ -701,9 +725,13 @@ pub(super) async fn connect_with_retry(
                         ));
                         let wait = crate::server::wait_for_reload_handoff_event(pid, &socket_path);
                         tokio::pin!(wait);
+                        let mut redraw = disconnected_redraw_interval();
                         loop {
                             tokio::select! {
                                 _ = &mut wait => break,
+                                _ = redraw.tick() => {
+                                    terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
+                                }
                                 event = event_stream.next() => {
                                     if handle_terminal_event_while_disconnected(
                                         app,
@@ -733,9 +761,13 @@ pub(super) async fn connect_with_retry(
                 };
                 let sleep = tokio::time::sleep(backoff);
                 tokio::pin!(sleep);
+                let mut redraw = disconnected_redraw_interval();
                 loop {
                     tokio::select! {
                         _ = &mut sleep => break,
+                        _ = redraw.tick() => {
+                            terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
+                        }
                         event = event_stream.next() => {
                             if handle_terminal_event_while_disconnected(
                                 app,
@@ -1168,6 +1200,32 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         }
     }
 
+    if app.pending_split_request && !app.is_processing {
+        app.pending_split_request = false;
+        let flow_label = app
+            .pending_split_label
+            .clone()
+            .unwrap_or_else(|| "Split".to_string());
+        begin_remote_split_launch(app, &flow_label);
+        if let Err(error) = remote.split().await {
+            finish_remote_split_launch(app);
+            let had_startup = app.pending_split_startup_message.take().is_some();
+            let label = app.pending_split_label.take();
+            app.pending_split_model_override = None;
+            app.pending_split_provider_key_override = None;
+            let flow_label = label.unwrap_or(flow_label);
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to launch {} session: {}",
+                flow_label.to_lowercase(),
+                error
+            )));
+            if had_startup {
+                app.set_status_notice(format!("{} launch failed", flow_label));
+            }
+        }
+        return;
+    }
+
     if app.is_processing {
         if let Some(interleave_msg) = app.interleave_message.take() {
             if !interleave_msg.trim().is_empty() {
@@ -1421,8 +1479,42 @@ pub(super) async fn begin_remote_send(
         retry_attempts,
         retry_at: None,
     });
+    app.autoreview_after_current_turn = !is_system;
     remote.reset_call_output_tokens_seen();
     Ok(msg_id)
+}
+
+fn begin_remote_split_launch(app: &mut App, label: &str) {
+    app.is_processing = true;
+    app.status = ProcessingStatus::Sending;
+    let started_at = Instant::now();
+    app.pending_split_started_at = Some(started_at);
+    app.processing_started = Some(started_at);
+    app.last_stream_activity = Some(started_at);
+    app.streaming_tps_start = None;
+    app.streaming_tps_elapsed = Duration::ZERO;
+    app.streaming_total_output_tokens = 0;
+    app.thought_line_inserted = false;
+    app.thinking_prefix_emitted = false;
+    app.thinking_buffer.clear();
+    app.current_message_id = None;
+    app.set_status_notice(format!("{} launching", label));
+}
+
+fn finish_remote_split_launch(app: &mut App) {
+    if !app.is_processing || app.current_message_id.is_some() {
+        return;
+    }
+    if !matches!(app.status, ProcessingStatus::Sending) {
+        return;
+    }
+    app.is_processing = false;
+    app.status = ProcessingStatus::Idle;
+    app.processing_started = None;
+    app.last_stream_activity = None;
+    app.streaming_tps_start = None;
+    app.streaming_tps_elapsed = Duration::ZERO;
+    app.current_message_id = None;
 }
 
 fn set_transcript_input(app: &mut App, text: String) {
@@ -1881,6 +1973,8 @@ pub(super) fn handle_server_event(
                         app.push_turn_footer(duration);
                     }
                     crate::tui::mermaid::clear_streaming_preview_diagram();
+                    let should_autoreview = app.autoreview_after_current_turn;
+                    app.autoreview_after_current_turn = false;
                     app.is_processing = false;
                     app.status = ProcessingStatus::Idle;
                     app.processing_started = None;
@@ -1893,6 +1987,9 @@ pub(super) fn handle_server_event(
                     app.thinking_buffer.clear();
                     remote.clear_pending();
                     remote.reset_call_output_tokens_seen();
+                    if should_autoreview {
+                        super::commands::queue_autoreview_remote(app);
+                    }
                 }
             }
             false
@@ -2002,6 +2099,7 @@ pub(super) fn handle_server_event(
             provider_name,
             provider_model,
             subagent_model,
+            autoreview_enabled,
             available_models,
             available_model_routes,
             mcp_servers,
@@ -2078,6 +2176,9 @@ pub(super) fn handle_server_event(
             }
             app.clear_remote_startup_phase();
             app.session.subagent_model = subagent_model;
+            app.session.autoreview_enabled = autoreview_enabled;
+            app.autoreview_enabled =
+                autoreview_enabled.unwrap_or(crate::config::config().autoreview.enabled);
             if upstream_provider.is_some() {
                 app.upstream_provider = upstream_provider;
             }
@@ -2497,6 +2598,21 @@ pub(super) fn handle_server_event(
             new_session_name,
             ..
         } => {
+            finish_remote_split_launch(app);
+            app.pending_split_request = false;
+            let startup_message = app.pending_split_startup_message.take();
+            let model_override = app.pending_split_model_override.take();
+            let provider_key_override = app.pending_split_provider_key_override.take();
+            let split_label = app.pending_split_label.take();
+            if let Some(startup_message) = startup_message {
+                super::commands::prepare_review_spawned_session(
+                    &new_session_id,
+                    startup_message,
+                    model_override,
+                    provider_key_override,
+                    split_label.clone().map(|label| label.to_ascii_lowercase()),
+                );
+            }
             let exe = std::env::current_exe().unwrap_or_default();
             let cwd = crate::session::Session::load(&new_session_id)
                 .ok()
@@ -2508,23 +2624,47 @@ pub(super) fn handle_server_event(
             let socket = std::env::var("JCODE_SOCKET").ok();
             match spawn_in_new_terminal(&exe, &new_session_id, &cwd, socket.as_deref()) {
                 Ok(true) => {
-                    app.push_display_message(DisplayMessage::system(format!(
-                        "✂ Split → **{}** (opened in new window)",
-                        new_session_name,
-                    )));
-                    app.set_status_notice(format!("Split → {}", new_session_name));
+                    if let Some(label) = split_label.as_deref() {
+                        app.push_display_message(DisplayMessage::system(format!(
+                            "🔍 {} launched in **{}**.",
+                            label, new_session_name,
+                        )));
+                        app.set_status_notice(format!("{} launched", label));
+                    } else {
+                        app.push_display_message(DisplayMessage::system(format!(
+                            "✂ Split → **{}** (opened in new window)",
+                            new_session_name,
+                        )));
+                        app.set_status_notice(format!("Split → {}", new_session_name));
+                    }
                 }
                 Ok(false) => {
-                    app.push_display_message(DisplayMessage::system(format!(
-                        "✂ Split → **{}**\n\nNo terminal found. Resume manually:\n```\njcode --resume {}\n```",
-                        new_session_name, new_session_id,
-                    )));
+                    if let Some(label) = split_label.as_deref() {
+                        app.push_display_message(DisplayMessage::system(format!(
+                            "🔍 {} session **{}** created.\n\nNo terminal found. Resume manually:\n```\njcode --resume {}\n```",
+                            label, new_session_name, new_session_id,
+                        )));
+                        app.set_status_notice(format!("{} session created", label));
+                    } else {
+                        app.push_display_message(DisplayMessage::system(format!(
+                            "✂ Split → **{}**\n\nNo terminal found. Resume manually:\n```\njcode --resume {}\n```",
+                            new_session_name, new_session_id,
+                        )));
+                    }
                 }
                 Err(e) => {
-                    app.push_display_message(DisplayMessage::error(format!(
-                        "Split created **{}** but failed to open window: {}\n\nResume manually: `jcode --resume {}`",
-                        new_session_name, e, new_session_id,
-                    )));
+                    if let Some(label) = split_label.as_deref() {
+                        app.push_display_message(DisplayMessage::error(format!(
+                            "{} session **{}** was created but failed to open a window: {}\n\nResume manually: `jcode --resume {}`",
+                            label, new_session_name, e, new_session_id,
+                        )));
+                        app.set_status_notice(format!("{} open failed", label));
+                    } else {
+                        app.push_display_message(DisplayMessage::error(format!(
+                            "Split created **{}** but failed to open window: {}\n\nResume manually: `jcode --resume {}`",
+                            new_session_name, e, new_session_id,
+                        )));
+                    }
                 }
             }
             false
@@ -3634,6 +3774,117 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
+                if trimmed == "/autoreview" || trimmed == "/autoreview status" {
+                    app.push_display_message(DisplayMessage::system(
+                        super::commands::autoreview_status_message(app),
+                    ));
+                    return Ok(());
+                }
+
+                if trimmed == "/autoreview on" {
+                    remote
+                        .set_feature(crate::protocol::FeatureToggle::Autoreview, true)
+                        .await?;
+                    app.set_autoreview_feature_enabled(true);
+                    app.set_status_notice("Autoreview: ON");
+                    app.push_display_message(DisplayMessage::system(
+                        "Autoreview enabled for this session.".to_string(),
+                    ));
+                    return Ok(());
+                }
+
+                if trimmed == "/autoreview off" {
+                    remote
+                        .set_feature(crate::protocol::FeatureToggle::Autoreview, false)
+                        .await?;
+                    app.set_autoreview_feature_enabled(false);
+                    app.set_status_notice("Autoreview: OFF");
+                    app.push_display_message(DisplayMessage::system(
+                        "Autoreview disabled for this session.".to_string(),
+                    ));
+                    return Ok(());
+                }
+
+                if trimmed == "/autoreview now" {
+                    super::commands::queue_review_spawn_remote(
+                        app,
+                        "Autoreview",
+                        super::commands::build_autoreview_startup_message(
+                            super::commands::active_session_id(app).as_str(),
+                        ),
+                        crate::config::config().autoreview.model.clone(),
+                        None,
+                    );
+                    if app.is_processing {
+                        app.set_status_notice("Autoreview queued");
+                    } else {
+                        app.pending_split_request = false;
+                        begin_remote_split_launch(app, "Autoreview");
+                        if let Err(error) = remote.split().await {
+                            finish_remote_split_launch(app);
+                            app.pending_split_startup_message = None;
+                            app.pending_split_model_override = None;
+                            app.pending_split_provider_key_override = None;
+                            app.pending_split_label = None;
+                            app.push_display_message(DisplayMessage::error(format!(
+                                "Failed to launch autoreview session: {}",
+                                error
+                            )));
+                            app.set_status_notice("Autoreview launch failed");
+                        }
+                    }
+                    return Ok(());
+                }
+
+                if trimmed == "/review" {
+                    let (model_override, provider_key_override) =
+                        super::commands::preferred_one_shot_review_override()
+                            .map(|(model, provider_key)| (Some(model), Some(provider_key)))
+                            .unwrap_or_else(|| {
+                                (crate::config::config().autoreview.model.clone(), None)
+                            });
+                    super::commands::queue_review_spawn_remote(
+                        app,
+                        "Review",
+                        super::commands::build_review_startup_message(
+                            super::commands::active_session_id(app).as_str(),
+                        ),
+                        model_override,
+                        provider_key_override,
+                    );
+                    if app.is_processing {
+                        app.set_status_notice("Review queued");
+                    } else {
+                        app.pending_split_request = false;
+                        begin_remote_split_launch(app, "Review");
+                        if let Err(error) = remote.split().await {
+                            finish_remote_split_launch(app);
+                            app.pending_split_startup_message = None;
+                            app.pending_split_model_override = None;
+                            app.pending_split_provider_key_override = None;
+                            app.pending_split_label = None;
+                            app.push_display_message(DisplayMessage::error(format!(
+                                "Failed to launch review session: {}",
+                                error
+                            )));
+                            app.set_status_notice("Review launch failed");
+                        }
+                    }
+                    return Ok(());
+                }
+
+                if trimmed.starts_with("/autoreview ") {
+                    app.push_display_message(DisplayMessage::error(
+                        "Usage: /autoreview [on|off|status|now]".to_string(),
+                    ));
+                    return Ok(());
+                }
+
+                if trimmed.starts_with("/review ") {
+                    app.push_display_message(DisplayMessage::error("Usage: /review".to_string()));
+                    return Ok(());
+                }
+
                 if trimmed == "/memory status" {
                     let default_enabled = crate::config::config().features.memory;
                     app.push_display_message(DisplayMessage::system(format!(
@@ -3695,6 +3946,15 @@ async fn handle_remote_key_internal(
                     app.push_display_message(DisplayMessage::error(
                         "Usage: /memory [on|off|status]".to_string(),
                     ));
+                    return Ok(());
+                }
+
+                if trimmed == "/observe"
+                    || trimmed == "/observe on"
+                    || trimmed == "/observe off"
+                    || trimmed == "/observe status"
+                {
+                    let _ = super::commands::handle_session_command(app, trimmed);
                     return Ok(());
                 }
 

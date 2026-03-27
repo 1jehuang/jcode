@@ -270,7 +270,6 @@ impl Agent {
         Ok(())
     }
 
-
     fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
         // Convert session messages to provider messages (single allocation)
         let all_messages = self.session.messages_for_provider();
@@ -393,7 +392,6 @@ impl Agent {
 
         repaired
     }
-
 
     pub fn session_id(&self) -> &str {
         &self.session.id
@@ -652,6 +650,17 @@ impl Agent {
     pub fn set_subagent_model(&mut self, model: Option<String>) -> Result<()> {
         self.session.subagent_model = model;
         self.log_env_snapshot("set_subagent_model");
+        self.session.save()?;
+        Ok(())
+    }
+
+    pub fn autoreview_enabled(&self) -> Option<bool> {
+        self.session.autoreview_enabled
+    }
+
+    pub fn set_autoreview_enabled(&mut self, enabled: bool) -> Result<()> {
+        self.session.autoreview_enabled = Some(enabled);
+        self.log_env_snapshot("set_autoreview_enabled");
         self.session.save()?;
         Ok(())
     }

@@ -110,6 +110,9 @@ impl App {
         }
         let display = config().display.clone();
         let features = config().features.clone();
+        let autoreview_enabled = session
+            .autoreview_enabled
+            .unwrap_or(config().autoreview.enabled);
         let context_limit = provider.context_window() as u64;
         let improve_mode = session.improve_mode.map(|mode| match mode {
             crate::session::SessionImproveMode::Run => ImproveMode::Run,
@@ -195,6 +198,7 @@ impl App {
             remote_provider_name: None,
             remote_provider_model: None,
             remote_startup_phase: None,
+            remote_startup_phase_started: None,
             remote_reasoning_effort: None,
             remote_service_tier: None,
             remote_transport: None,
@@ -232,6 +236,7 @@ impl App {
             resume_session_id: None,
             requested_exit_code: None,
             memory_enabled: features.memory,
+            autoreview_enabled,
             improve_mode,
             last_injected_memory_signature: None,
             swarm_enabled: features.swarm,
@@ -256,6 +261,9 @@ impl App {
             diff_pane_focus: false,
             diff_pane_auto_scroll: true,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            observe_mode_enabled: false,
+            observe_page_markdown: String::new(),
+            observe_page_updated_at_ms: 0,
             last_side_panel_refresh: None,
             last_side_panel_focus_id: None,
             pin_images: display.pin_images,
@@ -278,6 +286,13 @@ impl App {
             status_notice: None,
             interleave_message: None,
             pending_soft_interrupts: Vec::new(),
+            autoreview_after_current_turn: false,
+            pending_split_startup_message: None,
+            pending_split_model_override: None,
+            pending_split_provider_key_override: None,
+            pending_split_label: None,
+            pending_split_started_at: None,
+            pending_split_request: false,
             queue_mode: display.queue_mode,
             auto_server_reload: display.auto_server_reload,
             pending_queued_dispatch: false,
@@ -322,6 +337,9 @@ impl App {
         session.provider_key = crate::session::derive_session_provider_key(provider.name());
         let display = config().display.clone();
         let features = config().features.clone();
+        let autoreview_enabled = session
+            .autoreview_enabled
+            .unwrap_or(config().autoreview.enabled);
         let context_limit = provider.context_window() as u64;
         let improve_mode = session.improve_mode.map(|mode| match mode {
             crate::session::SessionImproveMode::Run => ImproveMode::Run,
@@ -437,6 +455,7 @@ impl App {
             remote_provider_name: None,
             remote_provider_model: None,
             remote_startup_phase: None,
+            remote_startup_phase_started: None,
             remote_reasoning_effort: None,
             remote_service_tier: None,
             remote_transport: None,
@@ -474,6 +493,7 @@ impl App {
             resume_session_id: None,
             requested_exit_code: None,
             memory_enabled: features.memory,
+            autoreview_enabled,
             improve_mode,
             last_injected_memory_signature: None,
             swarm_enabled: features.swarm,
@@ -498,6 +518,9 @@ impl App {
             diff_pane_focus: false,
             diff_pane_auto_scroll: true,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            observe_mode_enabled: false,
+            observe_page_markdown: String::new(),
+            observe_page_updated_at_ms: 0,
             last_side_panel_refresh: None,
             last_side_panel_focus_id: None,
             pin_images: display.pin_images,
@@ -520,6 +543,13 @@ impl App {
             status_notice: None,
             interleave_message: None,
             pending_soft_interrupts: Vec::new(),
+            autoreview_after_current_turn: false,
+            pending_split_startup_message: None,
+            pending_split_model_override: None,
+            pending_split_provider_key_override: None,
+            pending_split_label: None,
+            pending_split_started_at: None,
+            pending_split_request: false,
             queue_mode: display.queue_mode,
             auto_server_reload: display.auto_server_reload,
             pending_queued_dispatch: false,
@@ -587,6 +617,7 @@ impl App {
         let mut app = Self::new_minimal_with_session(provider, registry, session);
         app.is_remote = true;
         app.remote_startup_phase = Some(super::RemoteStartupPhase::Connecting);
+        app.remote_startup_phase_started = Some(Instant::now());
 
         // Load session to get canary status (for "client self-dev" badge)
         if let Some(ref session_id) = resume_session {
@@ -604,6 +635,7 @@ impl App {
     pub fn set_server_spawning(&mut self) {
         self.server_spawning = true;
         self.remote_startup_phase = Some(super::RemoteStartupPhase::StartingServer);
+        self.remote_startup_phase_started = Some(Instant::now());
     }
 
     /// Create an App instance for replay mode (playing back a saved session)
@@ -863,8 +895,9 @@ impl App {
             self.update_context_limit_for_model(&active_model);
             // Mark session as active now that it's being used again
             self.session.mark_active();
-            self.side_panel =
-                crate::side_panel::snapshot_for_session(session_id).unwrap_or_default();
+            self.set_side_panel_snapshot(
+                crate::side_panel::snapshot_for_session(session_id).unwrap_or_default(),
+            );
             crate::telemetry::begin_resumed_session(self.provider.name(), &active_model);
             crate::logging::info(&format!("Restored session: {}", session_id));
 

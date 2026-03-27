@@ -45,7 +45,13 @@ impl App {
     fn remote_header_provider_model(&self) -> Option<String> {
         self.remote_startup_phase
             .as_ref()
-            .map(crate::tui::app::RemoteStartupPhase::header_label)
+            .map(|phase| {
+                let elapsed = self
+                    .remote_startup_phase_started
+                    .map(|started| started.elapsed())
+                    .unwrap_or_default();
+                phase.header_label_with_elapsed(elapsed)
+            })
             .or_else(|| self.effective_remote_provider_model())
             .or_else(|| {
                 (self.remote_session_id.is_some() || self.connection_type.is_some())
@@ -263,7 +269,7 @@ impl crate::tui::TuiState for App {
     }
 
     fn is_processing(&self) -> bool {
-        self.is_processing
+        self.is_processing || self.split_launch_in_flight()
     }
 
     fn queued_messages(&self) -> &[String] {
@@ -358,11 +364,19 @@ impl crate::tui::TuiState for App {
         if let Some(d) = self.replay_elapsed_override {
             return Some(d);
         }
-        self.processing_started.map(|t| t.elapsed())
+        self.processing_started.map(|t| t.elapsed()).or_else(|| {
+            self.split_launch_in_flight()
+                .then(|| self.pending_split_started_at.map(|t| t.elapsed()))
+                .flatten()
+        })
     }
 
     fn status(&self) -> ProcessingStatus {
-        self.status.clone()
+        if self.split_launch_in_flight() {
+            ProcessingStatus::Sending
+        } else {
+            self.status.clone()
+        }
     }
 
     fn command_suggestions(&self) -> Vec<(String, &'static str)> {

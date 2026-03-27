@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::hash::{Hash as _, Hasher as _};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,6 +25,7 @@ pub enum SidePanelPageSource {
     #[default]
     Managed,
     LinkedFile,
+    Ephemeral,
 }
 
 impl SidePanelPageSource {
@@ -31,6 +33,7 @@ impl SidePanelPageSource {
         match self {
             Self::Managed => "managed",
             Self::LinkedFile => "linked_file",
+            Self::Ephemeral => "ephemeral",
         }
     }
 }
@@ -132,6 +135,7 @@ pub fn load_markdown_file(
         .with_context(|| format!("failed to read {}", source_path.display()))?;
     let source_path =
         std::fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
+    let content_revision = linked_file_revision(&source_path);
 
     let mut state = load_state(session_id)?;
     let now = now_ms();
@@ -150,8 +154,41 @@ pub fn load_markdown_file(
     let mut snapshot = hydrate_snapshot(state)?;
     if let Some(page) = snapshot.pages.iter_mut().find(|page| page.id == page_id) {
         page.content = content;
+        page.updated_at_ms = content_revision;
     }
     Ok(snapshot)
+}
+
+pub fn refresh_linked_page_content(
+    snapshot: &mut SidePanelSnapshot,
+    page_id: Option<&str>,
+) -> bool {
+    let target_page_id = page_id.or(snapshot.focused_page_id.as_deref());
+    let mut changed = false;
+
+    for page in &mut snapshot.pages {
+        if page.source != SidePanelPageSource::LinkedFile {
+            continue;
+        }
+        if let Some(target_page_id) = target_page_id {
+            if page.id != target_page_id {
+                continue;
+            }
+        }
+
+        let next_revision = linked_file_revision(Path::new(&page.file_path));
+        if next_revision == page.updated_at_ms {
+            continue;
+        }
+
+        if let Ok(content) = std::fs::read_to_string(&page.file_path) {
+            page.content = content;
+        }
+        page.updated_at_ms = next_revision;
+        changed = true;
+    }
+
+    changed
 }
 
 pub fn focus_page(session_id: &str, page_id: &str) -> Result<SidePanelSnapshot> {
@@ -323,14 +360,23 @@ fn hydrate_snapshot(state: PersistedSidePanelState) -> Result<SidePanelSnapshot>
         .into_iter()
         .map(|page| {
             let content = std::fs::read_to_string(&page.file_path).unwrap_or_default();
+            let updated_at_ms = match page.source {
+                SidePanelPageSource::Managed => page.updated_at_ms,
+                SidePanelPageSource::LinkedFile => linked_file_revision(Path::new(&page.file_path)),
+                SidePanelPageSource::Ephemeral => page.updated_at_ms,
+            };
             SidePanelPage {
                 id: page.id,
                 title: page.title,
                 file_path: page.file_path,
                 format: page.format,
                 source: page.source,
-                content,
-                updated_at_ms: page.updated_at_ms,
+                content: if page.source == SidePanelPageSource::Ephemeral {
+                    String::new()
+                } else {
+                    content
+                },
+                updated_at_ms,
             }
         })
         .collect();
@@ -412,6 +458,30 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|dur| dur.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn linked_file_revision(path: &Path) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            metadata.len().hash(&mut hasher);
+            metadata.permissions().readonly().hash(&mut hasher);
+            metadata
+                .modified()
+                .ok()
+                .and_then(|ts| ts.duration_since(UNIX_EPOCH).ok())
+                .map(|dur| (dur.as_secs(), dur.subsec_nanos()))
+                .hash(&mut hasher);
+            "present".hash(&mut hasher);
+        }
+        Err(_) => {
+            "missing".hash(&mut hasher);
+        }
+    }
+
+    hasher.finish()
 }
 
 #[cfg(test)]
@@ -580,5 +650,48 @@ mod tests {
         let output = status_output(&snapshot);
         assert!(output.contains("source: linked_file"));
         assert!(output.contains("source: managed"));
+    }
+
+    #[test]
+    fn refresh_linked_page_content_updates_snapshot_in_memory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let file_path = temp.path().join("linked.md");
+        std::fs::write(&file_path, "# First").expect("write initial");
+
+        let mut snapshot = SidePanelSnapshot {
+            focused_page_id: Some("linked".to_string()),
+            pages: vec![SidePanelPage {
+                id: "linked".to_string(),
+                title: "Linked".to_string(),
+                file_path: file_path.display().to_string(),
+                format: SidePanelPageFormat::Markdown,
+                source: SidePanelPageSource::LinkedFile,
+                content: "# Stale".to_string(),
+                updated_at_ms: 1,
+            }],
+        };
+
+        assert!(refresh_linked_page_content(&mut snapshot, None));
+        assert_eq!(
+            snapshot.focused_page().map(|page| page.content.as_str()),
+            Some("# First")
+        );
+
+        let unchanged_revision = snapshot
+            .focused_page()
+            .map(|page| page.updated_at_ms)
+            .unwrap_or(0);
+        assert!(!refresh_linked_page_content(&mut snapshot, None));
+        assert_eq!(
+            snapshot.focused_page().map(|page| page.updated_at_ms),
+            Some(unchanged_revision)
+        );
+
+        std::fs::write(&file_path, "# Second").expect("write update");
+        assert!(refresh_linked_page_content(&mut snapshot, None));
+        assert_eq!(
+            snapshot.focused_page().map(|page| page.content.as_str()),
+            Some("# Second")
+        );
     }
 }

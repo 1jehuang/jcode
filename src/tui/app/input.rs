@@ -739,7 +739,7 @@ pub(super) fn handle_pre_control_shortcuts(
     }
 
     if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('m')) {
-        app.toggle_diagram_pane();
+        app.toggle_side_panel();
         return true;
     }
     if modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Char('t')) {
@@ -1470,8 +1470,20 @@ impl App {
             "subagent" => {
                 "`/subagent <prompt>`\nLaunch a subagent immediately.\n\nOptional flags:\n- `--type <kind>` sets the subagent type (default `general`)\n- `--model <name>` overrides the subagent model for this run\n- `--continue <session_id>` resumes an existing subagent session"
             }
+            "observe" => {
+                "`/observe`\nToggle transient observe mode for the side panel.\n\n`/observe on`\nEnable observe mode and focus the observe page.\n\n`/observe off`\nDisable observe mode.\n\n`/observe status`\nShow whether observe mode is enabled.\n\nObserve mode shows only the latest tool call or tool result added to context, and it is not persisted to disk."
+            }
+            "btw" => {
+                "`/btw <question>`\nAsk a side question about the current session and route the answer into the side panel.\n\nCurrent v1 behavior:\n- uses the side panel as the response surface\n- asks only from current session context\n- should not read files or run tools other than `side_panel`"
+            }
             "subagent-model" => {
                 "`/subagent-model`\nShow the current subagent model policy for this session.\n\n`/subagent-model <name>`\nPin a fixed model for future subagents in this session.\n\n`/subagent-model inherit`\nReset to using the current active model."
+            }
+            "autoreview" => {
+                "`/autoreview`\nShow autoreview status for this session.\n\n`/autoreview on`\nEnable end-of-turn autoreview for this session.\n\n`/autoreview off`\nDisable autoreview for this session.\n\n`/autoreview now`\nLaunch a headed reviewer immediately in a new window."
+            }
+            "review" => {
+                "`/review`\nLaunch a one-shot headed review session immediately.\n\nThe reviewer will DM this session when done. If OpenAI ChatGPT OAuth is available, it prefers `gpt-5.4`."
             }
             "effort" => {
                 "`/effort`\nShow current reasoning effort.\n\n`/effort <level>`\nSet reasoning effort (none|low|medium|high|xhigh).\n\nAlso: Alt+←/→ to cycle."

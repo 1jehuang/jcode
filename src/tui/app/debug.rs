@@ -243,7 +243,7 @@ impl ScrollTestState {
     fn restore(self, app: &mut App) {
         app.display_messages = self.display_messages;
         app.display_messages_version = self.display_messages_version;
-        app.side_panel = self.side_panel;
+        app.apply_side_panel_snapshot(self.side_panel);
         app.scroll_offset = self.scroll_offset;
         app.auto_scroll_paused = self.auto_scroll_paused;
         app.diff_mode = self.diff_mode;

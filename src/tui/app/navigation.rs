@@ -3,7 +3,8 @@ use ratatui::layout::Rect;
 
 impl App {
     fn current_visible_diagram_hash(&self) -> Option<u64> {
-        if self.diagram_mode != crate::config::DiagramDisplayMode::Pinned || !self.diagram_pane_enabled
+        if self.diagram_mode != crate::config::DiagramDisplayMode::Pinned
+            || !self.diagram_pane_enabled
         {
             return None;
         }
@@ -332,6 +333,46 @@ impl App {
     pub(super) fn set_side_panel_ratio_preset(&mut self, next: u8) {
         self.set_diagram_pane_ratio(next as i16, false, false);
         self.set_status_notice(format!("Side panel: {}%", self.diagram_pane_ratio_target));
+    }
+
+    pub(super) fn toggle_side_panel(&mut self) {
+        if self.side_panel.pages.is_empty() {
+            self.toggle_diagram_pane();
+            return;
+        }
+
+        if self.side_panel.focused_page().is_some() {
+            self.last_side_panel_focus_id = self.side_panel.focused_page_id.clone();
+            self.side_panel.focused_page_id = None;
+            if !self.diff_pane_visible() {
+                self.set_diff_pane_focus(false);
+            }
+            self.sync_diagram_fit_context();
+            self.set_status_notice("Side panel: OFF");
+            return;
+        }
+
+        let restore_id = self
+            .last_side_panel_focus_id
+            .as_deref()
+            .filter(|id| self.side_panel.pages.iter().any(|page| page.id == *id))
+            .map(str::to_owned)
+            .or_else(|| self.side_panel.pages.first().map(|page| page.id.clone()));
+
+        let Some(restore_id) = restore_id else {
+            self.toggle_diagram_pane();
+            return;
+        };
+
+        self.side_panel.focused_page_id = Some(restore_id.clone());
+        self.last_side_panel_focus_id = Some(restore_id);
+        self.sync_diagram_fit_context();
+        let status = self
+            .side_panel
+            .focused_page()
+            .map(|page| format!("Side panel: {}", page.title))
+            .unwrap_or_else(|| "Side panel: ON".to_string());
+        self.set_status_notice(status);
     }
 
     pub(super) fn adjust_diagram_zoom(&mut self, delta: i8) {

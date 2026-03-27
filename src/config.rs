@@ -129,6 +129,28 @@ pub struct Config {
 
     /// Compaction configuration
     pub compaction: CompactionConfig,
+
+    /// Auto-review configuration
+    pub autoreview: AutoReviewConfig,
+}
+
+/// Automatic end-of-turn code review configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoReviewConfig {
+    /// Enable autoreview by default for new/resumed sessions (default: false)
+    pub enabled: bool,
+    /// Optional model override for autoreview reviewer sessions.
+    pub model: Option<String>,
+}
+
+impl Default for AutoReviewConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: None,
+        }
+    }
 }
 
 /// Keybinding configuration
@@ -311,6 +333,25 @@ impl MarkdownSpacingMode {
 /// Display/UI configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct NativeScrollbarConfig {
+    /// Show a native terminal scrollbar in the chat viewport (default: true)
+    pub chat: bool,
+    /// Show a native terminal scrollbar in the side panel (default: true)
+    pub side_panel: bool,
+}
+
+impl Default for NativeScrollbarConfig {
+    fn default() -> Self {
+        Self {
+            chat: true,
+            side_panel: true,
+        }
+    }
+}
+
+/// Display/UI configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DisplayConfig {
     /// How to display file diffs (off/inline/pinned, default: inline)
     pub diff_mode: DiffDisplayMode,
@@ -353,6 +394,8 @@ pub struct DisplayConfig {
     pub redraw_fps: u32,
     /// Show a truncated preview of the previous prompt at the top when it scrolls out of view (default: true)
     pub prompt_preview: bool,
+    /// Native terminal scrollbar configuration for scrollable panes
+    pub native_scrollbars: NativeScrollbarConfig,
 }
 
 impl Default for DisplayConfig {
@@ -378,6 +421,7 @@ impl Default for DisplayConfig {
             animation_fps: 60,
             redraw_fps: 60,
             prompt_preview: true,
+            native_scrollbars: NativeScrollbarConfig::default(),
         }
     }
 }
@@ -801,6 +845,16 @@ impl Config {
                 self.display.redraw_fps = fps.clamp(1, 120);
             }
         }
+        if let Ok(v) = std::env::var("JCODE_CHAT_NATIVE_SCROLLBAR") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.native_scrollbars.chat = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_SIDE_PANEL_NATIVE_SCROLLBAR") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.display.native_scrollbars.side_panel = parsed;
+            }
+        }
 
         // Features
         if let Ok(v) = std::env::var("JCODE_MEMORY_ENABLED") {
@@ -828,6 +882,21 @@ impl Config {
                 }
                 _ => {}
             }
+        }
+
+        // Autoreview
+        if let Ok(v) = std::env::var("JCODE_AUTOREVIEW_ENABLED") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.autoreview.enabled = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_AUTOREVIEW_MODEL") {
+            let trimmed = v.trim();
+            self.autoreview.model = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
         }
 
         // Ambient
@@ -1366,6 +1435,8 @@ desktop_notifications = true
 - Startup animation: {}
 - Idle animation: {}
 - Prompt entry animation: {}
+- Chat native scrollbar: {}
+- Side panel native scrollbar: {}
 - Disabled animations: {}
 - Performance tier: {}
 - Animation FPS: {}
@@ -1452,6 +1523,8 @@ desktop_notifications = true
             self.display.startup_animation,
             self.display.idle_animation,
             self.display.prompt_entry_animation,
+            self.display.native_scrollbars.chat,
+            self.display.native_scrollbars.side_panel,
             if self.display.disabled_animations.is_empty() {
                 "(none)".to_string()
             } else {
@@ -1614,6 +1687,13 @@ mod tests {
     }
 
     #[test]
+    fn test_native_scrollbars_default_to_enabled() {
+        let display = DisplayConfig::default();
+        assert!(display.native_scrollbars.chat);
+        assert!(display.native_scrollbars.side_panel);
+    }
+
+    #[test]
     fn test_env_override_auto_server_reload() {
         let _guard = crate::storage::lock_test_env();
         let prev = std::env::var_os("JCODE_AUTO_SERVER_RELOAD");
@@ -1628,6 +1708,32 @@ mod tests {
             crate::env::set_var("JCODE_AUTO_SERVER_RELOAD", prev);
         } else {
             crate::env::remove_var("JCODE_AUTO_SERVER_RELOAD");
+        }
+    }
+
+    #[test]
+    fn test_env_override_native_scrollbars() {
+        let _guard = crate::storage::lock_test_env();
+        let prev_chat = std::env::var_os("JCODE_CHAT_NATIVE_SCROLLBAR");
+        let prev_side = std::env::var_os("JCODE_SIDE_PANEL_NATIVE_SCROLLBAR");
+        crate::env::set_var("JCODE_CHAT_NATIVE_SCROLLBAR", "true");
+        crate::env::set_var("JCODE_SIDE_PANEL_NATIVE_SCROLLBAR", "false");
+
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+
+        assert!(cfg.display.native_scrollbars.chat);
+        assert!(!cfg.display.native_scrollbars.side_panel);
+
+        if let Some(prev) = prev_chat {
+            crate::env::set_var("JCODE_CHAT_NATIVE_SCROLLBAR", prev);
+        } else {
+            crate::env::remove_var("JCODE_CHAT_NATIVE_SCROLLBAR");
+        }
+        if let Some(prev) = prev_side {
+            crate::env::set_var("JCODE_SIDE_PANEL_NATIVE_SCROLLBAR", prev);
+        } else {
+            crate::env::remove_var("JCODE_SIDE_PANEL_NATIVE_SCROLLBAR");
         }
     }
 }

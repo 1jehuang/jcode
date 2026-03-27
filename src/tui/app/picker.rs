@@ -88,7 +88,13 @@ impl App {
                                         ref provider_id, ..
                                     },
                                 ) => Some(provider_id.as_str()),
+                                PickerSelection::Account(AccountPickerSelection::OpenCenter {
+                                    provider_filter: Some(ref provider_id),
+                                }) => Some(provider_id.as_str()),
                                 PickerSelection::Model => None,
+                                PickerSelection::Account(AccountPickerSelection::OpenCenter {
+                                    provider_filter: None,
+                                }) => None,
                             })
             }
         };
@@ -677,6 +683,9 @@ impl App {
                     provider_id
                 ))),
             },
+            AccountPickerSelection::OpenCenter { provider_filter } => {
+                self.open_account_center(provider_filter.as_deref())
+            }
         }
     }
 

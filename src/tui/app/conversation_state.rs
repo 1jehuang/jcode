@@ -320,11 +320,16 @@ impl App {
     }
 
     pub(crate) fn set_remote_startup_phase(&mut self, phase: super::RemoteStartupPhase) {
+        let changed = self.remote_startup_phase.as_ref() != Some(&phase);
         self.remote_startup_phase = Some(phase);
+        if changed || self.remote_startup_phase_started.is_none() {
+            self.remote_startup_phase_started = Some(Instant::now());
+        }
     }
 
     pub(crate) fn clear_remote_startup_phase(&mut self) {
         self.remote_startup_phase = None;
+        self.remote_startup_phase_started = None;
     }
 
     pub(super) fn set_memory_feature_enabled(&mut self, enabled: bool) {
@@ -335,6 +340,11 @@ impl App {
             crate::memory_agent::reset();
             self.last_injected_memory_signature = None;
         }
+    }
+
+    pub(super) fn set_autoreview_feature_enabled(&mut self, enabled: bool) {
+        self.autoreview_enabled = enabled;
+        self.session.autoreview_enabled = Some(enabled);
     }
 
     pub(super) fn trigger_save_memory_extraction(&self) {
@@ -564,8 +574,9 @@ impl App {
         self.active_skill = None;
         self.provider_session_id = None;
         self.session = new_session;
-        self.side_panel =
-            crate::side_panel::snapshot_for_session(&self.session.id).unwrap_or_default();
+        self.set_side_panel_snapshot(
+            crate::side_panel::snapshot_for_session(&self.session.id).unwrap_or_default(),
+        );
 
         for msg in old_messages {
             let role = msg.role.clone();

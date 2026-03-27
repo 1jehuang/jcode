@@ -237,6 +237,9 @@ pub struct Session {
     /// Last requested `/improve` mode for this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub improve_mode: Option<SessionImproveMode>,
+    /// Whether automatic end-of-turn review is enabled for this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autoreview_enabled: Option<bool>,
     /// Whether this session is a canary session (testing new builds)
     #[serde(default)]
     pub is_canary: bool,
@@ -291,6 +294,7 @@ struct SessionJournalMeta {
     model: Option<String>,
     subagent_model: Option<String>,
     improve_mode: Option<SessionImproveMode>,
+    autoreview_enabled: Option<bool>,
     is_canary: bool,
     testing_build: Option<String>,
     working_dir: Option<String>,
@@ -434,6 +438,7 @@ impl Session {
             model: self.model.clone(),
             subagent_model: self.subagent_model.clone(),
             improve_mode: self.improve_mode,
+            autoreview_enabled: self.autoreview_enabled,
             is_canary: self.is_canary,
             testing_build: self.testing_build.clone(),
             working_dir: self.working_dir.clone(),
@@ -508,6 +513,7 @@ impl Session {
             || prev.provider_key != current.provider_key
             || prev.subagent_model != current.subagent_model
             || prev.improve_mode != current.improve_mode
+            || prev.autoreview_enabled != current.autoreview_enabled
             || prev.is_canary != current.is_canary
             || prev.testing_build != current.testing_build
             || prev.working_dir != current.working_dir
@@ -528,6 +534,7 @@ impl Session {
         self.model = meta.model;
         self.subagent_model = meta.subagent_model;
         self.improve_mode = meta.improve_mode;
+        self.autoreview_enabled = meta.autoreview_enabled;
         self.is_canary = meta.is_canary;
         self.testing_build = meta.testing_build;
         self.working_dir = meta.working_dir;
@@ -610,6 +617,7 @@ impl Session {
             model: None,
             subagent_model: None,
             improve_mode: None,
+            autoreview_enabled: None,
             is_canary: false,
             testing_build: None,
             working_dir: std::env::current_dir()
@@ -648,6 +656,7 @@ impl Session {
             model: None,
             subagent_model: None,
             improve_mode: None,
+            autoreview_enabled: None,
             is_canary: false,
             testing_build: None,
             working_dir: std::env::current_dir()

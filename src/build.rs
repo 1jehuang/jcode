@@ -454,7 +454,11 @@ pub fn current_version_file() -> Result<PathBuf> {
 fn repo_build_version(repo_dir: &std::path::Path) -> Result<String> {
     let hash = current_git_hash(repo_dir)?;
     let dirty = is_working_tree_dirty(repo_dir)?;
-    Ok(if dirty { format!("{}-dirty", hash) } else { hash })
+    Ok(if dirty {
+        format!("{}-dirty", hash)
+    } else {
+        hash
+    })
 }
 
 /// Get the current git hash
@@ -787,8 +791,9 @@ mod tests {
         crate::env::set_var("JCODE_HOME", temp_home.path());
 
         let version = "test-current";
-        let version_binary = install_binary_at_version(std::env::current_exe().as_ref().unwrap(), version)
-            .expect("install test version");
+        let version_binary =
+            install_binary_at_version(std::env::current_exe().as_ref().unwrap(), version)
+                .expect("install test version");
         update_current_symlink(version).expect("update current symlink");
 
         let candidate = client_update_candidate(true).expect("expected selfdev candidate");

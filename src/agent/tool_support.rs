@@ -1,7 +1,10 @@
 use crate::message::{ContentBlock, ToolCall};
 use crate::tool::ToolOutput;
 
-pub(super) fn tool_output_to_content_blocks(tool_use_id: String, output: ToolOutput) -> Vec<ContentBlock> {
+pub(super) fn tool_output_to_content_blocks(
+    tool_use_id: String,
+    output: ToolOutput,
+) -> Vec<ContentBlock> {
     let mut blocks = vec![ContentBlock::ToolResult {
         tool_use_id,
         content: output.output,

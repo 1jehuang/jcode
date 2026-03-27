@@ -47,6 +47,7 @@ mod local;
 mod misc_ui;
 mod model_context;
 mod navigation;
+mod observe;
 mod picker;
 mod remote;
 mod replay;
@@ -106,6 +107,21 @@ impl RemoteStartupPhase {
             Self::LoadingSession => "loading session…".to_string(),
             Self::Reconnecting { attempt } => format!("reconnecting ({attempt})…"),
         }
+    }
+
+    pub(crate) fn header_label_with_elapsed(&self, elapsed: Duration) -> String {
+        let base = self.header_label();
+        if elapsed < Duration::from_secs(1) {
+            return base;
+        }
+
+        let elapsed_str = if elapsed.as_secs() < 60 {
+            format!("{}s", elapsed.as_secs())
+        } else {
+            format!("{}m {}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
+        };
+
+        format!("{base} {elapsed_str}")
     }
 }
 
@@ -363,6 +379,7 @@ pub struct App {
     remote_provider_name: Option<String>,
     remote_provider_model: Option<String>,
     remote_startup_phase: Option<RemoteStartupPhase>,
+    remote_startup_phase_started: Option<Instant>,
     remote_reasoning_effort: Option<String>,
     remote_service_tier: Option<String>,
     remote_transport: Option<String>,
@@ -427,6 +444,8 @@ pub struct App {
     requested_exit_code: Option<i32>,
     // Memory feature toggle for this session
     memory_enabled: bool,
+    // Automatic end-of-turn review toggle for this session
+    autoreview_enabled: bool,
     // Last requested `/improve` mode for this session.
     improve_mode: Option<ImproveMode>,
     // Suppress duplicate memory injection messages for near-identical prompts.
@@ -469,6 +488,9 @@ pub struct App {
     diff_pane_focus: bool,
     diff_pane_auto_scroll: bool,
     side_panel: crate::side_panel::SidePanelSnapshot,
+    observe_mode_enabled: bool,
+    observe_page_markdown: String,
+    observe_page_updated_at_ms: u64,
     last_side_panel_refresh: Option<Instant>,
     // Most recently focused side panel page, used to restore visibility when toggled off.
     last_side_panel_focus_id: Option<String>,
@@ -512,6 +534,20 @@ pub struct App {
     interleave_message: Option<String>,
     // Message sent as soft interrupt but not yet injected (shown in queue preview until injected)
     pending_soft_interrupts: Vec<String>,
+    // Whether the current remote turn should trigger autoreview after completion.
+    autoreview_after_current_turn: bool,
+    // Startup message to preload into the next spawned split window.
+    pending_split_startup_message: Option<String>,
+    // Optional model override to apply before opening the next spawned split window.
+    pending_split_model_override: Option<String>,
+    // Optional provider key override to persist into the next spawned split window.
+    pending_split_provider_key_override: Option<String>,
+    // Human-friendly label for the next spawned split window flow.
+    pending_split_label: Option<String>,
+    // Timestamp for showing a temporary client-side running state while a split launch is in flight.
+    pending_split_started_at: Option<Instant>,
+    // Ask the remote followup loop to issue a split request once idle.
+    pending_split_request: bool,
     // Queue mode: if true, Enter during processing queues; if false, Enter queues to send next
     // Toggle with Ctrl+Tab or Ctrl+T
     queue_mode: bool,

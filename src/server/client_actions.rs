@@ -431,6 +431,21 @@ pub(super) async fn handle_set_feature(
             }
             let _ = client_event_tx.send(ServerEvent::Done { id });
         }
+        FeatureToggle::Autoreview => {
+            let mut agent_guard = agent.lock().await;
+            match agent_guard.set_autoreview_enabled(enabled) {
+                Ok(()) => {
+                    let _ = client_event_tx.send(ServerEvent::Done { id });
+                }
+                Err(error) => {
+                    let _ = client_event_tx.send(ServerEvent::Error {
+                        id,
+                        message: crate::util::format_error_chain(&error),
+                        retry_after_secs: None,
+                    });
+                }
+            }
+        }
         FeatureToggle::Swarm => {
             if *swarm_enabled == enabled {
                 let _ = client_event_tx.send(ServerEvent::Done { id });

@@ -44,9 +44,11 @@ pub(super) fn handle_tick(app: &mut App) {
     if let Some(chunk) = app.stream_buffer.flush() {
         app.streaming_text.push_str(&chunk);
     }
+    app.refresh_side_panel_linked_content_if_due();
     app.poll_compaction_completion();
     app.check_debug_command();
     app.check_stable_version();
+    app.maybe_finish_background_update_reload();
     if app.pending_migration.is_some() && !app.is_processing {
         app.execute_migration();
     }
@@ -98,6 +100,9 @@ pub(super) fn handle_bus_event(app: &mut App, bus_event: std::result::Result<Bus
         }
         Ok(BusEvent::UpdateStatus(status)) => {
             app.handle_update_status(status);
+        }
+        Ok(BusEvent::SessionUpdateStatus(status)) => {
+            app.handle_session_update_status(status);
         }
         Ok(BusEvent::DictationCompleted { text, mode }) => {
             app.handle_local_dictation_completed(text, mode);
