@@ -22,6 +22,7 @@ mod ui;
 mod ui_diff;
 pub mod visual_debug;
 pub mod workspace_map;
+pub mod workspace_map_widget;
 
 pub use app::{App, CopyBadgeUiState, DisplayMessage, ProcessingStatus, RunResult};
 
