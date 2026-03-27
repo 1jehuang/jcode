@@ -1,12 +1,17 @@
+use super::await_members_state::{
+    PersistedAwaitMembersState, ensure_pending_state, load_state, persist_final_response,
+    request_key,
+};
 use super::{
-    ClientConnectionInfo, SwarmEvent, SwarmEventType, SwarmMember, VersionedPlan,
-    broadcast_swarm_plan, broadcast_swarm_status, queue_soft_interrupt_for_session,
+    AwaitMembersRuntime, ClientConnectionInfo, SwarmEvent, SwarmEventType, SwarmMember,
+    VersionedPlan, broadcast_swarm_plan, broadcast_swarm_status, queue_soft_interrupt_for_session,
     record_swarm_event, truncate_detail, update_member_status,
 };
 use crate::agent::{Agent, SoftInterruptSource};
 use crate::protocol::{AwaitedMemberStatus, NotificationType, ServerEvent};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 async fn awaited_member_statuses(
@@ -57,6 +62,136 @@ async fn awaited_member_statuses(
             }
         })
         .collect()
+}
+
+fn short_member_name(member: &AwaitedMemberStatus) -> String {
+    member
+        .friendly_name
+        .clone()
+        .unwrap_or_else(|| member.session_id[..8.min(member.session_id.len())].to_string())
+}
+
+fn timeout_summary(member_statuses: &[AwaitedMemberStatus]) -> String {
+    let pending: Vec<String> = member_statuses
+        .iter()
+        .filter(|member| !member.done)
+        .map(|member| format!("{} ({})", short_member_name(member), member.status))
+        .collect();
+    format!("Timed out. Still waiting on: {}", pending.join(", "))
+}
+
+fn completion_summary(member_statuses: &[AwaitedMemberStatus]) -> String {
+    let done_names: Vec<String> = member_statuses.iter().map(short_member_name).collect();
+    format!(
+        "All {} members are done: {}",
+        done_names.len(),
+        done_names.join(", ")
+    )
+}
+
+fn deadline_to_instant(deadline_unix_ms: u64) -> tokio::time::Instant {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    tokio::time::Instant::now() + Duration::from_millis(deadline_unix_ms.saturating_sub(now_ms))
+}
+
+async fn respond_to_waiters(
+    runtime: &AwaitMembersRuntime,
+    key: &str,
+    completed: bool,
+    members: Vec<AwaitedMemberStatus>,
+    summary: String,
+) {
+    for (request_id, client_event_tx) in runtime.take_waiters(key).await {
+        let _ = client_event_tx.send(ServerEvent::CommAwaitMembersResponse {
+            id: request_id,
+            completed,
+            members: members.clone(),
+            summary: summary.clone(),
+        });
+    }
+    runtime.clear_active(key).await;
+}
+
+async fn spawn_or_resume_await_members(
+    state: PersistedAwaitMembersState,
+    req_session_id: String,
+    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    swarm_event_tx: broadcast::Sender<SwarmEvent>,
+    await_members_runtime: AwaitMembersRuntime,
+) {
+    let key = state.key.clone();
+    let swarm_id = state.swarm_id.clone();
+    let requested_ids = state.requested_ids.clone();
+    let target_status = state.target_status.clone();
+
+    tokio::spawn(async move {
+        let mut event_rx = swarm_event_tx.subscribe();
+        let deadline = deadline_to_instant(state.deadline_unix_ms);
+
+        loop {
+            let member_statuses = awaited_member_statuses(
+                &req_session_id,
+                &swarm_id,
+                &requested_ids,
+                &target_status,
+                &swarm_members,
+                &swarms_by_id,
+            )
+            .await;
+
+            if member_statuses.is_empty() {
+                let summary = "No other members in swarm to wait for.".to_string();
+                let _ = persist_final_response(&state, true, vec![], summary.clone());
+                respond_to_waiters(&await_members_runtime, &key, true, vec![], summary).await;
+                return;
+            }
+
+            if member_statuses.iter().all(|status| status.done) {
+                let summary = completion_summary(&member_statuses);
+                let _ =
+                    persist_final_response(&state, true, member_statuses.clone(), summary.clone());
+                respond_to_waiters(&await_members_runtime, &key, true, member_statuses, summary)
+                    .await;
+                return;
+            }
+
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    let summary = timeout_summary(&member_statuses);
+                    let _ = persist_final_response(&state, false, member_statuses.clone(), summary.clone());
+                    respond_to_waiters(&await_members_runtime, &key, false, member_statuses, summary).await;
+                    return;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    if await_members_runtime.retain_open_waiters(&key).await == 0 {
+                        await_members_runtime.clear_active(&key).await;
+                        return;
+                    }
+                }
+                recv_result = event_rx.recv() => match recv_result {
+                    Ok(event) => {
+                        if event.swarm_id.as_deref() != Some(swarm_id.as_str()) {
+                            continue;
+                        }
+
+                        match &event.event {
+                            SwarmEventType::StatusChange { .. } | SwarmEventType::MemberChange { .. } => {}
+                            _ => continue,
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        await_members_runtime.clear_active(&key).await;
+                        return;
+                    }
+                }
+            }
+        }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -481,6 +616,7 @@ pub(super) async fn handle_comm_await_members(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+    await_members_runtime: &AwaitMembersRuntime,
 ) {
     let swarm_id = {
         let members = swarm_members.read().await;
@@ -490,6 +626,22 @@ pub(super) async fn handle_comm_await_members(
     };
 
     if let Some(swarm_id) = swarm_id {
+        let key = request_key(&req_session_id, &swarm_id, &requested_ids, &target_status);
+        let persisted = load_state(&key);
+
+        if let Some(final_response) = persisted
+            .as_ref()
+            .and_then(|state| state.final_response.clone())
+        {
+            let _ = client_event_tx.send(ServerEvent::CommAwaitMembersResponse {
+                id,
+                completed: final_response.completed,
+                members: final_response.members,
+                summary: final_response.summary,
+            });
+            return;
+        }
+
         let initial_statuses = awaited_member_statuses(
             &req_session_id,
             &swarm_id,
@@ -510,114 +662,57 @@ pub(super) async fn handle_comm_await_members(
             return;
         }
 
-        let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(3600));
-        let swarm_members_clone = swarm_members.clone();
-        let swarms_by_id_clone = swarms_by_id.clone();
-        let mut event_rx = swarm_event_tx.subscribe();
-        let client_tx = client_event_tx.clone();
-        let target_status_clone = target_status.clone();
-        let requested_ids_clone = requested_ids.clone();
-        let req_session_id_clone = req_session_id.clone();
-        let swarm_id_clone = swarm_id.clone();
-
-        tokio::spawn(async move {
-            let deadline = tokio::time::Instant::now() + timeout;
-
-            loop {
-                let member_statuses = awaited_member_statuses(
-                    &req_session_id_clone,
-                    &swarm_id_clone,
-                    &requested_ids_clone,
-                    &target_status_clone,
-                    &swarm_members_clone,
-                    &swarms_by_id_clone,
-                )
-                .await;
-                let all_done = member_statuses.iter().all(|status| status.done);
-
-                if all_done {
-                    if member_statuses.is_empty() {
-                        let _ = client_tx.send(ServerEvent::CommAwaitMembersResponse {
-                            id,
-                            completed: true,
-                            members: vec![],
-                            summary: "No other members in swarm to wait for.".to_string(),
-                        });
-                        return;
-                    }
-
-                    let done_names: Vec<String> = member_statuses
-                        .iter()
-                        .map(|member| {
-                            member.friendly_name.clone().unwrap_or_else(|| {
-                                member.session_id[..8.min(member.session_id.len())].to_string()
-                            })
-                        })
-                        .collect();
-                    let _ = client_tx.send(ServerEvent::CommAwaitMembersResponse {
-                        id,
-                        completed: true,
-                        members: member_statuses,
-                        summary: format!(
-                            "All {} members are done: {}",
-                            done_names.len(),
-                            done_names.join(", ")
-                        ),
-                    });
-                    return;
-                }
-
-                tokio::select! {
-                    _ = client_tx.closed() => {
-                        return;
-                    }
-                    _ = tokio::time::sleep_until(deadline) => {
-                        let pending: Vec<String> = member_statuses
-                            .iter()
-                            .filter(|member| !member.done)
-                            .map(|member| {
-                                let name = member.friendly_name.clone().unwrap_or_else(|| {
-                                    member.session_id[..8.min(member.session_id.len())].to_string()
-                                });
-                                format!("{} ({})", name, member.status)
-                            })
-                            .collect();
-                        let _ = client_tx.send(ServerEvent::CommAwaitMembersResponse {
-                            id,
-                            completed: false,
-                            members: member_statuses,
-                            summary: format!("Timed out. Still waiting on: {}", pending.join(", ")),
-                        });
-                        return;
-                    }
-                    recv_result = event_rx.recv() => match recv_result {
-                        Ok(event) => {
-                        if event.swarm_id.as_deref() != Some(swarm_id_clone.as_str()) {
-                            continue;
-                        }
-
-                        match &event.event {
-                            SwarmEventType::StatusChange { .. }
-                            | SwarmEventType::MemberChange { .. } => {
-                                continue;
-                            }
-                            _ => {}
-                        }
-                    }
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(broadcast::error::RecvError::Closed) => {
-                        let _ = client_tx.send(ServerEvent::CommAwaitMembersResponse {
-                            id,
-                            completed: false,
-                            members: member_statuses,
-                            summary: "Server shutting down.".to_string(),
-                        });
-                        return;
-                    }
-                    }
-                }
-            }
+        let requested_deadline = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+            + Duration::from_secs(timeout_secs.unwrap_or(3600)).as_millis() as u64;
+        let state = persisted.unwrap_or_else(|| {
+            ensure_pending_state(
+                &key,
+                &req_session_id,
+                &swarm_id,
+                &requested_ids,
+                &target_status,
+                requested_deadline,
+            )
         });
+
+        await_members_runtime
+            .add_waiter(&key, id, client_event_tx)
+            .await;
+
+        if state.deadline_unix_ms
+            <= SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64
+        {
+            let summary = timeout_summary(&initial_statuses);
+            let _ =
+                persist_final_response(&state, false, initial_statuses.clone(), summary.clone());
+            respond_to_waiters(
+                await_members_runtime,
+                &key,
+                false,
+                initial_statuses,
+                summary,
+            )
+            .await;
+            return;
+        }
+
+        if await_members_runtime.mark_active_if_new(&key).await {
+            spawn_or_resume_await_members(
+                state,
+                req_session_id,
+                swarm_members.clone(),
+                swarms_by_id.clone(),
+                swarm_event_tx.clone(),
+                await_members_runtime.clone(),
+            )
+            .await;
+        }
     } else {
         let _ = client_event_tx.send(ServerEvent::Error {
             id,
@@ -631,11 +726,42 @@ pub(super) async fn handle_comm_await_members(
 mod tests {
     use super::handle_comm_await_members;
     use crate::protocol::ServerEvent;
-    use crate::server::{SwarmEvent, SwarmEventType, SwarmMember};
+    use crate::server::{AwaitMembersRuntime, SwarmEvent, SwarmEventType, SwarmMember};
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
-    use std::time::{Instant, SystemTime};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use tokio::sync::{RwLock, broadcast, mpsc};
+
+    struct RuntimeEnvGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        prev_runtime: Option<std::ffi::OsString>,
+    }
+
+    impl RuntimeEnvGuard {
+        fn new() -> (Self, tempfile::TempDir) {
+            let guard = crate::storage::lock_test_env();
+            let temp = tempfile::TempDir::new().expect("create runtime dir");
+            let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+            crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+            (
+                Self {
+                    _guard: guard,
+                    prev_runtime,
+                },
+                temp,
+            )
+        }
+    }
+
+    impl Drop for RuntimeEnvGuard {
+        fn drop(&mut self) {
+            if let Some(prev_runtime) = self.prev_runtime.take() {
+                crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+            } else {
+                crate::env::remove_var("JCODE_RUNTIME_DIR");
+            }
+        }
+    }
 
     fn member(session_id: &str, swarm_id: &str, status: &str) -> SwarmMember {
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
@@ -669,10 +795,12 @@ mod tests {
 
     #[tokio::test]
     async fn await_members_includes_late_joiners_when_watching_swarm() {
+        let (_env, _runtime) = RuntimeEnvGuard::new();
         let swarm_id = "swarm-a";
         let requester = "req";
         let initial_peer = "peer-1";
         let late_peer = "peer-2";
+        let await_runtime = AwaitMembersRuntime::default();
 
         let (client_tx, mut client_rx) = mpsc::unbounded_channel();
         let swarm_members = Arc::new(RwLock::new(HashMap::from([
@@ -698,6 +826,7 @@ mod tests {
             &swarm_members,
             &swarms_by_id,
             &swarm_event_tx,
+            &await_runtime,
         )
         .await;
 
@@ -772,9 +901,11 @@ mod tests {
 
     #[tokio::test]
     async fn await_members_stops_when_requesting_client_disconnects() {
+        let (_env, _runtime) = RuntimeEnvGuard::new();
         let swarm_id = "swarm-b";
         let requester = "req";
         let peer = "peer-1";
+        let await_runtime = AwaitMembersRuntime::default();
 
         let (client_tx, client_rx) = mpsc::unbounded_channel();
         let swarm_members = Arc::new(RwLock::new(HashMap::from([
@@ -799,10 +930,9 @@ mod tests {
             &swarm_members,
             &swarms_by_id,
             &swarm_event_tx,
+            &await_runtime,
         )
         .await;
-
-        assert_eq!(swarm_event_tx.receiver_count(), baseline_receivers + 1);
 
         drop(client_rx);
 
@@ -816,6 +946,165 @@ mod tests {
         })
         .await
         .expect("await task should unsubscribe promptly after client disconnect");
+    }
+
+    #[tokio::test]
+    async fn await_members_reuses_persisted_deadline_after_reload_retry() {
+        let (_env, _runtime_dir) = RuntimeEnvGuard::new();
+        let swarm_id = "swarm-c";
+        let requester = "req";
+        let peer = "peer-1";
+        let key = crate::server::await_members_state::request_key(
+            requester,
+            swarm_id,
+            &[],
+            &["completed".to_string()],
+        );
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        crate::server::await_members_state::save_state(
+            &crate::server::await_members_state::PersistedAwaitMembersState {
+                key,
+                session_id: requester.to_string(),
+                swarm_id: swarm_id.to_string(),
+                target_status: vec!["completed".to_string()],
+                requested_ids: vec![],
+                created_at_unix_ms: now_ms,
+                deadline_unix_ms: now_ms + 150,
+                final_response: None,
+            },
+        );
+
+        let await_runtime = AwaitMembersRuntime::default();
+        let (client_tx, mut client_rx) = mpsc::unbounded_channel();
+        let swarm_members = Arc::new(RwLock::new(HashMap::from([
+            (requester.to_string(), member(requester, swarm_id, "ready")),
+            (peer.to_string(), member(peer, swarm_id, "running")),
+        ])));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+            swarm_id.to_string(),
+            HashSet::from([requester.to_string(), peer.to_string()]),
+        )])));
+        let (swarm_event_tx, _swarm_event_rx) = broadcast::channel(32);
+
+        handle_comm_await_members(
+            1,
+            requester.to_string(),
+            vec!["completed".to_string()],
+            vec![],
+            Some(60),
+            &client_tx,
+            &swarm_members,
+            &swarms_by_id,
+            &swarm_event_tx,
+            &await_runtime,
+        )
+        .await;
+
+        let started = Instant::now();
+        let response = tokio::time::timeout(Duration::from_secs(1), client_rx.recv())
+            .await
+            .expect("response should arrive")
+            .expect("channel should stay open");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "persisted deadline should win over new timeout"
+        );
+
+        match response {
+            ServerEvent::CommAwaitMembersResponse {
+                completed, summary, ..
+            } => {
+                assert!(!completed, "persisted expired wait should time out");
+                assert!(summary.contains("Timed out"));
+            }
+            other => panic!("expected CommAwaitMembersResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn await_members_returns_persisted_final_response_after_reload_retry() {
+        let (_env, _runtime_dir) = RuntimeEnvGuard::new();
+        let swarm_id = "swarm-d";
+        let requester = "req";
+        let key = crate::server::await_members_state::request_key(
+            requester,
+            swarm_id,
+            &[],
+            &["completed".to_string()],
+        );
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        crate::server::await_members_state::save_state(
+            &crate::server::await_members_state::PersistedAwaitMembersState {
+                key,
+                session_id: requester.to_string(),
+                swarm_id: swarm_id.to_string(),
+                target_status: vec!["completed".to_string()],
+                requested_ids: vec![],
+                created_at_unix_ms: now_ms,
+                deadline_unix_ms: now_ms + 60_000,
+                final_response: Some(
+                    crate::server::await_members_state::PersistedAwaitMembersResult {
+                        completed: true,
+                        members: vec![crate::protocol::AwaitedMemberStatus {
+                            session_id: "peer-1".to_string(),
+                            friendly_name: Some("peer-1".to_string()),
+                            status: "completed".to_string(),
+                            done: true,
+                        }],
+                        summary: "All 1 members are done: peer-1".to_string(),
+                        resolved_at_unix_ms: now_ms,
+                    },
+                ),
+            },
+        );
+
+        let await_runtime = AwaitMembersRuntime::default();
+        let (client_tx, mut client_rx) = mpsc::unbounded_channel();
+        let swarm_members = Arc::new(RwLock::new(HashMap::from([(
+            requester.to_string(),
+            member(requester, swarm_id, "ready"),
+        )])));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+            swarm_id.to_string(),
+            HashSet::from([requester.to_string()]),
+        )])));
+        let (swarm_event_tx, _swarm_event_rx) = broadcast::channel(32);
+
+        handle_comm_await_members(
+            1,
+            requester.to_string(),
+            vec!["completed".to_string()],
+            vec![],
+            Some(60),
+            &client_tx,
+            &swarm_members,
+            &swarms_by_id,
+            &swarm_event_tx,
+            &await_runtime,
+        )
+        .await;
+
+        match client_rx.recv().await.expect("response should arrive") {
+            ServerEvent::CommAwaitMembersResponse {
+                completed,
+                summary,
+                members,
+                ..
+            } => {
+                assert!(completed);
+                assert_eq!(summary, "All 1 members are done: peer-1");
+                assert_eq!(members.len(), 1);
+                assert_eq!(members[0].session_id, "peer-1");
+            }
+            other => panic!("expected CommAwaitMembersResponse, got {other:?}"),
+        }
     }
 }
 

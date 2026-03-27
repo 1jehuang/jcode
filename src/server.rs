@@ -1,3 +1,4 @@
+mod await_members_state;
 mod client_actions;
 mod client_api;
 mod client_comm;
@@ -29,6 +30,7 @@ mod socket;
 mod swarm;
 mod util;
 
+pub(super) use self::await_members_state::AwaitMembersRuntime;
 use self::client_lifecycle::handle_client;
 use self::debug::{ClientConnectionInfo, ClientDebugState, handle_debug_client};
 use self::debug_jobs::DebugJob;
@@ -66,6 +68,7 @@ use self::state::{
     rename_session_interrupt_queue,
 };
 
+pub use self::await_members_state::pending_await_members_for_session;
 use self::reload_state::clear_reload_marker_if_stale_for_pid;
 #[cfg(test)]
 pub(crate) use self::reload_state::subscribe_reload_signal_for_tests;
@@ -170,6 +173,8 @@ pub struct Server {
     /// Soft interrupt queues by session_id (stored outside agent mutex so swarm/debug
     /// notifications can be enqueued while an agent is actively processing)
     soft_interrupt_queues: SessionInterruptQueues,
+    /// Persisted communicate await_members wait registry.
+    await_members_runtime: AwaitMembersRuntime,
 }
 
 impl Server {
@@ -229,6 +234,7 @@ impl Server {
             mcp_pool: Arc::new(OnceCell::new()),
             shutdown_signals: Arc::new(RwLock::new(HashMap::new())),
             soft_interrupt_queues: Arc::new(RwLock::new(HashMap::new())),
+            await_members_runtime: AwaitMembersRuntime::default(),
         }
     }
 
@@ -776,6 +782,7 @@ impl Server {
         let main_mcp_pool = Arc::clone(&self.mcp_pool);
         let main_shutdown_signals = Arc::clone(&self.shutdown_signals);
         let main_soft_interrupt_queues = Arc::clone(&self.soft_interrupt_queues);
+        let main_await_members_runtime = self.await_members_runtime.clone();
 
         let main_handle = tokio::spawn(async move {
             loop {
@@ -806,6 +813,7 @@ impl Server {
                         let mcp_pool = Arc::clone(&main_mcp_pool);
                         let shutdown_signals = Arc::clone(&main_shutdown_signals);
                         let soft_interrupt_queues = Arc::clone(&main_soft_interrupt_queues);
+                        let await_members_runtime = main_await_members_runtime.clone();
 
                         // Increment client count
                         *client_count.write().await += 1;
@@ -839,6 +847,7 @@ impl Server {
                                 mcp_pool,
                                 shutdown_signals,
                                 soft_interrupt_queues,
+                                await_members_runtime,
                             )
                             .await;
 
@@ -1050,6 +1059,7 @@ impl Server {
         let gw_mcp_pool = Arc::clone(&self.mcp_pool);
         let gw_shutdown_signals = Arc::clone(&self.shutdown_signals);
         let gw_soft_interrupt_queues = Arc::clone(&self.soft_interrupt_queues);
+        let gw_await_members_runtime = self.await_members_runtime.clone();
 
         let handle = tokio::spawn(async move {
             while let Some(gw_client) = client_rx.recv().await {
@@ -1078,6 +1088,7 @@ impl Server {
                 let mcp_pool = Arc::clone(&gw_mcp_pool);
                 let shutdown_signals = Arc::clone(&gw_shutdown_signals);
                 let soft_interrupt_queues = Arc::clone(&gw_soft_interrupt_queues);
+                let await_members_runtime = gw_await_members_runtime.clone();
 
                 *client_count.write().await += 1;
 
@@ -1115,6 +1126,7 @@ impl Server {
                         mcp_pool,
                         shutdown_signals,
                         soft_interrupt_queues,
+                        await_members_runtime,
                     )
                     .await;
 

@@ -27,10 +27,10 @@ use super::provider_control::{
     handle_set_transport, handle_switch_anthropic_account, handle_switch_openai_account,
 };
 use super::{
-    ClientConnectionInfo, ClientDebugState, FileAccess, SessionInterruptQueues, SharedContext,
-    SwarmEvent, SwarmEventType, SwarmMember, VersionedPlan, broadcast_swarm_status,
-    enqueue_soft_interrupt, record_swarm_event, register_session_interrupt_queue, swarm_id_for_dir,
-    truncate_detail, update_member_status,
+    AwaitMembersRuntime, ClientConnectionInfo, ClientDebugState, FileAccess,
+    SessionInterruptQueues, SharedContext, SwarmEvent, SwarmEventType, SwarmMember, VersionedPlan,
+    broadcast_swarm_status, enqueue_soft_interrupt, record_swarm_event,
+    register_session_interrupt_queue, swarm_id_for_dir, truncate_detail, update_member_status,
 };
 use crate::agent::{Agent, InterruptSignal, SoftInterruptQueue, SoftInterruptSource, StreamError};
 use crate::bus::{Bus, BusEvent};
@@ -74,6 +74,7 @@ pub(super) async fn handle_client(
     mcp_pool: Arc<crate::mcp::SharedMcpPool>,
     shutdown_signals: Arc<RwLock<HashMap<String, crate::agent::InterruptSignal>>>,
     soft_interrupt_queues: SessionInterruptQueues,
+    await_members_runtime: AwaitMembersRuntime,
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -1243,6 +1244,7 @@ pub(super) async fn handle_client(
                     &swarm_members,
                     &swarms_by_id,
                     &swarm_event_tx,
+                    &await_members_runtime,
                 )
                 .await;
             }
