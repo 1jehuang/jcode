@@ -202,6 +202,8 @@ pub(super) async fn handle_comm_list(
                         session_id: sid.clone(),
                         friendly_name: member.friendly_name.clone(),
                         files_touched: files,
+                        status: Some(member.status.clone()),
+                        detail: member.detail.clone(),
                         role: Some(member.role.clone()),
                     }
                 })
@@ -575,7 +577,7 @@ pub(super) async fn handle_comm_message(
 
 #[cfg(test)]
 mod tests {
-    use super::handle_comm_message;
+    use super::{handle_comm_list, handle_comm_message};
     use crate::agent::Agent;
     use crate::message::{Message, ToolDefinition};
     use crate::protocol::{NotificationType, ServerEvent};
@@ -749,5 +751,84 @@ mod tests {
             pending.is_empty(),
             "connected interactive session should not get synthetic user-message interrupt"
         );
+    }
+
+    #[tokio::test]
+    async fn comm_list_includes_member_status_and_detail() {
+        let requester = test_agent().await;
+        let peer = test_agent().await;
+
+        let requester_id = requester.lock().await.session_id().to_string();
+        let peer_id = peer.lock().await.session_id().to_string();
+        let swarm_id = "swarm-test".to_string();
+
+        let (requester_event_tx, _requester_event_rx) = mpsc::unbounded_channel();
+        let (peer_event_tx, _peer_event_rx) = mpsc::unbounded_channel();
+        let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+
+        let swarm_members = Arc::new(RwLock::new(HashMap::from([
+            (
+                requester_id.clone(),
+                SwarmMember {
+                    session_id: requester_id.clone(),
+                    event_tx: requester_event_tx,
+                    working_dir: None,
+                    swarm_id: Some(swarm_id.clone()),
+                    swarm_enabled: true,
+                    status: "ready".to_string(),
+                    detail: None,
+                    friendly_name: Some("falcon".to_string()),
+                    role: "coordinator".to_string(),
+                    joined_at: Instant::now(),
+                    last_status_change: Instant::now(),
+                    is_headless: false,
+                },
+            ),
+            (
+                peer_id.clone(),
+                SwarmMember {
+                    session_id: peer_id.clone(),
+                    event_tx: peer_event_tx,
+                    working_dir: None,
+                    swarm_id: Some(swarm_id.clone()),
+                    swarm_enabled: true,
+                    status: "running".to_string(),
+                    detail: Some("working on tests".to_string()),
+                    friendly_name: Some("bear".to_string()),
+                    role: "agent".to_string(),
+                    joined_at: Instant::now(),
+                    last_status_change: Instant::now(),
+                    is_headless: false,
+                },
+            ),
+        ])));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+            swarm_id,
+            HashSet::from([requester_id.clone(), peer_id.clone()]),
+        )])));
+        let file_touches = Arc::new(RwLock::new(HashMap::new()));
+
+        handle_comm_list(
+            1,
+            requester_id,
+            &client_event_tx,
+            &swarm_members,
+            &swarms_by_id,
+            &file_touches,
+        )
+        .await;
+
+        match client_event_rx.recv().await.expect("comm list response") {
+            ServerEvent::CommMembers { id, members } => {
+                assert_eq!(id, 1);
+                let peer = members
+                    .into_iter()
+                    .find(|member| member.friendly_name.as_deref() == Some("bear"))
+                    .expect("peer entry present");
+                assert_eq!(peer.status.as_deref(), Some("running"));
+                assert_eq!(peer.detail.as_deref(), Some("working on tests"));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
     }
 }

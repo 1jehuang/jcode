@@ -140,6 +140,7 @@ fn format_members(ctx: &ToolContext, members: &[AgentInfo]) -> ToolOutput {
             let session = &member.session_id;
             let role = member.role.as_deref().unwrap_or("agent");
             let files = member.files_touched.join(", ");
+            let status = member.status.as_deref().unwrap_or("unknown");
             let is_me = session == &ctx.session_id;
             let role_label = if role != "agent" {
                 format!(" [{}]", role)
@@ -147,10 +148,16 @@ fn format_members(ctx: &ToolContext, members: &[AgentInfo]) -> ToolOutput {
                 String::new()
             };
             output.push_str(&format!(
-                "  {}{} ({}){}\n",
+                "  {}{} ({})\n    Status: {}{}{}\n",
                 name,
                 role_label,
                 if is_me { "you" } else { session },
+                status,
+                member
+                    .detail
+                    .as_deref()
+                    .map(|detail| format!(" — {}", detail))
+                    .unwrap_or_default(),
                 if files.is_empty() {
                     String::new()
                 } else {
@@ -221,6 +228,15 @@ fn format_awaited_members(
     ToolOutput::new(output)
 }
 
+fn default_await_target_statuses() -> Vec<String> {
+    vec![
+        "ready".to_string(),
+        "completed".to_string(),
+        "stopped".to_string(),
+        "failed".to_string(),
+    ]
+}
+
 pub struct CommunicateTool;
 
 impl CommunicateTool {
@@ -283,7 +299,7 @@ impl Tool for CommunicateTool {
          - \"broadcast\"/\"message\": Send a message to all other agents in the codebase.\n\
          - \"dm\": Send a direct message to a specific session.\n\
          - \"channel\": Send a message to a named channel in this swarm.\n\
-         - \"list\": See who else is working in this codebase and what files they've touched.\n\
+         - \"list\": See who else is working in this codebase, what they're doing, and what files they've touched.\n\
          - \"propose_plan\": Propose plan items to the swarm coordinator.\n\
          - \"approve_plan\": (Coordinator only) Approve a plan proposal from another agent.\n\
          - \"reject_plan\": (Coordinator only) Reject a plan proposal with an optional reason.\n\
@@ -296,7 +312,7 @@ impl Tool for CommunicateTool {
          - \"assign_task\": (Coordinator only) Assign a plan task to a specific agent.\n\
          - \"subscribe_channel\": Subscribe to a named channel.\n\
          - \"unsubscribe_channel\": Unsubscribe from a named channel.\n\
-         - \"await_members\": Block until other agents reach a target status (e.g. completed/stopped). \
+         - \"await_members\": Block until other agents reach a target status (e.g. ready/completed/stopped). \
          Use this to wait for other agents to finish before proceeding with a task like cutting a release."
     }
 
@@ -369,7 +385,7 @@ impl Tool for CommunicateTool {
                 "target_status": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "For 'await_members': statuses that count as done (e.g. ['completed', 'stopped']). Defaults to ['completed', 'stopped', 'failed']."
+                    "description": "For 'await_members': statuses that count as done (e.g. ['ready', 'completed', 'stopped']). Defaults to ['ready', 'completed', 'stopped', 'failed']."
                 },
                 "session_ids": {
                     "type": "array",
@@ -861,13 +877,9 @@ impl Tool for CommunicateTool {
             }
 
             "await_members" => {
-                let target_status = params.target_status.unwrap_or_else(|| {
-                    vec![
-                        "completed".to_string(),
-                        "stopped".to_string(),
-                        "failed".to_string(),
-                    ]
-                });
+                let target_status = params
+                    .target_status
+                    .unwrap_or_else(default_await_target_statuses);
                 let session_ids = params.session_ids.unwrap_or_default();
                 let timeout_minutes = params.timeout_minutes.unwrap_or(60);
                 let timeout_secs = timeout_minutes * 60;
@@ -904,5 +916,48 @@ impl Tool for CommunicateTool {
                 params.action
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{default_await_target_statuses, format_members};
+    use crate::protocol::AgentInfo;
+    use crate::tool::{ToolContext, ToolExecutionMode};
+
+    #[test]
+    fn default_await_members_targets_include_ready() {
+        assert_eq!(
+            default_await_target_statuses(),
+            vec!["ready", "completed", "stopped", "failed"]
+        );
+    }
+
+    #[test]
+    fn format_members_includes_status_and_detail() {
+        let ctx = ToolContext {
+            session_id: "sess-self".to_string(),
+            message_id: "msg-1".to_string(),
+            tool_call_id: "call-1".to_string(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: ToolExecutionMode::Direct,
+        };
+
+        let output = format_members(
+            &ctx,
+            &[AgentInfo {
+                session_id: "sess-peer".to_string(),
+                friendly_name: Some("bear".to_string()),
+                files_touched: vec!["src/main.rs".to_string()],
+                status: Some("running".to_string()),
+                detail: Some("working on tests".to_string()),
+                role: Some("agent".to_string()),
+            }],
+        );
+
+        assert!(output.output.contains("Status: running — working on tests"));
+        assert!(output.output.contains("Files: src/main.rs"));
     }
 }

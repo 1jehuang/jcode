@@ -938,6 +938,12 @@ pub struct AgentInfo {
     pub friendly_name: Option<String>,
     /// Files this agent has touched
     pub files_touched: Vec<String>,
+    /// Current lifecycle status (ready, running, completed, failed, stopped, etc.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Optional status detail (current task, error, etc.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     /// Role: "agent", "coordinator", "worktree_manager"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
@@ -1424,6 +1430,37 @@ mod tests {
                 assert!(summary.contains("fox"));
             }
             _ => panic!("expected CommAwaitMembersResponse"),
+        }
+    }
+
+    #[test]
+    fn test_comm_members_roundtrip_includes_status() {
+        let event = ServerEvent::CommMembers {
+            id: 9,
+            members: vec![AgentInfo {
+                session_id: "sess-peer".to_string(),
+                friendly_name: Some("bear".to_string()),
+                files_touched: vec!["src/main.rs".to_string()],
+                status: Some("running".to_string()),
+                detail: Some("working on tests".to_string()),
+                role: Some("agent".to_string()),
+            }],
+        };
+
+        let json = encode_event(&event);
+        assert!(json.contains("\"type\":\"comm_members\""));
+        assert!(json.contains("\"status\":\"running\""));
+
+        let decoded: ServerEvent = serde_json::from_str(json.trim()).unwrap();
+        match decoded {
+            ServerEvent::CommMembers { id, members } => {
+                assert_eq!(id, 9);
+                assert_eq!(members.len(), 1);
+                assert_eq!(members[0].friendly_name.as_deref(), Some("bear"));
+                assert_eq!(members[0].status.as_deref(), Some("running"));
+                assert_eq!(members[0].detail.as_deref(), Some("working on tests"));
+            }
+            _ => panic!("expected CommMembers"),
         }
     }
 
