@@ -29,6 +29,167 @@ pub(crate) fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
         .collect()
 }
 
+fn merge_string_sets(existing: &Value, incoming: &Value) -> Option<Value> {
+    fn collect_strings(value: &Value) -> Option<Vec<String>> {
+        match value {
+            Value::String(s) => Some(vec![s.clone()]),
+            Value::Array(items) => items
+                .iter()
+                .map(|item| item.as_str().map(ToString::to_string))
+                .collect(),
+            _ => None,
+        }
+    }
+
+    let mut combined = collect_strings(existing)?;
+    for item in collect_strings(incoming)? {
+        if !combined.contains(&item) {
+            combined.push(item);
+        }
+    }
+
+    if combined.len() == 1 {
+        Some(Value::String(combined.remove(0)))
+    } else {
+        Some(Value::Array(
+            combined.into_iter().map(Value::String).collect(),
+        ))
+    }
+}
+
+fn merge_schema_objects(
+    target: &mut serde_json::Map<String, Value>,
+    incoming: &serde_json::Map<String, Value>,
+) {
+    for (key, incoming_value) in incoming {
+        match key.as_str() {
+            "properties" | "$defs" | "definitions" | "patternProperties" => {
+                let Some(incoming_children) = incoming_value.as_object() else {
+                    target.insert(key.clone(), incoming_value.clone());
+                    continue;
+                };
+
+                match target.get_mut(key) {
+                    Some(Value::Object(existing_children)) => {
+                        for (child_key, child_value) in incoming_children {
+                            if let Some(existing_child) = existing_children.get_mut(child_key) {
+                                merge_schema_values(existing_child, child_value.clone());
+                            } else {
+                                existing_children.insert(child_key.clone(), child_value.clone());
+                            }
+                        }
+                    }
+                    _ => {
+                        target.insert(key.clone(), Value::Object(incoming_children.clone()));
+                    }
+                }
+            }
+            "required" | "enum" | "type" => match target.get_mut(key) {
+                Some(existing_value) => {
+                    if let Some(merged) = merge_string_sets(existing_value, incoming_value) {
+                        *existing_value = merged;
+                    }
+                }
+                None => {
+                    target.insert(key.clone(), incoming_value.clone());
+                }
+            },
+            "description" | "title" => {
+                target
+                    .entry(key.clone())
+                    .or_insert_with(|| incoming_value.clone());
+            }
+            "additionalProperties" => match target.get_mut(key) {
+                Some(Value::Bool(existing_bool)) => {
+                    if incoming_value == &Value::Bool(false) {
+                        *existing_bool = false;
+                    }
+                }
+                Some(Value::Object(existing_obj)) => {
+                    if let Value::Object(incoming_obj) = incoming_value {
+                        merge_schema_objects(existing_obj, incoming_obj);
+                    } else if incoming_value == &Value::Bool(false) {
+                        target.insert(key.clone(), Value::Bool(false));
+                    }
+                }
+                Some(_) => {
+                    if incoming_value == &Value::Bool(false) {
+                        target.insert(key.clone(), Value::Bool(false));
+                    }
+                }
+                None => {
+                    target.insert(key.clone(), incoming_value.clone());
+                }
+            },
+            _ => match target.get_mut(key) {
+                Some(existing_value) => merge_schema_values(existing_value, incoming_value.clone()),
+                None => {
+                    target.insert(key.clone(), incoming_value.clone());
+                }
+            },
+        }
+    }
+}
+
+fn merge_schema_values(existing: &mut Value, incoming: Value) {
+    if *existing == incoming {
+        return;
+    }
+
+    match incoming {
+        Value::Object(incoming_map) => {
+            if let Value::Object(existing_map) = existing {
+                merge_schema_objects(existing_map, &incoming_map);
+            } else {
+                *existing = Value::Object(incoming_map);
+            }
+        }
+        Value::Array(incoming_items) => {
+            if let Value::Array(existing_items) = existing {
+                if existing_items != &incoming_items {
+                    for item in incoming_items {
+                        if !existing_items.contains(&item) {
+                            existing_items.push(item);
+                        }
+                    }
+                }
+            } else {
+                *existing = Value::Array(incoming_items);
+            }
+        }
+        incoming_value => {
+            *existing = incoming_value;
+        }
+    }
+}
+
+fn flatten_all_of_schema(mut map: serde_json::Map<String, Value>) -> Value {
+    let Some(Value::Array(all_of_items)) = map.remove("allOf") else {
+        return Value::Object(map);
+    };
+
+    let mut merged = map;
+    let mut fallback_any_of = Vec::new();
+
+    for item in all_of_items {
+        match item {
+            Value::Object(item_map) => merge_schema_objects(&mut merged, &item_map),
+            other => fallback_any_of.push(other),
+        }
+    }
+
+    if !fallback_any_of.is_empty() {
+        match merged.get_mut("anyOf") {
+            Some(Value::Array(existing_any_of)) => existing_any_of.extend(fallback_any_of),
+            _ => {
+                merged.insert("anyOf".to_string(), Value::Array(fallback_any_of));
+            }
+        }
+    }
+
+    Value::Object(merged)
+}
+
 fn openai_compatible_schema(schema: &Value) -> Value {
     match schema {
         Value::Object(map) => {
@@ -37,7 +198,7 @@ fn openai_compatible_schema(schema: &Value) -> Value {
                 let normalized_key = if key == "oneOf" { "anyOf" } else { key };
                 out.insert(normalized_key.to_string(), openai_compatible_schema(value));
             }
-            Value::Object(out)
+            flatten_all_of_schema(out)
         }
         Value::Array(items) => Value::Array(items.iter().map(openai_compatible_schema).collect()),
         _ => schema.clone(),
@@ -230,8 +391,63 @@ fn strict_normalize_schema(schema: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{make_schema_nullable, schema_supports_strict, strict_normalize_schema};
+    use super::{
+        build_tools, make_schema_nullable, openai_compatible_schema, schema_supports_strict,
+        strict_normalize_schema,
+    };
+    use crate::message::{Message, ToolDefinition};
+    use crate::provider::{EventStream, Provider};
+    use crate::tool::Registry;
+    use anyhow::Result;
+    use async_trait::async_trait;
     use serde_json::json;
+    use std::sync::Arc;
+
+    struct MockProvider;
+
+    #[async_trait]
+    impl Provider for MockProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<EventStream> {
+            anyhow::bail!("Mock provider should not be called in schema tests")
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self)
+        }
+
+        fn available_models_display(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        async fn prefetch_models(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn schema_contains_keyword(schema: &serde_json::Value, keyword: &str) -> bool {
+        match schema {
+            serde_json::Value::Object(map) => {
+                map.contains_key(keyword)
+                    || map
+                        .values()
+                        .any(|value| schema_contains_keyword(value, keyword))
+            }
+            serde_json::Value::Array(items) => items
+                .iter()
+                .any(|value| schema_contains_keyword(value, keyword)),
+            _ => false,
+        }
+    }
 
     #[test]
     fn strict_normalize_schema_marks_optional_properties_nullable_and_required() {
@@ -329,6 +545,67 @@ mod tests {
             "properties": { "x": { "type": "string" } },
             "additionalProperties": false
         })));
+    }
+
+    #[test]
+    fn openai_compatible_schema_flattens_allof_object_branches() {
+        let schema = json!({
+            "description": "Read params",
+            "allOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "file_path": { "type": "string" }
+                    },
+                    "required": ["file_path"]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "start_line": { "type": "integer" }
+                    }
+                }
+            ]
+        });
+
+        let normalized = openai_compatible_schema(&schema);
+
+        assert!(normalized.get("allOf").is_none());
+        assert_eq!(normalized["type"], json!("object"));
+        assert_eq!(normalized["description"], json!("Read params"));
+        assert_eq!(
+            normalized["properties"]["file_path"]["type"],
+            json!("string")
+        );
+        assert_eq!(
+            normalized["properties"]["start_line"]["type"],
+            json!("integer")
+        );
+        assert_eq!(normalized["required"], json!(["file_path"]));
+    }
+
+    #[tokio::test]
+    async fn build_tools_never_sends_allof_to_openai() {
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+        let registry = Registry::new(provider).await;
+        let defs = registry.definitions(None).await;
+        let api_tools = build_tools(&defs);
+
+        let offending: Vec<String> = api_tools
+            .iter()
+            .filter_map(|tool| {
+                if schema_contains_keyword(&tool["parameters"], "allOf") {
+                    tool["name"].as_str().map(ToString::to_string)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(
+            offending.is_empty(),
+            "OpenAI tool schemas must not contain allOf; offending tools: {offending:?}"
+        );
     }
 }
 
