@@ -268,6 +268,14 @@ mod tests {
         WorkspaceSplitTarget, enable, handle_split_response, is_enabled, navigate_right,
         queue_split_target, reset_for_tests, status_summary, sync_after_history, visible_rows,
     };
+    use std::sync::{Mutex, OnceLock};
+
+    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("workspace test lock")
+    }
 
     fn reset() {
         reset_for_tests();
@@ -275,6 +283,7 @@ mod tests {
 
     #[test]
     fn enabling_imports_initial_sessions() {
+        let _guard = test_lock();
         reset();
         enable(
             Some("session_a"),
@@ -289,6 +298,7 @@ mod tests {
 
     #[test]
     fn horizontal_navigation_returns_new_target() {
+        let _guard = test_lock();
         reset();
         enable(
             Some("session_a"),
@@ -300,6 +310,7 @@ mod tests {
 
     #[test]
     fn split_response_in_workspace_targets_new_session() {
+        let _guard = test_lock();
         reset();
         enable(Some("session_a"), &["session_a".to_string()]);
         queue_split_target(WorkspaceSplitTarget::Right);
@@ -320,6 +331,7 @@ mod tests {
 
     #[test]
     fn status_summary_reports_enabled_state() {
+        let _guard = test_lock();
         reset();
         enable(Some("session_a"), &["session_a".to_string()]);
         let summary = status_summary();

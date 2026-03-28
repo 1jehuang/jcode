@@ -874,6 +874,19 @@ impl crate::tui::TuiState for App {
             Vec::new()
         };
 
+        let workspace_rows = if crate::tui::workspace_client::is_enabled() {
+            let session_id = if self.is_remote {
+                self.remote_session_id.as_deref()
+            } else {
+                Some(self.session.id.as_str())
+            };
+            crate::tui::workspace_client::visible_rows(5, session_id, self.is_processing)
+        } else {
+            Vec::new()
+        };
+
+        let workspace_animation_tick = self.app_started.elapsed().as_millis() as u64 / 180;
+
         crate::tui::info_widget::InfoWidgetData {
             todos,
             context_info,
@@ -903,6 +916,8 @@ impl crate::tui::TuiState for App {
             upstream_provider: self.upstream_provider.clone(),
             connection_type: self.connection_type.clone(),
             diagrams,
+            workspace_rows,
+            workspace_animation_tick,
             ambient_info: gather_ambient_info(crate::config::config().ambient.enabled),
             observed_context_tokens: self.current_stream_context_tokens(),
             is_compacting: if !self.is_remote && self.provider.uses_jcode_compaction() {

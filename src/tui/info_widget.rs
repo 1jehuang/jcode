@@ -8,6 +8,7 @@ use super::color_support::rgb;
 #[path = "info_widget_graph.rs"]
 mod graph;
 use super::info_widget_overview::{InfoPageKind, MAX_TODO_LINES, compute_page_layout};
+use super::workspace_map::VisibleWorkspaceRow;
 use crate::ambient::AmbientStatus;
 use crate::prompt::ContextInfo;
 use crate::protocol::SwarmMemberStatus;
@@ -34,6 +35,8 @@ use std::collections::HashSet;
 pub enum WidgetKind {
     /// Combined overview to reduce scattered widgets
     Overview,
+    /// Niri-style workspace map preview
+    WorkspaceMap,
     /// Todo list with progress
     Todos,
     /// Token/context usage bar
@@ -63,17 +66,18 @@ impl WidgetKind {
     pub fn priority(self) -> u8 {
         match self {
             WidgetKind::Diagrams => 0, // Highest priority - user explicitly wants to see it
-            WidgetKind::Overview => 1,
-            WidgetKind::Todos => 2,
-            WidgetKind::ContextUsage => 3,
-            WidgetKind::UsageLimits => 4, // Bumped up - important when near limits
-            WidgetKind::MemoryActivity => 5,
-            WidgetKind::ModelInfo => 6,
-            WidgetKind::BackgroundTasks => 7,
-            WidgetKind::GitStatus => 8,
-            WidgetKind::SwarmStatus => 9, // Session list - lower priority
-            WidgetKind::AmbientMode => 10, // Scheduled agent - lower priority
-            WidgetKind::Tips => 11,       // Did you know - lowest
+            WidgetKind::WorkspaceMap => 1,
+            WidgetKind::Overview => 2,
+            WidgetKind::Todos => 3,
+            WidgetKind::ContextUsage => 4,
+            WidgetKind::UsageLimits => 5, // Bumped up - important when near limits
+            WidgetKind::MemoryActivity => 6,
+            WidgetKind::ModelInfo => 7,
+            WidgetKind::BackgroundTasks => 8,
+            WidgetKind::GitStatus => 9,
+            WidgetKind::SwarmStatus => 10, // Session list - lower priority
+            WidgetKind::AmbientMode => 11, // Scheduled agent - lower priority
+            WidgetKind::Tips => 12,        // Did you know - lowest
         }
     }
 
@@ -81,6 +85,7 @@ impl WidgetKind {
     pub fn preferred_side(self) -> Side {
         match self {
             WidgetKind::Diagrams => Side::Right, // Diagrams on right
+            WidgetKind::WorkspaceMap => Side::Right,
             WidgetKind::Overview => Side::Right,
             WidgetKind::Todos => Side::Right,
             WidgetKind::ContextUsage => Side::Right,
@@ -99,6 +104,7 @@ impl WidgetKind {
     pub fn min_height(self) -> u16 {
         match self {
             WidgetKind::Diagrams => 10, // Diagrams need more space
+            WidgetKind::WorkspaceMap => 1,
             WidgetKind::Overview => 8,
             WidgetKind::Todos => 3,
             WidgetKind::ContextUsage => 2,
@@ -117,6 +123,7 @@ impl WidgetKind {
     pub fn all_by_priority() -> &'static [WidgetKind] {
         &[
             WidgetKind::Diagrams,
+            WidgetKind::WorkspaceMap,
             WidgetKind::Overview,
             WidgetKind::Todos,
             WidgetKind::ContextUsage,
@@ -134,6 +141,7 @@ impl WidgetKind {
     pub fn as_str(self) -> &'static str {
         match self {
             WidgetKind::Diagrams => "diagrams",
+            WidgetKind::WorkspaceMap => "workspace",
             WidgetKind::Overview => "overview",
             WidgetKind::Todos => "todos",
             WidgetKind::ContextUsage => "context",
@@ -641,6 +649,10 @@ pub struct InfoWidgetData {
     pub connection_type: Option<String>,
     /// Mermaid diagrams to display
     pub diagrams: Vec<DiagramInfo>,
+    /// Visible Niri-style workspace rows
+    pub workspace_rows: Vec<VisibleWorkspaceRow>,
+    /// Lightweight animation tick for workspace map rendering
+    pub workspace_animation_tick: u64,
     /// Ambient mode status
     pub ambient_info: Option<AmbientWidgetData>,
     /// Actual API-reported context tokens (from last streaming response)
@@ -669,6 +681,7 @@ impl InfoWidgetData {
             && self.swarm_info.is_none()
             && self.background_info.is_none()
             && self.diagrams.is_empty()
+            && self.workspace_rows.is_empty()
     }
 
     /// Check if a specific widget kind has data to display
@@ -679,6 +692,7 @@ impl InfoWidgetData {
 
         match kind {
             WidgetKind::Diagrams => !self.diagrams.is_empty(),
+            WidgetKind::WorkspaceMap => !self.workspace_rows.is_empty(),
             WidgetKind::Overview => {
                 let mut sections = 0usize;
                 if self.model.is_some() {
@@ -898,6 +912,14 @@ pub(crate) fn calculate_widget_height(
     let border_height = 2u16;
 
     let content_height = match kind {
+        WidgetKind::WorkspaceMap => {
+            if data.workspace_rows.is_empty() {
+                return 0;
+            }
+            let (_preferred_w, preferred_h) =
+                super::workspace_map_widget::preferred_size(&data.workspace_rows);
+            preferred_h.min(max_height.saturating_sub(border_height))
+        }
         WidgetKind::Overview => {
             let mut overview = data.clone();
             // Keep memory in its own widget so graph rendering stays focused.
@@ -1115,10 +1137,17 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
     let rect = placement.rect;
 
     // Semi-transparent looking border (using dim colors)
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(rgb(70, 70, 80)).dim());
+
+    if placement.kind == WidgetKind::WorkspaceMap {
+        block = block.title(Span::styled(
+            " Workspace ",
+            Style::default().fg(rgb(120, 120, 130)).dim(),
+        ));
+    }
 
     let inner = block.inner(rect);
 
@@ -1139,6 +1168,19 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
         }
         frame.render_widget(block, rect);
         render_overview_widget(frame, inner, data);
+        return;
+    }
+    if placement.kind == WidgetKind::WorkspaceMap {
+        if data.workspace_rows.is_empty() || inner.width == 0 || inner.height == 0 {
+            return;
+        }
+        frame.render_widget(block, rect);
+        super::workspace_map_widget::render_workspace_map(
+            frame.buffer_mut(),
+            inner,
+            &data.workspace_rows,
+            data.workspace_animation_tick,
+        );
         return;
     }
     let lines = render_widget_content(placement.kind, data, inner);
@@ -1407,6 +1449,7 @@ fn render_widget_content(
 ) -> Vec<Line<'static>> {
     match kind {
         WidgetKind::Diagrams => Vec::new(), // Handled specially in render_single_widget
+        WidgetKind::WorkspaceMap => Vec::new(), // Handled specially in render_single_widget
         WidgetKind::Overview => Vec::new(), // Handled specially in render_single_widget
         WidgetKind::Todos => render_todos_widget(data, inner),
         WidgetKind::ContextUsage => render_context_widget(data, inner),
@@ -3163,7 +3206,10 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(idle_data.effective_priority(WidgetKind::MemoryActivity), 5);
+        assert_eq!(
+            idle_data.effective_priority(WidgetKind::MemoryActivity),
+            WidgetKind::MemoryActivity.priority()
+        );
 
         idle_data.memory_info.as_mut().unwrap().activity = Some(MemoryActivity {
             state: MemoryState::Embedding,
@@ -3250,6 +3296,44 @@ mod tests {
         assert!(
             placements.iter().any(|p| p.kind == WidgetKind::Overview),
             "expected overview widget placement"
+        );
+    }
+
+    #[test]
+    fn workspace_widget_has_high_priority_when_enabled() {
+        {
+            let mut guard = super::get_or_init_state();
+            if let Some(state) = guard.as_mut() {
+                state.enabled = true;
+                state.placements.clear();
+                state.widget_states.clear();
+            }
+        }
+
+        let data = InfoWidgetData {
+            workspace_rows: vec![crate::tui::workspace_map::VisibleWorkspaceRow {
+                workspace: 0,
+                is_current: true,
+                focused_index: Some(0),
+                sessions: vec![crate::tui::workspace_map::WorkspaceSessionTile::new("fox")],
+            }],
+            model: Some("gpt-test".to_string()),
+            queue_mode: Some(true),
+            ..Default::default()
+        };
+
+        let available = data.available_widgets();
+        assert_eq!(available.first(), Some(&WidgetKind::WorkspaceMap));
+
+        let margins = Margins {
+            right_widths: vec![40; 20],
+            left_widths: Vec::new(),
+            centered: false,
+        };
+        let placements = calculate_placements(Rect::new(0, 0, 80, 20), &margins, &data);
+        assert_eq!(
+            placements.first().map(|p| p.kind),
+            Some(WidgetKind::WorkspaceMap)
         );
     }
 

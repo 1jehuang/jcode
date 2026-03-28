@@ -2981,36 +2981,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         });
     }
 
-    if app.workspace_mode_enabled() && !show_donut {
-        let rows = app.workspace_map_rows();
-        if !rows.is_empty() {
-            let (preferred_w, preferred_h) = super::workspace_map_widget::preferred_size(&rows);
-            let widget_w = preferred_w
-                .min(messages_area.width.saturating_sub(2))
-                .max(10);
-            let widget_h = preferred_h
-                .min(messages_area.height.saturating_sub(2))
-                .max(4);
-            let widget_rect = Rect::new(
-                messages_area.x.saturating_add(
-                    messages_area
-                        .width
-                        .saturating_sub(widget_w)
-                        .saturating_sub(1),
-                ),
-                messages_area.y.saturating_add(1),
-                widget_w,
-                widget_h,
-            );
-            super::workspace_map_widget::render_workspace_map(
-                frame.buffer_mut(),
-                widget_rect,
-                &rows,
-                app.workspace_animation_tick(),
-            );
-        }
-    }
-
     if visual_debug::overlay_enabled() {
         overlays::draw_debug_overlay(frame, &placements, &chunks);
     }

@@ -3,23 +3,22 @@ use crate::tui::workspace_map::{VisibleWorkspaceRow, WorkspaceSessionVisualState
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
 };
 
-const TILE_WIDTH: u16 = 8;
-const TILE_HEIGHT: u16 = 2;
-const COL_GAP: u16 = 2;
+const TILE_WIDTH: u16 = 1;
+const TILE_HEIGHT: u16 = 1;
+const COL_GAP: u16 = 1;
 const ROW_GAP: u16 = 1;
 
 pub fn preferred_size(rows: &[VisibleWorkspaceRow]) -> (u16, u16) {
     let max_tiles = rows.iter().map(|row| row.sessions.len()).max().unwrap_or(0) as u16;
     let width = if max_tiles == 0 {
-        TILE_WIDTH + 2
+        TILE_WIDTH
     } else {
-        max_tiles * TILE_WIDTH + max_tiles.saturating_sub(1) * COL_GAP + 2
+        max_tiles * TILE_WIDTH + max_tiles.saturating_sub(1) * COL_GAP
     };
-    let height =
-        rows.len() as u16 * TILE_HEIGHT + rows.len().saturating_sub(1) as u16 * ROW_GAP + 2;
+    let height = rows.len() as u16 * TILE_HEIGHT + rows.len().saturating_sub(1) as u16 * ROW_GAP;
     (width, height)
 }
 
@@ -62,15 +61,20 @@ pub fn compute_workspace_tile_placements(
 
         for (session_index, session) in row.sessions.iter().enumerate() {
             let x = left_offset + (session_index as u16 * (TILE_WIDTH + COL_GAP));
+            let area_right = area.x.saturating_add(area.width);
+            let area_bottom = area.y.saturating_add(area.height);
+            if x >= area_right || y >= area_bottom {
+                continue;
+            }
+            let width = area_right.saturating_sub(x).min(TILE_WIDTH);
+            let height = area_bottom.saturating_sub(y).min(TILE_HEIGHT);
+            if width == 0 || height == 0 {
+                continue;
+            }
             placements.push(WorkspaceTilePlacement {
                 workspace: row.workspace,
                 session_index,
-                rect: Rect::new(
-                    x,
-                    y,
-                    TILE_WIDTH.min(area.width),
-                    TILE_HEIGHT.min(area.height),
-                ),
+                rect: Rect::new(x, y, width, height),
                 focused: row.focused_index == Some(session_index),
                 current_workspace: row.is_current,
                 state: session.state,
@@ -97,123 +101,100 @@ fn clear_area(buf: &mut Buffer, area: Rect) {
 }
 
 fn draw_workspace_tile(buf: &mut Buffer, placement: WorkspaceTilePlacement, tick: u64) {
-    if placement.rect.width < 2 || placement.rect.height < 2 {
+    if placement.rect.width == 0 || placement.rect.height == 0 {
         return;
     }
 
-    let border_color = border_color(
+    let fg = tile_color(
         placement.state,
         placement.focused,
         placement.current_workspace,
         tick,
     );
-    let fill_color = fill_color(placement.state);
-    let glyphs = if placement.focused {
-        ['╔', '╗', '╚', '╝', '═', '║']
+    let symbol = tile_symbol(placement.state, placement.focused, tick);
+    let style = if placement.focused {
+        Style::default().fg(fg).add_modifier(Modifier::BOLD)
     } else {
-        ['┌', '┐', '└', '┘', '─', '│']
+        Style::default().fg(fg)
     };
 
-    let x0 = placement.rect.x;
-    let y0 = placement.rect.y;
-    let x1 = placement.rect.x + placement.rect.width - 1;
-    let y1 = placement.rect.y + placement.rect.height - 1;
-
-    // fill interior/background
-    for y in y0..=y1 {
-        for x in x0..=x1 {
-            let mut style = Style::default();
-            if let Some(bg) = fill_color {
-                style = style.bg(bg);
-            }
-            buf[(x, y)].set_symbol(" ").set_style(style);
+    for y in placement.rect.y..placement.rect.y.saturating_add(placement.rect.height) {
+        for x in placement.rect.x..placement.rect.x.saturating_add(placement.rect.width) {
+            buf[(x, y)].set_symbol(symbol).set_style(style);
         }
-    }
-
-    buf[(x0, y0)].set_symbol(&glyphs[0].to_string()).set_style(
-        Style::default()
-            .fg(border_color)
-            .bg(fill_color.unwrap_or(Color::Reset)),
-    );
-    buf[(x1, y0)].set_symbol(&glyphs[1].to_string()).set_style(
-        Style::default()
-            .fg(border_color)
-            .bg(fill_color.unwrap_or(Color::Reset)),
-    );
-    buf[(x0, y1)].set_symbol(&glyphs[2].to_string()).set_style(
-        Style::default()
-            .fg(border_color)
-            .bg(fill_color.unwrap_or(Color::Reset)),
-    );
-    buf[(x1, y1)].set_symbol(&glyphs[3].to_string()).set_style(
-        Style::default()
-            .fg(border_color)
-            .bg(fill_color.unwrap_or(Color::Reset)),
-    );
-
-    for x in (x0 + 1)..x1 {
-        buf[(x, y0)].set_symbol(&glyphs[4].to_string()).set_style(
-            Style::default()
-                .fg(border_color)
-                .bg(fill_color.unwrap_or(Color::Reset)),
-        );
-        buf[(x, y1)].set_symbol(&glyphs[4].to_string()).set_style(
-            Style::default()
-                .fg(border_color)
-                .bg(fill_color.unwrap_or(Color::Reset)),
-        );
-    }
-    for y in (y0 + 1)..y1 {
-        buf[(x0, y)].set_symbol(&glyphs[5].to_string()).set_style(
-            Style::default()
-                .fg(border_color)
-                .bg(fill_color.unwrap_or(Color::Reset)),
-        );
-        buf[(x1, y)].set_symbol(&glyphs[5].to_string()).set_style(
-            Style::default()
-                .fg(border_color)
-                .bg(fill_color.unwrap_or(Color::Reset)),
-        );
     }
 }
 
-fn border_color(
+fn tile_symbol(state: WorkspaceSessionVisualState, focused: bool, tick: u64) -> &'static str {
+    match state {
+        WorkspaceSessionVisualState::Running => match tick % 4 {
+            0 => "◴",
+            1 => "◷",
+            2 => "◶",
+            _ => "◵",
+        },
+        _ if focused => "■",
+        _ => "▪",
+    }
+}
+
+fn tile_color(
     state: WorkspaceSessionVisualState,
     focused: bool,
     current_workspace: bool,
     tick: u64,
 ) -> Color {
-    if focused {
-        return rgb(220, 220, 240);
-    }
     match state {
         WorkspaceSessionVisualState::Running => {
-            if tick % 2 == 0 {
+            if focused {
+                if tick % 2 == 0 {
+                    rgb(180, 220, 255)
+                } else {
+                    rgb(130, 170, 220)
+                }
+            } else if tick % 2 == 0 {
                 rgb(140, 200, 255)
             } else {
                 rgb(90, 140, 190)
             }
         }
-        WorkspaceSessionVisualState::Error => rgb(255, 120, 120),
-        WorkspaceSessionVisualState::Waiting => rgb(255, 210, 120),
-        WorkspaceSessionVisualState::Completed => rgb(120, 220, 140),
-        WorkspaceSessionVisualState::Detached => rgb(170, 170, 190),
+        WorkspaceSessionVisualState::Error => {
+            if focused {
+                rgb(255, 160, 160)
+            } else {
+                rgb(255, 120, 120)
+            }
+        }
+        WorkspaceSessionVisualState::Waiting => {
+            if focused {
+                rgb(255, 225, 150)
+            } else {
+                rgb(255, 210, 120)
+            }
+        }
+        WorkspaceSessionVisualState::Completed => {
+            if focused {
+                rgb(160, 240, 180)
+            } else {
+                rgb(120, 220, 140)
+            }
+        }
+        WorkspaceSessionVisualState::Detached => {
+            if focused {
+                rgb(200, 200, 215)
+            } else {
+                rgb(170, 170, 190)
+            }
+        }
         WorkspaceSessionVisualState::Idle => {
-            if current_workspace {
+            if focused {
+                rgb(220, 220, 240)
+            } else if current_workspace {
                 rgb(150, 150, 165)
             } else {
                 rgb(95, 95, 110)
             }
         }
-    }
-}
-
-fn fill_color(state: WorkspaceSessionVisualState) -> Option<Color> {
-    match state {
-        WorkspaceSessionVisualState::Completed => Some(rgb(40, 90, 50)),
-        WorkspaceSessionVisualState::Waiting => Some(rgb(90, 75, 30)),
-        WorkspaceSessionVisualState::Error => Some(rgb(95, 35, 35)),
-        _ => None,
     }
 }
 
@@ -259,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn render_workspace_map_uses_double_border_for_focused_tile() {
+    fn render_workspace_map_uses_square_for_focused_tile() {
         let rows = vec![row(
             0,
             true,
@@ -275,12 +256,11 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<Vec<_>>()
             .join("");
-        assert!(symbols.contains("╔"));
-        assert!(symbols.contains("╝"));
+        assert!(symbols.contains("■"));
     }
 
     #[test]
-    fn render_workspace_map_fills_completed_tiles() {
+    fn render_workspace_map_colors_completed_tiles_green() {
         let rows = vec![row(
             0,
             true,
@@ -293,9 +273,64 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 20, 6));
         render_workspace_map(&mut buf, Rect::new(0, 0, 20, 6), &rows, 0);
 
-        let has_greenish_bg = buf.content().iter().any(|cell| {
-            matches!(cell.style().bg, Some(ratatui::style::Color::Rgb(r, g, b)) if g > r && g > b)
+        let has_greenish_fg = buf.content().iter().any(|cell| {
+            matches!(cell.style().fg, Some(ratatui::style::Color::Rgb(r, g, b)) if g > r && g > b)
         });
-        assert!(has_greenish_bg);
+        assert!(has_greenish_fg);
+    }
+
+    #[test]
+    fn running_tile_uses_spinner_frames() {
+        let rows = vec![row(
+            0,
+            true,
+            Some(0),
+            vec![WorkspaceSessionTile::with_state(
+                "fox",
+                WorkspaceSessionVisualState::Running,
+            )],
+        )];
+        let mut buf_a = Buffer::empty(Rect::new(0, 0, 20, 6));
+        render_workspace_map(&mut buf_a, Rect::new(0, 0, 20, 6), &rows, 0);
+        let mut buf_b = Buffer::empty(Rect::new(0, 0, 20, 6));
+        render_workspace_map(&mut buf_b, Rect::new(0, 0, 20, 6), &rows, 1);
+
+        let symbols_a: String = buf_a
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<Vec<_>>()
+            .join("");
+        let symbols_b: String = buf_b
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<Vec<_>>()
+            .join("");
+        assert_ne!(symbols_a, symbols_b);
+    }
+
+    #[test]
+    fn placements_clip_when_area_is_narrower_than_full_row() {
+        let rows = vec![row(
+            0,
+            true,
+            Some(0),
+            vec![
+                WorkspaceSessionTile::new("fox"),
+                WorkspaceSessionTile::new("bear"),
+                WorkspaceSessionTile::new("owl"),
+            ],
+        )];
+        let area = Rect::new(0, 0, 12, 6);
+        let placements = compute_workspace_tile_placements(area, &rows);
+        assert!(!placements.is_empty());
+        let right = area.x + area.width;
+        assert!(placements.iter().all(|placement| placement.rect.x < right));
+        assert!(
+            placements
+                .iter()
+                .all(|placement| placement.rect.x + placement.rect.width <= right)
+        );
     }
 }
