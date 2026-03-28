@@ -2,17 +2,6 @@ use super::*;
 use ratatui::layout::Rect;
 
 impl App {
-    fn adaptive_scroll_amount_from_gap(
-        gap: Option<std::time::Duration>,
-        slow_amount: usize,
-    ) -> usize {
-        match gap.map(|gap| gap.as_millis()) {
-            Some(ms) if ms < 24 => 1,
-            Some(ms) if ms < 80 => slow_amount.min(2).max(1),
-            _ => slow_amount.max(1),
-        }
-    }
-
     fn current_visible_diagram_hash(&self) -> Option<u64> {
         if self.diagram_mode != crate::config::DiagramDisplayMode::Pinned
             || !self.diagram_pane_enabled
@@ -254,10 +243,8 @@ impl App {
     }
 
     fn side_pane_mouse_scroll_amount(&mut self) -> usize {
-        let now = Instant::now();
-        let gap = self.last_mouse_scroll.map(|last| now.duration_since(last));
-        self.last_mouse_scroll = Some(now);
-        Self::adaptive_scroll_amount_from_gap(gap, self.side_pane_line_scroll_amount())
+        self.last_mouse_scroll = Some(Instant::now());
+        self.side_pane_line_scroll_amount()
     }
 
     pub(super) fn cycle_diagram(&mut self, direction: i32) {
@@ -845,10 +832,8 @@ impl App {
     }
 
     pub(super) fn mouse_scroll_amount(&mut self) -> usize {
-        let now = Instant::now();
-        let gap = self.last_mouse_scroll.map(|last| now.duration_since(last));
-        self.last_mouse_scroll = Some(now);
-        Self::adaptive_scroll_amount_from_gap(gap, 3)
+        self.last_mouse_scroll = Some(Instant::now());
+        3
     }
 
     pub(super) fn scroll_up(&mut self, amount: usize) {
@@ -919,40 +904,5 @@ impl App {
 
     pub(super) fn debug_scroll_bottom(&mut self) {
         self.follow_chat_bottom();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::App;
-    use std::time::Duration;
-
-    #[test]
-    fn adaptive_scroll_amount_uses_small_steps_for_rapid_events() {
-        assert_eq!(
-            App::adaptive_scroll_amount_from_gap(Some(Duration::from_millis(12)), 3),
-            1
-        );
-        assert_eq!(
-            App::adaptive_scroll_amount_from_gap(Some(Duration::from_millis(40)), 3),
-            2
-        );
-        assert_eq!(
-            App::adaptive_scroll_amount_from_gap(Some(Duration::from_millis(140)), 3),
-            3
-        );
-    }
-
-    #[test]
-    fn adaptive_scroll_amount_respects_smaller_slow_amounts() {
-        assert_eq!(
-            App::adaptive_scroll_amount_from_gap(Some(Duration::from_millis(12)), 1),
-            1
-        );
-        assert_eq!(
-            App::adaptive_scroll_amount_from_gap(Some(Duration::from_millis(40)), 1),
-            1
-        );
-        assert_eq!(App::adaptive_scroll_amount_from_gap(None, 1), 1);
     }
 }
