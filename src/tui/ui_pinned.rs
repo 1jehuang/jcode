@@ -1124,8 +1124,6 @@ pub(super) fn draw_side_panel_markdown(
     focused: bool,
     centered: bool,
 ) {
-    use ratatui::widgets::{Block, Borders, Paragraph};
-
     if area.width < 10 || area.height < 3 {
         return;
     }
@@ -1143,7 +1141,6 @@ pub(super) fn draw_side_panel_markdown(
     let page_count = snapshot.pages.len();
 
     let border_style = side_panel_border_style(focused);
-    let inner = side_panel_inner(area);
     let Some(content_shell_area) = side_panel_content_area(area) else {
         return;
     };
@@ -1175,19 +1172,11 @@ pub(super) fn draw_side_panel_markdown(
         }
     }
 
-    let block = Block::default()
-        .borders(Borders::LEFT)
-        .border_style(border_style);
-    frame.render_widget(block, area);
-    frame.render_widget(
-        Paragraph::new(Line::from(title_parts)),
-        Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: SIDE_PANEL_HEADER_HEIGHT,
-        },
-    );
+    let Some(content_shell_area) =
+        super::draw_right_rail_chrome(frame, area, Line::from(title_parts), border_style)
+    else {
+        return;
+    };
     let show_native_scrollbar = super::native_scrollbar_visible(
         app.side_panel_native_scrollbar() && content_shell_area.width > 1,
         rendered_full_width.lines.len(),
@@ -1235,9 +1224,11 @@ pub(super) fn draw_side_panel_markdown(
         visible_left_margins,
     );
     apply_side_selection_highlight(app, &mut visible_lines, clamped_scroll);
+    super::clear_area(frame, content_inner);
     frame.render_widget(Paragraph::new(visible_lines), content_inner);
 
     if let Some(scrollbar_area) = scrollbar_area {
+        super::clear_area(frame, scrollbar_area);
         super::render_native_scrollbar(
             frame,
             scrollbar_area,
@@ -2583,7 +2574,7 @@ fn draw_pinned_content(
     line_wrap: bool,
     focused: bool,
 ) {
-    use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+    use ratatui::widgets::{Paragraph, Wrap};
 
     if area.width < 10 || area.height < 3 {
         return;
@@ -2639,19 +2630,12 @@ fn draw_pinned_content(
     }
     title_parts.push(Span::styled(" ", Style::default().fg(dim_color())));
 
-    let border_color = if focused { tool_color() } else { dim_color() };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border_color))
-        .title(Line::from(title_parts));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if inner.width == 0 || inner.height == 0 {
+    let border_style = super::right_rail_border_style(focused, tool_color());
+    let Some(inner) =
+        super::draw_right_rail_chrome(frame, area, Line::from(title_parts), border_style)
+    else {
         return;
-    }
+    };
 
     let mut text_lines: Vec<Line<'static>> = Vec::new();
     let mut last_image_group: Option<ImageGroup> = None;

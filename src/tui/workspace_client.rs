@@ -52,7 +52,7 @@ pub fn disable() {
 }
 
 #[cfg(test)]
-fn reset_for_tests() {
+pub(crate) fn reset_for_tests() {
     let mut guard = WORKSPACE_STATE.lock().unwrap_or_else(|e| e.into_inner());
     *guard = None;
 }

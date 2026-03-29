@@ -1,15 +1,39 @@
 use super::{accent_color, clear_area, dim_color, tool_color};
 use crate::tui::info_widget;
-use ratatui::{
-    prelude::*,
-    widgets::{Block, Borders, Paragraph},
-};
+use ratatui::{prelude::*, widgets::Paragraph};
 
 pub(crate) fn div_ceil_u32(value: u32, divisor: u32) -> u32 {
     if divisor == 0 {
         return value;
     }
     value.saturating_add(divisor - 1) / divisor
+}
+
+pub(crate) fn readable_image_target_area(area: Rect) -> Rect {
+    if area.width <= 6 || area.height <= 4 {
+        return area;
+    }
+
+    let horizontal_padding = (area.width / 12).clamp(1, 3);
+    let vertical_padding = (area.height / 14).clamp(1, 2);
+
+    let max_horizontal_padding = area.width.saturating_sub(1) / 2;
+    let max_vertical_padding = area.height.saturating_sub(1) / 2;
+    let horizontal_padding = horizontal_padding.min(max_horizontal_padding);
+    let vertical_padding = vertical_padding.min(max_vertical_padding);
+
+    Rect {
+        x: area.x + horizontal_padding,
+        y: area.y + vertical_padding,
+        width: area
+            .width
+            .saturating_sub(horizontal_padding.saturating_mul(2))
+            .max(1),
+        height: area
+            .height
+            .saturating_sub(vertical_padding.saturating_mul(2))
+            .max(1),
+    }
 }
 
 #[cfg(test)]
@@ -106,25 +130,26 @@ pub(crate) fn vcenter_fitted_image_with_font(
     if area.width == 0 || area.height == 0 || img_w_px == 0 || img_h_px == 0 {
         return area;
     }
+    let target_area = readable_image_target_area(area);
     let (font_w, font_h) = match font_size {
         Some(fs) => (fs.0.max(1) as f64, fs.1.max(1) as f64),
-        None => return area,
+        None => return target_area,
     };
 
-    let area_w_px = area.width as f64 * font_w;
-    let area_h_px = area.height as f64 * font_h;
+    let area_w_px = target_area.width as f64 * font_w;
+    let area_h_px = target_area.height as f64 * font_h;
     let scale = (area_w_px / img_w_px as f64).min(area_h_px / img_h_px as f64);
 
     let fitted_w_cells = ((img_w_px as f64 * scale) / font_w).ceil() as u16;
     let fitted_h_cells = ((img_h_px as f64 * scale) / font_h).ceil() as u16;
-    let fitted_w_cells = fitted_w_cells.min(area.width);
-    let fitted_h_cells = fitted_h_cells.min(area.height);
+    let fitted_w_cells = fitted_w_cells.min(target_area.width);
+    let fitted_h_cells = fitted_h_cells.min(target_area.height);
 
-    let x_offset = (area.width - fitted_w_cells) / 2;
-    let y_offset = (area.height - fitted_h_cells) / 2;
+    let x_offset = (target_area.width - fitted_w_cells) / 2;
+    let y_offset = (target_area.height - fitted_h_cells) / 2;
     Rect {
-        x: area.x + x_offset,
-        y: area.y + y_offset,
+        x: target_area.x + x_offset,
+        y: target_area.y + y_offset,
         width: fitted_w_cells,
         height: fitted_h_cells,
     }
@@ -190,13 +215,13 @@ pub(crate) fn draw_pinned_diagram(
     pane_position: crate::config::DiagramPanePosition,
     pane_animating: bool,
 ) {
-    use ratatui::widgets::{BorderType, Wrap};
+    use ratatui::widgets::{Block, BorderType, Borders, Wrap};
 
     if area.width < 5 || area.height < 3 {
         return;
     }
 
-    let border_color = if focused { accent_color() } else { dim_color() };
+    let border_style = super::right_rail_border_style(focused, accent_color());
     let mut title_parts = vec![Span::styled(" pinned ", Style::default().fg(tool_color()))];
     let fit_mode = diagram_view_uses_fit_mode(focused, scroll_x, scroll_y, zoom_percent);
     if total > 0 {
@@ -259,14 +284,24 @@ pub(crate) fn draw_pinned_diagram(
         ));
     }
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border_color))
-        .title(Line::from(title_parts));
+    let inner = if pane_position == crate::config::DiagramPanePosition::Side {
+        let Some(content_area) =
+            super::draw_right_rail_chrome(frame, area, Line::from(title_parts), border_style)
+        else {
+            return;
+        };
+        content_area
+    } else {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(border_style)
+            .title(Line::from(title_parts));
 
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        inner
+    };
 
     if inner.width > 0 && inner.height > 0 {
         let mut rendered = 0u16;

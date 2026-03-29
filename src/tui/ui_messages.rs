@@ -223,6 +223,7 @@ fn swarm_notification_style(title: Option<&str>) -> (&'static str, Color, Color)
         t if t.starts_with("Broadcast") => ("📣", rgb(255, 193, 94), rgb(255, 240, 214)),
         t if t.starts_with("Shared context") => ("🧠", rgb(120, 210, 160), rgb(221, 247, 232)),
         t if t.starts_with("File activity") => ("⚠", rgb(255, 160, 120), rgb(255, 228, 214)),
+        t if t.starts_with("Task") => ("⚑", rgb(130, 184, 255), rgb(220, 236, 255)),
         t if t.starts_with("Plan") => ("☰", rgb(186, 139, 255), rgb(238, 228, 255)),
         _ => ("◦", rgb(160, 160, 180), rgb(225, 225, 235)),
     }

@@ -1215,7 +1215,30 @@ impl App {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, m)| {
-                    Self::picker_fuzzy_score(&picker.filter, &m.name).map(|s| {
+                    let filter_text = if picker.kind == PickerKind::Account {
+                        let provider = m
+                            .routes
+                            .get(m.selected_route)
+                            .map(|route| route.provider.as_str())
+                            .unwrap_or("");
+                        let state = match &m.selection {
+                            PickerSelection::Account(AccountPickerSelection::Switch { .. }) => {
+                                if m.is_current { "active" } else { "saved" }
+                            }
+                            PickerSelection::Account(AccountPickerSelection::Add { .. }) => "add",
+                            PickerSelection::Account(AccountPickerSelection::Replace {
+                                ..
+                            }) => "replace",
+                            PickerSelection::Account(AccountPickerSelection::OpenCenter {
+                                ..
+                            }) => "manage",
+                            PickerSelection::Model => "",
+                        };
+                        format!("{} {} {}", m.name, provider, state)
+                    } else {
+                        m.name.clone()
+                    };
+                    Self::picker_fuzzy_score(&picker.filter, &filter_text).map(|s| {
                         let bonus = if m.recommended { 5 } else { 0 };
                         (i, s + bonus)
                     })

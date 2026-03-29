@@ -510,7 +510,7 @@ pub(super) fn draw_file_diff_view(
     pane_scroll: usize,
     focused: bool,
 ) {
-    use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+    use ratatui::widgets::Paragraph;
 
     if area.width < 10 || area.height < 3 {
         return;
@@ -528,16 +528,17 @@ pub(super) fn draw_file_diff_view(
     let active_context = active_file_diff_context(prepared, scroll, visible_height);
 
     let Some(active_context) = active_context else {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(dim_color()))
-            .title(Line::from(vec![Span::styled(
+        let Some(inner) = super::draw_right_rail_chrome(
+            frame,
+            area,
+            Line::from(vec![Span::styled(
                 " file ",
                 Style::default().fg(tool_color()),
-            )]));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+            )]),
+            super::right_rail_border_style(false, tool_color()),
+        ) else {
+            return;
+        };
         let msg = Paragraph::new(Line::from(Span::styled(
             "No edits visible",
             Style::default().fg(dim_color()),
@@ -640,19 +641,12 @@ pub(super) fn draw_file_diff_view(
         Style::default().fg(file_link_color()),
     ));
 
-    let border_color = if focused { tool_color() } else { dim_color() };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border_color))
-        .title(Line::from(title_parts));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if inner.width == 0 || inner.height == 0 {
+    let border_style = super::right_rail_border_style(focused, tool_color());
+    let Some(inner) =
+        super::draw_right_rail_chrome(frame, area, Line::from(title_parts), border_style)
+    else {
         return;
-    }
+    };
 
     super::set_pinned_pane_total_lines(total_lines);
 

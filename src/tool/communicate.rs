@@ -922,8 +922,270 @@ impl Tool for CommunicateTool {
 #[cfg(test)]
 mod tests {
     use super::{default_await_target_statuses, format_members};
-    use crate::protocol::AgentInfo;
-    use crate::tool::{ToolContext, ToolExecutionMode};
+    use crate::message::{Message, StreamEvent, ToolDefinition};
+    use crate::protocol::{AgentInfo, Request, ServerEvent};
+    use crate::provider::{EventStream, Provider};
+    use crate::server::Server;
+    use crate::tool::{Tool, ToolContext, ToolExecutionMode};
+    use crate::transport::{ReadHalf, Stream, WriteHalf};
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use futures::StreamExt;
+    use serde_json::json;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    use super::CommunicateTool;
+
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let original = std::env::var_os(key);
+            crate::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.original.take() {
+                crate::env::set_var(self.key, value);
+            } else {
+                crate::env::remove_var(self.key);
+            }
+        }
+    }
+
+    struct DelayedTestProvider {
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl Provider for DelayedTestProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<EventStream> {
+            let delay = self.delay;
+            let stream = futures::stream::once(async move {
+                tokio::time::sleep(delay).await;
+                Ok(StreamEvent::TextDelta("ok".to_string()))
+            })
+            .chain(futures::stream::once(async {
+                Ok(StreamEvent::MessageEnd { stop_reason: None })
+            }));
+            Ok(Box::pin(stream))
+        }
+
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self { delay: self.delay })
+        }
+    }
+
+    struct RawClient {
+        reader: BufReader<ReadHalf>,
+        writer: WriteHalf,
+        next_id: u64,
+    }
+
+    impl RawClient {
+        async fn connect(path: &Path) -> Result<Self> {
+            let stream = Stream::connect(path).await?;
+            let (reader, writer) = stream.into_split();
+            Ok(Self {
+                reader: BufReader::new(reader),
+                writer,
+                next_id: 1,
+            })
+        }
+
+        async fn send_request(&mut self, request: Request) -> Result<u64> {
+            let id = request.id();
+            let json = serde_json::to_string(&request)? + "\n";
+            self.writer.write_all(json.as_bytes()).await?;
+            Ok(id)
+        }
+
+        async fn read_event(&mut self) -> Result<ServerEvent> {
+            let mut line = String::new();
+            let n = self.reader.read_line(&mut line).await?;
+            if n == 0 {
+                anyhow::bail!("server disconnected")
+            }
+            Ok(serde_json::from_str(&line)?)
+        }
+
+        async fn read_until<F>(
+            &mut self,
+            timeout: Duration,
+            mut predicate: F,
+        ) -> Result<ServerEvent>
+        where
+            F: FnMut(&ServerEvent) -> bool,
+        {
+            let deadline = tokio::time::Instant::now() + timeout;
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                let event = tokio::time::timeout(remaining, self.read_event()).await??;
+                if predicate(&event) {
+                    return Ok(event);
+                }
+            }
+        }
+
+        async fn subscribe(&mut self, working_dir: &Path) -> Result<()> {
+            let id = self.next_id;
+            self.next_id += 1;
+            self.send_request(Request::Subscribe {
+                id,
+                working_dir: Some(working_dir.display().to_string()),
+                selfdev: None,
+            })
+            .await?;
+            self.read_until(
+                Duration::from_secs(5),
+                |event| matches!(event, ServerEvent::Done { id: done_id } if *done_id == id),
+            )
+            .await?;
+            Ok(())
+        }
+
+        async fn session_id(&mut self) -> Result<String> {
+            let id = self.next_id;
+            self.next_id += 1;
+            self.send_request(Request::GetState { id }).await?;
+            match self
+                .read_until(Duration::from_secs(5), |event| {
+                    matches!(event, ServerEvent::State { id: event_id, .. } if *event_id == id)
+                })
+                .await?
+            {
+                ServerEvent::State { session_id, .. } => Ok(session_id),
+                other => anyhow::bail!("unexpected state response: {other:?}"),
+            }
+        }
+
+        async fn send_message(&mut self, content: &str) -> Result<u64> {
+            let id = self.next_id;
+            self.next_id += 1;
+            self.send_request(Request::Message {
+                id,
+                content: content.to_string(),
+                images: vec![],
+                system_reminder: None,
+            })
+            .await
+        }
+
+        async fn wait_for_done(&mut self, request_id: u64) -> Result<()> {
+            self.read_until(
+                Duration::from_secs(10),
+                |event| matches!(event, ServerEvent::Done { id } if *id == request_id),
+            )
+            .await?;
+            Ok(())
+        }
+
+        async fn comm_list(&mut self, session_id: &str) -> Result<Vec<AgentInfo>> {
+            let id = self.next_id;
+            self.next_id += 1;
+            self.send_request(Request::CommList {
+                id,
+                session_id: session_id.to_string(),
+            })
+            .await?;
+            match self
+                .read_until(Duration::from_secs(5), |event| {
+                    matches!(event, ServerEvent::CommMembers { id: event_id, .. } if *event_id == id)
+                })
+                .await?
+            {
+                ServerEvent::CommMembers { members, .. } => Ok(members),
+                other => anyhow::bail!("unexpected comm_list response: {other:?}"),
+            }
+        }
+    }
+
+    async fn wait_for_server_socket(
+        path: &Path,
+        server_task: &mut tokio::task::JoinHandle<Result<()>>,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if server_task.is_finished() {
+                let result = server_task.await?;
+                return Err(anyhow::anyhow!(
+                    "server exited before socket became ready: {:?}",
+                    result
+                ));
+            }
+            match Stream::connect(path).await {
+                Ok(stream) => {
+                    drop(stream);
+                    return Ok(());
+                }
+                Err(err) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(err.into());
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            }
+        }
+    }
+
+    fn test_ctx(session_id: &str, working_dir: &Path) -> ToolContext {
+        ToolContext {
+            session_id: session_id.to_string(),
+            message_id: "msg-1".to_string(),
+            tool_call_id: "call-1".to_string(),
+            working_dir: Some(working_dir.to_path_buf()),
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: ToolExecutionMode::Direct,
+        }
+    }
+
+    async fn wait_for_member_status(
+        client: &mut RawClient,
+        requester_session: &str,
+        target_session: &str,
+        expected_status: &str,
+    ) -> Result<Vec<AgentInfo>> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let members = client.comm_list(requester_session).await?;
+            if members
+                .iter()
+                .find(|member| member.session_id == target_session)
+                .and_then(|member| member.status.as_deref())
+                == Some(expected_status)
+            {
+                return Ok(members);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "timed out waiting for member {} to reach status {}",
+                    target_session,
+                    expected_status
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
 
     #[test]
     fn default_await_members_targets_include_ready() {
@@ -959,5 +1221,109 @@ mod tests {
 
         assert!(output.output.contains("Status: running — working on tests"));
         assert!(output.output.contains("Files: src/main.rs"));
+    }
+
+    #[tokio::test]
+    async fn communicate_list_and_await_members_work_end_to_end() {
+        let _env_lock = crate::storage::lock_test_env();
+        let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
+        let repo_dir = std::env::current_dir().expect("repo cwd");
+        let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
+        let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+
+        let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
+            delay: Duration::from_millis(300),
+        });
+        let server = Arc::new(Server::new(provider));
+        let mut server_task = {
+            let server = Arc::clone(&server);
+            tokio::spawn(async move { server.run().await })
+        };
+
+        let socket_path = runtime_dir.path().join("jcode.sock");
+        wait_for_server_socket(&socket_path, &mut server_task)
+            .await
+            .expect("server socket should be ready");
+
+        let mut watcher = RawClient::connect(&socket_path)
+            .await
+            .expect("watcher should connect");
+        let mut peer = RawClient::connect(&socket_path)
+            .await
+            .expect("peer should connect");
+        watcher
+            .subscribe(&repo_dir)
+            .await
+            .expect("watcher subscribe");
+        peer.subscribe(&repo_dir).await.expect("peer subscribe");
+
+        let watcher_session = watcher.session_id().await.expect("watcher session id");
+        let peer_session = peer.session_id().await.expect("peer session id");
+
+        let tool = CommunicateTool::new();
+        let ctx = test_ctx(&watcher_session, &repo_dir);
+
+        let list_output = tool
+            .execute(json!({"action": "list"}), ctx.clone())
+            .await
+            .expect("communicate list should succeed");
+        assert!(
+            list_output.output.contains("Status: ready"),
+            "expected communicate list to render member status, got: {}",
+            list_output.output
+        );
+
+        let peer_message_id = peer
+            .send_message("Reply with a short acknowledgement.")
+            .await
+            .expect("peer message request should send");
+
+        let running_members =
+            wait_for_member_status(&mut watcher, &watcher_session, &peer_session, "running")
+                .await
+                .expect("peer should enter running state");
+        let running_peer = running_members
+            .iter()
+            .find(|member| member.session_id == peer_session)
+            .expect("peer should be listed while running");
+        assert_eq!(running_peer.status.as_deref(), Some("running"));
+
+        let await_output = tool
+            .execute(
+                json!({
+                    "action": "await_members",
+                    "session_ids": [peer_session.clone()],
+                    "timeout_minutes": 1
+                }),
+                ctx.clone(),
+            )
+            .await
+            .expect("await_members should complete");
+        assert!(
+            await_output.output.contains("All members done."),
+            "expected completion output, got: {}",
+            await_output.output
+        );
+        assert!(
+            await_output.output.contains("(ready)"),
+            "expected await_members to treat ready as done, got: {}",
+            await_output.output
+        );
+
+        peer.wait_for_done(peer_message_id)
+            .await
+            .expect("peer message should finish");
+
+        let ready_members =
+            wait_for_member_status(&mut watcher, &watcher_session, &peer_session, "ready")
+                .await
+                .expect("peer should return to ready state");
+        let ready_peer = ready_members
+            .iter()
+            .find(|member| member.session_id == peer_session)
+            .expect("peer should still be listed when ready");
+        assert_eq!(ready_peer.status.as_deref(), Some("ready"));
+
+        server_task.abort();
     }
 }

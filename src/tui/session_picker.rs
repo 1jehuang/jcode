@@ -817,11 +817,21 @@ pub enum PickerItem {
 }
 
 /// Interactive session picker
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionRef {
+    Flat(usize),
+    Group {
+        group_idx: usize,
+        session_idx: usize,
+    },
+    Orphan(usize),
+}
+
 pub struct SessionPicker {
     /// Flat list of items (headers and sessions)
     items: Vec<PickerItem>,
-    /// Just the sessions for selection (filtered view)
-    sessions: Vec<SessionInfo>,
+    /// References into the backing session collections for the filtered view.
+    visible_sessions: Vec<SessionRef>,
     /// All sessions (unfiltered, for rebuilding)
     all_sessions: Vec<SessionInfo>,
     /// All server groups (unfiltered, for rebuilding)
@@ -871,7 +881,7 @@ impl SessionPicker {
 
         let mut picker = Self {
             items: Vec::new(),
-            sessions: Vec::new(),
+            visible_sessions: Vec::new(),
             all_sessions: sessions,
             all_server_groups: Vec::new(),
             all_orphan_sessions: Vec::new(),
@@ -929,7 +939,7 @@ impl SessionPicker {
 
         let mut picker = Self {
             items: Vec::new(),
-            sessions: Vec::new(),
+            visible_sessions: Vec::new(),
             all_sessions: Vec::new(),
             all_server_groups: server_groups,
             all_orphan_sessions: orphan_sessions,
@@ -960,57 +970,85 @@ impl SessionPicker {
             self.item_to_session
                 .get(i)
                 .and_then(|opt| opt.as_ref())
-                .and_then(|session_idx| self.sessions.get(*session_idx))
+                .and_then(|session_idx| self.visible_sessions.get(*session_idx))
+                .copied()
+                .and_then(|session_ref| self.session_by_ref(session_ref))
         })
     }
 
-    fn selected_session_index(&self) -> Option<usize> {
+    fn selected_session_ref(&self) -> Option<SessionRef> {
         self.list_state.selected().and_then(|i| {
             self.item_to_session
                 .get(i)
-                .and_then(|opt| opt.as_ref().copied())
+                .and_then(|opt| opt.as_ref())
+                .and_then(|idx| self.visible_sessions.get(*idx))
+                .copied()
         })
     }
 
+    fn session_by_ref(&self, session_ref: SessionRef) -> Option<&SessionInfo> {
+        match session_ref {
+            SessionRef::Flat(idx) => self.all_sessions.get(idx),
+            SessionRef::Group {
+                group_idx,
+                session_idx,
+            } => self
+                .all_server_groups
+                .get(group_idx)
+                .and_then(|group| group.sessions.get(session_idx)),
+            SessionRef::Orphan(idx) => self.all_orphan_sessions.get(idx),
+        }
+    }
+
+    fn session_by_ref_mut(&mut self, session_ref: SessionRef) -> Option<&mut SessionInfo> {
+        match session_ref {
+            SessionRef::Flat(idx) => self.all_sessions.get_mut(idx),
+            SessionRef::Group {
+                group_idx,
+                session_idx,
+            } => self
+                .all_server_groups
+                .get_mut(group_idx)
+                .and_then(|group| group.sessions.get_mut(session_idx)),
+            SessionRef::Orphan(idx) => self.all_orphan_sessions.get_mut(idx),
+        }
+    }
+
+    fn push_visible_session(&mut self, session_ref: SessionRef) {
+        let session_idx = self.visible_sessions.len();
+        self.visible_sessions.push(session_ref);
+        self.items.push(PickerItem::Session);
+        self.item_to_session.push(Some(session_idx));
+    }
+
+    fn visible_session_iter(&self) -> impl Iterator<Item = &SessionInfo> + '_ {
+        self.visible_sessions
+            .iter()
+            .filter_map(|session_ref| self.session_by_ref(*session_ref))
+    }
+
     fn ensure_selected_preview_loaded(&mut self) {
-        let Some(session_idx) = self.selected_session_index() else {
+        let Some(session_ref) = self.selected_session_ref() else {
             return;
         };
         let needs_preview = self
-            .sessions
-            .get(session_idx)
+            .session_by_ref(session_ref)
             .map(|s| s.messages_preview.is_empty())
             .unwrap_or(false);
         if !needs_preview {
             return;
         }
 
-        let session_id = self.sessions[session_idx].id.clone();
+        let Some(session_id) = self.session_by_ref(session_ref).map(|s| s.id.clone()) else {
+            return;
+        };
         let Ok(session) = Session::load(&session_id) else {
             return;
         };
         let preview = build_messages_preview(&session);
 
-        if let Some(s) = self.sessions.get_mut(session_idx) {
-            s.messages_preview = preview.clone();
-        }
-        for s in &mut self.all_sessions {
-            if s.id == session_id {
-                s.messages_preview = preview.clone();
-                break;
-            }
-        }
-        for s in &mut self.all_orphan_sessions {
-            if s.id == session_id {
-                s.messages_preview = preview.clone();
-                break;
-            }
-        }
-        for group in &mut self.all_server_groups {
-            if let Some(found) = group.sessions.iter_mut().find(|s| s.id == session_id) {
-                found.messages_preview = preview;
-                return;
-            }
+        if let Some(s) = self.session_by_ref_mut(session_ref) {
+            s.messages_preview = preview;
         }
     }
 
@@ -1045,7 +1083,7 @@ impl SessionPicker {
     }
 
     pub fn next(&mut self) {
-        if self.sessions.is_empty() {
+        if self.visible_sessions.is_empty() {
             return;
         }
         let current = self.list_state.selected().unwrap_or(0);
@@ -1057,7 +1095,7 @@ impl SessionPicker {
     }
 
     pub fn previous(&mut self) {
-        if self.sessions.is_empty() {
+        if self.visible_sessions.is_empty() {
             return;
         }
         let current = self.list_state.selected().unwrap_or(0);
@@ -1193,31 +1231,44 @@ impl SessionPicker {
     fn collect_filtered_sessions(
         &self,
         session_visible: impl Fn(&SessionInfo) -> bool,
-    ) -> Vec<&SessionInfo> {
+    ) -> Vec<SessionRef> {
         let mut filtered = Vec::new();
 
         if !self.all_server_groups.is_empty() {
-            for group in &self.all_server_groups {
-                for session in &group.sessions {
+            for (group_idx, group) in self.all_server_groups.iter().enumerate() {
+                for (session_idx, session) in group.sessions.iter().enumerate() {
                     if session_visible(session) {
-                        filtered.push(session);
+                        filtered.push(SessionRef::Group {
+                            group_idx,
+                            session_idx,
+                        });
                     }
                 }
             }
-            for session in &self.all_orphan_sessions {
+            for (idx, session) in self.all_orphan_sessions.iter().enumerate() {
                 if session_visible(session) {
-                    filtered.push(session);
+                    filtered.push(SessionRef::Orphan(idx));
                 }
             }
         } else {
-            for session in &self.all_sessions {
+            for (idx, session) in self.all_sessions.iter().enumerate() {
                 if session_visible(session) {
-                    filtered.push(session);
+                    filtered.push(SessionRef::Flat(idx));
                 }
             }
         }
 
-        filtered.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
+        filtered.sort_by(|a, b| {
+            let a = self
+                .session_by_ref(*a)
+                .map(|session| session.last_message_time)
+                .unwrap_or_default();
+            let b = self
+                .session_by_ref(*b)
+                .map(|session| session.last_message_time)
+                .unwrap_or_default();
+            b.cmp(&a)
+        });
         filtered
     }
 
@@ -1234,20 +1285,13 @@ impl SessionPicker {
         };
 
         self.items.clear();
-        self.sessions.clear();
+        self.visible_sessions.clear();
         self.item_to_session.clear();
 
         if filter_mode != SessionFilterMode::All {
-            let filtered: Vec<SessionInfo> = self
-                .collect_filtered_sessions(session_visible)
-                .into_iter()
-                .cloned()
-                .collect();
-            for session in filtered {
-                let session_idx = self.sessions.len();
-                self.sessions.push(session);
-                self.items.push(PickerItem::Session);
-                self.item_to_session.push(Some(session_idx));
+            let filtered = self.collect_filtered_sessions(session_visible);
+            for session_ref in filtered {
+                self.push_visible_session(session_ref);
             }
 
             self.hidden_test_count = if show_test {
@@ -1273,34 +1317,47 @@ impl SessionPicker {
             return;
         }
 
-        let mut saved_sessions: Vec<&SessionInfo> = Vec::new();
+        let mut saved_sessions: Vec<SessionRef> = Vec::new();
         let mut saved_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         if !self.all_server_groups.is_empty() {
-            for group in &self.all_server_groups {
-                for s in &group.sessions {
+            for (group_idx, group) in self.all_server_groups.iter().enumerate() {
+                for (session_idx, s) in group.sessions.iter().enumerate() {
                     if s.saved && session_visible(s) {
                         saved_ids.insert(s.id.clone());
-                        saved_sessions.push(s);
+                        saved_sessions.push(SessionRef::Group {
+                            group_idx,
+                            session_idx,
+                        });
                     }
                 }
             }
-            for s in &self.all_orphan_sessions {
+            for (idx, s) in self.all_orphan_sessions.iter().enumerate() {
                 if s.saved && session_visible(s) {
                     saved_ids.insert(s.id.clone());
-                    saved_sessions.push(s);
+                    saved_sessions.push(SessionRef::Orphan(idx));
                 }
             }
         } else {
-            for s in &self.all_sessions {
+            for (idx, s) in self.all_sessions.iter().enumerate() {
                 if s.saved && session_visible(s) {
                     saved_ids.insert(s.id.clone());
-                    saved_sessions.push(s);
+                    saved_sessions.push(SessionRef::Flat(idx));
                 }
             }
         }
 
-        saved_sessions.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
+        saved_sessions.sort_by(|a, b| {
+            let a = self
+                .session_by_ref(*a)
+                .map(|session| session.last_message_time)
+                .unwrap_or_default();
+            let b = self
+                .session_by_ref(*b)
+                .map(|session| session.last_message_time)
+                .unwrap_or_default();
+            b.cmp(&a)
+        });
 
         if !saved_sessions.is_empty() {
             self.items.push(PickerItem::SavedHeader {
@@ -1308,46 +1365,66 @@ impl SessionPicker {
             });
             self.item_to_session.push(None);
 
-            for session in saved_sessions {
-                let session_idx = self.sessions.len();
-                self.sessions.push(session.clone());
-                self.items.push(PickerItem::Session);
-                self.item_to_session.push(Some(session_idx));
+            for session_ref in saved_sessions {
+                self.push_visible_session(session_ref);
             }
         }
 
         if !self.all_server_groups.is_empty() {
-            for group in &self.all_server_groups {
-                let visible: Vec<&SessionInfo> = group
-                    .sessions
-                    .iter()
-                    .filter(|s| session_visible(s) && !saved_ids.contains(&s.id))
-                    .collect();
+            let grouped_sections: Vec<(String, String, String, Vec<SessionRef>)> = self
+                .all_server_groups
+                .iter()
+                .enumerate()
+                .filter_map(|(group_idx, group)| {
+                    let visible: Vec<SessionRef> = group
+                        .sessions
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(session_idx, s)| {
+                            (session_visible(s) && !saved_ids.contains(&s.id)).then_some(
+                                SessionRef::Group {
+                                    group_idx,
+                                    session_idx,
+                                },
+                            )
+                        })
+                        .collect();
 
-                if visible.is_empty() {
-                    continue;
-                }
+                    if visible.is_empty() {
+                        None
+                    } else {
+                        Some((
+                            group.name.clone(),
+                            group.icon.clone(),
+                            group.version.clone(),
+                            visible,
+                        ))
+                    }
+                })
+                .collect();
 
+            for (name, icon, version, visible) in grouped_sections {
                 self.items.push(PickerItem::ServerHeader {
-                    name: group.name.clone(),
-                    icon: group.icon.clone(),
-                    version: group.version.clone(),
+                    name,
+                    icon,
+                    version,
                     session_count: visible.len(),
                 });
                 self.item_to_session.push(None);
 
-                for session in visible {
-                    let session_idx = self.sessions.len();
-                    self.sessions.push(session.clone());
-                    self.items.push(PickerItem::Session);
-                    self.item_to_session.push(Some(session_idx));
+                for session_ref in visible {
+                    self.push_visible_session(session_ref);
                 }
             }
 
-            let visible_orphans: Vec<&SessionInfo> = self
+            let visible_orphans: Vec<SessionRef> = self
                 .all_orphan_sessions
                 .iter()
-                .filter(|s| session_visible(s) && !saved_ids.contains(&s.id))
+                .enumerate()
+                .filter_map(|(idx, s)| {
+                    (session_visible(s) && !saved_ids.contains(&s.id))
+                        .then_some(SessionRef::Orphan(idx))
+                })
                 .collect();
             if !visible_orphans.is_empty() {
                 self.items.push(PickerItem::OrphanHeader {
@@ -1355,21 +1432,22 @@ impl SessionPicker {
                 });
                 self.item_to_session.push(None);
 
-                for session in visible_orphans {
-                    let session_idx = self.sessions.len();
-                    self.sessions.push(session.clone());
-                    self.items.push(PickerItem::Session);
-                    self.item_to_session.push(Some(session_idx));
+                for session_ref in visible_orphans {
+                    self.push_visible_session(session_ref);
                 }
             }
         } else {
-            for session in &self.all_sessions {
-                if session_visible(session) && !saved_ids.contains(&session.id) {
-                    let session_idx = self.sessions.len();
-                    self.sessions.push(session.clone());
-                    self.items.push(PickerItem::Session);
-                    self.item_to_session.push(Some(session_idx));
-                }
+            let visible_sessions: Vec<SessionRef> = self
+                .all_sessions
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, session)| {
+                    (session_visible(session) && !saved_ids.contains(&session.id))
+                        .then_some(SessionRef::Flat(idx))
+                })
+                .collect();
+            for session_ref in visible_sessions {
+                self.push_visible_session(session_ref);
             }
         }
 
@@ -1508,7 +1586,7 @@ impl SessionPicker {
                 }
                 KeyCode::Enter => {
                     self.search_active = false;
-                    if self.sessions.is_empty() {
+                    if self.visible_sessions.is_empty() {
                         self.search_query.clear();
                         self.rebuild_items();
                     } else if let Some(s) = self.selected_session() {
@@ -1828,7 +1906,11 @@ impl SessionPicker {
                     PickerItem::Session => self
                         .item_to_session
                         .get(idx)
-                        .and_then(|session_idx| session_idx.and_then(|i| self.sessions.get(i)))
+                        .and_then(|session_idx| {
+                            session_idx
+                                .and_then(|i| self.visible_sessions.get(i).copied())
+                                .and_then(|session_ref| self.session_by_ref(session_ref))
+                        })
                         .map(|session| self.render_session_item(session, is_selected))
                         .unwrap_or_else(|| ListItem::new(Line::from(""))),
                 }
@@ -1838,7 +1920,7 @@ impl SessionPicker {
         // Title with session count and filter state
         let mut title_parts: Vec<Span> = Vec::new();
         title_parts.push(Span::styled(
-            format!(" {} ", self.sessions.len()),
+            format!(" {} ", self.visible_sessions.len()),
             Style::default()
                 .fg(rgb(200, 200, 200))
                 .add_modifier(Modifier::BOLD),
@@ -2443,7 +2525,7 @@ impl SessionPicker {
                                 }
                                 KeyCode::Enter => {
                                     self.search_active = false;
-                                    if self.sessions.is_empty() {
+                                    if self.visible_sessions.is_empty() {
                                         // No results - clear search and return to full list
                                         self.search_query.clear();
                                         self.rebuild_items();
@@ -2660,18 +2742,18 @@ mod tests {
 
         let mut picker = SessionPicker::new(vec![normal.clone(), debug.clone()]);
 
-        assert_eq!(picker.sessions.len(), 1);
+        assert_eq!(picker.visible_sessions.len(), 1);
         assert!(!picker.show_test_sessions);
         assert_eq!(picker.hidden_test_count, 1);
 
         picker.toggle_test_sessions();
         assert!(picker.show_test_sessions);
-        assert_eq!(picker.sessions.len(), 2);
+        assert_eq!(picker.visible_sessions.len(), 2);
         assert_eq!(picker.hidden_test_count, 0);
 
         picker.toggle_test_sessions();
         assert!(!picker.show_test_sessions);
-        assert_eq!(picker.sessions.len(), 1);
+        assert_eq!(picker.visible_sessions.len(), 1);
         assert_eq!(picker.hidden_test_count, 1);
     }
 
@@ -2708,16 +2790,16 @@ mod tests {
 
         assert!(!picker.show_test_sessions);
         // Canary sessions are now visible by default, only debug sessions are hidden
-        assert_eq!(picker.sessions.len(), 3); // normal + canary + orphan_normal
-        assert!(picker.sessions.iter().all(|s| !s.is_debug));
+        assert_eq!(picker.visible_sessions.len(), 3); // normal + canary + orphan_normal
+        assert!(picker.visible_session_iter().all(|s| !s.is_debug));
         assert_eq!(picker.hidden_test_count, 2); // debug + orphan_debug
 
         picker.toggle_test_sessions();
         assert!(picker.show_test_sessions);
-        assert_eq!(picker.sessions.len(), 5);
+        assert_eq!(picker.visible_sessions.len(), 5);
         assert_eq!(picker.hidden_test_count, 0);
-        assert!(picker.sessions.iter().any(|s| s.is_debug));
-        assert!(picker.sessions.iter().any(|s| s.is_canary));
+        assert!(picker.visible_session_iter().any(|s| s.is_debug));
+        assert!(picker.visible_session_iter().any(|s| s.is_canary));
     }
 
     #[test]
@@ -2841,11 +2923,11 @@ mod tests {
 
         picker.search_query = "world".to_string();
         picker.rebuild_items();
-        assert_eq!(picker.sessions.len(), 1);
+        assert_eq!(picker.visible_sessions.len(), 1);
 
         picker.search_query = "not-in-preview".to_string();
         picker.rebuild_items();
-        assert!(picker.sessions.is_empty());
+        assert!(picker.visible_sessions.is_empty());
     }
 
     #[test]
@@ -2873,47 +2955,53 @@ mod tests {
         let mut picker = SessionPicker::new(vec![saved, claude_code, codex, pi, opencode]);
 
         assert_eq!(picker.filter_mode, SessionFilterMode::All);
-        assert_eq!(picker.sessions.len(), 5);
+        assert_eq!(picker.visible_sessions.len(), 5);
 
         picker.cycle_filter_mode();
         assert_eq!(picker.filter_mode, SessionFilterMode::Saved);
-        assert_eq!(picker.sessions.len(), 1);
-        assert!(picker.sessions.iter().all(|session| session.saved));
-        assert_eq!(picker.items.len(), picker.sessions.len());
+        assert_eq!(picker.visible_sessions.len(), 1);
+        assert!(picker.visible_session_iter().all(|session| session.saved));
+        assert_eq!(picker.items.len(), picker.visible_sessions.len());
 
         picker.cycle_filter_mode();
         assert_eq!(picker.filter_mode, SessionFilterMode::ClaudeCode);
-        assert_eq!(picker.sessions.len(), 1);
+        assert_eq!(picker.visible_sessions.len(), 1);
         assert!(
             picker
-                .sessions
-                .iter()
+                .visible_session_iter()
                 .all(SessionPicker::session_is_claude_code)
         );
 
         picker.cycle_filter_mode();
         assert_eq!(picker.filter_mode, SessionFilterMode::Codex);
-        assert_eq!(picker.sessions.len(), 1);
-        assert!(picker.sessions.iter().all(SessionPicker::session_is_codex));
+        assert_eq!(picker.visible_sessions.len(), 1);
+        assert!(
+            picker
+                .visible_session_iter()
+                .all(SessionPicker::session_is_codex)
+        );
 
         picker.cycle_filter_mode();
         assert_eq!(picker.filter_mode, SessionFilterMode::Pi);
-        assert_eq!(picker.sessions.len(), 1);
-        assert!(picker.sessions.iter().all(SessionPicker::session_is_pi));
+        assert_eq!(picker.visible_sessions.len(), 1);
+        assert!(
+            picker
+                .visible_session_iter()
+                .all(SessionPicker::session_is_pi)
+        );
 
         picker.cycle_filter_mode();
         assert_eq!(picker.filter_mode, SessionFilterMode::OpenCode);
-        assert_eq!(picker.sessions.len(), 1);
+        assert_eq!(picker.visible_sessions.len(), 1);
         assert!(
             picker
-                .sessions
-                .iter()
+                .visible_session_iter()
                 .all(SessionPicker::session_is_open_code)
         );
 
         picker.cycle_filter_mode();
         assert_eq!(picker.filter_mode, SessionFilterMode::All);
-        assert_eq!(picker.sessions.len(), 5);
+        assert_eq!(picker.visible_sessions.len(), 5);
     }
 
     #[test]

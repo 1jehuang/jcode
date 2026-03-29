@@ -1653,7 +1653,12 @@ mod tests {
             .collect();
         assert_eq!(
             rendered,
-            vec!["outline", "--path", "/workspace/repo", "src/tool/agentgrep.rs"]
+            vec![
+                "outline",
+                "--path",
+                "/workspace/repo",
+                "src/tool/agentgrep.rs"
+            ]
         );
     }
 

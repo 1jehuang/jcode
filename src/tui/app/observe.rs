@@ -88,6 +88,10 @@ impl App {
     }
 
     fn refresh_observe_page(&mut self) {
+        if !self.observe_mode_enabled {
+            return;
+        }
+
         let focus_observe = self.side_panel.focused_page_id.as_deref() == Some(OBSERVE_PAGE_ID);
         let snapshot =
             self.decorate_side_panel_with_observe(self.snapshot_without_observe(), focus_observe);
@@ -112,7 +116,7 @@ impl App {
 }
 
 fn observe_placeholder_markdown() -> String {
-    "# Observe\n\nWaiting for the next tool call or tool result.\n\nThis page is transient and only shows the **latest** context-bearing tool activity. It is not persisted to disk.\n".to_string()
+    "# Observe\n\nWaiting for the next tool call or tool result.\n\nThis page is transient and only shows the **latest** useful context-bearing tool activity. UI/bookkeeping tools like `side_panel`, `goal`, and todo reads/writes are skipped. It is not persisted to disk.\n".to_string()
 }
 
 fn build_observe_tool_call_markdown(tool_call: &ToolCall) -> String {
