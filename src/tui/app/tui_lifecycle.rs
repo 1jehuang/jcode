@@ -109,7 +109,7 @@ impl App {
         registry: Registry,
         mut session: Session,
     ) -> Self {
-        let skills = SkillRegistry::default();
+        let skills = Arc::new(SkillRegistry::default());
         let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
         if session.model.is_none() {
             session.model = Some(provider.model());
@@ -345,7 +345,7 @@ impl App {
 
     pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
         let t0 = std::time::Instant::now();
-        let skills = SkillRegistry::load().unwrap_or_default();
+        let skills = SkillRegistry::shared_snapshot();
         let t_skills = t0.elapsed();
         let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
         let mut session = Session::create(None, None);

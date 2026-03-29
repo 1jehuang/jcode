@@ -284,12 +284,11 @@ impl ImproveMode {
 }
 
 /// State for an in-progress OAuth/API-key login flow triggered by `/login`.
-
 /// TUI Application state
 pub struct App {
     provider: Arc<dyn Provider>,
     registry: Registry,
-    skills: SkillRegistry,
+    skills: Arc<SkillRegistry>,
     mcp_manager: Arc<RwLock<McpManager>>,
     messages: Vec<Message>,
     session: Session,

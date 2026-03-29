@@ -4,6 +4,9 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+#[cfg(not(test))]
+use std::sync::OnceLock;
 
 /// A skill definition from SKILL.md
 #[derive(Debug, Clone)]
@@ -30,6 +33,23 @@ pub struct SkillRegistry {
 }
 
 impl SkillRegistry {
+    /// Load a process-wide shared immutable snapshot of skills for startup paths
+    /// that only need read access.
+    pub fn shared_snapshot() -> Arc<Self> {
+        #[cfg(test)]
+        {
+            Arc::new(Self::load().unwrap_or_default())
+        }
+
+        #[cfg(not(test))]
+        {
+            static SHARED: OnceLock<Arc<SkillRegistry>> = OnceLock::new();
+            SHARED
+                .get_or_init(|| Arc::new(SkillRegistry::load().unwrap_or_default()))
+                .clone()
+        }
+    }
+
     /// Import skills from Claude Code and Codex CLI on first run.
     /// Only runs if ~/.jcode/skills/ doesn't exist yet.
     fn import_from_external() {

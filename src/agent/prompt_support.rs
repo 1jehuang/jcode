@@ -85,7 +85,7 @@ impl Agent {
             .working_dir
             .as_deref()
             .map(|dir| crate::memory::MemoryManager::new().with_project_dir(dir))
-            .unwrap_or_else(crate::memory::MemoryManager::new);
+            .unwrap_or_default();
         let shared_messages: std::sync::Arc<[Message]> = messages.to_vec().into();
         manager.spawn_relevance_check(session_id, shared_messages.clone());
 
@@ -106,7 +106,7 @@ impl Agent {
             .working_dir
             .as_deref()
             .map(|dir| crate::memory::MemoryManager::new().with_project_dir(dir))
-            .unwrap_or_else(crate::memory::MemoryManager::new);
+            .unwrap_or_default();
         match manager.relevant_prompt_for_messages(messages).await {
             Ok(prompt) => prompt,
             Err(error) => {

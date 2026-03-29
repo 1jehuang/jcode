@@ -746,7 +746,7 @@ fn choose_animation_variant<'a>(variants: &'a [&'a str], salt: u64) -> &'a str {
 }
 
 fn startup_animation_variant() -> &'static str {
-    choose_animation_variant(STARTUP_VARIANTS, 0x5354_4152_5455_50)
+    choose_animation_variant(STARTUP_VARIANTS, 0x0053_5441_5254_5550)
 }
 
 pub(super) fn build_startup_animation_lines(

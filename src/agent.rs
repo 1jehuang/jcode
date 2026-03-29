@@ -77,7 +77,7 @@ pub struct TokenUsage {
 pub struct Agent {
     provider: Arc<dyn Provider>,
     registry: Registry,
-    skills: SkillRegistry,
+    skills: Arc<SkillRegistry>,
     session: Session,
     active_skill: Option<String>,
     allowed_tools: Option<HashSet<String>>,
@@ -138,7 +138,7 @@ impl Agent {
         session: Session,
         allowed_tools: Option<HashSet<String>>,
     ) -> Self {
-        let skills = SkillRegistry::load().unwrap_or_default();
+        let skills = SkillRegistry::shared_snapshot();
         Self {
             provider,
             registry,
@@ -182,7 +182,7 @@ impl Agent {
             crate::session::derive_session_provider_key(agent.provider.name());
         agent.seed_compaction_from_session();
         agent.log_env_snapshot("create");
-        crate::telemetry::begin_session(&agent.provider.name(), &agent.provider.model());
+        crate::telemetry::begin_session(agent.provider.name(), &agent.provider.model());
         agent
     }
 
@@ -210,7 +210,7 @@ impl Agent {
         }
         agent.seed_compaction_from_session();
         agent.log_env_snapshot("attach");
-        crate::telemetry::begin_session(&agent.provider.name(), &agent.provider.model());
+        crate::telemetry::begin_session(agent.provider.name(), &agent.provider.model());
         agent
     }
 
@@ -458,7 +458,7 @@ impl Agent {
     /// Mark this agent session as closed and persist it.
     pub fn mark_closed(&mut self) {
         crate::telemetry::end_session_with_reason(
-            &self.provider.name(),
+            self.provider.name(),
             &self.provider.model(),
             crate::telemetry::SessionEndReason::NormalExit,
         );
@@ -470,7 +470,7 @@ impl Agent {
 
     pub fn mark_crashed(&mut self, message: Option<String>) {
         crate::telemetry::record_crash(
-            &self.provider.name(),
+            self.provider.name(),
             &self.provider.model(),
             crate::telemetry::SessionEndReason::Unknown,
         );
@@ -679,8 +679,7 @@ impl Agent {
     }
 
     pub async fn compaction_mode(&self) -> crate::config::CompactionMode {
-        let mode = self.registry.compaction().read().await.mode();
-        mode
+        self.registry.compaction().read().await.mode()
     }
 
     pub async fn set_compaction_mode(&self, mode: crate::config::CompactionMode) -> Result<()> {
@@ -1148,10 +1147,10 @@ impl Agent {
     }
 
     fn validate_tool_allowed(&self, name: &str) -> Result<()> {
-        if let Some(allowed) = self.allowed_tools.as_ref() {
-            if !allowed.contains(name) {
-                return Err(anyhow::anyhow!("Tool '{}' is not allowed", name));
-            }
+        if let Some(allowed) = self.allowed_tools.as_ref()
+            && !allowed.contains(name)
+        {
+            return Err(anyhow::anyhow!("Tool '{}' is not allowed", name));
         }
         Ok(())
     }
@@ -1331,7 +1330,7 @@ impl Agent {
             for block in &msg.content {
                 match block {
                     ContentBlock::Text { text, .. } => {
-                        transcript.push_str(&text);
+                        transcript.push_str(text);
                         transcript.push('\n');
                     }
                     ContentBlock::ToolUse { name, .. } => {
@@ -1366,7 +1365,7 @@ impl Agent {
                     .working_dir
                     .as_deref()
                     .map(|dir| crate::memory::MemoryManager::new().with_project_dir(dir))
-                    .unwrap_or_else(crate::memory::MemoryManager::new);
+                    .unwrap_or_default();
                 let mut stored_count = 0;
 
                 for memory in &extracted {
@@ -1390,12 +1389,12 @@ impl Agent {
                 if stored_count > 0 {
                     logging::info(&format!("Extracted {} memories from session", stored_count));
                 }
-                return stored_count;
+                stored_count
             }
-            Ok(_) => return 0,
+            Ok(_) => 0,
             Err(e) => {
                 logging::info(&format!("Memory extraction skipped: {}", e));
-                return 0;
+                0
             }
         }
     }
@@ -1443,13 +1442,13 @@ impl Agent {
             // Check for client-side cache violations before memory injection.
             // Memory is an ephemeral suffix that changes each turn; tracking it would cause
             // false-positive violations every turn (prior turn's memory ≠ current history prefix).
-            if self.should_track_client_cache() {
-                if let Some(violation) = self.cache_tracker.record_request(&messages) {
-                    logging::warn(&format!(
-                        "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
-                        violation.reason, violation.turn, violation.message_count
-                    ));
-                }
+            if self.should_track_client_cache()
+                && let Some(violation) = self.cache_tracker.record_request(&messages)
+            {
+                logging::warn(&format!(
+                    "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
+                    violation.reason, violation.turn, violation.message_count
+                ));
             }
 
             // Inject memory as a user message at the end (preserves cache prefix)
@@ -1755,9 +1754,8 @@ impl Agent {
                         openai_encrypted_content,
                     } => {
                         if let Some(encrypted_content) = openai_encrypted_content {
-                            openai_native_compaction.get_or_insert_with(|| {
-                                (encrypted_content, self.session.messages.len())
-                            });
+                            openai_native_compaction
+                                .get_or_insert((encrypted_content, self.session.messages.len()));
                         }
                         if print_output {
                             let tokens_str = pre_tokens
@@ -2213,13 +2211,13 @@ impl Agent {
             // Check for client-side cache violations before memory injection.
             // Memory is an ephemeral suffix that changes each turn; tracking it would cause
             // false-positive violations every turn (prior turn's memory ≠ current history prefix).
-            if self.should_track_client_cache() {
-                if let Some(violation) = self.cache_tracker.record_request(&messages) {
-                    logging::warn(&format!(
-                        "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
-                        violation.reason, violation.turn, violation.message_count
-                    ));
-                }
+            if self.should_track_client_cache()
+                && let Some(violation) = self.cache_tracker.record_request(&messages)
+            {
+                logging::warn(&format!(
+                    "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
+                    violation.reason, violation.turn, violation.message_count
+                ));
             }
 
             // Inject memory as a user message at the end (preserves cache prefix)
@@ -2261,53 +2259,54 @@ impl Agent {
             let provider = Arc::clone(&self.provider);
             let resume_session_id = self.provider_session_id.clone();
             let mut keepalive = stream_keepalive_ticker();
-            let mut complete_future = std::pin::pin!(provider.complete_split(
-                send_messages,
-                &tools,
-                &split_prompt.static_part,
-                &split_prompt.dynamic_part,
-                resume_session_id.as_deref(),
-            ));
-            let mut stream = loop {
-                tokio::select! {
-                    _ = keepalive.tick() => {
-                        send_stream_keepalive_broadcast(&event_tx);
-                    }
-                    result = &mut complete_future => {
-                        match result {
-                            Ok(stream) => break stream,
-                            Err(e) => {
-                                if self.try_auto_compact_after_context_limit(&e.to_string()) {
-                                    context_limit_retries += 1;
-                                    if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
-                                        logging::warn(
-                                            "Context-limit compaction retry limit reached; giving up",
-                                        );
-                                        return Err(anyhow::anyhow!(
-                                            "Context limit exceeded after {} compaction retries",
-                                            Self::MAX_CONTEXT_LIMIT_RETRIES
-                                        ));
+            let mut stream = {
+                let mut complete_future = std::pin::pin!(provider.complete_split(
+                    send_messages,
+                    &tools,
+                    &split_prompt.static_part,
+                    &split_prompt.dynamic_part,
+                    resume_session_id.as_deref(),
+                ));
+                loop {
+                    tokio::select! {
+                        _ = keepalive.tick() => {
+                            send_stream_keepalive_broadcast(&event_tx);
+                        }
+                        result = &mut complete_future => {
+                            match result {
+                                Ok(stream) => break stream,
+                                Err(e) => {
+                                    if self.try_auto_compact_after_context_limit(&e.to_string()) {
+                                        context_limit_retries += 1;
+                                        if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
+                                            logging::warn(
+                                                "Context-limit compaction retry limit reached; giving up",
+                                            );
+                                            return Err(anyhow::anyhow!(
+                                                "Context limit exceeded after {} compaction retries",
+                                                Self::MAX_CONTEXT_LIMIT_RETRIES
+                                            ));
+                                        }
+                                        let _ = event_tx.send(ServerEvent::Compaction {
+                                            trigger: "auto_recovery".to_string(),
+                                            pre_tokens: None,
+                                            post_tokens: None,
+                                            tokens_saved: None,
+                                            duration_ms: None,
+                                            messages_dropped: None,
+                                            messages_compacted: None,
+                                            summary_chars: None,
+                                            active_messages: None,
+                                        });
+                                        continue;
                                     }
-                                    let _ = event_tx.send(ServerEvent::Compaction {
-                                        trigger: "auto_recovery".to_string(),
-                                        pre_tokens: None,
-                                        post_tokens: None,
-                                        tokens_saved: None,
-                                        duration_ms: None,
-                                        messages_dropped: None,
-                                        messages_compacted: None,
-                                        summary_chars: None,
-                                        active_messages: None,
-                                    });
-                                    continue;
+                                    return Err(e);
                                 }
-                                return Err(e);
                             }
                         }
                     }
                 }
             };
-            drop(complete_future);
 
             // Successful API call - reset retry counter
             context_limit_retries = 0;
@@ -2531,9 +2530,8 @@ impl Agent {
                         ..
                     } => {
                         if let Some(encrypted_content) = openai_encrypted_content {
-                            openai_native_compaction.get_or_insert_with(|| {
-                                (encrypted_content, self.session.messages.len())
-                            });
+                            openai_native_compaction
+                                .get_or_insert((encrypted_content, self.session.messages.len()));
                         }
                     }
                     StreamEvent::NativeToolCall {
@@ -2641,26 +2639,26 @@ impl Agent {
             let had_tool_calls_before = !tool_calls.is_empty();
             self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
 
-            if !had_tool_calls_before && !tool_calls.is_empty() {
-                if let Some(tc) = tool_calls.last() {
-                    if tc.id.starts_with("fallback_text_call_") {
-                        let _ = event_tx.send(ServerEvent::TextReplace {
-                            text: text_content.clone(),
-                        });
-                        let _ = event_tx.send(ServerEvent::ToolStart {
-                            id: tc.id.clone(),
-                            name: tc.name.clone(),
-                        });
-                        tool_id_to_name.insert(tc.id.clone(), tc.name.clone());
-                        let _ = event_tx.send(ServerEvent::ToolInput {
-                            delta: tc.input.to_string(),
-                        });
-                        let _ = event_tx.send(ServerEvent::ToolExec {
-                            id: tc.id.clone(),
-                            name: tc.name.clone(),
-                        });
-                    }
-                }
+            if !had_tool_calls_before
+                && !tool_calls.is_empty()
+                && let Some(tc) = tool_calls.last()
+                && tc.id.starts_with("fallback_text_call_")
+            {
+                let _ = event_tx.send(ServerEvent::TextReplace {
+                    text: text_content.clone(),
+                });
+                let _ = event_tx.send(ServerEvent::ToolStart {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                });
+                tool_id_to_name.insert(tc.id.clone(), tc.name.clone());
+                let _ = event_tx.send(ServerEvent::ToolInput {
+                    delta: tc.input.to_string(),
+                });
+                let _ = event_tx.send(ServerEvent::ToolExec {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                });
             }
 
             // Add assistant message to history
@@ -2970,13 +2968,13 @@ impl Agent {
             // Check for client-side cache violations before memory injection.
             // Memory is an ephemeral suffix that changes each turn; tracking it would cause
             // false-positive violations every turn (prior turn's memory ≠ current history prefix).
-            if self.should_track_client_cache() {
-                if let Some(violation) = self.cache_tracker.record_request(&messages) {
-                    logging::warn(&format!(
-                        "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
-                        violation.reason, violation.turn, violation.message_count
-                    ));
-                }
+            if self.should_track_client_cache()
+                && let Some(violation) = self.cache_tracker.record_request(&messages)
+            {
+                logging::warn(&format!(
+                    "CLIENT_CACHE_VIOLATION: {} | turn={} messages={}",
+                    violation.reason, violation.turn, violation.message_count
+                ));
             }
 
             // Inject memory as a user message at the end (preserves cache prefix)
@@ -3018,53 +3016,54 @@ impl Agent {
             let provider = Arc::clone(&self.provider);
             let resume_session_id = self.provider_session_id.clone();
             let mut keepalive = stream_keepalive_ticker();
-            let mut complete_future = std::pin::pin!(provider.complete_split(
-                send_messages,
-                &tools,
-                &split_prompt.static_part,
-                &split_prompt.dynamic_part,
-                resume_session_id.as_deref(),
-            ));
-            let mut stream = loop {
-                tokio::select! {
-                    _ = keepalive.tick() => {
-                        send_stream_keepalive_mpsc(&event_tx);
-                    }
-                    result = &mut complete_future => {
-                        match result {
-                            Ok(stream) => break stream,
-                            Err(e) => {
-                                if self.try_auto_compact_after_context_limit(&e.to_string()) {
-                                    context_limit_retries += 1;
-                                    if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
-                                        logging::warn(
-                                            "Context-limit compaction retry limit reached; giving up",
-                                        );
-                                        return Err(anyhow::anyhow!(
-                                            "Context limit exceeded after {} compaction retries",
-                                            Self::MAX_CONTEXT_LIMIT_RETRIES
-                                        ));
+            let mut stream = {
+                let mut complete_future = std::pin::pin!(provider.complete_split(
+                    send_messages,
+                    &tools,
+                    &split_prompt.static_part,
+                    &split_prompt.dynamic_part,
+                    resume_session_id.as_deref(),
+                ));
+                loop {
+                    tokio::select! {
+                        _ = keepalive.tick() => {
+                            send_stream_keepalive_mpsc(&event_tx);
+                        }
+                        result = &mut complete_future => {
+                            match result {
+                                Ok(stream) => break stream,
+                                Err(e) => {
+                                    if self.try_auto_compact_after_context_limit(&e.to_string()) {
+                                        context_limit_retries += 1;
+                                        if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
+                                            logging::warn(
+                                                "Context-limit compaction retry limit reached; giving up",
+                                            );
+                                            return Err(anyhow::anyhow!(
+                                                "Context limit exceeded after {} compaction retries",
+                                                Self::MAX_CONTEXT_LIMIT_RETRIES
+                                            ));
+                                        }
+                                        let _ = event_tx.send(ServerEvent::Compaction {
+                                            trigger: "auto_recovery".to_string(),
+                                            pre_tokens: None,
+                                            post_tokens: None,
+                                            tokens_saved: None,
+                                            duration_ms: None,
+                                            messages_dropped: None,
+                                            messages_compacted: None,
+                                            summary_chars: None,
+                                            active_messages: None,
+                                        });
+                                        continue;
                                     }
-                                    let _ = event_tx.send(ServerEvent::Compaction {
-                                        trigger: "auto_recovery".to_string(),
-                                        pre_tokens: None,
-                                        post_tokens: None,
-                                        tokens_saved: None,
-                                        duration_ms: None,
-                                        messages_dropped: None,
-                                        messages_compacted: None,
-                                        summary_chars: None,
-                                        active_messages: None,
-                                    });
-                                    continue;
+                                    return Err(e);
                                 }
-                                return Err(e);
                             }
                         }
                     }
                 }
             };
-            drop(complete_future);
 
             // Successful API call - reset retry counter
             context_limit_retries = 0;
@@ -3296,9 +3295,8 @@ impl Agent {
                         ..
                     } => {
                         if let Some(encrypted_content) = openai_encrypted_content {
-                            openai_native_compaction.get_or_insert_with(|| {
-                                (encrypted_content, self.session.messages.len())
-                            });
+                            openai_native_compaction
+                                .get_or_insert((encrypted_content, self.session.messages.len()));
                         }
                     }
                     StreamEvent::NativeToolCall {
@@ -3405,26 +3403,26 @@ impl Agent {
             let had_tool_calls_before = !tool_calls.is_empty();
             self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
 
-            if !had_tool_calls_before && !tool_calls.is_empty() {
-                if let Some(tc) = tool_calls.last() {
-                    if tc.id.starts_with("fallback_text_call_") {
-                        let _ = event_tx.send(ServerEvent::TextReplace {
-                            text: text_content.clone(),
-                        });
-                        let _ = event_tx.send(ServerEvent::ToolStart {
-                            id: tc.id.clone(),
-                            name: tc.name.clone(),
-                        });
-                        tool_id_to_name.insert(tc.id.clone(), tc.name.clone());
-                        let _ = event_tx.send(ServerEvent::ToolInput {
-                            delta: tc.input.to_string(),
-                        });
-                        let _ = event_tx.send(ServerEvent::ToolExec {
-                            id: tc.id.clone(),
-                            name: tc.name.clone(),
-                        });
-                    }
-                }
+            if !had_tool_calls_before
+                && !tool_calls.is_empty()
+                && let Some(tc) = tool_calls.last()
+                && tc.id.starts_with("fallback_text_call_")
+            {
+                let _ = event_tx.send(ServerEvent::TextReplace {
+                    text: text_content.clone(),
+                });
+                let _ = event_tx.send(ServerEvent::ToolStart {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                });
+                tool_id_to_name.insert(tc.id.clone(), tc.name.clone());
+                let _ = event_tx.send(ServerEvent::ToolInput {
+                    delta: tc.input.to_string(),
+                });
+                let _ = event_tx.send(ServerEvent::ToolExec {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                });
             }
 
             // Add assistant message to history

@@ -80,7 +80,7 @@ pub(crate) fn compute_page_layout(
         let filtered: Vec<InfoPage> = pages
             .iter()
             .copied()
-            .filter(|page| page.height + 1 <= inner_height)
+            .filter(|page| page.height < inner_height)
             .collect();
         if filtered.len() > 1 {
             pages = filtered;

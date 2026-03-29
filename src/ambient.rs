@@ -421,13 +421,11 @@ impl AmbientLock {
 
         // Check existing lock
         if path.exists() {
-            if let Ok(contents) = std::fs::read_to_string(&path) {
-                if let Ok(pid) = contents.trim().parse::<u32>() {
-                    if is_pid_alive(pid) {
-                        return Ok(None); // Another instance is running
-                    }
-                    // Stale lock from a dead process — remove it
-                }
+            if let Ok(contents) = std::fs::read_to_string(&path)
+                && let Ok(pid) = contents.trim().parse::<u32>()
+                && is_pid_alive(pid)
+            {
+                return Ok(None); // Another instance is running
             }
             let _ = std::fs::remove_file(&path);
         }
@@ -673,32 +671,31 @@ pub fn gather_feedback_memories(memory_manager: &crate::memory::MemoryManager) -
         Err(_) => return feedback,
     };
 
-    if transcripts_dir.exists() {
-        if let Ok(dir) = std::fs::read_dir(&transcripts_dir) {
-            let mut files: Vec<_> = dir.flatten().collect();
-            // Sort by filename descending (most recent first)
-            files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
-            // Only look at the last 5 transcripts
-            files.truncate(5);
+    if transcripts_dir.exists()
+        && let Ok(dir) = std::fs::read_dir(&transcripts_dir)
+    {
+        let mut files: Vec<_> = dir.flatten().collect();
+        // Sort by filename descending (most recent first)
+        files.sort_by_key(|entry| std::cmp::Reverse(entry.file_name()));
+        // Only look at the last 5 transcripts
+        files.truncate(5);
 
-            for entry in files {
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                    if let Ok(transcript) =
-                        serde_json::from_str::<crate::safety::AmbientTranscript>(&content)
-                    {
-                        let status = format!("{:?}", transcript.status);
-                        let summary = transcript.summary.as_deref().unwrap_or("no summary");
-                        let age = format_duration_rough(Utc::now() - transcript.started_at);
-                        feedback.push(format!(
-                            "Past cycle ({} ago, {}): {} memories modified, {} compactions — {}",
-                            age,
-                            status.to_lowercase(),
-                            transcript.memories_modified,
-                            transcript.compactions,
-                            summary,
-                        ));
-                    }
-                }
+        for entry in files {
+            if let Ok(content) = std::fs::read_to_string(entry.path())
+                && let Ok(transcript) =
+                    serde_json::from_str::<crate::safety::AmbientTranscript>(&content)
+            {
+                let status = format!("{:?}", transcript.status);
+                let summary = transcript.summary.as_deref().unwrap_or("no summary");
+                let age = format_duration_rough(Utc::now() - transcript.started_at);
+                feedback.push(format!(
+                    "Past cycle ({} ago, {}): {} memories modified, {} compactions — {}",
+                    age,
+                    status.to_lowercase(),
+                    transcript.memories_modified,
+                    transcript.compactions,
+                    summary,
+                ));
             }
         }
     }
@@ -741,40 +738,39 @@ pub fn gather_recent_sessions(since: Option<DateTime<Utc>>) -> Vec<RecentSession
     if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map(|e| e == "json").unwrap_or(false) {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    if let Ok(session) = crate::session::Session::load(stem) {
-                        // Skip debug sessions
-                        if session.is_debug {
-                            continue;
-                        }
-                        // Only include sessions updated after cutoff
-                        if session.updated_at < cutoff {
-                            continue;
-                        }
-                        let duration = (session.updated_at - session.created_at)
-                            .num_seconds()
-                            .max(0);
-                        let extraction = if session.messages.is_empty() {
-                            "no messages"
-                        } else {
-                            // Heuristic: if session closed normally, assume extracted
-                            match &session.status {
-                                crate::session::SessionStatus::Closed => "extracted",
-                                crate::session::SessionStatus::Crashed { .. } => "missed",
-                                crate::session::SessionStatus::Active => "in progress",
-                                _ => "unknown",
-                            }
-                        };
-                        recent.push(RecentSessionInfo {
-                            id: session.id.clone(),
-                            status: session.status.display().to_string(),
-                            topic: session.title.clone(),
-                            duration_secs: duration,
-                            extraction_status: extraction.to_string(),
-                        });
-                    }
+            if path.extension().map(|e| e == "json").unwrap_or(false)
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                && let Ok(session) = crate::session::Session::load(stem)
+            {
+                // Skip debug sessions
+                if session.is_debug {
+                    continue;
                 }
+                // Only include sessions updated after cutoff
+                if session.updated_at < cutoff {
+                    continue;
+                }
+                let duration = (session.updated_at - session.created_at)
+                    .num_seconds()
+                    .max(0);
+                let extraction = if session.messages.is_empty() {
+                    "no messages"
+                } else {
+                    // Heuristic: if session closed normally, assume extracted
+                    match &session.status {
+                        crate::session::SessionStatus::Closed => "extracted",
+                        crate::session::SessionStatus::Crashed { .. } => "missed",
+                        crate::session::SessionStatus::Active => "in progress",
+                        _ => "unknown",
+                    }
+                };
+                recent.push(RecentSessionInfo {
+                    id: session.id.clone(),
+                    status: session.status.display().to_string(),
+                    topic: session.title.clone(),
+                    duration_secs: duration,
+                    extraction_status: extraction.to_string(),
+                });
             }
         }
     }

@@ -118,20 +118,20 @@ impl AmbientRunnerHandle {
     /// Returns true if injected into active cycle, false if queued as directive.
     pub async fn inject_message(&self, text: &str, source: &str) -> bool {
         let queue = self.inner.active_cycle_queue.read().await;
-        if let Some(ref q) = *queue {
-            if let Ok(mut q) = q.lock() {
-                q.push(crate::agent::SoftInterruptMessage {
-                    content: format!("[{} message from user]\n{}", source, text),
-                    urgent: false,
-                    source: crate::agent::SoftInterruptSource::User,
-                });
-                logging::info(&format!(
-                    "{} message injected into active ambient cycle: {}",
-                    source,
-                    if text.len() > 60 { &text[..60] } else { text }
-                ));
-                return true;
-            }
+        if let Some(ref q) = *queue
+            && let Ok(mut q) = q.lock()
+        {
+            q.push(crate::agent::SoftInterruptMessage {
+                content: format!("[{} message from user]\n{}", source, text),
+                urgent: false,
+                source: crate::agent::SoftInterruptSource::User,
+            });
+            logging::info(&format!(
+                "{} message injected into active ambient cycle: {}",
+                source,
+                if text.len() > 60 { &text[..60] } else { text }
+            ));
+            return true;
         }
         drop(queue);
 
@@ -344,24 +344,23 @@ impl AmbientRunnerHandle {
         let mut entries: Vec<serde_json::Value> = Vec::new();
         if let Ok(dir) = std::fs::read_dir(&transcripts_dir) {
             let mut files: Vec<_> = dir.flatten().collect();
-            files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+            files.sort_by_key(|entry| std::cmp::Reverse(entry.file_name()));
             files.truncate(20);
 
             for entry in files {
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                    if let Ok(transcript) =
+                if let Ok(content) = std::fs::read_to_string(entry.path())
+                    && let Ok(transcript) =
                         serde_json::from_str::<crate::safety::AmbientTranscript>(&content)
-                    {
-                        entries.push(serde_json::json!({
-                            "session_id": transcript.session_id,
-                            "started_at": transcript.started_at.to_rfc3339(),
-                            "ended_at": transcript.ended_at.map(|t| t.to_rfc3339()),
-                            "status": format!("{:?}", transcript.status),
-                            "summary": transcript.summary,
-                            "memories_modified": transcript.memories_modified,
-                            "compactions": transcript.compactions,
-                        }));
-                    }
+                {
+                    entries.push(serde_json::json!({
+                        "session_id": transcript.session_id,
+                        "started_at": transcript.started_at.to_rfc3339(),
+                        "ended_at": transcript.ended_at.map(|t| t.to_rfc3339()),
+                        "status": format!("{:?}", transcript.status),
+                        "summary": transcript.summary,
+                        "memories_modified": transcript.memories_modified,
+                        "compactions": transcript.compactions,
+                    }));
                 }
             }
         }
@@ -602,7 +601,7 @@ impl AmbientRunnerHandle {
                 } else {
                     next_session_due
                         .map(|next| (next - Utc::now()).num_seconds().max(0) as u64)
-                        .map(|secs| secs.max(1).min(MAX_IDLE_POLL_SECS))
+                        .map(|secs| secs.clamp(1, MAX_IDLE_POLL_SECS))
                         .unwrap_or(MAX_IDLE_POLL_SECS)
                 };
 
@@ -957,19 +956,17 @@ impl AmbientRunnerHandle {
                 }
 
                 // Try to read the cycle result from the file
-                if let Ok(result_path) = VisibleCycleContext::result_path() {
-                    if result_path.exists() {
-                        if let Ok(result) =
-                            crate::storage::read_json::<AmbientCycleResult>(&result_path)
-                        {
-                            let _ = std::fs::remove_file(&result_path);
-                            return Ok(AmbientCycleResult {
-                                started_at,
-                                ended_at: Utc::now(),
-                                ..result
-                            });
-                        }
-                    }
+                if let Ok(result_path) = VisibleCycleContext::result_path()
+                    && result_path.exists()
+                    && let Ok(result) =
+                        crate::storage::read_json::<AmbientCycleResult>(&result_path)
+                {
+                    let _ = std::fs::remove_file(&result_path);
+                    return Ok(AmbientCycleResult {
+                        started_at,
+                        ended_at: Utc::now(),
+                        ..result
+                    });
                 }
 
                 // No result file — user closed the window without end_ambient_cycle

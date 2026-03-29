@@ -94,6 +94,12 @@ impl InterruptSignal {
     }
 }
 
+impl Default for InterruptSignal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub(super) enum NoToolCallOutcome {
     Break,
     ContinueWithoutEvent,
