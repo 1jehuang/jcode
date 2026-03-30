@@ -1,7 +1,10 @@
 use super::*;
 use crate::tui::mermaid;
 use serde::Serialize;
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::hash::Hasher as _;
 
 const SIDE_PANEL_HEADER_HEIGHT: u16 = 1;
 
@@ -257,7 +260,7 @@ struct PinnedCacheState {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SidePanelMarkdownKey {
     page_id: String,
-    content_revision: u64,
+    content_signature: u64,
     inner_width: u16,
     has_protocol: bool,
     centered: bool,
@@ -272,7 +275,7 @@ struct SidePanelMarkdownCacheState {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SidePanelRenderKey {
     page_id: String,
-    content_revision: u64,
+    content_signature: u64,
     inner_width: u16,
     inner_height: u16,
     has_protocol: bool,
@@ -401,6 +404,13 @@ static SIDE_PANEL_MARKDOWN_CACHE: OnceLock<Mutex<SidePanelMarkdownCacheState>> =
 static SIDE_PANEL_RENDER_CACHE: OnceLock<Mutex<SidePanelRenderCacheState>> = OnceLock::new();
 static SIDE_PANEL_DEBUG: OnceLock<Mutex<SidePanelDebugState>> = OnceLock::new();
 
+#[cfg(test)]
+thread_local! {
+    static TEST_SIDE_PANEL_MARKDOWN_CACHE: RefCell<SidePanelMarkdownCacheState> = RefCell::new(SidePanelMarkdownCacheState::default());
+    static TEST_SIDE_PANEL_RENDER_CACHE: RefCell<SidePanelRenderCacheState> = RefCell::new(SidePanelRenderCacheState::default());
+    static TEST_SIDE_PANEL_DEBUG: RefCell<SidePanelDebugState> = RefCell::new(SidePanelDebugState::default());
+}
+
 const SIDE_PANEL_MARKDOWN_CACHE_LIMIT: usize = 12;
 const SIDE_PANEL_RENDER_CACHE_LIMIT: usize = 12;
 
@@ -418,6 +428,92 @@ fn side_panel_render_cache() -> &'static Mutex<SidePanelRenderCacheState> {
 
 fn side_panel_debug() -> &'static Mutex<SidePanelDebugState> {
     SIDE_PANEL_DEBUG.get_or_init(|| Mutex::new(SidePanelDebugState::default()))
+}
+
+fn with_side_panel_markdown_cache<R>(f: impl FnOnce(&SidePanelMarkdownCacheState) -> R) -> R {
+    #[cfg(test)]
+    {
+        return TEST_SIDE_PANEL_MARKDOWN_CACHE.with(|state| f(&state.borrow()));
+    }
+    #[cfg(not(test))]
+    {
+        let state = side_panel_markdown_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&state)
+    }
+}
+
+fn with_side_panel_markdown_cache_mut<R>(
+    f: impl FnOnce(&mut SidePanelMarkdownCacheState) -> R,
+) -> R {
+    #[cfg(test)]
+    {
+        return TEST_SIDE_PANEL_MARKDOWN_CACHE.with(|state| f(&mut state.borrow_mut()));
+    }
+    #[cfg(not(test))]
+    {
+        let mut state = side_panel_markdown_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&mut state)
+    }
+}
+
+fn with_side_panel_render_cache<R>(f: impl FnOnce(&SidePanelRenderCacheState) -> R) -> R {
+    #[cfg(test)]
+    {
+        return TEST_SIDE_PANEL_RENDER_CACHE.with(|state| f(&state.borrow()));
+    }
+    #[cfg(not(test))]
+    {
+        let state = side_panel_render_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&state)
+    }
+}
+
+fn with_side_panel_render_cache_mut<R>(f: impl FnOnce(&mut SidePanelRenderCacheState) -> R) -> R {
+    #[cfg(test)]
+    {
+        return TEST_SIDE_PANEL_RENDER_CACHE.with(|state| f(&mut state.borrow_mut()));
+    }
+    #[cfg(not(test))]
+    {
+        let mut state = side_panel_render_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&mut state)
+    }
+}
+
+fn with_side_panel_debug<R>(f: impl FnOnce(&SidePanelDebugState) -> R) -> R {
+    #[cfg(test)]
+    {
+        return TEST_SIDE_PANEL_DEBUG.with(|state| f(&state.borrow()));
+    }
+    #[cfg(not(test))]
+    {
+        let state = side_panel_debug()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&state)
+    }
+}
+
+fn with_side_panel_debug_mut<R>(f: impl FnOnce(&mut SidePanelDebugState) -> R) -> R {
+    #[cfg(test)]
+    {
+        return TEST_SIDE_PANEL_DEBUG.with(|state| f(&mut state.borrow_mut()));
+    }
+    #[cfg(not(test))]
+    {
+        let mut state = side_panel_debug()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&mut state)
+    }
 }
 
 fn lru_touch<K: PartialEq>(order: &mut VecDeque<K>, key: &K) {
@@ -459,32 +555,25 @@ fn lru_insert<K, V>(
 }
 
 pub(crate) fn side_panel_debug_stats() -> SidePanelDebugStats {
-    let mut stats = side_panel_debug()
-        .lock()
-        .map(|state| state.stats.clone())
-        .unwrap_or_default();
-    if let Ok(cache) = side_panel_markdown_cache().lock() {
-        stats.markdown_cache_entries = cache.entries.len();
-    }
-    if let Ok(cache) = side_panel_render_cache().lock() {
-        stats.render_cache_entries = cache.entries.len();
-    }
+    let mut stats = with_side_panel_debug(|state| state.stats.clone());
+    stats.markdown_cache_entries = with_side_panel_markdown_cache(|cache| cache.entries.len());
+    stats.render_cache_entries = with_side_panel_render_cache(|cache| cache.entries.len());
     stats
 }
 
 pub(crate) fn reset_side_panel_debug_stats() {
-    if let Ok(mut debug) = side_panel_debug().lock() {
+    with_side_panel_debug_mut(|debug| {
         debug.stats = SidePanelDebugStats::default();
-    }
+    });
 }
 
 pub(crate) fn clear_side_panel_render_caches() {
-    if let Ok(mut cache) = side_panel_markdown_cache().lock() {
+    with_side_panel_markdown_cache_mut(|cache| {
         *cache = SidePanelMarkdownCacheState::default();
-    }
-    if let Ok(mut cache) = side_panel_render_cache().lock() {
+    });
+    with_side_panel_render_cache_mut(|cache| {
         *cache = SidePanelRenderCacheState::default();
-    }
+    });
 }
 
 fn hash_content(content: &str) -> u64 {
@@ -495,12 +584,14 @@ fn hash_content(content: &str) -> u64 {
     hasher.finish()
 }
 
-fn side_panel_content_revision(page: &crate::side_panel::SidePanelPage) -> u64 {
-    if page.updated_at_ms != 0 {
-        page.updated_at_ms
-    } else {
-        hash_content(&page.content)
-    }
+fn side_panel_content_signature(page: &crate::side_panel::SidePanelPage) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    page.id.hash(&mut hasher);
+    page.file_path.hash(&mut hasher);
+    page.source.as_str().hash(&mut hasher);
+    page.updated_at_ms.hash(&mut hasher);
+    page.content.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn estimate_side_panel_pane_area(
@@ -1347,37 +1438,36 @@ fn render_side_panel_markdown_cached(
     has_protocol: bool,
     centered: bool,
 ) -> PinnedRenderedCache {
-    let content_revision = side_panel_content_revision(page);
+    let content_signature = side_panel_content_signature(page);
     let key = SidePanelRenderKey {
         page_id: page.id.clone(),
-        content_revision,
+        content_signature,
         inner_width: inner.width,
         inner_height: inner.height,
         has_protocol,
         centered,
     };
 
-    {
-        let mut cache = match side_panel_render_cache().lock() {
-            Ok(cache) => cache,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if let Some(rendered) = cache.entries.get(&key).cloned() {
+    if let Some(rendered) = with_side_panel_render_cache_mut(|cache| {
+        let rendered = cache.entries.get(&key).cloned();
+        if rendered.is_some() {
             lru_touch(&mut cache.order, &key);
             cache.order.push_back(key.clone());
-            if let Ok(mut debug) = side_panel_debug().lock() {
-                debug.stats.render_cache_hits += 1;
-            }
-            return rendered;
         }
+        rendered
+    }) {
+        with_side_panel_debug_mut(|debug| {
+            debug.stats.render_cache_hits += 1;
+        });
+        return rendered;
     }
-    if let Ok(mut debug) = side_panel_debug().lock() {
+    with_side_panel_debug_mut(|debug| {
         debug.stats.render_cache_misses += 1;
-    }
+    });
 
     let rendered_markdown = render_side_panel_markdown_lines_cached(
         page,
-        content_revision,
+        content_signature,
         inner.width,
         has_protocol,
         centered,
@@ -1445,54 +1535,51 @@ fn render_side_panel_markdown_cached(
         has_scrollable_images,
     };
 
-    let mut cache = match side_panel_render_cache().lock() {
-        Ok(cache) => cache,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    lru_touch(&mut cache.order, &key);
-    cache.entries.insert(key.clone(), rendered.clone());
-    cache.order.push_back(key);
-    while cache.order.len() > SIDE_PANEL_RENDER_CACHE_LIMIT {
-        if let Some(oldest) = cache.order.pop_front() {
-            cache.entries.remove(&oldest);
+    with_side_panel_render_cache_mut(|cache| {
+        lru_touch(&mut cache.order, &key);
+        cache.entries.insert(key.clone(), rendered.clone());
+        cache.order.push_back(key);
+        while cache.order.len() > SIDE_PANEL_RENDER_CACHE_LIMIT {
+            if let Some(oldest) = cache.order.pop_front() {
+                cache.entries.remove(&oldest);
+            }
         }
-    }
+    });
 
     rendered
 }
 
 fn render_side_panel_markdown_lines_cached(
     page: &crate::side_panel::SidePanelPage,
-    content_revision: u64,
+    content_signature: u64,
     inner_width: u16,
     has_protocol: bool,
     centered: bool,
 ) -> RenderedSidePanelMarkdown {
     let key = SidePanelMarkdownKey {
         page_id: page.id.clone(),
-        content_revision,
+        content_signature,
         inner_width,
         has_protocol,
         centered,
     };
 
-    {
-        let mut cache = match side_panel_markdown_cache().lock() {
-            Ok(cache) => cache,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if let Some(rendered) = cache.entries.get(&key).cloned() {
+    if let Some(rendered) = with_side_panel_markdown_cache_mut(|cache| {
+        let rendered = cache.entries.get(&key).cloned();
+        if rendered.is_some() {
             lru_touch(&mut cache.order, &key);
             cache.order.push_back(key.clone());
-            if let Ok(mut debug) = side_panel_debug().lock() {
-                debug.stats.markdown_cache_hits += 1;
-            }
-            return rendered;
         }
+        rendered
+    }) {
+        with_side_panel_debug_mut(|debug| {
+            debug.stats.markdown_cache_hits += 1;
+        });
+        return rendered;
     }
-    if let Ok(mut debug) = side_panel_debug().lock() {
+    with_side_panel_debug_mut(|debug| {
         debug.stats.markdown_cache_misses += 1;
-    }
+    });
 
     let saved_override = markdown::get_diagram_mode_override();
     let saved_centered = markdown::center_code_blocks();
@@ -1525,18 +1612,16 @@ fn render_side_panel_markdown_lines_cached(
         has_following_content_after,
     };
 
-    let mut cache = match side_panel_markdown_cache().lock() {
-        Ok(cache) => cache,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    lru_touch(&mut cache.order, &key);
-    cache.entries.insert(key.clone(), rendered.clone());
-    cache.order.push_back(key);
-    while cache.order.len() > SIDE_PANEL_MARKDOWN_CACHE_LIMIT {
-        if let Some(oldest) = cache.order.pop_front() {
-            cache.entries.remove(&oldest);
+    with_side_panel_markdown_cache_mut(|cache| {
+        lru_touch(&mut cache.order, &key);
+        cache.entries.insert(key.clone(), rendered.clone());
+        cache.order.push_back(key);
+        while cache.order.len() > SIDE_PANEL_MARKDOWN_CACHE_LIMIT {
+            if let Some(oldest) = cache.order.pop_front() {
+                cache.entries.remove(&oldest);
+            }
         }
-    }
+    });
 
     rendered
 }
@@ -2458,6 +2543,54 @@ mod tests {
         assert_eq!(
             after_second, after_first,
             "height-only cache miss should not trigger another markdown render"
+        );
+    }
+
+    #[test]
+    fn render_side_panel_content_change_with_same_revision_invalidates_cache() {
+        clear_side_panel_render_caches();
+
+        let first_page = crate::side_panel::SidePanelPage {
+            id: "cache_invalidation_demo".to_string(),
+            title: "Cache Invalidation Demo".to_string(),
+            file_path: "cache_invalidation_demo.md".to_string(),
+            format: crate::side_panel::SidePanelPageFormat::Markdown,
+            source: crate::side_panel::SidePanelPageSource::Managed,
+            content: "# First version".to_string(),
+            updated_at_ms: 1,
+        };
+        let second_page = crate::side_panel::SidePanelPage {
+            content: "# Second version".to_string(),
+            ..first_page.clone()
+        };
+
+        let first =
+            render_side_panel_markdown_cached(&first_page, Rect::new(0, 0, 28, 12), false, false);
+        let second =
+            render_side_panel_markdown_cached(&second_page, Rect::new(0, 0, 28, 12), false, false);
+
+        let first_text: Vec<String> = first
+            .lines
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        let second_text: Vec<String> = second
+            .lines
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+
+        assert!(
+            first_text.iter().any(|line| line.contains("First version")),
+            "expected first render to contain the original content: {:?}",
+            first_text
+        );
+        assert!(
+            second_text
+                .iter()
+                .any(|line| line.contains("Second version")),
+            "expected second render to invalidate the stale cache entry: {:?}",
+            second_text
         );
     }
 

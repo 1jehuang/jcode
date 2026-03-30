@@ -108,6 +108,9 @@ thread_local! {
     static TEST_LAST_DIFF_PANE_EFFECTIVE_SCROLL: Cell<usize> = const { Cell::new(0) };
     static TEST_LAST_USER_PROMPT_POSITIONS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static TEST_LAST_LAYOUT: RefCell<Option<LayoutSnapshot>> = const { RefCell::new(None) };
+    static TEST_VISIBLE_COPY_TARGETS: RefCell<Vec<VisibleCopyTarget>> = RefCell::new(Vec::new());
+    static TEST_PROMPT_VIEWPORT_STATE: RefCell<PromptViewportState> = RefCell::new(PromptViewportState::default());
+    static TEST_COPY_VIEWPORT: RefCell<CopyViewportSnapshots> = RefCell::new(CopyViewportSnapshots::default());
 }
 
 /// Get the last known max scroll value (from the most recent render frame).
@@ -1491,22 +1494,45 @@ fn visible_copy_targets_state() -> &'static Mutex<Vec<VisibleCopyTarget>> {
 }
 
 fn set_visible_copy_targets(targets: Vec<VisibleCopyTarget>) {
-    let mut state = match visible_copy_targets_state().lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    *state = targets;
+    #[cfg(test)]
+    {
+        TEST_VISIBLE_COPY_TARGETS.with(|state| {
+            *state.borrow_mut() = targets;
+        });
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        let mut state = match visible_copy_targets_state().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *state = targets;
+    }
 }
 
 pub(crate) fn visible_copy_target_for_key(key: char) -> Option<VisibleCopyTarget> {
-    let state = match visible_copy_targets_state().lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    state
-        .iter()
-        .find(|target| target.key.eq_ignore_ascii_case(&key))
-        .cloned()
+    #[cfg(test)]
+    {
+        return TEST_VISIBLE_COPY_TARGETS.with(|state| {
+            state
+                .borrow()
+                .iter()
+                .find(|target| target.key.eq_ignore_ascii_case(&key))
+                .cloned()
+        });
+    }
+    #[cfg(not(test))]
+    {
+        let state = match visible_copy_targets_state().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        return state
+            .iter()
+            .find(|target| target.key.eq_ignore_ascii_case(&key))
+            .cloned();
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1532,29 +1558,59 @@ fn prompt_viewport_state() -> &'static Mutex<PromptViewportState> {
 }
 
 fn active_prompt_entry_animation(now_ms: u64) -> Option<PromptViewportAnimation> {
-    let mut state = match prompt_viewport_state().lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-
-    if let Some(anim) = state.active {
-        if now_ms.saturating_sub(anim.start_ms) <= PROMPT_ENTRY_ANIMATION_MS {
-            return Some(anim);
-        }
-        state.active = None;
+    #[cfg(test)]
+    {
+        return TEST_PROMPT_VIEWPORT_STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            if let Some(anim) = state.active {
+                if now_ms.saturating_sub(anim.start_ms) <= PROMPT_ENTRY_ANIMATION_MS {
+                    return Some(anim);
+                }
+                state.active = None;
+            }
+            None
+        });
     }
-    None
+    #[cfg(not(test))]
+    {
+        let mut state = match prompt_viewport_state().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        if let Some(anim) = state.active {
+            if now_ms.saturating_sub(anim.start_ms) <= PROMPT_ENTRY_ANIMATION_MS {
+                return Some(anim);
+            }
+            state.active = None;
+        }
+        None
+    }
 }
 
 fn record_prompt_viewport(visible_start: usize, visible_end: usize) {
-    let mut state = match prompt_viewport_state().lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    state.initialized = true;
-    state.last_visible_start = visible_start;
-    state.last_visible_end = visible_end;
-    state.active = None;
+    #[cfg(test)]
+    {
+        TEST_PROMPT_VIEWPORT_STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.initialized = true;
+            state.last_visible_start = visible_start;
+            state.last_visible_end = visible_end;
+            state.active = None;
+        });
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        let mut state = match prompt_viewport_state().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.initialized = true;
+        state.last_visible_start = visible_start;
+        state.last_visible_end = visible_end;
+        state.active = None;
+    }
 }
 
 fn update_prompt_entry_animation(
@@ -1563,51 +1619,104 @@ fn update_prompt_entry_animation(
     visible_end: usize,
     now_ms: u64,
 ) {
-    let mut state = match prompt_viewport_state().lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
+    #[cfg(test)]
+    {
+        TEST_PROMPT_VIEWPORT_STATE.with(|state| {
+            let mut state = state.borrow_mut();
 
-    if !state.initialized {
-        state.initialized = true;
-        state.last_visible_start = visible_start;
-        state.last_visible_end = visible_end;
+            if !state.initialized {
+                state.initialized = true;
+                state.last_visible_start = visible_start;
+                state.last_visible_end = visible_end;
+                return;
+            }
+
+            let prev_visible_start = state.last_visible_start;
+            let prev_visible_end = state.last_visible_end;
+            let viewport_changed =
+                prev_visible_start != visible_start || prev_visible_end != visible_end;
+
+            if let Some(anim) = state.active {
+                let still_fresh = now_ms.saturating_sub(anim.start_ms) <= PROMPT_ENTRY_ANIMATION_MS;
+                let still_visible = anim.line_idx >= visible_start && anim.line_idx < visible_end;
+                if still_fresh && still_visible {
+                    state.last_visible_start = visible_start;
+                    state.last_visible_end = visible_end;
+                    return;
+                }
+                if !still_fresh || !still_visible {
+                    state.active = None;
+                }
+            }
+
+            if viewport_changed && state.active.is_none() {
+                let newly_visible = user_prompt_lines.iter().copied().find(|line| {
+                    *line >= visible_start
+                        && *line < visible_end
+                        && (*line < prev_visible_start || *line >= prev_visible_end)
+                });
+                if let Some(line_idx) = newly_visible {
+                    state.active = Some(PromptViewportAnimation {
+                        line_idx,
+                        start_ms: now_ms,
+                    });
+                }
+            }
+
+            state.last_visible_start = visible_start;
+            state.last_visible_end = visible_end;
+        });
         return;
     }
+    #[cfg(not(test))]
+    {
+        let mut state = match prompt_viewport_state().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
 
-    let prev_visible_start = state.last_visible_start;
-    let prev_visible_end = state.last_visible_end;
-    let viewport_changed = prev_visible_start != visible_start || prev_visible_end != visible_end;
-
-    if let Some(anim) = state.active {
-        let still_fresh = now_ms.saturating_sub(anim.start_ms) <= PROMPT_ENTRY_ANIMATION_MS;
-        let still_visible = anim.line_idx >= visible_start && anim.line_idx < visible_end;
-        if still_fresh && still_visible {
+        if !state.initialized {
+            state.initialized = true;
             state.last_visible_start = visible_start;
             state.last_visible_end = visible_end;
             return;
         }
-        if !still_fresh || !still_visible {
-            state.active = None;
-        }
-    }
 
-    if viewport_changed && state.active.is_none() {
-        let newly_visible = user_prompt_lines.iter().copied().find(|line| {
-            *line >= visible_start
-                && *line < visible_end
-                && (*line < prev_visible_start || *line >= prev_visible_end)
-        });
-        if let Some(line_idx) = newly_visible {
-            state.active = Some(PromptViewportAnimation {
-                line_idx,
-                start_ms: now_ms,
+        let prev_visible_start = state.last_visible_start;
+        let prev_visible_end = state.last_visible_end;
+        let viewport_changed =
+            prev_visible_start != visible_start || prev_visible_end != visible_end;
+
+        if let Some(anim) = state.active {
+            let still_fresh = now_ms.saturating_sub(anim.start_ms) <= PROMPT_ENTRY_ANIMATION_MS;
+            let still_visible = anim.line_idx >= visible_start && anim.line_idx < visible_end;
+            if still_fresh && still_visible {
+                state.last_visible_start = visible_start;
+                state.last_visible_end = visible_end;
+                return;
+            }
+            if !still_fresh || !still_visible {
+                state.active = None;
+            }
+        }
+
+        if viewport_changed && state.active.is_none() {
+            let newly_visible = user_prompt_lines.iter().copied().find(|line| {
+                *line >= visible_start
+                    && *line < visible_end
+                    && (*line < prev_visible_start || *line >= prev_visible_end)
             });
+            if let Some(line_idx) = newly_visible {
+                state.active = Some(PromptViewportAnimation {
+                    line_idx,
+                    start_ms: now_ms,
+                });
+            }
         }
-    }
 
-    state.last_visible_start = visible_start;
-    state.last_visible_end = visible_end;
+        state.last_visible_start = visible_start;
+        state.last_visible_end = visible_end;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1819,9 +1928,9 @@ pub(crate) fn clear_test_render_state_for_tests() {
     set_visible_copy_targets(Vec::new());
     clear_copy_viewport_snapshot();
 
-    if let Ok(mut state) = prompt_viewport_state().lock() {
-        *state = PromptViewportState::default();
-    }
+    TEST_PROMPT_VIEWPORT_STATE.with(|state| {
+        *state.borrow_mut() = PromptViewportState::default();
+    });
 }
 
 #[derive(Clone, Debug)]
@@ -1868,14 +1977,35 @@ fn copy_snapshot_slot_mut(
 }
 
 fn copy_snapshot_for_pane(pane: crate::tui::CopySelectionPane) -> Option<CopyViewportSnapshot> {
-    let snapshots = copy_viewport_state().lock().ok()?.clone();
-    match pane {
-        crate::tui::CopySelectionPane::Chat => snapshots.chat,
-        crate::tui::CopySelectionPane::SidePane => snapshots.side,
+    #[cfg(test)]
+    {
+        return TEST_COPY_VIEWPORT.with(|snapshots| {
+            let snapshots = snapshots.borrow().clone();
+            match pane {
+                crate::tui::CopySelectionPane::Chat => snapshots.chat,
+                crate::tui::CopySelectionPane::SidePane => snapshots.side,
+            }
+        });
+    }
+    #[cfg(not(test))]
+    {
+        let snapshots = copy_viewport_state().lock().ok()?.clone();
+        match pane {
+            crate::tui::CopySelectionPane::Chat => snapshots.chat,
+            crate::tui::CopySelectionPane::SidePane => snapshots.side,
+        }
     }
 }
 
 pub(crate) fn clear_copy_viewport_snapshot() {
+    #[cfg(test)]
+    {
+        TEST_COPY_VIEWPORT.with(|state| {
+            *state.borrow_mut() = CopyViewportSnapshots::default();
+        });
+        return;
+    }
+    #[cfg(not(test))]
     if let Ok(mut state) = copy_viewport_state().lock() {
         *state = CopyViewportSnapshots::default();
     }
@@ -1899,6 +2029,24 @@ fn record_copy_pane_snapshot(
     content_area: Rect,
     left_margins: &[u16],
 ) {
+    #[cfg(test)]
+    {
+        TEST_COPY_VIEWPORT.with(|state| {
+            *copy_snapshot_slot_mut(&mut state.borrow_mut(), pane) = Some(CopyViewportSnapshot {
+                pane,
+                wrapped_plain_lines,
+                wrapped_copy_offsets,
+                raw_plain_lines,
+                wrapped_line_map,
+                scroll,
+                visible_end,
+                content_area,
+                left_margins: left_margins.to_vec(),
+            });
+        });
+        return;
+    }
+    #[cfg(not(test))]
     if let Ok(mut state) = copy_viewport_state().lock() {
         *copy_snapshot_slot_mut(&mut state, pane) = Some(CopyViewportSnapshot {
             pane,
@@ -2071,17 +2219,36 @@ pub(crate) fn copy_point_from_screen(
     column: u16,
     row: u16,
 ) -> Option<crate::tui::CopySelectionPoint> {
-    let snapshots = copy_viewport_state().lock().ok()?.clone();
-    snapshots
-        .chat
-        .as_ref()
-        .and_then(|snapshot| copy_point_from_snapshot(snapshot, column, row))
-        .or_else(|| {
+    #[cfg(test)]
+    {
+        return TEST_COPY_VIEWPORT.with(|snapshots| {
+            let snapshots = snapshots.borrow().clone();
             snapshots
-                .side
+                .chat
                 .as_ref()
                 .and_then(|snapshot| copy_point_from_snapshot(snapshot, column, row))
-        })
+                .or_else(|| {
+                    snapshots
+                        .side
+                        .as_ref()
+                        .and_then(|snapshot| copy_point_from_snapshot(snapshot, column, row))
+                })
+        });
+    }
+    #[cfg(not(test))]
+    {
+        let snapshots = copy_viewport_state().lock().ok()?.clone();
+        snapshots
+            .chat
+            .as_ref()
+            .and_then(|snapshot| copy_point_from_snapshot(snapshot, column, row))
+            .or_else(|| {
+                snapshots
+                    .side
+                    .as_ref()
+                    .and_then(|snapshot| copy_point_from_snapshot(snapshot, column, row))
+            })
+    }
 }
 
 pub(crate) fn copy_viewport_point_from_screen(
@@ -3824,11 +3991,9 @@ mod tests {
     }
 
     fn reset_prompt_viewport_state_for_test() {
-        let mut state = match prompt_viewport_state().lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        *state = PromptViewportState::default();
+        TEST_PROMPT_VIEWPORT_STATE.with(|state| {
+            *state.borrow_mut() = PromptViewportState::default();
+        });
     }
 
     #[test]
