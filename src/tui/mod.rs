@@ -85,17 +85,28 @@ pub struct CopySelectionStatus {
     pub dragging: bool,
 }
 
+fn keyboard_enhancement_flags() -> crossterm::event::KeyboardEnhancementFlags {
+    use crossterm::event::KeyboardEnhancementFlags;
+
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+}
+
 /// Enable Kitty keyboard protocol for unambiguous key reporting.
+///
+/// Intentionally avoid REPORT_ALL_KEYS_AS_ESCAPE_CODES for now. When that flag is enabled,
+/// terminals such as kitty/Alacritty/Warp can report printable keys as a base key plus
+/// modifiers instead of the final text produced by the active keyboard layout. Crossterm does
+/// not yet expose kitty's associated text / alternate key data, so our printable fallback would
+/// reconstruct characters using a US-centric shift map and break international layouts (for
+/// example German macOS keyboards).
+///
 /// Returns true if successfully enabled, false if the terminal doesn't support it.
 pub fn enable_keyboard_enhancement() -> bool {
-    use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
+    use crossterm::event::PushKeyboardEnhancementFlags;
     let result = crossterm::execute!(
         std::io::stdout(),
-        PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-        )
+        PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
     )
     .is_ok();
     crate::logging::info(&format!(
@@ -580,9 +591,13 @@ pub fn prewarm_focused_side_panel(
 
 #[cfg(test)]
 mod tests {
-    use super::{connection_type_icon, is_unexpected_cache_miss, scheduled_notification_text};
+    use super::{
+        connection_type_icon, is_unexpected_cache_miss, keyboard_enhancement_flags,
+        scheduled_notification_text,
+    };
     use crate::ambient::AmbientStatus;
     use crate::tui::info_widget::AmbientWidgetData;
+    use crossterm::event::KeyboardEnhancementFlags;
 
     #[test]
     fn cache_creation_only_on_turn_two_is_expected() {
@@ -635,5 +650,14 @@ mod tests {
             scheduled_notification_text(Some(&info)).as_deref(),
             Some("⏰ next scheduled task in 5m · 2 queued")
         );
+    }
+
+    #[test]
+    fn keyboard_enhancement_flags_avoid_report_all_keys_escape_mode() {
+        let flags = keyboard_enhancement_flags();
+
+        assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
+        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
+        assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES));
     }
 }
