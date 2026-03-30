@@ -24,6 +24,14 @@ pub enum TranscriptMode {
     Send,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CommDeliveryMode {
+    Notify,
+    Interrupt,
+    Wake,
+}
+
 /// A message in conversation history (for sync)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryMessage {
@@ -283,6 +291,8 @@ pub enum Request {
         session_id: String,
         key: String,
         value: String,
+        #[serde(default)]
+        append: bool,
     },
 
     /// Read shared context from other agents
@@ -305,12 +315,26 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         channel: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivery: Option<CommDeliveryMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         wake: Option<bool>,
     },
 
     /// List agents and their activity
     #[serde(rename = "comm_list")]
     CommList { id: u64, session_id: String },
+
+    /// List swarm channels and subscriber counts
+    #[serde(rename = "comm_list_channels")]
+    CommListChannels { id: u64, session_id: String },
+
+    /// List members subscribed to a swarm channel
+    #[serde(rename = "comm_channel_members")]
+    CommChannelMembers {
+        id: u64,
+        session_id: String,
+        channel: String,
+    },
 
     /// Propose a swarm plan update
     #[serde(rename = "comm_propose_plan")]
@@ -847,6 +871,13 @@ pub enum ServerEvent {
     #[serde(rename = "comm_members")]
     CommMembers { id: u64, members: Vec<AgentInfo> },
 
+    /// Response to comm_list_channels request
+    #[serde(rename = "comm_channels")]
+    CommChannels {
+        id: u64,
+        channels: Vec<SwarmChannelInfo>,
+    },
+
     /// Response to comm_summary request
     #[serde(rename = "comm_summary_response")]
     CommSummaryResponse {
@@ -923,6 +954,12 @@ pub struct ToolCallSummary {
     pub brief_output: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwarmChannelInfo {
+    pub channel: String,
+    pub member_count: usize,
 }
 
 /// A shared context entry
@@ -1063,6 +1100,8 @@ impl Request {
             Request::CommRead { id, .. } => *id,
             Request::CommMessage { id, .. } => *id,
             Request::CommList { id, .. } => *id,
+            Request::CommListChannels { id, .. } => *id,
+            Request::CommChannelMembers { id, .. } => *id,
             Request::CommProposePlan { id, .. } => *id,
             Request::CommApprovePlan { id, .. } => *id,
             Request::CommRejectPlan { id, .. } => *id,

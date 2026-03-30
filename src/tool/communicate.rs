@@ -1,8 +1,8 @@
 use super::{Tool, ToolContext, ToolOutput};
 use crate::plan::PlanItem;
 use crate::protocol::{
-    AgentInfo, AwaitedMemberStatus, ContextEntry, HistoryMessage, Request, ServerEvent,
-    ToolCallSummary,
+    AgentInfo, AwaitedMemberStatus, CommDeliveryMode, ContextEntry, HistoryMessage, Request,
+    ServerEvent, SwarmChannelInfo, ToolCallSummary,
 };
 use crate::transport::SyncStream;
 use anyhow::Result;
@@ -237,6 +237,23 @@ fn default_await_target_statuses() -> Vec<String> {
     ]
 }
 
+fn format_channels(channels: &[SwarmChannelInfo]) -> ToolOutput {
+    if channels.is_empty() {
+        ToolOutput::new("No swarm channels found.")
+    } else {
+        let mut output = String::from("Swarm channels:\n\n");
+        for channel in channels {
+            output.push_str(&format!(
+                "  #{} — {} subscriber{}\n",
+                channel.channel,
+                channel.member_count,
+                if channel.member_count == 1 { "" } else { "s" }
+            ));
+        }
+        ToolOutput::new(output)
+    }
+}
+
 pub struct CommunicateTool;
 
 impl CommunicateTool {
@@ -286,6 +303,8 @@ struct CommunicateInput {
     timeout_minutes: Option<u64>,
     #[serde(default)]
     wake: Option<bool>,
+    #[serde(default)]
+    delivery: Option<CommDeliveryMode>,
 }
 
 impl CommunicateInput {
@@ -305,11 +324,14 @@ impl Tool for CommunicateTool {
          a notification about another agent's activity, or to proactively coordinate with other agents.\n\n\
          Actions:\n\
          - \"share\": Share context (key/value) with other agents. They'll be notified.\n\
+         - \"share_append\": Append text to an existing shared context key.\n\
          - \"read\": Read shared context from other agents.\n\
-         - \"broadcast\"/\"message\": Send a message to all other agents in the codebase.\n\
-         - \"dm\": Send a direct message to a specific session.\n\
-         - \"channel\": Send a message to a named channel in this swarm.\n\
+         - \"broadcast\"/\"message\": Send a message to all other agents in the codebase. Supports explicit delivery mode and defaults to notification-only delivery.\n\
+         - \"dm\": Send a direct message to a specific session. Defaults to waking the target immediately.\n\
+         - \"channel\": Send a message to a named channel in this swarm. Defaults to notification-only delivery unless you request interrupt/wake.\n\
          - \"list\": See who else is working in this codebase, what they're doing, and what files they've touched.\n\
+         - \"list_channels\": List active channels in this swarm and subscriber counts.\n\
+         - \"channel_members\": List members currently subscribed to a channel.\n\
          - \"propose_plan\": Propose plan items to the swarm coordinator.\n\
          - \"approve_plan\": (Coordinator only) Approve a plan proposal from another agent.\n\
          - \"reject_plan\": (Coordinator only) Reject a plan proposal with an optional reason.\n\
@@ -333,7 +355,7 @@ impl Tool for CommunicateTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["share", "read", "message", "broadcast", "dm", "channel", "list",
+                    "enum": ["share", "share_append", "read", "message", "broadcast", "dm", "channel", "list", "list_channels", "channel_members",
                              "propose_plan", "approve_plan", "reject_plan", "spawn", "stop", "assign_role",
                              "summary", "read_context", "resync_plan", "assign_task",
                              "subscribe_channel", "unsubscribe_channel", "await_members"],
@@ -353,7 +375,12 @@ impl Tool for CommunicateTool {
                 },
                 "wake": {
                     "type": "boolean",
-                    "description": "For 'message'/'broadcast'/'dm'/'channel': when true, immediately kick the recipient agent(s) into processing the message instead of waiting for later input. When false, deliver the message without waking them. If omitted, preserves the current default behavior."
+                    "description": "Backward-compatible alias for delivery choice on 'message'/'broadcast'/'dm'/'channel'. true => delivery='wake'; false => delivery='notify'. If omitted, per-action defaults apply."
+                },
+                "delivery": {
+                    "type": "string",
+                    "enum": ["notify", "interrupt", "wake"],
+                    "description": "For 'message'/'broadcast'/'dm'/'channel': explicit delivery mode. 'notify' only shows the notification, 'interrupt' queues it for safe-point ingestion, 'wake' starts processing immediately if idle otherwise queues an interrupt. Defaults: dm=wake, channel/broadcast=notify."
                 },
                 "to_session": {
                     "type": "string",
@@ -457,7 +484,7 @@ impl Tool for CommunicateTool {
         let params: CommunicateInput = serde_json::from_value(input)?;
 
         match params.action.as_str() {
-            "share" => {
+            "share" | "share_append" => {
                 let key = params
                     .key
                     .ok_or_else(|| anyhow::anyhow!("'key' is required for share action"))?;
@@ -470,15 +497,18 @@ impl Tool for CommunicateTool {
                     session_id: ctx.session_id.clone(),
                     key: key.clone(),
                     value: value.clone(),
+                    append: params.action == "share_append",
                 };
 
                 match send_request(request) {
                     Ok(response) => {
                         ensure_success(&response)?;
-                        Ok(ToolOutput::new(format!(
-                            "Shared with other agents: {} = {}",
-                            key, value
-                        )))
+                        let verb = if params.action == "share_append" {
+                            "Appended shared context"
+                        } else {
+                            "Shared with other agents"
+                        };
+                        Ok(ToolOutput::new(format!("{}: {} = {}", verb, key, value)))
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to share: {}", e)),
                 }
@@ -515,6 +545,7 @@ impl Tool for CommunicateTool {
                     to_session: None,
                     channel: None,
                     wake: params.wake,
+                    delivery: None,
                 };
 
                 match send_request(request) {
@@ -543,6 +574,7 @@ impl Tool for CommunicateTool {
                     message: message.clone(),
                     to_session: Some(to_session.clone()),
                     channel: None,
+                    delivery: params.delivery,
                     wake: params.wake,
                 };
 
@@ -572,6 +604,7 @@ impl Tool for CommunicateTool {
                     message: message.clone(),
                     to_session: None,
                     channel: Some(channel.clone()),
+                    delivery: params.delivery,
                     wake: params.wake,
                 };
 
@@ -602,6 +635,56 @@ impl Tool for CommunicateTool {
                         Ok(ToolOutput::new("No agents found."))
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to list agents: {}", e)),
+                }
+            }
+
+            "list_channels" => {
+                let request = Request::CommListChannels {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                };
+
+                match send_request(request) {
+                    Ok(ServerEvent::CommChannels { channels, .. }) => {
+                        Ok(format_channels(&channels))
+                    }
+                    Ok(response) => {
+                        ensure_success(&response)?;
+                        Ok(ToolOutput::new("No channels found."))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to list channels: {}", e)),
+                }
+            }
+
+            "channel_members" => {
+                let channel = params.channel.ok_or_else(|| {
+                    anyhow::anyhow!("'channel' is required for channel_members action")
+                })?;
+                let request = Request::CommChannelMembers {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    channel: channel.clone(),
+                };
+
+                match send_request(request) {
+                    Ok(ServerEvent::CommMembers { members, .. }) => {
+                        let mut output = format!("Members subscribed to #{}:\n\n", channel);
+                        if members.is_empty() {
+                            output.push_str("  (none)\n");
+                        } else {
+                            for member in members {
+                                let name = member.friendly_name.unwrap_or(member.session_id);
+                                let status = member.status.unwrap_or_else(|| "unknown".to_string());
+                                output.push_str(&format!("  {} ({})\n", name, status));
+                            }
+                        }
+                        Ok(ToolOutput::new(output))
+                    }
+                    Ok(response) => {
+                        ensure_success(&response)?;
+                        Ok(ToolOutput::new("No channel members found."))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to list channel members: {}", e)),
                 }
             }
 
@@ -1238,6 +1321,29 @@ mod tests {
             preferred.spawn_initial_message().as_deref(),
             Some("preferred")
         );
+    }
+
+    #[test]
+    fn communicate_input_accepts_delivery_and_share_append() {
+        let delivery: CommunicateInput = serde_json::from_value(serde_json::json!({
+            "action": "dm",
+            "message": "ping",
+            "to_session": "sess-2",
+            "delivery": "wake"
+        }))
+        .expect("delivery mode should deserialize");
+        assert_eq!(
+            delivery.delivery,
+            Some(crate::protocol::CommDeliveryMode::Wake)
+        );
+
+        let append: CommunicateInput = serde_json::from_value(serde_json::json!({
+            "action": "share_append",
+            "key": "task/123/notes",
+            "value": "new line"
+        }))
+        .expect("share_append should deserialize");
+        assert_eq!(append.action, "share_append");
     }
 
     #[test]

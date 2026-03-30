@@ -139,6 +139,8 @@ resolution. The system supports:
 - Direct messages (DMs)
 - Swarm broadcast
 - Topic channels (group chats)
+- Shared context keys (set/read/append)
+- Channel discovery and member inspection
 
 All agents can broadcast and send DMs or channel messages.
 

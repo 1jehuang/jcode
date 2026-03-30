@@ -65,6 +65,15 @@ fn left_pad_lines_for_centered_mode(lines: &mut [Line<'static>], width: u16) {
     }
 }
 
+fn centered_wrap_width(width: u16, centered: bool, centered_max_width: usize) -> usize {
+    let width = width as usize;
+    if centered {
+        width.min(centered_max_width).max(1)
+    } else {
+        width.max(1)
+    }
+}
+
 pub(super) fn get_cached_message_lines<F>(
     msg: &DisplayMessage,
     width: u16,
@@ -205,7 +214,8 @@ pub(crate) fn render_system_message(
     _diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
     let centered = markdown::center_code_blocks();
-    let mut lines = markdown::render_markdown_with_width(&msg.content, Some(width as usize));
+    let wrap_width = centered_wrap_width(width.saturating_sub(4), centered, 96);
+    let mut lines = markdown::render_markdown_with_width(&msg.content, Some(wrap_width));
     if centered {
         left_pad_lines_for_centered_mode(&mut lines, width);
     }
@@ -362,7 +372,7 @@ pub(crate) fn render_swarm_message(
     let body_style = Style::default().fg(text_color);
 
     let content_width = if centered {
-        width.saturating_sub(6) as usize
+        centered_wrap_width(width.saturating_sub(6), true, 96)
     } else {
         width.saturating_sub(4) as usize
     }
@@ -911,6 +921,60 @@ mod tests {
         assert!(
             first_pad > 0,
             "tool summary should still be padded/centered as a block: {tool_lines:?}"
+        );
+
+        crate::tui::markdown::set_center_code_blocks(saved);
+    }
+
+    #[test]
+    fn render_system_message_centered_mode_caps_wrap_width_for_visible_gutters() {
+        let saved = crate::tui::markdown::center_code_blocks();
+        crate::tui::markdown::set_center_code_blocks(true);
+        let msg = DisplayMessage::system(
+            "This is a long centered-mode system notification that should keep visible side gutters instead of stretching nearly edge to edge in a wide terminal.",
+        );
+
+        let lines = render_system_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+
+        assert!(
+            rendered.iter().all(|line| line.starts_with("          ")),
+            "centered system message should retain visible left padding in wide layouts: {rendered:?}"
+        );
+
+        crate::tui::markdown::set_center_code_blocks(saved);
+    }
+
+    #[test]
+    fn render_swarm_message_centered_mode_caps_wrap_width_for_long_notifications() {
+        let saved = crate::tui::markdown::center_code_blocks();
+        crate::tui::markdown::set_center_code_blocks(true);
+        let msg = DisplayMessage::swarm(
+            "File activity",
+            "/home/jeremy/jcode/src/tui/ui_messages.rs — moss just edited this file while you were working nearby, so the notification should still read as centered in wide layouts.",
+        );
+
+        let lines = render_swarm_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+        let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
+        let first_pad = rendered[0].chars().take_while(|c| *c == ' ').count();
+
+        assert!(
+            first_pad >= 8,
+            "centered swarm notification should keep a clearly visible left gutter: {rendered:?}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .all(|line| line.is_empty() || line.starts_with(&" ".repeat(first_pad))),
+            "centered swarm notification should share one left pad across wrapped lines: {rendered:?}"
         );
 
         crate::tui::markdown::set_center_code_blocks(saved);

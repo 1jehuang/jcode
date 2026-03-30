@@ -3,10 +3,11 @@ use super::{
     ClientConnectionInfo, SessionInterruptQueues, SharedContext, SwarmEvent, SwarmEventType,
     SwarmMember, queue_soft_interrupt_for_session, record_swarm_event,
     subscribe_session_to_channel, truncate_detail, unsubscribe_session_from_channel,
-    update_member_status,
 };
 use crate::agent::Agent;
-use crate::protocol::{AgentInfo, ContextEntry, NotificationType, ServerEvent};
+use crate::protocol::{
+    AgentInfo, CommDeliveryMode, ContextEntry, NotificationType, ServerEvent, SwarmChannelInfo,
+};
 use jcode_agent_runtime::SoftInterruptSource;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -85,11 +86,33 @@ async fn run_message_in_live_session_if_idle(
     true
 }
 
+fn resolve_comm_delivery_mode(
+    scope: &str,
+    delivery: Option<CommDeliveryMode>,
+    wake: Option<bool>,
+) -> CommDeliveryMode {
+    if let Some(mode) = delivery {
+        return mode;
+    }
+    if let Some(should_wake) = wake {
+        return if should_wake {
+            CommDeliveryMode::Wake
+        } else {
+            CommDeliveryMode::Notify
+        };
+    }
+    match scope {
+        "dm" => CommDeliveryMode::Wake,
+        _ => CommDeliveryMode::Notify,
+    }
+}
+
 pub(super) async fn handle_comm_share(
     id: u64,
     req_session_id: String,
     key: String,
     value: String,
+    append: bool,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
@@ -108,11 +131,25 @@ pub(super) async fn handle_comm_share(
             let swarm_ctx = ctx.entry(swarm_id.clone()).or_insert_with(HashMap::new);
             let now = Instant::now();
             let created_at = swarm_ctx.get(&key).map(|c| c.created_at).unwrap_or(now);
+            let stored_value = if append {
+                swarm_ctx
+                    .get(&key)
+                    .map(|existing| {
+                        if existing.value.is_empty() {
+                            value.clone()
+                        } else {
+                            format!("{}\n{}", existing.value, value)
+                        }
+                    })
+                    .unwrap_or_else(|| value.clone())
+            } else {
+                value.clone()
+            };
             swarm_ctx.insert(
                 key.clone(),
                 SharedContext {
                     key: key.clone(),
-                    value: value.clone(),
+                    value: stored_value.clone(),
                     from_session: req_session_id.clone(),
                     from_name: friendly_name.clone(),
                     created_at,
@@ -138,9 +175,17 @@ pub(super) async fn handle_comm_share(
                         from_name: friendly_name.clone(),
                         notification_type: NotificationType::SharedContext {
                             key: key.clone(),
-                            value: value.clone(),
+                            value: if append {
+                                format!("(appended) {}", value)
+                            } else {
+                                value.clone()
+                            },
                         },
-                        message: format!("Shared context: {} = {}", key, value),
+                        message: if append {
+                            format!("Appended shared context: {} += {}", key, value)
+                        } else {
+                            format!("Shared context: {} = {}", key, value)
+                        },
                     });
                 }
             }
@@ -275,6 +320,95 @@ pub(super) async fn handle_comm_list(
     }
 }
 
+pub(super) async fn handle_comm_list_channels(
+    id: u64,
+    req_session_id: String,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    channel_subscriptions: &Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>,
+) {
+    let swarm_id = swarm_id_for_session(&req_session_id, swarm_members).await;
+
+    if let Some(swarm_id) = swarm_id {
+        let channels = {
+            let subs = channel_subscriptions.read().await;
+            let mut channels: Vec<SwarmChannelInfo> = subs
+                .get(&swarm_id)
+                .map(|swarm_channels| {
+                    swarm_channels
+                        .iter()
+                        .map(|(channel, members)| SwarmChannelInfo {
+                            channel: channel.clone(),
+                            member_count: members.len(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            channels.sort_by(|left, right| left.channel.cmp(&right.channel));
+            channels
+        };
+
+        let _ = client_event_tx.send(ServerEvent::CommChannels { id, channels });
+    } else {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: "Not in a swarm. Use a git repository to enable swarm features.".to_string(),
+            retry_after_secs: None,
+        });
+    }
+}
+
+pub(super) async fn handle_comm_channel_members(
+    id: u64,
+    req_session_id: String,
+    channel: String,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    channel_subscriptions: &Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>,
+) {
+    let swarm_id = swarm_id_for_session(&req_session_id, swarm_members).await;
+
+    if let Some(swarm_id) = swarm_id {
+        let member_ids: Vec<String> = {
+            let subs = channel_subscriptions.read().await;
+            subs.get(&swarm_id)
+                .and_then(|swarm_channels| swarm_channels.get(&channel))
+                .map(|members| {
+                    let mut ids: Vec<String> = members.iter().cloned().collect();
+                    ids.sort();
+                    ids
+                })
+                .unwrap_or_default()
+        };
+
+        let members = swarm_members.read().await;
+        let entries: Vec<AgentInfo> = member_ids
+            .iter()
+            .filter_map(|sid| {
+                members.get(sid).map(|member| AgentInfo {
+                    session_id: sid.clone(),
+                    friendly_name: member.friendly_name.clone(),
+                    files_touched: Vec::new(),
+                    status: Some(member.status.clone()),
+                    detail: member.detail.clone(),
+                    role: Some(member.role.clone()),
+                })
+            })
+            .collect();
+
+        let _ = client_event_tx.send(ServerEvent::CommMembers {
+            id,
+            members: entries,
+        });
+    } else {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: "Not in a swarm. Use a git repository to enable swarm features.".to_string(),
+            retry_after_secs: None,
+        });
+    }
+}
+
 pub(super) async fn handle_comm_subscribe_channel(
     id: u64,
     req_session_id: String,
@@ -382,6 +516,7 @@ pub(super) async fn handle_comm_message(
     message: String,
     to_session: Option<String>,
     channel: Option<String>,
+    delivery: Option<CommDeliveryMode>,
     wake: Option<bool>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     sessions: &Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
@@ -392,7 +527,7 @@ pub(super) async fn handle_comm_message(
     event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
-    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
+    _client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
 ) {
     let swarm_id = swarm_id_for_session(&from_session, swarm_members).await;
 
@@ -456,14 +591,6 @@ pub(super) async fn handle_comm_message(
                 .collect()
         };
 
-        let connected_sessions: HashSet<String> = {
-            let connections = client_connections.read().await;
-            connections
-                .values()
-                .map(|connection| connection.session_id.clone())
-                .collect()
-        };
-
         for session_id in &target_sessions {
             if !swarm_session_ids.contains(session_id) {
                 continue;
@@ -472,13 +599,12 @@ pub(super) async fn handle_comm_message(
                 let from_label = friendly_name
                     .clone()
                     .unwrap_or_else(|| from_session[..8.min(from_session.len())].to_string());
-                let target_has_client = connected_sessions.contains(session_id);
-                let target_is_headless = member.is_headless;
                 let scope_label = match (scope, channel.as_deref()) {
                     ("channel", Some(channel_name)) => format!("#{}", channel_name),
                     ("dm", _) => "DM".to_string(),
                     _ => "broadcast".to_string(),
                 };
+                let delivery_mode = resolve_comm_delivery_mode(scope, delivery, wake);
                 let notification_msg = format!("{} from {}: {}", scope_label, from_label, message);
                 let _ = member.event_tx.send(ServerEvent::Notification {
                     from_session: from_session.clone(),
@@ -490,36 +616,28 @@ pub(super) async fn handle_comm_message(
                     message: notification_msg.clone(),
                 });
 
-                if wake == Some(true) && target_has_client {
-                    let sender_name = friendly_name
-                        .clone()
-                        .unwrap_or_else(|| from_session.clone());
-                    let reminder = match scope {
-                        "dm" => Some(format!(
-                            "You just received a direct swarm message from {}. Review it and respond or act if useful.",
-                            sender_name
-                        )),
-                        "channel" => Some(format!(
-                            "You just received a swarm channel message in #{} from {}. Review it and respond or act if useful.",
-                            channel.clone().unwrap_or_else(|| "channel".to_string()),
-                            sender_name
-                        )),
-                        _ => Some(format!(
-                            "You just received a swarm broadcast from {}. Review it and respond or act if useful.",
-                            sender_name
-                        )),
-                    };
+                let sender_name = friendly_name
+                    .clone()
+                    .unwrap_or_else(|| from_session.clone());
+                let reminder = match scope {
+                    "dm" => Some(format!(
+                        "You just received a direct swarm message from {}. Review it and respond or act if useful.",
+                        sender_name
+                    )),
+                    "channel" => Some(format!(
+                        "You just received a swarm channel message in #{} from {}. Review it and respond or act if useful.",
+                        channel.clone().unwrap_or_else(|| "channel".to_string()),
+                        sender_name
+                    )),
+                    _ => Some(format!(
+                        "You just received a swarm broadcast from {}. Review it and respond or act if useful.",
+                        sender_name
+                    )),
+                };
 
-                    let woke_immediately = run_message_in_live_session_if_idle(
-                        session_id,
-                        &notification_msg,
-                        reminder,
-                        sessions,
-                        swarm_members,
-                    )
-                    .await;
-
-                    if !woke_immediately {
+                match delivery_mode {
+                    CommDeliveryMode::Notify => {}
+                    CommDeliveryMode::Interrupt => {
                         let _ = queue_soft_interrupt_for_session(
                             session_id,
                             notification_msg.clone(),
@@ -530,124 +648,28 @@ pub(super) async fn handle_comm_message(
                         )
                         .await;
                     }
-
-                    continue;
-                }
-
-                if wake == Some(false) {
-                    continue;
-                }
-
-                if !target_has_client {
-                    let _ = queue_soft_interrupt_for_session(
-                        session_id,
-                        notification_msg.clone(),
-                        false,
-                        SoftInterruptSource::System,
-                        soft_interrupt_queues,
-                        sessions,
-                    )
-                    .await;
-                }
-
-                if target_is_headless && !target_has_client {
-                    let target_session = session_id.clone();
-                    let notification_msg = notification_msg.clone();
-                    let scope_string = scope.to_string();
-                    let channel_name = channel.clone();
-                    let from_session_clone = from_session.clone();
-                    let from_name_clone = friendly_name.clone();
-                    let sessions_for_run = Arc::clone(sessions);
-                    let swarm_members_for_run = Arc::clone(swarm_members);
-                    let swarms_for_run = Arc::clone(swarms_by_id);
-                    let event_history_for_run = Arc::clone(event_history);
-                    let event_counter_for_run = Arc::clone(event_counter);
-                    let swarm_event_tx_for_run = swarm_event_tx.clone();
-                    tokio::spawn(async move {
-                        let agent_arc = {
-                            let agent_sessions = sessions_for_run.read().await;
-                            agent_sessions.get(&target_session).cloned()
-                        };
-                        let Some(agent_arc) = agent_arc else {
-                            return;
-                        };
-
-                        let detail = match scope_string.as_str() {
-                            "dm" => format!("DM from {}", from_label),
-                            "channel" => format!(
-                                "#{} from {}",
-                                channel_name
-                                    .clone()
-                                    .unwrap_or_else(|| "channel".to_string()),
-                                from_label
-                            ),
-                            _ => format!("broadcast from {}", from_label),
-                        };
-
-                        update_member_status(
-                            &target_session,
-                            "running",
-                            Some(truncate_detail(&detail, 120)),
-                            &swarm_members_for_run,
-                            &swarms_for_run,
-                            Some(&event_history_for_run),
-                            Some(&event_counter_for_run),
-                            Some(&swarm_event_tx_for_run),
-                        )
-                        .await;
-
-                        let sender_name = from_name_clone
-                            .clone()
-                            .unwrap_or_else(|| from_session_clone.clone());
-                        let reminder = match scope_string.as_str() {
-                            "dm" => format!(
-                                "You just received a direct swarm message from {}. The latest swarm notification context has already been queued into this turn. Review it and respond or act if useful.",
-                                sender_name
-                            ),
-                            "channel" => format!(
-                                "You just received a swarm channel message in #{} from {}. The latest swarm notification context has already been queued into this turn. Review it and respond or act if useful.",
-                                channel_name
-                                    .clone()
-                                    .unwrap_or_else(|| "channel".to_string()),
-                                sender_name
-                            ),
-                            _ => format!(
-                                "You just received a swarm broadcast from {}. The latest swarm notification context has already been queued into this turn. Review it and respond or act if useful.",
-                                sender_name
-                            ),
-                        };
-
-                        let (drain_tx, mut drain_rx) =
-                            tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
-                        tokio::spawn(async move { while drain_rx.recv().await.is_some() {} });
-
-                        let result = process_message_streaming_mpsc(
-                            Arc::clone(&agent_arc),
+                    CommDeliveryMode::Wake => {
+                        let woke_immediately = run_message_in_live_session_if_idle(
+                            session_id,
                             &notification_msg,
-                            vec![],
-                            Some(reminder),
-                            drain_tx,
+                            reminder,
+                            sessions,
+                            swarm_members,
                         )
                         .await;
 
-                        let (status, detail) = match result {
-                            Ok(()) => ("ready", None),
-                            Err(error) => {
-                                ("failed", Some(truncate_detail(&error.to_string(), 120)))
-                            }
-                        };
-                        update_member_status(
-                            &target_session,
-                            status,
-                            detail,
-                            &swarm_members_for_run,
-                            &swarms_for_run,
-                            Some(&event_history_for_run),
-                            Some(&event_counter_for_run),
-                            Some(&swarm_event_tx_for_run),
-                        )
-                        .await;
-                    });
+                        if !woke_immediately {
+                            let _ = queue_soft_interrupt_for_session(
+                                session_id,
+                                notification_msg.clone(),
+                                false,
+                                SoftInterruptSource::System,
+                                soft_interrupt_queues,
+                                sessions,
+                            )
+                            .await;
+                        }
+                    }
                 }
             }
         }
@@ -686,7 +708,7 @@ mod tests {
     use super::{handle_comm_list, handle_comm_message};
     use crate::agent::Agent;
     use crate::message::{Message, ToolDefinition};
-    use crate::protocol::{NotificationType, ServerEvent};
+    use crate::protocol::{CommDeliveryMode, NotificationType, ServerEvent};
     use crate::provider::{EventStream, Provider};
     use crate::server::{ClientConnectionInfo, SessionInterruptQueues, SwarmEvent, SwarmMember};
     use crate::tool::Registry;
@@ -814,6 +836,7 @@ mod tests {
             "hello".to_string(),
             None,
             Some("religion-debate".to_string()),
+            None,
             None,
             &client_event_tx,
             &sessions,
@@ -951,7 +974,8 @@ mod tests {
             "hello now".to_string(),
             Some(target_id.clone()),
             None,
-            Some(true),
+            Some(CommDeliveryMode::Wake),
+            None,
             &client_event_tx,
             &sessions,
             &soft_interrupt_queues,

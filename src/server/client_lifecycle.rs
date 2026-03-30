@@ -4,8 +4,9 @@ use super::client_actions::{
     handle_stdin_response, handle_trigger_memory_extraction,
 };
 use super::client_comm::{
-    handle_comm_list, handle_comm_message, handle_comm_read, handle_comm_share,
-    handle_comm_subscribe_channel, handle_comm_unsubscribe_channel,
+    handle_comm_channel_members, handle_comm_list, handle_comm_list_channels, handle_comm_message,
+    handle_comm_read, handle_comm_share, handle_comm_subscribe_channel,
+    handle_comm_unsubscribe_channel,
 };
 use super::client_disconnect_cleanup::cleanup_client_connection;
 use super::client_session::{
@@ -897,12 +898,14 @@ pub(super) async fn handle_client(
                 session_id: req_session_id,
                 key,
                 value,
+                append,
             } => {
                 handle_comm_share(
                     id,
                     req_session_id,
                     key,
                     value,
+                    append,
                     &client_event_tx,
                     &swarm_members,
                     &swarms_by_id,
@@ -936,6 +939,7 @@ pub(super) async fn handle_client(
                 message,
                 to_session,
                 channel,
+                delivery,
                 wake,
             } => {
                 handle_comm_message(
@@ -944,6 +948,7 @@ pub(super) async fn handle_client(
                     message,
                     to_session,
                     channel,
+                    delivery,
                     wake,
                     &client_event_tx,
                     &sessions,
@@ -970,6 +975,36 @@ pub(super) async fn handle_client(
                     &swarm_members,
                     &swarms_by_id,
                     &files_touched_by_session,
+                )
+                .await;
+            }
+
+            Request::CommListChannels {
+                id,
+                session_id: req_session_id,
+            } => {
+                handle_comm_list_channels(
+                    id,
+                    req_session_id,
+                    &client_event_tx,
+                    &swarm_members,
+                    &channel_subscriptions,
+                )
+                .await;
+            }
+
+            Request::CommChannelMembers {
+                id,
+                session_id: req_session_id,
+                channel,
+            } => {
+                handle_comm_channel_members(
+                    id,
+                    req_session_id,
+                    channel,
+                    &client_event_tx,
+                    &swarm_members,
+                    &channel_subscriptions,
                 )
                 .await;
             }
@@ -1126,19 +1161,36 @@ pub(super) async fn handle_client(
 
             Request::CommSummary {
                 id,
-                session_id: _req_session_id,
+                session_id: req_session_id,
                 target_session,
                 limit,
             } => {
-                handle_comm_summary(id, target_session, limit, &sessions, &client_event_tx).await;
+                handle_comm_summary(
+                    id,
+                    req_session_id,
+                    target_session,
+                    limit,
+                    &sessions,
+                    &swarm_members,
+                    &client_event_tx,
+                )
+                .await;
             }
 
             Request::CommReadContext {
                 id,
-                session_id: _req_session_id,
+                session_id: req_session_id,
                 target_session,
             } => {
-                handle_comm_read_context(id, target_session, &sessions, &client_event_tx).await;
+                handle_comm_read_context(
+                    id,
+                    req_session_id,
+                    target_session,
+                    &sessions,
+                    &swarm_members,
+                    &client_event_tx,
+                )
+                .await;
             }
 
             Request::CommResyncPlan {
