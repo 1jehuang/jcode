@@ -53,6 +53,7 @@ mod navigation;
 mod observe;
 mod picker;
 mod remote;
+mod remote_notifications;
 mod replay;
 mod run_shell;
 mod state_ui;
