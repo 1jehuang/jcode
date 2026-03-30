@@ -9279,6 +9279,40 @@ fn test_disconnected_key_handler_restart_runs_locally() {
 }
 
 #[test]
+fn test_disconnected_key_handler_runs_effort_locally() {
+    let mut app = create_test_app();
+    app.input = "/effort".to_string();
+    app.cursor_pos = app.input.len();
+
+    remote::handle_disconnected_key(&mut app, KeyCode::Enter, KeyModifiers::empty()).unwrap();
+
+    assert!(app.input.is_empty());
+    assert!(app.queued_messages().is_empty());
+    let last = app
+        .display_messages()
+        .last()
+        .expect("missing effort message");
+    assert_eq!(last.role, "system");
+    assert!(last.content.contains("Reasoning effort not available"));
+}
+
+#[test]
+fn test_disconnected_key_handler_runs_model_picker_locally() {
+    let mut app = create_test_app();
+    configure_test_remote_models(&mut app);
+    app.input = "/model".to_string();
+    app.cursor_pos = app.input.len();
+
+    remote::handle_disconnected_key(&mut app, KeyCode::Enter, KeyModifiers::empty()).unwrap();
+
+    assert!(app.input.is_empty());
+    assert!(app.queued_messages().is_empty());
+    let picker = app.picker_state.as_ref().expect("model picker should open");
+    assert!(!picker.models.is_empty());
+    assert_eq!(picker.models[picker.selected].name, "gpt-5.3-codex");
+}
+
+#[test]
 fn test_disconnected_key_handler_does_not_queue_server_commands() {
     let mut app = create_test_app();
     app.input = "/server-reload".to_string();
