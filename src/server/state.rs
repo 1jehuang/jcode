@@ -1,7 +1,8 @@
-use crate::agent::{Agent, SoftInterruptQueue, SoftInterruptSource};
+use crate::agent::Agent;
 use crate::bus::FileOp;
 use crate::plan::PlanItem;
 use crate::protocol::ServerEvent;
+use jcode_agent_runtime::{SoftInterruptMessage, SoftInterruptQueue, SoftInterruptSource};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -165,7 +166,7 @@ pub(super) fn enqueue_soft_interrupt(
     source: SoftInterruptSource,
 ) -> bool {
     if let Ok(mut pending) = queue.lock() {
-        pending.push(crate::agent::SoftInterruptMessage {
+        pending.push(SoftInterruptMessage {
             content,
             urgent,
             source,

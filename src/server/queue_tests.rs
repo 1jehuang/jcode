@@ -1,12 +1,13 @@
 use super::{
     SessionInterruptQueues, queue_soft_interrupt_for_session, register_session_interrupt_queue,
 };
-use crate::agent::{Agent, SoftInterruptSource};
+use crate::agent::Agent;
 use crate::message::{Message, ToolDefinition};
 use crate::provider::{EventStream, Provider};
 use crate::tool::Registry;
 use anyhow::Result;
 use async_trait::async_trait;
+use jcode_agent_runtime::SoftInterruptSource;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};

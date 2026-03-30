@@ -5,8 +5,9 @@ use super::{
     subscribe_session_to_channel, truncate_detail, unsubscribe_session_from_channel,
     update_member_status,
 };
-use crate::agent::{Agent, SoftInterruptSource};
+use crate::agent::Agent;
 use crate::protocol::{AgentInfo, ContextEntry, NotificationType, ServerEvent};
+use jcode_agent_runtime::SoftInterruptSource;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -4,10 +4,11 @@ use super::{
     broadcast_swarm_status, queue_soft_interrupt_for_session, remove_session_channel_subscriptions,
     remove_session_from_swarm, swarm_id_for_dir, truncate_detail, update_member_status,
 };
-use crate::agent::{Agent, SoftInterruptSource, StreamError};
+use crate::agent::Agent;
 use crate::protocol::{FeatureToggle, NotificationType, ServerEvent};
 use crate::session::Session;
 use crate::util::truncate_str;
+use jcode_agent_runtime::{SoftInterruptSource, StreamError};
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::Arc;

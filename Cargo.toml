@@ -7,6 +7,7 @@ edition = "2024"
 [workspace]
 members = [
     ".",
+    "crates/jcode-agent-runtime",
     "crates/jcode-embedding",
     "crates/jcode-pdf",
     "crates/jcode-azure-auth",
@@ -84,6 +85,7 @@ hex = "0.4"
 url = "2"
 open = "5"               # Open URLs in browser
 jcode-azure-auth = { path = "crates/jcode-azure-auth" }
+jcode-agent-runtime = { path = "crates/jcode-agent-runtime" }
 jcode-notify-email = { path = "crates/jcode-notify-email" }
 jcode-provider-metadata = { path = "crates/jcode-provider-metadata" }
 jcode-provider-core = { path = "crates/jcode-provider-core" }

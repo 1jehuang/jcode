@@ -38,27 +38,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
 
-pub use interrupts::{
-    BackgroundToolSignal, GracefulShutdownSignal, InterruptSignal, SoftInterruptMessage,
-    SoftInterruptQueue, SoftInterruptSource,
-};
 use interrupts::{NoToolCallOutcome, PostToolInterruptOutcome};
-
-#[derive(Debug, thiserror::Error)]
-#[error("{message}")]
-pub struct StreamError {
-    pub message: String,
-    pub retry_after_secs: Option<u64>,
-}
-
-impl StreamError {
-    fn new(message: String, retry_after_secs: Option<u64>) -> Self {
-        Self {
-            message,
-            retry_after_secs,
-        }
-    }
-}
+pub use jcode_agent_runtime::{
+    BackgroundToolSignal, GracefulShutdownSignal, InterruptSignal, SoftInterruptMessage,
+    SoftInterruptQueue, SoftInterruptSource, StreamError,
+};
 
 const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "communicate"];
 static RECOVERED_TEXT_WRAPPED_TOOL_CALLS: std::sync::atomic::AtomicU64 =

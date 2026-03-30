@@ -32,7 +32,7 @@ use super::{
     broadcast_swarm_status, enqueue_soft_interrupt, record_swarm_event,
     register_session_interrupt_queue, swarm_id_for_dir, truncate_detail, update_member_status,
 };
-use crate::agent::{Agent, InterruptSignal, SoftInterruptQueue, SoftInterruptSource, StreamError};
+use crate::agent::Agent;
 use crate::bus::{Bus, BusEvent};
 use crate::id;
 use crate::message::format_background_task_notification_markdown;
@@ -42,6 +42,7 @@ use crate::tool::Registry;
 use crate::transport::Stream;
 use anyhow::Result;
 use futures::FutureExt;
+use jcode_agent_runtime::{InterruptSignal, SoftInterruptQueue, SoftInterruptSource, StreamError};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -77,7 +78,7 @@ pub(super) async fn handle_client(
     server_name: String,
     server_icon: String,
     mcp_pool: Arc<crate::mcp::SharedMcpPool>,
-    shutdown_signals: Arc<RwLock<HashMap<String, crate::agent::InterruptSignal>>>,
+    shutdown_signals: Arc<RwLock<HashMap<String, InterruptSignal>>>,
     soft_interrupt_queues: SessionInterruptQueues,
     await_members_runtime: AwaitMembersRuntime,
 ) -> Result<()> {

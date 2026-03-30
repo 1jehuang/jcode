@@ -7,8 +7,9 @@ use super::{
     VersionedPlan, broadcast_swarm_plan, broadcast_swarm_status, queue_soft_interrupt_for_session,
     record_swarm_event, truncate_detail, update_member_status,
 };
-use crate::agent::{Agent, SoftInterruptSource};
+use crate::agent::Agent;
 use crate::protocol::{AwaitedMemberStatus, NotificationType, ServerEvent};
+use jcode_agent_runtime::SoftInterruptSource;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

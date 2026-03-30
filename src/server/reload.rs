@@ -1,5 +1,6 @@
 use crate::agent::Agent;
 use crate::server::{SwarmEvent, SwarmEventType, SwarmMember};
+use jcode_agent_runtime::InterruptSignal;
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -45,7 +46,7 @@ async fn receive_reload_signal(
 pub(super) async fn await_reload_signal(
     sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
     swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
-    shutdown_signals: Arc<RwLock<HashMap<String, crate::agent::InterruptSignal>>>,
+    shutdown_signals: Arc<RwLock<HashMap<String, InterruptSignal>>>,
     swarm_event_tx: broadcast::Sender<SwarmEvent>,
 ) {
     use std::process::Command as ProcessCommand;
@@ -148,7 +149,7 @@ pub(super) async fn await_reload_signal(
 pub(super) async fn graceful_shutdown_sessions(
     _sessions: &Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-    shutdown_signals: &Arc<RwLock<HashMap<String, crate::agent::InterruptSignal>>>,
+    shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
 ) {
     graceful_shutdown_sessions_with_timeout(
@@ -164,7 +165,7 @@ pub(super) async fn graceful_shutdown_sessions(
 async fn graceful_shutdown_sessions_with_timeout(
     _sessions: &Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-    shutdown_signals: &Arc<RwLock<HashMap<String, crate::agent::InterruptSignal>>>,
+    shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     timeout: Duration,
 ) {
@@ -289,7 +290,7 @@ mod tests {
     use super::{
         graceful_shutdown_sessions, graceful_shutdown_sessions_with_timeout, receive_reload_signal,
     };
-    use crate::agent::InterruptSignal;
+    use jcode_agent_runtime::InterruptSignal;
     use crate::server::{ReloadSignal, SwarmEvent, SwarmEventType, SwarmMember};
     use std::collections::HashMap;
     use std::sync::Arc;

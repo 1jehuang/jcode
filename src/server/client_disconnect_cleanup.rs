@@ -4,8 +4,9 @@ use super::{
     remove_session_channel_subscriptions, remove_session_file_touches, remove_session_from_swarm,
     remove_session_interrupt_queue, update_member_status,
 };
-use crate::agent::{Agent, InterruptSignal};
+use crate::agent::Agent;
 use anyhow::Result;
+use jcode_agent_runtime::InterruptSignal;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;

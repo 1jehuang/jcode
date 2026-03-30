@@ -1,9 +1,10 @@
 use super::ServerIdentity;
 use super::debug_jobs::{DebugJob, maybe_start_async_debug_job};
-use crate::agent::{Agent, SoftInterruptSource};
+use crate::agent::Agent;
 use crate::build;
 use crate::mcp::McpConfig;
 use anyhow::Result;
+use jcode_agent_runtime::SoftInterruptSource;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;

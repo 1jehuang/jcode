@@ -4,7 +4,7 @@
 //! ambient cycles: scheduling, spawning agent sessions, handling results, and
 //! providing status for the TUI widget and debug socket.
 
-use crate::agent::{Agent, SoftInterruptQueue};
+use crate::agent::Agent;
 use crate::ambient::{
     self, AmbientCycleResult, AmbientLock, AmbientManager, AmbientState, AmbientStatus,
     CycleStatus, ScheduleTarget, ScheduledItem,
@@ -20,6 +20,7 @@ use crate::session::Session;
 use crate::tool;
 use crate::tool::ambient as ambient_tools;
 use chrono::Utc;
+use jcode_agent_runtime::{SoftInterruptMessage, SoftInterruptQueue, SoftInterruptSource};
 use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
 
@@ -121,10 +122,10 @@ impl AmbientRunnerHandle {
         if let Some(ref q) = *queue
             && let Ok(mut q) = q.lock()
         {
-            q.push(crate::agent::SoftInterruptMessage {
+            q.push(SoftInterruptMessage {
                 content: format!("[{} message from user]\n{}", source, text),
                 urgent: false,
-                source: crate::agent::SoftInterruptSource::User,
+                source: SoftInterruptSource::User,
             });
             logging::info(&format!(
                 "{} message injected into active ambient cycle: {}",

@@ -629,7 +629,7 @@ mod tests {
         }
     }
 
-    fn make_agent_ctx(signal: crate::agent::InterruptSignal) -> ToolContext {
+    fn make_agent_ctx(signal: jcode_agent_runtime::InterruptSignal) -> ToolContext {
         ToolContext {
             session_id: "test-session".to_string(),
             message_id: "test-msg".to_string(),
@@ -793,7 +793,7 @@ mod tests {
     #[tokio::test]
     async fn test_reload_persistable_bash_continues_in_background() {
         let tool = BashTool::new();
-        let signal = crate::agent::InterruptSignal::new();
+        let signal = jcode_agent_runtime::InterruptSignal::new();
         let ctx = make_agent_ctx(signal.clone());
 
         let signal_task = tokio::spawn(async move {

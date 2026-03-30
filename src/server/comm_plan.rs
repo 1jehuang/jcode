@@ -3,9 +3,10 @@ use super::{
     broadcast_swarm_plan, queue_soft_interrupt_for_session, record_swarm_event,
     summarize_plan_items,
 };
-use crate::agent::{Agent, SoftInterruptSource};
+use crate::agent::Agent;
 use crate::plan::PlanItem;
 use crate::protocol::{NotificationType, ServerEvent};
+use jcode_agent_runtime::SoftInterruptSource;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;

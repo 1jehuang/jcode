@@ -44,13 +44,14 @@ use self::swarm::{
     run_swarm_message, subscribe_session_to_channel, summarize_plan_items, truncate_detail,
     unsubscribe_session_from_channel, update_member_status,
 };
-use crate::agent::{Agent, SoftInterruptSource};
+use crate::agent::Agent;
 use crate::ambient_runner::AmbientRunnerHandle;
 use crate::bus::{Bus, BusEvent, FileOp};
 use crate::protocol::{NotificationType, ServerEvent};
 use crate::provider::Provider;
 use crate::transport::Listener;
 use anyhow::Result;
+use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -177,7 +178,7 @@ pub struct Server {
     mcp_pool: Arc<OnceCell<Arc<crate::mcp::SharedMcpPool>>>,
     /// Graceful shutdown signals by session_id (stored outside agent mutex so they
     /// can be signaled without locking the agent during active tool execution)
-    shutdown_signals: Arc<RwLock<HashMap<String, crate::agent::InterruptSignal>>>,
+    shutdown_signals: Arc<RwLock<HashMap<String, InterruptSignal>>>,
     /// Soft interrupt queues by session_id (stored outside agent mutex so swarm/debug
     /// notifications can be enqueued while an agent is actively processing)
     soft_interrupt_queues: SessionInterruptQueues,

@@ -4,39 +4,24 @@ use crate::message::{ContentBlock, Role};
 use crate::protocol::ServerEvent;
 use crate::session::StoredDisplayRole;
 use anyhow::Result;
+use jcode_agent_runtime::{
+    InterruptSignal, SoftInterruptMessage, SoftInterruptQueue, SoftInterruptSource,
+};
 use std::sync::Arc;
 
-/// A soft interrupt message queued for injection at the next safe point
-#[derive(Debug, Clone)]
-pub struct SoftInterruptMessage {
-    pub content: String,
-    /// If true, can skip remaining tools when injected at point C
-    pub urgent: bool,
-    pub source: SoftInterruptSource,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SoftInterruptSource {
-    User,
-    System,
-    BackgroundTask,
-}
-
-impl SoftInterruptSource {
-    fn session_display_role(self) -> Option<StoredDisplayRole> {
-        match self {
-            Self::User => None,
-            Self::System => Some(StoredDisplayRole::System),
-            Self::BackgroundTask => Some(StoredDisplayRole::BackgroundTask),
-        }
+fn soft_interrupt_session_display_role(source: SoftInterruptSource) -> Option<StoredDisplayRole> {
+    match source {
+        SoftInterruptSource::User => None,
+        SoftInterruptSource::System => Some(StoredDisplayRole::System),
+        SoftInterruptSource::BackgroundTask => Some(StoredDisplayRole::BackgroundTask),
     }
+}
 
-    fn protocol_display_role(self) -> Option<String> {
-        match self {
-            Self::User => None,
-            Self::System => Some("system".to_string()),
-            Self::BackgroundTask => Some("background_task".to_string()),
-        }
+fn soft_interrupt_protocol_display_role(source: SoftInterruptSource) -> Option<String> {
+    match source {
+        SoftInterruptSource::User => None,
+        SoftInterruptSource::System => Some("system".to_string()),
+        SoftInterruptSource::BackgroundTask => Some("background_task".to_string()),
     }
 }
 
@@ -44,63 +29,6 @@ impl SoftInterruptSource {
 pub(super) struct InjectedSoftInterrupt {
     pub(super) content: String,
     pub(super) source: SoftInterruptSource,
-}
-
-/// Thread-safe soft interrupt queue that can be accessed without holding the agent lock
-pub type SoftInterruptQueue = Arc<std::sync::Mutex<Vec<SoftInterruptMessage>>>;
-
-/// Signal to move the currently executing tool to background.
-/// Set by the server when the client sends BackgroundTool request.
-/// Uses std::sync so it can be set without async from outside the agent lock.
-pub type BackgroundToolSignal = Arc<std::sync::atomic::AtomicBool>;
-pub type GracefulShutdownSignal = Arc<std::sync::atomic::AtomicBool>;
-
-/// Async-aware interrupt signal that combines AtomicBool (sync read) with
-/// tokio::Notify (async wake). Eliminates spin-loops during tool execution.
-#[derive(Clone)]
-pub struct InterruptSignal {
-    flag: Arc<std::sync::atomic::AtomicBool>,
-    notify: Arc<tokio::sync::Notify>,
-}
-
-impl InterruptSignal {
-    pub fn new() -> Self {
-        Self {
-            flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            notify: Arc::new(tokio::sync::Notify::new()),
-        }
-    }
-
-    pub fn fire(&self) {
-        self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
-        self.notify.notify_waiters();
-    }
-
-    pub fn is_set(&self) -> bool {
-        self.flag.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    pub fn reset(&self) {
-        self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub async fn notified(&self) {
-        let notified = self.notify.notified();
-        if self.is_set() {
-            return;
-        }
-        notified.await;
-    }
-
-    pub fn as_atomic(&self) -> Arc<std::sync::atomic::AtomicBool> {
-        Arc::clone(&self.flag)
-    }
-}
-
-impl Default for InterruptSignal {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 pub(super) enum NoToolCallOutcome {
@@ -304,7 +232,7 @@ impl Agent {
                     text: content.clone(),
                     cache_control: None,
                 }],
-                source.session_display_role(),
+                soft_interrupt_session_display_role(source),
             );
             injected.push(InjectedSoftInterrupt { content, source });
         };
@@ -370,7 +298,7 @@ impl Agent {
             .enumerate()
             .map(|(idx, interrupt)| ServerEvent::SoftInterruptInjected {
                 content: interrupt.content,
-                display_role: interrupt.source.protocol_display_role(),
+                display_role: soft_interrupt_protocol_display_role(interrupt.source),
                 point: point.to_string(),
                 tools_skipped: if idx == 0 { tools_skipped } else { None },
             })

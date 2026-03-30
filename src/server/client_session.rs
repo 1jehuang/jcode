@@ -13,6 +13,7 @@ use crate::provider::Provider;
 use crate::tool::Registry;
 use crate::transport::WriteHalf;
 use anyhow::Result;
+use jcode_agent_runtime::InterruptSignal;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -50,7 +51,7 @@ fn mark_remote_reload_started(request_id: &str) {
 }
 
 async fn rename_shutdown_signal(
-    shutdown_signals: &Arc<RwLock<HashMap<String, crate::agent::InterruptSignal>>>,
+    shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
     old_session_id: &str,
     new_session_id: &str,
 ) {
@@ -376,7 +377,7 @@ pub(super) async fn handle_resume_session(
     provider: &Arc<dyn Provider>,
     registry: &Registry,
     sessions: &Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
-    shutdown_signals: &Arc<RwLock<HashMap<String, crate::agent::InterruptSignal>>>,
+    shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
     soft_interrupt_queues: &SessionInterruptQueues,
     client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
@@ -571,7 +572,7 @@ mod tests {
         handle_reload, mark_remote_reload_started, rename_shutdown_signal,
         session_was_interrupted_by_reload,
     };
-    use crate::agent::{Agent, InterruptSignal};
+    use crate::agent::Agent;
     use crate::message::ContentBlock;
     use crate::message::{Message, ToolDefinition};
     use crate::protocol::ServerEvent;
@@ -579,6 +580,7 @@ mod tests {
     use crate::tool::Registry;
     use anyhow::Result;
     use async_trait::async_trait;
+    use jcode_agent_runtime::InterruptSignal;
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::{Mutex, RwLock, mpsc};

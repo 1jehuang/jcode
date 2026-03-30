@@ -1,0 +1,12 @@
+[package]
+name = "jcode-agent-runtime"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "jcode_agent_runtime"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = "1"
+tokio = { version = "1", features = ["sync"] }

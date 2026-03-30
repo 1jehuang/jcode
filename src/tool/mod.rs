@@ -40,6 +40,7 @@ use crate::provider::Provider;
 use crate::skill::SkillRegistry;
 use anyhow::Result;
 use async_trait::async_trait;
+use jcode_agent_runtime::InterruptSignal;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -122,7 +123,7 @@ pub struct ToolContext {
     pub tool_call_id: String,
     pub working_dir: Option<PathBuf>,
     pub stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<StdinInputRequest>>,
-    pub graceful_shutdown_signal: Option<crate::agent::InterruptSignal>,
+    pub graceful_shutdown_signal: Option<InterruptSignal>,
     pub execution_mode: ToolExecutionMode,
 }
 
