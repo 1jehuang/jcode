@@ -72,7 +72,7 @@ fn user_prompt_text_style() -> Style {
 }
 
 fn default_message_alignment(role: &str, centered: bool) -> ratatui::layout::Alignment {
-    if centered && matches!(role, "user" | "assistant") {
+    if centered && !matches!(role, "tool" | "system" | "swarm" | "background_task") {
         ratatui::layout::Alignment::Center
     } else {
         ratatui::layout::Alignment::Left
@@ -1503,27 +1503,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn centered_mode_only_centers_user_and_assistant_messages() {
-        assert_eq!(
-            default_message_alignment("user", true),
-            ratatui::layout::Alignment::Center
-        );
-        assert_eq!(
-            default_message_alignment("assistant", true),
-            ratatui::layout::Alignment::Center
-        );
-        assert_eq!(
-            default_message_alignment("tool", true),
-            ratatui::layout::Alignment::Left
-        );
-        assert_eq!(
-            default_message_alignment("system", true),
-            ratatui::layout::Alignment::Left
-        );
-        assert_eq!(
-            default_message_alignment("swarm", true),
-            ratatui::layout::Alignment::Left
-        );
+    fn centered_mode_centers_unstructured_messages_and_preserves_structured_left_blocks() {
+        for role in ["user", "assistant", "meta", "usage", "error", "memory"] {
+            assert_eq!(
+                default_message_alignment(role, true),
+                ratatui::layout::Alignment::Center,
+                "role {role} should default to centered alignment"
+            );
+        }
+        for role in ["tool", "system", "swarm", "background_task"] {
+            assert_eq!(
+                default_message_alignment(role, true),
+                ratatui::layout::Alignment::Left,
+                "role {role} should keep left/default alignment"
+            );
+        }
     }
 }
 

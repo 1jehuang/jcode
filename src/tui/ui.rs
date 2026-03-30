@@ -5190,6 +5190,38 @@ mod tests {
     }
 
     #[test]
+    fn test_prepare_messages_centers_meta_footer_in_centered_mode() {
+        let state = TestState {
+            centered_mode: true,
+            display_messages: vec![
+                DisplayMessage::assistant("Done."),
+                DisplayMessage {
+                    role: "meta".to_string(),
+                    content: "1.2s · ↑12 ↓34".to_string(),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let prepared = prepare::prepare_messages(&state, 100, 20);
+        let footer = prepared
+            .wrapped_lines
+            .iter()
+            .find(|line| extract_line_text(line).contains("↑12 ↓34"))
+            .expect("missing meta footer line");
+
+        assert_eq!(
+            footer.alignment,
+            Some(Alignment::Center),
+            "meta footer should stay centered in centered mode"
+        );
+    }
+
+    #[test]
     fn test_prepare_messages_recomputes_when_streaming_text_changes_same_length() {
         let first = TestState {
             status: ProcessingStatus::Streaming,
