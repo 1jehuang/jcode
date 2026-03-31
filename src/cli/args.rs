@@ -113,6 +113,13 @@ pub(crate) enum Command {
         json: bool,
     },
 
+    /// Show subscription usage limits for connected providers
+    Usage {
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Self-development mode: run as a canary session on the shared server
     #[command(alias = "selfdev")]
     SelfDev {
@@ -495,6 +502,15 @@ mod tests {
         let args = Args::try_parse_from(["jcode", "version", "--json"]).unwrap();
         match args.command {
             Some(Command::Version { json }) => assert!(json),
+            other => panic!("unexpected command: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn usage_subcommand_parses() {
+        let args = Args::try_parse_from(["jcode", "usage", "--json"]).unwrap();
+        match args.command {
+            Some(Command::Usage { json }) => assert!(json),
             other => panic!("unexpected command: {:?}", other),
         }
     }

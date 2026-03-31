@@ -611,6 +611,27 @@ struct VersionReport {
     release_build: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct UsageLimitReport {
+    name: String,
+    usage_percent: f32,
+    resets_at: Option<String>,
+    reset_in: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct UsageProviderReport {
+    provider_name: String,
+    limits: Vec<UsageLimitReport>,
+    extra_info: Vec<(String, String)>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct UsageReport {
+    providers: Vec<UsageProviderReport>,
+}
+
 pub fn run_auth_status_command(emit_json: bool) -> Result<()> {
     let status = crate::auth::AuthStatus::check();
     let providers = crate::provider_catalog::auth_status_login_providers();
@@ -713,6 +734,95 @@ pub fn run_version_command(emit_json: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub async fn run_usage_command(emit_json: bool) -> Result<()> {
+    let providers = crate::usage::fetch_all_provider_usage().await;
+
+    let report = UsageReport {
+        providers: providers.iter().map(usage_provider_report).collect(),
+    };
+
+    if emit_json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    if report.providers.is_empty() {
+        println!("No connected providers");
+        println!();
+        println!("Next steps:");
+        println!("- Use `jcode login --provider claude` to connect Claude OAuth.");
+        println!("- Use `jcode login --provider openai` to connect ChatGPT / Codex OAuth.");
+        return Ok(());
+    }
+
+    for (idx, provider) in report.providers.iter().enumerate() {
+        if idx > 0 {
+            println!();
+        }
+
+        println!("{}", provider.provider_name);
+        println!("{}", "-".repeat(provider.provider_name.chars().count()));
+
+        if let Some(error) = &provider.error {
+            println!("error: {}", error);
+            continue;
+        }
+
+        if provider.limits.is_empty() && provider.extra_info.is_empty() {
+            println!("No usage data available.");
+            continue;
+        }
+
+        for limit in &provider.limits {
+            match limit.reset_in.as_deref() {
+                Some(reset_in) => println!(
+                    "{}: {} (resets in {})",
+                    limit.name,
+                    crate::usage::format_usage_bar(limit.usage_percent, 15),
+                    reset_in
+                ),
+                None => println!(
+                    "{}: {}",
+                    limit.name,
+                    crate::usage::format_usage_bar(limit.usage_percent, 15)
+                ),
+            }
+        }
+
+        if !provider.extra_info.is_empty() {
+            if !provider.limits.is_empty() {
+                println!();
+            }
+            for (key, value) in &provider.extra_info {
+                println!("{}: {}", key, value);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn usage_provider_report(provider: &crate::usage::ProviderUsage) -> UsageProviderReport {
+    UsageProviderReport {
+        provider_name: provider.provider_name.clone(),
+        limits: provider
+            .limits
+            .iter()
+            .map(|limit| UsageLimitReport {
+                name: limit.name.clone(),
+                usage_percent: limit.usage_percent,
+                resets_at: limit.resets_at.clone(),
+                reset_in: limit
+                    .resets_at
+                    .as_deref()
+                    .map(crate::usage::format_reset_time),
+            })
+            .collect(),
+        extra_info: provider.extra_info.clone(),
+        error: provider.error.clone(),
+    }
 }
 
 fn list_cli_providers() -> Vec<ProviderListEntry> {
