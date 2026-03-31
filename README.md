@@ -51,12 +51,9 @@ jcode is built to be as performant and resource efficient as possible. Every met
 
 ### Headline numbers
 
-- **At 10 simultaneous sessions, jcode used ~7.2× less PSS than pi**
-- **At 10 simultaneous sessions, jcode used ~22× less PSS than OpenCode**
-- **At 10 simultaneous sessions, jcode used ~25× less PSS than Claude Code**
-- **jcode reached first terminal output ~44.4× faster than pi**
-- **jcode reached first terminal output ~66.8× faster than OpenCode**
-- **jcode reached first terminal output ~24.3× faster than Claude Code**
+- **jcode uses 7.2× less PSS than pi**
+- **jcode uses 22× less PSS than OpenCode**
+- **jcode uses 25× less PSS than Claude Code**
 
 ### Memory benchmarks: 10 simultaneous sessions
 
