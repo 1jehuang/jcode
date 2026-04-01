@@ -61,6 +61,10 @@ pub enum ProviderChoice {
     TogetherAi,
     #[value(alias = "deep-infra")]
     Deepinfra,
+    #[value(alias = "fireworks-ai", alias = "fireworks.ai")]
+    Fireworks,
+    #[value(alias = "minimax-ai", alias = "minimaxi")]
+    Minimax,
     #[value(alias = "x.ai", alias = "x-ai", alias = "grok")]
     Xai,
     #[value(alias = "lm-studio")]
@@ -114,6 +118,8 @@ impl ProviderChoice {
             Self::Perplexity => "perplexity",
             Self::TogetherAi => "togetherai",
             Self::Deepinfra => "deepinfra",
+            Self::Fireworks => "fireworks",
+            Self::Minimax => "minimax",
             Self::Xai => "xai",
             Self::Lmstudio => "lmstudio",
             Self::Ollama => "ollama",
@@ -152,6 +158,8 @@ pub fn profile_for_choice(choice: &ProviderChoice) -> Option<OpenAiCompatiblePro
         ProviderChoice::Perplexity => Some(crate::provider_catalog::PERPLEXITY_PROFILE),
         ProviderChoice::TogetherAi => Some(crate::provider_catalog::TOGETHER_AI_PROFILE),
         ProviderChoice::Deepinfra => Some(crate::provider_catalog::DEEPINFRA_PROFILE),
+        ProviderChoice::Fireworks => Some(crate::provider_catalog::FIREWORKS_PROFILE),
+        ProviderChoice::Minimax => Some(crate::provider_catalog::MINIMAX_PROFILE),
         ProviderChoice::Xai => Some(crate::provider_catalog::XAI_PROFILE),
         ProviderChoice::Lmstudio => Some(crate::provider_catalog::LMSTUDIO_PROFILE),
         ProviderChoice::Ollama => Some(crate::provider_catalog::OLLAMA_PROFILE),
@@ -193,6 +201,8 @@ pub fn login_provider_for_choice(choice: &ProviderChoice) -> Option<LoginProvide
         ProviderChoice::Perplexity => Some(crate::provider_catalog::PERPLEXITY_LOGIN_PROVIDER),
         ProviderChoice::TogetherAi => Some(crate::provider_catalog::TOGETHER_AI_LOGIN_PROVIDER),
         ProviderChoice::Deepinfra => Some(crate::provider_catalog::DEEPINFRA_LOGIN_PROVIDER),
+        ProviderChoice::Fireworks => Some(crate::provider_catalog::FIREWORKS_LOGIN_PROVIDER),
+        ProviderChoice::Minimax => Some(crate::provider_catalog::MINIMAX_LOGIN_PROVIDER),
         ProviderChoice::Xai => Some(crate::provider_catalog::XAI_LOGIN_PROVIDER),
         ProviderChoice::Lmstudio => Some(crate::provider_catalog::LMSTUDIO_LOGIN_PROVIDER),
         ProviderChoice::Ollama => Some(crate::provider_catalog::OLLAMA_LOGIN_PROVIDER),
@@ -786,6 +796,8 @@ async fn init_provider_with_options(
         | ProviderChoice::Perplexity
         | ProviderChoice::TogetherAi
         | ProviderChoice::Deepinfra
+        | ProviderChoice::Fireworks
+        | ProviderChoice::Minimax
         | ProviderChoice::Xai
         | ProviderChoice::Lmstudio
         | ProviderChoice::Ollama
@@ -983,6 +995,8 @@ mod tests {
         assert_eq!(ProviderChoice::Perplexity.as_arg_value(), "perplexity");
         assert_eq!(ProviderChoice::TogetherAi.as_arg_value(), "togetherai");
         assert_eq!(ProviderChoice::Deepinfra.as_arg_value(), "deepinfra");
+        assert_eq!(ProviderChoice::Fireworks.as_arg_value(), "fireworks");
+        assert_eq!(ProviderChoice::Minimax.as_arg_value(), "minimax");
         assert_eq!(ProviderChoice::Xai.as_arg_value(), "xai");
         assert_eq!(ProviderChoice::Lmstudio.as_arg_value(), "lmstudio");
         assert_eq!(ProviderChoice::Ollama.as_arg_value(), "ollama");

@@ -343,6 +343,28 @@ pub const DEEPINFRA_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     requires_api_key: true,
 };
 
+pub const FIREWORKS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "fireworks",
+    display_name: "Fireworks",
+    api_base: "https://api.fireworks.ai/inference/v1",
+    api_key_env: "FIREWORKS_API_KEY",
+    env_file: "fireworks.env",
+    setup_url: "https://docs.fireworks.ai/tools-sdks/openai-compatibility",
+    default_model: Some("accounts/fireworks/routers/kimi-k2p5-turbo"),
+    requires_api_key: true,
+};
+
+pub const MINIMAX_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "minimax",
+    display_name: "MiniMax",
+    api_base: "https://api.minimax.io/v1",
+    api_key_env: "MINIMAX_API_KEY",
+    env_file: "minimax.env",
+    setup_url: "https://platform.minimax.io/docs/api-reference/text-openai-api",
+    default_model: Some("MiniMax-M2.7"),
+    requires_api_key: true,
+};
+
 pub const XAI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "xai",
     display_name: "xAI",
@@ -420,7 +442,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 26] = [
+const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 28] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -443,6 +465,8 @@ const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 26] = [
     PERPLEXITY_PROFILE,
     TOGETHER_AI_PROFILE,
     DEEPINFRA_PROFILE,
+    FIREWORKS_PROFILE,
+    MINIMAX_PROFILE,
     XAI_PROFILE,
     LMSTUDIO_PROFILE,
     OLLAMA_PROFILE,
@@ -806,6 +830,32 @@ pub const DEEPINFRA_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescr
     order: LoginProviderSurfaceOrder::new(Some(32), Some(32), Some(32), Some(32), Some(32)),
 };
 
+pub const FIREWORKS_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "fireworks",
+    display_name: "Fireworks",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &["fireworks-ai", "fireworks.ai"],
+    menu_detail: "API key",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(FIREWORKS_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(37), Some(37), Some(37), Some(37), Some(37)),
+};
+
+pub const MINIMAX_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "minimax",
+    display_name: "MiniMax",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &["minimaxi", "minimax-ai"],
+    menu_detail: "API key",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(MINIMAX_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(38), Some(38), Some(38), Some(38), Some(38)),
+};
+
 pub const XAI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "xai",
     display_name: "xAI",
@@ -923,7 +973,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-const LOGIN_PROVIDERS: [LoginProviderDescriptor; 36] = [
+const LOGIN_PROVIDERS: [LoginProviderDescriptor; 38] = [
     CLAUDE_LOGIN_PROVIDER,
     OPENAI_LOGIN_PROVIDER,
     JCODE_LOGIN_PROVIDER,
@@ -951,6 +1001,8 @@ const LOGIN_PROVIDERS: [LoginProviderDescriptor; 36] = [
     PERPLEXITY_LOGIN_PROVIDER,
     TOGETHER_AI_LOGIN_PROVIDER,
     DEEPINFRA_LOGIN_PROVIDER,
+    FIREWORKS_LOGIN_PROVIDER,
+    MINIMAX_LOGIN_PROVIDER,
     XAI_LOGIN_PROVIDER,
     LMSTUDIO_LOGIN_PROVIDER,
     OLLAMA_LOGIN_PROVIDER,
@@ -1168,6 +1220,14 @@ mod tests {
         assert_eq!(
             resolve_login_provider("deep-infra").map(|provider| provider.id),
             Some("deepinfra")
+        );
+        assert_eq!(
+            resolve_login_provider("fireworks.ai").map(|provider| provider.id),
+            Some("fireworks")
+        );
+        assert_eq!(
+            resolve_login_provider("minimax-ai").map(|provider| provider.id),
+            Some("minimax")
         );
         assert_eq!(
             resolve_login_provider("grok").map(|provider| provider.id),
