@@ -818,13 +818,19 @@ fn render_rounded_box(
         .unwrap_or(0)
         .min(max_width.saturating_sub(4));
 
-    if max_content_width < 6 {
+    let truncated_title = truncate_line_with_ellipsis_to_width(
+        &Line::from(Span::raw(format!(" {} ", title))),
+        max_width.saturating_sub(2).max(1),
+    );
+    let title_text = line_plain_text(&truncated_title);
+    let title_len = truncated_title.width();
+    let box_content_width = max_content_width.max(title_len.saturating_sub(2));
+
+    if box_content_width < 6 {
         return Vec::new();
     }
 
-    let box_width = max_content_width + 4; // "│ " + content + " │"
-    let title_text = format!(" {} ", title);
-    let title_len = unicode_width::UnicodeWidthStr::width(title_text.as_str());
+    let box_width = box_content_width + 4; // "│ " + content + " │"
     let border_chars = box_width.saturating_sub(title_len + 2);
     let left_border = "─".repeat(border_chars / 2);
     let right_border = "─".repeat(border_chars - border_chars / 2);
@@ -836,8 +842,8 @@ fn render_rounded_box(
     )));
 
     for line in content {
-        let truncated = truncate_line_to_width(&line, max_content_width);
-        let padding = max_content_width.saturating_sub(truncated.width());
+        let truncated = truncate_line_to_width(&line, box_content_width);
+        let padding = box_content_width.saturating_sub(truncated.width());
         let mut spans: Vec<Span<'static>> = Vec::new();
         spans.push(Span::styled("│ ", border_style));
         spans.extend(truncated.spans);
@@ -5588,6 +5594,27 @@ mod tests {
                 line.width(),
                 top_width,
                 "emoji title: line {} width {} != expected {}",
+                i,
+                line.width(),
+                top_width
+            );
+        }
+    }
+
+    #[test]
+    fn test_render_rounded_box_long_title_keeps_body_width_in_sync() {
+        let content = vec![Line::from("tiny")];
+        let style = Style::default();
+        let lines = render_rounded_box("✓ bg bash completed · 6150794bik", content, 24, style);
+
+        assert!(lines.len() >= 3);
+        let top_width = lines[0].width();
+        assert_eq!(top_width, 24, "box should respect max width");
+        for (i, line) in lines.iter().enumerate() {
+            assert_eq!(
+                line.width(),
+                top_width,
+                "long title: line {} width {} != expected {}",
                 i,
                 line.width(),
                 top_width
