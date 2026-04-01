@@ -154,7 +154,7 @@ Agents are also able to spawn their own swarms autonomously. They have a swarm t
 
 jcode works with subscription-backed OAuth flows and many provider integrations, so you can use the models you already pay for and still fall back to direct API providers when needed.
 
-### Supported OAuth / login flows
+### Supported built-in login flows
 
 - **Claude** (`jcode login --provider claude`)
 - **OpenAI / ChatGPT / Codex** (`jcode login --provider openai`)
@@ -162,12 +162,14 @@ jcode works with subscription-backed OAuth flows and many provider integrations,
 - **GitHub Copilot** (`jcode login --provider copilot`)
 - **Azure OpenAI** (`jcode login --provider azure`)
 - **Alibaba Cloud Coding Plan** (`jcode login --provider alibaba-coding-plan`)
+- **Fireworks** (`jcode login --provider fireworks`)
+- **MiniMax** (`jcode login --provider minimax`)
 
 ### Supported provider
 
 - **Native / first-party style providers:** `jcode`, `claude`, `openai`, `copilot`, `gemini`, `azure`, `alibaba-coding-plan`
 - **Aggregator / compatibility providers:** `openrouter`, `openai-compatible`
-- **Additional provider integrations:** `opencode`, `opencode-go`, `zai` / `kimi`, `302ai`, `baseten`, `cortecs`, `deepseek`, `firmware`, `huggingface`, `moonshotai`, `nebius`, `scaleway`, `stackit`, `groq`, `mistral`, `perplexity`, `togetherai`, `deepinfra`, `xai`, `lmstudio`, `ollama`, `chutes`, `cerebras`, `cursor`, `antigravity`, `google`
+- **Additional provider integrations:** `opencode`, `opencode-go`, `zai` / `kimi`, `302ai`, `baseten`, `cortecs`, `deepseek`, `firmware`, `huggingface`, `moonshotai`, `nebius`, `scaleway`, `stackit`, `groq`, `mistral`, `perplexity`, `togetherai`, `deepinfra`, `fireworks`, `minimax`, `xai`, `lmstudio`, `ollama`, `chutes`, `cerebras`, `cursor`, `antigravity`, `google`
 
 ---
 
@@ -271,6 +273,8 @@ Set up jcode on this machine for me.
    - GitHub Copilot: existing auth under `~/.config/github-copilot/`
    - Azure OpenAI: `~/.config/jcode/azure-openai.env`, `AZURE_OPENAI_*`, or an existing `az login`
    - OpenRouter: `OPENROUTER_API_KEY`
+   - Fireworks: `~/.config/jcode/fireworks.env`, `FIREWORKS_API_KEY`
+   - MiniMax: `~/.config/jcode/minimax.env`, `MINIMAX_API_KEY`
    - Alibaba Cloud Coding Plan: existing jcode config/env if present
 5. Prefer whichever provider is already configured and verify it with `jcode auth-test --all-configured` or a provider-specific auth test when appropriate.
 6. Only if no usable provider is already configured, guide me through the minimal manual step needed:
@@ -279,6 +283,8 @@ Set up jcode on this machine for me.
    - OpenAI: `jcode login --provider openai`
    - Gemini: `jcode login --provider gemini`
    - Azure OpenAI: `jcode login --provider azure`
+   - Fireworks: `jcode login --provider fireworks`
+   - MiniMax: `jcode login --provider minimax`
    - Alibaba Cloud Coding Plan: `jcode login --provider alibaba-coding-plan`
    - OpenRouter: help me set `OPENROUTER_API_KEY`
    - Anthropic direct API: help me set `ANTHROPIC_API_KEY`

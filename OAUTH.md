@@ -1,10 +1,10 @@
-# Auth Notes: Claude Code CLI + OpenAI/Codex + Gemini
+# Auth Notes: OAuth + API-key Providers
 
 This document explains how authentication works in J-Code.
 
 ## Overview
 
-J-Code can detect existing local credentials and can also run built-in OAuth login flows.
+J-Code can detect existing local credentials and can also run built-in OAuth and API-key login flows.
 
 For auth files managed by other tools/CLIs, jcode asks before reading them. If you
 approve a source, jcode remembers that approval for future sessions and still leaves
@@ -28,6 +28,7 @@ Relevant code:
 - Azure OpenAI transport: `src/provider/openrouter.rs`
 - Gemini login + refresh: `src/auth/gemini.rs`
 - Gemini Code Assist provider: `src/provider/gemini.rs`
+- OpenAI-compatible provider metadata/login descriptors: `crates/jcode-provider-metadata/src/lib.rs`
 
 ## Claude (Claude Max)
 
@@ -215,6 +216,32 @@ For model providers, `auth-test` attempts:
 Use `--no-tool-smoke` if you only want the auth/simple-runtime checks.
 
 For Gmail/Google it verifies credential discovery and token refresh, but skips model smoke because it is not a model provider.
+
+## OpenAI-compatible API-key providers
+
+J-Code also ships first-class provider presets for many OpenAI-compatible APIs.
+These providers use the same built-in login flow pattern: `jcode login --provider <name>`.
+
+Two notable presets are:
+
+### Fireworks
+- Login: `jcode login --provider fireworks`
+- Stored env file: `~/.config/jcode/fireworks.env`
+- API key env var: `FIREWORKS_API_KEY`
+- Base URL: `https://api.fireworks.ai/inference/v1`
+- Default model hint: `accounts/fireworks/routers/kimi-k2p5-turbo`
+- Docs: <https://docs.fireworks.ai/tools-sdks/openai-compatibility>
+
+### MiniMax
+- Login: `jcode login --provider minimax`
+- Stored env file: `~/.config/jcode/minimax.env`
+- API key env var: `MINIMAX_API_KEY`
+- Base URL: `https://api.minimax.io/v1`
+- Default model hint: `MiniMax-M2.7`
+- Docs: <https://platform.minimax.io/docs/api-reference/text-openai-api>
+
+These are first-class jcode provider presets, not just manual custom endpoint examples.
+You can still use `openai-compatible` for arbitrary custom providers when there is not a built-in preset.
 
 ## Experimental CLI Providers
 
