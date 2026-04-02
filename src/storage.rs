@@ -203,6 +203,57 @@ mod tests {
             crate::env::remove_var("JCODE_HOME");
         }
     }
+
+    #[test]
+    fn upsert_env_file_value_writes_replaces_and_removes_entries() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let file = dir.path().join("test.env");
+
+        upsert_env_file_value(&file, "API_KEY", Some("one")).expect("write initial env value");
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("read env file"),
+            "API_KEY=one\n"
+        );
+
+        upsert_env_file_value(&file, "OTHER", Some("two")).expect("append second value");
+        upsert_env_file_value(&file, "API_KEY", Some("updated"))
+            .expect("replace existing value");
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("read env file after replace"),
+            "API_KEY=updated\nOTHER=two\n"
+        );
+
+        upsert_env_file_value(&file, "API_KEY", None).expect("remove env value");
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("read env file after remove"),
+            "OTHER=two\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_text_secret_sets_owner_only_modes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let file = dir.path().join("secret.env");
+
+        write_text_secret(&file, "SECRET=value\n").expect("write secret text");
+
+        let dir_mode = std::fs::metadata(dir.path())
+            .expect("stat dir")
+            .permissions()
+            .mode()
+            & 0o777;
+        let file_mode = std::fs::metadata(&file)
+            .expect("stat file")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(file_mode, 0o600);
+    }
 }
 
 pub fn ensure_dir(path: &Path) -> Result<()> {
@@ -211,6 +262,43 @@ pub fn ensure_dir(path: &Path) -> Result<()> {
         crate::platform::set_directory_permissions_owner_only(path)?;
     }
     Ok(())
+}
+
+pub fn write_text_secret(path: &Path, content: &str) -> Result<()> {
+    write_bytes_inner(path, content.as_bytes(), true)?;
+    if let Some(parent) = path.parent() {
+        crate::platform::set_directory_permissions_owner_only(parent)?;
+    }
+    crate::platform::set_permissions_owner_only(path)?;
+    Ok(())
+}
+
+pub fn upsert_env_file_value(path: &Path, env_key: &str, value: Option<&str>) -> Result<()> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let prefix = format!("{}=", env_key);
+
+    let mut lines = Vec::new();
+    let mut replaced = false;
+    for line in existing.lines() {
+        if line.starts_with(&prefix) {
+            replaced = true;
+            if let Some(value) = value {
+                lines.push(format!("{}={}", env_key, value));
+            }
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+
+    if !replaced && let Some(value) = value {
+        lines.push(format!("{}={}", env_key, value));
+    }
+
+    let mut content = lines.join("\n");
+    if !content.is_empty() {
+        content.push('\n');
+    }
+    write_text_secret(path, &content)
 }
 
 pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
@@ -234,6 +322,11 @@ pub fn write_json_fast<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<
 }
 
 fn write_json_inner<T: Serialize + ?Sized>(path: &Path, value: &T, durable: bool) -> Result<()> {
+    let bytes = serde_json::to_vec(value)?;
+    write_bytes_inner(path, &bytes, durable)
+}
+
+fn write_bytes_inner(path: &Path, bytes: &[u8], durable: bool) -> Result<()> {
     if let Some(parent) = path.parent() {
         ensure_dir(parent)?;
     }
@@ -245,7 +338,7 @@ fn write_json_inner<T: Serialize + ?Sized>(path: &Path, value: &T, durable: bool
     let result = (|| -> Result<()> {
         let file = std::fs::File::create(&tmp_path)?;
         let mut writer = std::io::BufWriter::new(file);
-        serde_json::to_writer(&mut writer, value)?;
+        writer.write_all(bytes)?;
         let file = writer
             .into_inner()
             .map_err(|e| anyhow::anyhow!("flush failed: {}", e))?;

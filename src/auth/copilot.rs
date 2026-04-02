@@ -394,10 +394,8 @@ pub fn save_github_token(token: &str, username: &str) -> Result<()> {
     config.insert("github.com".to_string(), entry);
 
     let json = serde_json::to_string_pretty(&config)?;
-    std::fs::write(&hosts_path, json)
+    crate::storage::write_text_secret(&hosts_path, &json)
         .with_context(|| format!("Failed to write {}", hosts_path.display()))?;
-    crate::platform::set_permissions_owner_only(&hosts_path)
-        .with_context(|| format!("Failed to secure {}", hosts_path.display()))?;
 
     // A token written by jcode's own device-login flow should be immediately
     // usable in future sessions. Without this, later reads treat the saved

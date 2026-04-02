@@ -662,13 +662,8 @@ pub fn save_named_api_key(env_file: &str, key_name: &str, key: &str) -> Result<(
     }
 
     let config_dir = crate::storage::app_config_dir()?;
-    std::fs::create_dir_all(&config_dir)?;
-    crate::platform::set_directory_permissions_owner_only(&config_dir)?;
-
     let file_path = config_dir.join(env_file);
-    let content = format!("{}={}\n", key_name, key);
-    std::fs::write(&file_path, &content)?;
-    crate::platform::set_permissions_owner_only(&file_path)?;
+    crate::storage::upsert_env_file_value(&file_path, key_name, Some(key))?;
 
     crate::env::set_var(key_name, key);
     Ok(())

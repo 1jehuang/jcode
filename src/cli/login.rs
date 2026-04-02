@@ -122,12 +122,8 @@ fn login_jcode_flow() -> Result<()> {
     }
 
     let config_dir = crate::storage::app_config_dir()?;
-    std::fs::create_dir_all(&config_dir)?;
-    crate::platform::set_directory_permissions_owner_only(&config_dir)?;
-
     let file_path = config_dir.join(crate::subscription_catalog::JCODE_ENV_FILE);
-    std::fs::write(&file_path, &content)?;
-    crate::platform::set_permissions_owner_only(&file_path)?;
+    crate::storage::write_text_secret(&file_path, &content)?;
 
     crate::env::set_var(crate::subscription_catalog::JCODE_API_KEY_ENV, key);
     if !api_base.trim().is_empty() {

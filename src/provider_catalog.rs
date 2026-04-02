@@ -309,38 +309,8 @@ pub fn save_env_value_to_env_file(
     }
 
     let config_dir = crate::storage::app_config_dir()?;
-    std::fs::create_dir_all(&config_dir)?;
-    crate::platform::set_directory_permissions_owner_only(&config_dir)?;
-
     let file_path = config_dir.join(file_name);
-    let existing = std::fs::read_to_string(&file_path).unwrap_or_default();
-    let prefix = format!("{}=", env_key);
-
-    let mut lines = Vec::new();
-    let mut replaced = false;
-    for line in existing.lines() {
-        if line.starts_with(&prefix) {
-            replaced = true;
-            if let Some(value) = value {
-                lines.push(format!("{}={}", env_key, value));
-            }
-        } else {
-            lines.push(line.to_string());
-        }
-    }
-
-    if !replaced {
-        if let Some(value) = value {
-            lines.push(format!("{}={}", env_key, value));
-        }
-    }
-
-    let mut content = lines.join("\n");
-    if !content.is_empty() {
-        content.push('\n');
-    }
-    std::fs::write(&file_path, &content)?;
-    crate::platform::set_permissions_owner_only(&file_path)?;
+    crate::storage::upsert_env_file_value(&file_path, env_key, value)?;
 
     if let Some(value) = value {
         crate::env::set_var(env_key, value);

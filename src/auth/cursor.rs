@@ -277,15 +277,7 @@ pub fn load_api_key() -> Result<String> {
 /// Save a Cursor API key to `~/.config/jcode/cursor.env`.
 pub fn save_api_key(key: &str) -> Result<()> {
     let file_path = config_file_path()?;
-    let config_dir = file_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("No parent dir"))?;
-    std::fs::create_dir_all(config_dir)?;
-    crate::platform::set_directory_permissions_owner_only(config_dir)?;
-
-    let content = format!("CURSOR_API_KEY={}\n", key);
-    std::fs::write(&file_path, &content)?;
-    crate::platform::set_permissions_owner_only(&file_path)?;
+    crate::storage::upsert_env_file_value(&file_path, "CURSOR_API_KEY", Some(key))?;
 
     crate::env::set_var("CURSOR_API_KEY", key);
     Ok(())
