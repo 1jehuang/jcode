@@ -134,6 +134,7 @@ Spawn two or more agents in the same repo, and they will automatically be manage
 
 
 https://github.com/user-attachments/assets/0b69a309-e4c2-4721-8e4d-b5a93d8865ed
+
 The above is a video of me manually managing a swarm of 20 agents. Some working on the jcode codebase, and some not. This is only possible with the performance/resource efficiency noted in the above section on client/session memory usage. 
 
 Agents are also able to spawn their own swarms autonomously. They have a swarm tool which allows them to spawn in their own teamates to accomplish tasks in parallel. Doing so turns the main agent into a coordinator and the spawned agents into workers. Groups of agents, their messaging channels, their completion statuses, etc are all automatically managed. This can be done headlessly or headed. 
