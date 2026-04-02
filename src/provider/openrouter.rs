@@ -1933,7 +1933,8 @@ async fn stream_response(
             client
                 .post(&url)
                 .header("Content-Type", "application/json")
-                .header("Accept-Encoding", "identity"),
+                .header("Accept-Encoding", "identity")
+                .header("User-Agent", "claude-cli/1.0.0"),
         )
         .await?;
 
@@ -2019,6 +2020,8 @@ struct OpenRouterStream {
     provider_emitted: bool,
     model: String,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
+    /// Track reasoning content to emit only incremental deltas
+    reasoning_buffer: String,
 }
 
 #[derive(Default)]
@@ -2042,6 +2045,7 @@ impl OpenRouterStream {
             provider_emitted: false,
             model,
             provider_pin,
+            reasoning_buffer: String::new(),
         }
     }
 
@@ -2090,6 +2094,8 @@ impl OpenRouterStream {
             let mut data = None;
             for line in event_str.lines() {
                 if let Some(d) = line.strip_prefix("data: ") {
+                    data = Some(d);
+                } else if let Some(d) = line.strip_prefix("data:") {
                     data = Some(d);
                 }
             }
@@ -2141,7 +2147,23 @@ impl OpenRouterStream {
                         None => continue,
                     };
 
-                    // Text content
+                    // Text content - handle reasoning_content incrementally
+                    if let Some(reasoning) = delta.get("reasoning_content").and_then(|r| r.as_str()) {
+                        if !reasoning.is_empty() {
+                            // Check if this is a continuation of previous reasoning
+                            let new_part = if reasoning.starts_with(&self.reasoning_buffer) {
+                                // Continuing from previous - emit only the delta
+                                &reasoning[self.reasoning_buffer.len()..]
+                            } else {
+                                // Content changed/reset - emit full new content
+                                reasoning
+                            };
+                            if !new_part.is_empty() {
+                                self.reasoning_buffer = reasoning.to_string();
+                                return Some(StreamEvent::ThinkingDelta(new_part.to_string()));
+                            }
+                        }
+                    }
                     if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                         if !content.is_empty() {
                             return Some(StreamEvent::TextDelta(content.to_string()));
@@ -2701,6 +2723,117 @@ mod tests {
             !order.is_empty(),
             "Kimi routing should always produce a provider order"
         );
+    }
+
+    #[test]
+    fn test_reasoning_content_incremental() {
+        use bytes::Bytes;
+        use futures::stream;
+
+        let mut stream = OpenRouterStream::new(
+            stream::empty::<Result<Bytes, reqwest::Error>>(),
+            "kimi-k2.5".to_string(),
+            Arc::new(Mutex::new(None)),
+        );
+
+        // Test incremental growth - first delta
+        stream.buffer = r#"data:{"choices":[{"delta":{"reasoning_content":"Analyzing"}}]}
+
+"#.to_string();
+        match stream.parse_next_event() {
+            Some(StreamEvent::ThinkingDelta(text)) => assert_eq!(text, "Analyzing"),
+            other => panic!("expected ThinkingDelta('Analyzing'), got {:?}", other),
+        }
+
+        // Test incremental growth - continuation
+        stream.buffer = r#"data:{"choices":[{"delta":{"reasoning_content":"Analyzing the problem"}}]}
+
+"#.to_string();
+        match stream.parse_next_event() {
+            Some(StreamEvent::ThinkingDelta(text)) => assert_eq!(text, " the problem"),
+            other => panic!("expected ThinkingDelta(' the problem'), got {:?}", other),
+        }
+
+        // Test content reset (different content)
+        stream.buffer = r#"data:{"choices":[{"delta":{"reasoning_content":"New thought"}}]}
+
+"#.to_string();
+        match stream.parse_next_event() {
+            Some(StreamEvent::ThinkingDelta(text)) => assert_eq!(text, "New thought"),
+            other => panic!("expected ThinkingDelta('New thought'), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_sse_parsing_without_space() {
+        use bytes::Bytes;
+        use futures::stream;
+
+        let mut stream = OpenRouterStream::new(
+            stream::empty::<Result<Bytes, reqwest::Error>>(),
+            "kimi-k2.5".to_string(),
+            Arc::new(Mutex::new(None)),
+        );
+
+        // Test SSE without space after data:
+        stream.buffer = r#"data:{"choices":[{"delta":{"content":"Hello"}}]}
+
+"#.to_string();
+        match stream.parse_next_event() {
+            Some(StreamEvent::TextDelta(text)) => assert_eq!(text, "Hello"),
+            other => panic!("expected TextDelta('Hello'), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_sse_parsing_with_space() {
+        use bytes::Bytes;
+        use futures::stream;
+
+        let mut stream = OpenRouterStream::new(
+            stream::empty::<Result<Bytes, reqwest::Error>>(),
+            "kimi-k2.5".to_string(),
+            Arc::new(Mutex::new(None)),
+        );
+
+        // Test SSE with space after data:
+        stream.buffer = r#"data: {"choices":[{"delta":{"content":"World"}}]}
+
+"#.to_string();
+        match stream.parse_next_event() {
+            Some(StreamEvent::TextDelta(text)) => assert_eq!(text, "World"),
+            other => panic!("expected TextDelta('World'), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_reasoning_content_with_regular_content() {
+        use bytes::Bytes;
+        use futures::stream;
+
+        let mut stream = OpenRouterStream::new(
+            stream::empty::<Result<Bytes, reqwest::Error>>(),
+            "kimi-k2.5".to_string(),
+            Arc::new(Mutex::new(None)),
+        );
+
+        // First, reasoning content
+        stream.buffer = r#"data:{"choices":[{"delta":{"reasoning_content":"Let me think"}}]}
+
+"#.to_string();
+        match stream.parse_next_event() {
+            Some(StreamEvent::ThinkingDelta(text)) => assert_eq!(text, "Let me think"),
+            other => panic!("expected ThinkingDelta, got {:?}", other),
+        }
+
+        // Then regular content - reasoning should not interfere
+        stream.buffer = r#"data:{"choices":[{"delta":{"content":"Answer here"}}]}
+
+"#.to_string();
+        match stream.parse_next_event() {
+            Some(StreamEvent::TextDelta(text)) => assert_eq!(text, "Answer here"),
+            other => panic!("expected TextDelta, got {:?}", other),
+        }
     }
 
     #[test]

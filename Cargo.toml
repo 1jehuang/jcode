@@ -117,7 +117,7 @@ flate2 = "1"
 tar = "0.4"
 
 # Mermaid diagram rendering (stable v0.2.0 tag)
-mermaid-rs-renderer = { git = "https://github.com/1jehuang/mermaid-rs-renderer.git", tag = "v0.2.1" }
+mermaid-rs-renderer = { git = "https://github.com/1jehuang/mermaid-rs-renderer.git", tag = "v0.2.1", default-features = false, features = ["png"] }
 qr2term = "0.3.3"
 
 [features]
