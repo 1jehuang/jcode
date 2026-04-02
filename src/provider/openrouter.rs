@@ -1966,7 +1966,8 @@ async fn stream_response(
             client
                 .post(&url)
                 .header("Content-Type", "application/json")
-                .header("Accept-Encoding", "identity"),
+                .header("Accept-Encoding", "identity")
+                .header("User-Agent", "claude-cli/1.0.0"),
         )
         .await?,
         &api_base,
@@ -2127,6 +2128,8 @@ impl OpenRouterStream {
             for line in event_str.lines() {
                 if let Some(d) = crate::util::sse_data_line(line) {
                     data = Some(d);
+                } else if let Some(d) = line.strip_prefix("data:") {
+                    data = Some(d);
                 }
             }
 
@@ -2188,6 +2191,11 @@ impl OpenRouterStream {
                     }
 
                     // Text content
+                    if let Some(reasoning) = delta.get("reasoning_content").and_then(|r| r.as_str()) {
+                        if !reasoning.is_empty() {
+                            return Some(StreamEvent::TextDelta(reasoning.to_string()));
+                        }
+                    }
                     if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                         if !content.is_empty() {
                             self.pending
