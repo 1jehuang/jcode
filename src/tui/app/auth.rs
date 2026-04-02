@@ -2352,7 +2352,10 @@ impl App {
             )));
             self.set_status_notice("Login: cursor browser...");
 
-            match Self::run_external_login_command(&binary, &["login"]) {
+            match crate::auth::login_flows::run_external_login_command_with_terminal_handoff(
+                &binary,
+                &["login"],
+            ) {
                 Ok(()) => {
                     self.push_display_message(DisplayMessage::system(
                         "Cursor login completed.".to_string(),
@@ -2642,67 +2645,6 @@ impl App {
         Ok(msg)
     }
 
-    fn run_external_login_command(program: &str, args: &[&str]) -> anyhow::Result<()> {
-        let raw_was_enabled = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
-        if raw_was_enabled {
-            let _ = crossterm::terminal::disable_raw_mode();
-        }
-
-        let status_result = std::process::Command::new(program).args(args).status();
-
-        if raw_was_enabled {
-            let _ = crossterm::terminal::enable_raw_mode();
-        }
-
-        let status = status_result.map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to start command: {} {} ({})",
-                program,
-                args.join(" "),
-                e
-            )
-        })?;
-        if !status.success() {
-            anyhow::bail!(
-                "Command exited with non-zero status: {} {} ({})",
-                program,
-                args.join(" "),
-                status
-            );
-        }
-        Ok(())
-    }
-
-    fn run_external_login_command_owned(program: &str, args: &[String]) -> anyhow::Result<()> {
-        let raw_was_enabled = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
-        if raw_was_enabled {
-            let _ = crossterm::terminal::disable_raw_mode();
-        }
-
-        let status_result = std::process::Command::new(program).args(args).status();
-
-        if raw_was_enabled {
-            let _ = crossterm::terminal::enable_raw_mode();
-        }
-
-        let status = status_result.map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to start command: {} {} ({})",
-                program,
-                args.join(" "),
-                e
-            )
-        })?;
-        if !status.success() {
-            anyhow::bail!(
-                "Command exited with non-zero status: {} {} ({})",
-                program,
-                args.join(" "),
-                status
-            );
-        }
-        Ok(())
-    }
 
     pub(super) fn handle_login_input(&mut self, pending: PendingLogin, input: String) {
         let trimmed = input.trim();

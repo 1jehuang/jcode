@@ -159,6 +159,7 @@ jcode works with subscription-backed OAuth flows and many provider integrations,
 - **Claude** (`jcode login --provider claude`)
 - **OpenAI / ChatGPT / Codex** (`jcode login --provider openai`)
 - **Google Gemini** (`jcode login --provider gemini`)
+- **Google / Gmail tools** (`jcode login --provider google`)
 - **GitHub Copilot** (`jcode login --provider copilot`)
 - **Azure OpenAI** (`jcode login --provider azure`)
 - **Alibaba Cloud Coding Plan** (`jcode login --provider alibaba-coding-plan`)
@@ -170,6 +171,16 @@ jcode works with subscription-backed OAuth flows and many provider integrations,
 - **Native / first-party style providers:** `jcode`, `claude`, `openai`, `copilot`, `gemini`, `azure`, `alibaba-coding-plan`
 - **Aggregator / compatibility providers:** `openrouter`, `openai-compatible`
 - **Additional provider integrations:** `opencode`, `opencode-go`, `zai` / `kimi`, `302ai`, `baseten`, `cortecs`, `deepseek`, `firmware`, `huggingface`, `moonshotai`, `nebius`, `scaleway`, `stackit`, `groq`, `mistral`, `perplexity`, `togetherai`, `deepinfra`, `fireworks`, `minimax`, `xai`, `lmstudio`, `ollama`, `chutes`, `cerebras`, `cursor`, `antigravity`, `google`
+
+### Auth UX and safety notes
+
+- OAuth flows use **PKCE + state validation**.
+- Secret files are written with **owner-only permissions** when supported.
+- For auth managed by other tools (for example `~/.codex/auth.json` or `~/.claude/.credentials.json`), jcode asks before reading them and remembers that approval.
+- OpenAI OAuth uses `http://localhost:1455/auth/callback` by default, with a manual paste fallback if the callback port is unavailable.
+- You can verify currently configured providers with `jcode auth-test --all-configured`.
+
+For more auth details, see [OAUTH.md](OAUTH.md).
 
 ---
 

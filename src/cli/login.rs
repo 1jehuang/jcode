@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use std::io::{self, IsTerminal, Write};
-use std::process::Command as ProcessCommand;
 
 use crate::auth;
 use crate::provider_catalog::{
@@ -446,7 +445,7 @@ fn login_cursor_flow() -> Result<()> {
     let binary = crate::auth::cursor::cursor_agent_cli_path();
 
     if crate::auth::cursor::has_cursor_agent_cli() {
-        match run_external_login_command(&binary, &["login"]) {
+        match crate::auth::login_flows::run_external_login_command(&binary, &["login"]) {
             Ok(()) => {
                 eprintln!("Cursor login command completed.");
                 crate::telemetry::record_auth_success("cursor", "oauth");
@@ -820,38 +819,5 @@ async fn login_google_flow() -> Result<()> {
     eprintln!("Try asking: \"check my recent emails\" or \"search emails from ...\"");
 
     crate::telemetry::record_auth_success("google", "oauth");
-    Ok(())
-}
-
-pub fn run_external_login_command(program: &str, args: &[&str]) -> Result<()> {
-    let status = ProcessCommand::new(program)
-        .args(args)
-        .status()
-        .with_context(|| format!("Failed to start command: {} {}", program, args.join(" ")))?;
-    if !status.success() {
-        anyhow::bail!(
-            "Command exited with non-zero status: {} {} ({})",
-            program,
-            args.join(" "),
-            status
-        );
-    }
-    Ok(())
-}
-
-#[allow(dead_code)]
-pub fn run_external_login_command_owned(program: &str, args: &[String]) -> Result<()> {
-    let status = ProcessCommand::new(program)
-        .args(args)
-        .status()
-        .with_context(|| format!("Failed to start command: {} {}", program, args.join(" ")))?;
-    if !status.success() {
-        anyhow::bail!(
-            "Command exited with non-zero status: {} {} ({})",
-            program,
-            args.join(" "),
-            status
-        );
-    }
     Ok(())
 }

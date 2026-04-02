@@ -98,7 +98,9 @@ These environment variables control the deprecated Claude Code CLI transport:
 ### Login steps
 1. Run `jcode login --provider openai`.
 2. Your browser opens to the OpenAI OAuth page. The local callback listens on
-   `http://localhost:9876/callback`.
+   `http://localhost:1455/auth/callback` by default.
+   If port `1455` is unavailable, jcode falls back to a manual paste flow where
+   you can paste the full callback URL or query string.
 3. After login, tokens are saved to `~/.jcode/openai-auth.json`.
 
 Credential discovery order is:
@@ -124,8 +126,8 @@ Otherwise it uses:
 ### Troubleshooting
 - Claude 401/auth errors: run `jcode login --provider claude`.
 - 401/403: re-run `jcode login --provider openai`.
-- Callback issues: make sure port 9876 is free and the browser can reach
-  `http://localhost:9876/callback`.
+- Callback issues: make sure port 1455 is free and the browser can reach
+  `http://localhost:1455/auth/callback`.
 
 ## Azure OpenAI
 

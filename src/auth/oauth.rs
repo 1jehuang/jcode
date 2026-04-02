@@ -24,11 +24,16 @@ pub mod openai {
     pub const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
     pub const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
     pub const DEFAULT_PORT: u16 = 1455;
+    pub const CALLBACK_PATH: &str = "/auth/callback";
     pub const SCOPES: &str =
         "openid profile email offline_access api.connectors.read api.connectors.invoke";
 
     pub fn redirect_uri(port: u16) -> String {
-        format!("http://localhost:{}/auth/callback", port)
+        format!("http://localhost:{}{}", port, CALLBACK_PATH)
+    }
+
+    pub fn default_redirect_uri() -> String {
+        redirect_uri(DEFAULT_PORT)
     }
 }
 
@@ -2100,6 +2105,20 @@ mod tests {
             err.to_string().contains("OAuth state mismatch"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn openai_docs_reference_current_callback_uri() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let expected = openai::default_redirect_uri();
+        for relative in ["OAUTH.md", "README.md"] {
+            let content = std::fs::read_to_string(repo_root.join(relative))
+                .unwrap_or_else(|e| panic!("failed to read {relative}: {e}"));
+            assert!(
+                content.contains(&expected),
+                "{relative} should mention current OpenAI callback URI {expected}"
+            );
+        }
     }
 
     #[tokio::test]
