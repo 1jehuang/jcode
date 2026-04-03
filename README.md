@@ -177,17 +177,6 @@ The above image is the first page of provider logins
 - **Aggregator / compatibility providers:** `openrouter`, `openai-compatible`
 - **Additional provider integrations:** `opencode`, `opencode-go`, `zai` / `kimi`, `302ai`, `baseten`, `cortecs`, `deepseek`, `firmware`, `huggingface`, `moonshotai`, `nebius`, `scaleway`, `stackit`, `groq`, `mistral`, `perplexity`, `togetherai`, `deepinfra`, `fireworks`, `minimax`, `xai`, `lmstudio`, `ollama`, `chutes`, `cerebras`, `cursor`, `antigravity`, `google`
 
-### Auth UX and safety notes
-
-- OAuth flows use **PKCE + state validation**.
-- Secret files are written with **owner-only permissions** when supported.
-- For auth managed by other tools (for example `~/.codex/auth.json`, `~/.claude/.credentials.json`, `~/.local/share/opencode/auth.json`, or `~/.pi/agent/auth.json`), jcode asks before reading them, binds that approval to the external file path, rejects symlinked auth files, and does not rewrite or chmod the original external auth file.
-- OpenAI OAuth uses `http://localhost:1455/auth/callback` by default, with a manual paste fallback if the callback port is unavailable.
-- GitHub Copilot import checks `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, `~/.copilot/config.json`, legacy `github-copilot/{hosts,apps}.json`, trusted OpenCode/pi OAuth entries, and finally `gh auth token`.
-- You can verify currently configured providers with `jcode auth-test --all-configured`.
-
-For more auth details, see [OAUTH.md](OAUTH.md).
-
 ---
 
 ## Self-Dev
