@@ -126,7 +126,7 @@ Memories are automatically consolidated every so often via the ambient mode. Thi
 
 ---
 
-## UI: Side panels, Diagrams, Infowidgets, rendering, scrolling, alignment
+## UI: Side panels, Diagrams, Info Widgets, rendering, scrolling, alignment
 
 The side panel is a place for auxiliary information. Tell your jcode agent to load a file into the side panel and see it update in real time, or tell your agent to write directly to the side panel, or use it as a diff viewer. The side panel (and chat) is able to render mermaid diagrams inline. 
 <img width="2877" height="1762" alt="image" src="https://github.com/user-attachments/assets/6c7bec81-ef3f-434d-8a7b-d55f8a54e5cf" />
@@ -137,7 +137,7 @@ To show you important information without taking space away from the screen that
 
 Jcode can render at over a thousand fps. Your monitor will not have the refresh rate to show you, but this means you will not have silly flicker problems. 
 
-The custom scrollback implementation of jcode allows it to do much more than a native scrollback. However, it is a terminal-level limitation that I cannot have smooth scrolling with a custom scrollback. To fix this, I made my own terminal. Handterm https://github.com/1jehuang/handterm implements a native scroll api, and also happens to be very effiecent. This is a work in progress. 
+The custom scrollback implementation of jcode allows it to do much more than a native scrollback. However, it is a terminal-level limitation that I cannot have smooth, partial line scrolling with a custom scrollback. To fix this, I made my own terminal. Handterm https://github.com/1jehuang/handterm implements a native scroll api, and also happens to be very effiecent. This is a work in progress. Scrolling is still well implemented for normal terminals.
 
 Yes, you can change the alignment to be left-aligned. I prefer the centered mode, but to each their own. You can change this with the `Alt, C` hotkey, or with the /aligment command, or in the config.
 
