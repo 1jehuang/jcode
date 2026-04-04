@@ -24,7 +24,7 @@ use ratatui::{
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
 pub use graph::build_graph_topology;
@@ -1610,6 +1610,12 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
 
     lines.push(render_memory_header_line(info, activity, max_width));
 
+    if lines.len() < inner.height as usize {
+        if let Some(count_line) = render_memory_count_line(info, max_width) {
+            lines.push(count_line);
+        }
+    }
+
     if let Some(activity) = activity {
         if lines.len() < inner.height as usize {
             lines.push(render_memory_status_line(activity, max_width));
@@ -1621,11 +1627,13 @@ fn render_memory_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>
             }
         }
 
-        for line in render_memory_pipeline_display_lines(activity, max_width) {
-            if lines.len() >= inner.height as usize {
-                break;
+        if memory_should_render_pipeline(activity) {
+            for line in render_memory_pipeline_display_lines(activity, max_width) {
+                if lines.len() >= inner.height as usize {
+                    break;
+                }
+                lines.push(line);
             }
-            lines.push(line);
         }
 
         if lines.len() < inner.height as usize {
@@ -1678,6 +1686,71 @@ fn render_memory_header_line(
     Line::from(spans)
 }
 
+fn render_memory_count_line(info: &MemoryInfo, max_width: usize) -> Option<Line<'static>> {
+    if info.total_count == 0 {
+        return None;
+    }
+
+    Some(Line::from(vec![Span::styled(
+        truncate_with_ellipsis(&memory_count_label(info.total_count), max_width.max(8)),
+        Style::default().fg(rgb(160, 160, 170)).bold(),
+    )]))
+}
+
+fn memory_count_label(total_count: usize) -> String {
+    if total_count == 1 {
+        "1 memory".to_string()
+    } else {
+        format!("{total_count} memories")
+    }
+}
+
+fn memory_recent_done(activity: &MemoryActivity) -> bool {
+    matches!(activity.state, MemoryState::Idle)
+        && activity
+            .pipeline
+            .as_ref()
+            .map(PipelineState::is_complete)
+            .unwrap_or(false)
+        && activity.state_since.elapsed() <= Duration::from_secs(5)
+}
+
+fn memory_should_render_pipeline(activity: &MemoryActivity) -> bool {
+    activity.pipeline.is_some()
+        && (!matches!(activity.state, MemoryState::Idle) || memory_recent_done(activity))
+}
+
+fn memory_compact_summary(info: &MemoryInfo) -> String {
+    if let Some(activity) = info.activity.as_ref() {
+        if activity.is_processing() {
+            return memory_active_summary(&activity.state)
+                .or_else(|| {
+                    activity
+                        .pipeline
+                        .as_ref()
+                        .map(memory_pipeline_progress_summary)
+                })
+                .or_else(|| memory_last_trace_summary(activity))
+                .unwrap_or_else(|| "working".to_string());
+        }
+
+        if memory_recent_done(activity) {
+            return "done".to_string();
+        }
+
+        return "idle".to_string();
+    }
+
+    if info.total_count > 0 {
+        "idle".to_string()
+    } else {
+        info.sidecar_model
+            .as_deref()
+            .map(compact_memory_model_label)
+            .unwrap_or_else(|| "idle".to_string())
+    }
+}
+
 fn memory_status_badge(activity: Option<&MemoryActivity>) -> (String, Color) {
     let Some(activity) = activity else {
         return ("IDLE".to_string(), rgb(120, 120, 130));
@@ -1708,7 +1781,7 @@ fn memory_status_badge(activity: Option<&MemoryActivity>) -> (String, Color) {
             );
         }
 
-        if pipeline.is_complete() {
+        if memory_recent_done(activity) {
             return ("DONE".to_string(), rgb(100, 200, 100));
         }
     }
@@ -1744,10 +1817,14 @@ fn render_memory_status_line(activity: &MemoryActivity, max_width: usize) -> Lin
     let (_badge, badge_color) = memory_status_badge(Some(activity));
     let summary = memory_state_detail(&activity.state)
         .or_else(|| {
-            activity
-                .pipeline
-                .as_ref()
-                .map(memory_pipeline_progress_summary)
+            if memory_should_render_pipeline(activity) {
+                activity
+                    .pipeline
+                    .as_ref()
+                    .map(memory_pipeline_progress_summary)
+            } else {
+                None
+            }
         })
         .or_else(|| memory_last_trace_summary(activity))
         .unwrap_or_else(|| "idle".to_string());
@@ -3256,7 +3333,7 @@ mod tests {
             .join("\n")
             .to_lowercase();
 
-        assert!(text.contains("memory"));
+        assert!(text.contains("7 memories"));
         assert!(text.contains("find matches"));
         assert!(text.contains("check relevance"));
         assert!(text.contains("1/3"));
@@ -3314,6 +3391,52 @@ mod tests {
 
         assert!(text.contains("done"));
         assert!(text.contains("last:"));
+    }
+
+    #[test]
+    fn memory_widget_does_not_stay_done_after_idle_settles() {
+        let now = Instant::now();
+        let mut pipeline = PipelineState::new();
+        pipeline.search = StepStatus::Done;
+        pipeline.verify = StepStatus::Done;
+        pipeline.inject = StepStatus::Done;
+        pipeline.maintain = StepStatus::Done;
+
+        let data = InfoWidgetData {
+            memory_info: Some(MemoryInfo {
+                total_count: 128,
+                activity: Some(MemoryActivity {
+                    state: MemoryState::Idle,
+                    state_since: now - Duration::from_secs(12),
+                    pipeline: Some(pipeline),
+                    recent_events: vec![MemoryEvent {
+                        kind: MemoryEventKind::MemoryInjected {
+                            count: 1,
+                            prompt_chars: 42,
+                            age_ms: 12,
+                            preview: "prefers terse answers".to_string(),
+                            items: Vec::new(),
+                        },
+                        timestamp: now - Duration::from_secs(11),
+                        detail: None,
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let text = render_memory_widget(&data, Rect::new(0, 0, 50, 6))
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .to_lowercase();
+
+        assert!(text.contains("128 memories"), "{text}");
+        assert!(!text.contains("done"), "{text}");
+        assert!(text.contains("idle") || text.contains("trace:"), "{text}");
     }
 
     #[test]
@@ -3382,6 +3505,35 @@ mod tests {
         assert!(text.contains("gpt-5.3"), "{text}");
         assert!(!text.contains("openai"), "{text}");
         assert!(!text.contains("codex-spark"), "{text}");
+    }
+
+    #[test]
+    fn memory_compact_shows_memory_count_before_status() {
+        let lines = render_memory_compact(
+            &MemoryInfo {
+                total_count: 128,
+                activity: Some(MemoryActivity {
+                    state: MemoryState::Idle,
+                    state_since: Instant::now() - Duration::from_secs(8),
+                    pipeline: None,
+                    recent_events: Vec::new(),
+                }),
+                ..Default::default()
+            },
+            30,
+        );
+
+        let text = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .to_lowercase();
+
+        assert!(text.contains("128 memories"), "{text}");
+        assert!(text.contains("idle"), "{text}");
+        assert!(!text.contains("memory ·"), "{text}");
     }
 
     #[test]
@@ -3828,36 +3980,21 @@ fn render_todos_compact(data: &InfoWidgetData, _inner: Rect) -> Vec<Line<'static
 
 fn render_memory_compact(info: &MemoryInfo, inner_width: u16) -> Vec<Line<'static>> {
     let max_width = inner_width.saturating_sub(2) as usize;
-    let title = "Memory".to_string();
-    let summary = info
-        .activity
-        .as_ref()
-        .and_then(|activity| {
-            activity
-                .pipeline
-                .as_ref()
-                .map(memory_pipeline_progress_summary)
-                .or_else(|| memory_active_summary(&activity.state))
-                .or_else(|| memory_last_trace_summary(activity))
-        })
-        .or_else(|| {
-            info.sidecar_model
-                .as_deref()
-                .map(compact_memory_model_label)
-        })
-        .unwrap_or_else(|| "idle".to_string());
+    let title = if info.total_count > 0 {
+        memory_count_label(info.total_count)
+    } else {
+        "Memory".to_string()
+    };
+    let summary = memory_compact_summary(info);
 
     let title_width = UnicodeWidthStr::width(title.as_str());
     let summary_width = max_width.saturating_sub(title_width + 5);
-    let accent = if info
-        .activity
-        .as_ref()
-        .map(MemoryActivity::is_processing)
-        .unwrap_or(false)
-    {
-        rgb(255, 200, 100)
-    } else {
+    let accent = if let Some(activity) = info.activity.as_ref() {
+        memory_status_badge(Some(activity)).1
+    } else if info.total_count > 0 {
         rgb(160, 160, 170)
+    } else {
+        rgb(140, 200, 255)
     };
 
     vec![Line::from(vec![
@@ -3957,6 +4094,9 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
         info.activity.as_ref(),
         max_width,
     ));
+    if let Some(count_line) = render_memory_count_line(info, max_width) {
+        lines.push(count_line);
+    }
     if let Some(activity) = &info.activity {
         lines.push(render_memory_status_line(activity, max_width));
     }
@@ -3965,7 +4105,9 @@ fn render_memory_expanded(info: &MemoryInfo, inner: Rect) -> Vec<Line<'static>> 
     }
 
     if let Some(activity) = &info.activity {
-        lines.extend(render_memory_pipeline_display_lines(activity, max_width));
+        if memory_should_render_pipeline(activity) {
+            lines.extend(render_memory_pipeline_display_lines(activity, max_width));
+        }
 
         if let Some(last_line) = render_memory_last_trace_line(activity, max_width) {
             lines.push(last_line);

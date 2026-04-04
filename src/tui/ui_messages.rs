@@ -124,9 +124,6 @@ pub(crate) fn render_assistant_message(
             false,
         ));
     }
-    if centered {
-        super::left_pad_lines_to_block_width(&mut lines, width, wrap_width);
-    }
     lines
 }
 
@@ -692,7 +689,12 @@ pub(crate) fn render_tool_message(
         (0, 0)
     };
 
-    let row_width = width.saturating_sub(1) as usize;
+    let block_width = if centered {
+        super::centered_content_block_width(width, 96)
+    } else {
+        width as usize
+    };
+    let row_width = block_width.saturating_sub(1);
     let base_prefix = format!("  {} {} ", icon, tc.name);
     let token_suffix_width =
         UnicodeWidthStr::width(format!(" · {}", token_badge.label.as_str()).as_str());
@@ -936,7 +938,7 @@ pub(crate) fn render_tool_message(
     }
 
     if centered {
-        left_pad_lines_for_centered_mode(&mut lines, width);
+        super::left_pad_lines_to_block_width(&mut lines, width, block_width);
     }
 
     lines
@@ -1127,7 +1129,7 @@ mod tests {
     }
 
     #[test]
-    fn render_assistant_message_centered_mode_left_aligns_markdown_block_with_shared_padding() {
+    fn render_assistant_message_centered_mode_keeps_markdown_unpadded_for_center_alignment() {
         let saved = crate::tui::markdown::center_code_blocks();
         crate::tui::markdown::set_center_code_blocks(true);
         let msg = DisplayMessage::assistant(
@@ -1144,14 +1146,13 @@ mod tests {
             .chars()
             .take_while(|c| *c == ' ')
             .count();
-        assert!(
-            first_pad > 0,
-            "expected centered assistant padding: {lines:?}"
+        assert_eq!(
+            first_pad, 0,
+            "centered assistant markdown should not inject left padding: {lines:?}"
         );
         assert_eq!(
-            content_line.alignment,
-            Some(ratatui::layout::Alignment::Left),
-            "centered assistant markdown should use left-aligned block padding"
+            content_line.alignment, None,
+            "assistant render should leave centered prose alignment unset for outer centering"
         );
 
         crate::tui::markdown::set_center_code_blocks(saved);

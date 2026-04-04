@@ -170,27 +170,33 @@ fn line_is_blank(line: &Line<'_>) -> bool {
 
 fn repeated_gutter_prefix_text(line: &Line<'_>) -> Option<String> {
     let plain = line_plain_text(line);
-    let leading_spaces = plain
-        .chars()
-        .take_while(|ch| ch.is_whitespace())
-        .map(char::len_utf8)
-        .sum::<usize>();
-    let mut rest = &plain[leading_spaces..];
+    let mut leading_prefix = String::new();
+    let mut prefix_bytes = 0usize;
+    for ch in plain.chars() {
+        if ch.is_whitespace() {
+            leading_prefix.push(ch);
+            prefix_bytes += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    let mut rest = &plain[prefix_bytes..];
     let mut gutter_count = 0usize;
     while let Some(next) = rest.strip_prefix("│ ") {
         gutter_count += 1;
         rest = next;
     }
 
-    if gutter_count == 0 {
-        return None;
+    if gutter_count > 0 {
+        return Some(format!("{}{}", leading_prefix, "│ ".repeat(gutter_count)));
     }
 
-    Some(format!(
-        "{}{}",
-        " ".repeat(leading_spaces),
-        "│ ".repeat(gutter_count)
-    ))
+    if !leading_prefix.is_empty() && line.alignment == Some(Alignment::Left) {
+        return Some(leading_prefix);
+    }
+
+    None
 }
 
 fn leading_spans_for_display_width(

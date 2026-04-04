@@ -253,6 +253,10 @@ pub(crate) fn left_aligned_content_inset(width: u16, centered: bool) -> u16 {
     if centered || width <= 1 { 0 } else { 1 }
 }
 
+pub(crate) fn centered_content_block_width(width: u16, max_width: usize) -> usize {
+    (width as usize).min(max_width).max(1)
+}
+
 pub(crate) fn left_pad_lines_to_block_width(
     lines: &mut [Line<'static>],
     width: u16,
@@ -4715,6 +4719,69 @@ mod tests {
     }
 
     #[test]
+    fn test_prepare_messages_centered_live_batch_rows_keep_dedicated_padding_span() {
+        let state = TestState {
+            centered_mode: true,
+            display_messages: vec![DisplayMessage::user("build it")],
+            status: ProcessingStatus::RunningTool("batch".to_string()),
+            anim_elapsed: 0.0,
+            batch_progress: Some(crate::bus::BatchProgress {
+                session_id: "s".to_string(),
+                tool_call_id: "tc".to_string(),
+                total: 1,
+                completed: 0,
+                last_completed: None,
+                running: vec![ToolCall {
+                    id: "batch-1-bash".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({
+                        "command": "cargo test --package jcode --lib tui::ui::tests::render_tool_message_batch_rows_do_not_soft_wrap_on_narrow_width -- --nocapture --exact with-extra-flags-and-output-to-stretch-the-line"
+                    }),
+                    intent: None,
+                }],
+                subcalls: vec![crate::bus::BatchSubcallProgress {
+                    index: 1,
+                    tool_call: ToolCall {
+                        id: "batch-1-bash".to_string(),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({
+                            "command": "cargo test --package jcode --lib tui::ui::tests::render_tool_message_batch_rows_do_not_soft_wrap_on_narrow_width -- --nocapture --exact with-extra-flags-and-output-to-stretch-the-line"
+                        }),
+                        intent: None,
+                    },
+                    state: crate::bus::BatchSubcallState::Running,
+                }],
+            }),
+            ..Default::default()
+        };
+
+        let prepared = prepare::prepare_messages(&state, 120, 20);
+        let batch_rows: Vec<&Line<'static>> = prepared
+            .wrapped_lines
+            .iter()
+            .filter(|line| {
+                let text = extract_line_text(line);
+                text.contains("batch") || text.contains("bash")
+            })
+            .collect();
+        let rendered: Vec<String> = batch_rows
+            .iter()
+            .map(|line| extract_line_text(line))
+            .collect();
+
+        assert!(batch_rows.len() >= 2, "rendered={rendered:?}");
+        for line in batch_rows {
+            let Some(first_span) = line.spans.first() else {
+                panic!("missing spans: {rendered:?}");
+            };
+            assert!(
+                !first_span.content.is_empty() && first_span.content.chars().all(|ch| ch == ' '),
+                "expected a dedicated padding span for centered live batch rows: {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_prepare_messages_shows_live_batch_progress_in_chat_history() {
         let state = TestState {
             display_messages: vec![DisplayMessage {
@@ -5065,7 +5132,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_messages_centered_streaming_uses_shared_left_padding() {
+    fn test_prepare_messages_centered_streaming_uses_center_alignment_without_left_padding() {
         let state = TestState {
             centered_mode: true,
             status: ProcessingStatus::Streaming,
@@ -5091,24 +5158,19 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
-        let first_pad = extract_line_text(stream_lines[0])
-            .chars()
-            .take_while(|c| *c == ' ')
-            .count();
-        assert!(first_pad > 0, "expected visible streaming left pad");
         for line in stream_lines {
             assert_eq!(
                 line.alignment,
-                Some(Alignment::Left),
-                "centered streaming lines should use left-aligned block padding"
+                Some(Alignment::Center),
+                "centered streaming lines should use center alignment"
             );
             assert_eq!(
                 extract_line_text(line)
                     .chars()
                     .take_while(|c| *c == ' ')
                     .count(),
-                first_pad,
-                "streamed assistant lines should share one stable left pad"
+                0,
+                "streamed assistant lines should not be manually left padded"
             );
         }
     }

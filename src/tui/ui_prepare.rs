@@ -187,6 +187,12 @@ fn prepare_active_batch_progress(
     let centered = app.centered_mode();
     let accent = rgb(255, 193, 94);
     let spinner = super::spinner_frame(app.animation_elapsed(), 12.5);
+    let block_width = if centered {
+        super::centered_content_block_width(width, 96)
+    } else {
+        width as usize
+    };
+    let row_width = block_width.saturating_sub(1);
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     if prefix_blank {
@@ -231,13 +237,13 @@ fn prepare_active_batch_progress(
             icon,
             icon_color,
             50,
-            Some(width.saturating_sub(1) as usize),
+            Some(row_width),
             None,
         ));
     }
 
     if centered {
-        pad_lines_for_centered_mode(&mut lines, width);
+        super::left_pad_lines_to_block_width(&mut lines, width, block_width);
     }
 
     wrap_lines_with_map(lines, &[], &[], &[], &[], &[], width, &[], &[])
@@ -1129,10 +1135,7 @@ fn prepare_streaming_cached(
     } else {
         width.saturating_sub(4) as usize
     };
-    let mut md_lines = app.render_streaming_markdown(content_width);
-    if centered {
-        super::left_pad_lines_to_block_width(&mut md_lines, width, content_width);
-    }
+    let md_lines = app.render_streaming_markdown(content_width);
     let align = if centered {
         ratatui::layout::Alignment::Center
     } else {
@@ -1488,10 +1491,7 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
         } else {
             width.saturating_sub(4) as usize
         };
-        let mut md_lines = app.render_streaming_markdown(content_width);
-        if centered {
-            super::left_pad_lines_to_block_width(&mut md_lines, width, content_width);
-        }
+        let md_lines = app.render_streaming_markdown(content_width);
         let align = default_message_alignment("assistant", centered);
         for line in md_lines {
             lines.push(align_if_unset(line, align));
