@@ -60,6 +60,50 @@ pub struct SessionInfo {
     pub server_name: Option<String>,
     /// Server icon
     pub server_icon: Option<String>,
+    /// Human/session source classification shown in the UI.
+    pub source: SessionSource,
+    /// How this entry should be resumed when selected.
+    pub resume_target: ResumeTarget,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionSource {
+    Jcode,
+    ClaudeCode,
+    Codex,
+    Pi,
+    OpenCode,
+}
+
+impl SessionSource {
+    pub fn badge(self) -> Option<&'static str> {
+        match self {
+            Self::Jcode => None,
+            Self::ClaudeCode => Some("🧵 Claude Code"),
+            Self::Codex => Some("🧠 Codex"),
+            Self::Pi => Some("π Pi"),
+            Self::OpenCode => Some("◌ OpenCode"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResumeTarget {
+    JcodeSession { session_id: String },
+    CodexSession { session_id: String },
+    PiSession { session_path: String },
+    OpenCodeSession { session_id: String },
+}
+
+impl ResumeTarget {
+    pub fn stable_id(&self) -> &str {
+        match self {
+            Self::JcodeSession { session_id } => session_id,
+            Self::CodexSession { session_id } => session_id,
+            Self::PiSession { session_path } => session_path,
+            Self::OpenCodeSession { session_id } => session_id,
+        }
+    }
 }
 
 /// A group of sessions under a server
@@ -89,7 +133,7 @@ const MAX_SESSION_SCAN_LIMIT: usize = 10_000;
 
 #[derive(Clone, Debug)]
 pub enum PickerResult {
-    Selected(Vec<String>),
+    Selected(Vec<ResumeTarget>),
     RestoreAllCrashed,
 }
 
@@ -382,19 +426,26 @@ impl SessionPicker {
         })
     }
 
-    fn selection_or_current_ids(&self) -> Vec<String> {
+    pub fn session_for_target(&self, target: &ResumeTarget) -> Option<&SessionInfo> {
+        self.visible_sessions
+            .iter()
+            .filter_map(|session_ref| self.session_by_ref(*session_ref))
+            .find(|session| &session.resume_target == target)
+    }
+
+    fn selection_or_current_targets(&self) -> Vec<ResumeTarget> {
         if !self.selected_session_ids.is_empty() {
             return self
                 .visible_sessions
                 .iter()
                 .filter_map(|session_ref| self.session_by_ref(*session_ref))
                 .filter(|session| self.selected_session_ids.contains(&session.id))
-                .map(|session| session.id.clone())
+                .map(|session| session.resume_target.clone())
                 .collect();
         }
 
         self.selected_session()
-            .map(|session| vec![session.id.clone()])
+            .map(|session| vec![session.resume_target.clone()])
             .unwrap_or_default()
     }
 
@@ -480,7 +531,13 @@ impl SessionPicker {
             return;
         }
 
-        let Some(session_id) = self.session_by_ref(session_ref).map(|s| s.id.clone()) else {
+        let Some(session_id) =
+            self.session_by_ref(session_ref)
+                .and_then(|s| match &s.resume_target {
+                    ResumeTarget::JcodeSession { session_id } => Some(session_id.clone()),
+                    _ => None,
+                })
+        else {
             return;
         };
         let Ok(session) = Session::load(&session_id) else {
@@ -495,7 +552,7 @@ impl SessionPicker {
 
     /// Handle a key event when used as an overlay inside the main TUI.
     /// Returns:
-    /// - `Some(PickerResult::Selected(ids))` if user selected one or more sessions
+    /// - `Some(PickerResult::Selected(targets))` if user selected one or more sessions
     /// - `Some(PickerResult::RestoreAllCrashed)` if user chose batch restore
     /// - `None` if the overlay should close (Esc/q/Ctrl+C)
     /// - The method returns `Ok(true)` to keep the overlay open (still navigating)
@@ -517,9 +574,9 @@ impl SessionPicker {
                         self.search_query.clear();
                         self.rebuild_items();
                     } else {
-                        let ids = self.selection_or_current_ids();
-                        if !ids.is_empty() {
-                            return Ok(OverlayAction::Selected(PickerResult::Selected(ids)));
+                        let targets = self.selection_or_current_targets();
+                        if !targets.is_empty() {
+                            return Ok(OverlayAction::Selected(PickerResult::Selected(targets)));
                         }
                     }
                 }
@@ -555,9 +612,9 @@ impl SessionPicker {
                 self.toggle_selected_session();
             }
             KeyCode::Enter => {
-                let ids = self.selection_or_current_ids();
-                if !ids.is_empty() {
-                    return Ok(OverlayAction::Selected(PickerResult::Selected(ids)));
+                let targets = self.selection_or_current_targets();
+                if !targets.is_empty() {
+                    return Ok(OverlayAction::Selected(PickerResult::Selected(targets)));
                 }
             }
             KeyCode::Char('R') | KeyCode::Char('B') | KeyCode::Char('b') => {
@@ -1099,11 +1156,11 @@ impl SessionPicker {
                                         self.search_query.clear();
                                         self.rebuild_items();
                                     } else {
-                                        let ids = self.selection_or_current_ids();
-                                        if ids.is_empty() {
+                                        let targets = self.selection_or_current_targets();
+                                        if targets.is_empty() {
                                             break Ok(None);
                                         }
-                                        break Ok(Some(PickerResult::Selected(ids)));
+                                        break Ok(Some(PickerResult::Selected(targets)));
                                     }
                                 }
                                 KeyCode::Backspace => {
@@ -1142,11 +1199,11 @@ impl SessionPicker {
                                 self.toggle_selected_session();
                             }
                             KeyCode::Enter => {
-                                let ids = self.selection_or_current_ids();
-                                if ids.is_empty() {
+                                let targets = self.selection_or_current_targets();
+                                if targets.is_empty() {
                                     break Ok(None);
                                 }
-                                break Ok(Some(PickerResult::Selected(ids)));
+                                break Ok(Some(PickerResult::Selected(targets)));
                             }
                             KeyCode::Char('R') | KeyCode::Char('B') | KeyCode::Char('b') => {
                                 if self.crashed_sessions.is_some() {
@@ -1299,6 +1356,10 @@ mod tests {
             search_index,
             server_name: None,
             server_icon: None,
+            source: SessionSource::Jcode,
+            resume_target: ResumeTarget::JcodeSession {
+                session_id: id.to_string(),
+            },
         }
     }
 
@@ -1577,13 +1638,16 @@ mod tests {
 
         let mut codex = make_session("session_codex", "codex", false, SessionStatus::Closed);
         codex.model = Some("gpt-5.3-codex".to_string());
+        codex.source = SessionSource::Codex;
 
         let mut pi = make_session("session_pi", "pi", false, SessionStatus::Closed);
         pi.provider_key = Some("pi".to_string());
+        pi.source = SessionSource::Pi;
 
         let mut opencode =
             make_session("session_opencode", "opencode", false, SessionStatus::Closed);
         opencode.provider_key = Some("opencode".to_string());
+        opencode.source = SessionSource::OpenCode;
 
         let mut picker = SessionPicker::new(vec![saved, claude_code, codex, pi, opencode]);
 
@@ -1692,7 +1756,14 @@ mod tests {
             OverlayAction::Selected(PickerResult::Selected(ids)) => {
                 assert_eq!(
                     ids,
-                    vec!["session_older".to_string(), "session_newer".to_string()]
+                    vec![
+                        ResumeTarget::JcodeSession {
+                            session_id: "session_older".to_string(),
+                        },
+                        ResumeTarget::JcodeSession {
+                            session_id: "session_newer".to_string(),
+                        }
+                    ]
                 );
             }
             other => panic!("expected selected sessions, got {other:?}"),

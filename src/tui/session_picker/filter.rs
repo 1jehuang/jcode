@@ -11,10 +11,13 @@ impl SessionPicker {
     }
 
     pub(super) fn session_is_claude_code(session: &SessionInfo) -> bool {
-        session.id.starts_with("imported_cc_")
+        session.source == SessionSource::ClaudeCode || session.id.starts_with("imported_cc_")
     }
 
     pub(super) fn session_is_codex(session: &SessionInfo) -> bool {
+        if session.source == SessionSource::Codex {
+            return true;
+        }
         session
             .model
             .as_deref()
@@ -23,6 +26,9 @@ impl SessionPicker {
     }
 
     pub(super) fn session_is_pi(session: &SessionInfo) -> bool {
+        if session.source == SessionSource::Pi {
+            return true;
+        }
         let provider_matches = session
             .provider_key
             .as_deref()
@@ -46,6 +52,9 @@ impl SessionPicker {
     }
 
     pub(super) fn session_is_open_code(session: &SessionInfo) -> bool {
+        if session.source == SessionSource::OpenCode {
+            return true;
+        }
         session
             .provider_key
             .as_deref()

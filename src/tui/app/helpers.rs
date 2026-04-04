@@ -1,5 +1,6 @@
 use crate::todo::TodoItem;
 use crate::tui::info_widget::{AmbientWidgetData, GitInfo, MemoryInfo};
+use crate::tui::session_picker::ResumeTarget;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -371,6 +372,188 @@ fn resume_invocation_args(session_id: &str, socket: Option<&str>) -> Vec<String>
     args
 }
 
+fn command_display(program: &Path, args: &[String]) -> String {
+    std::iter::once(program.to_string_lossy().to_string())
+        .chain(args.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn resolve_cli_executable(name: &str) -> PathBuf {
+    let candidate = PathBuf::from(name);
+    if candidate.components().count() > 1 || candidate.is_absolute() {
+        return candidate;
+    }
+
+    let mut search_dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).collect())
+        .unwrap_or_default();
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        for extra in [".npm-global/bin", ".local/bin", ".cargo/bin"] {
+            let path = home.join(extra);
+            if !search_dirs.iter().any(|existing| existing == &path) {
+                search_dirs.push(path);
+            }
+        }
+    }
+
+    for dir in search_dirs {
+        let path = dir.join(name);
+        if path.is_file() {
+            return path;
+        }
+    }
+
+    PathBuf::from(name)
+}
+
+pub(super) fn build_resume_command(
+    target: &ResumeTarget,
+    socket: Option<&str>,
+) -> (PathBuf, Vec<String>, String) {
+    match target {
+        ResumeTarget::JcodeSession { session_id } => {
+            let exe = launch_client_executable();
+            let args = resume_invocation_args(session_id, socket);
+            let title = resumed_window_title(session_id);
+            (exe, args, title)
+        }
+        ResumeTarget::CodexSession { session_id } => {
+            let exe = resolve_cli_executable("codex");
+            let args = vec!["resume".to_string(), session_id.clone()];
+            let title = format!("🧠 Codex {}", &session_id[..session_id.len().min(8)]);
+            (exe, args, title)
+        }
+        ResumeTarget::PiSession { session_path } => {
+            let exe = resolve_cli_executable("pi");
+            let args = vec!["--session".to_string(), session_path.clone()];
+            let title = format!(
+                "π Pi {}",
+                Path::new(session_path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("session")
+            );
+            (exe, args, title)
+        }
+        ResumeTarget::OpenCodeSession { session_id } => {
+            let exe = resolve_cli_executable("opencode");
+            let args = vec!["--session".to_string(), session_id.clone()];
+            let title = format!("◌ OpenCode {}", &session_id[..session_id.len().min(8)]);
+            (exe, args, title)
+        }
+    }
+}
+
+pub(super) fn resume_target_manual_command(target: &ResumeTarget, socket: Option<&str>) -> String {
+    let (exe, args, _) = build_resume_command(target, socket);
+    command_display(&exe, &args)
+}
+
+fn spawn_command_in_new_terminal(
+    program: &Path,
+    args: &[String],
+    title: &str,
+    cwd: &Path,
+) -> anyhow::Result<bool> {
+    use std::process::{Command, Stdio};
+
+    let mut last_spawn_error: Option<std::io::Error> = None;
+
+    for term in resume_terminal_candidates_unix() {
+        let mut cmd = Command::new(&term);
+        cmd.current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        match term.as_str() {
+            "handterm" => {
+                let command = shell_command(
+                    &std::iter::once(program.to_string_lossy().into_owned())
+                        .chain(args.iter().cloned())
+                        .collect::<Vec<_>>(),
+                );
+                cmd.args(["--standalone", "--backend", "gpu", "--exec", &command]);
+            }
+            "kitty" => {
+                cmd.args(["--title", title, "-e"]).arg(program).args(args);
+            }
+            "wezterm" => {
+                cmd.args([
+                    "start",
+                    "--always-new-process",
+                    "--",
+                    program.to_string_lossy().as_ref(),
+                ]);
+                cmd.args(args);
+            }
+            "alacritty" | "konsole" | "xterm" | "foot" => {
+                if term == "alacritty" {
+                    cmd.args(["--title", title, "-e"]).arg(program).args(args);
+                } else {
+                    cmd.args(["-e"]).arg(program).args(args);
+                }
+            }
+            "gnome-terminal" => {
+                cmd.arg("--title").arg(title);
+                cmd.arg("--").arg(program).args(args);
+            }
+            #[cfg(target_os = "macos")]
+            "iterm2" => {
+                cmd = Command::new("osascript");
+                cmd.args([
+                    "-e",
+                    &format!(
+                        r#"tell application \"iTerm2\"
+                            create window with default profile command \"{}\"
+                        end tell"#,
+                        shell_command(
+                            &std::iter::once(program.to_string_lossy().into_owned())
+                                .chain(args.iter().cloned())
+                                .collect::<Vec<_>>()
+                        )
+                    ),
+                ]);
+            }
+            #[cfg(target_os = "macos")]
+            "terminal" => {
+                cmd = Command::new("open");
+                cmd.args([
+                    "-a",
+                    "Terminal",
+                    program.to_str().unwrap_or("jcode"),
+                    "--args",
+                ]);
+                cmd.args(args);
+            }
+            _ => continue,
+        }
+
+        match crate::platform::spawn_detached(&mut cmd) {
+            Ok(_) => return Ok(true),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => last_spawn_error = Some(err),
+        }
+    }
+
+    if let Some(err) = last_spawn_error {
+        Err(err.into())
+    } else {
+        Ok(false)
+    }
+}
+
+pub(super) fn spawn_resume_target_in_new_terminal(
+    target: &ResumeTarget,
+    cwd: &Path,
+    socket: Option<&str>,
+) -> anyhow::Result<bool> {
+    let (program, args, title) = build_resume_command(target, socket);
+    spawn_command_in_new_terminal(&program, &args, &title, cwd)
+}
+
 fn resumed_window_title(session_id: &str) -> String {
     let session_name = crate::id::extract_session_name(session_id)
         .map(|s| s.to_string())
@@ -488,100 +671,9 @@ pub(super) fn spawn_in_new_terminal(
     cwd: &Path,
     socket: Option<&str>,
 ) -> anyhow::Result<bool> {
-    use std::process::{Command, Stdio};
-
-    let mut last_spawn_error: Option<std::io::Error> = None;
-
-    for term in resume_terminal_candidates_unix() {
-        let mut cmd = Command::new(&term);
-        cmd.current_dir(cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-
-        match term.as_str() {
-            "handterm" => {
-                let command = shell_command(
-                    &std::iter::once(exe.to_string_lossy().into_owned())
-                        .chain(resume_invocation_args(session_id, socket))
-                        .collect::<Vec<_>>(),
-                );
-                cmd.args(["--standalone", "--backend", "gpu", "--exec", &command]);
-            }
-            "kitty" => {
-                let title = resumed_window_title(session_id);
-                cmd.args(["--title", &title, "-e"])
-                    .arg(exe)
-                    .args(resume_invocation_args(session_id, socket));
-            }
-            "wezterm" => {
-                cmd.args([
-                    "start",
-                    "--always-new-process",
-                    "--",
-                    exe.to_string_lossy().as_ref(),
-                ]);
-                cmd.args(resume_invocation_args(session_id, socket));
-            }
-            "alacritty" => {
-                cmd.args(["-e"])
-                    .arg(exe)
-                    .args(resume_invocation_args(session_id, socket));
-            }
-            "gnome-terminal" => {
-                cmd.args(["--", exe.to_string_lossy().as_ref()]);
-                cmd.args(resume_invocation_args(session_id, socket));
-            }
-            "konsole" => {
-                cmd.args(["-e"])
-                    .arg(exe)
-                    .args(resume_invocation_args(session_id, socket));
-            }
-            "xterm" => {
-                cmd.args(["-e"])
-                    .arg(exe)
-                    .args(resume_invocation_args(session_id, socket));
-            }
-            "foot" => {
-                cmd.args(["-e"])
-                    .arg(exe)
-                    .args(resume_invocation_args(session_id, socket));
-            }
-            #[cfg(target_os = "macos")]
-            "iterm2" => {
-                cmd = Command::new("osascript");
-                cmd.args([
-                    "-e",
-                    &format!(
-                        r#"tell application "iTerm2"
-                            create window with default profile command "{} {}"
-                        end tell"#,
-                        exe.to_string_lossy(),
-                        resume_invocation_args(session_id, socket).join(" ")
-                    ),
-                ]);
-            }
-            #[cfg(target_os = "macos")]
-            "terminal" => {
-                cmd = Command::new("open");
-                cmd.args(["-a", "Terminal", exe.to_str().unwrap_or("jcode"), "--args"]);
-                cmd.args(resume_invocation_args(session_id, socket));
-            }
-            _ => continue,
-        }
-
-        match crate::platform::spawn_detached(&mut cmd) {
-            Ok(_) => return Ok(true),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => last_spawn_error = Some(err),
-        }
-    }
-
-    if let Some(err) = last_spawn_error {
-        Err(err.into())
-    } else {
-        Ok(false)
-    }
+    let title = resumed_window_title(session_id);
+    let args = resume_invocation_args(session_id, socket);
+    spawn_command_in_new_terminal(exe, &args, &title, cwd)
 }
 
 #[cfg(not(unix))]

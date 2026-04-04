@@ -1,5 +1,5 @@
 use super::*;
-use crate::tui::session_picker::{self, OverlayAction, PickerResult, SessionPicker};
+use crate::tui::session_picker::{self, OverlayAction, PickerResult, ResumeTarget, SessionPicker};
 use crate::tui::{
     AccountPickerAction, AgentModelTarget, PickerAction, PickerEntry, PickerKind, PickerOption,
     PickerState,
@@ -1232,15 +1232,18 @@ impl App {
         }
     }
 
-    pub(super) fn handle_session_picker_selection(&mut self, session_ids: &[String]) {
-        if session_ids.is_empty() {
+    pub(super) fn handle_session_picker_selection(&mut self, targets: &[ResumeTarget]) {
+        if targets.is_empty() {
             return;
         }
 
         if self.session_picker_mode == SessionPickerMode::CatchUp {
             let current_session_id = super::commands::active_session_id(self);
-            let mut names = Vec::with_capacity(session_ids.len());
-            for session_id in session_ids {
+            let mut names = Vec::with_capacity(targets.len());
+            for target in targets {
+                let ResumeTarget::JcodeSession { session_id } = target else {
+                    continue;
+                };
                 let queue_position = catchup_queue_position(&current_session_id, session_id);
                 self.queue_catchup_resume(
                     session_id.to_string(),
@@ -1272,32 +1275,51 @@ impl App {
             return;
         }
 
-        let exe = launch_client_executable();
         let default_cwd = std::env::current_dir().unwrap_or_default();
         let socket = std::env::var("JCODE_SOCKET").ok();
         let mut spawned = 0usize;
         let mut failed = Vec::new();
-        let mut names = Vec::with_capacity(session_ids.len());
+        let mut names = Vec::with_capacity(targets.len());
 
-        for session_id in session_ids {
+        for target in targets {
             let mut cwd = default_cwd.clone();
-            if let Ok(session) = crate::session::Session::load(session_id) {
-                if let Some(dir) = session.working_dir.as_deref() {
-                    if std::path::Path::new(dir).is_dir() {
-                        cwd = std::path::PathBuf::from(dir);
+            if let Some(picker_cell) = self.session_picker_overlay.as_ref() {
+                let picker = picker_cell.borrow();
+                if let Some(session) = picker.session_for_target(target) {
+                    if let Some(dir) = session.working_dir.as_deref() {
+                        if std::path::Path::new(dir).is_dir() {
+                            cwd = std::path::PathBuf::from(dir);
+                        }
                     }
                 }
             }
 
-            let name = crate::id::extract_session_name(session_id)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| session_id.to_string());
-            match spawn_in_new_terminal(&exe, session_id, &cwd, socket.as_deref()) {
+            let name = match target {
+                ResumeTarget::JcodeSession { session_id } => {
+                    crate::id::extract_session_name(session_id)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| session_id.to_string())
+                }
+                ResumeTarget::CodexSession { session_id } => {
+                    format!("Codex {}", &session_id[..session_id.len().min(8)])
+                }
+                ResumeTarget::PiSession { session_path } => std::path::Path::new(session_path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Pi session")
+                    .to_string(),
+                ResumeTarget::OpenCodeSession { session_id } => {
+                    format!("OpenCode {}", &session_id[..session_id.len().min(8)])
+                }
+            };
+            match spawn_resume_target_in_new_terminal(target, &cwd, socket.as_deref()) {
                 Ok(true) => {
                     spawned += 1;
                     names.push(name);
                 }
-                Ok(false) | Err(_) => failed.push(session_id.clone()),
+                Ok(false) | Err(_) => {
+                    failed.push(resume_target_manual_command(target, socket.as_deref()))
+                }
             }
         }
 
@@ -1319,10 +1341,7 @@ impl App {
             return;
         }
 
-        let manual: Vec<String> = failed
-            .iter()
-            .map(|id| format!("  jcode --resume {}", id))
-            .collect();
+        let manual: Vec<String> = failed.iter().map(|cmd| format!("  {}", cmd)).collect();
 
         if spawned > 0 {
             self.push_display_message(DisplayMessage::system(format!(

@@ -1068,36 +1068,213 @@ pub fn spawn_selfdev_in_new_terminal(
 }
 
 pub fn list_sessions() -> Result<()> {
+    fn resolve_cli_executable(name: &str) -> std::path::PathBuf {
+        let mut search_dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+            .map(|paths| std::env::split_paths(&paths).collect())
+            .unwrap_or_default();
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = std::path::PathBuf::from(home);
+            for extra in [".npm-global/bin", ".local/bin", ".cargo/bin"] {
+                let path = home.join(extra);
+                if !search_dirs.iter().any(|existing| existing == &path) {
+                    search_dirs.push(path);
+                }
+            }
+        }
+        for dir in search_dirs {
+            let path = dir.join(name);
+            if path.is_file() {
+                return path;
+            }
+        }
+        std::path::PathBuf::from(name)
+    }
+
+    fn build_resume_target_command(
+        exe: &std::path::Path,
+        target: &crate::tui::session_picker::ResumeTarget,
+    ) -> (std::path::PathBuf, Vec<String>) {
+        match target {
+            crate::tui::session_picker::ResumeTarget::JcodeSession { session_id } => (
+                exe.to_path_buf(),
+                vec!["--resume".to_string(), session_id.clone()],
+            ),
+            crate::tui::session_picker::ResumeTarget::CodexSession { session_id } => (
+                resolve_cli_executable("codex"),
+                vec!["resume".to_string(), session_id.clone()],
+            ),
+            crate::tui::session_picker::ResumeTarget::PiSession { session_path } => (
+                resolve_cli_executable("pi"),
+                vec!["--session".to_string(), session_path.clone()],
+            ),
+            crate::tui::session_picker::ResumeTarget::OpenCodeSession { session_id } => (
+                resolve_cli_executable("opencode"),
+                vec!["--session".to_string(), session_id.clone()],
+            ),
+        }
+    }
+
+    fn command_display(program: &std::path::Path, args: &[String]) -> String {
+        std::iter::once(program.to_string_lossy().to_string())
+            .chain(args.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn spawn_target_in_new_terminal(
+        target: &crate::tui::session_picker::ResumeTarget,
+        exe: &std::path::Path,
+        cwd: &std::path::Path,
+    ) -> Result<bool> {
+        use std::process::{Command, Stdio};
+
+        let (program, args) = build_resume_target_command(exe, target);
+        let title = match target {
+            crate::tui::session_picker::ResumeTarget::JcodeSession { session_id } => {
+                resumed_window_title(session_id)
+            }
+            crate::tui::session_picker::ResumeTarget::CodexSession { session_id } => {
+                format!("🧠 Codex {}", &session_id[..session_id.len().min(8)])
+            }
+            crate::tui::session_picker::ResumeTarget::PiSession { session_path } => {
+                format!(
+                    "π Pi {}",
+                    std::path::Path::new(session_path)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("session")
+                )
+            }
+            crate::tui::session_picker::ResumeTarget::OpenCodeSession { session_id } => {
+                format!("◌ OpenCode {}", &session_id[..session_id.len().min(8)])
+            }
+        };
+
+        for term in resume_terminal_candidates_unix() {
+            let mut cmd = Command::new(&term);
+            cmd.current_dir(cwd)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+
+            match term.as_str() {
+                "handterm" => {
+                    let command = shell_command(
+                        &std::iter::once(program.to_string_lossy().into_owned())
+                            .chain(args.iter().cloned())
+                            .collect::<Vec<_>>(),
+                    );
+                    cmd.args(["--standalone", "--backend", "gpu", "--exec", &command]);
+                }
+                "kitty" => {
+                    cmd.args(["--title", &title, "-e"])
+                        .arg(&program)
+                        .args(&args);
+                }
+                "wezterm" => {
+                    cmd.args([
+                        "start",
+                        "--always-new-process",
+                        "--",
+                        program.to_string_lossy().as_ref(),
+                    ]);
+                    cmd.args(&args);
+                }
+                "alacritty" => {
+                    cmd.args(["--title", &title, "-e"])
+                        .arg(&program)
+                        .args(&args);
+                }
+                "gnome-terminal" => {
+                    cmd.arg("--title").arg(&title);
+                    cmd.arg("--").arg(&program).args(&args);
+                }
+                "konsole" | "xterm" | "foot" => {
+                    cmd.args(["-e"]).arg(&program).args(&args);
+                }
+                "iterm2" => {
+                    cmd = Command::new("osascript");
+                    cmd.args([
+                        "-e",
+                        &format!(
+                            r#"tell application "iTerm2"
+                                create window with default profile command "{}"
+                            end tell"#,
+                            shell_command(
+                                &std::iter::once(program.to_string_lossy().into_owned())
+                                    .chain(args.iter().cloned())
+                                    .collect::<Vec<_>>()
+                            )
+                        ),
+                    ]);
+                }
+                "terminal" => {
+                    cmd = Command::new("open");
+                    cmd.args([
+                        "-a",
+                        "Terminal",
+                        program.to_str().unwrap_or("jcode"),
+                        "--args",
+                    ]);
+                    cmd.args(&args);
+                }
+                _ => continue,
+            }
+
+            if crate::platform::spawn_detached(&mut cmd).is_ok() {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
     match tui::session_picker::pick_session()? {
-        Some(tui::session_picker::PickerResult::Selected(session_ids)) => {
+        Some(tui::session_picker::PickerResult::Selected(targets)) => {
             let exe = std::env::current_exe()?;
             let cwd = std::env::current_dir()?;
 
-            if session_ids.len() == 1 {
-                let session_id = &session_ids[0];
-                let err = crate::platform::replace_process(
-                    ProcessCommand::new(&exe)
-                        .arg("--resume")
-                        .arg(session_id)
-                        .current_dir(cwd),
-                );
-
-                Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
-            } else {
-                let mut spawned = 0usize;
-                let mut warned_no_terminal = false;
-
-                for session_id in session_ids {
-                    let mut session_cwd = cwd.clone();
-                    if let Ok(sess) = session::Session::load(&session_id) {
+            if targets.len() == 1 {
+                let target = &targets[0];
+                let mut session_cwd = cwd.clone();
+                if let crate::tui::session_picker::ResumeTarget::JcodeSession { session_id } =
+                    target
+                {
+                    if let Ok(sess) = session::Session::load(session_id) {
                         if let Some(dir) = sess.working_dir.as_deref() {
                             if std::path::Path::new(dir).is_dir() {
                                 session_cwd = std::path::PathBuf::from(dir);
                             }
                         }
                     }
+                }
+                let (program, args) = build_resume_target_command(&exe, target);
+                let err = crate::platform::replace_process(
+                    ProcessCommand::new(&program)
+                        .args(&args)
+                        .current_dir(session_cwd),
+                );
 
-                    match spawn_resume_in_new_terminal(&exe, &session_id, &session_cwd) {
+                Err(anyhow::anyhow!("Failed to exec {:?}: {}", program, err))
+            } else {
+                let mut spawned = 0usize;
+                let mut warned_no_terminal = false;
+
+                for target in targets {
+                    let mut session_cwd = cwd.clone();
+                    if let crate::tui::session_picker::ResumeTarget::JcodeSession { session_id } =
+                        &target
+                    {
+                        if let Ok(sess) = session::Session::load(session_id) {
+                            if let Some(dir) = sess.working_dir.as_deref() {
+                                if std::path::Path::new(dir).is_dir() {
+                                    session_cwd = std::path::PathBuf::from(dir);
+                                }
+                            }
+                        }
+                    }
+
+                    match spawn_target_in_new_terminal(&target, &exe, &session_cwd) {
                         Ok(true) => spawned += 1,
                         Ok(false) => {
                             if !warned_no_terminal {
@@ -1106,10 +1283,11 @@ pub fn list_sessions() -> Result<()> {
                                 );
                                 warned_no_terminal = true;
                             }
-                            eprintln!("  jcode --resume {}", session_id);
+                            let (program, args) = build_resume_target_command(&exe, &target);
+                            eprintln!("  {}", command_display(&program, &args));
                         }
                         Err(e) => {
-                            eprintln!("Failed to spawn session {}: {}", session_id, e);
+                            eprintln!("Failed to spawn selected session: {}", e);
                         }
                     }
                 }

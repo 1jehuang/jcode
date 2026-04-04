@@ -94,6 +94,14 @@ impl SessionPicker {
                 Style::default().fg(rgb(255, 200, 140)),
             ));
         }
+        if let Some(source_badge) = session.source.badge() {
+            line1_spans.push(Span::styled(
+                format!("  {}", source_badge),
+                Style::default()
+                    .fg(rgb(120, 210, 255))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
         if in_batch_restore {
             line1_spans.push(Span::styled(
                 "  [BATCH]",
