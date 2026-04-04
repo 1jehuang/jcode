@@ -105,6 +105,8 @@ pub async fn run_login_provider(
         LoginProviderTarget::Google => login_google_flow().await?,
     }
     auth::AuthStatus::invalidate_cache();
+    super::commands::run_post_login_validation(provider).await?;
+    auth::AuthStatus::invalidate_cache();
     Ok(())
 }
 

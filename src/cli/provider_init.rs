@@ -223,6 +223,54 @@ pub fn login_provider_for_choice(choice: &ProviderChoice) -> Option<LoginProvide
     }
 }
 
+pub fn choice_for_login_provider(provider: LoginProviderDescriptor) -> Option<ProviderChoice> {
+    match provider.target {
+        LoginProviderTarget::AutoImport => None,
+        LoginProviderTarget::Jcode => Some(ProviderChoice::Jcode),
+        LoginProviderTarget::Claude => Some(ProviderChoice::Claude),
+        LoginProviderTarget::OpenAi => Some(ProviderChoice::Openai),
+        LoginProviderTarget::OpenRouter => Some(ProviderChoice::Openrouter),
+        LoginProviderTarget::Azure => Some(ProviderChoice::Azure),
+        LoginProviderTarget::OpenAiCompatible(profile) => [
+            ProviderChoice::Opencode,
+            ProviderChoice::OpencodeGo,
+            ProviderChoice::Zai,
+            ProviderChoice::Kimi,
+            ProviderChoice::Ai302,
+            ProviderChoice::Baseten,
+            ProviderChoice::Cortecs,
+            ProviderChoice::Deepseek,
+            ProviderChoice::Firmware,
+            ProviderChoice::HuggingFace,
+            ProviderChoice::MoonshotAi,
+            ProviderChoice::Nebius,
+            ProviderChoice::Scaleway,
+            ProviderChoice::Stackit,
+            ProviderChoice::Groq,
+            ProviderChoice::Mistral,
+            ProviderChoice::Perplexity,
+            ProviderChoice::TogetherAi,
+            ProviderChoice::Deepinfra,
+            ProviderChoice::Fireworks,
+            ProviderChoice::Minimax,
+            ProviderChoice::Xai,
+            ProviderChoice::Lmstudio,
+            ProviderChoice::Ollama,
+            ProviderChoice::Chutes,
+            ProviderChoice::Cerebras,
+            ProviderChoice::AlibabaCodingPlan,
+            ProviderChoice::OpenaiCompatible,
+        ]
+        .into_iter()
+        .find(|choice| profile_for_choice(choice) == Some(profile)),
+        LoginProviderTarget::Cursor => Some(ProviderChoice::Cursor),
+        LoginProviderTarget::Copilot => Some(ProviderChoice::Copilot),
+        LoginProviderTarget::Gemini => Some(ProviderChoice::Gemini),
+        LoginProviderTarget::Antigravity => Some(ProviderChoice::Antigravity),
+        LoginProviderTarget::Google => Some(ProviderChoice::Google),
+    }
+}
+
 pub fn prompt_login_provider_selection(
     providers: &[LoginProviderDescriptor],
     heading: &str,
@@ -1332,20 +1380,28 @@ pub async fn init_provider(
     choice: &ProviderChoice,
     model: Option<&str>,
 ) -> Result<Arc<dyn provider::Provider>> {
-    init_provider_with_options(choice, model, true).await
+    init_provider_with_options(choice, model, true, true).await
 }
 
 pub async fn init_provider_quiet(
     choice: &ProviderChoice,
     model: Option<&str>,
 ) -> Result<Arc<dyn provider::Provider>> {
-    init_provider_with_options(choice, model, false).await
+    init_provider_with_options(choice, model, false, true).await
+}
+
+pub async fn init_provider_for_validation(
+    choice: &ProviderChoice,
+    model: Option<&str>,
+) -> Result<Arc<dyn provider::Provider>> {
+    init_provider_with_options(choice, model, false, false).await
 }
 
 async fn init_provider_with_options(
     choice: &ProviderChoice,
     model: Option<&str>,
     show_init_messages: bool,
+    allow_login_bootstrap: bool,
 ) -> Result<Arc<dyn provider::Provider>> {
     if let Some(profile) = profile_for_choice(choice) {
         apply_openai_compatible_profile_env(Some(profile));
@@ -1607,11 +1663,17 @@ async fn init_provider_with_options(
                     );
                 }
 
+                if !allow_login_bootstrap {
+                    anyhow::bail!(
+                        "No credentials configured for provider auto-detection; automatic login/bootstrap is disabled during validation."
+                    );
+                }
+
                 let provider_desc = prompt_login_provider_selection(
                     &crate::provider_catalog::auto_init_login_providers(),
                     "No credentials found. Let's log in!\n\nChoose a provider:",
                 )?;
-                login_and_bootstrap_provider(provider_desc, None).await?
+                Box::pin(login_and_bootstrap_provider(provider_desc, None)).await?
             }
         }
     };
@@ -1649,6 +1711,15 @@ pub async fn init_provider_and_registry(
     model: Option<&str>,
 ) -> Result<(Arc<dyn provider::Provider>, tool::Registry)> {
     let provider = init_provider(choice, model).await?;
+    let registry = tool::Registry::new(provider.clone()).await;
+    Ok((provider, registry))
+}
+
+pub async fn init_provider_and_registry_for_validation(
+    choice: &ProviderChoice,
+    model: Option<&str>,
+) -> Result<(Arc<dyn provider::Provider>, tool::Registry)> {
+    let provider = init_provider_for_validation(choice, model).await?;
     let registry = tool::Registry::new(provider.clone()).await;
     Ok((provider, registry))
 }
@@ -1903,6 +1974,46 @@ mod tests {
         );
         assert!(parse_external_auth_review_selection("4", 3).is_err());
         assert!(parse_external_auth_review_selection("nope", 3).is_err());
+    }
+
+    #[test]
+    fn choice_for_login_provider_round_trips_core_targets() {
+        assert_eq!(
+            choice_for_login_provider(provider_catalog::JCODE_LOGIN_PROVIDER),
+            Some(ProviderChoice::Jcode)
+        );
+        assert_eq!(
+            choice_for_login_provider(provider_catalog::OPENROUTER_LOGIN_PROVIDER),
+            Some(ProviderChoice::Openrouter)
+        );
+        assert_eq!(
+            choice_for_login_provider(provider_catalog::AZURE_LOGIN_PROVIDER),
+            Some(ProviderChoice::Azure)
+        );
+        assert_eq!(
+            choice_for_login_provider(provider_catalog::CURSOR_LOGIN_PROVIDER),
+            Some(ProviderChoice::Cursor)
+        );
+        assert_eq!(
+            choice_for_login_provider(provider_catalog::AUTO_IMPORT_LOGIN_PROVIDER),
+            None
+        );
+    }
+
+    #[test]
+    fn choice_for_login_provider_round_trips_openai_compatible_profiles() {
+        assert_eq!(
+            choice_for_login_provider(provider_catalog::OPENCODE_LOGIN_PROVIDER),
+            Some(ProviderChoice::Opencode)
+        );
+        assert_eq!(
+            choice_for_login_provider(provider_catalog::LMSTUDIO_LOGIN_PROVIDER),
+            Some(ProviderChoice::Lmstudio)
+        );
+        assert_eq!(
+            choice_for_login_provider(provider_catalog::OPENAI_COMPAT_LOGIN_PROVIDER),
+            Some(ProviderChoice::OpenaiCompatible)
+        );
     }
 
     #[test]
