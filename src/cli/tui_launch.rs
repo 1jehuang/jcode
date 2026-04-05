@@ -1099,6 +1099,10 @@ pub fn list_sessions() -> Result<()> {
                 exe.to_path_buf(),
                 vec!["--resume".to_string(), session_id.clone()],
             ),
+            crate::tui::session_picker::ResumeTarget::ClaudeCodeSession { session_id } => (
+                resolve_cli_executable("claude"),
+                vec!["--resume".to_string(), session_id.clone()],
+            ),
             crate::tui::session_picker::ResumeTarget::CodexSession { session_id } => (
                 resolve_cli_executable("codex"),
                 vec!["resume".to_string(), session_id.clone()],
@@ -1132,6 +1136,9 @@ pub fn list_sessions() -> Result<()> {
         let title = match target {
             crate::tui::session_picker::ResumeTarget::JcodeSession { session_id } => {
                 resumed_window_title(session_id)
+            }
+            crate::tui::session_picker::ResumeTarget::ClaudeCodeSession { session_id } => {
+                format!("🧵 Claude Code {}", &session_id[..session_id.len().min(8)])
             }
             crate::tui::session_picker::ResumeTarget::CodexSession { session_id } => {
                 format!("🧠 Codex {}", &session_id[..session_id.len().min(8)])

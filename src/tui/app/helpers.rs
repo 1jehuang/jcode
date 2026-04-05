@@ -419,6 +419,12 @@ pub(super) fn build_resume_command(
             let title = resumed_window_title(session_id);
             (exe, args, title)
         }
+        ResumeTarget::ClaudeCodeSession { session_id } => {
+            let exe = resolve_cli_executable("claude");
+            let args = vec!["--resume".to_string(), session_id.clone()];
+            let title = format!("🧵 Claude Code {}", &session_id[..session_id.len().min(8)]);
+            (exe, args, title)
+        }
         ResumeTarget::CodexSession { session_id } => {
             let exe = resolve_cli_executable("codex");
             let args = vec!["resume".to_string(), session_id.clone()];
@@ -689,10 +695,12 @@ pub(super) fn spawn_in_new_terminal(
 #[cfg(test)]
 mod tests {
     use super::{
-        detected_resume_terminal, extract_bracketed_system_message, format_countdown_until,
-        gather_ambient_info, partition_queued_messages, resume_invocation_args, shell_command,
+        build_resume_command, detected_resume_terminal, extract_bracketed_system_message,
+        format_countdown_until, gather_ambient_info, partition_queued_messages,
+        resume_invocation_args, shell_command,
     };
     use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget};
+    use crate::tui::session_picker::ResumeTarget;
     use chrono::{Duration as ChronoDuration, Utc};
 
     struct EnvVarGuard {
@@ -795,6 +803,27 @@ mod tests {
     fn resume_invocation_args_omits_blank_socket() {
         let args = resume_invocation_args("ses_123", Some("   "));
         assert_eq!(args, vec!["--resume".to_string(), "ses_123".to_string()]);
+    }
+
+    #[test]
+    fn build_resume_command_uses_claude_code_cli() {
+        let (program, args, title) = build_resume_command(
+            &ResumeTarget::ClaudeCodeSession {
+                session_id: "claude-session-123".to_string(),
+            },
+            None,
+        );
+
+        assert_eq!(
+            program.file_name().and_then(|name| name.to_str()),
+            Some("claude")
+        );
+        assert_eq!(
+            args,
+            vec!["--resume".to_string(), "claude-session-123".to_string()]
+        );
+        assert!(title.contains("Claude Code"));
+        assert!(title.contains("claude-s"));
     }
 
     #[test]

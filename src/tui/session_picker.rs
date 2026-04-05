@@ -90,6 +90,7 @@ impl SessionSource {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResumeTarget {
     JcodeSession { session_id: String },
+    ClaudeCodeSession { session_id: String },
     CodexSession { session_id: String },
     PiSession { session_path: String },
     OpenCodeSession { session_id: String },
@@ -99,6 +100,7 @@ impl ResumeTarget {
     pub fn stable_id(&self) -> &str {
         match self {
             Self::JcodeSession { session_id } => session_id,
+            Self::ClaudeCodeSession { session_id } => session_id,
             Self::CodexSession { session_id } => session_id,
             Self::PiSession { session_path } => session_path,
             Self::OpenCodeSession { session_id } => session_id,
@@ -535,15 +537,31 @@ impl SessionPicker {
             self.session_by_ref(session_ref)
                 .and_then(|s| match &s.resume_target {
                     ResumeTarget::JcodeSession { session_id } => Some(session_id.clone()),
+                    ResumeTarget::ClaudeCodeSession { session_id } => Some(session_id.clone()),
                     _ => None,
                 })
         else {
             return;
         };
-        let Ok(session) = Session::load(&session_id) else {
-            return;
+
+        let preview = match self
+            .session_by_ref(session_ref)
+            .map(|s| s.resume_target.clone())
+        {
+            Some(ResumeTarget::JcodeSession { .. }) => {
+                let Ok(session) = Session::load(&session_id) else {
+                    return;
+                };
+                build_messages_preview(&session)
+            }
+            Some(ResumeTarget::ClaudeCodeSession { .. }) => {
+                let Some(preview) = loading::load_claude_code_preview(&session_id) else {
+                    return;
+                };
+                preview
+            }
+            _ => return,
         };
-        let preview = build_messages_preview(&session);
 
         if let Some(s) = self.session_by_ref_mut(session_ref) {
             s.messages_preview = preview;
@@ -1629,12 +1647,12 @@ mod tests {
         saved.saved = true;
         saved.needs_catchup = true;
 
-        let claude_code = make_session(
-            "imported_cc_demo",
-            "claude-code",
-            false,
-            SessionStatus::Closed,
-        );
+        let mut claude_code =
+            make_session("claude:demo", "claude-code", false, SessionStatus::Closed);
+        claude_code.source = SessionSource::ClaudeCode;
+        claude_code.resume_target = ResumeTarget::ClaudeCodeSession {
+            session_id: "claude-session-demo".to_string(),
+        };
 
         let mut codex = make_session("session_codex", "codex", false, SessionStatus::Closed);
         codex.model = Some("gpt-5.3-codex".to_string());

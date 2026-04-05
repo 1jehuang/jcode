@@ -568,14 +568,14 @@ pub(super) fn crashed_sessions_from_all_sessions(
 
 pub fn load_sessions() -> Result<Vec<SessionInfo>> {
     let sessions_dir = storage::jcode_dir()?.join("sessions");
-
-    if !sessions_dir.exists() {
-        return Ok(Vec::new());
-    }
-
     let scan_limit = session_scan_limit();
-    let candidates = collect_recent_session_stems(&sessions_dir, scan_limit)?;
     let mut sessions: Vec<SessionInfo> = Vec::new();
+
+    let candidates = if sessions_dir.exists() {
+        collect_recent_session_stems(&sessions_dir, scan_limit)?
+    } else {
+        Vec::new()
+    };
 
     for stem in candidates {
         let path = sessions_dir.join(format!("{stem}.json"));
@@ -659,6 +659,7 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
         }
     }
 
+    sessions.extend(load_external_claude_code_sessions(scan_limit));
     sessions.extend(load_external_codex_sessions(scan_limit));
     sessions.extend(load_external_pi_sessions(scan_limit));
     sessions.extend(load_external_opencode_sessions(scan_limit));
@@ -666,6 +667,113 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
     sessions.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
 
     Ok(sessions)
+}
+
+fn load_external_claude_code_sessions(scan_limit: usize) -> Vec<SessionInfo> {
+    let Ok(sessions) = crate::import::list_claude_code_sessions() else {
+        return Vec::new();
+    };
+
+    sessions
+        .into_iter()
+        .take(scan_limit)
+        .map(|session| {
+            let session_id = session.session_id;
+            let created_at = session.created.unwrap_or_else(chrono::Utc::now);
+            let last_message_time = session.modified.or(session.created).unwrap_or(created_at);
+            let working_dir = session.project_path;
+            let title = session
+                .summary
+                .filter(|summary| !summary.trim().is_empty())
+                .unwrap_or_else(|| truncate_title_text(&session.first_prompt, 72));
+            let short_name = working_dir
+                .as_deref()
+                .and_then(|dir| Path::new(dir).file_name())
+                .and_then(|name| name.to_str())
+                .map(|name| name.to_string())
+                .unwrap_or_else(|| format!("claude {}", &session_id[..session_id.len().min(8)]));
+            let search_index = build_search_index(
+                &format!("claude:{session_id}"),
+                &short_name,
+                &title,
+                working_dir.as_deref(),
+                None,
+                &[],
+            );
+
+            SessionInfo {
+                id: format!("claude:{session_id}"),
+                parent_id: None,
+                short_name,
+                icon: "🧵".to_string(),
+                title,
+                message_count: session.message_count as usize,
+                user_message_count: 0,
+                assistant_message_count: 0,
+                created_at,
+                last_message_time,
+                last_active_at: Some(last_message_time),
+                working_dir,
+                model: None,
+                provider_key: Some("claude-code".to_string()),
+                is_canary: false,
+                is_debug: false,
+                saved: false,
+                save_label: None,
+                status: SessionStatus::Closed,
+                needs_catchup: false,
+                estimated_tokens: 0,
+                messages_preview: Vec::new(),
+                search_index,
+                server_name: None,
+                server_icon: None,
+                source: SessionSource::ClaudeCode,
+                resume_target: ResumeTarget::ClaudeCodeSession { session_id },
+            }
+        })
+        .collect()
+}
+
+pub(super) fn load_claude_code_preview(session_id: &str) -> Option<Vec<PreviewMessage>> {
+    let session = crate::import::list_claude_code_sessions()
+        .ok()?
+        .into_iter()
+        .find(|session| session.session_id == session_id)?;
+    let file = File::open(session.full_path).ok()?;
+    let reader = BufReader::new(file);
+    let mut preview = Vec::new();
+
+    for line in reader.lines() {
+        let line = line.ok()?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+        let entry_type = value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if entry_type != "user" && entry_type != "assistant" {
+            continue;
+        }
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        let role = message
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or(entry_type);
+        let text =
+            extract_text_from_value(message.get("content").unwrap_or(&serde_json::Value::Null));
+        push_preview_message(&mut preview, role, text);
+    }
+
+    if preview.is_empty() {
+        None
+    } else {
+        Some(preview)
+    }
 }
 
 fn load_external_codex_sessions(scan_limit: usize) -> Vec<SessionInfo> {
@@ -1202,4 +1310,135 @@ pub fn load_sessions_grouped() -> Result<(Vec<ServerGroup>, Vec<SessionInfo>)> {
     });
 
     Ok((groups, orphan_sessions))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+            let prev = std::env::var_os(key);
+            crate::env::set_var(key, value);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = self.prev.take() {
+                crate::env::set_var(self.key, prev);
+            } else {
+                crate::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[test]
+    fn load_sessions_includes_claude_code_sessions_from_external_home() {
+        let _env_lock = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+        let project_dir = temp.path().join("external/.claude/projects/demo-project");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let transcript_path = project_dir.join("claude-session-123.jsonl");
+        std::fs::write(
+            &transcript_path,
+            concat!(
+                "{\"type\":\"user\",\"uuid\":\"u1\",\"message\":{\"role\":\"user\",\"content\":\"Investigate the login bug\"}}\n",
+                "{\"type\":\"assistant\",\"uuid\":\"a1\",\"parentUuid\":\"u1\",\"message\":{\"role\":\"assistant\",\"content\":\"I can help with that.\"}}\n"
+            ),
+        )
+        .expect("write transcript");
+
+        std::fs::write(
+            project_dir.join("sessions-index.json"),
+            format!(
+                concat!(
+                    "{{\"version\":1,\"entries\":[",
+                    "{{\"sessionId\":\"claude-session-123\",",
+                    "\"fullPath\":\"{}\",",
+                    "\"firstPrompt\":\"Investigate the login bug\",",
+                    "\"summary\":\"Investigate the login bug\",",
+                    "\"messageCount\":2,",
+                    "\"created\":\"2026-04-04T12:00:00Z\",",
+                    "\"modified\":\"2026-04-04T12:05:00Z\",",
+                    "\"projectPath\":\"/tmp/demo-project\"",
+                    "}}]}}"
+                ),
+                transcript_path.display()
+            ),
+        )
+        .expect("write index");
+
+        let sessions = load_sessions().expect("load sessions");
+        let session = sessions
+            .iter()
+            .find(|session| {
+                matches!(
+                    session.resume_target,
+                    ResumeTarget::ClaudeCodeSession { .. }
+                )
+            })
+            .expect("claude session present");
+
+        assert_eq!(session.source, SessionSource::ClaudeCode);
+        assert_eq!(session.id, "claude:claude-session-123");
+        assert_eq!(session.short_name, "demo-project");
+        assert_eq!(session.title, "Investigate the login bug");
+        assert_eq!(session.message_count, 2);
+        assert_eq!(session.working_dir.as_deref(), Some("/tmp/demo-project"));
+    }
+
+    #[test]
+    fn load_claude_code_preview_reads_transcript_messages() {
+        let _env_lock = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+        let project_dir = temp.path().join("external/.claude/projects/demo-project");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let transcript_path = project_dir.join("claude-session-456.jsonl");
+        std::fs::write(
+            &transcript_path,
+            concat!(
+                "{\"type\":\"user\",\"uuid\":\"u1\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Fix the flaky test\"}]}}\n",
+                "{\"type\":\"assistant\",\"uuid\":\"a1\",\"parentUuid\":\"u1\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"I found the race condition\"}]}}\n"
+            ),
+        )
+        .expect("write transcript");
+
+        std::fs::write(
+            project_dir.join("sessions-index.json"),
+            format!(
+                concat!(
+                    "{{\"version\":1,\"entries\":[",
+                    "{{\"sessionId\":\"claude-session-456\",",
+                    "\"fullPath\":\"{}\",",
+                    "\"firstPrompt\":\"Fix the flaky test\",",
+                    "\"messageCount\":2,",
+                    "\"created\":\"2026-04-04T12:00:00Z\",",
+                    "\"modified\":\"2026-04-04T12:05:00Z\"",
+                    "}}]}}"
+                ),
+                transcript_path.display()
+            ),
+        )
+        .expect("write index");
+
+        let preview = load_claude_code_preview("claude-session-456").expect("preview");
+        assert_eq!(preview.len(), 2);
+        assert_eq!(preview[0].role, "user");
+        assert!(preview[0].content.contains("Fix the flaky test"));
+        assert_eq!(preview[1].role, "assistant");
+        assert!(preview[1].content.contains("I found the race condition"));
+    }
 }

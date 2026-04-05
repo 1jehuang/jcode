@@ -1300,6 +1300,9 @@ impl App {
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| session_id.to_string())
                 }
+                ResumeTarget::ClaudeCodeSession { session_id } => {
+                    format!("Claude Code {}", &session_id[..session_id.len().min(8)])
+                }
                 ResumeTarget::CodexSession { session_id } => {
                     format!("Codex {}", &session_id[..session_id.len().min(8)])
                 }
