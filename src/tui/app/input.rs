@@ -1509,7 +1509,7 @@ impl App {
                 "`/autoreview`\nShow autoreview status for this session.\n\n`/autoreview on`\nEnable end-of-turn autoreview for this session.\n\n`/autoreview off`\nDisable autoreview for this session.\n\n`/autoreview now`\nLaunch a headed reviewer immediately in a new window."
             }
             "autojudge" => {
-                "`/autojudge`\nShow autojudge status for this session.\n\n`/autojudge on`\nEnable end-of-turn autojudge for this session.\n\n`/autojudge off`\nDisable autojudge for this session.\n\n`/autojudge now`\nLaunch a headed judge immediately in a new window."
+                "`/autojudge`\nShow autojudge status for this session.\n\n`/autojudge on`\nEnable end-of-turn autojudge for this session. The autojudge acts like a completion manager: it tells the parent agent either to continue with specific next steps or that it is fine to stop.\n\n`/autojudge off`\nDisable autojudge for this session.\n\n`/autojudge now`\nLaunch a headed autojudge immediately in a new window."
             }
             "review" => {
                 "`/review`\nLaunch a one-shot headed review session immediately.\n\nThe reviewer will DM this session when done. If OpenAI ChatGPT OAuth is available, it prefers `gpt-5.4`."

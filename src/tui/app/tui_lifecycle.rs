@@ -722,6 +722,7 @@ impl App {
 
         // Load session to get canary status (for "client self-dev" badge)
         if let Some(ref session_id) = resume_session {
+            app.restore_remote_startup_history(session_id);
             if let Some(restored) = Self::restore_input_for_reload(session_id) {
                 app.apply_restored_reload_input(restored);
                 if app.has_queued_followups() {
@@ -731,7 +732,6 @@ impl App {
                     }
                 }
             }
-            app.restore_remote_startup_history(session_id);
         }
 
         app.resume_session_id = resume_session;

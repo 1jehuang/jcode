@@ -4128,6 +4128,17 @@ fn test_review_and_judge_startup_prompts_are_analysis_only() {
 }
 
 #[test]
+fn test_autojudge_prompt_is_continue_or_stop_manager() {
+    let prompt = super::commands::build_autojudge_startup_message("session_parent");
+
+    assert!(prompt.contains("act like a strong completion manager/reviewer"));
+    assert!(prompt.contains("tell it exactly what to do next"));
+    assert!(prompt.contains("Default to `CONTINUE:` unless you are genuinely convinced"));
+    assert!(prompt.contains("Start with either `CONTINUE:` or `STOP:`"));
+    assert!(prompt.contains("Address the DM to the parent agent, not to the user"));
+}
+
+#[test]
 fn test_judge_startup_prompts_describe_visible_mirror_context() {
     let prompts = [
         super::commands::build_autojudge_startup_message("session_parent"),
@@ -4279,7 +4290,11 @@ fn test_new_for_remote_restores_spawn_startup_hints_and_dispatch_state() {
         assert_eq!(startup_banner.role, "system");
         assert_eq!(startup_banner.title.as_deref(), Some("Autojudge"));
         assert!(startup_banner.content.contains("analysis-only"));
-        assert!(startup_banner.content.contains("send exactly one DM back"));
+        assert!(
+            startup_banner
+                .content
+                .contains("send exactly one DM back telling the parent either to `CONTINUE:`")
+        );
         assert!(startup_banner.content.contains("user-visible mirror"));
         assert!(startup_banner.content.contains("session_parent_123"));
     });
