@@ -362,6 +362,21 @@ impl App {
         }
     }
 
+    pub(super) fn replace_latest_tool_display_message(
+        &mut self,
+        tool_call_id: &str,
+        title: Option<String>,
+        content: String,
+    ) -> bool {
+        let Some(idx) = self.display_messages.iter().rposition(|message| {
+            message.tool_data.as_ref().map(|tool| tool.id.as_str()) == Some(tool_call_id)
+        }) else {
+            return false;
+        };
+
+        self.replace_display_message_title_and_content(idx, title, content)
+    }
+
     pub(super) fn remove_display_message(&mut self, idx: usize) -> Option<DisplayMessage> {
         if idx < self.display_messages.len() {
             let removed = self.display_messages.remove(idx);

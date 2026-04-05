@@ -531,15 +531,11 @@ impl App {
                     };
 
                 // Update the tool's DisplayMessage with the output
-                if let Some(dm) = self
-                    .display_messages
-                    .iter_mut()
-                    .rev()
-                    .find(|dm| dm.tool_data.as_ref().map(|td| &td.id) == Some(&tc.id))
-                {
-                    dm.content = output.clone();
-                    dm.title = tool_title.clone();
-                }
+                let _ = self.replace_latest_tool_display_message(
+                    &tc.id,
+                    tool_title.clone(),
+                    output.clone(),
+                );
 
                 self.add_provider_message(Message::tool_result_with_duration(
                     &tc.id,
@@ -1322,23 +1318,16 @@ impl App {
                     }));
 
                     // Update the tool's DisplayMessage with the output
-                    if let Some(dm) = self
-                        .display_messages
-                        .iter_mut()
-                        .rev()
-                        .find(|dm| dm.tool_data.as_ref().map(|td| &td.id) == Some(&tc.id))
+                    let display_output = if sdk_is_error
+                        && !sdk_content.starts_with("Error:")
+                        && !sdk_content.starts_with("error:")
+                        && !sdk_content.starts_with("Failed:")
                     {
-                        dm.content = if sdk_is_error
-                            && !sdk_content.starts_with("Error:")
-                            && !sdk_content.starts_with("error:")
-                            && !sdk_content.starts_with("Failed:")
-                        {
-                            format!("Error: {}", sdk_content)
-                        } else {
-                            sdk_content.clone()
-                        };
-                        dm.title = None;
-                    }
+                        format!("Error: {}", sdk_content)
+                    } else {
+                        sdk_content.clone()
+                    };
+                    let _ = self.replace_latest_tool_display_message(&tc.id, None, display_output);
 
                     self.observe_tool_result(&tc, &sdk_content, sdk_is_error, None);
 
@@ -1527,15 +1516,11 @@ impl App {
                 };
 
                 // Update the tool's DisplayMessage with the output
-                if let Some(dm) = self
-                    .display_messages
-                    .iter_mut()
-                    .rev()
-                    .find(|dm| dm.tool_data.as_ref().map(|td| &td.id) == Some(&tc.id))
-                {
-                    dm.content = output.clone();
-                    dm.title = tool_title.clone();
-                }
+                let _ = self.replace_latest_tool_display_message(
+                    &tc.id,
+                    tool_title.clone(),
+                    output.clone(),
+                );
 
                 self.add_provider_message(Message::tool_result_with_duration(
                     &tc.id,

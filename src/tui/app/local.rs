@@ -131,21 +131,20 @@ fn handle_manual_tool_completed(app: &mut App, result: ManualToolCompleted) {
         return;
     }
 
-    if let Some(dm) = app.display_messages.iter_mut().rev().find(|dm| {
-        dm.tool_data.as_ref().map(|td| td.id.as_str()) == Some(result.tool_call.id.as_str())
-    }) {
-        dm.content = if result.is_error
-            && !result.output.starts_with("Error:")
-            && !result.output.starts_with("error:")
-            && !result.output.starts_with("Failed:")
-        {
-            format!("Error: {}", result.output)
-        } else {
-            result.output.clone()
-        };
-        dm.title = result.title.clone();
-    }
-    app.bump_display_messages_version();
+    let display_output = if result.is_error
+        && !result.output.starts_with("Error:")
+        && !result.output.starts_with("error:")
+        && !result.output.starts_with("Failed:")
+    {
+        format!("Error: {}", result.output)
+    } else {
+        result.output.clone()
+    };
+    let _ = app.replace_latest_tool_display_message(
+        result.tool_call.id.as_str(),
+        result.title.clone(),
+        display_output,
+    );
 
     app.add_provider_message(Message::tool_result_with_duration(
         &result.tool_call.id,

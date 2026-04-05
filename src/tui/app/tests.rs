@@ -6969,6 +6969,60 @@ fn test_replace_display_message_content_bumps_version() {
 }
 
 #[test]
+fn test_replace_latest_tool_display_message_updates_latest_match_and_bumps_version() {
+    let mut app = create_test_app();
+    let tool_call = crate::message::ToolCall {
+        id: "tool-1".to_string(),
+        name: "read".to_string(),
+        input: serde_json::json!({"file_path": "src/main.rs"}),
+        intent: None,
+    };
+
+    app.push_display_message(DisplayMessage {
+        role: "tool".to_string(),
+        content: "placeholder 1".to_string(),
+        tool_calls: vec![],
+        duration_secs: None,
+        title: Some("old title".to_string()),
+        tool_data: Some(tool_call.clone()),
+    });
+    app.push_display_message(DisplayMessage {
+        role: "tool".to_string(),
+        content: "placeholder 2".to_string(),
+        tool_calls: vec![],
+        duration_secs: None,
+        title: None,
+        tool_data: Some(tool_call),
+    });
+    let before = app.display_messages_version;
+
+    assert!(app.replace_latest_tool_display_message(
+        "tool-1",
+        Some("new title".to_string()),
+        "final output".to_string(),
+    ));
+    assert_eq!(app.display_messages()[0].content, "placeholder 1");
+    assert_eq!(
+        app.display_messages()[0].title.as_deref(),
+        Some("old title")
+    );
+    assert_eq!(app.display_messages()[1].content, "final output");
+    assert_eq!(
+        app.display_messages()[1].title.as_deref(),
+        Some("new title")
+    );
+    assert_ne!(app.display_messages_version, before);
+
+    let after_change = app.display_messages_version;
+    assert!(app.replace_latest_tool_display_message(
+        "tool-1",
+        Some("new title".to_string()),
+        "final output".to_string(),
+    ));
+    assert_eq!(app.display_messages_version, after_change);
+}
+
+#[test]
 fn test_push_display_message_coalesces_repeated_single_line_system_messages() {
     let mut app = create_test_app();
 
