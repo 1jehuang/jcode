@@ -89,7 +89,6 @@ fn build_search_index_from_summary(
     title: &str,
     working_dir: Option<&str>,
     save_label: Option<&str>,
-    messages: &[SessionMessageSummary],
 ) -> String {
     let mut combined = String::new();
     combined.push_str(title);
@@ -106,19 +105,6 @@ fn build_search_index_from_summary(
     if let Some(label) = save_label {
         combined.push(' ');
         combined.push_str(label);
-    }
-
-    let mut budget = SEARCH_CONTENT_BUDGET_BYTES;
-    for msg in messages {
-        let content = msg.content.trim();
-        if content.is_empty() {
-            continue;
-        }
-        combined.push(' ');
-        push_with_byte_budget(&mut combined, content, &mut budget);
-        if budget == 0 {
-            break;
-        }
     }
 
     combined.to_lowercase()
@@ -412,61 +398,8 @@ struct SessionSummary {
 #[derive(Deserialize)]
 struct SessionMessageSummary {
     role: Role,
-    #[serde(default, deserialize_with = "deserialize_content_text")]
-    content: String,
     #[serde(default)]
     token_usage: Option<SessionTokenUsageSummary>,
-}
-
-fn deserialize_content_text<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de;
-
-    struct ContentVisitor;
-
-    impl<'de> de::Visitor<'de> for ContentVisitor {
-        type Value = String;
-
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("a string or array of content blocks")
-        }
-
-        fn visit_str<E: de::Error>(self, v: &str) -> Result<String, E> {
-            Ok(v.to_string())
-        }
-
-        fn visit_string<E: de::Error>(self, v: String) -> Result<String, E> {
-            Ok(v)
-        }
-
-        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<String, A::Error> {
-            let mut text = String::new();
-            while let Some(block) = seq.next_element::<serde_json::Value>()? {
-                if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
-                    let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    if block_type == "text" || block_type == "" {
-                        if !text.is_empty() {
-                            text.push(' ');
-                        }
-                        text.push_str(t);
-                    }
-                }
-            }
-            Ok(text)
-        }
-
-        fn visit_unit<E: de::Error>(self) -> Result<String, E> {
-            Ok(String::new())
-        }
-
-        fn visit_none<E: de::Error>(self) -> Result<String, E> {
-            Ok(String::new())
-        }
-    }
-
-    deserializer.deserialize_any(ContentVisitor)
 }
 
 #[derive(Deserialize)]
@@ -694,7 +627,6 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
                 &title,
                 session.working_dir.as_deref(),
                 session.save_label.as_deref(),
-                &session.messages,
             );
 
             sessions.push(SessionInfo {
@@ -888,6 +820,10 @@ fn load_codex_session_info(path: &Path) -> Result<Option<SessionInfo>> {
     let created_at = parse_timestamp_value(meta.get("timestamp"))
         .or_else(|| parse_timestamp_value(header.get("timestamp")))
         .unwrap_or_else(chrono::Utc::now);
+    let last_message_time = std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .map(chrono::DateTime::<chrono::Utc>::from)
+        .unwrap_or(created_at);
 
     let mut title: Option<String> = None;
     let mut working_dir: Option<String> = meta
@@ -895,13 +831,8 @@ fn load_codex_session_info(path: &Path) -> Result<Option<SessionInfo>> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
     let mut model: Option<String> = None;
-    let mut last_message_time = created_at;
-    let mut user_message_count = 0usize;
-    let mut assistant_message_count = 0usize;
-    let mut message_count = 0usize;
-    let mut preview = Vec::new();
 
-    for line in lines {
+    for line in lines.take(64) {
         let line = line?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -914,7 +845,7 @@ fn load_codex_session_info(path: &Path) -> Result<Option<SessionInfo>> {
             .get("type")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        let (role, content_value, timestamp_value, model_value) = if line_type == "message" {
+        let (role, content_value, _timestamp_value, model_value) = if line_type == "message" {
             let Some(role) = value.get("role").and_then(|v| v.as_str()) else {
                 continue;
             };
@@ -948,9 +879,8 @@ fn load_codex_session_info(path: &Path) -> Result<Option<SessionInfo>> {
             continue;
         }
 
-        let text = extract_block_text_from_value(content_value);
         if title.is_none() && role == "user" {
-            title = codex_title_candidate(&text);
+            title = codex_title_candidate(&extract_block_text_from_value(content_value));
         }
         if working_dir.is_none() {
             let content_text = extract_block_text_from_value(content_value);
@@ -968,20 +898,9 @@ fn load_codex_session_info(path: &Path) -> Result<Option<SessionInfo>> {
         if model.is_none() {
             model = model_value.and_then(|v| v.as_str()).map(|s| s.to_string());
         }
-        if let Some(ts) = parse_timestamp_value(timestamp_value) {
-            last_message_time = ts;
+        if title.is_some() && model.is_some() && working_dir.is_some() {
+            break;
         }
-        message_count += 1;
-        match role {
-            "user" => user_message_count += 1,
-            "assistant" => assistant_message_count += 1,
-            _ => {}
-        }
-        push_preview_message(&mut preview, role, text);
-    }
-
-    if message_count == 0 {
-        return Ok(None);
     }
 
     let short_name = format!("codex {}", &session_id[..session_id.len().min(8)]);
@@ -993,7 +912,7 @@ fn load_codex_session_info(path: &Path) -> Result<Option<SessionInfo>> {
         &title,
         working_dir.as_deref(),
         None,
-        &preview,
+        &[],
     );
 
     Ok(Some(SessionInfo {
@@ -1002,9 +921,9 @@ fn load_codex_session_info(path: &Path) -> Result<Option<SessionInfo>> {
         short_name,
         icon: "🧠".to_string(),
         title,
-        message_count,
-        user_message_count,
-        assistant_message_count,
+        message_count: 0,
+        user_message_count: 0,
+        assistant_message_count: 0,
         created_at,
         last_message_time,
         last_active_at: Some(last_message_time),
@@ -1018,13 +937,92 @@ fn load_codex_session_info(path: &Path) -> Result<Option<SessionInfo>> {
         status: SessionStatus::Closed,
         needs_catchup: false,
         estimated_tokens: 0,
-        messages_preview: preview,
+        messages_preview: Vec::new(),
         search_index,
         server_name: None,
         server_icon: None,
         source: SessionSource::Codex,
         resume_target: ResumeTarget::CodexSession { session_id },
     }))
+}
+
+fn find_codex_session_file(session_id: &str) -> Option<PathBuf> {
+    let root = crate::storage::user_home_path(".codex/sessions").ok()?;
+    if !root.exists() {
+        return None;
+    }
+
+    for path in collect_files_recursive(&root, "jsonl") {
+        let Ok(file) = File::open(&path) else {
+            continue;
+        };
+        let mut lines = BufReader::new(file).lines();
+        let Some(Ok(first_line)) = lines.next() else {
+            continue;
+        };
+        let Ok(header) = serde_json::from_str::<serde_json::Value>(&first_line) else {
+            continue;
+        };
+        let meta = if header.get("type").and_then(|v| v.as_str()) == Some("session_meta") {
+            header.get("payload").unwrap_or(&header)
+        } else {
+            &header
+        };
+        if meta.get("id").and_then(|v| v.as_str()) == Some(session_id) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+pub(super) fn load_codex_preview(session_id: &str) -> Option<Vec<PreviewMessage>> {
+    let path = find_codex_session_file(session_id)?;
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let mut preview = Vec::new();
+
+    for line in reader.lines().skip(1) {
+        let line = line.ok()?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+        let line_type = value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let (role, content_value) = if line_type == "message" {
+            let role = value.get("role").and_then(|v| v.as_str())?;
+            (
+                role,
+                value.get("content").unwrap_or(&serde_json::Value::Null),
+            )
+        } else if line_type == "response_item" {
+            let payload = value.get("payload")?;
+            if payload.get("type").and_then(|v| v.as_str()) != Some("message") {
+                continue;
+            }
+            let role = payload.get("role").and_then(|v| v.as_str())?;
+            (
+                role,
+                payload.get("content").unwrap_or(&serde_json::Value::Null),
+            )
+        } else {
+            continue;
+        };
+        if role != "user" && role != "assistant" {
+            continue;
+        }
+        let text = extract_block_text_from_value(content_value);
+        push_preview_message(&mut preview, role, text);
+    }
+
+    if preview.is_empty() {
+        None
+    } else {
+        Some(preview)
+    }
 }
 
 fn load_external_pi_sessions(scan_limit: usize) -> Vec<SessionInfo> {

@@ -129,7 +129,7 @@ pub struct PreviewMessage {
 }
 
 const SEARCH_CONTENT_BUDGET_BYTES: usize = 12_000;
-const DEFAULT_SESSION_SCAN_LIMIT: usize = 300;
+const DEFAULT_SESSION_SCAN_LIMIT: usize = 100;
 const MIN_SESSION_SCAN_LIMIT: usize = 50;
 const MAX_SESSION_SCAN_LIMIT: usize = 10_000;
 
@@ -538,6 +538,7 @@ impl SessionPicker {
                 .and_then(|s| match &s.resume_target {
                     ResumeTarget::JcodeSession { session_id } => Some(session_id.clone()),
                     ResumeTarget::ClaudeCodeSession { session_id } => Some(session_id.clone()),
+                    ResumeTarget::CodexSession { session_id } => Some(session_id.clone()),
                     _ => None,
                 })
         else {
@@ -556,6 +557,12 @@ impl SessionPicker {
             }
             Some(ResumeTarget::ClaudeCodeSession { .. }) => {
                 let Some(preview) = loading::load_claude_code_preview(&session_id) else {
+                    return;
+                };
+                preview
+            }
+            Some(ResumeTarget::CodexSession { .. }) => {
+                let Some(preview) = loading::load_codex_preview(&session_id) else {
                     return;
                 };
                 preview
