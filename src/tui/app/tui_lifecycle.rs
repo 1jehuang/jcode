@@ -978,6 +978,10 @@ impl App {
             // process restarts. The messages are restored, so Claude will get full context.
             self.provider_session_id = None;
             self.session = session;
+            crate::memory::sync_injected_memories(
+                &self.session.id,
+                &self.session.injected_memory_ids(),
+            );
             let provider_messages = self.session.messages_for_provider();
             self.replace_provider_messages(provider_messages);
             // Clear the saved provider_session_id since it's no longer valid

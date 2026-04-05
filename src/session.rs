@@ -90,6 +90,10 @@ pub struct StoredMemoryInjection {
     pub content: String,
     /// Number of memories recalled
     pub count: u32,
+    /// Stable memory IDs included in this injection, used to avoid re-injecting
+    /// the same memories after session resume/reload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_ids: Vec<String>,
     /// Age of memories in milliseconds
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub age_ms: Option<u64>,
@@ -1163,16 +1167,26 @@ impl Session {
         content: String,
         count: u32,
         age_ms: u64,
+        memory_ids: Vec<String>,
     ) {
         self.memory_injections.push(StoredMemoryInjection {
             summary,
             content,
             count,
+            memory_ids,
             age_ms: Some(age_ms),
             before_message: Some(self.messages.len()),
             timestamp: Utc::now(),
         });
         self.mark_memory_injections_append_dirty();
+    }
+
+    pub fn injected_memory_ids(&self) -> Vec<String> {
+        let mut ids = HashSet::new();
+        for injection in &self.memory_injections {
+            ids.extend(injection.memory_ids.iter().cloned());
+        }
+        ids.into_iter().collect()
     }
 
     pub fn record_replay_display_message(
@@ -1711,7 +1725,13 @@ mod tests {
             testing_build: Some("self-dev".to_string()),
             working_git: None,
         });
-        session.record_memory_injection("summary".to_string(), "content".to_string(), 1, 5);
+        session.record_memory_injection(
+            "summary".to_string(),
+            "content".to_string(),
+            1,
+            5,
+            Vec::new(),
+        );
         session.record_replay_display_message("system", Some("Launch".to_string()), "boot");
         session.save().expect("save session");
 

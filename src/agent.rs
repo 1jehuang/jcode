@@ -230,6 +230,7 @@ impl Agent {
         } else {
             agent.session.model = Some(agent.provider.model());
         }
+        agent.sync_memory_dedup_state_from_session();
         agent.seed_compaction_from_session();
         agent.log_env_snapshot("attach");
         crate::telemetry::begin_session(agent.provider.name(), &agent.provider.model());
@@ -255,6 +256,44 @@ impl Agent {
             "seed_compaction_from_session: seeded compaction with {} messages",
             self.session.messages.len()
         ));
+    }
+
+    fn sync_memory_dedup_state_from_session(&self) {
+        crate::memory::sync_injected_memories(
+            &self.session.id,
+            &self.session.injected_memory_ids(),
+        );
+    }
+
+    fn record_memory_injection_in_session(&mut self, memory: &crate::memory::PendingMemory) {
+        let count = memory.count.max(1);
+        let age_ms = memory.computed_at.elapsed().as_millis() as u64;
+        let summary = if count == 1 {
+            "🧠 auto-recalled 1 memory".to_string()
+        } else {
+            format!("🧠 auto-recalled {} memories", count)
+        };
+        let display_prompt = memory.display_prompt.clone().unwrap_or_else(|| {
+            if memory.prompt.trim().is_empty() {
+                "# Memory\n\n## Notes\n1. (empty injection payload)".to_string()
+            } else {
+                memory.prompt.clone()
+            }
+        });
+
+        self.session.record_memory_injection(
+            summary,
+            display_prompt,
+            count as u32,
+            age_ms,
+            memory.memory_ids.clone(),
+        );
+        if let Err(err) = self.session.save() {
+            logging::warn(&format!(
+                "Failed to persist memory injection for session {}: {}",
+                self.session.id, err
+            ));
+        }
     }
 
     fn reset_runtime_state_for_session_change(&mut self) {
@@ -1230,6 +1269,7 @@ impl Agent {
         let mark_active_start = Instant::now();
         self.session.mark_active();
         let mark_active_ms = mark_active_start.elapsed().as_millis();
+        self.sync_memory_dedup_state_from_session();
 
         logging::info(&format!(
             "restore_session: loaded session {} with {} messages, calling seed_compaction",
@@ -1535,6 +1575,7 @@ impl Agent {
                 let memory_count = memory.count.max(1);
                 let age_ms = memory.computed_at.elapsed().as_millis() as u64;
                 crate::memory::record_injected_prompt(&memory.prompt, memory_count, age_ms);
+                self.record_memory_injection_in_session(memory);
                 logging::info(&format!(
                     "Memory injected as message ({} chars)",
                     memory.prompt.len()
@@ -2323,6 +2364,7 @@ impl Agent {
                     memory_count,
                     computed_age_ms,
                 );
+                self.record_memory_injection_in_session(memory);
                 let _ = event_tx.send(ServerEvent::MemoryInjected {
                     count: memory_count,
                     prompt: memory.prompt.clone(),
@@ -3093,6 +3135,7 @@ impl Agent {
                     memory_count,
                     computed_age_ms,
                 );
+                self.record_memory_injection_in_session(memory);
                 let _ = event_tx.send(ServerEvent::MemoryInjected {
                     count: memory_count,
                     prompt: memory.prompt.clone(),
@@ -4395,6 +4438,47 @@ mod tests {
         assert_eq!(agent.last_usage.input_tokens, 0);
         assert_eq!(agent.last_usage.output_tokens, 0);
         assert!(agent.locked_tools.is_none());
+    }
+
+    #[tokio::test]
+    async fn restore_session_rehydrates_injected_memory_ids() {
+        let _guard = crate::storage::lock_test_env();
+        crate::memory::clear_all_pending_memory();
+
+        let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+        let registry = Registry::new(provider.clone()).await;
+        let mut agent = Agent::new(provider, registry);
+
+        let mut restored_session = crate::session::Session::create_with_id(
+            "session_restore_memory_dedup".to_string(),
+            None,
+            None,
+        );
+        restored_session.record_memory_injection(
+            "🧠 auto-recalled 1 memory".to_string(),
+            "persisted memory".to_string(),
+            1,
+            5,
+            vec!["memory-persisted".to_string()],
+        );
+        restored_session.save().expect("save restored session");
+
+        crate::memory::mark_memories_injected(&restored_session.id, &["memory-stale".to_string()]);
+
+        agent
+            .restore_session(&restored_session.id)
+            .expect("restore session should succeed");
+
+        assert!(crate::memory::is_memory_injected(
+            &restored_session.id,
+            "memory-persisted"
+        ));
+        assert!(
+            !crate::memory::is_memory_injected(&restored_session.id, "memory-stale"),
+            "restore should replace stale in-memory dedup state with persisted session data"
+        );
+
+        crate::memory::clear_all_pending_memory();
     }
 
     #[tokio::test]

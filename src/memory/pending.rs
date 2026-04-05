@@ -159,6 +159,24 @@ pub fn mark_memories_injected(session_id: &str, ids: &[String]) {
     }
 }
 
+/// Replace injected memory tracking for a session with the provided IDs.
+/// Used when restoring persisted session state so the same logical session does
+/// not re-inject memories after reload/resume.
+pub fn sync_injected_memories(session_id: &str, ids: &[String]) {
+    if let Ok(mut guard) = INJECTED_MEMORY_IDS.lock() {
+        let outer = guard.get_or_insert_with(HashMap::new);
+        if ids.is_empty() {
+            outer.remove(session_id);
+            return;
+        }
+
+        outer.insert(
+            session_id.to_string(),
+            ids.iter().cloned().collect::<HashSet<_>>(),
+        );
+    }
+}
+
 /// Check if a memory ID has already been injected for a session.
 pub fn is_memory_injected(session_id: &str, id: &str) -> bool {
     if let Ok(guard) = INJECTED_MEMORY_IDS.lock() {

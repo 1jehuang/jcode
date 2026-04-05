@@ -57,6 +57,7 @@ impl App {
                     pending.display_prompt.as_deref(),
                     pending.count,
                     age_ms,
+                    pending.memory_ids.clone(),
                 );
             }
 
@@ -617,6 +618,7 @@ impl App {
                     pending.display_prompt.as_deref(),
                     pending.count,
                     age_ms,
+                    pending.memory_ids.clone(),
                 );
             }
 
@@ -1602,6 +1604,7 @@ impl App {
         display_prompt: Option<&str>,
         count: usize,
         age_ms: u64,
+        memory_ids: Vec<String>,
     ) {
         let count = count.max(1);
         let plural = if count == 1 { "memory" } else { "memories" };
@@ -1627,7 +1630,14 @@ impl App {
             display_prompt.clone(),
             count as u32,
             age_ms,
+            memory_ids,
         );
+        if let Err(err) = self.session.save() {
+            crate::logging::warn(&format!(
+                "Failed to persist memory injection for session {}: {}",
+                self.session.id, err
+            ));
+        }
         self.push_display_message(DisplayMessage::memory(summary, display_prompt));
         self.set_status_notice(format!("🧠 {} {} injected", count, plural));
     }
