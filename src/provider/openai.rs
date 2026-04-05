@@ -294,6 +294,49 @@ async fn emit_status_detail(tx: &mpsc::Sender<Result<StreamEvent>>, detail: impl
         .await;
 }
 
+fn format_status_duration(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    if secs >= 3600 {
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        format!("{}h {}m", hours, mins)
+    } else if secs >= 60 {
+        let mins = secs / 60;
+        let rem_secs = secs % 60;
+        format!("{}m {}s", mins, rem_secs)
+    } else {
+        format!("{}s", secs)
+    }
+}
+
+fn summarize_websocket_fallback_reason(error: &str) -> &'static str {
+    let error = error.to_ascii_lowercase();
+    if error.contains("connect timed out") {
+        "connect timeout"
+    } else if error.contains("did not emit api activity within")
+        || error.contains("timed out waiting for first websocket activity")
+    {
+        "first response timeout"
+    } else if error.contains("timed out waiting for next websocket activity")
+        || error.contains("did not complete within")
+    {
+        "stream timeout"
+    } else if error.contains("upgrade required")
+        || error.contains("server requested fallback")
+        || error.contains(WEBSOCKET_FALLBACK_NOTICE)
+    {
+        "server requested https"
+    } else if error.contains("failed to connect websocket stream") {
+        "connect failed"
+    } else if error.contains("ended before response.completed")
+        || error.contains("closed before response.completed")
+    {
+        "stream closed early"
+    } else {
+        "websocket error"
+    }
+}
+
 async fn ensure_persistent_ws_is_healthy(state: &mut PersistentWsState) -> Result<bool, String> {
     let idle_for = state.last_activity_at.elapsed();
     if persistent_ws_idle_requires_reconnect(idle_for) {
@@ -960,6 +1003,11 @@ impl Provider for OpenAIProvider {
                                     model_for_transport,
                                     remaining.as_secs()
                                 ));
+                                emit_status_detail(
+                                    &tx,
+                                    format!("https cooldown {}", format_status_duration(remaining)),
+                                )
+                                .await;
                                 OpenAITransport::HTTPS
                             } else {
                                 OpenAITransport::WebSocket
@@ -980,11 +1028,6 @@ impl Provider for OpenAIProvider {
                 ));
 
                 let use_websocket = matches!(transport, OpenAITransport::WebSocket);
-                if !use_websocket && force_https_for_request {
-                    emit_status_detail(&tx, "https fallback").await;
-                } else if !use_websocket {
-                    emit_status_detail(&tx, "https").await;
-                }
                 let result = if use_websocket {
                     stream_response_websocket_persistent(
                         Arc::clone(&credentials),
@@ -999,6 +1042,22 @@ impl Provider for OpenAIProvider {
                         client.clone(),
                         Arc::clone(&credentials),
                         request.clone(),
+                        if force_https_for_request {
+                            let reason = last_error
+                                .as_ref()
+                                .map(|error: &anyhow::Error| {
+                                    summarize_websocket_fallback_reason(&error.to_string())
+                                })
+                                .unwrap_or("websocket error");
+                            format!("https fallback: {}", reason)
+                        } else if let Some(remaining) =
+                            websocket_cooldown_remaining(&websocket_cooldowns, &model_for_transport)
+                                .await
+                        {
+                            format!("https cooldown {}", format_status_duration(remaining))
+                        } else {
+                            "https".to_string()
+                        },
                         tx.clone(),
                     )
                     .await
@@ -1018,11 +1077,12 @@ impl Provider for OpenAIProvider {
                     }
                     Err(OpenAIStreamFailure::FallbackToHttps(error)) => {
                         let elapsed_ms = attempt_started.elapsed().as_millis();
+                        let reason = summarize_websocket_fallback_reason(&error.to_string());
                         crate::logging::warn(&format!(
                             "WebSocket fallback after {}ms: {}",
                             elapsed_ms, error
                         ));
-                        emit_status_detail(&tx, "https fallback").await;
+                        emit_status_detail(&tx, format!("https fallback: {}", reason)).await;
                         force_https_for_request = true;
                         skip_backoff_once = true;
                         if matches!(transport_mode, OpenAITransportMode::Auto) {
@@ -1442,6 +1502,7 @@ async fn stream_response(
     client: Client,
     credentials: Arc<RwLock<CodexCredentials>>,
     request: Value,
+    initial_status_detail: String,
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<(), OpenAIStreamFailure> {
     use crate::message::ConnectionPhase;
@@ -1450,7 +1511,7 @@ async fn stream_response(
         "OpenAI limit diag: starting fresh HTTPS request usage=({})",
         usage_snapshot.diagnostic_fields()
     ));
-    emit_status_detail(&tx, "https").await;
+    emit_status_detail(&tx, initial_status_detail).await;
     emit_connection_phase(&tx, ConnectionPhase::Authenticating).await;
     let access_token = openai_access_token(&credentials).await?;
     let creds = credentials.read().await;
@@ -3837,6 +3898,43 @@ mod tests {
     fn test_websocket_activity_timeout_kind_labels_first_and_next() {
         assert_eq!(websocket_activity_timeout_kind(false), "first");
         assert_eq!(websocket_activity_timeout_kind(true), "next");
+    }
+
+    #[test]
+    fn test_format_status_duration_uses_compact_human_labels() {
+        assert_eq!(format_status_duration(Duration::from_secs(9)), "9s");
+        assert_eq!(format_status_duration(Duration::from_secs(125)), "2m 5s");
+        assert_eq!(format_status_duration(Duration::from_secs(7260)), "2h 1m");
+    }
+
+    #[test]
+    fn test_summarize_websocket_fallback_reason_classifies_common_failures() {
+        assert_eq!(
+            summarize_websocket_fallback_reason("WebSocket connect timed out after 8s"),
+            "connect timeout"
+        );
+        assert_eq!(
+            summarize_websocket_fallback_reason(
+                "WebSocket stream timed out waiting for first websocket activity (8s)"
+            ),
+            "first response timeout"
+        );
+        assert_eq!(
+            summarize_websocket_fallback_reason(
+                "WebSocket stream timed out waiting for next websocket activity (300s)"
+            ),
+            "stream timeout"
+        );
+        assert_eq!(
+            summarize_websocket_fallback_reason("server requested fallback"),
+            "server requested https"
+        );
+        assert_eq!(
+            summarize_websocket_fallback_reason(
+                "WebSocket stream closed before response.completed"
+            ),
+            "stream closed early"
+        );
     }
 
     #[test]
