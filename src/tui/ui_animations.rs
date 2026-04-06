@@ -14,7 +14,7 @@ const LUMINANCE: &[u8] = b".,-~:;=!*#$@";
 
 const STARTUP_VARIANTS: &[&str] = &["donut", "globe", "cube", "octahedron", "lorenz", "rabbit"];
 
-const IDLE_VARIANTS: &[&str] = &["donut", "knot", "three_rings", "black_hole"];
+const IDLE_VARIANTS: &[&str] = &["donut", "knot", "three_rings"];
 
 struct RenderBuffers {
     output: Vec<Vec<u8>>,
@@ -1649,6 +1649,11 @@ mod tests {
     }
 
     #[test]
+    fn idle_variants_exclude_black_hole() {
+        assert!(!IDLE_VARIANTS.contains(&"black_hole"));
+    }
+
+    #[test]
     fn disabling_mobius_also_disables_knot_alias() {
         let disabled = expand_disabled_animation_names(["mobius"]);
         assert!(disabled.contains("mobius"));
@@ -1664,9 +1669,9 @@ mod tests {
 
     #[test]
     fn variant_selection_avoids_disabled_entries_when_possible() {
-        let disabled = expand_disabled_animation_names(["donut", "black_hole"]);
+        let disabled = expand_disabled_animation_names(["donut", "three_rings"]);
         let variant = choose_animation_variant_from_disabled(IDLE_VARIANTS, 7, &disabled);
         assert_ne!(variant, "donut");
-        assert_ne!(variant, "black_hole");
+        assert_ne!(variant, "three_rings");
     }
 }
