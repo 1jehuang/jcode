@@ -1155,13 +1155,17 @@ fn prepare_streaming_cached(
 
     let centered = app.centered_mode();
     markdown::set_center_code_blocks(centered);
+    let display_width = width.saturating_sub(4) as usize;
 
     let content_width = if centered {
-        (width.saturating_sub(4) as usize).min(96).max(1)
+        display_width.min(96).max(1)
     } else {
-        width.saturating_sub(4) as usize
+        display_width
     };
-    let md_lines = app.render_streaming_markdown(content_width);
+    let mut md_lines = app.render_streaming_markdown(content_width);
+    if centered {
+        markdown::recenter_structured_blocks_for_display(&mut md_lines, display_width);
+    }
     let align = if centered {
         ratatui::layout::Alignment::Center
     } else {
@@ -1190,6 +1194,7 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
     let mut copy_targets: Vec<RawCopyTarget> = Vec::new();
     let centered = app.centered_mode();
     markdown::set_center_code_blocks(centered);
+    let display_width = width.saturating_sub(4) as usize;
     let mut prompt_num = 0usize;
     let total_prompts = app
         .display_messages()
@@ -1516,11 +1521,14 @@ fn prepare_body(app: &dyn TuiState, width: u16, include_streaming: bool) -> Prep
             line_copy_offsets.push(0);
         }
         let content_width = if centered {
-            (width.saturating_sub(4) as usize).min(96).max(1)
+            display_width.min(96).max(1)
         } else {
-            width.saturating_sub(4) as usize
+            display_width
         };
-        let md_lines = app.render_streaming_markdown(content_width);
+        let mut md_lines = app.render_streaming_markdown(content_width);
+        if centered {
+            markdown::recenter_structured_blocks_for_display(&mut md_lines, display_width);
+        }
         let align = default_message_alignment("assistant", centered);
         for line in md_lines {
             lines.push(align_if_unset(line, align));

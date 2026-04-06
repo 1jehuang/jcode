@@ -5246,6 +5246,62 @@ mod tests {
     }
 
     #[test]
+    fn test_prepare_messages_centered_streaming_recenters_structured_markdown_like_final_render() {
+        let content = "- stream-centering-alpha\n- stream-centering-beta";
+
+        let streaming = TestState {
+            centered_mode: true,
+            status: ProcessingStatus::Streaming,
+            streaming_text: content.to_string(),
+            anim_elapsed: 10.0,
+            ..Default::default()
+        };
+        let finalized = TestState {
+            centered_mode: true,
+            display_messages: vec![DisplayMessage::assistant(content)],
+            ..Default::default()
+        };
+
+        let streaming_prepared = prepare::prepare_messages(&streaming, 120, 20);
+        let finalized_prepared = prepare::prepare_messages(&finalized, 120, 20);
+
+        let streaming_bullets: Vec<String> = streaming_prepared
+            .wrapped_lines
+            .iter()
+            .map(extract_line_text)
+            .filter(|line| {
+                line.contains("stream-centering-alpha") || line.contains("stream-centering-beta")
+            })
+            .collect();
+        let finalized_bullets: Vec<String> = finalized_prepared
+            .wrapped_lines
+            .iter()
+            .map(extract_line_text)
+            .filter(|line| {
+                line.contains("stream-centering-alpha") || line.contains("stream-centering-beta")
+            })
+            .collect();
+
+        assert_eq!(
+            streaming_bullets.len(),
+            2,
+            "streaming={streaming_bullets:?}"
+        );
+        assert_eq!(
+            streaming_bullets, finalized_bullets,
+            "streaming structured markdown should match finalized centering"
+        );
+        assert!(
+            streaming_bullets[0]
+                .chars()
+                .take_while(|ch| *ch == ' ')
+                .count()
+                > 40,
+            "expected centered streaming list to keep left padding inside the centered block: {streaming_bullets:?}"
+        );
+    }
+
+    #[test]
     fn test_render_tool_message_batch_nested_subcall_params_still_render() {
         let msg = DisplayMessage {
             role: "tool".to_string(),
