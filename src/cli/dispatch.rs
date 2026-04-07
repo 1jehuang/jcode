@@ -113,6 +113,9 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         }) => {
             setup_hints::run_setup_hotkey(listen_macos_hotkey)?;
         }
+        Some(Command::SetupLauncher) => {
+            setup_hints::run_setup_launcher()?;
+        }
         Some(Command::Browser { action }) => {
             commands::run_browser(&action).await?;
         }

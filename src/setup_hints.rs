@@ -8,11 +8,11 @@
 //! State is persisted in `~/.jcode/setup_hints.json`.
 
 use crate::storage;
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 use anyhow::Context;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 use std::fmt;
 #[cfg(any(windows, target_os = "macos"))]
 use std::io::Write;
@@ -94,7 +94,7 @@ impl SetupHintsState {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MacTerminalKind {
     Ghostty,
@@ -107,7 +107,7 @@ enum MacTerminalKind {
     Unknown,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 impl MacTerminalKind {
     fn label(self) -> &'static str {
         match self {
@@ -149,32 +149,32 @@ impl MacTerminalKind {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 impl fmt::Display for MacTerminalKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.label())
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MacTerminalPreference {
     terminal: String,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn mac_terminal_pref_path() -> Result<PathBuf> {
     Ok(storage::jcode_dir()?.join("preferred_terminal.json"))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn load_preferred_macos_terminal() -> Option<MacTerminalKind> {
     let path = mac_terminal_pref_path().ok()?;
     let pref: MacTerminalPreference = storage::read_json(&path).ok()?;
     MacTerminalKind::from_cli_value(&pref.terminal)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn save_preferred_macos_terminal(terminal: MacTerminalKind) -> Result<()> {
     let path = mac_terminal_pref_path()?;
     storage::write_json(
@@ -185,12 +185,12 @@ fn save_preferred_macos_terminal(terminal: MacTerminalKind) -> Result<()> {
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn effective_macos_terminal() -> MacTerminalKind {
     load_preferred_macos_terminal().unwrap_or_else(detect_macos_terminal)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn detect_macos_terminal() -> MacTerminalKind {
     let term_program = std::env::var("TERM_PROGRAM")
         .unwrap_or_default()
@@ -222,7 +222,7 @@ fn detect_macos_terminal() -> MacTerminalKind {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn is_ghostty_installed() -> bool {
     if std::path::Path::new("/Applications/Ghostty.app").exists() {
         return true;
@@ -315,12 +315,12 @@ fn find_alacritty_path() -> Option<String> {
     None
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn mac_hotkey_support_dir() -> Result<PathBuf> {
     Ok(storage::jcode_dir()?.join("hotkey"))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn mac_hotkey_launch_agent_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Could not find home directory")?;
     Ok(home
@@ -329,47 +329,58 @@ fn mac_hotkey_launch_agent_path() -> Result<PathBuf> {
         .join("com.jcode.hotkey.plist"))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn escape_shell_single_quotes(input: &str) -> String {
     input.replace('\'', r#"'\''"#)
 }
 
-#[cfg(target_os = "macos")]
-fn launch_script_for_macos_terminal(terminal: MacTerminalKind, exe_path: &str) -> String {
+#[cfg(any(test, target_os = "macos"))]
+fn escape_applescript_text(input: &str) -> String {
+    input.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn paused_jcode_shell_command(exe_path: &str) -> String {
     let escaped_exe = escape_shell_single_quotes(exe_path);
+    format!(
+        "if [ ! -x '{exe}' ]; then printf 'jcode executable not found.\\n'; exit 127; fi; '{exe}'; status=$?; if [ \"$status\" -ne 0 ]; then printf '\\nJcode exited with status %s.\\n' \"$status\"; printf 'Press Enter to close... '; read -r _; fi; exit \"$status\"",
+        exe = escaped_exe,
+    )
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn launch_command_for_macos_terminal(terminal: MacTerminalKind, shell_command: &str) -> String {
+    let escaped_shell = escape_shell_single_quotes(shell_command);
     match terminal {
         MacTerminalKind::Ghostty => {
-            format!(
-                "#!/bin/bash\nopen -na Ghostty --args -e '{}'\n",
-                escaped_exe
-            )
+            format!("/usr/bin/open -na Ghostty --args -e /bin/bash -lc '{escaped_shell}'")
         }
         MacTerminalKind::Alacritty => {
-            format!(
-                "#!/bin/bash\nopen -na Alacritty --args -e '{}'\n",
-                escaped_exe
-            )
+            format!("/usr/bin/open -na Alacritty --args -e /bin/bash -lc '{escaped_shell}'")
         }
         MacTerminalKind::WezTerm => format!(
-            "#!/bin/bash\nopen -na WezTerm --args start --always-new-process -- '{}'\n",
-            escaped_exe
+            "/usr/bin/open -na WezTerm --args start --always-new-process -- /bin/bash -lc '{escaped_shell}'"
         ),
         MacTerminalKind::Iterm2 => format!(
-            "#!/bin/bash\nosascript <<'APPLESCRIPT'\ntell application \"iTerm2\"\n    create window with default profile command \"{}\"\n    activate\nend tell\nAPPLESCRIPT\n",
-            exe_path.replace('"', r#"\""#)
+            "/usr/bin/osascript <<'APPLESCRIPT'\ntell application \"iTerm2\"\n    create window with default profile command \"{}\"\n    activate\nend tell\nAPPLESCRIPT",
+            escape_applescript_text(shell_command)
         ),
-        MacTerminalKind::Warp => {
-            format!("#!/bin/bash\nopen -na Warp --args '{}'\n", escaped_exe)
-        }
-        MacTerminalKind::Vscode => format!(
-            "#!/bin/bash\nopen -na 'Visual Studio Code' --args --new-window --command 'workbench.action.terminal.new' '{}'\n",
-            escaped_exe
-        ),
-        MacTerminalKind::AppleTerminal | MacTerminalKind::Unknown => format!(
-            "#!/bin/bash\nosascript <<'APPLESCRIPT'\ntell application \"Terminal\"\n    activate\n    do script \"{}\"\nend tell\nAPPLESCRIPT\n",
-            exe_path.replace('"', r#"\""#)
+        MacTerminalKind::AppleTerminal
+        | MacTerminalKind::Warp
+        | MacTerminalKind::Vscode
+        | MacTerminalKind::Unknown => format!(
+            "/usr/bin/osascript <<'APPLESCRIPT'\ntell application \"Terminal\"\n    activate\n    do script \"{}\"\nend tell\nAPPLESCRIPT",
+            escape_applescript_text(shell_command)
         ),
     }
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn launch_script_for_macos_terminal(terminal: MacTerminalKind, shell_command: &str) -> String {
+    format!(
+        "#!/bin/bash\nset -e\n{}\n",
+        launch_command_for_macos_terminal(terminal, shell_command)
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -382,11 +393,12 @@ fn install_macos_hotkey_listener(
 
     let exe = std::env::current_exe()?;
     let exe_path = exe.to_string_lossy().into_owned();
+    let shell_command = paused_jcode_shell_command(&exe_path);
 
     let launch_script_path = hotkey_dir.join("launch_jcode.sh");
     std::fs::write(
         &launch_script_path,
-        launch_script_for_macos_terminal(terminal, &exe_path),
+        launch_script_for_macos_terminal(terminal, &shell_command),
     )?;
     #[cfg(unix)]
     {
@@ -1199,6 +1211,170 @@ pub fn maybe_show_setup_hints() -> Option<StartupHints> {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn macos_app_launcher_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("Could not find home directory")?;
+    Ok(home.join("Applications").join("Jcode.app"))
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn macos_launcher_script(
+    terminal: MacTerminalKind,
+    exe_path: &str,
+    app_dir: &std::path::Path,
+) -> String {
+    let app_dir_escaped = escape_shell_single_quotes(&app_dir.to_string_lossy());
+    let exe_path_escaped = escape_shell_single_quotes(exe_path);
+    let shell_command = paused_jcode_shell_command(exe_path);
+    let launch_command = launch_command_for_macos_terminal(terminal, &shell_command);
+    let missing_message = escape_applescript_text(&format!(
+        "Jcode could not launch because the executable was not found.\n\nExpected path:\n{}\n\nTry reinstalling jcode or rerun:\njcode setup-launcher",
+        exe_path
+    ));
+    let terminal_failure_message = escape_applescript_text(&format!(
+        "Jcode could not open {}.\n\nTry rerunning:\njcode setup-launcher\n\nLauncher log:\n~/.jcode/launcher/macos-launcher.log",
+        terminal.label()
+    ));
+
+    format!(
+        r#"#!/bin/bash
+set -u
+
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+LOG_DIR="$HOME/.jcode/launcher"
+LOG_FILE="$LOG_DIR/macos-launcher.log"
+mkdir -p "$LOG_DIR" >/dev/null 2>&1 || true
+
+show_missing_executable() {{
+  /usr/bin/osascript <<'APPLESCRIPT' >/dev/null 2>&1 || true
+display alert "Jcode launch failed" message "{missing_message}" as critical
+APPLESCRIPT
+}}
+
+show_terminal_launch_failure() {{
+  /usr/bin/osascript <<'APPLESCRIPT' >/dev/null 2>&1 || true
+display alert "Jcode launch failed" message "{terminal_failure_message}" as critical
+APPLESCRIPT
+}}
+
+if [ ! -x '{exe_path_escaped}' ]; then
+  printf '[%s] missing executable: {exe_path}\n' "$(date '+%Y-%m-%d %H:%M:%S')" >>"$LOG_FILE" 2>&1
+  show_missing_executable
+  exit 1
+fi
+
+{launch_command} >>"$LOG_FILE" 2>&1
+status=$?
+if [ "$status" -ne 0 ]; then
+  printf '[%s] terminal launch failed for {terminal_name} (status %s)\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$status" >>"$LOG_FILE" 2>&1
+  show_terminal_launch_failure
+  exit "$status"
+fi
+
+/usr/bin/touch '{app_dir_escaped}' >/dev/null 2>&1 || true
+exit 0
+"#,
+        missing_message = missing_message,
+        terminal_failure_message = terminal_failure_message,
+        exe_path = exe_path,
+        exe_path_escaped = exe_path_escaped,
+        terminal_name = terminal.label(),
+        launch_command = launch_command,
+        app_dir_escaped = app_dir_escaped,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn install_macos_app_launcher() -> Result<(PathBuf, MacTerminalKind)> {
+    let app_dir = macos_app_launcher_dir()?;
+    let contents_dir = app_dir.join("Contents");
+    let macos_dir = contents_dir.join("MacOS");
+    std::fs::create_dir_all(&macos_dir)?;
+
+    let exe = std::env::current_exe()?;
+    let exe_path = exe.to_string_lossy().into_owned();
+    let terminal = effective_macos_terminal();
+    let launcher_path = macos_dir.join("jcode-launcher");
+    let launcher_script = macos_launcher_script(terminal, &exe_path, &app_dir);
+    std::fs::write(&launcher_path, launcher_script)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&launcher_path, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    let info_plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Jcode</string>
+    <key>CFBundleDisplayName</key>
+    <string>Jcode</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.jcode.launcher</string>
+    <key>CFBundleVersion</key>
+    <string>{version}</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{version}</string>
+    <key>CFBundleExecutable</key>
+    <string>jcode-launcher</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.developer-tools</string>
+</dict>
+</plist>
+"#,
+        version = env!("JCODE_VERSION")
+    );
+    std::fs::write(contents_dir.join("Info.plist"), info_plist)?;
+
+    let _ = std::process::Command::new("touch").arg(&app_dir).status();
+    save_preferred_macos_terminal(terminal)?;
+    Ok((app_dir, terminal))
+}
+
+/// Manual `jcode setup-launcher` command.
+pub fn run_setup_launcher() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut state = SetupHintsState::load();
+        eprintln!("\x1b[1mjcode setup-launcher\x1b[0m");
+        eprintln!();
+
+        match install_macos_app_launcher() {
+            Ok((app_dir, terminal)) => {
+                state.desktop_shortcut_created = true;
+                let _ = state.save();
+                eprintln!(
+                    "  \x1b[32m✓\x1b[0m Installed launcher: {}",
+                    app_dir.display()
+                );
+                eprintln!(
+                    "  \x1b[32m✓\x1b[0m Spotlight/Launchpad/Dock will launch jcode in {}",
+                    terminal.label()
+                );
+                eprintln!();
+                eprintln!("  Tip: pin Jcode.app to your Dock or launch it with Cmd+Space.");
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("  \x1b[31m✗\x1b[0m Failed: {}", e);
+                anyhow::bail!("macOS launcher setup failed: {}", e);
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        eprintln!("Launcher setup is currently only supported on macOS.");
+        Ok(())
+    }
+}
+
 /// Create a desktop shortcut/launcher for jcode.
 ///
 /// - Windows: creates a .lnk shortcut on the Desktop
@@ -1251,55 +1427,7 @@ Write-Output "OK"
 
     #[cfg(target_os = "macos")]
     {
-        let home = dirs::home_dir().context("Could not find home directory")?;
-        let apps_dir = home.join("Applications");
-        std::fs::create_dir_all(&apps_dir)?;
-
-        let app_dir = apps_dir.join("jcode.app");
-        let contents_dir = app_dir.join("Contents");
-        let macos_dir = contents_dir.join("MacOS");
-        std::fs::create_dir_all(&macos_dir)?;
-
-        let exe = std::env::current_exe()?;
-        let exe_path = exe.to_string_lossy();
-
-        let terminal = detect_macos_terminal();
-        let launch_script = match terminal {
-            MacTerminalKind::Ghostty => {
-                format!("#!/bin/bash\nopen -a Ghostty --args -e \"{}\"\n", exe_path)
-            }
-            MacTerminalKind::Alacritty => format!("#!/bin/bash\nalacritty -e \"{}\"\n", exe_path),
-            _ => format!("#!/bin/bash\nopen -a Terminal \"{}\"\n", exe_path),
-        };
-
-        let launcher_path = macos_dir.join("jcode");
-        std::fs::write(&launcher_path, &launch_script)?;
-
-        let _ = std::process::Command::new("chmod")
-            .args(["+x", &launcher_path.to_string_lossy()])
-            .output();
-
-        let info_plist = r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleName</key>
-    <string>jcode</string>
-    <key>CFBundleDisplayName</key>
-    <string>jcode</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.jcode.app</string>
-    <key>CFBundleVersion</key>
-    <string>1.0</string>
-    <key>CFBundleExecutable</key>
-    <string>jcode</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-</dict>
-</plist>
-"#;
-
-        std::fs::write(contents_dir.join("Info.plist"), info_plist)?;
+        let (app_dir, _terminal) = install_macos_app_launcher()?;
 
         state.desktop_shortcut_created = true;
         let _ = state.save();
@@ -1386,5 +1514,26 @@ mod tests {
         let (_, message) = hints.display_message.expect("expected display message");
         assert!(message.contains("Alt+C"));
         assert!(message.contains("Alt+;"));
+    }
+
+    #[test]
+    fn paused_jcode_shell_command_keeps_failures_visible() {
+        let command = paused_jcode_shell_command("/tmp/jcode");
+        assert!(command.contains("Press Enter to close"));
+        assert!(command.contains("Jcode exited with status"));
+        assert!(command.contains("jcode executable not found"));
+    }
+
+    #[test]
+    fn macos_launcher_script_shows_alerts_and_uses_terminal_launcher() {
+        let script = macos_launcher_script(
+            MacTerminalKind::Ghostty,
+            "/tmp/jcode",
+            std::path::Path::new("/Users/test/Applications/Jcode.app"),
+        );
+        assert!(script.contains("display alert \"Jcode launch failed\""));
+        assert!(script.contains("jcode setup-launcher"));
+        assert!(script.contains("/usr/bin/open -na Ghostty"));
+        assert!(script.contains("macos-launcher.log"));
     }
 }

@@ -209,6 +209,9 @@ pub(crate) enum Command {
         listen_macos_hotkey: bool,
     },
 
+    /// Install a launcher so jcode appears in your app launcher
+    SetupLauncher,
+
     /// Firefox Agent Bridge - browser automation setup and management
     Browser {
         /// Subcommand (setup, status)
