@@ -689,10 +689,12 @@ fn md_dim_color() -> Color {
 }
 const RULE_LEN: usize = 24;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ListRenderState {
     ordered: bool,
     next_index: u64,
+    item_line_starts: Vec<usize>,
+    max_marker_digits: usize,
 }
 
 #[derive(Debug, Default)]
@@ -890,6 +892,92 @@ fn strip_leading_raw_padding(line: &mut Line<'static>, trim_width: usize) {
         let keep = span_width.saturating_sub(remaining);
         line.spans[0].content = " ".repeat(keep).into();
         remaining = 0;
+    }
+}
+
+fn blockquote_gutter_width(text: &str) -> (usize, &str) {
+    let mut rest = text;
+    let mut width = 0usize;
+    while let Some(next) = rest.strip_prefix("│ ") {
+        width += UnicodeWidthStr::width("│ ");
+        rest = next;
+    }
+    (width, rest)
+}
+
+fn ordered_marker_components(text: &str) -> Option<(usize, usize)> {
+    let indent_width = text.chars().take_while(|ch| *ch == ' ').count();
+    let suffix = text.get(indent_width..)?;
+    let digit_count = suffix.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if digit_count == 0 {
+        return None;
+    }
+    let rest = suffix.get(digit_count..)?;
+    rest.strip_prefix(". ")?;
+    Some((indent_width, digit_count))
+}
+
+fn ordered_marker_info(line: &Line<'_>) -> Option<(usize, usize, usize)> {
+    let plain = line_plain_text(line);
+    let leading_width = plain.chars().take_while(|ch| ch.is_whitespace()).count();
+    let rest = plain.get(leading_width..)?;
+    let (gutter_width, rest) = blockquote_gutter_width(rest);
+    let (indent_width, digit_count) = ordered_marker_components(rest)?;
+    Some((leading_width + gutter_width, indent_width, digit_count))
+}
+
+fn pad_ordered_marker_line(
+    line: &mut Line<'static>,
+    marker_prefix_width: usize,
+    indent_width: usize,
+    extra_pad: usize,
+) {
+    if extra_pad == 0 {
+        return;
+    }
+
+    let mut consumed_width = 0usize;
+    for span in &mut line.spans {
+        let span_width = UnicodeWidthStr::width(span.content.as_ref());
+        if consumed_width + span_width <= marker_prefix_width {
+            consumed_width += span_width;
+            continue;
+        }
+
+        let content = span.content.as_ref();
+        let indent_prefix = " ".repeat(indent_width);
+        if let Some(rest) = content.strip_prefix(&indent_prefix) {
+            let digit_count = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+            if digit_count > 0 {
+                let mut updated = indent_prefix;
+                updated.push_str(&" ".repeat(extra_pad));
+                updated.push_str(rest);
+                span.content = updated.into();
+            }
+        }
+        break;
+    }
+}
+
+fn align_ordered_list_markers(
+    lines: &mut [Line<'static>],
+    item_starts: &[usize],
+    max_digits: usize,
+) {
+    if max_digits <= 1 {
+        return;
+    }
+
+    for &line_idx in item_starts {
+        let Some(line) = lines.get_mut(line_idx) else {
+            continue;
+        };
+        let Some((marker_prefix_width, indent_width, digit_count)) = ordered_marker_info(line)
+        else {
+            continue;
+        };
+        let extra_pad = max_digits.saturating_sub(digit_count);
+        pad_ordered_marker_line(line, marker_prefix_width, indent_width, extra_pad);
     }
 }
 
@@ -1408,9 +1496,12 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
 
             Event::Start(Tag::List(start)) => {
                 enter_centered_structured_block(&mut centered_blocks, lines.len());
+                let start_index = start.unwrap_or(1);
                 let state = ListRenderState {
                     ordered: start.is_some(),
-                    next_index: start.unwrap_or(1),
+                    next_index: start_index,
+                    item_line_starts: Vec::new(),
+                    max_marker_digits: start_index.to_string().len(),
                 };
                 list_stack.push(state);
             }
@@ -1425,7 +1516,15 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                         in_footnote_definition,
                     ),
                 );
-                list_stack.pop();
+                if let Some(state) = list_stack.pop() {
+                    if center_code_blocks() && state.ordered {
+                        align_ordered_list_markers(
+                            &mut lines,
+                            &state.item_line_starts,
+                            state.max_marker_digits,
+                        );
+                    }
+                }
                 exit_centered_structured_block(&mut centered_blocks, lines.len());
                 if blockquote_depth == 0
                     && list_stack.is_empty()
@@ -1975,12 +2074,16 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                     ),
                 );
                 ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                let item_line_start = lines.len();
                 let depth = list_stack.len().saturating_sub(1);
                 let indent = "  ".repeat(depth);
                 let marker = if let Some(state) = list_stack.last_mut() {
                     if state.ordered {
                         let idx = state.next_index;
                         state.next_index = state.next_index.saturating_add(1);
+                        state.max_marker_digits =
+                            state.max_marker_digits.max(idx.to_string().len());
+                        state.item_line_starts.push(item_line_start);
                         format!("{}{}. ", indent, idx)
                     } else {
                         format!("{}• ", indent)
@@ -2660,9 +2763,12 @@ pub fn render_markdown_lazy(
 
             Event::Start(Tag::List(start)) => {
                 enter_centered_structured_block(&mut centered_blocks, lines.len());
+                let start_index = start.unwrap_or(1);
                 let state = ListRenderState {
                     ordered: start.is_some(),
-                    next_index: start.unwrap_or(1),
+                    next_index: start_index,
+                    item_line_starts: Vec::new(),
+                    max_marker_digits: start_index.to_string().len(),
                 };
                 list_stack.push(state);
             }
@@ -2677,7 +2783,15 @@ pub fn render_markdown_lazy(
                         in_footnote_definition,
                     ),
                 );
-                list_stack.pop();
+                if let Some(state) = list_stack.pop() {
+                    if center_code_blocks() && state.ordered {
+                        align_ordered_list_markers(
+                            &mut lines,
+                            &state.item_line_starts,
+                            state.max_marker_digits,
+                        );
+                    }
+                }
                 exit_centered_structured_block(&mut centered_blocks, lines.len());
                 if blockquote_depth == 0
                     && list_stack.is_empty()
@@ -3231,12 +3345,16 @@ pub fn render_markdown_lazy(
                     ),
                 );
                 ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                let item_line_start = lines.len();
                 let depth = list_stack.len().saturating_sub(1);
                 let indent = "  ".repeat(depth);
                 let marker = if let Some(state) = list_stack.last_mut() {
                     if state.ordered {
                         let idx = state.next_index;
                         state.next_index = state.next_index.saturating_add(1);
+                        state.max_marker_digits =
+                            state.max_marker_digits.max(idx.to_string().len());
+                        state.item_line_starts.push(item_line_start);
                         format!("{}{}. ", indent, idx)
                     } else {
                         format!("{}• ", indent)
@@ -4363,6 +4481,86 @@ mod tests {
         assert!(rendered
             .iter()
             .all(|line| line[first_pad..].starts_with("• ")));
+    }
+
+    #[test]
+    fn test_centered_mode_right_aligns_ordered_markers_within_list_block() {
+        let saved = center_code_blocks();
+        set_center_code_blocks(true);
+        let lines = render_markdown_with_width("9. stuff\n10. more stuff here", Some(50));
+        set_center_code_blocks(saved);
+
+        let nine = lines
+            .iter()
+            .find(|line| line_to_string(line).contains("stuff"))
+            .expect("9 line");
+        let ten = lines
+            .iter()
+            .find(|line| line_to_string(line).contains("more stuff here"))
+            .expect("10 line");
+
+        let nine_text = line_to_string(nine);
+        let ten_text = line_to_string(ten);
+        let nine_content = nine_text.find("stuff").expect("9 content");
+        let ten_content = ten_text.find("more").expect("10 content");
+
+        assert_eq!(
+            nine_content, ten_content,
+            "ordered list content should share a single column: {nine_text:?} / {ten_text:?}"
+        );
+        assert!(
+            nine_text.contains(" 9. "),
+            "single-digit marker should be right-aligned to match two-digit markers: {nine_text:?}"
+        );
+    }
+
+    #[test]
+    fn test_wrapped_centered_ordered_list_keeps_shared_content_column() {
+        let saved = center_code_blocks();
+        set_center_code_blocks(true);
+        let lines = render_markdown_with_width(
+            "9. short\n10. this centered numbered list item should wrap onto another line cleanly",
+            Some(42),
+        );
+        set_center_code_blocks(saved);
+
+        let wrapped = wrap_lines(lines, 26);
+        let rendered: Vec<String> = wrapped
+            .iter()
+            .map(line_to_string)
+            .filter(|line| !line.is_empty())
+            .collect();
+
+        assert!(
+            rendered.len() >= 3,
+            "expected wrapped ordered list: {rendered:?}"
+        );
+
+        let short_line = rendered
+            .iter()
+            .find(|line| line.contains("short"))
+            .expect("short line");
+        let wrapped_first = rendered
+            .iter()
+            .find(|line| line.contains("this centered"))
+            .expect("wrapped first line");
+        let wrapped_cont = rendered
+            .iter()
+            .find(|line| line.contains("another line"))
+            .expect("wrapped continuation");
+
+        let short_col = short_line.find("short").expect("short col");
+        let wrapped_first_col = wrapped_first.find("this").expect("first col");
+        let wrapped_cont_col = wrapped_cont.find("another").expect("cont col");
+
+        assert_eq!(
+            short_col, wrapped_first_col,
+            "9 and 10 content should align: {rendered:?}"
+        );
+        assert_eq!(
+            wrapped_first_col, wrapped_cont_col,
+            "wrapped continuation should stay on the shared content column: {rendered:?}"
+        );
     }
 
     #[test]
