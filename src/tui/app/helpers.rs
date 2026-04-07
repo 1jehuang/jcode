@@ -546,7 +546,13 @@ fn resumed_window_title(session_id: &str) -> String {
         .map(|s| s.to_string())
         .unwrap_or_else(|| session_id.to_string());
     let icon = crate::id::session_icon(&session_name);
-    format!("{} jcode {}", icon, session_name)
+    if let Some(server_info) =
+        crate::registry::find_server_by_socket_sync(&crate::server::socket_path())
+    {
+        format!("{} jcode/{} {}", icon, server_info.name, session_name)
+    } else {
+        format!("{} jcode {}", icon, session_name)
+    }
 }
 
 #[cfg(unix)]

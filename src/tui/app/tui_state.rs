@@ -489,11 +489,23 @@ impl crate::tui::TuiState for App {
     }
 
     fn server_display_name(&self) -> Option<String> {
-        self.remote_server_short_name.clone()
+        self.remote_server_short_name.clone().or_else(|| {
+            if !self.is_remote {
+                return None;
+            }
+            crate::registry::find_server_by_socket_sync(&crate::server::socket_path())
+                .map(|info| info.name)
+        })
     }
 
     fn server_display_icon(&self) -> Option<String> {
-        self.remote_server_icon.clone()
+        self.remote_server_icon.clone().or_else(|| {
+            if !self.is_remote {
+                return None;
+            }
+            crate::registry::find_server_by_socket_sync(&crate::server::socket_path())
+                .map(|info| info.icon)
+        })
     }
 
     fn server_sessions(&self) -> Vec<String> {

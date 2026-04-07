@@ -229,6 +229,21 @@ pub async fn list_servers() -> Result<Vec<ServerInfo>> {
     Ok(registry.servers_by_time().into_iter().cloned().collect())
 }
 
+/// Best-effort sync lookup for a server by socket path.
+///
+/// This is used by client-side window title code before the async runtime is fully
+/// established or in synchronous spawn helpers.
+pub fn find_server_by_socket_sync(socket: &std::path::Path) -> Option<ServerInfo> {
+    let path = registry_path().ok()?;
+    let content = std::fs::read_to_string(path).ok()?;
+    let registry: ServerRegistry = serde_json::from_str(&content).ok()?;
+    registry
+        .servers
+        .values()
+        .find(|info| info.socket == socket)
+        .cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,6 +280,36 @@ mod tests {
 
         assert!(registry.find_by_name("blazing").is_some());
         assert!(registry.find_by_name("frozen").is_none());
+    }
+
+    #[test]
+    fn find_server_by_socket_sync_returns_matching_server() {
+        let _guard = lock_test_env();
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let prev_home: Option<OsString> = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp_home.path());
+
+        let socket = PathBuf::from("/tmp/blazing.sock");
+        let mut registry = ServerRegistry::default();
+        let mut info = test_server_info("blazing");
+        info.socket = socket.clone();
+        registry.register(info.clone());
+        std::fs::create_dir_all(temp_home.path()).expect("create temp home");
+        std::fs::write(
+            registry_path().expect("registry path"),
+            serde_json::to_string(&registry).expect("serialize registry"),
+        )
+        .expect("write registry");
+
+        let found = find_server_by_socket_sync(&socket).expect("find server by socket");
+        assert_eq!(found.name, info.name);
+        assert_eq!(found.icon, info.icon);
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
     }
 
     #[cfg(unix)]

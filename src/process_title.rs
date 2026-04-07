@@ -58,6 +58,19 @@ pub(crate) fn set_client_display_title(session_name: &str, is_selfdev: bool) {
     set_title(compact_process_title(prefix, Some(session_name)));
 }
 
+pub(crate) fn set_client_remote_display_title(
+    server_name: &str,
+    session_name: &str,
+    is_selfdev: bool,
+) {
+    if server_name.is_empty() || server_name.eq_ignore_ascii_case("jcode") {
+        set_client_display_title(session_name, is_selfdev);
+        return;
+    }
+    let prefix = if is_selfdev { "jcode:d:" } else { "jcode:c:" };
+    set_title(format!("{prefix}{server_name}/{session_name}"));
+}
+
 pub(crate) fn initial_title(args: &Args) -> String {
     match &args.command {
         Some(Command::Serve) => "jcode:server".to_string(),

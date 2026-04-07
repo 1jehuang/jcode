@@ -843,7 +843,15 @@ impl App {
         } else {
             format!("jcode/{}", server_name.to_lowercase())
         };
-        crate::process_title::set_client_display_title(&session_name, is_canary);
+        if server_name.eq_ignore_ascii_case("jcode") {
+            crate::process_title::set_client_display_title(&session_name, is_canary);
+        } else {
+            crate::process_title::set_client_remote_display_title(
+                server_name,
+                &session_name,
+                is_canary,
+            );
+        }
         let _ = crossterm::execute!(
             std::io::stdout(),
             crossterm::terminal::SetTitle(format!(

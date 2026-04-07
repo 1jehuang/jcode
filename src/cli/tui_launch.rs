@@ -79,12 +79,16 @@ pub async fn run_tui(
     Ok(())
 }
 
-fn resumed_window_title(session_id: &str) -> String {
+pub(crate) fn resumed_window_title(session_id: &str) -> String {
     let session_name = id::extract_session_name(session_id)
         .map(|s| s.to_string())
         .unwrap_or_else(|| session_id.to_string());
     let icon = id::session_icon(&session_name);
-    format!("{} jcode {}", icon, session_name)
+    if let Some(server_info) = crate::registry::find_server_by_socket_sync(&server::socket_path()) {
+        format!("{} jcode/{} {}", icon, server_info.name, session_name)
+    } else {
+        format!("{} jcode {}", icon, session_name)
+    }
 }
 
 fn applescript_escape(text: &str) -> String {
@@ -330,14 +334,21 @@ pub async fn run_tui_client(
         let session_name = id::extract_session_name(session_id)
             .map(|s| s.to_string())
             .unwrap_or_else(|| session_id.clone());
-        crate::process_title::set_client_display_title(
-            &session_name,
-            super::selfdev::client_selfdev_requested(),
-        );
-        let icon = id::session_icon(&session_name);
+        let is_selfdev = super::selfdev::client_selfdev_requested();
+        if let Some(server_info) =
+            crate::registry::find_server_by_socket_sync(&server::socket_path())
+        {
+            crate::process_title::set_client_remote_display_title(
+                &server_info.name,
+                &session_name,
+                is_selfdev,
+            );
+        } else {
+            crate::process_title::set_client_display_title(&session_name, is_selfdev);
+        }
         let _ = crossterm::execute!(
             std::io::stdout(),
-            crossterm::terminal::SetTitle(format!("{} jcode {}", icon, session_name))
+            crossterm::terminal::SetTitle(resumed_window_title(session_id))
         );
     } else {
         crate::process_title::set_client_generic_title(super::selfdev::client_selfdev_requested());
@@ -1400,7 +1411,8 @@ pub fn list_sessions() -> Result<()> {
 mod tests {
     #[cfg(unix)]
     use super::{
-        should_show_server_spawning, spawn_resume_in_new_terminal, spawn_selfdev_in_new_terminal,
+        resumed_window_title, should_show_server_spawning, spawn_resume_in_new_terminal,
+        spawn_selfdev_in_new_terminal,
     };
     #[cfg(unix)]
     use crate::platform::set_permissions_executable;
@@ -1510,6 +1522,42 @@ mod tests {
         assert!(lines[5].contains("--resume"));
         assert!(lines[5].contains("ses_test_123"));
         assert!(lines[5].contains(exe.to_string_lossy().as_ref()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resumed_window_title_includes_server_name_when_registry_matches_socket() {
+        let _guard = crate::storage::lock_test_env();
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let temp_runtime = tempfile::tempdir().expect("temp runtime");
+        let socket_path = temp_runtime.path().join("jcode.sock");
+        let _home_guard = EnvVarGuard::set_path("JCODE_HOME", temp_home.path());
+        let _socket_guard = EnvVarGuard::set_path("JCODE_SOCKET", &socket_path);
+
+        let mut registry = crate::registry::ServerRegistry::default();
+        registry.register(crate::registry::ServerInfo {
+            id: "server_blazing_123".to_string(),
+            name: "blazing".to_string(),
+            icon: "🔥".to_string(),
+            socket: socket_path,
+            debug_socket: temp_runtime.path().join("jcode-debug.sock"),
+            git_hash: "abc1234".to_string(),
+            version: "v0.1.0".to_string(),
+            pid: std::process::id(),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            sessions: Vec::new(),
+        });
+        std::fs::create_dir_all(temp_home.path()).expect("create temp home");
+        std::fs::write(
+            crate::registry::registry_path().expect("registry path"),
+            serde_json::to_string(&registry).expect("serialize registry"),
+        )
+        .expect("write registry");
+
+        assert_eq!(
+            resumed_window_title("session_parrot_123"),
+            "🦜 jcode/blazing parrot"
+        );
     }
 
     #[cfg(unix)]
