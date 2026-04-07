@@ -387,13 +387,16 @@ fn provider_model_display_candidates(provider_name: &str, model: &str) -> Vec<St
 
 fn configured_auth_count(auth: &AuthStatus) -> usize {
     [
+        auth.jcode,
         auth.anthropic.state,
         auth.openrouter,
+        auth.azure,
         auth.openai,
         auth.cursor,
         auth.copilot,
         auth.gemini,
         auth.antigravity,
+        auth.google,
     ]
     .into_iter()
     .filter(|state| *state != AuthState::NotConfigured)
@@ -417,27 +420,27 @@ fn summary_display_candidates(
     let skills_full = format!("skills {}", skills_count);
     let skills_short = format!("sk {}", skills_count);
     let mcp_full = format!("mcp {}", mcp_count);
-    let auth_full = format!("auth {}", auth_count);
+    let auths_full = format!("auths {}", auth_count);
 
     vec![
         format!(
             "{} · {} · {} · {}",
-            memory_label, skills_full, mcp_full, auth_full
+            memory_label, skills_full, mcp_full, auths_full
         ),
         format!(
             "{} · {} · {} · {}",
-            memories_short, skills_full, mcp_full, auth_full
+            memories_short, skills_full, mcp_full, auths_full
         ),
         format!(
             "{} · {} · {} · {}",
-            memories_short, skills_short, mcp_full, auth_full
+            memories_short, skills_short, mcp_full, auths_full
         ),
         format!(
             "{} · {} · {} · {}",
             memories_short,
             skills_short,
             mcp_full,
-            format!("au {}", auth_count)
+            format!("auth {}", auth_count)
         ),
         format!(
             "{} · {} · {} · {}a",
@@ -645,6 +648,23 @@ mod tests {
     }
 
     #[test]
+    fn configured_auth_count_includes_non_model_auth_surfaces() {
+        let auth = AuthStatus {
+            jcode: AuthState::Available,
+            anthropic: ProviderAuth {
+                state: AuthState::Expired,
+                has_oauth: true,
+                has_api_key: false,
+            },
+            azure: AuthState::Available,
+            google: AuthState::Available,
+            ..AuthStatus::default()
+        };
+
+        assert_eq!(configured_auth_count(&auth), 4);
+    }
+
+    #[test]
     fn build_persistent_header_prefers_configured_model_during_remote_connect() {
         let _guard = crate::storage::lock_test_env();
         let prev_model = std::env::var_os("JCODE_MODEL");
@@ -688,7 +708,7 @@ mod tests {
         assert!(rendered.contains("memories"), "rendered: {rendered}");
         assert!(rendered.contains("skills"), "rendered: {rendered}");
         assert!(rendered.contains("mcp"), "rendered: {rendered}");
-        assert!(rendered.contains("auth"), "rendered: {rendered}");
+        assert!(rendered.contains("auths"), "rendered: {rendered}");
     }
 
     #[test]
