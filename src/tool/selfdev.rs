@@ -84,6 +84,7 @@ enum BuildRequestState {
     Building,
     Attached,
     Completed,
+    Superseded,
     Failed,
     Cancelled,
 }
@@ -294,6 +295,16 @@ impl BuildRequest {
                     .clone()
                     .or_else(|| Some(Utc::now().to_rfc3339()));
                 self.error = None;
+                self.save()?;
+                Ok(false)
+            }
+            BackgroundTaskStatus::Superseded => {
+                self.state = BuildRequestState::Superseded;
+                self.completed_at = task_status
+                    .completed_at
+                    .clone()
+                    .or_else(|| Some(Utc::now().to_rfc3339()));
+                self.error = task_status.error.clone();
                 self.save()?;
                 Ok(false)
             }
@@ -527,6 +538,7 @@ pub fn selfdev_status_output() -> Result<ToolOutput> {
                 BuildRequestState::Building => "building",
                 BuildRequestState::Attached => "attached",
                 BuildRequestState::Completed => "completed",
+                BuildRequestState::Superseded => "superseded",
                 BuildRequestState::Failed => "failed",
                 BuildRequestState::Cancelled => "cancelled",
             };
@@ -1084,18 +1096,12 @@ impl SelfDevTool {
         .await;
 
         if status.success() {
-            Ok(TaskResult {
-                exit_code,
-                error: None,
-            })
+            Ok(TaskResult::completed(exit_code))
         } else {
-            Ok(TaskResult {
+            Ok(TaskResult::failed(
                 exit_code,
-                error: Some(format!(
-                    "Command exited with code {}",
-                    exit_code.unwrap_or(-1)
-                )),
-            })
+                format!("Command exited with code {}", exit_code.unwrap_or(-1)),
+            ))
         }
     }
 
@@ -1110,10 +1116,7 @@ impl SelfDevTool {
         .await;
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         Self::append_output_line(&mut file, "--- Command finished with exit code: 0 ---").await;
-        Ok(TaskResult {
-            exit_code: Some(0),
-            error: None,
-        })
+        Ok(TaskResult::completed(Some(0)))
     }
 
     async fn follow_existing_build(
@@ -1157,10 +1160,24 @@ impl SelfDevTool {
                         ),
                     )
                     .await;
-                    return Ok(TaskResult {
-                        exit_code: Some(0),
-                        error: None,
+                    return Ok(TaskResult::completed(Some(0)));
+                }
+                BuildRequestState::Superseded => {
+                    let mut request = BuildRequest::load(&request_id)?.ok_or_else(|| {
+                        anyhow::anyhow!("Attached build request {} disappeared", request_id)
+                    })?;
+                    request.state = BuildRequestState::Superseded;
+                    request.completed_at = Some(Utc::now().to_rfc3339());
+                    request.error = original.error.clone();
+                    request.save()?;
+                    let detail = original.error.clone().unwrap_or_else(|| {
+                        format!(
+                            "Original build {} completed but was superseded before activation",
+                            original_request_id
+                        )
                     });
+                    Self::append_output_line(&mut file, &detail).await;
+                    return Ok(TaskResult::superseded(Some(0), detail));
                 }
                 BuildRequestState::Failed | BuildRequestState::Cancelled => {
                     let mut request = BuildRequest::load(&request_id)?.ok_or_else(|| {
@@ -1174,10 +1191,7 @@ impl SelfDevTool {
                         format!("Original build {} did not complete", original_request_id)
                     });
                     Self::append_output_line(&mut file, &error).await;
-                    return Ok(TaskResult {
-                        exit_code: None,
-                        error: Some(error),
-                    });
+                    return Ok(TaskResult::failed(None, error));
                 }
                 BuildRequestState::Attached => {
                     anyhow::bail!(
@@ -1232,35 +1246,64 @@ impl SelfDevTool {
                 Self::stream_build_command(repo_dir.clone(), command.clone(), output_path.clone())
                     .await?;
             if result.error.is_none() {
-                let source_after_build =
-                    build::ensure_source_state_matches(&repo_dir, &expected_source)?;
-                let published =
-                    build::publish_local_current_build_for_source(&repo_dir, &source_after_build)?;
-                let mut manifest = build::BuildManifest::load()?;
-                manifest.add_to_history(build::current_build_info(&repo_dir)?)?;
-                let mut request = BuildRequest::load(&request_id)?.ok_or_else(|| {
-                    anyhow::anyhow!("Missing queued build request {}", request_id)
-                })?;
-                request.published_version = Some(published.version.clone());
-                request.validated = true;
-                request.last_progress = Some("published and smoke-tested".to_string());
-                request.save()?;
+                match build::ensure_source_state_matches(&repo_dir, &expected_source) {
+                    Ok(source_after_build) => {
+                        let published = build::publish_local_current_build_for_source(
+                            &repo_dir,
+                            &source_after_build,
+                        )?;
+                        let mut manifest = build::BuildManifest::load()?;
+                        manifest.add_to_history(build::current_build_info(&repo_dir)?)?;
+                        let mut request = BuildRequest::load(&request_id)?.ok_or_else(|| {
+                            anyhow::anyhow!("Missing queued build request {}", request_id)
+                        })?;
+                        request.published_version = Some(published.version.clone());
+                        request.validated = true;
+                        request.last_progress = Some("published and smoke-tested".to_string());
+                        request.save()?;
+                        result
+                    }
+                    Err(err) => {
+                        let detail = format!(
+                            "Build completed successfully, but the source changed before activation. Marking this result as superseded instead of failed. {}",
+                            err
+                        );
+                        let mut file = tokio::fs::OpenOptions::new()
+                            .append(true)
+                            .open(&output_path)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Failed to append output note: {}", e))?;
+                        Self::append_output_line(&mut file, &detail).await;
+                        TaskResult::superseded(result.exit_code.or(Some(0)), detail)
+                    }
+                }
+            } else {
+                result
             }
-            result
         };
 
         let mut request = BuildRequest::load(&request_id)?
             .ok_or_else(|| anyhow::anyhow!("Missing queued build request {}", request_id))?;
         request.completed_at = Some(Utc::now().to_rfc3339());
-        request.state = if result.error.is_some() {
-            BuildRequestState::Failed
-        } else {
-            BuildRequestState::Completed
+        request.state = match result.status.as_ref().unwrap_or(&BackgroundTaskStatus::Failed) {
+            BackgroundTaskStatus::Completed => BuildRequestState::Completed,
+            BackgroundTaskStatus::Superseded => BuildRequestState::Superseded,
+            BackgroundTaskStatus::Failed => BuildRequestState::Failed,
+            BackgroundTaskStatus::Running => BuildRequestState::Building,
         };
         request.error = result.error.clone();
-        if result.error.is_some() {
-            request.last_progress = Some("failed".to_string());
-        }
+        request.last_progress = match request.state {
+            BuildRequestState::Completed => request
+                .last_progress
+                .take()
+                .or_else(|| Some("completed".to_string())),
+            BuildRequestState::Superseded => Some("superseded by newer source state".to_string()),
+            BuildRequestState::Failed => Some("failed".to_string()),
+            BuildRequestState::Building => Some("building".to_string()),
+            BuildRequestState::Queued => Some("queued".to_string()),
+            BuildRequestState::Attached => Some("attached".to_string()),
+            BuildRequestState::Cancelled => Some("cancelled".to_string()),
+        };
         request.save()?;
         Ok(result)
     }
@@ -2705,5 +2748,81 @@ mod tests {
         let task_id = metadata["task_id"].as_str().expect("task id");
         let status = wait_for_task_completion(task_id).await;
         assert_eq!(status.status, BackgroundTaskStatus::Completed);
+    }
+
+    #[test]
+    fn reconcile_pending_state_maps_superseded_background_status() {
+        let _storage_guard = crate::storage::lock_test_env();
+        let _lock = lock_env();
+        let temp_home = tempfile::TempDir::new().expect("temp home");
+        let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+
+        let mut session = session::Session::create(None, Some("Superseded Build".to_string()));
+        session.short_name = Some("alpha".to_string());
+        session.save().expect("save session");
+
+        let status_path = temp_home.path().join("superseded.status.json");
+        storage::write_json(
+            &status_path,
+            &background::TaskStatusFile {
+                task_id: "superseded-task".to_string(),
+                tool_name: "selfdev-build".to_string(),
+                session_id: session.id.clone(),
+                status: BackgroundTaskStatus::Superseded,
+                exit_code: Some(0),
+                error: Some("Build completed, but source changed before activation".to_string()),
+                started_at: Utc::now().to_rfc3339(),
+                completed_at: Some(Utc::now().to_rfc3339()),
+                duration_secs: Some(1.0),
+                pid: None,
+                detached: false,
+                notify: true,
+                wake: true,
+            },
+        )
+        .expect("write superseded status file");
+
+        let source = test_source_state(std::path::Path::new("/tmp/jcode"));
+        let request = BuildRequest {
+            request_id: "superseded-request".to_string(),
+            background_task_id: Some("superseded-task".to_string()),
+            session_id: session.id.clone(),
+            session_short_name: session.short_name.clone(),
+            session_title: Some("Superseded Build".to_string()),
+            reason: "superseded reason".to_string(),
+            repo_dir: "/tmp/jcode".to_string(),
+            repo_scope: source.repo_scope.clone(),
+            worktree_scope: source.worktree_scope.clone(),
+            command: "scripts/dev_cargo.sh build --release --bin jcode".to_string(),
+            requested_at: Utc::now().to_rfc3339(),
+            started_at: Some(Utc::now().to_rfc3339()),
+            completed_at: None,
+            state: BuildRequestState::Building,
+            version: Some("superseded-build".to_string()),
+            dedupe_key: Some("superseded-dedupe".to_string()),
+            requested_source: Some(source),
+            built_source: None,
+            published_version: None,
+            last_progress: Some("building".to_string()),
+            validated: false,
+            error: None,
+            output_file: None,
+            status_file: Some(status_path.display().to_string()),
+            attached_to_request_id: None,
+        };
+        request.save().expect("save superseded request");
+
+        let mut request = BuildRequest::load("superseded-request")
+            .expect("load superseded request")
+            .expect("request exists");
+        assert!(!request
+            .reconcile_pending_state()
+            .expect("reconcile superseded request"));
+        assert_eq!(request.state, BuildRequestState::Superseded);
+        assert!(request
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("source changed before activation"));
     }
 }

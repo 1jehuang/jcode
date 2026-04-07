@@ -570,18 +570,12 @@ impl BashTool {
                     file.write_all(status_line.as_bytes()).await.ok();
 
                     if status.success() {
-                        Ok(TaskResult {
-                            exit_code,
-                            error: None,
-                        })
+                        Ok(TaskResult::completed(exit_code))
                     } else {
-                        Ok(TaskResult {
+                        Ok(TaskResult::failed(
                             exit_code,
-                            error: Some(format!(
-                                "Command exited with code {}",
-                                exit_code.unwrap_or(-1)
-                            )),
-                        })
+                            format!("Command exited with code {}", exit_code.unwrap_or(-1)),
+                        ))
                     }
                 },
             )

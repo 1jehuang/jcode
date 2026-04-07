@@ -75,6 +75,33 @@ struct RunningTask {
 pub struct TaskResult {
     pub exit_code: Option<i32>,
     pub error: Option<String>,
+    pub status: Option<BackgroundTaskStatus>,
+}
+
+impl TaskResult {
+    pub fn completed(exit_code: Option<i32>) -> Self {
+        Self {
+            exit_code,
+            error: None,
+            status: Some(BackgroundTaskStatus::Completed),
+        }
+    }
+
+    pub fn failed(exit_code: Option<i32>, error: impl Into<String>) -> Self {
+        Self {
+            exit_code,
+            error: Some(error.into()),
+            status: Some(BackgroundTaskStatus::Failed),
+        }
+    }
+
+    pub fn superseded(exit_code: Option<i32>, detail: impl Into<String>) -> Self {
+        Self {
+            exit_code,
+            error: Some(detail.into()),
+            status: Some(BackgroundTaskStatus::Superseded),
+        }
+    }
 }
 
 /// Manages background task execution
@@ -335,15 +362,14 @@ impl BackgroundTaskManager {
             let duration_secs = started_at.elapsed().as_secs_f64();
             let (status, exit_code, error) = match &result {
                 Ok(task_result) => {
-                    if task_result.error.is_some() {
-                        (
-                            BackgroundTaskStatus::Failed,
-                            task_result.exit_code,
-                            task_result.error.clone(),
-                        )
-                    } else {
-                        (BackgroundTaskStatus::Completed, task_result.exit_code, None)
-                    }
+                    let status = task_result.status.clone().unwrap_or_else(|| {
+                        if task_result.error.is_some() {
+                            BackgroundTaskStatus::Failed
+                        } else {
+                            BackgroundTaskStatus::Completed
+                        }
+                    });
+                    (status, task_result.exit_code, task_result.error.clone())
                 }
                 Err(e) => (BackgroundTaskStatus::Failed, None, Some(e.to_string())),
             };
@@ -517,7 +543,7 @@ impl BackgroundTaskManager {
                 task_id: task_id_clone,
                 tool_name: tool_name_owned,
                 session_id: session_id_owned,
-                status,
+                status: status.clone(),
                 exit_code,
                 output_preview,
                 output_file: output_path_clone,
@@ -526,7 +552,11 @@ impl BackgroundTaskManager {
                 wake: false,
             }));
 
-            Ok(TaskResult { exit_code, error })
+            Ok(TaskResult {
+                exit_code,
+                error,
+                status: Some(status),
+            })
         });
 
         let running_task = RunningTask {

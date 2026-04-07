@@ -90,6 +90,7 @@ impl Tool for BgTool {
                     let status = match task.status {
                         BackgroundTaskStatus::Running => "running",
                         BackgroundTaskStatus::Completed => "completed",
+                        BackgroundTaskStatus::Superseded => "superseded",
                         BackgroundTaskStatus::Failed => "failed",
                     };
                     output.push_str(&format!(
@@ -115,6 +116,7 @@ impl Tool for BgTool {
                         let status_str = match task.status {
                             BackgroundTaskStatus::Running => "running",
                             BackgroundTaskStatus::Completed => "completed",
+                            BackgroundTaskStatus::Superseded => "superseded",
                             BackgroundTaskStatus::Failed => "failed",
                         };
 

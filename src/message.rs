@@ -78,6 +78,7 @@ pub fn input_shell_status_notice(shell: &InputShellResult) -> String {
 fn format_background_task_status(status: &BackgroundTaskStatus) -> &'static str {
     match status {
         BackgroundTaskStatus::Completed => "✓ completed",
+        BackgroundTaskStatus::Superseded => "↻ superseded",
         BackgroundTaskStatus::Failed => "✗ failed",
         BackgroundTaskStatus::Running => "running",
     }
@@ -197,6 +198,9 @@ pub fn background_task_status_notice(task: &BackgroundTaskCompleted) -> String {
     match task.status {
         BackgroundTaskStatus::Completed => {
             format!("Background task completed · {}", task.tool_name)
+        }
+        BackgroundTaskStatus::Superseded => {
+            format!("Background task superseded · {}", task.tool_name)
         }
         BackgroundTaskStatus::Failed => match task.exit_code {
             Some(code) => format!(
@@ -1024,6 +1028,26 @@ mod tests {
 
         assert!(rendered.contains("✗ failed"));
         assert!(rendered.contains("_No output captured._"));
+    }
+
+    #[test]
+    fn format_background_task_notification_markdown_renders_superseded_status() {
+        let rendered = format_background_task_notification_markdown(&BackgroundTaskCompleted {
+            task_id: "abc123".to_string(),
+            tool_name: "selfdev-build".to_string(),
+            session_id: "session".to_string(),
+            status: BackgroundTaskStatus::Superseded,
+            exit_code: Some(0),
+            output_preview: "Build completed, but source changed before activation".to_string(),
+            output_file: std::path::PathBuf::from("/tmp/output.log"),
+            duration_secs: 5.0,
+            notify: true,
+            wake: false,
+        });
+
+        assert!(rendered.contains("↻ superseded"));
+        assert!(rendered.contains("exit 0"));
+        assert!(rendered.contains("source changed before activation"));
     }
 
     #[test]

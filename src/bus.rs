@@ -143,6 +143,7 @@ pub struct FileTouch {
 pub enum BackgroundTaskStatus {
     Running,
     Completed,
+    Superseded,
     Failed,
 }
 
