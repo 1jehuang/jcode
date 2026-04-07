@@ -168,13 +168,50 @@ fn line_is_blank(line: &Line<'_>) -> bool {
             .all(|span| span.content.as_ref().is_empty())
 }
 
-fn repeated_gutter_prefix_text(line: &Line<'_>) -> Option<String> {
+fn rendered_task_marker_width(text: &str) -> Option<(usize, &str)> {
+    if let Some(rest) = text.strip_prefix("[x] ") {
+        return Some((UnicodeWidthStr::width("[x] "), rest));
+    }
+    if let Some(rest) = text.strip_prefix("[ ] ") {
+        return Some((UnicodeWidthStr::width("[ ] "), rest));
+    }
+    None
+}
+
+fn rendered_list_marker_width(text: &str) -> Option<usize> {
+    if let Some(rest) = text.strip_prefix("• ") {
+        let mut width = UnicodeWidthStr::width("• ");
+        if let Some((task_width, task_rest)) = rendered_task_marker_width(rest) {
+            if !task_rest.is_empty() {
+                width += task_width;
+            }
+        }
+        return (!rest.is_empty()).then_some(width);
+    }
+
+    let digit_count = text.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if digit_count == 0 {
+        return None;
+    }
+
+    let suffix = text.get(digit_count..)?;
+    let rest = suffix.strip_prefix(". ")?;
+    let mut width = digit_count + UnicodeWidthStr::width(". ");
+    if let Some((task_width, task_rest)) = rendered_task_marker_width(rest) {
+        if !task_rest.is_empty() {
+            width += task_width;
+        }
+    }
+    (!rest.is_empty()).then_some(width)
+}
+
+fn repeated_gutter_prefix(line: &Line<'static>) -> Option<(Vec<Span<'static>>, usize)> {
     let plain = line_plain_text(line);
-    let mut leading_prefix = String::new();
+    let mut leading_width = 0usize;
     let mut prefix_bytes = 0usize;
     for ch in plain.chars() {
         if ch.is_whitespace() {
-            leading_prefix.push(ch);
+            leading_width += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
             prefix_bytes += ch.len_utf8();
         } else {
             break;
@@ -187,13 +224,30 @@ fn repeated_gutter_prefix_text(line: &Line<'_>) -> Option<String> {
         gutter_count += 1;
         rest = next;
     }
+    let gutter_width = gutter_count * UnicodeWidthStr::width("│ ");
+    let base_prefix_width = leading_width + gutter_width;
 
-    if gutter_count > 0 {
-        return Some(format!("{}{}", leading_prefix, "│ ".repeat(gutter_count)));
+    if let Some(marker_width) = rendered_list_marker_width(rest) {
+        let total_width = base_prefix_width + marker_width;
+        if total_width > 0 {
+            let mut spans = leading_spans_for_display_width(line, base_prefix_width);
+            spans.push(Span::raw(" ".repeat(marker_width)));
+            return Some((spans, total_width));
+        }
     }
 
-    if !leading_prefix.is_empty() && line.alignment == Some(Alignment::Left) {
-        return Some(leading_prefix);
+    if gutter_count > 0 {
+        return Some((
+            leading_spans_for_display_width(line, base_prefix_width),
+            base_prefix_width,
+        ));
+    }
+
+    if leading_width > 0 && line.alignment == Some(Alignment::Left) {
+        return Some((
+            leading_spans_for_display_width(line, leading_width),
+            leading_width,
+        ));
     }
 
     None
@@ -3329,15 +3383,11 @@ pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     // Preserve the original alignment
     let alignment = line.alignment;
 
-    let repeated_prefix = repeated_gutter_prefix_text(&line).and_then(|prefix_text| {
-        let prefix_width = UnicodeWidthStr::width(prefix_text.as_str());
+    let repeated_prefix = repeated_gutter_prefix(&line).and_then(|(prefix_spans, prefix_width)| {
         if prefix_width == 0 || prefix_width >= width {
             None
         } else {
-            Some((
-                leading_spans_for_display_width(&line, prefix_width),
-                prefix_width,
-            ))
+            Some((prefix_spans, prefix_width))
         }
     });
 
@@ -3356,9 +3406,15 @@ pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
         return balanced;
     }
 
+    let initial_prefix_width = repeated_prefix
+        .as_ref()
+        .map(|(_, prefix_width)| *prefix_width)
+        .unwrap_or(0);
+
     let mut result: Vec<Line<'static>> = Vec::new();
     let mut current_spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len());
     let mut current_width = 0usize;
+    let mut current_has_content = false;
     let mut pending_repeated_prefix = false;
 
     for span in line.spans {
@@ -3392,13 +3448,14 @@ pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
             let chunk_width = chunk.width();
 
             // If adding this chunk would exceed width, start new line
-            if current_width + chunk_width > width && current_width > 0 {
+            if current_width + chunk_width > width && current_has_content {
                 let mut new_line = Line::from(std::mem::take(&mut current_spans));
                 if let Some(align) = alignment {
                     new_line = new_line.alignment(align);
                 }
                 result.push(new_line);
                 current_width = 0;
+                current_has_content = false;
                 pending_repeated_prefix = repeated_prefix.is_some();
             }
 
@@ -3423,18 +3480,23 @@ pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
                         // Push current part if non-empty
                         if !part.is_empty() {
                             current_spans.push(Span::styled(std::mem::take(&mut part), style));
+                            let width_before = current_width;
                             current_width += part_width;
+                            if width_before + part_width > initial_prefix_width {
+                                current_has_content = true;
+                            }
                             part_width = 0;
                         }
 
                         // Start new line if we have content
-                        if current_width > 0 {
+                        if current_has_content {
                             let mut new_line = Line::from(std::mem::take(&mut current_spans));
                             if let Some(align) = alignment {
                                 new_line = new_line.alignment(align);
                             }
                             result.push(new_line);
                             current_width = 0;
+                            current_has_content = false;
                             pending_repeated_prefix = repeated_prefix.is_some();
                         }
 
@@ -3457,7 +3519,11 @@ pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
                         &mut pending_repeated_prefix,
                     );
                     current_spans.push(Span::styled(part, style));
+                    let width_before = current_width;
                     current_width += part_width;
+                    if width_before + part_width > initial_prefix_width {
+                        current_has_content = true;
+                    }
                 }
             } else {
                 seed_repeated_prefix(
@@ -3466,13 +3532,17 @@ pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
                     &mut pending_repeated_prefix,
                 );
                 current_spans.push(Span::styled(chunk, style));
+                let width_before = current_width;
                 current_width += chunk_width;
+                if width_before + chunk_width > initial_prefix_width {
+                    current_has_content = true;
+                }
             }
         }
     }
 
     // Don't forget the last line
-    if !current_spans.is_empty() {
+    if !current_spans.is_empty() && current_has_content {
         let mut new_line = Line::from(current_spans);
         if let Some(align) = alignment {
             new_line = new_line.alignment(align);
@@ -4293,6 +4363,62 @@ mod tests {
         assert!(rendered
             .iter()
             .all(|line| line[first_pad..].starts_with("• ")));
+    }
+
+    #[test]
+    fn test_wrapped_centered_bullet_list_preserves_content_indent() {
+        let saved = center_code_blocks();
+        set_center_code_blocks(true);
+        let lines = render_markdown_with_width(
+            "- this centered bullet item should wrap onto another line cleanly",
+            Some(34),
+        );
+        set_center_code_blocks(saved);
+
+        let wrapped = wrap_lines(lines, 22);
+        let rendered: Vec<String> = wrapped
+            .iter()
+            .map(line_to_string)
+            .filter(|line| !line.is_empty())
+            .collect();
+
+        assert!(
+            rendered.len() >= 2,
+            "expected wrapped list item: {rendered:?}"
+        );
+
+        let first_pad = leading_spaces(&rendered[0]);
+        let second_pad = leading_spaces(&rendered[1]);
+        assert!(rendered[0][first_pad..].starts_with("• "));
+        assert_eq!(second_pad, first_pad + UnicodeWidthStr::width("• "));
+    }
+
+    #[test]
+    fn test_wrapped_centered_numbered_list_preserves_content_indent() {
+        let saved = center_code_blocks();
+        set_center_code_blocks(true);
+        let lines = render_markdown_with_width(
+            "12. this centered numbered list item should wrap onto another line cleanly",
+            Some(38),
+        );
+        set_center_code_blocks(saved);
+
+        let wrapped = wrap_lines(lines, 24);
+        let rendered: Vec<String> = wrapped
+            .iter()
+            .map(line_to_string)
+            .filter(|line| !line.is_empty())
+            .collect();
+
+        assert!(
+            rendered.len() >= 2,
+            "expected wrapped numbered item: {rendered:?}"
+        );
+
+        let first_pad = leading_spaces(&rendered[0]);
+        let second_pad = leading_spaces(&rendered[1]);
+        assert!(rendered[0][first_pad..].starts_with("12. "));
+        assert_eq!(second_pad, first_pad + UnicodeWidthStr::width("12. "));
     }
 
     #[test]
