@@ -40,6 +40,19 @@ pub fn byte_offset_to_char_index(s: &str, byte_offset: usize) -> usize {
     s[..byte_offset.min(s.len())].chars().count()
 }
 
+/// Convert a character index back to a byte offset.
+/// Returns `s.len()` when the requested index is at or beyond the end.
+pub fn char_index_to_byte_offset(s: &str, char_index: usize) -> usize {
+    if char_index == 0 {
+        return 0;
+    }
+
+    s.char_indices()
+        .nth(char_index)
+        .map(|(idx, _)| idx)
+        .unwrap_or(s.len())
+}
+
 /// Shared TUI state for display and input handling.
 pub struct TuiCore {
     // Display state

@@ -2759,6 +2759,7 @@ fn test_mouse_scroll_over_diff_pane_scrolls_side_panel_without_changing_focus() 
         Rect::new(0, 0, 40, 20),
         None,
         Some(Rect::new(40, 0, 20, 20)),
+        None,
     );
 
     app.handle_mouse_event(MouseEvent {
@@ -2798,6 +2799,7 @@ fn test_mouse_scroll_over_tool_side_panel_scrolls_shared_right_pane_without_chan
         Rect::new(0, 0, 40, 20),
         None,
         Some(Rect::new(40, 0, 20, 20)),
+        None,
     );
 
     let scroll_only = app.handle_mouse_event(MouseEvent {
@@ -2840,6 +2842,7 @@ fn test_mouse_scroll_over_tool_side_panel_keeps_typing_in_chat() {
         Rect::new(0, 0, 40, 20),
         None,
         Some(Rect::new(40, 0, 20, 20)),
+        None,
     );
 
     let scroll_only = app.handle_mouse_event(MouseEvent {
@@ -3138,6 +3141,7 @@ fn test_mouse_horizontal_scroll_over_tool_side_panel_pans_without_focus_change()
         Rect::new(0, 0, 40, 20),
         None,
         Some(Rect::new(40, 0, 20, 20)),
+        None,
     );
 
     let scroll_only = app.handle_mouse_event(MouseEvent {
@@ -3164,6 +3168,7 @@ fn test_mouse_scroll_events_are_classified_as_scroll_only() {
         Rect::new(0, 0, 40, 20),
         None,
         Some(Rect::new(40, 0, 20, 20)),
+        None,
     );
 
     let scroll_only = app.handle_mouse_event(MouseEvent {
@@ -3195,7 +3200,7 @@ fn test_handterm_native_scroll_command_updates_chat_offset() {
     terminal
         .draw(|f| crate::tui::ui::draw(f, &app))
         .expect("draw failed");
-    crate::tui::ui::record_layout_snapshot(Rect::new(0, 0, 50, 12), None, None);
+    crate::tui::ui::record_layout_snapshot(Rect::new(0, 0, 50, 12), None, None, None);
 
     app.auto_scroll_paused = true;
     app.scroll_offset = 6;
@@ -3345,6 +3350,7 @@ fn test_mouse_scroll_over_unfocused_diagram_resizes_immediately_without_animatio
         Rect::new(0, 0, 80, 30),
         Some(Rect::new(80, 0, 40, 30)),
         None,
+        None,
     );
 
     app.handle_mouse_event(MouseEvent {
@@ -3379,6 +3385,7 @@ fn test_dragging_diagram_border_resizes_immediately_without_animation() {
     crate::tui::ui::record_layout_snapshot(
         Rect::new(0, 0, 80, 30),
         Some(Rect::new(80, 0, 40, 30)),
+        None,
         None,
     );
 
@@ -10391,6 +10398,61 @@ fn test_try_open_link_at_opens_clicked_url_and_sets_notice() {
         app.status_notice(),
         Some("Opened link: https://example.com/docs".to_string())
     );
+}
+
+#[test]
+fn test_mouse_click_in_input_moves_cursor_to_clicked_position() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.input = "hello world".to_string();
+    app.cursor_pos = app.input.len();
+    app.set_centered(false);
+    app.session.short_name = Some("test".to_string());
+
+    let backend = ratatui::backend::TestBackend::new(60, 16);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    render_and_snap(&app, &mut terminal);
+
+    let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
+    let input_area = layout.input_area.expect("input area");
+    let next_prompt = crate::tui::ui::input_ui::next_input_prompt_number(&app);
+    let prompt_len = crate::tui::ui::input_ui::input_prompt_len(&app, next_prompt) as u16;
+
+    let handled = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: input_area.x + prompt_len + 2,
+        row: input_area.y,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(!handled, "clicks should request an immediate redraw");
+    assert_eq!(app.cursor_pos, 2);
+}
+
+#[test]
+fn test_mouse_click_in_wrapped_input_moves_cursor_to_second_visual_line() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.input = "abcdefghij".to_string();
+    app.cursor_pos = 0;
+    app.set_centered(false);
+    app.session.short_name = Some("test".to_string());
+
+    let backend = ratatui::backend::TestBackend::new(11, 16);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    render_and_snap(&app, &mut terminal);
+
+    let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
+    let input_area = layout.input_area.expect("input area");
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: input_area.x + 4,
+        row: input_area.y + 1,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert_eq!(app.cursor_pos, 5);
 }
 
 #[test]

@@ -42,7 +42,7 @@ mod inline_interactive_ui;
 #[path = "ui_inline.rs"]
 mod inline_ui;
 #[path = "ui_input.rs"]
-mod input_ui;
+pub(crate) mod input_ui;
 #[path = "ui_memory.rs"]
 mod memory_ui;
 #[path = "ui_messages.rs"]
@@ -1550,6 +1550,7 @@ pub struct LayoutSnapshot {
     pub messages_area: Rect,
     pub diagram_area: Option<Rect>,
     pub diff_pane_area: Option<Rect>,
+    pub input_area: Option<Rect>,
 }
 
 static LAST_LAYOUT: OnceLock<Mutex<Option<LayoutSnapshot>>> = OnceLock::new();
@@ -1562,6 +1563,7 @@ pub fn record_layout_snapshot(
     messages_area: Rect,
     diagram_area: Option<Rect>,
     diff_pane_area: Option<Rect>,
+    input_area: Option<Rect>,
 ) {
     #[cfg(test)]
     {
@@ -1570,6 +1572,7 @@ pub fn record_layout_snapshot(
                 messages_area,
                 diagram_area,
                 diff_pane_area,
+                input_area,
             });
         });
         return;
@@ -1581,6 +1584,7 @@ pub fn record_layout_snapshot(
                 messages_area,
                 diagram_area,
                 diff_pane_area,
+                input_area,
             });
         }
     }
@@ -2701,7 +2705,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         capture.layout.messages_area = Some(messages_area.into());
         capture.layout.diagram_area = diagram_area.map(|r| r.into());
     }
-    record_layout_snapshot(messages_area, diagram_area, diff_pane_area);
+    record_layout_snapshot(messages_area, diagram_area, diff_pane_area, Some(chunks[6]));
 
     let margins = draw_messages(frame, app, messages_area, &prepared, chat_scrollbar_visible);
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::tui::ui::input_ui;
 use ratatui::layout::Rect;
 
 impl App {
@@ -633,6 +634,7 @@ impl App {
         let mut over_diagram = false;
         let mut over_diff_pane = false;
         let mut on_diagram_border = false;
+        let mut input_area: Option<Rect> = None;
         let mut current_messages_area: Option<Rect> = None;
         let mut current_diagram_area: Option<Rect> = None;
         let mut terminal_width: u16 = 0;
@@ -640,6 +642,7 @@ impl App {
         if let Some(layout) = layout {
             current_messages_area = Some(layout.messages_area);
             current_diagram_area = layout.diagram_area;
+            input_area = layout.input_area;
             terminal_width =
                 layout.messages_area.width + layout.diagram_area.map(|a| a.width).unwrap_or(0);
             terminal_height =
@@ -677,6 +680,26 @@ impl App {
                     self.set_diagram_focus(false);
                 }
             }
+        }
+
+        let clicked_input_cursor = if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            input_area.and_then(|area| {
+                input_ui::input_cursor_pos_from_screen(
+                    self,
+                    area,
+                    input_ui::next_input_prompt_number(self),
+                    mouse.column,
+                    mouse.row,
+                )
+            })
+        } else {
+            None
+        };
+        if let Some(cursor_pos) = clicked_input_cursor {
+            self.cursor_pos = cursor_pos.min(self.input.len());
+            self.reset_tab_completion();
+            return false;
         }
 
         if self.diagram_pane_dragging {
