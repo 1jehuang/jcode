@@ -1,12 +1,15 @@
 #![allow(dead_code)]
 
+use super::box_utils::render_rounded_box;
+use super::changelog::get_unseen_changelog_entries;
 use super::{
-    TuiState, dim_color, header_animation_color, header_chrome_color, header_fade_color,
-    header_fade_t, header_icon_color, header_name_color, header_session_color, semver,
-    shorten_model_name,
+    TuiState, binary_age, dim_color, header_animation_color, header_chrome_color,
+    header_fade_color, header_fade_t, header_icon_color, header_name_color, header_session_color,
+    is_running_stable_release, semver, shorten_model_name,
 };
 use crate::auth::{AuthState, AuthStatus};
 use crate::tui::color_support::rgb;
+use crate::tui::connection_type_icon;
 use ratatui::prelude::*;
 
 pub(crate) fn capitalize(s: &str) -> String {
@@ -513,56 +516,381 @@ fn build_summary_line(text: &str) -> Line<'static> {
 }
 
 pub(super) fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
+    let model = app.provider_model();
+    let session_name = app.session_display_name().unwrap_or_default();
+    let server_name = app.server_display_name();
+    let short_model = shorten_model_name(&model);
+    let icon = connection_type_icon(app.connection_type().as_deref())
+        .unwrap_or_else(|| crate::id::session_icon(&session_name));
+    let nice_model = format_model_name(&short_model);
+    let build_info = binary_age().unwrap_or_else(|| "unknown".to_string());
     let align = Alignment::Center;
     let mut lines: Vec<Line> = Vec::new();
     let w = width as usize;
 
-    if let Some(dir) = app.working_dir() {
-        let display_dir = choose_header_candidate(w, path_display_candidates(&dir));
+    let is_canary = app.is_canary();
+    let is_remote = app.is_remote_mode();
+    let server_update = app.server_update_available() == Some(true);
+    let client_update = app.client_update_available();
+    let mut status_items: Vec<&str> = Vec::new();
+    if app.is_replay() {
+        status_items.push("replay");
+    } else if is_remote {
+        status_items.push("client");
+    }
+    if is_canary {
+        status_items.push("dev");
+    }
+    if server_update {
+        status_items.push("srv↑");
+    }
+    if client_update {
+        status_items.push("cli↑");
+    }
+    if let Some(badge) = crate::perf::profile().tier.badge() {
+        status_items.push(badge);
+    }
+
+    if !status_items.is_empty() {
+        let badge_text = format!("⟨{}⟩", status_items.join("·"));
+        lines.push(
+            Line::from(Span::styled(badge_text, Style::default().fg(dim_color()))).alignment(align),
+        );
+    } else {
+        lines.push(Line::from(""));
+    }
+
+    if let Some(server_name) = server_name.as_deref() {
+        let server_icon = app.server_display_icon().unwrap_or_default();
+        let server_text = if server_icon.is_empty() {
+            format!("server: {}", capitalize(server_name))
+        } else {
+            format!("server: {} {}", capitalize(server_name), server_icon)
+        };
         lines.push(
             Line::from(Span::styled(
-                display_dir,
+                server_text,
                 Style::default().fg(header_name_color()),
             ))
             .alignment(align),
         );
     }
 
-    let version_text = choose_header_candidate(w, version_display_candidates());
-    lines.push(build_version_line(&version_text).alignment(align));
+    if !session_name.is_empty() {
+        let client_text = format!("client: {} {}", capitalize(&session_name), icon);
+        lines.push(
+            Line::from(Span::styled(
+                client_text,
+                Style::default().fg(header_name_color()),
+            ))
+            .alignment(align),
+        );
+    } else if server_name.is_none() {
+        lines.push(
+            Line::from(Span::styled(
+                "JCode".to_string(),
+                Style::default().fg(header_name_color()),
+            ))
+            .alignment(align),
+        );
+    }
 
-    let provider_model_text = choose_header_candidate(
-        w,
-        provider_model_display_candidates(&app.provider_name(), &app.provider_model()),
+    lines.push(
+        Line::from(Span::styled(
+            nice_model,
+            Style::default().fg(header_session_color()),
+        ))
+        .alignment(align),
     );
-    if !provider_model_text.is_empty() {
-        lines.push(build_provider_model_line(&provider_model_text).alignment(align));
+
+    let version_text = if is_running_stable_release() {
+        let tag = env!("JCODE_GIT_TAG");
+        if tag.is_empty() || tag.contains('-') {
+            let full = format!("{} · release · built {}", semver(), build_info);
+            if full.chars().count() <= w {
+                full
+            } else {
+                format!("{} · release", semver())
+            }
+        } else {
+            let full = format!("{} · release {} · built {}", semver(), tag, build_info);
+            if full.chars().count() <= w {
+                full
+            } else {
+                format!("{} · {}", semver(), tag)
+            }
+        }
+    } else {
+        let full = format!("{} · built {}", semver(), build_info);
+        if full.chars().count() <= w {
+            full
+        } else {
+            semver().to_string()
+        }
+    };
+    lines.push(
+        Line::from(Span::styled(version_text, Style::default().fg(dim_color()))).alignment(align),
+    );
+
+    if let Some(dir) = app.working_dir() {
+        let display_dir = abbreviate_home(&dir);
+        lines.push(
+            Line::from(Span::styled(display_dir, Style::default().fg(dim_color())))
+                .alignment(align),
+        );
     }
 
     lines
 }
 
 pub(crate) fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line> = Vec::new();
     let align = ratatui::layout::Alignment::Center;
+    let model = app.provider_model();
+    let provider_name = app.provider_name();
+    let upstream = app.upstream_provider();
     let auth = app.auth_status();
     let w = width as usize;
-    let info = app.info_widget_data();
-    let memory_label = memory_summary_label(info.memory_info.as_ref());
-    let summary_text = choose_header_candidate(
-        w,
-        summary_display_candidates(
-            &memory_label,
-            app.available_skills().len(),
-            app.mcp_servers().len(),
-            configured_auth_count(&auth),
-        ),
+    let model = model.trim().to_string();
+    let provider_label = {
+        let trimmed = provider_name.trim();
+        if trimmed.is_empty() {
+            String::new()
+        } else {
+            let name = trimmed.to_lowercase();
+            let auth_tag = match name.as_str() {
+                "anthropic" => {
+                    if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+                        "api-key"
+                    } else if auth.anthropic.has_oauth {
+                        "oauth"
+                    } else {
+                        ""
+                    }
+                }
+                "openai" => {
+                    if auth.openai_has_api_key {
+                        "api-key"
+                    } else if auth.openai_has_oauth {
+                        "oauth"
+                    } else {
+                        ""
+                    }
+                }
+                "copilot" => {
+                    if auth.copilot_has_api_token {
+                        "oauth"
+                    } else {
+                        ""
+                    }
+                }
+                "openrouter" => "api-key",
+                _ => "",
+            };
+            if auth_tag.is_empty() {
+                name
+            } else {
+                format!("{}:{}", auth_tag, name)
+            }
+        }
+    };
+
+    let suppress_placeholder_detail = provider_label.is_empty()
+        && upstream.is_none()
+        && matches!(model.as_str(), "" | "connecting to server…" | "connected");
+
+    let model_info = if suppress_placeholder_detail || model.is_empty() {
+        String::new()
+    } else if let Some(ref provider) = upstream {
+        if provider_label.is_empty() {
+            let full = format!("{} via {} · /model to switch", model, provider);
+            if full.chars().count() <= w {
+                full
+            } else {
+                format!("{} via {}", model, provider)
+            }
+        } else {
+            let full = format!(
+                "({}) {} via {} · /model to switch",
+                provider_label, model, provider
+            );
+            if full.chars().count() <= w {
+                full
+            } else {
+                let short = format!("({}) {} via {}", provider_label, model, provider);
+                if short.chars().count() <= w {
+                    short
+                } else {
+                    format!("({}) {}", provider_label, model)
+                }
+            }
+        }
+    } else if provider_label.is_empty() {
+        let full = format!("{} · /model to switch", model);
+        if full.chars().count() <= w {
+            full
+        } else {
+            model.clone()
+        }
+    } else {
+        let full = format!("({}) {} · /model to switch", provider_label, model);
+        if full.chars().count() <= w {
+            full
+        } else {
+            format!("({}) {}", provider_label, model)
+        }
+    };
+    if !model_info.is_empty() {
+        lines.push(
+            Line::from(Span::styled(model_info, Style::default().fg(dim_color()))).alignment(align),
+        );
+    }
+
+    let auth_line = build_auth_status_line(&auth, w);
+    if !auth_line.spans.is_empty() {
+        lines.push(auth_line.alignment(align));
+    }
+
+    if let Some(goal_badge) = crate::goal::header_badge(
+        app.working_dir().as_deref().map(std::path::Path::new),
+        app.side_panel(),
+    ) {
+        lines.push(
+            Line::from(Span::styled(
+                goal_badge,
+                Style::default().fg(rgb(170, 200, 120)),
+            ))
+            .alignment(align),
+        );
+    }
+
+    let new_entries = get_unseen_changelog_entries();
+    if !new_entries.is_empty() && w > 20 {
+        const MAX_LINES: usize = 8;
+        let available_width = w.saturating_sub(2);
+        let display_count = new_entries.len().min(MAX_LINES);
+        let has_more = new_entries.len() > MAX_LINES;
+
+        let mut content: Vec<Line> = Vec::new();
+        for entry in new_entries.iter().take(display_count) {
+            content.push(
+                Line::from(Span::styled(
+                    format!("• {}", entry),
+                    Style::default().fg(dim_color()),
+                ))
+                .alignment(align),
+            );
+        }
+        if has_more {
+            content.push(
+                Line::from(Span::styled(
+                    format!(
+                        "  …{} more · /changelog to see all",
+                        new_entries.len() - MAX_LINES
+                    ),
+                    Style::default().fg(dim_color()),
+                ))
+                .alignment(align),
+            );
+        }
+
+        let boxed = render_rounded_box(
+            "Updates",
+            content,
+            available_width,
+            Style::default().fg(dim_color()),
+        );
+        for line in boxed {
+            lines.push(line.alignment(align));
+        }
+    }
+
+    let mcps = app.mcp_servers();
+    let mcp_text = if mcps.is_empty() {
+        "mcp: (none)".to_string()
+    } else {
+        let full_parts: Vec<String> = mcps
+            .iter()
+            .map(|(name, count)| {
+                if *count > 0 {
+                    format!("{} ({} tools)", name, count)
+                } else {
+                    format!("{} (...)", name)
+                }
+            })
+            .collect();
+        let full = format!("mcp: {}", full_parts.join(", "));
+        if full.chars().count() <= w {
+            full
+        } else {
+            let short_parts: Vec<String> = mcps
+                .iter()
+                .map(|(name, count)| {
+                    if *count > 0 {
+                        format!("{}({})", name, count)
+                    } else {
+                        format!("{}(…)", name)
+                    }
+                })
+                .collect();
+            let short = format!("mcp: {}", short_parts.join(" "));
+            if short.chars().count() <= w {
+                short
+            } else {
+                format!("mcp: {} servers", mcps.len())
+            }
+        }
+    };
+    lines.push(
+        Line::from(Span::styled(mcp_text, Style::default().fg(dim_color()))).alignment(align),
     );
 
-    if summary_text.is_empty() {
-        Vec::new()
-    } else {
-        vec![build_summary_line(&summary_text).alignment(align)]
+    let skills = app.available_skills();
+    if !skills.is_empty() {
+        let full = format!(
+            "skills: {}",
+            skills
+                .iter()
+                .map(|s| format!("/{}", s))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let skills_text = if full.chars().count() <= w {
+            full
+        } else {
+            format!("skills: {} loaded", skills.len())
+        };
+        lines.push(
+            Line::from(Span::styled(skills_text, Style::default().fg(dim_color())))
+                .alignment(align),
+        );
     }
+
+    let client_count = app.connected_clients().unwrap_or(0);
+    let session_count = app.server_sessions().len();
+    if client_count > 0 || session_count > 1 {
+        let mut parts = Vec::new();
+        if client_count > 0 {
+            parts.push(format!(
+                "{} client{}",
+                client_count,
+                if client_count == 1 { "" } else { "s" }
+            ));
+        }
+        if session_count > 1 {
+            parts.push(format!("{} sessions", session_count));
+        }
+        lines.push(
+            Line::from(Span::styled(
+                format!("server: {}", parts.join(", ")),
+                Style::default().fg(dim_color()),
+            ))
+            .alignment(align),
+        );
+    }
+
+    lines.push(Line::from(""));
+    lines
 }
 
 fn multi_status_badge_no_leading_space(items: &[(&str, Color)]) -> Vec<Span<'static>> {
@@ -685,17 +1013,6 @@ mod tests {
     }
 
     #[test]
-    fn summary_display_candidates_compact_before_dropping_counts() {
-        let rendered =
-            choose_header_candidate(28, summary_display_candidates("memories 87", 12, 3, 6));
-        assert!(rendered.contains("87"), "rendered: {rendered}");
-        assert!(rendered.contains("12"), "rendered: {rendered}");
-        assert!(rendered.contains("3"), "rendered: {rendered}");
-        assert!(rendered.contains("6"), "rendered: {rendered}");
-        assert!(!rendered.is_empty());
-    }
-
-    #[test]
     fn configured_auth_count_includes_non_model_auth_surfaces() {
         let auth = AuthStatus {
             jcode: AuthState::Available,
@@ -744,19 +1061,40 @@ mod tests {
     }
 
     #[test]
-    fn build_header_lines_renders_summary_counts() {
-        let app = create_test_app();
-        let lines = build_header_lines(&app, 120);
+    fn build_header_lines_omits_placeholder_provider_label_when_unknown() {
+        let mut app = crate::tui::app::App::new_for_remote(None);
+        app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::LoadingSession);
+
+        let lines = build_header_lines(&app, 80);
+        let rendered = lines
+            .first()
+            .expect("header line")
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(rendered.contains("loading session…"));
+        assert!(!rendered.contains("(unknown)"));
+        assert!(!rendered.contains("(remote)"));
+    }
+
+    #[test]
+    fn build_header_lines_hides_secondary_placeholder_during_brief_connecting_phase() {
+        let app = crate::tui::app::App::new_for_remote(None);
+
+        let lines = build_header_lines(&app, 80);
         let rendered = lines
             .iter()
             .flat_map(|line| line.spans.iter())
             .map(|span| span.content.as_ref())
             .collect::<String>();
 
-        assert!(rendered.contains("memories"), "rendered: {rendered}");
-        assert!(rendered.contains("skills"), "rendered: {rendered}");
-        assert!(rendered.contains("mcp"), "rendered: {rendered}");
-        assert!(rendered.contains("auths"), "rendered: {rendered}");
+        assert!(
+            !rendered.contains("connecting to server…"),
+            "brief connecting placeholder should not render the secondary detail line"
+        );
+        assert!(!rendered.contains("(remote)"));
     }
 
     #[test]
