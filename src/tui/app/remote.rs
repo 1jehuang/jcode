@@ -2142,6 +2142,25 @@ pub(super) fn handle_server_event(
                 .or_else(|| crate::id::extract_session_name(&from_session).map(str::to_string))
                 .unwrap_or_else(|| from_session[..8.min(from_session.len())].to_string());
 
+            let background_task_scope = matches!(
+                &notification_type,
+                crate::protocol::NotificationType::Message {
+                    scope: Some(scope),
+                    ..
+                } if scope == "background_task"
+            );
+
+            if background_task_scope
+                && crate::message::parse_background_task_notification_markdown(&message).is_some()
+            {
+                let presentation =
+                    present_swarm_notification(&sender, &notification_type, &message);
+                app.push_display_message(DisplayMessage::background_task(message.clone()));
+                persist_replay_display_message(app, "background_task", None, &message);
+                app.set_status_notice(presentation.status_notice);
+                return false;
+            }
+
             let presentation = present_swarm_notification(&sender, &notification_type, &message);
             app.push_display_message(DisplayMessage::swarm(
                 presentation.title.clone(),

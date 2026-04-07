@@ -7041,6 +7041,50 @@ fn test_handle_server_event_soft_interrupt_injected_background_task_renders_card
 }
 
 #[test]
+fn test_handle_server_event_notification_background_task_scope_uses_card_rendering() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.set_centered(true);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Notification {
+            from_session: "session_background_task_123".to_string(),
+            from_name: Some("background task".to_string()),
+            notification_type: crate::protocol::NotificationType::Message {
+                scope: Some("background_task".to_string()),
+                channel: None,
+            },
+            message: "**Background task** `abc123` · `bash` · ✗ failed · 7.1s · exit 1\n\n```text\n[stderr] line one\n[stderr] line two\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"abc123\"`".to_string(),
+        },
+        &mut remote,
+    );
+
+    let last = app
+        .display_messages()
+        .last()
+        .expect("missing background task notification message");
+    assert_eq!(last.role, "background_task");
+
+    let backend = ratatui::backend::TestBackend::new(42, 12);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    let text = render_and_snap(&app, &mut terminal);
+
+    assert!(
+        text.contains("╭") && text.contains("╰"),
+        "expected rounded background-task card in render, got:\n{}",
+        text
+    );
+    assert!(
+        !text.contains("◦ Background task"),
+        "background-task notifications should not render as generic swarm items:\n{}",
+        text
+    );
+}
+
+#[test]
 fn test_handle_remote_disconnect_flushes_streaming_text_and_sets_reconnect_state() {
     let mut app = create_test_app();
     app.is_processing = true;
