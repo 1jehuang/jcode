@@ -463,6 +463,7 @@ pub struct App {
     // Debug socket broadcast channel (if enabled)
     debug_tx: Option<tokio::sync::broadcast::Sender<super::backend::DebugEvent>>,
     // Remote provider info (set when running in remote mode)
+    remote_client_instance_id: String,
     remote_provider_name: Option<String>,
     remote_provider_model: Option<String>,
     remote_startup_phase: Option<RemoteStartupPhase>,

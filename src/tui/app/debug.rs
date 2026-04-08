@@ -1416,6 +1416,13 @@ impl App {
         } else if cmd == "mermaid:memory" {
             let profile = crate::tui::mermaid::debug_memory_profile();
             serde_json::to_string_pretty(&profile).unwrap_or_else(|_| "{}".to_string())
+        } else if cmd == "memory" {
+            let payload = serde_json::json!({
+                "process": crate::process_memory::snapshot(),
+                "markdown": crate::tui::markdown::debug_memory_profile(),
+                "mermaid": crate::tui::mermaid::debug_memory_profile(),
+            });
+            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
         } else if cmd == "mermaid:memory-bench" {
             let result = crate::tui::mermaid::debug_memory_benchmark(40);
             serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())
@@ -1455,6 +1462,9 @@ impl App {
         } else if cmd == "markdown:stats" {
             let stats = crate::tui::markdown::debug_stats();
             serde_json::to_string_pretty(&stats).unwrap_or_else(|_| "{}".to_string())
+        } else if cmd == "markdown:memory" {
+            let profile = crate::tui::markdown::debug_memory_profile();
+            serde_json::to_string_pretty(&profile).unwrap_or_else(|_| "{}".to_string())
         } else if cmd.starts_with("assert:") {
             let raw = cmd.strip_prefix("assert:").unwrap_or("");
             self.handle_assertions(raw)
@@ -1660,10 +1670,13 @@ impl App {
                  - anomalies - dump visual debug anomalies\n\
                  - theme - dump current palette snapshot\n\
                  - mermaid:stats - dump mermaid debug stats\n\
+                 - mermaid:memory - dump mermaid memory profile\n\
                  - mermaid:flicker-bench [n] - benchmark viewport protocol churn / flicker risk\n\
                  - mermaid:cache - list mermaid cache entries\n\
                  - mermaid:evict - clear mermaid cache\n\
                  - markdown:stats - dump markdown debug stats\n\
+                 - markdown:memory - dump markdown cache memory estimate\n\
+                 - memory - dump aggregate client memory profile\n\
                  - overlay:on/off/status - toggle overlay boxes\n\
                  - enable/disable/status - control visual debug capture\n\
                  - wait - check if processing\n\

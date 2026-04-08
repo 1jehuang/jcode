@@ -74,6 +74,31 @@ fn picker_entry_display_name(entry: &crate::tui::PickerEntry) -> String {
     format!("{}{}", entry.name, suffix)
 }
 
+fn picker_row_marker(is_row_selected: bool, unavailable: bool) -> &'static str {
+    if unavailable {
+        "×"
+    } else if is_row_selected {
+        "▸"
+    } else {
+        " "
+    }
+}
+
+fn route_detail_display_text(detail: &str, unavailable: bool) -> Option<String> {
+    let trimmed = detail.trim();
+    if unavailable {
+        if trimmed.is_empty() {
+            Some("unavailable".to_string())
+        } else {
+            Some(format!("unavailable · {}", trimmed))
+        }
+    } else if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 fn account_picker_shows_provider_badge(picker: &crate::tui::InlineInteractiveState) -> bool {
     let mut providers: Vec<&str> = Vec::new();
     for &fi in &picker.filtered {
@@ -432,20 +457,21 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
         let entry = &picker.entries[model_idx];
         let is_row_selected = vi == selected;
         let route = entry.active_option();
+        let unavailable = route.map(|r| !r.available).unwrap_or(true);
 
-        let marker = if is_row_selected { "▸" } else { " " };
+        let marker = picker_row_marker(is_row_selected, unavailable);
 
         let mut spans: Vec<Span> = Vec::new();
         spans.push(Span::styled(
             format!(" {} ", marker),
-            if is_row_selected {
+            if unavailable {
+                Style::default().fg(rgb(180, 120, 120)).bold()
+            } else if is_row_selected {
                 Style::default().fg(Color::White).bold()
             } else {
                 Style::default().fg(dim_color())
             },
         ));
-
-        let unavailable = route.map(|r| !r.available).unwrap_or(true);
         let display_name = picker_entry_display_name(entry);
         let account_action_color = match &entry.action {
             crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Add { .. }) => {
@@ -534,14 +560,13 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
             spans.extend(title_spans);
             spans.push(Span::styled(state_display, state_style));
             if let Some(route) = route {
-                if !route.detail.is_empty() && detail_width > 0 {
+                if let Some(detail_text) = route_detail_display_text(&route.detail, unavailable)
+                    && detail_width > 0
+                {
                     spans.push(Span::styled(
-                        format!(
-                            "  {}",
-                            truncate_display(route.detail.as_str(), detail_width)
-                        ),
+                        format!("  {}", truncate_display(detail_text.as_str(), detail_width)),
                         if unavailable {
-                            Style::default().fg(rgb(80, 80, 80))
+                            Style::default().fg(rgb(180, 120, 120)).italic()
                         } else {
                             Style::default().fg(dim_color())
                         },
@@ -643,14 +668,13 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
         }
 
         if let Some(route) = route {
-            if !route.detail.is_empty() && detail_width > 0 {
+            if let Some(detail_text) = route_detail_display_text(&route.detail, unavailable)
+                && detail_width > 0
+            {
                 spans.push(Span::styled(
-                    format!(
-                        "  {}",
-                        truncate_display(route.detail.as_str(), detail_width)
-                    ),
+                    format!("  {}", truncate_display(detail_text.as_str(), detail_width)),
                     if unavailable {
-                        Style::default().fg(rgb(80, 80, 80))
+                        Style::default().fg(rgb(180, 120, 120)).italic()
                     } else {
                         Style::default().fg(dim_color())
                     },
@@ -788,6 +812,31 @@ mod tests {
                 effort: None,
             }],
         }
+    }
+
+    #[test]
+    fn picker_row_marker_uses_explicit_unavailable_marker() {
+        assert_eq!(picker_row_marker(true, true), "×");
+        assert_eq!(picker_row_marker(false, true), "×");
+        assert_eq!(picker_row_marker(true, false), "▸");
+        assert_eq!(picker_row_marker(false, false), " ");
+    }
+
+    #[test]
+    fn route_detail_display_text_prefixes_unavailable_reason() {
+        assert_eq!(
+            route_detail_display_text("credentials expired", true).as_deref(),
+            Some("unavailable · credentials expired")
+        );
+        assert_eq!(
+            route_detail_display_text("", true).as_deref(),
+            Some("unavailable")
+        );
+        assert_eq!(route_detail_display_text("", false), None);
+        assert_eq!(
+            route_detail_display_text("catalog still loading", false).as_deref(),
+            Some("catalog still loading")
+        );
     }
 
     #[test]

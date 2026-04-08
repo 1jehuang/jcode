@@ -79,6 +79,7 @@ impl Client {
             working_dir,
             selfdev,
             target_session_id,
+            client_instance_id: None,
             client_has_local_history,
             allow_session_takeover,
         };
@@ -198,6 +199,7 @@ impl Client {
         let request = Request::ResumeSession {
             id,
             session_id: session_id.to_string(),
+            client_instance_id: None,
             client_has_local_history,
             allow_session_takeover,
         };

@@ -461,7 +461,12 @@ struct SessionTelemetry {
 }
 
 impl TurnTelemetry {
-    fn new(turn_index: u32, started_at: Instant, started_ms_since_session: u64, idle_before_turn_ms: Option<u64>) -> Self {
+    fn new(
+        turn_index: u32,
+        started_at: Instant,
+        started_ms_since_session: u64,
+        idle_before_turn_ms: Option<u64>,
+    ) -> Self {
         Self {
             turn_index,
             started_at,
@@ -707,12 +712,20 @@ fn read_epoch_lines(path: &PathBuf) -> Vec<i64> {
     std::fs::read_to_string(path)
         .ok()
         .into_iter()
-        .flat_map(|text| text.lines().map(str::trim).map(str::to_string).collect::<Vec<_>>())
+        .flat_map(|text| {
+            text.lines()
+                .map(str::trim)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
         .filter_map(|line| line.parse::<i64>().ok())
         .collect()
 }
 
-fn update_session_start_history(id: &str, started_at_utc: DateTime<Utc>) -> (Option<u64>, u32, u32) {
+fn update_session_start_history(
+    id: &str,
+    started_at_utc: DateTime<Utc>,
+) -> (Option<u64>, u32, u32) {
     let Some(path) = session_starts_path(id) else {
         return (None, 0, 0);
     };
@@ -1532,7 +1545,8 @@ fn finalize_current_turn(
         || turn.executed_tool_successes > 0
         || turn.tests_passed > 0
         || turn.file_write_calls > 0;
-    let turn_abandoned = !turn_success && turn.tool_failures == 0 && turn.executed_tool_failures == 0;
+    let turn_abandoned =
+        !turn_success && turn.tool_failures == 0 && turn.executed_tool_failures == 0;
     let (
         workflow_chat_only,
         workflow_coding_used,
@@ -1840,7 +1854,8 @@ fn begin_session_with_mode(provider: &str, model: &str, resumed_session: bool) {
     let (previous_session_gap_secs, sessions_started_24h, sessions_started_7d) = get_or_create_id()
         .map(|id| update_session_start_history(&id, started_at_utc))
         .unwrap_or((None, 0, 0));
-    let (active_sessions_at_start, other_active_sessions_at_start) = register_active_session(&session_id);
+    let (active_sessions_at_start, other_active_sessions_at_start) =
+        register_active_session(&session_id);
     let state = SessionTelemetry {
         session_id,
         started_at,
@@ -1927,7 +1942,10 @@ pub fn record_turn() {
         if let Some(ref mut state) = *guard {
             observe_session_concurrency(state);
             let now = Instant::now();
-            let previous_last_activity = state.current_turn.as_ref().map(|turn| turn.last_activity_at);
+            let previous_last_activity = state
+                .current_turn
+                .as_ref()
+                .map(|turn| turn.last_activity_at);
             if let Some(ref id) = id {
                 finalize_current_turn(id, state, now, "next_user_prompt", DeliveryMode::Background);
             }
@@ -2412,7 +2430,8 @@ fn emit_lifecycle_event(
         active_sessions_at_start: state.active_sessions_at_start,
         other_active_sessions_at_start: state.other_active_sessions_at_start,
         max_concurrent_sessions: state.max_concurrent_sessions,
-        multi_sessioned: state.max_concurrent_sessions > 1 || state.other_active_sessions_at_start > 0,
+        multi_sessioned: state.max_concurrent_sessions > 1
+            || state.other_active_sessions_at_start > 0,
         resumed_session: state.resumed_session,
         end_reason: reason.as_str(),
         schema_version,

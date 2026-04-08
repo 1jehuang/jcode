@@ -37,6 +37,7 @@ pub(super) struct ClientDebugState {
 pub(super) struct ClientConnectionInfo {
     pub(super) client_id: String,
     pub(super) session_id: String,
+    pub(super) client_instance_id: Option<String>,
     pub(super) debug_client_id: Option<String>,
     pub(super) connected_at: Instant,
     pub(super) last_seen: Instant,
@@ -571,6 +572,7 @@ mod tests {
             ClientConnectionInfo {
                 client_id: "conn-1".to_string(),
                 session_id: "session_abc".to_string(),
+                client_instance_id: None,
                 debug_client_id: Some("debug-1".to_string()),
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),
@@ -605,6 +607,7 @@ mod tests {
             ClientConnectionInfo {
                 client_id: "conn-1".to_string(),
                 session_id: "session_focus".to_string(),
+                client_instance_id: None,
                 debug_client_id: Some("debug-1".to_string()),
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),
@@ -628,6 +631,7 @@ mod tests {
             ClientConnectionInfo {
                 client_id: "conn-1".to_string(),
                 session_id: "session_abc".to_string(),
+                client_instance_id: None,
                 debug_client_id: None,
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),
@@ -666,6 +670,7 @@ mod tests {
             ClientConnectionInfo {
                 client_id: "conn-1".to_string(),
                 session_id: "session_debug".to_string(),
+                client_instance_id: None,
                 debug_client_id: Some("debug-1".to_string()),
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),

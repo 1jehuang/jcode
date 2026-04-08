@@ -174,6 +174,8 @@ pub enum Request {
         selfdev: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_instance_id: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         client_has_local_history: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -193,6 +195,8 @@ pub enum Request {
     ResumeSession {
         id: u64,
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_instance_id: Option<String>,
         #[serde(default)]
         client_has_local_history: bool,
         #[serde(default)]

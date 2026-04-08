@@ -861,6 +861,7 @@ mod tests {
             ClientConnectionInfo {
                 client_id: "client-1".to_string(),
                 session_id: session_id.clone(),
+                client_instance_id: None,
                 debug_client_id: Some("debug-1".to_string()),
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),
@@ -960,6 +961,7 @@ mod tests {
             ClientConnectionInfo {
                 client_id: "client-1".to_string(),
                 session_id: session_id.clone(),
+                client_instance_id: None,
                 debug_client_id: Some("debug-1".to_string()),
                 connected_at: Instant::now(),
                 last_seen: Instant::now(),

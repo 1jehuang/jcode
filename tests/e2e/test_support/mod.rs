@@ -305,6 +305,7 @@ impl WsTestClient {
             working_dir: None,
             selfdev: None,
             target_session_id: None,
+            client_instance_id: None,
             client_has_local_history: false,
             allow_session_takeover: false,
         })
@@ -335,6 +336,7 @@ impl WsTestClient {
         self.send_request(Request::ResumeSession {
             id,
             session_id: session_id.to_string(),
+            client_instance_id: None,
             client_has_local_history: false,
             allow_session_takeover: false,
         })

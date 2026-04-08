@@ -441,7 +441,7 @@ impl App {
         }
     }
 
-    pub(super) fn toggle_next_prompt_new_session_routing(&mut self) {
+    pub(crate) fn toggle_next_prompt_new_session_routing(&mut self) {
         self.route_next_prompt_to_new_session = !self.route_next_prompt_to_new_session;
         if self.route_next_prompt_to_new_session {
             self.set_status_notice("Next prompt → new session");

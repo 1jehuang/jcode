@@ -3,7 +3,7 @@ use std::process::{Command as ProcessCommand, Stdio};
 
 use super::args::{
     AmbientCommand, Args, AuthCommand, Command, MemoryCommand, ModelCommand, ProviderCommand,
-    TranscriptModeArg,
+    RestartCommand, TranscriptModeArg,
 };
 use crate::{
     agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
@@ -183,6 +183,14 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             )
             .await?;
         }
+        Some(Command::Restart { action }) => match action {
+            RestartCommand::Save { auto_restore } => {
+                commands::run_restart_save_command(auto_restore).await?
+            }
+            RestartCommand::Restore => commands::run_restart_restore_command()?,
+            RestartCommand::Status => commands::run_restart_status_command()?,
+            RestartCommand::Clear => commands::run_restart_clear_command()?,
+        },
         None => run_default_command(args).await?,
     }
 
@@ -257,6 +265,10 @@ fn map_transcript_mode(mode: TranscriptModeArg) -> crate::protocol::TranscriptMo
 #[allow(deprecated)]
 async fn run_default_command(args: Args) -> Result<()> {
     startup_profile::mark("run_main_none_branch");
+
+    if args.resume.is_none() && commands::maybe_run_pending_restart_restore_on_startup().await? {
+        return Ok(());
+    }
 
     let startup_hints = setup_hints::maybe_show_setup_hints();
     startup_profile::mark("setup_hints");

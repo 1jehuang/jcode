@@ -720,6 +720,9 @@ impl App {
         };
 
         if routes.is_empty() {
+            self.push_display_message(DisplayMessage::system(
+                crate::tui::app::model_context::no_models_available_message(self.is_remote),
+            ));
             self.set_status_notice("No models available");
             return;
         }
@@ -1779,6 +1782,19 @@ impl App {
                         }
                     }
                     PickerAction::Model => {
+                        if !route.available {
+                            self.push_display_message(DisplayMessage::error(
+                                crate::tui::app::model_context::unavailable_model_route_message(
+                                    &entry.name,
+                                    &route.provider,
+                                    &route.detail,
+                                    self.is_remote,
+                                ),
+                            ));
+                            self.set_status_notice("Model unavailable");
+                            return Ok(());
+                        }
+
                         let bare_name = model_entry_base_name(&entry);
 
                         let spec = if route.api_method == "openrouter" && route.provider != "auto" {
@@ -1803,13 +1819,29 @@ impl App {
                             entry.name, route.provider, route.api_method
                         );
 
-                        self.inline_interactive_state = None;
-                        self.upstream_provider = None;
-                        self.status_detail = None;
                         if self.is_remote {
+                            self.inline_interactive_state = None;
+                            self.upstream_provider = None;
+                            self.status_detail = None;
                             self.pending_model_switch = Some(spec);
                         } else {
-                            let _ = self.provider.set_model(&spec);
+                            match self.provider.set_model(&spec) {
+                                Ok(()) => {
+                                    self.inline_interactive_state = None;
+                                    self.upstream_provider = None;
+                                    self.status_detail = None;
+                                }
+                                Err(error) => {
+                                    self.push_display_message(DisplayMessage::error(
+                                        crate::tui::app::model_context::model_switch_failure_message(
+                                            &error.to_string(),
+                                            self.is_remote,
+                                        ),
+                                    ));
+                                    self.set_status_notice("Model switch failed");
+                                    return Ok(());
+                                }
+                            }
                         }
                         if let Some(effort) = effort {
                             let _ = self.provider.set_reasoning_effort(&effort);

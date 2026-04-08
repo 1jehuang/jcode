@@ -425,6 +425,63 @@ fn create_auth_refresh_test_app() -> App {
     app
 }
 
+#[derive(Clone)]
+struct FailingModelSwitchProvider;
+
+#[async_trait::async_trait]
+impl Provider for FailingModelSwitchProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        unimplemented!("FailingModelSwitchProvider")
+    }
+
+    fn name(&self) -> &str {
+        "failing-model-switch"
+    }
+
+    fn model(&self) -> String {
+        "gpt-5.4".to_string()
+    }
+
+    fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
+        vec![crate::provider::ModelRoute {
+            model: "claude-opus-4.6".to_string(),
+            provider: "Copilot".to_string(),
+            api_method: "copilot".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        }]
+    }
+
+    fn set_model(&self, _model: &str) -> Result<()> {
+        anyhow::bail!("credentials expired")
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+fn create_failing_model_switch_test_app() -> App {
+    ensure_test_jcode_home_if_unset();
+    clear_persisted_test_ui_state();
+    crate::tui::ui::clear_test_render_state_for_tests();
+
+    let provider: Arc<dyn Provider> = Arc::new(FailingModelSwitchProvider);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let mut app = App::new(provider, registry);
+    app.queue_mode = false;
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app
+}
+
 fn write_test_config(contents: &str) {
     let path = crate::config::Config::path().expect("config path");
     std::fs::create_dir_all(path.parent().expect("config dir")).expect("config dir");
@@ -4179,6 +4236,46 @@ fn test_model_picker_preview_arrow_keys_navigate() {
 }
 
 #[test]
+fn test_open_model_picker_without_routes_shows_actionable_guidance() {
+    let mut app = create_test_app();
+
+    app.open_model_picker();
+
+    assert!(app.inline_interactive_state.is_none());
+    assert_eq!(app.status_notice(), Some("No models available".to_string()));
+
+    let last = app.display_messages.last().expect("display message");
+    assert_eq!(last.role, "system");
+    assert!(last.content.contains("/login"));
+    assert!(last.content.contains("/account"));
+    assert!(last.content.contains("/model"));
+}
+
+#[test]
+fn test_local_model_picker_selection_failure_keeps_picker_open_and_shows_next_steps() {
+    let mut app = create_failing_model_switch_test_app();
+
+    app.open_model_picker();
+    assert!(app.inline_interactive_state.is_some());
+
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .expect("enter should be handled");
+
+    assert!(
+        app.inline_interactive_state.is_some(),
+        "picker should remain open so the user can choose another model"
+    );
+    assert_eq!(app.status_notice(), Some("Model switch failed".to_string()));
+
+    let last = app.display_messages.last().expect("display message");
+    assert_eq!(last.role, "error");
+    assert!(last.content.contains("credentials expired"));
+    assert!(last.content.contains("/model"));
+    assert!(last.content.contains("/login"));
+    assert!(last.content.contains("/account"));
+}
+
+#[test]
 fn test_login_completed_surfaces_new_provider_models_in_local_model_picker() {
     let mut app = create_auth_refresh_test_app();
 
@@ -4792,6 +4889,34 @@ fn test_available_models_updated_event_surfaces_authed_provider_in_remote_model_
     assert!(copilot_entry.options.iter().any(|route| {
         route.provider == "Copilot" && route.api_method == "copilot" && route.available
     }));
+}
+
+#[test]
+fn test_remote_model_switch_failure_shows_actionable_guidance() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_remote = true;
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ModelChanged {
+            id: 7,
+            model: "claude-opus-4.6".to_string(),
+            provider_name: Some("Copilot".to_string()),
+            error: Some("credentials expired".to_string()),
+        },
+        &mut remote,
+    );
+
+    assert_eq!(app.status_notice(), Some("Model switch failed".to_string()));
+
+    let last = app.display_messages.last().expect("display message");
+    assert_eq!(last.role, "error");
+    assert!(last.content.contains("credentials expired"));
+    assert!(last.content.contains("/model"));
+    assert!(last.content.contains("/login"));
+    assert!(last.content.contains("reconnect"));
 }
 
 #[test]
@@ -7391,7 +7516,10 @@ fn test_handle_server_event_soft_interrupt_injected_duplicate_content_keeps_late
     );
 
     assert_eq!(app.pending_soft_interrupts, vec!["same"]);
-    assert_eq!(app.pending_soft_interrupt_requests, vec![(22, "same".to_string())]);
+    assert_eq!(
+        app.pending_soft_interrupt_requests,
+        vec![(22, "same".to_string())]
+    );
 }
 
 #[test]

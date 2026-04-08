@@ -866,14 +866,10 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
                 app.set_status_notice(format!("Model → {}", model_name));
             }
             Err(e) => {
-                app.push_display_message(DisplayMessage {
-                    role: "error".to_string(),
-                    content: format!("Failed to switch model: {}", e),
-                    tool_calls: vec![],
-                    duration_secs: None,
-                    title: None,
-                    tool_data: None,
-                });
+                app.push_display_message(DisplayMessage::error(model_switch_failure_message(
+                    &e.to_string(),
+                    app.is_remote,
+                )));
                 app.set_status_notice("Model switch failed");
             }
         }
@@ -1118,4 +1114,77 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     false
+}
+
+pub(super) fn no_models_available_message(is_remote: bool) -> String {
+    let mut lines = vec![
+        "No models are available right now.".to_string(),
+        String::new(),
+        "Next steps:".to_string(),
+        "- Run `/login` to connect or refresh a provider".to_string(),
+        "- Run `/account` to inspect or switch credentials".to_string(),
+        "- If you just logged in, wait a moment and try `/model` again".to_string(),
+    ];
+
+    if is_remote {
+        lines.push(
+            "- If this is a remote session, reconnect if the server model list looks stale"
+                .to_string(),
+        );
+    }
+
+    lines.join("\n")
+}
+
+pub(super) fn model_switch_failure_message(error: &str, is_remote: bool) -> String {
+    let mut lines = vec![
+        format!("Failed to switch model: {}", error),
+        String::new(),
+        "Next steps:".to_string(),
+        "- Use `/model` to choose another available route".to_string(),
+        "- Run `/login` to add or refresh credentials".to_string(),
+        "- Run `/account` to inspect or switch accounts".to_string(),
+    ];
+
+    if is_remote {
+        lines.push(
+            "- If this is a remote session and the list looks stale, reconnect and try again"
+                .to_string(),
+        );
+    }
+
+    lines.join("\n")
+}
+
+pub(super) fn unavailable_model_route_message(
+    model: &str,
+    provider: &str,
+    detail: &str,
+    is_remote: bool,
+) -> String {
+    let reason = if detail.trim().is_empty() {
+        "This route is not currently available.".to_string()
+    } else {
+        format!("This route is not currently available: {}", detail.trim())
+    };
+
+    let mut lines = vec![
+        format!("Cannot use `{}` via **{}** right now.", model, provider),
+        String::new(),
+        reason,
+        String::new(),
+        "Next steps:".to_string(),
+        "- Pick another available row in `/model`".to_string(),
+        "- Run `/login` to add or refresh credentials".to_string(),
+        "- Run `/account` to inspect or switch accounts".to_string(),
+    ];
+
+    if is_remote {
+        lines.push(
+            "- If this is a remote session, wait a moment or reconnect if the catalog looks stale"
+                .to_string(),
+        );
+    }
+
+    lines.join("\n")
 }

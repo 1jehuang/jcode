@@ -314,7 +314,11 @@ pub(crate) enum Command {
 #[derive(Subcommand, Debug)]
 pub(crate) enum RestartCommand {
     /// Save a reboot snapshot of currently active jcode windows
-    Save,
+    Save {
+        /// Restore this reboot snapshot automatically the next time plain `jcode` starts
+        #[arg(long)]
+        auto_restore: bool,
+    },
     /// Restore the most recently saved reboot snapshot
     Restore,
     /// Show the currently saved reboot snapshot
@@ -567,7 +571,23 @@ mod tests {
     fn restart_save_subcommand_parses() {
         let args = Args::try_parse_from(["jcode", "restart", "save"]).unwrap();
         match args.command {
-            Some(Command::Restart { action: RestartCommand::Save }) => {}
+            Some(Command::Restart {
+                action:
+                    RestartCommand::Save {
+                        auto_restore: false,
+                    },
+            }) => {}
+            other => panic!("unexpected command: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn restart_save_auto_restore_flag_parses() {
+        let args = Args::try_parse_from(["jcode", "restart", "save", "--auto-restore"]).unwrap();
+        match args.command {
+            Some(Command::Restart {
+                action: RestartCommand::Save { auto_restore: true },
+            }) => {}
             other => panic!("unexpected command: {:?}", other),
         }
     }

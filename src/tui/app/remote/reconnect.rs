@@ -322,11 +322,17 @@ pub(in crate::tui::app) async fn connect_with_retry(
 
     let client_has_local_history =
         session_to_resume.is_some() && !app.display_messages().is_empty();
+    let client_instance_id = app.remote_client_instance_id.clone();
     let connect = RemoteConnection::connect_with_session(
         session_to_resume,
+        Some(client_instance_id.as_str()),
         client_has_local_history,
-        state.reconnect_attempts > 0 && client_has_local_history,
+        state.reconnect_attempts > 0,
     );
+    crate::logging::info(&format!(
+        "Remote reconnect attempt: resume={:?}, reconnect_attempts={}, client_instance_id={}, local_history={}",
+        session_to_resume, state.reconnect_attempts, client_instance_id, client_has_local_history,
+    ));
     tokio::pin!(connect);
     let mut redraw = disconnected_redraw_interval();
 
