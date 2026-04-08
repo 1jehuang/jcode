@@ -180,7 +180,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build-linux-macos, build-windows]
+    needs: [build-linux-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -191,18 +191,20 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: jcode-*
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            artifacts/**/*.tar.gz
-            artifacts/**/*.exe
+            artifacts/jcode-linux-x86_64/*.tar.gz
+            artifacts/jcode-macos-aarch64/*.tar.gz
 
       - name: Update Homebrew formula
         env:
           HOMEBREW_DEPLOY_KEY: ${{ secrets.HOMEBREW_DEPLOY_KEY }}
+        if: env.HOMEBREW_DEPLOY_KEY != ''
         run: |
           VERSION="${GITHUB_REF_NAME}"
           VERSION_NUM="${VERSION#v}"
@@ -348,3 +350,22 @@ jobs:
           git add PKGBUILD .SRCINFO
           git commit -m "Update to ${VERSION}" || echo "No changes"
           retry 3 5 git push origin master
+
+  upload-windows-assets:
+    name: Upload Windows Assets
+    needs: [release, build-windows]
+    if: always() && needs.release.result == 'success' && needs.build-windows.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: jcode-windows-*
+
+      - name: Attach Windows artifacts to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/jcode-windows-*/**/*.tar.gz
+            artifacts/jcode-windows-*/**/*.exe
