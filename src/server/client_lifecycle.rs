@@ -25,8 +25,8 @@ use super::comm_sync::{handle_comm_read_context, handle_comm_resync_plan, handle
 use super::provider_control::{
     handle_cycle_model, handle_notify_auth_changed, handle_refresh_models,
     handle_set_compaction_mode, handle_set_model, handle_set_premium_mode,
-    handle_set_reasoning_effort, handle_set_service_tier,
-    handle_set_transport, handle_switch_anthropic_account, handle_switch_openai_account,
+    handle_set_reasoning_effort, handle_set_service_tier, handle_set_transport,
+    handle_switch_anthropic_account, handle_switch_openai_account,
 };
 use super::{
     AwaitMembersRuntime, ClientConnectionInfo, ClientDebugState, FileAccess,
@@ -683,15 +683,16 @@ pub(super) async fn handle_client(
                             let snapshot = {
                                 let agent_guard = agent.lock().await;
                                 let models = agent_guard.available_models_display();
-                                let routes_json = serde_json::to_string(&agent_guard.model_routes()).unwrap_or_default();
+                                let routes_json =
+                                    serde_json::to_string(&agent_guard.model_routes())
+                                        .unwrap_or_default();
                                 (models, routes_json)
                             };
                             last_available_models_snapshot = Some(snapshot);
                         } else {
                             crate::logging::warn(&format!(
                                 "Target-aware subscribe failed to bind {} from temporary {}; closing temporary client connection {}",
-                                target_session_id, pre_resume_session_id
-                                , client_connection_id
+                                target_session_id, pre_resume_session_id, client_connection_id
                             ));
                             break;
                         }
@@ -749,7 +750,8 @@ pub(super) async fn handle_client(
                     let snapshot = {
                         let agent_guard = agent.lock().await;
                         let models = agent_guard.available_models_display();
-                        let routes_json = serde_json::to_string(&agent_guard.model_routes()).unwrap_or_default();
+                        let routes_json =
+                            serde_json::to_string(&agent_guard.model_routes()).unwrap_or_default();
                         (models, routes_json)
                     };
                     last_available_models_snapshot = Some(snapshot);
@@ -776,7 +778,8 @@ pub(super) async fn handle_client(
                 let snapshot = {
                     let agent_guard = agent.lock().await;
                     let models = agent_guard.available_models_display();
-                    let routes_json = serde_json::to_string(&agent_guard.model_routes()).unwrap_or_default();
+                    let routes_json =
+                        serde_json::to_string(&agent_guard.model_routes()).unwrap_or_default();
                     (models, routes_json)
                 };
                 last_available_models_snapshot = Some(snapshot);
@@ -852,7 +855,8 @@ pub(super) async fn handle_client(
                 let snapshot = {
                     let agent_guard = agent.lock().await;
                     let models = agent_guard.available_models_display();
-                    let routes_json = serde_json::to_string(&agent_guard.model_routes()).unwrap_or_default();
+                    let routes_json =
+                        serde_json::to_string(&agent_guard.model_routes()).unwrap_or_default();
                     (models, routes_json)
                 };
                 last_available_models_snapshot = Some(snapshot);

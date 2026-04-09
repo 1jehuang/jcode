@@ -495,6 +495,67 @@ pub fn derive_session_provider_key(provider_name: &str) -> Option<String> {
 }
 
 impl Session {
+    fn session_from_startup_stub(stub: SessionStartupStub) -> Self {
+        let mut session = Self::create_with_id(stub.id, stub.parent_id, stub.title);
+        session.created_at = stub.created_at;
+        session.updated_at = stub.updated_at;
+        session.compaction = stub.compaction;
+        session.provider_session_id = stub.provider_session_id;
+        session.provider_key = stub.provider_key;
+        session.model = stub.model;
+        session.subagent_model = stub.subagent_model;
+        session.improve_mode = stub.improve_mode;
+        session.autoreview_enabled = stub.autoreview_enabled;
+        session.autojudge_enabled = stub.autojudge_enabled;
+        session.is_canary = stub.is_canary;
+        session.testing_build = stub.testing_build;
+        session.working_dir = stub.working_dir;
+        session.short_name = stub.short_name;
+        session.status = stub.status;
+        session.last_pid = stub.last_pid;
+        session.last_active_at = stub.last_active_at;
+        session.is_debug = stub.is_debug;
+        session.saved = stub.saved;
+        session.save_label = stub.save_label;
+        session.messages.clear();
+        session.env_snapshots.clear();
+        session.memory_injections.clear();
+        session.replay_events.clear();
+        session.reset_persist_state(true);
+        session
+    }
+
+    fn session_from_remote_startup_snapshot(snapshot: RemoteStartupSessionSnapshot) -> Self {
+        let mut session = Self::create_with_id(snapshot.id, snapshot.parent_id, snapshot.title);
+        session.created_at = snapshot.created_at;
+        session.updated_at = snapshot.updated_at;
+        session.messages = snapshot.messages;
+        session.compaction = snapshot.compaction;
+        session.provider_session_id = snapshot.provider_session_id;
+        session.provider_key = snapshot.provider_key;
+        session.model = snapshot.model;
+        session.subagent_model = snapshot.subagent_model;
+        session.improve_mode = snapshot.improve_mode;
+        session.autoreview_enabled = snapshot.autoreview_enabled;
+        session.autojudge_enabled = snapshot.autojudge_enabled;
+        session.is_canary = snapshot.is_canary;
+        session.testing_build = snapshot.testing_build;
+        session.working_dir = snapshot.working_dir;
+        session.short_name = snapshot.short_name;
+        session.status = snapshot.status;
+        session.last_pid = snapshot.last_pid;
+        session.last_active_at = snapshot.last_active_at;
+        session.is_debug = snapshot.is_debug;
+        session.saved = snapshot.saved;
+        session.save_label = snapshot.save_label;
+        session.replay_events.clear();
+        session.env_snapshots.clear();
+        session.memory_injections.clear();
+        session.reset_persist_state(true);
+        session.reset_provider_messages_cache();
+        session
+    }
+
     pub fn debug_memory_profile(&self) -> serde_json::Value {
         let mut message_block_count = 0usize;
         let mut text_blocks = 0usize;
@@ -1074,33 +1135,63 @@ impl Session {
         let path = session_path(session_id)?;
         let reader = BufReader::new(std::fs::File::open(&path)?);
         let stub: SessionStartupStub = serde_json::from_reader(reader)?;
+        Ok(Self::session_from_startup_stub(stub))
+    }
 
-        let mut session = Self::create_with_id(stub.id, stub.parent_id, stub.title);
-        session.created_at = stub.created_at;
-        session.updated_at = stub.updated_at;
-        session.compaction = stub.compaction;
-        session.provider_session_id = stub.provider_session_id;
-        session.provider_key = stub.provider_key;
-        session.model = stub.model;
-        session.subagent_model = stub.subagent_model;
-        session.improve_mode = stub.improve_mode;
-        session.autoreview_enabled = stub.autoreview_enabled;
-        session.autojudge_enabled = stub.autojudge_enabled;
-        session.is_canary = stub.is_canary;
-        session.testing_build = stub.testing_build;
-        session.working_dir = stub.working_dir;
-        session.short_name = stub.short_name;
-        session.status = stub.status;
-        session.last_pid = stub.last_pid;
-        session.last_active_at = stub.last_active_at;
-        session.is_debug = stub.is_debug;
-        session.saved = stub.saved;
-        session.save_label = stub.save_label;
-        session.messages.clear();
-        session.env_snapshots.clear();
-        session.memory_injections.clear();
-        session.replay_events.clear();
-        session.reset_persist_state(true);
+    pub fn load_for_remote_startup(session_id: &str) -> Result<Self> {
+        let path = session_path(session_id)?;
+        let load_start = Instant::now();
+        let snapshot_start = Instant::now();
+        let reader = BufReader::new(std::fs::File::open(&path)?);
+        let snapshot: RemoteStartupSessionSnapshot = serde_json::from_reader(reader)?;
+        let snapshot_ms = snapshot_start.elapsed().as_millis();
+        let mut session = Self::session_from_remote_startup_snapshot(snapshot);
+        let journal_path = session_journal_path_from_snapshot(&path);
+        let journal_start = Instant::now();
+        let mut journal_entries = 0usize;
+        if journal_path.exists() {
+            let file = std::fs::File::open(&journal_path)?;
+            let reader = BufReader::new(file);
+            for (line_idx, line) in reader.lines().enumerate() {
+                let line = line?;
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<SessionJournalEntry>(trimmed) {
+                    Ok(entry) => {
+                        journal_entries += 1;
+                        session.apply_journal_meta(entry.meta);
+                        session.messages.extend(entry.append_messages);
+                        session.replay_events.extend(entry.append_replay_events);
+                    }
+                    Err(err) => {
+                        crate::logging::warn(&format!(
+                            "Remote startup journal parse failed at {} line {}: {}",
+                            journal_path.display(),
+                            line_idx + 1,
+                            err
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+        let journal_ms = journal_start.elapsed().as_millis();
+        let finalize_start = Instant::now();
+        session.reset_persist_state(path.exists());
+        session.reset_provider_messages_cache();
+        let finalize_ms = finalize_start.elapsed().as_millis();
+        crate::logging::info(&format!(
+            "[TIMING] remote_startup_load: session={}, snapshot={}ms, journal={}ms, finalize={}ms, journal_entries={}, messages={}, total={}ms",
+            session.id,
+            snapshot_ms,
+            journal_ms,
+            finalize_ms,
+            journal_entries,
+            session.messages.len(),
+            load_start.elapsed().as_millis(),
+        ));
         Ok(session)
     }
 
@@ -1453,12 +1544,61 @@ fn redact_json_value(value: &mut serde_json::Value) {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderedMessage {
     pub role: String,
     pub content: String,
     pub tool_calls: Vec<String>,
     pub tool_data: Option<ToolCall>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteStartupSessionSnapshot {
+    id: String,
+    #[serde(default)]
+    parent_id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    #[serde(default)]
+    messages: Vec<StoredMessage>,
+    #[serde(default)]
+    compaction: Option<StoredCompactionState>,
+    #[serde(default)]
+    provider_session_id: Option<String>,
+    #[serde(default)]
+    provider_key: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    subagent_model: Option<String>,
+    #[serde(default)]
+    improve_mode: Option<SessionImproveMode>,
+    #[serde(default)]
+    autoreview_enabled: Option<bool>,
+    #[serde(default)]
+    autojudge_enabled: Option<bool>,
+    #[serde(default)]
+    is_canary: bool,
+    #[serde(default)]
+    testing_build: Option<String>,
+    #[serde(default)]
+    working_dir: Option<String>,
+    #[serde(default)]
+    short_name: Option<String>,
+    #[serde(default)]
+    status: SessionStatus,
+    #[serde(default)]
+    last_pid: Option<u32>,
+    #[serde(default)]
+    last_active_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    is_debug: bool,
+    #[serde(default)]
+    saved: bool,
+    #[serde(default)]
+    save_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1942,6 +2082,73 @@ mod tests {
         assert!(stub.env_snapshots.is_empty());
         assert!(stub.memory_injections.is_empty());
         assert!(stub.replay_events.is_empty());
+    }
+
+    #[test]
+    fn load_for_remote_startup_preserves_messages_and_replay_but_skips_heavy_vectors() {
+        let _env_lock = lock_env();
+        let temp_home = tempfile::Builder::new()
+            .prefix("jcode-remote-startup-test-")
+            .tempdir()
+            .expect("create temp JCODE_HOME");
+        let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+        let session_id = "session_remote_startup_roundtrip";
+        let mut session = Session::create_with_id(
+            session_id.to_string(),
+            Some("parent_remote".to_string()),
+            Some("remote startup".to_string()),
+        );
+        session.model = Some("gpt-5.4".to_string());
+        session.append_stored_message(StoredMessage {
+            id: "msg_remote_1".to_string(),
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "hello remote startup".to_string(),
+                cache_control: None,
+            }],
+            display_role: None,
+            timestamp: Some(Utc::now()),
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+        session.record_env_snapshot(EnvSnapshot {
+            captured_at: Utc::now(),
+            reason: "resume".to_string(),
+            session_id: session_id.to_string(),
+            working_dir: Some(temp_home.path().to_string_lossy().to_string()),
+            provider: "openai".to_string(),
+            model: "gpt-5.4".to_string(),
+            jcode_version: "test".to_string(),
+            jcode_git_hash: Some("abc123".to_string()),
+            jcode_git_dirty: Some(false),
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            pid: 123,
+            is_selfdev: false,
+            is_debug: false,
+            is_canary: false,
+            testing_build: None,
+            working_git: None,
+        });
+        session.record_memory_injection(
+            "summary".to_string(),
+            "content".to_string(),
+            1,
+            5,
+            Vec::new(),
+        );
+        session.record_replay_display_message("system", Some("Launch".to_string()), "boot");
+        session.save().expect("save session");
+
+        let loaded = Session::load_for_remote_startup(session_id).expect("load remote startup");
+        assert_eq!(loaded.id, session_id);
+        assert_eq!(loaded.parent_id.as_deref(), Some("parent_remote"));
+        assert_eq!(loaded.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(loaded.messages.len(), 1);
+        assert!(loaded.replay_events.is_empty());
+        assert!(loaded.env_snapshots.is_empty());
+        assert!(loaded.memory_injections.is_empty());
     }
 
     #[test]

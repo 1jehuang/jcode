@@ -9885,6 +9885,44 @@ fn test_remote_typing_scroll_lock_can_be_toggled_back_off() {
 }
 
 #[test]
+fn test_should_allow_reconnect_takeover_only_after_successful_attach() {
+    let mut app = create_test_app();
+    let state = super::remote::RemoteRunState {
+        reconnect_attempts: 1,
+        ..Default::default()
+    };
+
+    app.resume_session_id = Some("ses_resume_only".to_string());
+    assert!(!super::remote::should_allow_reconnect_takeover(
+        &app,
+        &state,
+        app.resume_session_id.as_deref(),
+    ));
+
+    app.remote_session_id = Some("ses_other".to_string());
+    assert!(!super::remote::should_allow_reconnect_takeover(
+        &app,
+        &state,
+        app.resume_session_id.as_deref(),
+    ));
+
+    app.remote_session_id = Some("ses_resume_only".to_string());
+    assert!(super::remote::should_allow_reconnect_takeover(
+        &app,
+        &state,
+        app.resume_session_id.as_deref(),
+    ));
+    assert!(!super::remote::should_allow_reconnect_takeover(
+        &app,
+        &super::remote::RemoteRunState::default(),
+        app.resume_session_id.as_deref(),
+    ));
+    assert!(!super::remote::should_allow_reconnect_takeover(
+        &app, &state, None,
+    ));
+}
+
+#[test]
 fn test_reconnect_target_prefers_remote_session_id() {
     let mut app = create_test_app();
     app.resume_session_id = Some("ses_resume_idle".to_string());

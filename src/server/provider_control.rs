@@ -538,10 +538,7 @@ mod tests {
         assert!(saw_done, "expected immediate Done ack");
         let (available_models, available_model_routes) =
             saw_models.expect("expected AvailableModelsUpdated event");
-        assert_eq!(
-            available_models,
-            vec!["logged-out-model".to_string()]
-        );
+        assert_eq!(available_models, vec!["logged-out-model".to_string()]);
         assert!(available_model_routes.iter().any(|route| {
             route.model == "logged-out-model"
                 && route.provider == "MockAuth"

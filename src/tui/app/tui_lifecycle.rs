@@ -685,22 +685,29 @@ impl App {
     }
 
     fn restore_remote_startup_history(&mut self, session_id: &str) {
-        let Ok(session) = Session::load(session_id) else {
+        let load_start = Instant::now();
+        let Ok(session) = Session::load_for_remote_startup(session_id) else {
             return;
         };
 
-        self.clear_display_messages();
-        for item in crate::session::render_messages(&session) {
-            self.push_display_message(DisplayMessage {
+        let render_start = Instant::now();
+        let display_messages = crate::session::render_messages(&session)
+            .into_iter()
+            .map(|item| DisplayMessage {
                 role: item.role,
                 content: item.content,
                 tool_calls: item.tool_calls,
                 duration_secs: None,
                 title: None,
                 tool_data: item.tool_data,
-            });
-        }
+            })
+            .collect();
+        self.replace_display_messages(display_messages);
+        let render_ms = render_start.elapsed().as_millis();
+
+        let image_start = Instant::now();
         self.remote_side_pane_images = crate::session::render_images(&session);
+        let image_ms = image_start.elapsed().as_millis();
         self.set_side_panel_snapshot(
             crate::side_panel::snapshot_for_session(session_id).unwrap_or_default(),
         );

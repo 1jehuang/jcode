@@ -335,6 +335,11 @@ impl App {
         }
     }
 
+    pub(super) fn replace_display_messages(&mut self, messages: Vec<DisplayMessage>) {
+        self.display_messages = messages;
+        self.bump_display_messages_version();
+    }
+
     pub(super) fn replace_display_message_content(&mut self, idx: usize, content: String) -> bool {
         if let Some(message) = self.display_messages.get_mut(idx) {
             if message.content != content {

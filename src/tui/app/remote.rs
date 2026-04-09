@@ -19,6 +19,7 @@ mod workspace;
 pub(super) use reconnect::{
     ConnectOutcome, PostConnectOutcome, ReloadReconnectHints, RemoteRunState, connect_with_retry,
     finalize_reload_reconnect, handle_post_connect, reload_handoff_active,
+    should_allow_reconnect_takeover,
 };
 use reconnect::{format_disconnect_reason, reconnect_status_message};
 use workspace::{handle_workspace_command, handle_workspace_navigation_key};
@@ -1948,15 +1949,23 @@ pub(super) fn handle_server_event(
                     history_model.as_deref().unwrap_or("<none>")
                 ));
                 remote.mark_history_loaded();
-                for msg in messages {
-                    app.push_display_message(DisplayMessage {
-                        role: msg.role,
-                        content: msg.content,
-                        tool_calls: msg.tool_calls.unwrap_or_default(),
-                        duration_secs: None,
-                        title: None,
-                        tool_data: msg.tool_data,
-                    });
+                if messages.is_empty() && !session_changed && !app.display_messages().is_empty() {
+                    crate::logging::info(
+                        "Preserving locally restored display history for metadata-only History bootstrap",
+                    );
+                } else {
+                    let restored_messages = messages
+                        .into_iter()
+                        .map(|msg| DisplayMessage {
+                            role: msg.role,
+                            content: msg.content,
+                            tool_calls: msg.tool_calls.unwrap_or_default(),
+                            duration_secs: None,
+                            title: None,
+                            tool_data: msg.tool_data,
+                        })
+                        .collect();
+                    app.replace_display_messages(restored_messages);
                 }
             } else {
                 crate::logging::info(

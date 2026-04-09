@@ -85,6 +85,7 @@ pub(super) async fn handle_get_history(
         server_icon,
         None,
         HistoryPayloadMode::Full,
+        true,
     )
     .await?;
     let send_history_ms = history_start.elapsed().as_millis();
@@ -112,6 +113,7 @@ pub(super) async fn send_history(
     server_icon: &str,
     was_interrupted: Option<bool>,
     payload_mode: HistoryPayloadMode,
+    include_model_catalog: bool,
 ) -> Result<()> {
     let history_start = Instant::now();
     let agent_lock_start = Instant::now();
@@ -170,9 +172,16 @@ pub(super) async fn send_history(
         let tool_names = agent_guard.tool_names().await;
         let tool_names_ms = tool_names_start.elapsed().as_millis();
 
-        let available_models_start = Instant::now();
-        let available_models = agent_guard.available_models_display();
-        let available_models_ms = available_models_start.elapsed().as_millis();
+        let (available_models, available_models_ms) = if include_model_catalog {
+            let available_models_start = Instant::now();
+            let available_models = agent_guard.available_models_display();
+            (
+                available_models,
+                available_models_start.elapsed().as_millis(),
+            )
+        } else {
+            (Vec::new(), 0)
+        };
 
         // Model-route expansion can be relatively expensive (provider/account routing,
         // endpoint cache reads, etc.). The TUI already supports later
@@ -332,10 +341,7 @@ async fn write_event(writer: &Arc<Mutex<WriteHalf>>, event: &ServerEvent) -> Res
     Ok(())
 }
 
-pub(super) fn spawn_model_prefetch_update(
-    provider: Arc<dyn Provider>,
-    agent: Arc<Mutex<Agent>>,
-) {
+pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Arc<Mutex<Agent>>) {
     tokio::spawn(async move {
         let (provider_name, initial_models) = {
             let agent_guard = agent.lock().await;

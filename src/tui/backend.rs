@@ -683,21 +683,18 @@ impl RemoteConnection {
                         Err(error) => {
                             crate::logging::warn(&format!(
                                 "RemoteConnection::next_event: protocol error={} line={:?} (session_id={:?}, client_instance_id={:?})",
-                                error,
-                                self.line_buffer,
-                                self.session_id,
-                                self.client_instance_id
+                                error, self.line_buffer, self.session_id, self.client_instance_id
                             ));
-                            return RemoteRead::Disconnected(RemoteDisconnectReason::Protocol(error.to_string()));
+                            return RemoteRead::Disconnected(RemoteDisconnectReason::Protocol(
+                                error.to_string(),
+                            ));
                         }
                     }
                 }
                 Err(error) => {
                     crate::logging::warn(&format!(
                         "RemoteConnection::next_event: io error={} (session_id={:?}, client_instance_id={:?})",
-                        error,
-                        self.session_id,
-                        self.client_instance_id
+                        error, self.session_id, self.client_instance_id
                     ));
                     return RemoteRead::Disconnected(RemoteDisconnectReason::Io(error.to_string()));
                 }

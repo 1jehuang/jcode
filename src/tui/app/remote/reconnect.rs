@@ -62,6 +62,25 @@ pub(super) fn format_disconnect_reason(reason: &RemoteDisconnectReason) -> Strin
     }
 }
 
+pub(in crate::tui::app) fn should_allow_reconnect_takeover(
+    app: &App,
+    state: &RemoteRunState,
+    session_to_resume: Option<&str>,
+) -> bool {
+    if state.reconnect_attempts == 0 {
+        return false;
+    }
+
+    let Some(session_to_resume) = session_to_resume else {
+        return false;
+    };
+
+    app.remote_session_id
+        .as_deref()
+        .map(|remote_session_id| remote_session_id == session_to_resume)
+        .unwrap_or(false)
+}
+
 pub(super) fn reconnect_status_message(app: &App, state: &RemoteRunState, detail: &str) -> String {
     let elapsed = state
         .disconnect_start
@@ -323,15 +342,20 @@ pub(in crate::tui::app) async fn connect_with_retry(
     let client_has_local_history =
         session_to_resume.is_some() && !app.display_messages().is_empty();
     let client_instance_id = app.remote_client_instance_id.clone();
+    let allow_session_takeover = should_allow_reconnect_takeover(app, state, session_to_resume);
     let connect = RemoteConnection::connect_with_session(
         session_to_resume,
         Some(client_instance_id.as_str()),
         client_has_local_history,
-        state.reconnect_attempts > 0,
+        allow_session_takeover,
     );
     crate::logging::info(&format!(
-        "Remote reconnect attempt: resume={:?}, reconnect_attempts={}, client_instance_id={}, local_history={}",
-        session_to_resume, state.reconnect_attempts, client_instance_id, client_has_local_history,
+        "Remote reconnect attempt: resume={:?}, reconnect_attempts={}, client_instance_id={}, local_history={}, allow_takeover={}",
+        session_to_resume,
+        state.reconnect_attempts,
+        client_instance_id,
+        client_has_local_history,
+        allow_session_takeover,
     ));
     tokio::pin!(connect);
     let mut redraw = disconnected_redraw_interval();
