@@ -1427,6 +1427,7 @@ fn persist_improve_mode_local(app: &mut App, mode: Option<ImproveMode>) {
 }
 
 fn start_synthetic_user_turn(app: &mut App, content: String) {
+    app.commit_pending_streaming_assistant_message();
     app.add_provider_message(Message::user(&content));
     app.session.add_message(
         Role::User,

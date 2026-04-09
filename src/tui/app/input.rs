@@ -1735,6 +1735,12 @@ impl App {
         self.clear_input_undo_history();
         self.follow_chat_bottom(); // Reset to bottom and resume auto-scroll on new input
 
+        // If the previous assistant turn still has visible streamed text that has not yet been
+        // committed into chat history, finalize it before inserting the next user turn.
+        // Otherwise the new prompt can appear directly under the last tool call, and the final
+        // assistant paragraph shows up later out of order.
+        self.commit_pending_streaming_assistant_message();
+
         if let Some(pending) = self.pending_login.take() {
             self.handle_login_input(pending, input);
             return;
@@ -1904,6 +1910,8 @@ impl App {
             let (messages, reminder, display_system_messages) =
                 super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
             let combined = messages.join("\n\n");
+
+            self.commit_pending_streaming_assistant_message();
 
             for msg in display_system_messages {
                 self.push_display_message(DisplayMessage::system(msg));

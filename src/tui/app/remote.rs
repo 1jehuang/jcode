@@ -702,10 +702,7 @@ pub(super) fn handle_disconnect(
     };
     crate::logging::warn(&format!(
         "handle_disconnect: session={:?}, remote_session_id={:?}, reason={:?}, detail={}",
-        app.resume_session_id,
-        app.remote_session_id,
-        reason,
-        detail
+        app.resume_session_id, app.remote_session_id, reason, detail
     ));
     state.last_disconnect_reason = Some(detail.clone());
 
@@ -1106,6 +1103,7 @@ async fn submit_prepared_remote_input(
         return Ok(());
     }
 
+    app.commit_pending_streaming_assistant_message();
     app.push_display_message(DisplayMessage {
         role: "user".to_string(),
         content: prepared.raw_input,
@@ -1292,6 +1290,7 @@ async fn submit_remote_input_shell(
     raw_input: String,
     command: String,
 ) -> Result<()> {
+    app.commit_pending_streaming_assistant_message();
     app.push_display_message(DisplayMessage::user(raw_input));
 
     if command.trim().is_empty() {

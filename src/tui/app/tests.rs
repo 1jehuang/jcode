@@ -5378,6 +5378,39 @@ fn test_submit_input_adds_message() {
 }
 
 #[test]
+fn test_submit_input_commits_pending_streaming_assistant_text_before_user_message() {
+    let mut app = create_test_app();
+    app.display_messages.push(DisplayMessage::tool(
+        "file contents",
+        crate::message::ToolCall {
+            id: "tool_read".to_string(),
+            name: "read".to_string(),
+            input: serde_json::json!({"file_path": "src/main.rs"}),
+            intent: None,
+        },
+    ));
+    app.bump_display_messages_version();
+    app.streaming_text = "Here is the final paragraph".to_string();
+    assert_eq!(app.stream_buffer.push(" that was still buffered."), None);
+
+    app.input = "follow up".to_string();
+    app.cursor_pos = app.input.len();
+    app.submit_input();
+
+    assert_eq!(app.display_messages().len(), 3);
+    assert_eq!(app.display_messages()[0].role, "tool");
+    assert_eq!(app.display_messages()[1].role, "assistant");
+    assert_eq!(
+        app.display_messages()[1].content,
+        "Here is the final paragraph that was still buffered."
+    );
+    assert_eq!(app.display_messages()[2].role, "user");
+    assert_eq!(app.display_messages()[2].content, "follow up");
+    assert!(app.streaming_text().is_empty());
+    assert!(app.stream_buffer.is_empty());
+}
+
+#[test]
 fn test_queue_message_while_processing() {
     let mut app = create_test_app();
     app.queue_mode = true;
