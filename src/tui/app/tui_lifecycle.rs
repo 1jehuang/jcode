@@ -746,6 +746,10 @@ impl App {
 
     /// Create an App instance for remote mode (connecting to server)
     pub fn new_for_remote(resume_session: Option<String>) -> Self {
+        Self::new_for_remote_with_options(resume_session, false)
+    }
+
+    pub fn new_for_remote_with_options(resume_session: Option<String>, fresh_spawn: bool) -> Self {
         let provider: Arc<dyn Provider> = Arc::new(NullProvider);
         let registry = Registry::empty();
         let session = resume_session
@@ -759,7 +763,14 @@ impl App {
 
         // Load session to get canary status (for "client self-dev" badge)
         if let Some(ref session_id) = resume_session {
-            app.restore_remote_startup_history(session_id);
+            if !fresh_spawn {
+                app.restore_remote_startup_history(session_id);
+            } else {
+                crate::logging::info(&format!(
+                    "Remote startup fresh-spawn path: skipping local transcript restore for {}",
+                    session_id
+                ));
+            }
             if let Some(restored) = Self::restore_input_for_reload(session_id) {
                 app.apply_restored_reload_input(restored);
                 if app.has_queued_followups() {

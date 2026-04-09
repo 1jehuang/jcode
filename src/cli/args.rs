@@ -43,6 +43,10 @@ pub(crate) struct Args {
     #[arg(long, global = true, num_args = 0..=1, default_missing_value = "")]
     pub(crate) resume: Option<String>,
 
+    /// Internal: launched as a freshly spawned window, so skip heavy local resume bootstrap.
+    #[arg(long, global = true, hide = true)]
+    pub(crate) fresh_spawn: bool,
+
     /// DEPRECATED: Run standalone TUI without connecting to server.
     /// The default mode is now always client/server (even for self-dev).
     /// Standalone mode is missing features like graceful cancel with partial

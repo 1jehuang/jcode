@@ -5,7 +5,6 @@ import argparse
 import json
 import os
 import pty
-import resource
 import select
 import signal
 import socket
@@ -15,6 +14,9 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+CLK_TCK = os.sysconf("SC_CLK_TCK")
+PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,9 +28,48 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def cpu_time() -> float:
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    return usage.ru_utime + usage.ru_stime
+@dataclass
+class ProcSample:
+    cpu_ticks: int
+    rss_kb: int
+
+
+@dataclass
+class ProcTracker:
+    start_cpu_ticks: int | None = None
+    last_cpu_ticks: int = 0
+    peak_rss_kb: int = 0
+
+    def record(self, sample: ProcSample | None) -> bool:
+        if sample is None:
+            return False
+        if self.start_cpu_ticks is None:
+            self.start_cpu_ticks = sample.cpu_ticks
+        self.last_cpu_ticks = sample.cpu_ticks
+        self.peak_rss_kb = max(self.peak_rss_kb, sample.rss_kb)
+        return True
+
+    def cpu_ms(self) -> float:
+        if self.start_cpu_ticks is None:
+            return 0.0
+        return (self.last_cpu_ticks - self.start_cpu_ticks) * 1000.0 / CLK_TCK
+
+
+def read_proc_sample(pid: int) -> ProcSample | None:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except FileNotFoundError:
+        return None
+    end = stat.rfind(")")
+    if end == -1:
+        return None
+    fields = stat[end + 2 :].split()
+    if len(fields) <= 21:
+        return None
+    utime = int(fields[11])
+    stime = int(fields[12])
+    rss_pages = int(fields[21])
+    return ProcSample(cpu_ticks=utime + stime, rss_kb=rss_pages * PAGE_SIZE // 1024)
 
 
 def wait_for_socket(path: Path, timeout_s: float = 10.0) -> None:
@@ -110,6 +151,7 @@ class LiveClient:
     master_fd: int
     start: float
     buffer: bytes
+    tracker: ProcTracker
     first_output_ms: float | None = None
     done: bool = False
 
@@ -118,7 +160,16 @@ def start_resume_client(binary: str, env: dict[str, str], session_id: str) -> Li
     master_fd, slave_fd = pty.openpty()
     start = time.perf_counter()
     proc = subprocess.Popen(
-        [binary, "--no-update", "--no-selfdev", "--socket", env["JCODE_SOCKET"], "--resume", session_id],
+        [
+            binary,
+            "--no-update",
+            "--no-selfdev",
+            "--socket",
+            env["JCODE_SOCKET"],
+            "--fresh-spawn",
+            "--resume",
+            session_id,
+        ],
         stdin=slave_fd,
         stdout=slave_fd,
         stderr=slave_fd,
@@ -133,16 +184,20 @@ def start_resume_client(binary: str, env: dict[str, str], session_id: str) -> Li
         master_fd=master_fd,
         start=start,
         buffer=b"",
+        tracker=ProcTracker(),
     )
 
 
 def finish_client(client: LiveClient) -> dict:
     try:
+        client.tracker.record(read_proc_sample(client.proc.pid))
         return {
             "session_id": client.session_id,
             "pid": client.proc.pid,
             "first_output_ms": client.first_output_ms,
             "buffer_bytes": len(client.buffer),
+            "cpu_ms": client.tracker.cpu_ms(),
+            "peak_rss_kb": client.tracker.peak_rss_kb,
         }
     finally:
         os.close(client.master_fd)
@@ -159,16 +214,37 @@ def finish_client(client: LiveClient) -> dict:
                 pass
 
 
-def run_burst(binary: str, env: dict[str, str], session_ids: list[str], timeout_s: float) -> list[dict]:
+def run_burst(
+    binary: str, env: dict[str, str], session_ids: list[str], timeout_s: float, server_pid: int
+) -> tuple[list[dict], dict[str, float | int]]:
     clients = [start_resume_client(binary, env, session_id) for session_id in session_ids]
     fd_to_index = {client.master_fd: idx for idx, client in enumerate(clients)}
     deadline = time.perf_counter() + timeout_s
+    server_tracker = ProcTracker()
+    peak_clients_rss_kb = 0
+    peak_live_clients = 0
+
+    def sample_processes() -> None:
+        nonlocal peak_clients_rss_kb, peak_live_clients
+        server_tracker.record(read_proc_sample(server_pid))
+        live_clients = 0
+        clients_rss_kb = 0
+        for client in clients:
+            sample = read_proc_sample(client.proc.pid)
+            if client.tracker.record(sample):
+                live_clients += 1
+                clients_rss_kb += sample.rss_kb if sample is not None else 0
+        peak_live_clients = max(peak_live_clients, live_clients)
+        peak_clients_rss_kb = max(peak_clients_rss_kb, clients_rss_kb)
+
+    sample_processes()
 
     while time.perf_counter() < deadline and any(not client.done for client in clients):
         active_fds = [client.master_fd for client in clients if not client.done]
         if not active_fds:
             break
         rlist, _, _ = select.select(active_fds, [], [], 0.05)
+        sample_processes()
         for fd in rlist:
             client = clients[fd_to_index[fd]]
             try:
@@ -195,7 +271,17 @@ def run_burst(binary: str, env: dict[str, str], session_ids: list[str], timeout_
     for client in clients:
         client.done = True
 
-    return [finish_client(client) for client in clients]
+    sample_processes()
+
+    results = [finish_client(client) for client in clients]
+    metrics = {
+        "server_cpu_ms": server_tracker.cpu_ms(),
+        "server_peak_rss_kb": server_tracker.peak_rss_kb,
+        "clients_cpu_ms": sum(result["cpu_ms"] for result in results),
+        "clients_peak_rss_kb": peak_clients_rss_kb,
+        "peak_live_clients": peak_live_clients,
+    }
+    return results, metrics
 
 
 def main() -> None:
@@ -225,23 +311,28 @@ def main() -> None:
         wait_for_socket(debug_socket)
         session_ids = [create_session(debug_socket, os.getcwd()) for _ in range(args.burst)]
 
-        cpu_start = cpu_time()
         wall_start = time.perf_counter()
-        results = run_burst(args.binary, env, session_ids, args.timeout)
+        results, proc_metrics = run_burst(args.binary, env, session_ids, args.timeout, server.pid)
         wall_ms = (time.perf_counter() - wall_start) * 1000.0
-        cpu_ms = (cpu_time() - cpu_start) * 1000.0
         firsts = [r["first_output_ms"] for r in results if r["first_output_ms"] is not None]
         output = {
             "burst": args.burst,
             "wall_ms": wall_ms,
-            "cpu_ms": cpu_ms,
-            "cpu_utilization_ratio": 0.0 if wall_ms == 0 else cpu_ms / wall_ms,
+            "server_cpu_ms": proc_metrics["server_cpu_ms"],
+            "clients_cpu_ms": proc_metrics["clients_cpu_ms"],
+            "total_cpu_ms": proc_metrics["server_cpu_ms"] + proc_metrics["clients_cpu_ms"],
+            "cpu_utilization_ratio": 0.0
+            if wall_ms == 0
+            else (proc_metrics["server_cpu_ms"] + proc_metrics["clients_cpu_ms"]) / wall_ms,
             "first_output_ms": {
                 "min": min(firsts) if firsts else None,
                 "p50": statistics.median(firsts) if firsts else None,
                 "max": max(firsts) if firsts else None,
             },
             "buffer_bytes_total": sum(r["buffer_bytes"] for r in results),
+            "server_peak_rss_kb": proc_metrics["server_peak_rss_kb"],
+            "clients_peak_rss_kb": proc_metrics["clients_peak_rss_kb"],
+            "peak_live_clients": proc_metrics["peak_live_clients"],
             "results": results,
         }
         Path(args.json_out).write_text(json.dumps(output, indent=2))

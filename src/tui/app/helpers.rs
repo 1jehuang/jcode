@@ -364,7 +364,11 @@ pub(super) fn mask_email(email: &str) -> String {
 /// Spawn a new terminal window that resumes a jcode session.
 /// Returns Ok(true) if a terminal was successfully launched, Ok(false) if no terminal found.
 fn resume_invocation_args(session_id: &str, socket: Option<&str>) -> Vec<String> {
-    let mut args = vec!["--resume".to_string(), session_id.to_string()];
+    let mut args = vec![
+        "--fresh-spawn".to_string(),
+        "--resume".to_string(),
+        session_id.to_string(),
+    ];
     if let Some(socket) = socket.filter(|s| !s.trim().is_empty()) {
         args.push("--socket".to_string());
         args.push(socket.to_string());
@@ -778,6 +782,7 @@ mod tests {
         assert_eq!(
             args,
             vec![
+                "--fresh-spawn".to_string(),
                 "--resume".to_string(),
                 "ses_123".to_string(),
                 "--socket".to_string(),
@@ -789,7 +794,14 @@ mod tests {
     #[test]
     fn resume_invocation_args_omits_blank_socket() {
         let args = resume_invocation_args("ses_123", Some("   "));
-        assert_eq!(args, vec!["--resume".to_string(), "ses_123".to_string()]);
+        assert_eq!(
+            args,
+            vec![
+                "--fresh-spawn".to_string(),
+                "--resume".to_string(),
+                "ses_123".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -808,6 +820,7 @@ mod tests {
         assert_eq!(
             args,
             vec![
+                "--fresh-spawn".to_string(),
                 "--resume".to_string(),
                 crate::import::imported_claude_code_session_id("claude-session-123")
             ]

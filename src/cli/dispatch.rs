@@ -353,7 +353,13 @@ async fn run_default_command(args: Args) -> Result<()> {
     if std::env::var("JCODE_RESUMING").is_err() && server_running {
         output::stderr_info("Connecting to server...");
     }
-    tui_launch::run_tui_client(args.resume, startup_hints, !server_running).await?;
+    tui_launch::run_tui_client(
+        args.resume,
+        startup_hints,
+        !server_running,
+        args.fresh_spawn,
+    )
+    .await?;
 
     Ok(())
 }

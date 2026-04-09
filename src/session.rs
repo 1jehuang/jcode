@@ -298,6 +298,8 @@ pub struct Session {
     #[serde(skip)]
     provider_messages_cache: Vec<Message>,
     #[serde(skip)]
+    provider_message_prefix_hashes_cache: Vec<u64>,
+    #[serde(skip)]
     provider_messages_cache_len: usize,
     #[serde(skip)]
     provider_messages_cache_mode: PersistVectorMode,
@@ -734,8 +736,21 @@ impl Session {
 
     fn reset_provider_messages_cache(&mut self) {
         self.provider_messages_cache.clear();
+        self.provider_message_prefix_hashes_cache.clear();
         self.provider_messages_cache_len = 0;
         self.provider_messages_cache_mode = PersistVectorMode::Full;
+    }
+
+    fn push_provider_message_cache_entry(&mut self, message: Message) {
+        let message_hash = crate::message::stable_message_hash(&message);
+        let prefix_hash = self
+            .provider_message_prefix_hashes_cache
+            .last()
+            .copied()
+            .map(|prev| crate::message::extend_stable_hash(prev, message_hash))
+            .unwrap_or(message_hash);
+        self.provider_messages_cache.push(message);
+        self.provider_message_prefix_hashes_cache.push(prefix_hash);
     }
 
     fn mark_messages_append_dirty(&mut self) {
@@ -937,6 +952,7 @@ impl Session {
             replay_events: Vec::new(),
             persist_state: SessionPersistState::default(),
             provider_messages_cache: Vec::new(),
+            provider_message_prefix_hashes_cache: Vec::new(),
             provider_messages_cache_len: 0,
             provider_messages_cache_mode: PersistVectorMode::Full,
         };
@@ -980,6 +996,7 @@ impl Session {
             replay_events: Vec::new(),
             persist_state: SessionPersistState::default(),
             provider_messages_cache: Vec::new(),
+            provider_message_prefix_hashes_cache: Vec::new(),
             provider_messages_cache_len: 0,
             provider_messages_cache_mode: PersistVectorMode::Full,
         };
@@ -1482,11 +1499,16 @@ impl Session {
             || self.provider_messages_cache_len > self.messages.len();
 
         if needs_full_rebuild {
-            self.provider_messages_cache = self
+            self.provider_messages_cache.clear();
+            self.provider_message_prefix_hashes_cache.clear();
+            let rebuilt_messages: Vec<Message> = self
                 .messages
                 .iter()
                 .map(StoredMessage::to_message)
                 .collect();
+            for message in rebuilt_messages {
+                self.push_provider_message_cache_entry(message);
+            }
             self.provider_messages_cache_len = self.messages.len();
             self.provider_messages_cache_mode = PersistVectorMode::Clean;
             return &self.provider_messages_cache;
@@ -1495,16 +1517,23 @@ impl Session {
         if self.provider_messages_cache_mode == PersistVectorMode::Append
             && self.provider_messages_cache_len < self.messages.len()
         {
-            self.provider_messages_cache.extend(
-                self.messages[self.provider_messages_cache_len..]
-                    .iter()
-                    .map(StoredMessage::to_message),
-            );
+            let appended_messages: Vec<Message> = self.messages[self.provider_messages_cache_len..]
+                .iter()
+                .map(StoredMessage::to_message)
+                .collect();
+            for message in appended_messages {
+                self.push_provider_message_cache_entry(message);
+            }
             self.provider_messages_cache_len = self.messages.len();
             self.provider_messages_cache_mode = PersistVectorMode::Clean;
         }
 
         &self.provider_messages_cache
+    }
+
+    pub fn provider_message_prefix_hashes(&mut self) -> &[u64] {
+        let _ = self.provider_messages();
+        &self.provider_message_prefix_hashes_cache
     }
 
     pub fn messages_for_provider(&mut self) -> Vec<Message> {

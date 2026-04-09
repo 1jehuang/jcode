@@ -316,6 +316,7 @@ pub async fn run_tui_client(
     resume_session: Option<String>,
     startup_hints: Option<setup_hints::StartupHints>,
     server_spawning: bool,
+    fresh_spawn: bool,
 ) -> Result<()> {
     startup_profile::mark("tui_client_enter");
     let (terminal, tui_runtime) = init_tui_runtime()?;
@@ -356,7 +357,7 @@ pub async fn run_tui_client(
     }
     startup_profile::mark("terminal_title");
 
-    let mut app = tui::App::new_for_remote(resume_session.clone());
+    let mut app = tui::App::new_for_remote_with_options(resume_session.clone(), fresh_spawn);
     if should_show_server_spawning(server_spawning).await {
         app.set_server_spawning();
     }
@@ -642,6 +643,7 @@ pub fn spawn_resume_in_new_terminal(
     for term in resume_terminal_candidates_unix() {
         let mut cmd = Command::new(&term);
         cmd.current_dir(cwd)
+            .env("JCODE_FRESH_SPAWN", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -650,6 +652,7 @@ pub fn spawn_resume_in_new_terminal(
             "handterm" => {
                 let command = shell_command(&[
                     exe.to_string_lossy().into_owned(),
+                    "--fresh-spawn".to_string(),
                     "--resume".to_string(),
                     session_id.to_string(),
                 ]);
@@ -659,6 +662,7 @@ pub fn spawn_resume_in_new_terminal(
                 let title = resumed_window_title(session_id);
                 cmd.args(["--title", &title, "-e"])
                     .arg(exe)
+                    .arg("--fresh-spawn")
                     .arg("--resume")
                     .arg(session_id);
             }
@@ -668,24 +672,47 @@ pub fn spawn_resume_in_new_terminal(
                     "--always-new-process",
                     "--",
                     exe.to_string_lossy().as_ref(),
+                    "--fresh-spawn",
                     "--resume",
                     session_id,
                 ]);
             }
             "alacritty" => {
-                cmd.args(["-e"]).arg(exe).arg("--resume").arg(session_id);
+                cmd.args(["-e"])
+                    .arg(exe)
+                    .arg("--fresh-spawn")
+                    .arg("--resume")
+                    .arg(session_id);
             }
             "gnome-terminal" => {
-                cmd.args(["--", exe.to_string_lossy().as_ref(), "--resume", session_id]);
+                cmd.args([
+                    "--",
+                    exe.to_string_lossy().as_ref(),
+                    "--fresh-spawn",
+                    "--resume",
+                    session_id,
+                ]);
             }
             "konsole" => {
-                cmd.args(["-e"]).arg(exe).arg("--resume").arg(session_id);
+                cmd.args(["-e"])
+                    .arg(exe)
+                    .arg("--fresh-spawn")
+                    .arg("--resume")
+                    .arg(session_id);
             }
             "xterm" => {
-                cmd.args(["-e"]).arg(exe).arg("--resume").arg(session_id);
+                cmd.args(["-e"])
+                    .arg(exe)
+                    .arg("--fresh-spawn")
+                    .arg("--resume")
+                    .arg(session_id);
             }
             "foot" => {
-                cmd.args(["-e"]).arg(exe).arg("--resume").arg(session_id);
+                cmd.args(["-e"])
+                    .arg(exe)
+                    .arg("--fresh-spawn")
+                    .arg("--resume")
+                    .arg(session_id);
             }
             "iterm2" => {
                 cmd = Command::new("osascript");
@@ -735,6 +762,7 @@ pub fn spawn_selfdev_in_new_terminal(
     for term in resume_terminal_candidates_unix() {
         let mut cmd = Command::new(&term);
         cmd.current_dir(cwd)
+            .env("JCODE_FRESH_SPAWN", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -748,6 +776,7 @@ pub fn spawn_selfdev_in_new_terminal(
             "handterm" => {
                 let command = shell_command(&[
                     exe.to_string_lossy().into_owned(),
+                    "--fresh-spawn".to_string(),
                     "--resume".to_string(),
                     session_id.to_string(),
                     "self-dev".to_string(),
@@ -757,6 +786,7 @@ pub fn spawn_selfdev_in_new_terminal(
             "kitty" => {
                 cmd.args(["--title", selfdev_title.as_str(), "-e"])
                     .arg(exe)
+                    .arg("--fresh-spawn")
                     .arg("--resume")
                     .arg(session_id)
                     .arg("self-dev");
@@ -767,6 +797,7 @@ pub fn spawn_selfdev_in_new_terminal(
                     "--always-new-process",
                     "--",
                     exe.to_string_lossy().as_ref(),
+                    "--fresh-spawn",
                     "--resume",
                     session_id,
                     "self-dev",
@@ -775,6 +806,7 @@ pub fn spawn_selfdev_in_new_terminal(
             "alacritty" => {
                 cmd.args(["--title", selfdev_title.as_str(), "-e"])
                     .arg(exe)
+                    .arg("--fresh-spawn")
                     .arg("--resume")
                     .arg(session_id)
                     .arg("self-dev");
@@ -784,6 +816,7 @@ pub fn spawn_selfdev_in_new_terminal(
                 cmd.args([
                     "--",
                     exe.to_string_lossy().as_ref(),
+                    "--fresh-spawn",
                     "--resume",
                     session_id,
                     "self-dev",
@@ -792,6 +825,7 @@ pub fn spawn_selfdev_in_new_terminal(
             "konsole" => {
                 cmd.args(["-e"])
                     .arg(exe)
+                    .arg("--fresh-spawn")
                     .arg("--resume")
                     .arg(session_id)
                     .arg("self-dev");
@@ -806,6 +840,7 @@ pub fn spawn_selfdev_in_new_terminal(
             "foot" => {
                 cmd.args(["-e"])
                     .arg(exe)
+                    .arg("--fresh-spawn")
                     .arg("--resume")
                     .arg(session_id)
                     .arg("self-dev");

@@ -4735,6 +4735,52 @@ fn test_new_for_remote_restores_spawn_startup_hints_and_dispatch_state() {
 }
 
 #[test]
+fn test_new_for_remote_fresh_spawn_skips_local_transcript_restore() {
+    with_temp_jcode_home(|| {
+        let session_id = "session_spawn_fresh_skip";
+        let mut session = crate::session::Session::create_with_id(
+            session_id.to_string(),
+            None,
+            Some("spawn fresh".to_string()),
+        );
+        session.model = Some("gpt-5.4".to_string());
+        session.append_stored_message(crate::session::StoredMessage {
+            id: "msg_spawn_fresh_skip".to_string(),
+            role: crate::message::Role::Assistant,
+            content: vec![crate::message::ContentBlock::Text {
+                text: "persisted transcript should not be restored locally".to_string(),
+                cache_control: None,
+            }],
+            display_role: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+        session.save().expect("save spawned child session");
+
+        super::App::save_startup_message_for_session(
+            session_id,
+            super::commands::build_autojudge_startup_message("session_parent_123"),
+        );
+
+        let app = App::new_for_remote_with_options(Some(session_id.to_string()), true);
+
+        assert_eq!(crate::tui::TuiState::provider_model(&app), "gpt-5.4");
+        assert!(app.pending_queued_dispatch);
+        assert_eq!(app.hidden_queued_system_messages.len(), 1);
+        assert_eq!(app.display_messages().len(), 1);
+        let startup_banner = app.display_messages().last().expect("startup banner");
+        assert_eq!(startup_banner.role, "system");
+        assert_eq!(startup_banner.title.as_deref(), Some("Autojudge"));
+        assert!(
+            !startup_banner
+                .content
+                .contains("persisted transcript should not be restored locally")
+        );
+    });
+}
+
+#[test]
 fn test_restore_session_restores_local_judge_processing_state() {
     with_temp_jcode_home(|| {
         let session_id = "session_local_judge_child";
