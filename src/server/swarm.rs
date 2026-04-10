@@ -96,7 +96,9 @@ async fn broadcast_swarm_status_now(
         .collect();
 
     drop(members_guard);
-    let event = ServerEvent::SwarmStatus { members: members_list };
+    let event = ServerEvent::SwarmStatus {
+        members: members_list,
+    };
     for sid in session_ids {
         let _ = fanout_session_event(swarm_members, &sid, event.clone()).await;
     }
@@ -644,14 +646,14 @@ pub(super) async fn update_member_status(
                     swarm_members,
                     &coord_id,
                     ServerEvent::Notification {
-                    from_session: session_id.to_string(),
-                    from_name: agent_name.clone(),
-                    notification_type: NotificationType::Message {
-                        scope: Some("swarm".to_string()),
-                        channel: None,
+                        from_session: session_id.to_string(),
+                        from_name: agent_name.clone(),
+                        notification_type: NotificationType::Message {
+                            scope: Some("swarm".to_string()),
+                            channel: None,
+                        },
+                        message: msg,
                     },
-                    message: msg,
-                },
                 )
                 .await;
             }

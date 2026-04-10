@@ -1,9 +1,9 @@
 use super::client_lifecycle::process_message_streaming_mpsc;
 use super::{
     ClientConnectionInfo, SessionInterruptQueues, SharedContext, SwarmEvent, SwarmEventType,
-    SwarmMember, fanout_session_event, queue_soft_interrupt_for_session,
-    record_swarm_event, session_event_fanout_sender,
-    subscribe_session_to_channel, truncate_detail, unsubscribe_session_from_channel,
+    SwarmMember, fanout_session_event, queue_soft_interrupt_for_session, record_swarm_event,
+    session_event_fanout_sender, subscribe_session_to_channel, truncate_detail,
+    unsubscribe_session_from_channel,
 };
 use crate::agent::Agent;
 use crate::id::extract_session_name;

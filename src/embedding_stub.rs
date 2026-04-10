@@ -4,6 +4,7 @@
 //! operations return errors or no-ops.
 
 use anyhow::Result;
+use serde::Serialize;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::time::Duration;
@@ -81,9 +82,12 @@ where
         .collect()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct EmbedderStats {
     pub loaded: bool,
+    pub model_artifact_bytes: u64,
+    pub tokenizer_artifact_bytes: u64,
+    pub total_artifact_bytes: u64,
     pub load_count: u64,
     pub unload_count: u64,
     pub embed_calls: u64,
@@ -94,6 +98,8 @@ pub struct EmbedderStats {
     pub loaded_secs: Option<u64>,
     pub cache_hits: u64,
     pub cache_size: usize,
+    pub cache_bytes_estimate: u64,
+    pub embedding_dim: usize,
 }
 
 pub struct Embedder;
@@ -116,9 +122,16 @@ pub fn maybe_unload_if_idle(_idle_for: Duration) -> bool {
     false
 }
 
+pub fn unload_now() -> bool {
+    false
+}
+
 pub fn stats() -> EmbedderStats {
     EmbedderStats {
         loaded: false,
+        model_artifact_bytes: 0,
+        tokenizer_artifact_bytes: 0,
+        total_artifact_bytes: 0,
         load_count: 0,
         unload_count: 0,
         embed_calls: 0,
@@ -129,6 +142,8 @@ pub fn stats() -> EmbedderStats {
         loaded_secs: None,
         cache_hits: 0,
         cache_size: 0,
+        cache_bytes_estimate: 0,
+        embedding_dim: embedding_dim(),
     }
 }
 

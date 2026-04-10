@@ -142,6 +142,42 @@ pub(super) async fn maybe_handle_server_state_command(
         ));
     }
 
+    if cmd == "embeddings" || cmd == "embeddings:stats" {
+        return Ok(Some(
+            serde_json::to_string_pretty(&crate::embedding::stats())
+                .unwrap_or_else(|_| "{}".to_string()),
+        ));
+    }
+
+    if cmd == "embeddings:load" {
+        let result = crate::embedding::get_embedder();
+        let payload = match result {
+            Ok(_) => serde_json::json!({
+                "status": "loaded",
+                "embeddings": crate::embedding::stats(),
+            }),
+            Err(err) => serde_json::json!({
+                "status": "error",
+                "error": err.to_string(),
+                "embeddings": crate::embedding::stats(),
+            }),
+        };
+        return Ok(Some(
+            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()),
+        ));
+    }
+
+    if cmd == "embeddings:unload" {
+        let unloaded = crate::embedding::unload_now();
+        let payload = serde_json::json!({
+            "status": if unloaded { "unloaded" } else { "noop" },
+            "embeddings": crate::embedding::stats(),
+        });
+        return Ok(Some(
+            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()),
+        ));
+    }
+
     if cmd == "info" || cmd == "server:info" {
         let uptime_secs = server_start_time.elapsed().as_secs();
         let session_count = sessions.read().await.len();

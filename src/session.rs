@@ -220,6 +220,10 @@ impl StoredMessage {
     }
 }
 
+fn stored_messages_to_messages(messages: &[StoredMessage]) -> Vec<Message> {
+    messages.iter().map(StoredMessage::to_message).collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -1536,8 +1540,26 @@ impl Session {
         &self.provider_message_prefix_hashes_cache
     }
 
+    pub fn messages_for_provider_uncached(&self) -> Vec<Message> {
+        stored_messages_to_messages(&self.messages)
+    }
+
     pub fn messages_for_provider(&mut self) -> Vec<Message> {
         self.provider_messages().to_vec()
+    }
+
+    /// Drop heavyweight transcript vectors after remote startup has rendered the
+    /// optimistic local history. The authoritative transcript comes from the
+    /// server once the connection is established, so keeping another owned copy
+    /// in the client only inflates memory during idle remote sessions.
+    pub fn strip_transcript_for_remote_client(&mut self) {
+        self.messages.clear();
+        self.compaction = None;
+        self.env_snapshots.clear();
+        self.memory_injections.clear();
+        self.replay_events.clear();
+        self.reset_provider_messages_cache();
+        self.reset_persist_state(true);
     }
 
     /// Remove all ToolUse content blocks from a specific message.

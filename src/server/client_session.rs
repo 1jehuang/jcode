@@ -584,7 +584,9 @@ async fn cleanup_detached_source_session_if_unused(
 
     let removed_swarm_id = {
         let mut members = swarm_members.write().await;
-        members.remove(old_session_id).and_then(|member| member.swarm_id)
+        members
+            .remove(old_session_id)
+            .and_then(|member| member.swarm_id)
     };
     if let Some(swarm_id) = removed_swarm_id {
         remove_session_from_swarm(
@@ -643,7 +645,10 @@ pub(super) async fn handle_resume_session(
         sessions_guard.get(&session_id).cloned()
     };
 
-    if let Some(live_target_agent) = live_target_agent.as_ref().filter(|existing| !Arc::ptr_eq(existing, agent)) {
+    if let Some(live_target_agent) = live_target_agent
+        .as_ref()
+        .filter(|existing| !Arc::ptr_eq(existing, agent))
+    {
         let old_session_id = client_session_id.clone();
 
         cleanup_detached_source_session_if_unused(
@@ -1084,13 +1089,11 @@ mod tests {
     ) -> Vec<ServerEvent> {
         let mut events = Vec::new();
         for _ in 0..16 {
-            let event = tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                client_event_rx.recv(),
-            )
-            .await
-            .expect("timed out waiting for server event")
-            .expect("expected server event");
+            let event =
+                tokio::time::timeout(std::time::Duration::from_secs(1), client_event_rx.recv())
+                    .await
+                    .expect("timed out waiting for server event")
+                    .expect("expected server event");
             let is_done = matches!(event, ServerEvent::Done { id } if id == done_id);
             events.push(event);
             if is_done {
@@ -1549,7 +1552,9 @@ mod tests {
             "expected Done event for live attach, got {events:?}"
         );
         assert!(
-            !events.iter().any(|event| matches!(event, ServerEvent::Error { .. })),
+            !events
+                .iter()
+                .any(|event| matches!(event, ServerEvent::Error { .. })),
             "attach should not emit error events: {events:?}"
         );
 
@@ -1890,7 +1895,9 @@ mod tests {
             "expected Done event for live attach, got {events:?}"
         );
         assert!(
-            !events.iter().any(|event| matches!(event, ServerEvent::Error { .. })),
+            !events
+                .iter()
+                .any(|event| matches!(event, ServerEvent::Error { .. })),
             "attach should not emit error events: {events:?}"
         );
 
@@ -2069,7 +2076,9 @@ mod tests {
             "expected Done event for live attach, got {events:?}"
         );
         assert!(
-            !events.iter().any(|event| matches!(event, ServerEvent::Error { .. })),
+            !events
+                .iter()
+                .any(|event| matches!(event, ServerEvent::Error { .. })),
             "attach should not emit error events: {events:?}"
         );
 
@@ -2249,7 +2258,9 @@ mod tests {
             "expected Done event for live attach, got {events:?}"
         );
         assert!(
-            !events.iter().any(|event| matches!(event, ServerEvent::Error { .. })),
+            !events
+                .iter()
+                .any(|event| matches!(event, ServerEvent::Error { .. })),
             "same-instance attach should not queue an error event: {events:?}"
         );
         assert_eq!(client_session_id, target_session_id);

@@ -7,6 +7,7 @@
 
 use anyhow::Result;
 use jcode_embedding as backend;
+use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -46,9 +47,12 @@ struct EmbedderCache {
     cache_hits: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct EmbedderStats {
     pub loaded: bool,
+    pub model_artifact_bytes: u64,
+    pub tokenizer_artifact_bytes: u64,
+    pub total_artifact_bytes: u64,
     pub load_count: u64,
     pub unload_count: u64,
     pub embed_calls: u64,
@@ -59,6 +63,8 @@ pub struct EmbedderStats {
     pub loaded_secs: Option<u64>,
     pub cache_hits: u64,
     pub cache_size: usize,
+    pub cache_bytes_estimate: u64,
+    pub embedding_dim: usize,
 }
 
 fn embedder_cache() -> &'static Mutex<EmbedderCache> {
@@ -250,9 +256,39 @@ pub fn maybe_unload_if_idle(idle_for: Duration) -> bool {
     unloaded
 }
 
+/// Force unload the global embedder and clear its embedding cache.
+pub fn unload_now() -> bool {
+    let mut unloaded = false;
+    if let Ok(mut cache) = embedder_cache().lock() {
+        if cache.embedder.is_some() {
+            cache.embedder = None;
+            cache.loaded_at = None;
+            cache.unload_count = cache.unload_count.saturating_add(1);
+            cache.embedding_lru.clear();
+            unloaded = true;
+        }
+    }
+
+    if unloaded {
+        crate::logging::info("Embedding model force-unloaded");
+
+        #[cfg(all(target_os = "linux", not(feature = "jemalloc")))]
+        {
+            unsafe extern "C" {
+                fn malloc_trim(pad: usize) -> i32;
+            }
+            let _ = unsafe { malloc_trim(0) };
+        }
+    }
+
+    unloaded
+}
+
 /// Snapshot runtime statistics for the global embedder cache.
 pub fn stats() -> EmbedderStats {
     let now = Instant::now();
+    let (model_artifact_bytes, tokenizer_artifact_bytes) = artifact_sizes();
+    let total_artifact_bytes = model_artifact_bytes.saturating_add(tokenizer_artifact_bytes);
     match embedder_cache().lock() {
         Ok(cache) => {
             let avg_embed_ms = if cache.embed_calls == 0 {
@@ -267,8 +303,17 @@ pub fn stats() -> EmbedderStats {
                 .loaded_at
                 .map(|loaded| now.saturating_duration_since(loaded).as_secs());
 
+            let cache_bytes_estimate = cache
+                .embedding_lru
+                .values()
+                .map(|(embedding, _)| embedding.len().saturating_mul(std::mem::size_of::<f32>()))
+                .sum::<usize>() as u64;
+
             EmbedderStats {
                 loaded: cache.embedder.is_some(),
+                model_artifact_bytes,
+                tokenizer_artifact_bytes,
+                total_artifact_bytes,
                 load_count: cache.load_count,
                 unload_count: cache.unload_count,
                 embed_calls: cache.embed_calls,
@@ -279,10 +324,15 @@ pub fn stats() -> EmbedderStats {
                 loaded_secs,
                 cache_hits: cache.cache_hits,
                 cache_size: cache.embedding_lru.len(),
+                cache_bytes_estimate,
+                embedding_dim: embedding_dim(),
             }
         }
         Err(_) => EmbedderStats {
             loaded: false,
+            model_artifact_bytes,
+            tokenizer_artifact_bytes,
+            total_artifact_bytes,
             load_count: 0,
             unload_count: 0,
             embed_calls: 0,
@@ -293,8 +343,25 @@ pub fn stats() -> EmbedderStats {
             loaded_secs: None,
             cache_hits: 0,
             cache_size: 0,
+            cache_bytes_estimate: 0,
+            embedding_dim: embedding_dim(),
         },
     }
+}
+
+fn artifact_sizes() -> (u64, u64) {
+    let Ok(dir) = models_dir() else {
+        return (0, 0);
+    };
+    let model_bytes = std::fs::metadata(dir.join("model.onnx"))
+        .ok()
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    let tokenizer_bytes = std::fs::metadata(dir.join("tokenizer.json"))
+        .ok()
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    (model_bytes, tokenizer_bytes)
 }
 
 /// Compute cosine similarity between two embeddings.

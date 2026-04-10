@@ -648,8 +648,7 @@ pub(super) async fn handle_client(
                             &event_counter,
                             &swarm_event_tx,
                         )
-                        .await
-                        ?;
+                        .await?;
                         (soft_interrupt_queue, background_tool_signal, cancel_signal) =
                             refresh_runtime_handles(&agent).await;
                         if client_session_id == target_session_id {

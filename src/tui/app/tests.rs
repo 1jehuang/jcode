@@ -4781,6 +4781,40 @@ fn test_new_for_remote_fresh_spawn_skips_local_transcript_restore() {
 }
 
 #[test]
+fn test_new_for_remote_restores_display_history_without_retaining_session_transcript() {
+    with_temp_jcode_home(|| {
+        let session_id = "session_remote_restore_lightweight";
+        let mut session = crate::session::Session::create_with_id(
+            session_id.to_string(),
+            None,
+            Some("remote resume".to_string()),
+        );
+        session.model = Some("gpt-5.4".to_string());
+        session.append_stored_message(crate::session::StoredMessage {
+            id: "msg_remote_restore_1".to_string(),
+            role: crate::message::Role::Assistant,
+            content: vec![crate::message::ContentBlock::Text {
+                text: "persisted transcript should render once".to_string(),
+                cache_control: None,
+            }],
+            display_role: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+        session.save().expect("save remote restore session");
+
+        let app = App::new_for_remote_with_options(Some(session_id.to_string()), false);
+
+        assert_eq!(crate::tui::TuiState::provider_model(&app), "gpt-5.4");
+        assert_eq!(app.display_messages().len(), 1);
+        assert_eq!(app.display_messages()[0].content, "persisted transcript should render once");
+        assert!(app.session.messages.is_empty());
+        assert!(app.session.compaction.is_none());
+    });
+}
+
+#[test]
 fn test_restore_session_restores_local_judge_processing_state() {
     with_temp_jcode_home(|| {
         let session_id = "session_local_judge_child";
@@ -6213,6 +6247,7 @@ fn test_restore_session_adds_reload_message() {
 
     // Messages for API should only have the original message (no reload msg to avoid breaking alternation)
     assert_eq!(app.messages.len(), 1);
+    assert_eq!(app.session.debug_memory_profile()["provider_messages_cache"]["count"], 0);
 
     // Provider session ID should be cleared (Claude sessions don't persist across restarts)
     assert!(app.provider_session_id.is_none());

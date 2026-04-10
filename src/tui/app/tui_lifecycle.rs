@@ -694,7 +694,7 @@ impl App {
 
     fn restore_remote_startup_history(&mut self, session_id: &str) {
         let load_start = Instant::now();
-        let Ok(session) = Session::load_for_remote_startup(session_id) else {
+        let Ok(mut session) = Session::load_for_remote_startup(session_id) else {
             return;
         };
 
@@ -720,6 +720,7 @@ impl App {
             crate::side_panel::snapshot_for_session(session_id).unwrap_or_default(),
         );
         self.remote_session_id = Some(session_id.to_string());
+        session.strip_transcript_for_remote_client();
         self.session = session;
         self.autoreview_enabled = self
             .session
@@ -1042,7 +1043,7 @@ impl App {
                 &self.session.id,
                 &self.session.injected_memory_ids(),
             );
-            let provider_messages = self.session.messages_for_provider();
+            let provider_messages = self.session.messages_for_provider_uncached();
             self.replace_provider_messages(provider_messages);
             // Clear the saved provider_session_id since it's no longer valid
             self.session.provider_session_id = None;
