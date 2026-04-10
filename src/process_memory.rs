@@ -1,8 +1,30 @@
+use anyhow::{Result, anyhow};
 use serde::Serialize;
 use std::collections::VecDeque;
+#[cfg(feature = "jemalloc-prof")]
+use std::ffi::CString;
+use std::path::Path;
+#[cfg(feature = "jemalloc-prof")]
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 const MAX_HISTORY_SAMPLES: usize = 512;
+
+#[cfg(feature = "jemalloc")]
+struct JemallocStatsMibs {
+    epoch: tikv_jemalloc_ctl::epoch_mib,
+    allocated: tikv_jemalloc_ctl::stats::allocated_mib,
+    active: tikv_jemalloc_ctl::stats::active_mib,
+    metadata: tikv_jemalloc_ctl::stats::metadata_mib,
+    resident: tikv_jemalloc_ctl::stats::resident_mib,
+    mapped: tikv_jemalloc_ctl::stats::mapped_mib,
+    retained: tikv_jemalloc_ctl::stats::retained_mib,
+}
+
+#[cfg(feature = "jemalloc-prof")]
+struct JemallocProfilingMibs {
+    enabled: tikv_jemalloc_ctl::profiling::prof_mib,
+}
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ProcessMemorySnapshot {
@@ -16,6 +38,26 @@ pub struct ProcessMemorySnapshot {
 pub struct AllocatorInfo {
     pub name: &'static str,
     pub stats_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stats: Option<AllocatorStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profiling: Option<AllocatorProfilingInfo>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AllocatorStats {
+    pub allocated_bytes: Option<u64>,
+    pub active_bytes: Option<u64>,
+    pub metadata_bytes: Option<u64>,
+    pub resident_bytes: Option<u64>,
+    pub mapped_bytes: Option<u64>,
+    pub retained_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AllocatorProfilingInfo {
+    pub available: bool,
+    pub enabled: Option<bool>,
 }
 
 impl Default for AllocatorInfo {
@@ -82,9 +124,13 @@ pub fn history(limit: usize) -> Vec<ProcessMemoryHistoryEntry> {
 pub fn allocator_info() -> AllocatorInfo {
     #[cfg(feature = "jemalloc")]
     {
+        let stats = jemalloc_stats();
+        let profiling = jemalloc_profiling_info();
         return AllocatorInfo {
             name: "jemalloc",
-            stats_available: false,
+            stats_available: stats.is_some(),
+            stats,
+            profiling,
         };
     }
 
@@ -93,7 +139,79 @@ pub fn allocator_info() -> AllocatorInfo {
         AllocatorInfo {
             name: "system",
             stats_available: false,
+            stats: None,
+            profiling: None,
         }
+    }
+}
+
+pub fn set_allocator_profiling_active(active: bool) -> Result<()> {
+    #[cfg(feature = "jemalloc-prof")]
+    {
+        unsafe {
+            tikv_jemalloc_ctl::raw::write(b"prof.active\0", active)
+                .map_err(|e| anyhow!("failed to update jemalloc prof.active: {}", e))
+        }
+    }
+
+    #[cfg(not(feature = "jemalloc-prof"))]
+    {
+        let _ = active;
+        Err(anyhow!(
+            "jemalloc profiling controls unavailable: rebuild with --features jemalloc-prof"
+        ))
+    }
+}
+
+pub fn dump_allocator_profile(path: Option<&Path>) -> Result<PathBuf> {
+    #[cfg(feature = "jemalloc-prof")]
+    {
+        let output_path = match path {
+            Some(path) => path.to_path_buf(),
+            None => default_heap_profile_path()?,
+        };
+
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let c_path = CString::new(output_path.to_string_lossy().as_bytes())
+            .map_err(|_| anyhow!("heap profile path contains NUL byte"))?;
+
+        unsafe {
+            tikv_jemalloc_ctl::raw::write(b"prof.dump\0", c_path.as_ptr())
+                .map_err(|e| anyhow!("failed to dump jemalloc heap profile: {}", e))?;
+        }
+
+        Ok(output_path)
+    }
+
+    #[cfg(not(feature = "jemalloc-prof"))]
+    {
+        let _ = path;
+        Err(anyhow!(
+            "jemalloc heap dumps unavailable: rebuild with --features jemalloc-prof"
+        ))
+    }
+}
+
+pub fn set_allocator_profile_prefix(prefix: &str) -> Result<()> {
+    #[cfg(feature = "jemalloc-prof")]
+    {
+        let c_prefix =
+            CString::new(prefix).map_err(|_| anyhow!("heap profile prefix contains NUL byte"))?;
+        unsafe {
+            tikv_jemalloc_ctl::raw::write(b"prof.prefix\0", c_prefix.as_ptr())
+                .map_err(|e| anyhow!("failed to update jemalloc prof.prefix: {}", e))
+        }
+    }
+
+    #[cfg(not(feature = "jemalloc-prof"))]
+    {
+        let _ = prefix;
+        Err(anyhow!(
+            "jemalloc heap profiling unavailable: rebuild with --features jemalloc-prof"
+        ))
     }
 }
 
@@ -120,6 +238,74 @@ fn record_snapshot(source: String, snapshot: ProcessMemorySnapshot) {
     });
 }
 
+#[cfg(feature = "jemalloc-prof")]
+fn default_heap_profile_path() -> Result<PathBuf> {
+    let base = crate::storage::jcode_dir()?.join("profiles").join("heap");
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let pid = std::process::id();
+    Ok(base.join(format!("jcode-{}-{}.heap", pid, timestamp)))
+}
+
+#[cfg(feature = "jemalloc")]
+fn jemalloc_stats() -> Option<AllocatorStats> {
+    let mibs = jemalloc_stats_mibs()?;
+    mibs.epoch.advance().ok()?;
+
+    Some(AllocatorStats {
+        allocated_bytes: mibs.allocated.read().ok().map(|value| value as u64),
+        active_bytes: mibs.active.read().ok().map(|value| value as u64),
+        metadata_bytes: mibs.metadata.read().ok().map(|value| value as u64),
+        resident_bytes: mibs.resident.read().ok().map(|value| value as u64),
+        mapped_bytes: mibs.mapped.read().ok().map(|value| value as u64),
+        retained_bytes: mibs.retained.read().ok().map(|value| value as u64),
+    })
+}
+
+#[cfg(feature = "jemalloc")]
+fn jemalloc_stats_mibs() -> Option<&'static JemallocStatsMibs> {
+    static MIBS: OnceLock<Option<JemallocStatsMibs>> = OnceLock::new();
+    MIBS.get_or_init(|| {
+        Some(JemallocStatsMibs {
+            epoch: tikv_jemalloc_ctl::epoch::mib().ok()?,
+            allocated: tikv_jemalloc_ctl::stats::allocated::mib().ok()?,
+            active: tikv_jemalloc_ctl::stats::active::mib().ok()?,
+            metadata: tikv_jemalloc_ctl::stats::metadata::mib().ok()?,
+            resident: tikv_jemalloc_ctl::stats::resident::mib().ok()?,
+            mapped: tikv_jemalloc_ctl::stats::mapped::mib().ok()?,
+            retained: tikv_jemalloc_ctl::stats::retained::mib().ok()?,
+        })
+    })
+    .as_ref()
+}
+
+#[cfg(feature = "jemalloc-prof")]
+fn jemalloc_profiling_info() -> Option<AllocatorProfilingInfo> {
+    let mibs = jemalloc_profiling_mibs()?;
+    Some(AllocatorProfilingInfo {
+        available: true,
+        enabled: mibs.enabled.read().ok(),
+    })
+}
+
+#[cfg(all(feature = "jemalloc", not(feature = "jemalloc-prof")))]
+fn jemalloc_profiling_info() -> Option<AllocatorProfilingInfo> {
+    Some(AllocatorProfilingInfo {
+        available: false,
+        enabled: None,
+    })
+}
+
+#[cfg(feature = "jemalloc-prof")]
+fn jemalloc_profiling_mibs() -> Option<&'static JemallocProfilingMibs> {
+    static MIBS: OnceLock<Option<JemallocProfilingMibs>> = OnceLock::new();
+    MIBS.get_or_init(|| {
+        Some(JemallocProfilingMibs {
+            enabled: tikv_jemalloc_ctl::profiling::prof::mib().ok()?,
+        })
+    })
+    .as_ref()
+}
+
 #[cfg(target_os = "linux")]
 fn parse_proc_status_value_bytes(status: &str, key: &str) -> Option<u64> {
     status.lines().find_map(|line| {
@@ -138,4 +324,24 @@ fn parse_proc_status_value_bytes(status: &str, key: &str) -> Option<u64> {
             _ => number,
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allocator_info_matches_enabled_allocator_features() {
+        let info = allocator_info();
+        if cfg!(feature = "jemalloc") {
+            assert_eq!(info.name, "jemalloc");
+            assert_eq!(info.stats_available, info.stats.is_some());
+            assert!(info.profiling.is_some());
+        } else {
+            assert_eq!(info.name, "system");
+            assert!(!info.stats_available);
+            assert!(info.stats.is_none());
+            assert!(info.profiling.is_none());
+        }
+    }
 }

@@ -323,6 +323,72 @@ pub(super) async fn execute_debug_command(
         return Ok(serde_json::to_string_pretty(&info).unwrap_or_else(|_| "{}".to_string()));
     }
 
+    if trimmed == "allocator" || trimmed == "allocator:info" {
+        let info = crate::process_memory::allocator_info();
+        return Ok(serde_json::to_string_pretty(&info).unwrap_or_else(|_| "{}".to_string()));
+    }
+
+    if trimmed == "allocator:profile:on" {
+        crate::process_memory::set_allocator_profiling_active(true)?;
+        let payload = serde_json::json!({
+            "status": "ok",
+            "profiling_active": true,
+            "allocator": crate::process_memory::allocator_info(),
+        });
+        return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
+    }
+
+    if trimmed == "allocator:profile:off" {
+        crate::process_memory::set_allocator_profiling_active(false)?;
+        let payload = serde_json::json!({
+            "status": "ok",
+            "profiling_active": false,
+            "allocator": crate::process_memory::allocator_info(),
+        });
+        return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
+    }
+
+    if let Some(prefix) = trimmed.strip_prefix("allocator:profile:prefix:") {
+        let prefix = prefix.trim();
+        if prefix.is_empty() {
+            return Err(anyhow::anyhow!(
+                "allocator:profile:prefix: requires a prefix"
+            ));
+        }
+        crate::process_memory::set_allocator_profile_prefix(prefix)?;
+        let payload = serde_json::json!({
+            "status": "ok",
+            "prefix": prefix,
+            "allocator": crate::process_memory::allocator_info(),
+        });
+        return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
+    }
+
+    if trimmed == "allocator:profile:dump" {
+        let path = crate::process_memory::dump_allocator_profile(None)?;
+        let payload = serde_json::json!({
+            "status": "ok",
+            "path": path,
+            "allocator": crate::process_memory::allocator_info(),
+        });
+        return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
+    }
+
+    if let Some(path) = trimmed.strip_prefix("allocator:profile:dump ") {
+        let path = path.trim();
+        if path.is_empty() {
+            return Err(anyhow::anyhow!("allocator:profile:dump requires a path"));
+        }
+        let output_path =
+            crate::process_memory::dump_allocator_profile(Some(std::path::Path::new(path)))?;
+        let payload = serde_json::json!({
+            "status": "ok",
+            "path": output_path,
+            "allocator": crate::process_memory::allocator_info(),
+        });
+        return Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
+    }
+
     if trimmed == "last_response" {
         let agent = agent.lock().await;
         return Ok(agent
@@ -356,7 +422,7 @@ pub(super) async fn execute_debug_command(
 
     if trimmed == "help" {
         return Ok(
-            "debug commands: state, usage, history, tools, tools:full, mcp:servers, mcp:tools, mcp:connect:<server> <json>, mcp:disconnect:<server>, mcp:reload, mcp:call:<server>:<tool> <json>, last_response, message:<text>, message_async:<text>, swarm_message:<text>, swarm_message_async:<text>, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, jobs, job_status:<id>, job_wait:<id>, sessions, create_session, create_session:<path>, create_session:selfdev:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
+            "debug commands: state, usage, history, tools, tools:full, mcp:servers, mcp:tools, mcp:connect:<server> <json>, mcp:disconnect:<server>, mcp:reload, mcp:call:<server>:<tool> <json>, last_response, message:<text>, message_async:<text>, swarm_message:<text>, swarm_message_async:<text>, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, agent:info, agent:memory, allocator, allocator:profile:on, allocator:profile:off, allocator:profile:prefix:<prefix>, allocator:profile:dump [path], jobs, job_status:<id>, job_wait:<id>, sessions, create_session, create_session:<path>, create_session:selfdev:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
         );
     }
 

@@ -11,7 +11,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 // narenas:4            — limit arena count (17 threads don't need 64 arenas)
 #[cfg(feature = "jemalloc")]
 #[allow(non_upper_case_globals)]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub static malloc_conf: Option<&'static [u8; 50]> =
     Some(b"dirty_decay_ms:1000,muzzy_decay_ms:1000,narenas:4\0");
 

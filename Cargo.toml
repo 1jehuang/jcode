@@ -38,6 +38,7 @@ path = "src/bin/harness.rs"
 [dependencies]
 # Memory allocator (reduces fragmentation for long-running server)
 tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"], optional = true }
+tikv-jemalloc-ctl = { version = "0.6", optional = true }
 
 # Async runtime
 tokio = { version = "1", features = ["full", "process"] }
@@ -122,7 +123,17 @@ qr2term = "0.3.3"
 
 [features]
 default = ["embeddings", "pdf"]
-jemalloc = ["tikv-jemallocator"]
+jemalloc = [
+    "dep:tikv-jemallocator",
+    "dep:tikv-jemalloc-ctl",
+    "tikv-jemallocator/stats",
+    "tikv-jemalloc-ctl/stats",
+]
+jemalloc-prof = [
+    "jemalloc",
+    "tikv-jemallocator/profiling",
+    "tikv-jemalloc-ctl/profiling",
+]
 embeddings = ["dep:jcode-embedding"]
 pdf = ["dep:jcode-pdf"]
 

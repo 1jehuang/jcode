@@ -31,6 +31,11 @@ SERVER COMMANDS (server: prefix or no prefix):
   clear                    - Clear conversation history
   agent:info               - Get comprehensive agent internal state
   agent:memory             - Get process + session memory breakdown
+  allocator                - Get allocator info and jemalloc stats, if available
+  allocator:profile:on     - Enable jemalloc sampling at runtime (jemalloc-prof builds)
+  allocator:profile:off    - Disable jemalloc sampling at runtime (jemalloc-prof builds)
+  allocator:profile:prefix:<prefix> - Set jemalloc heap dump filename prefix
+  allocator:profile:dump [path] - Write jemalloc heap profile to default or explicit path
   jobs                     - List async debug jobs
   job_status:<id>          - Get async job status/output
   job_wait:<id>            - Wait for async job to finish
