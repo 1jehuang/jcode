@@ -48,33 +48,50 @@ Need Windows, Homebrew, source builds, provider setup, or tell your agent to set
 
 jcode is built to be as performant and resource efficient as possible. Every metric is optimized to the bone, which is important for scaling multi-session workflows. Here we sample two metrics to show the difference: RAM usage and startup time.
 
-<!-- Add performance demo thumbnail/video link here: spawning many jcode instances and using them in parallel. -->
 
-### Headline numbers
+### RAM comparison
 
 <div align="center">
 
-| Tool | PSS at 10 sessions (avg/session) | Time to UI | Input-ready time |
+| Tool | 1 active session | 10 active sessions | jcode improvement multiplier |
 |---|---:|---:|---:|
-| **jcode** | **14.1 MB** | **14.0 ms** | **48.7 ms** |
-| **pi** | **101.1 MB** (**7.2×**) | **590.7 ms** (**42.2×**) | **596.4 ms** (**12.2×**) |
-| **Codex CLI** | n/a | **882.8 ms** (**63.1×**) | **905.8 ms** (**18.6×**) |
-| **OpenCode** | **313.5 MB** (**22.2×**) | **1035.9 ms** (**74.0×**) | **1047.9 ms** (**21.5×**) |
-| **GitHub Copilot CLI** | n/a | **1518.6 ms** (**108.5×**) | **1583.4 ms** (**32.5×**) |
-| **Cursor Agent** | n/a | **1949.7 ms** (**139.3×**) | **1978.7 ms** (**40.6×**) |
-| **Claude Code** | **346.0 MB** (**24.5×**) | **3436.9 ms** (**245.5×**) | **3512.8 ms** (**72.2×**) |
+| **jcode** | **28.2 MB RSS** / **8.9 MB PSS** | **433.3 MB RSS** / **140.7 MB PSS** | baseline |
+| **pi** | **168.4 MB RSS** / **156.2 MB PSS** | **1554.9 MB RSS** / **1010.6 MB PSS** | **7.2× less PSS** |
+| **OpenCode** | **377.0 MB RSS** / **372.6 MB PSS** | **3665.2 MB RSS** / **3135.1 MB PSS** | **22.2× less PSS** |
+| **Claude Code** | **677.0 MB RSS** / **674.1 MB PSS** | **4880.9 MB RSS** / **3460.2 MB PSS** | **24.5× less PSS** |
 
 </div>
 
-- Multipliers are relative to jcode.
-- PSS numbers come from the 10-session memory benchmark below. Startup numbers come from the 10-launch interactive startup benchmark below.
+Measured on this Linux machine using real interactive PTY sessions and Linux `/proc` memory stats. For jcode, the number includes both client memory and the incremental memory growth of the shared server, which is the fair comparison for many active sessions.
 
-### Interactive startup time
+The multiplier column is based on average PSS per session at 10 active sessions, where lower is better.
+
+Memory benchmark versions tested:
+
+- `jcode v0.8.16-dev (161f9fa)`
+- `pi-coding-agent 0.62.0` (`pi`)
+- `opencode 1.0.203`
+- `Claude Code 2.1.86`
+
+### Time to first frame
+
+<div align="center">
+
+| Tool | Time to first frame | Range | jcode improvement multiplier |
+|---|---:|---:|---:|
+| **jcode** | **14.0 ms** | 10.1–19.3 ms | baseline |
+| **pi** | **590.7 ms** | 369.6–934.8 ms | **42.2× faster** |
+| **Codex CLI** | **882.8 ms** | 742.3–1640.9 ms | **63.1× faster** |
+| **OpenCode** | **1035.9 ms** | 922.5–1104.4 ms | **74.0× faster** |
+| **GitHub Copilot CLI** | **1518.6 ms** | 1357.4–1826.8 ms | **108.5× faster** |
+| **Cursor Agent** | **1949.7 ms** | 1711.0–2104.8 ms | **139.3× faster** |
+| **Claude Code** | **3436.9 ms** | 2032.7–8927.2 ms | **245.5× faster** |
+
+</div>
 
 Measured on this Linux machine across 10 interactive PTY launches. These numbers intentionally avoid misleading "first byte" / ANSI-handshake timing.
 
-- **First visible content**: first meaningful rendered text visible on screen
-- **Input-ready**: time until typed probe text appears on the rendered screen
+**Time to first frame** means the first meaningful rendered text visible on screen.
 
 Startup versions tested:
 
@@ -86,66 +103,60 @@ Startup versions tested:
 - `Cursor Agent 2026.03.18-f6873f7`
 - `GitHub Copilot CLI 0.0.421`
 
-<div align="center">
-
-| Tool | First visible content | Range |
-|---|---:|---:|
-| **jcode** | **14.0 ms** | 10.1–19.3 ms |
-| **pi** | **590.7 ms** | 369.6–934.8 ms |
-| **codex** | **882.8 ms** | 742.3–1640.9 ms |
-| **opencode** | **1035.9 ms** | 922.5–1104.4 ms |
-| **Copilot CLI** | **1518.6 ms** | 1357.4–1826.8 ms |
-| **Cursor Agent** | **1949.7 ms** | 1711.0–2104.8 ms |
-| **Claude Code** | **3436.9 ms** | 2032.7–8927.2 ms |
-
-</div>
+### Time to first input
 
 <div align="center">
 
-| Tool | Input-ready | Range |
-|---|---:|---:|
-| **jcode** | **48.7 ms** | 30.3–62.7 ms |
-| **pi** | **596.4 ms** | 373.9–955.2 ms |
-| **codex** | **905.8 ms** | 760.1–1675.7 ms |
-| **opencode** | **1047.9 ms** | 931.1–1116.9 ms |
-| **Copilot CLI** | **1583.4 ms** | 1422.8–1880.0 ms |
-| **Cursor Agent** | **1978.7 ms** | 1727.3–2130.0 ms |
-| **Claude Code** | **3512.8 ms** | 2137.4–9002.0 ms |
+| Tool | Time to first input | Range | jcode improvement multiplier |
+|---|---:|---:|---:|
+| **jcode** | **48.7 ms** | 30.3–62.7 ms | baseline |
+| **pi** | **596.4 ms** | 373.9–955.2 ms | **12.2× faster** |
+| **Codex CLI** | **905.8 ms** | 760.1–1675.7 ms | **18.6× faster** |
+| **OpenCode** | **1047.9 ms** | 931.1–1116.9 ms | **21.5× faster** |
+| **GitHub Copilot CLI** | **1583.4 ms** | 1422.8–1880.0 ms | **32.5× faster** |
+| **Cursor Agent** | **1978.7 ms** | 1727.3–2130.0 ms | **40.6× faster** |
+| **Claude Code** | **3512.8 ms** | 2137.4–9002.0 ms | **72.2× faster** |
 
 </div>
 
-### Memory benchmarks: 10 simultaneous sessions
+Measured on this Linux machine across 10 interactive PTY launches. These numbers intentionally avoid misleading "first byte" / ANSI-handshake timing.
 
-Measured on this Linux machine using real interactive PTY sessions and Linux `/proc` memory stats. For jcode, the number includes both client memory and the incremental memory growth of the shared server, which is the fair comparison for many active sessions.
+**Time to first input** means the time until typed probe text appears on the rendered screen.
 
-Memory benchmark versions tested:
+Startup versions tested:
 
-- `jcode v0.8.16-dev (161f9fa)`
-- `pi-coding-agent 0.62.0` (`pi`)
+- `jcode v0.9.366-dev (dbd480c, dirty)`
+- `pi 0.62.0`
 - `opencode 1.0.203`
+- `codex-cli 0.118.0`
 - `Claude Code 2.1.86`
+- `Cursor Agent 2026.03.18-f6873f7`
+- `GitHub Copilot CLI 0.0.421`
+
+### Additional clients / memory scaling
+
+A 10-session snapshot is useful, but the scaling story matters just as much. The table below shows how much memory each additional active session adds, which is where a shared-server architecture compounds its advantage.
 
 <div align="center">
 
-| Tool | 1 active session | 10 active sessions | Avg per session at 10 | Architecture |
-|---|---:|---:|---:|---|
-| **jcode** | **28.2 MB RSS** / **8.9 MB PSS** | **433.3 MB RSS** / **140.7 MB PSS** | **43.3 MB RSS** / **14.1 MB PSS** | shared server + lightweight clients |
-| **pi** | **168.4 MB RSS** / **156.2 MB PSS** | **1554.9 MB RSS** / **1010.6 MB PSS** | **155.5 MB RSS** / **101.1 MB PSS** | mostly per-session Node process |
-| **opencode** | **377.0 MB RSS** / **372.6 MB PSS** | **3665.2 MB RSS** / **3135.1 MB PSS** | **366.5 MB RSS** / **313.5 MB PSS** | mostly per-session monolith |
-| **Claude Code** | **677.0 MB RSS** / **674.1 MB PSS** | **4880.9 MB RSS** / **3460.2 MB PSS** | **488.1 MB RSS** / **346.0 MB PSS** | mostly per-session monolith |
+| Tool | Extra RSS per added session | Extra PSS per added session | jcode improvement multiplier |
+|---|---:|---:|---:|
+| **jcode** | **~45.0 MB** | **~14.6 MB** | baseline |
+| **pi** | **~154.1 MB** | **~94.9 MB** | **6.5× less PSS** |
+| **OpenCode** | **~365.4 MB** | **~306.9 MB** | **21.0× less PSS** |
+| **Claude Code** | **~467.1 MB** | **~309.6 MB** | **21.2× less PSS** |
 
 </div>
 
-### Additional memory per added session
+Same machine, methodology, and tool versions as the RAM comparison above.
 
 <div align="center">
 
-| Tool | Extra RSS per added session | Extra PSS per added session |
-|---|---:|---:|
-| **jcode** | **~45.0 MB** | **~14.6 MB** |
-| **pi** | **~154.1 MB** | **~94.9 MB** |
-| **opencode** | **~365.4 MB** | **~306.9 MB** |
-| **Claude Code** | **~467.1 MB** | **~309.6 MB** |
+<a href="assets/demos/workflow.mp4">
+  <img src="assets/demos/jcode-vs-claude-code.png" alt="Performance demo video preview" width="900">
+</a>
+
+<p><em>Performance demo: running many interactive jcode sessions in parallel while staying responsive. Click the preview to open the video.</em></p>
 
 </div>
 
