@@ -9,11 +9,19 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 // dirty_decay_ms:1000  — return dirty pages to OS after 1 s idle
 // muzzy_decay_ms:1000  — release muzzy pages after 1 s
 // narenas:4            — limit arena count (17 threads don't need 64 arenas)
-#[cfg(feature = "jemalloc")]
+// prof:true            — enable profiling support in jemalloc-prof builds
+// prof_active:false    — keep sampling disabled until explicitly enabled at runtime
+#[cfg(all(feature = "jemalloc", not(feature = "jemalloc-prof")))]
 #[allow(non_upper_case_globals)]
 #[unsafe(no_mangle)]
 pub static malloc_conf: Option<&'static [u8; 50]> =
     Some(b"dirty_decay_ms:1000,muzzy_decay_ms:1000,narenas:4\0");
+
+#[cfg(feature = "jemalloc-prof")]
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static malloc_conf: Option<&'static [u8; 78]> =
+    Some(b"dirty_decay_ms:1000,muzzy_decay_ms:1000,narenas:4,prof:true,prof_active:false\0");
 
 use anyhow::Result;
 

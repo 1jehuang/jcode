@@ -31,7 +31,22 @@ pub struct ProcessMemorySnapshot {
     pub rss_bytes: Option<u64>,
     pub peak_rss_bytes: Option<u64>,
     pub virtual_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os: Option<OsProcessMemoryInfo>,
     pub allocator: AllocatorInfo,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct OsProcessMemoryInfo {
+    pub pss_bytes: Option<u64>,
+    pub rss_anon_bytes: Option<u64>,
+    pub rss_file_bytes: Option<u64>,
+    pub rss_shmem_bytes: Option<u64>,
+    pub private_clean_bytes: Option<u64>,
+    pub private_dirty_bytes: Option<u64>,
+    pub shared_clean_bytes: Option<u64>,
+    pub shared_dirty_bytes: Option<u64>,
+    pub swap_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -101,6 +116,7 @@ pub fn snapshot_with_source(source: impl Into<String>) -> ProcessMemorySnapshot 
         rss_bytes: parse_proc_status_value_bytes(&status, "VmRSS:"),
         peak_rss_bytes: parse_proc_status_value_bytes(&status, "VmHWM:"),
         virtual_bytes: parse_proc_status_value_bytes(&status, "VmSize:"),
+        os: read_linux_memory_info(&status),
         allocator: allocator_info(),
     };
     record_snapshot(source.into(), snapshot.clone());
@@ -238,6 +254,51 @@ fn record_snapshot(source: String, snapshot: ProcessMemorySnapshot) {
     });
 }
 
+#[cfg(target_os = "linux")]
+fn read_linux_memory_info(status: &str) -> Option<OsProcessMemoryInfo> {
+    let smaps = std::fs::read_to_string("/proc/self/smaps_rollup").ok();
+    let info = OsProcessMemoryInfo {
+        pss_bytes: smaps
+            .as_deref()
+            .and_then(|text| parse_proc_value_bytes(text, "Pss:")),
+        rss_anon_bytes: parse_proc_status_value_bytes(status, "RssAnon:"),
+        rss_file_bytes: parse_proc_status_value_bytes(status, "RssFile:"),
+        rss_shmem_bytes: parse_proc_status_value_bytes(status, "RssShmem:"),
+        private_clean_bytes: smaps
+            .as_deref()
+            .and_then(|text| parse_proc_value_bytes(text, "Private_Clean:")),
+        private_dirty_bytes: smaps
+            .as_deref()
+            .and_then(|text| parse_proc_value_bytes(text, "Private_Dirty:")),
+        shared_clean_bytes: smaps
+            .as_deref()
+            .and_then(|text| parse_proc_value_bytes(text, "Shared_Clean:")),
+        shared_dirty_bytes: smaps
+            .as_deref()
+            .and_then(|text| parse_proc_value_bytes(text, "Shared_Dirty:")),
+        swap_bytes: parse_proc_status_value_bytes(status, "VmSwap:").or_else(|| {
+            smaps
+                .as_deref()
+                .and_then(|text| parse_proc_value_bytes(text, "Swap:"))
+        }),
+    };
+
+    if info.pss_bytes.is_none()
+        && info.rss_anon_bytes.is_none()
+        && info.rss_file_bytes.is_none()
+        && info.rss_shmem_bytes.is_none()
+        && info.private_clean_bytes.is_none()
+        && info.private_dirty_bytes.is_none()
+        && info.shared_clean_bytes.is_none()
+        && info.shared_dirty_bytes.is_none()
+        && info.swap_bytes.is_none()
+    {
+        None
+    } else {
+        Some(info)
+    }
+}
+
 #[cfg(feature = "jemalloc-prof")]
 fn default_heap_profile_path() -> Result<PathBuf> {
     let base = crate::storage::jcode_dir()?.join("profiles").join("heap");
@@ -308,6 +369,11 @@ fn jemalloc_profiling_mibs() -> Option<&'static JemallocProfilingMibs> {
 
 #[cfg(target_os = "linux")]
 fn parse_proc_status_value_bytes(status: &str, key: &str) -> Option<u64> {
+    parse_proc_value_bytes(status, key)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_proc_value_bytes(status: &str, key: &str) -> Option<u64> {
     status.lines().find_map(|line| {
         let trimmed = line.trim_start();
         if !trimmed.starts_with(key) {
@@ -343,5 +409,20 @@ mod tests {
             assert!(info.stats.is_none());
             assert!(info.profiling.is_none());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_proc_value_bytes_handles_kib_and_mib_units() {
+        let text = "Pss:               123 kB\nMapped:            2 MB\nRetained:          1 GB\n";
+        assert_eq!(parse_proc_value_bytes(text, "Pss:"), Some(123 * 1024));
+        assert_eq!(
+            parse_proc_value_bytes(text, "Mapped:"),
+            Some(2 * 1024 * 1024)
+        );
+        assert_eq!(
+            parse_proc_value_bytes(text, "Retained:"),
+            Some(1024 * 1024 * 1024)
+        );
     }
 }

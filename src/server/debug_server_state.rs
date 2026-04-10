@@ -232,6 +232,8 @@ async fn build_server_memory_payload(
 ) -> serde_json::Value {
     let process = crate::process_memory::snapshot_with_source("server:memory");
     let background_tasks = crate::background::global().list().await;
+    let embedder_stats = crate::embedding::stats();
+    let embedding_model_available = crate::embedding::is_model_available();
 
     let sessions_guard = sessions.read().await;
     let mut locked_session_profiles: Vec<serde_json::Value> = Vec::new();
@@ -524,6 +526,20 @@ async fn build_server_memory_payload(
         "background": {
             "task_count": background_task_count,
             "tasks_json_bytes": background_task_json_bytes,
+        },
+        "embeddings": {
+            "model_available": embedding_model_available,
+            "loaded": embedder_stats.loaded,
+            "load_count": embedder_stats.load_count,
+            "unload_count": embedder_stats.unload_count,
+            "embed_calls": embedder_stats.embed_calls,
+            "embed_failures": embedder_stats.embed_failures,
+            "total_embed_ms": embedder_stats.total_embed_ms,
+            "avg_embed_ms": embedder_stats.avg_embed_ms,
+            "idle_secs": embedder_stats.idle_secs,
+            "loaded_secs": embedder_stats.loaded_secs,
+            "cache_hits": embedder_stats.cache_hits,
+            "cache_size": embedder_stats.cache_size,
         }
     })
 }
