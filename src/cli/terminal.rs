@@ -7,6 +7,7 @@ use crate::{id, session, telemetry, tui};
 pub struct TuiRuntimeState {
     mouse_capture: bool,
     keyboard_enhanced: bool,
+    focus_change: bool,
 }
 
 pub fn set_current_session(session_id: &str) {
@@ -108,11 +109,19 @@ pub fn init_tui_runtime() -> Result<(ratatui::DefaultTerminal, TuiRuntimeState)>
     let terminal = init_tui_terminal()?;
     crate::tui::mermaid::init_picker();
 
-    let mouse_capture = crate::config::config().display.mouse_capture;
-    let keyboard_enhanced = tui::enable_keyboard_enhancement();
+    let perf_policy = crate::perf::tui_policy();
+    let mouse_capture = perf_policy.enable_mouse_capture;
+    let focus_change = perf_policy.enable_focus_change;
+    let keyboard_enhanced = if perf_policy.enable_keyboard_enhancement {
+        tui::enable_keyboard_enhancement()
+    } else {
+        false
+    };
 
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
-    crossterm::execute!(std::io::stdout(), crossterm::event::EnableFocusChange)?;
+    if focus_change {
+        crossterm::execute!(std::io::stdout(), crossterm::event::EnableFocusChange)?;
+    }
     if mouse_capture {
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
     }
@@ -122,6 +131,7 @@ pub fn init_tui_runtime() -> Result<(ratatui::DefaultTerminal, TuiRuntimeState)>
         TuiRuntimeState {
             mouse_capture,
             keyboard_enhanced,
+            focus_change,
         },
     ))
 }
@@ -129,7 +139,9 @@ pub fn init_tui_runtime() -> Result<(ratatui::DefaultTerminal, TuiRuntimeState)>
 pub fn cleanup_tui_runtime(state: &TuiRuntimeState, restore_terminal: bool) {
     if restore_terminal {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableFocusChange);
+        if state.focus_change {
+            let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableFocusChange);
+        }
         if state.mouse_capture {
             let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
         }

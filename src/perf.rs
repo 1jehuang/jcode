@@ -59,6 +59,34 @@ pub struct SystemProfile {
     pub tier: PerformanceTier,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyntheticSystemProfile {
+    Native,
+    Wsl,
+    WslWindowsTerminal,
+}
+
+impl SyntheticSystemProfile {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Wsl => "wsl",
+            Self::WslWindowsTerminal => "wsl-windows-terminal",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TuiPerfPolicy {
+    pub tier: PerformanceTier,
+    pub redraw_fps: u32,
+    pub animation_fps: u32,
+    pub enable_focus_change: bool,
+    pub enable_mouse_capture: bool,
+    pub enable_keyboard_enhancement: bool,
+    pub linked_side_panel_refresh_interval: std::time::Duration,
+}
+
 impl SystemProfile {
     pub fn load_ratio(&self) -> Option<f64> {
         match (self.load_avg_1m, self.cpu_count) {
@@ -73,12 +101,127 @@ impl SystemProfile {
             _ => None,
         }
     }
+
+    pub fn is_windows_terminal(&self) -> bool {
+        self.terminal == "windows-terminal"
+    }
+
+    pub fn is_wsl_windows_terminal(&self) -> bool {
+        self.is_wsl && self.is_windows_terminal()
+    }
 }
 
 static PROFILE: OnceLock<SystemProfile> = OnceLock::new();
 
 pub fn profile() -> &'static SystemProfile {
     PROFILE.get_or_init(detect)
+}
+
+pub fn synthetic_profile(kind: SyntheticSystemProfile) -> SystemProfile {
+    match kind {
+        SyntheticSystemProfile::Native => SystemProfile {
+            load_avg_1m: Some(0.2),
+            cpu_count: Some(8),
+            available_memory_mb: Some(8192),
+            total_memory_mb: Some(16384),
+            is_ssh: false,
+            is_wsl: false,
+            terminal: "kitty".to_string(),
+            tier: PerformanceTier::Full,
+        },
+        SyntheticSystemProfile::Wsl => SystemProfile {
+            load_avg_1m: Some(0.4),
+            cpu_count: Some(8),
+            available_memory_mb: Some(8192),
+            total_memory_mb: Some(16384),
+            is_ssh: false,
+            is_wsl: true,
+            terminal: "wezterm".to_string(),
+            tier: compute_tier(
+                Some(0.4),
+                Some(8),
+                Some(8192),
+                Some(16384),
+                false,
+                true,
+                "wezterm",
+            ),
+        },
+        SyntheticSystemProfile::WslWindowsTerminal => SystemProfile {
+            load_avg_1m: Some(0.4),
+            cpu_count: Some(8),
+            available_memory_mb: Some(8192),
+            total_memory_mb: Some(16384),
+            is_ssh: false,
+            is_wsl: true,
+            terminal: "windows-terminal".to_string(),
+            tier: compute_tier(
+                Some(0.4),
+                Some(8),
+                Some(8192),
+                Some(16384),
+                false,
+                true,
+                "windows-terminal",
+            ),
+        },
+    }
+}
+
+pub fn tui_policy() -> TuiPerfPolicy {
+    tui_policy_for(profile(), &crate::config::config().display)
+}
+
+pub fn tui_policy_for(
+    profile: &SystemProfile,
+    display: &crate::config::DisplayConfig,
+) -> TuiPerfPolicy {
+    let mut redraw_fps = display.redraw_fps.clamp(1, 120);
+    let mut animation_fps = display.animation_fps.clamp(1, 120);
+    let mut enable_focus_change = true;
+    let enable_mouse_capture = display.mouse_capture;
+    let mut enable_keyboard_enhancement = true;
+    let mut linked_side_panel_refresh_interval = std::time::Duration::from_millis(250);
+
+    if profile.is_wsl {
+        redraw_fps = redraw_fps.min(30);
+        animation_fps = animation_fps.min(24);
+        linked_side_panel_refresh_interval = std::time::Duration::from_millis(500);
+    }
+
+    if profile.is_wsl_windows_terminal() {
+        redraw_fps = redraw_fps.min(20);
+        animation_fps = animation_fps.min(12);
+        enable_focus_change = false;
+        enable_keyboard_enhancement = false;
+        linked_side_panel_refresh_interval = std::time::Duration::from_millis(1000);
+    }
+
+    match profile.tier {
+        PerformanceTier::Full => {}
+        PerformanceTier::Reduced => {
+            redraw_fps = redraw_fps.min(30);
+            animation_fps = animation_fps.min(24);
+            linked_side_panel_refresh_interval =
+                linked_side_panel_refresh_interval.max(std::time::Duration::from_millis(500));
+        }
+        PerformanceTier::Minimal => {
+            redraw_fps = redraw_fps.min(12);
+            animation_fps = animation_fps.min(12);
+            linked_side_panel_refresh_interval =
+                linked_side_panel_refresh_interval.max(std::time::Duration::from_millis(1000));
+        }
+    }
+
+    TuiPerfPolicy {
+        tier: profile.tier,
+        redraw_fps,
+        animation_fps,
+        enable_focus_change,
+        enable_mouse_capture,
+        enable_keyboard_enhancement,
+        linked_side_panel_refresh_interval,
+    }
 }
 
 pub fn init_background() {
@@ -527,6 +670,65 @@ mod tests {
         assert!(!PerformanceTier::Minimal.startup_animation_enabled());
         assert!(!PerformanceTier::Minimal.idle_animation_enabled());
         assert!(!PerformanceTier::Minimal.prompt_entry_animation_enabled());
+    }
+
+    #[test]
+    fn test_tui_policy_caps_wsl_windows_terminal() {
+        let profile = synthetic_profile(SyntheticSystemProfile::WslWindowsTerminal);
+        let mut display = crate::config::DisplayConfig::default();
+        display.mouse_capture = true;
+        display.redraw_fps = 60;
+        display.animation_fps = 60;
+        let policy = tui_policy_for(&profile, &display);
+        assert_eq!(policy.tier, PerformanceTier::Reduced);
+        assert_eq!(policy.redraw_fps, 20);
+        assert_eq!(policy.animation_fps, 12);
+        assert!(!policy.enable_focus_change);
+        assert!(!policy.enable_keyboard_enhancement);
+        assert!(policy.enable_mouse_capture);
+        assert_eq!(
+            policy.linked_side_panel_refresh_interval,
+            std::time::Duration::from_millis(1000)
+        );
+    }
+
+    #[test]
+    fn test_tui_policy_keeps_native_defaults() {
+        let profile = synthetic_profile(SyntheticSystemProfile::Native);
+        let mut display = crate::config::DisplayConfig::default();
+        display.mouse_capture = true;
+        display.redraw_fps = 48;
+        display.animation_fps = 50;
+        let policy = tui_policy_for(&profile, &display);
+        assert_eq!(policy.tier, PerformanceTier::Full);
+        assert_eq!(policy.redraw_fps, 48);
+        assert_eq!(policy.animation_fps, 50);
+        assert!(policy.enable_focus_change);
+        assert!(policy.enable_keyboard_enhancement);
+        assert!(policy.enable_mouse_capture);
+        assert_eq!(
+            policy.linked_side_panel_refresh_interval,
+            std::time::Duration::from_millis(250)
+        );
+    }
+
+    #[test]
+    fn test_tui_policy_caps_generic_wsl_without_disabling_terminal_features() {
+        let profile = synthetic_profile(SyntheticSystemProfile::Wsl);
+        let mut display = crate::config::DisplayConfig::default();
+        display.mouse_capture = false;
+        display.redraw_fps = 60;
+        display.animation_fps = 60;
+        let policy = tui_policy_for(&profile, &display);
+        assert_eq!(policy.redraw_fps, 30);
+        assert_eq!(policy.animation_fps, 24);
+        assert!(policy.enable_focus_change);
+        assert!(policy.enable_keyboard_enhancement);
+        assert!(!policy.enable_mouse_capture);
+        assert_eq!(
+            policy.linked_side_panel_refresh_interval,
+            std::time::Duration::from_millis(500)
+        );
     }
 
     #[test]

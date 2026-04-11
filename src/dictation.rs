@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::{HashMap, VecDeque};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use tokio::time::{Duration, timeout};
 
 const CLIENT_TITLE_PREFIXES: &[&str] = &["jcode:d:", "jcode:c:"];
@@ -67,12 +68,33 @@ pub async fn run_command(command: &str, timeout_secs: u64) -> Result<String> {
     Ok(transcript)
 }
 
+fn last_focused_session_write_cache() -> &'static Mutex<Option<String>> {
+    static CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
 pub fn remember_last_focused_session(session_id: &str) -> Result<()> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return Ok(());
+    }
+
+    if let Ok(cache) = last_focused_session_write_cache().lock()
+        && cache.as_deref() == Some(session_id)
+    {
+        return Ok(());
+    }
+
     let path = last_focused_session_path()?;
     if let Some(parent) = path.parent() {
         crate::storage::ensure_dir(parent)?;
     }
     std::fs::write(&path, session_id).context("failed to persist last focused jcode session")?;
+
+    if let Ok(mut cache) = last_focused_session_write_cache().lock() {
+        *cache = Some(session_id.to_string());
+    }
+
     Ok(())
 }
 

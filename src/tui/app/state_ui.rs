@@ -2306,7 +2306,7 @@ impl App {
     }
 
     pub(super) fn refresh_side_panel_linked_content_if_due(&mut self) {
-        const SIDE_PANEL_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+        let refresh_interval = crate::perf::tui_policy().linked_side_panel_refresh_interval;
 
         let should_refresh = self
             .side_panel
@@ -2322,7 +2322,7 @@ impl App {
         let now = Instant::now();
         if self
             .last_side_panel_refresh
-            .is_some_and(|last| now.duration_since(last) < SIDE_PANEL_REFRESH_INTERVAL)
+            .is_some_and(|last| now.duration_since(last) < refresh_interval)
         {
             return;
         }

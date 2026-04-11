@@ -1576,17 +1576,19 @@ prompt_entry_animation = true
 # disabled_animations = []
 
 # Performance tier: auto/full/reduced/minimal (default: auto)
-# auto = detect system load, memory, terminal type, SSH
+# auto = detect system load, memory, terminal type, SSH, and apply extra caps for WSL/Windows Terminal
 # full = all animations enabled
 # reduced = skip startup/idle animations, keep spinners
 # minimal = disable all animations, slower redraw rate
 # performance = "auto"
 
 # Animation FPS (startup animation, idle donut): 1-120 (default: 60)
+# Runtime policy may cap this lower on slower environments such as WSL/Windows Terminal.
 # Startup animation is skipped entirely if animation_fps < 20 (shows nothing instead of low-FPS jank)
 # animation_fps = 60
 
 # Active redraw FPS (processing, streaming, spinners): 1-120 (default: 60)
+# Runtime policy may cap this lower on slower environments such as WSL/Windows Terminal.
 # redraw_fps = 60
 
 [features]

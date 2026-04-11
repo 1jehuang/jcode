@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use jcode::message::{ContentBlock, Role, ToolCall};
+use jcode::perf::{SyntheticSystemProfile, TuiPerfPolicy, tui_policy_for};
 use jcode::prompt::ContextInfo;
 use jcode::session::{Session, StoredDisplayRole};
 use jcode::side_panel::{
@@ -71,6 +72,31 @@ struct MermaidUiBenchmarkSummary {
     time_to_first_worker_render_ms: Option<f64>,
     time_to_first_protocol_render_ms: Option<f64>,
     time_to_deferred_idle_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TuiPolicySummary {
+    source: String,
+    tier: String,
+    redraw_fps: u32,
+    animation_fps: u32,
+    enable_focus_change: bool,
+    enable_mouse_capture: bool,
+    enable_keyboard_enhancement: bool,
+    linked_side_panel_refresh_ms: u64,
+}
+
+fn summarize_policy(source: &str, policy: TuiPerfPolicy) -> TuiPolicySummary {
+    TuiPolicySummary {
+        source: source.to_string(),
+        tier: policy.tier.label().to_string(),
+        redraw_fps: policy.redraw_fps,
+        animation_fps: policy.animation_fps,
+        enable_focus_change: policy.enable_focus_change,
+        enable_mouse_capture: policy.enable_mouse_capture,
+        enable_keyboard_enhancement: policy.enable_keyboard_enhancement,
+        linked_side_panel_refresh_ms: policy.linked_side_panel_refresh_interval.as_millis() as u64,
+    }
 }
 
 fn summarize_timing(samples_ms: &[f64]) -> TimingSummary {
@@ -229,6 +255,10 @@ struct Args {
     #[arg(long, default_value_t = false)]
     no_side_panel_prewarm: bool,
 
+    /// Report policy as if running under a synthetic environment profile
+    #[arg(long, value_enum)]
+    synthetic_profile: Option<BenchSyntheticProfile>,
+
     /// Keep any existing mermaid cache instead of forcing a cold-cache benchmark start
     #[arg(long, default_value_t = false)]
     keep_mermaid_cache: bool,
@@ -248,6 +278,23 @@ enum BenchMode {
 enum SidePanelSource {
     Managed,
     LinkedFile,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BenchSyntheticProfile {
+    Native,
+    Wsl,
+    WslWindowsTerminal,
+}
+
+impl BenchSyntheticProfile {
+    fn to_system_profile(self) -> SyntheticSystemProfile {
+        match self {
+            Self::Native => SyntheticSystemProfile::Native,
+            Self::Wsl => SyntheticSystemProfile::Wsl,
+            Self::WslWindowsTerminal => SyntheticSystemProfile::WslWindowsTerminal,
+        }
+    }
 }
 
 struct BenchState {
@@ -1399,6 +1446,14 @@ fn main() -> Result<()> {
     } else {
         None
     };
+    let actual_policy = summarize_policy("detected", jcode::perf::tui_policy());
+    let synthetic_policy = args.synthetic_profile.map(|kind| {
+        let synthetic = jcode::perf::synthetic_profile(kind.to_system_profile());
+        summarize_policy(
+            kind.to_system_profile().label(),
+            tui_policy_for(&synthetic, &jcode::config::config().display),
+        )
+    });
     let cold_frame_count = side_panel_profiles
         .iter()
         .filter(|frame| {
@@ -1421,6 +1476,10 @@ fn main() -> Result<()> {
             "keep_mermaid_cache": args.keep_mermaid_cache,
             "session": state.session_source,
             "session_messages": if !state.messages.is_empty() { Some(state.messages.len()) } else { None },
+            "tui_policy": {
+                "detected": actual_policy,
+                "synthetic": synthetic_policy,
+            },
             "side_panel": if profile_side_panel {
                 Some(json!({
                     "pages": state.side_panel.pages.len(),
@@ -1448,6 +1507,46 @@ fn main() -> Result<()> {
     }
 
     println!("mode: {:?}", args.mode);
+    println!("tui_policy_source: {}", actual_policy.source);
+    println!("tui_policy_tier: {}", actual_policy.tier);
+    println!("tui_policy_redraw_fps: {}", actual_policy.redraw_fps);
+    println!("tui_policy_animation_fps: {}", actual_policy.animation_fps);
+    println!(
+        "tui_policy_focus_change: {}",
+        actual_policy.enable_focus_change
+    );
+    println!(
+        "tui_policy_keyboard_enhancement: {}",
+        actual_policy.enable_keyboard_enhancement
+    );
+    println!(
+        "tui_policy_linked_refresh_ms: {}",
+        actual_policy.linked_side_panel_refresh_ms
+    );
+    if let Some(synthetic_policy) = &synthetic_policy {
+        println!("synthetic_tui_policy_source: {}", synthetic_policy.source);
+        println!("synthetic_tui_policy_tier: {}", synthetic_policy.tier);
+        println!(
+            "synthetic_tui_policy_redraw_fps: {}",
+            synthetic_policy.redraw_fps
+        );
+        println!(
+            "synthetic_tui_policy_animation_fps: {}",
+            synthetic_policy.animation_fps
+        );
+        println!(
+            "synthetic_tui_policy_focus_change: {}",
+            synthetic_policy.enable_focus_change
+        );
+        println!(
+            "synthetic_tui_policy_keyboard_enhancement: {}",
+            synthetic_policy.enable_keyboard_enhancement
+        );
+        println!(
+            "synthetic_tui_policy_linked_refresh_ms: {}",
+            synthetic_policy.linked_side_panel_refresh_ms
+        );
+    }
     if let Some(session_source) = &state.session_source {
         println!("session: {}", session_source);
         println!("session_messages: {}", state.messages.len());

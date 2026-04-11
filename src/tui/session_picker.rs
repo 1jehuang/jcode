@@ -1205,9 +1205,17 @@ impl SessionPicker {
             })?;
         // Initialize mermaid image picker (fast default, optional probe via env)
         super::mermaid::init_picker();
-        let keyboard_enhanced = super::enable_keyboard_enhancement();
+        let perf_policy = crate::perf::tui_policy();
+        let keyboard_enhanced = if perf_policy.enable_keyboard_enhancement {
+            super::enable_keyboard_enhancement()
+        } else {
+            false
+        };
+        let mouse_capture = perf_policy.enable_mouse_capture;
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
-        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+        if mouse_capture {
+            crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+        }
 
         let result = loop {
             terminal.draw(|frame| self.render(frame))?;
@@ -1319,7 +1327,9 @@ impl SessionPicker {
         };
 
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+        if mouse_capture {
+            let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+        }
         if keyboard_enhanced {
             super::disable_keyboard_enhancement();
         }

@@ -678,8 +678,7 @@ impl App {
             self.provider.model().to_string()
         };
 
-        let cfg = crate::config::Config::load();
-        let config_default_model = cfg.provider.default_model.clone();
+        let config_default_model = crate::config::config().provider.default_model.clone();
 
         let is_config_default = |name: &str| -> bool {
             match &config_default_model {

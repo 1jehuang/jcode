@@ -768,16 +768,18 @@ pub(crate) const STARTUP_ANIMATION_WINDOW: Duration = Duration::from_millis(3000
 
 const STARTUP_ANIMATION_MIN_FPS: u32 = 20;
 
-pub(crate) fn startup_animation_active(state: &dyn TuiState) -> bool {
+fn startup_animation_active_with_policy(
+    state: &dyn TuiState,
+    policy: &crate::perf::TuiPerfPolicy,
+) -> bool {
     if state.remote_startup_phase_active() {
         return false;
     }
 
-    let tier = crate::perf::profile().tier;
     let cfg = &crate::config::config().display;
-    crate::config::config().display.startup_animation
-        && tier.startup_animation_enabled()
-        && cfg.animation_fps >= STARTUP_ANIMATION_MIN_FPS
+    cfg.startup_animation
+        && policy.tier.startup_animation_enabled()
+        && policy.animation_fps >= STARTUP_ANIMATION_MIN_FPS
         && state.animation_elapsed() < STARTUP_ANIMATION_WINDOW.as_secs_f32()
         && !state.is_processing()
         && state.display_messages().is_empty()
@@ -789,32 +791,47 @@ pub(crate) fn startup_animation_active(state: &dyn TuiState) -> bool {
         && state.inline_ui_state().is_none()
 }
 
-pub(crate) fn idle_donut_active(state: &dyn TuiState) -> bool {
+pub(crate) fn startup_animation_active(state: &dyn TuiState) -> bool {
+    let policy = crate::perf::tui_policy();
+    startup_animation_active_with_policy(state, &policy)
+}
+
+fn idle_donut_active_with_policy(
+    state: &dyn TuiState,
+    policy: &crate::perf::TuiPerfPolicy,
+) -> bool {
     if state.remote_startup_phase_active() {
         return false;
     }
 
-    let tier = crate::perf::profile().tier;
     crate::config::config().display.idle_animation
-        && tier.idle_animation_enabled()
+        && policy.tier.idle_animation_enabled()
         && state.display_messages().is_empty()
         && !state.is_processing()
         && state.streaming_text().is_empty()
         && state.queued_messages().is_empty()
 }
 
+pub(crate) fn idle_donut_active(state: &dyn TuiState) -> bool {
+    let policy = crate::perf::tui_policy();
+    idle_donut_active_with_policy(state, &policy)
+}
+
 fn fps_to_duration(fps: u32) -> Duration {
     Duration::from_millis((1000 / fps.max(1)) as u64)
 }
 
-pub(crate) fn redraw_interval(state: &dyn TuiState) -> Duration {
-    let tier = crate::perf::profile().tier;
-    let cfg = &crate::config::config().display;
-    let animation_interval = fps_to_duration(cfg.animation_fps);
-    let fast_interval = fps_to_duration(cfg.redraw_fps);
+pub(crate) fn redraw_interval_with_policy(
+    state: &dyn TuiState,
+    policy: &crate::perf::TuiPerfPolicy,
+) -> Duration {
+    let animation_interval = fps_to_duration(policy.animation_fps);
+    let fast_interval = fps_to_duration(policy.redraw_fps);
 
-    if startup_animation_active(state) || idle_donut_active(state) {
-        return match tier {
+    if startup_animation_active_with_policy(state, policy)
+        || idle_donut_active_with_policy(state, policy)
+    {
+        return match policy.tier {
             crate::perf::PerformanceTier::Minimal => fast_interval,
             _ => animation_interval,
         };
@@ -827,7 +844,7 @@ pub(crate) fn redraw_interval(state: &dyn TuiState) -> Duration {
         || state.has_notification()
         || state.rate_limit_remaining().is_some()
     {
-        return match tier {
+        return match policy.tier {
             crate::perf::PerformanceTier::Minimal => REDRAW_IDLE,
             _ => fast_interval,
         };
@@ -852,6 +869,11 @@ pub(crate) fn redraw_interval(state: &dyn TuiState) -> Duration {
     } else {
         REDRAW_IDLE
     }
+}
+
+pub(crate) fn redraw_interval(state: &dyn TuiState) -> Duration {
+    let policy = crate::perf::tui_policy();
+    redraw_interval_with_policy(state, &policy)
 }
 
 /// Returns true when cache behavior is unexpected for a multi-turn conversation.
