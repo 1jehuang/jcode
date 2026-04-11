@@ -193,6 +193,63 @@ jcode works with subscription-backed OAuth flows and many provider integrations,
 
 For custom OpenAI-compatible endpoints, jcode now prompts for the API base and supports local localhost servers without requiring an API key.
 
+### Config-file setup for self-hosted endpoints and MCP
+
+If you prefer to configure things by editing files instead of using the login UI, jcode supports both a custom OpenAI-compatible endpoint config and MCP config files.
+
+#### Self-hosted OpenAI-compatible endpoints, including vLLM
+
+The custom OpenAI-compatible provider reads overrides from environment variables or from an env file in jcode's app config directory. On Linux this is usually `~/.config/jcode/`, so the default file is usually:
+
+```text
+~/.config/jcode/openai-compatible.env
+```
+
+Example for a local or LAN vLLM server:
+
+```bash
+JCODE_OPENAI_COMPAT_API_BASE=http://192.168.1.50:8000/v1
+JCODE_OPENAI_COMPAT_DEFAULT_MODEL=Qwen/Qwen3-Coder-30B-A3B-Instruct
+# Optional if your server expects auth
+OPENAI_COMPAT_API_KEY=your-token-here
+```
+
+Notes:
+
+- `jcode login --provider openai-compatible` can create or update this for you.
+- Plain `http://` is accepted for `localhost` and private LAN IPs. Public remote HTTP is still rejected.
+- HTTPS endpoints work as usual.
+
+#### MCP config files
+
+MCP config is separate from `config.toml`.
+
+Primary config files:
+
+- `~/.jcode/mcp.json` for global MCP servers
+- `.jcode/mcp.json` for project-local MCP servers
+
+Compatibility fallback:
+
+- `.claude/mcp.json`
+
+Example MCP config:
+
+```json
+{
+  "servers": {
+    "filesystem": {
+      "command": "/path/to/mcp-server",
+      "args": ["--root", "/workspace"],
+      "env": {},
+      "shared": true
+    }
+  }
+}
+```
+
+On first run, jcode also tries to import MCP servers from `~/.claude/mcp.json` and `~/.codex/config.toml` if `~/.jcode/mcp.json` does not exist yet.
+
 For headless or SSH sessions, OAuth-style providers support `jcode login --provider <provider> --no-browser` (alias: `--headless`) so jcode prints the auth URL/QR and falls back to manual code or callback paste instead of trying to launch a local browser.
 
 For more scriptable remote flows, `claude`, `openai`, `gemini`, and `antigravity` also support a two-step pattern:
