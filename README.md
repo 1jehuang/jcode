@@ -189,11 +189,8 @@ Yes, you can change the alignment to be left-aligned. I prefer the centered mode
 
 Spawn two or more agents in the same repo, and they will automatically be managed by the server to allow native collaboration. When agent A edits a file that agent B has read (code shifting under its feet), the server notifies agent B. Agent B can ignore it if it is not relevant, or it can check the diff to make sure that it doesn't conflict. Each agent has messaging abilities, capable of DMing just one agent, broadcasting to all other agents hosted by the server, or just agents working in that repo. This allows you to spawn multiple sessions in the same repo, and have all conflicts automatically resolved. 
 
-<div align="center">
-  <img src="assets/readme/100-sessions-spawn-demo.gif" alt="Spawning 100 jcode sessions demo" width="900">
-</div>
-
-The above GIF shows jcode spawning 100 sessions. This kind of large swarm workflow is only practical because of the performance and resource-efficiency described in the section above.
+https://github.com/user-attachments/assets/161df3c5-a7b5-43c8-bb47-771a49164aea
+The above video is me managing 20 agent sessions
 
 Agents are also able to spawn their own swarms autonomously. They have a swarm tool which allows them to spawn in their own teamates to accomplish tasks in parallel. Doing so turns the main agent into a coordinator and the spawned agents into workers. Groups of agents, their messaging channels, their completion statuses, etc are all automatically managed. This can be done headlessly or headed. 
 
@@ -285,6 +282,9 @@ Agent grep is a grep tool I made for the jcode agent. It adds file strucuture in
 Inputs are by default interleaved with the working agent. It sends the input as soon as it safely can without breaking the KV cache. Submit with shift enter instead, and it will send a queue send, and wait for the agent to fully finish its turn before sending.
 
 Resume sessions from different harnesses. Claude code broke on you? Resume the session from jcode and continue where you left off. Session resume is supported for codex, claude code, opencode, and pi. 
+
+<img width="2877" height="1762" alt="Screenshot from 2026-04-11 16-28-52" src="https://github.com/user-attachments/assets/c2b383cf-2531-4217-85ae-6a863354dc97" />
+/Resume for codex sessions
 
 Skills are not all loaded on startup. The conversation is embedded as a semantic vector, and will automatically inject a skill if there is an embedding hit similar to memories. The agent has a skill tool for you to manually activate a skill at anytime. You may also activate via slash commands. 
 
