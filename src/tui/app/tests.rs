@@ -138,6 +138,37 @@ fn create_jcode_repo_fixture() -> tempfile::TempDir {
     temp
 }
 
+fn create_real_git_repo_fixture() -> tempfile::TempDir {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(temp.path())
+        .output()
+        .expect("git init");
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(temp.path())
+        .output()
+        .expect("git config email");
+    std::process::Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(temp.path())
+        .output()
+        .expect("git config name");
+    std::fs::write(temp.path().join("tracked.txt"), "before\n").expect("write tracked file");
+    std::process::Command::new("git")
+        .args(["add", "tracked.txt"])
+        .current_dir(temp.path())
+        .output()
+        .expect("git add");
+    std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(temp.path())
+        .output()
+        .expect("git commit");
+    temp
+}
+
 #[test]
 fn test_handle_turn_error_failover_prompt_manual_mode_shows_system_notice() {
     with_temp_jcode_home(|| {
@@ -637,6 +668,22 @@ fn test_help_topic_shows_btw_command_details() {
 }
 
 #[test]
+fn test_help_topic_shows_git_command_details() {
+    let mut app = create_test_app();
+    app.input = "/help git".to_string();
+    app.submit_input();
+
+    let msg = app
+        .display_messages()
+        .last()
+        .expect("missing help response");
+    assert_eq!(msg.role, "system");
+    assert!(msg.content.contains("`/git`"));
+    assert!(msg.content.contains("git status --short --branch"));
+    assert!(msg.content.contains("`/git status`"));
+}
+
+#[test]
 fn test_help_topic_shows_catchup_command_details() {
     let mut app = create_test_app();
     app.input = "/help catchup".to_string();
@@ -966,6 +1013,24 @@ fn test_btw_command_in_remote_mode_queues_followup_instead_of_erroring() {
     } else {
         crate::env::remove_var("JCODE_HOME");
     }
+}
+
+#[test]
+fn test_git_command_shows_repo_status_for_working_directory() {
+    let repo = create_real_git_repo_fixture();
+    std::fs::write(repo.path().join("tracked.txt"), "after\n").expect("update tracked file");
+
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repo.path().display().to_string());
+    app.input = "/git".to_string();
+    app.submit_input();
+
+    let msg = app.display_messages().last().expect("missing git response");
+    assert_eq!(msg.role, "system");
+    assert!(msg.content.contains("`/git`"));
+    assert!(msg.content.contains("```text"));
+    assert!(msg.content.contains("## "));
+    assert!(msg.content.contains("tracked.txt"));
 }
 
 #[test]
@@ -3687,6 +3752,9 @@ fn test_top_level_command_suggestions_include_catchup_and_back() {
 
     let suggestions = app.get_suggestions_for("/bac");
     assert!(suggestions.iter().any(|(cmd, _)| cmd == "/back"));
+
+    let suggestions = app.get_suggestions_for("/gi");
+    assert!(suggestions.iter().any(|(cmd, _)| cmd == "/git"));
 }
 
 #[test]
@@ -4749,10 +4817,7 @@ fn test_new_for_remote_restores_spawn_startup_hints_and_dispatch_state() {
         assert!(app.pending_queued_dispatch);
         assert!(app.is_processing());
         assert!(app.processing_started.is_some());
-        assert!(matches!(
-            crate::tui::TuiState::status(&app),
-            ProcessingStatus::Sending
-        ));
+        assert!(matches!(crate::tui::TuiState::status(&app), ProcessingStatus::Sending));
         assert_eq!(app.status_notice(), Some("Autojudge starting".to_string()));
         assert_eq!(app.hidden_queued_system_messages.len(), 1);
 
@@ -4801,7 +4866,10 @@ fn test_remote_startup_done_event_does_not_cancel_pending_judge_launch() {
 
         assert!(app.pending_queued_dispatch);
         assert!(app.is_processing());
-        assert!(matches!(crate::tui::TuiState::status(&app), ProcessingStatus::Sending));
+        assert!(matches!(
+            crate::tui::TuiState::status(&app),
+            ProcessingStatus::Sending
+        ));
         assert_eq!(app.current_message_id, None);
         assert_eq!(app.hidden_queued_system_messages.len(), 1);
     });

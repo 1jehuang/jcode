@@ -152,6 +152,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(help_entry("/config edit", "Open config in $EDITOR"));
     lines.push(help_entry("/dictate", "Run configured external dictation"));
     lines.push(help_entry(
+        "/git [status]",
+        "Show branch and working tree status for the repo",
+    ));
+    lines.push(help_entry(
         "/context",
         "Show the full session context snapshot",
     ));

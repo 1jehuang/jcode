@@ -4,6 +4,7 @@ use crate::id;
 use crate::message::{ContentBlock, Message, Role, ToolCall};
 use crate::session::{Session, StoredMessage};
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Instant;
 
 const BTW_PAGE_ID: &str = "btw";
@@ -2301,11 +2302,103 @@ fn handle_back_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
+fn git_command_repo_dir(app: &App) -> Result<PathBuf, String> {
+    if app.is_remote {
+        return Err("`/git` is currently only available in a local jcode TUI session.".to_string());
+    }
+
+    active_working_dir(app)
+        .or_else(|| std::env::current_dir().ok())
+        .ok_or_else(|| "Unable to determine a working directory for `/git`.".to_string())
+}
+
+fn run_git_command(repo_dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo_dir)
+        .output()
+        .map_err(|error| format!("Failed to run `git {}`: {}", args.join(" "), error))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let failure = if stderr.is_empty() {
+            format!(
+                "`git {}` exited with status {}",
+                args.join(" "),
+                output.status
+            )
+        } else {
+            stderr
+        };
+        return Err(failure);
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_string())
+}
+
+fn build_git_status_message(app: &App) -> Result<String, String> {
+    let repo_dir = git_command_repo_dir(app)?;
+    let repo_root =
+        run_git_command(&repo_dir, &["rev-parse", "--show-toplevel"]).map_err(|error| {
+            format!(
+                "No git repository found for `{}`: {}",
+                repo_dir.display(),
+                error
+            )
+        })?;
+    let status = run_git_command(&repo_dir, &["status", "--short", "--branch"])?;
+
+    let repo_root_path = std::path::Path::new(&repo_root);
+    let relative_dir = repo_dir
+        .strip_prefix(repo_root_path)
+        .ok()
+        .and_then(|path| {
+            if path.as_os_str().is_empty() {
+                None
+            } else {
+                Some(path.display().to_string())
+            }
+        })
+        .unwrap_or_else(|| ".".to_string());
+
+    let heading = if relative_dir == "." {
+        format!("`/git` in `{}`", repo_root)
+    } else {
+        format!("`/git` in `{}` (`{}`)", repo_root, relative_dir)
+    };
+
+    Ok(format!("{heading}\n\n```text\n{status}\n```"))
+}
+
+fn handle_git_command(app: &mut App, trimmed: &str) -> bool {
+    if trimmed != "/git" && trimmed != "/git status" {
+        if trimmed.starts_with("/git ") {
+            app.push_display_message(DisplayMessage::error(
+                "Usage: `/git` or `/git status`".to_string(),
+            ));
+            return true;
+        }
+        return false;
+    }
+
+    match build_git_status_message(app) {
+        Ok(message) => {
+            app.push_display_message(DisplayMessage::system(message));
+            app.set_status_notice("Git status");
+        }
+        Err(error) => app.push_display_message(DisplayMessage::error(error)),
+    }
+    true
+}
+
 pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
     if handle_subagent_model_command(app, trimmed)
         || handle_subagent_command(app, trimmed)
         || handle_observe_command(app, trimmed)
         || handle_btw_command(app, trimmed)
+        || handle_git_command(app, trimmed)
         || handle_catchup_command(app, trimmed)
         || handle_back_command(app, trimmed)
         || handle_autoreview_command_local(app, trimmed)

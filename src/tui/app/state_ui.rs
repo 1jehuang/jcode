@@ -676,6 +676,10 @@ impl App {
             ),
             ("/btw".into(), "Ask a side question in the side panel"),
             (
+                "/git".into(),
+                "Show git status for the session working directory",
+            ),
+            (
                 "/subagent-model".into(),
                 "Show/change subagent model policy",
             ),
@@ -1091,6 +1095,17 @@ impl App {
                 .map(|(cmd, help)| (format!("{} {}", base, cmd.trim_start_matches('/')), help))
                 .collect();
             return self.rank_suggestions(input, topics);
+        }
+
+        if prefix.starts_with("/git ") {
+            return self.rank_suggestions(
+                input,
+                vec![("/git status".into(), "Show branch and working tree status")],
+            );
+        }
+
+        if prefix_trimmed == "/git" {
+            return vec![("/git status".into(), "Show branch and working tree status")];
         }
 
         if prefix.starts_with("/effort ") {
@@ -1547,6 +1562,7 @@ impl App {
             "/help"
                 | "/?"
                 | "/btw"
+                | "/git"
                 | "/observe"
                 | "/model"
                 | "/agents"

@@ -1618,6 +1618,9 @@ impl App {
             "btw" => {
                 "`/btw <question>`\nAsk a side question about the current session and route the answer into the side panel.\n\nCurrent v1 behavior:\n- uses the side panel as the response surface\n- asks only from current session context\n- should not read files or run tools other than `side_panel`"
             }
+            "git" => {
+                "`/git`\nShow `git status --short --branch` for the current session working directory.\n\n`/git status`\nAlias for `/git`."
+            }
             "catchup" => {
                 "`/catchup`\nOpen the Catch Up picker for finished sessions that need attention.\n\n`/catchup next`\nTeleport to the next session needing attention and open a Catch Up brief in the side panel.\n\n`/catchup list`\nAlias for opening the picker."
             }
