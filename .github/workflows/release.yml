@@ -197,6 +197,38 @@ jobs:
             -ArtifactExePath "target/${{ matrix.target }}/release/jcode.exe" `
             -Version "${{ github.ref_name }}"
 
+      - name: Run Windows runtime smoke tests (x64)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $tests = @(
+            'binary_integration::binary_version_command',
+            'provider_behavior::test_socket_model_cycle_supported_models',
+            'provider_behavior::test_model_switch_resets_provider_session'
+          )
+
+          foreach ($testName in $tests) {
+            & cargo test --locked --target ${{ matrix.target }} --test e2e $testName -- --exact --nocapture
+            if ($LASTEXITCODE -ne 0) {
+              throw "Windows smoke test failed: $testName"
+            }
+          }
+
+      - name: Verify built Windows binary launches
+        shell: pwsh
+        run: |
+          & "target/${{ matrix.target }}/release/jcode.exe" --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Built Windows binary failed to run --version"
+          }
+
+      - name: Verify Windows installer with local artifact
+        shell: pwsh
+        run: |
+          & ./.github/scripts/verify_windows_install.ps1 `
+            -ArtifactExePath "target/${{ matrix.target }}/release/jcode.exe" `
+            -Version "${{ github.ref_name }}"
+
       - name: Package binary
         shell: pwsh
         run: |
