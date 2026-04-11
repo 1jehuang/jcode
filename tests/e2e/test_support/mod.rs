@@ -1192,7 +1192,6 @@ pub(crate) async fn wait_for_selfdev_client_reload_cycle(
     )
 }
 
-#[cfg(unix)]
 pub(crate) fn latest_log_excerpt(home_dir: &std::path::Path) -> Option<String> {
     let logs_dir = home_dir.join("logs");
     let mut entries = std::fs::read_dir(logs_dir)

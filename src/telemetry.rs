@@ -1497,7 +1497,17 @@ fn send_payload(payload: serde_json::Value, mode: DeliveryMode) -> bool {
             });
             true
         }
-        DeliveryMode::Blocking(timeout) => post_payload(payload, timeout),
+        DeliveryMode::Blocking(timeout) => {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                std::thread::spawn(move || {
+                    let _ = tx.send(post_payload(payload, timeout));
+                });
+                rx.recv_timeout(timeout).unwrap_or(false)
+            } else {
+                post_payload(payload, timeout)
+            }
+        }
     }
 }
 
