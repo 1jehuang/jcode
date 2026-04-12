@@ -90,9 +90,7 @@ impl Tool for SessionSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search across all past chat sessions to find relevant context, code snippets, \
-         or previous discussions. Use this when you need to recall something from a \
-         previous conversation that might be helpful for the current task."
+        "Search past chat sessions."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -101,15 +99,15 @@ impl Tool for SessionSearchTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search term to find in past sessions"
+                    "description": "Search query."
                 },
                 "working_dir": {
                     "type": "string",
-                    "description": "Optional: only search sessions from this directory"
+                    "description": "Working directory."
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum results to return (default: 10)"
+                    "description": "Max results."
                 }
             },
             "required": ["query"]

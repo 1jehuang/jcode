@@ -40,9 +40,7 @@ impl Tool for SkillTool {
     }
 
     fn description(&self) -> &str {
-        "Manage skills: list available skills, reload after editing, or read skill content. \
-         Use action='list' to see skills, 'reload' to refresh a skill after editing its SKILL.md, \
-         'read' to see full content."
+        "Manage skills."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -52,11 +50,11 @@ impl Tool for SkillTool {
                 "action": {
                     "type": "string",
                     "enum": ["load", "list", "reload", "reload_all", "read"],
-                    "description": "Action: 'load' (default) activates a skill, 'list' shows all skills, 'reload' reloads a skill after editing, 'reload_all' reloads all skills, 'read' shows skill content"
+                    "description": "Action."
                 },
                 "name": {
                     "type": "string",
-                    "description": "Skill name (required for load, reload, read)"
+                    "description": "Skill name."
                 }
             }
         })

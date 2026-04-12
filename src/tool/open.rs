@@ -111,7 +111,7 @@ impl Tool for OpenTool {
     }
 
     fn description(&self) -> &str {
-        "Open something user-facing without waiting for it to exit. Supports opening files, directories, and URLs in the default app, or revealing local filesystem paths in the file manager."
+        "Open or reveal a file, folder, or URL for the user."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -122,16 +122,16 @@ impl Tool for OpenTool {
                 "mode": {
                     "type": "string",
                     "enum": ["open", "reveal"],
-                    "description": "Preferred behavior selector. 'open' opens a file, folder, or URL in the default app. 'reveal' shows a local file or folder in the system file manager."
+                    "description": "Open mode."
                 },
                 "action": {
                     "type": "string",
                     "enum": ["open", "reveal"],
-                    "description": "Deprecated alias for 'mode'. 'open' opens a file, folder, or URL in the default app. 'reveal' shows a local file or folder in the system file manager. Defaults to 'open'."
+                    "description": "Alias for mode."
                 },
                 "target": {
                     "type": "string",
-                    "description": "Local file path, directory path, or URL to open. Relative paths are resolved from the current working directory. '~' is expanded to the home directory."
+                    "description": "Open target."
                 }
             }
         })

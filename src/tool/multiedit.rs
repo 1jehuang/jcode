@@ -35,8 +35,7 @@ impl Tool for MultiEditTool {
     }
 
     fn description(&self) -> &str {
-        "Apply multiple edits to a single file sequentially. Each edit replaces old_string with new_string. \
-         Edits are applied in order, so later edits see the result of earlier ones."
+        "Apply multiple edits to one file."
     }
 
     fn parameters_schema(&self) -> Value {

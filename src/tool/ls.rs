@@ -50,8 +50,7 @@ impl Tool for LsTool {
     }
 
     fn description(&self) -> &str {
-        "List directory contents in a tree format. Automatically ignores common build directories \
-         like node_modules, __pycache__, .git, dist, target, etc."
+        "List directory contents."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -60,12 +59,12 @@ impl Tool for LsTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Directory to list (default: current directory)"
+                    "description": "Directory path."
                 },
                 "ignore": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Additional patterns to ignore"
+                    "description": "Ignore patterns."
                 }
             }
         })

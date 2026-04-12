@@ -31,8 +31,7 @@ impl Tool for WriteTool {
     }
 
     fn description(&self) -> &str {
-        "Write content to a file. Creates the file if it doesn't exist, \
-         or overwrites if it does. Creates parent directories as needed."
+        "Write a file."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -42,11 +41,11 @@ impl Tool for WriteTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "The path to the file to write (absolute or relative)"
+                    "description": "File path."
                 },
                 "content": {
                     "type": "string",
-                    "description": "The content to write to the file"
+                    "description": "File content."
                 }
             }
         })

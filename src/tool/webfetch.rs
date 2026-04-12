@@ -38,8 +38,7 @@ impl Tool for WebFetchTool {
     }
 
     fn description(&self) -> &str {
-        "Fetch content from a URL. Returns the page content as text, markdown, or HTML. \
-         Useful for reading documentation, API responses, or web pages."
+        "Fetch a URL."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -49,16 +48,16 @@ impl Tool for WebFetchTool {
             "properties": {
                 "url": {
                     "type": "string",
-                    "description": "The URL to fetch (must start with http:// or https://)"
+                    "description": "URL."
                 },
                 "format": {
                     "type": "string",
                     "enum": ["text", "markdown", "html"],
-                    "description": "Output format (default: markdown)"
+                    "description": "Output format."
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in seconds (default: 30, max: 120)"
+                    "description": "Timeout in seconds."
                 }
             }
         })

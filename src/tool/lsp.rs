@@ -41,8 +41,7 @@ impl Tool for LspTool {
     }
 
     fn description(&self) -> &str {
-        "Run a language-server (LSP) operation such as go-to-definition or hover. \
-         Currently returns a fallback message because LSP is not integrated in jcode."
+        "Run an LSP operation."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -53,21 +52,21 @@ impl Tool for LspTool {
                 "operation": {
                     "type": "string",
                     "enum": OPERATIONS,
-                    "description": "The LSP operation to perform"
+                    "description": "LSP operation."
                 },
                 "filePath": {
                     "type": "string",
-                    "description": "Absolute or relative path to the file"
+                    "description": "File path."
                 },
                 "line": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "1-based line number"
+                    "description": "1-based line."
                 },
                 "character": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "1-based character offset"
+                    "description": "1-based character."
                 }
             }
         })

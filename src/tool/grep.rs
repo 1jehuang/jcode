@@ -42,8 +42,7 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search for a regex pattern in files. Returns matching lines with file paths and line numbers. \
-         Respects .gitignore and skips binary files."
+        "Search files with a regex."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -53,15 +52,15 @@ impl Tool for GrepTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Regex pattern to search for"
+                    "description": "Regex pattern."
                 },
                 "path": {
                     "type": "string",
-                    "description": "Directory to search in (default: current directory)"
+                    "description": "Search path."
                 },
                 "include": {
                     "type": "string",
-                    "description": "File pattern to include (e.g., '*.rs', '*.{ts,tsx}')"
+                    "description": "Include pattern."
                 }
             }
         })

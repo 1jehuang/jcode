@@ -37,8 +37,7 @@ impl Tool for BgTool {
     }
 
     fn description(&self) -> &str {
-        "Manage background tasks. Actions: 'list' shows all tasks, 'status' checks a specific task, \
-         'output' retrieves full output, 'cancel' stops a running task, 'cleanup' removes old task files."
+        "Manage background tasks."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -49,15 +48,15 @@ impl Tool for BgTool {
                 "action": {
                     "type": "string",
                     "enum": ["list", "status", "output", "cancel", "cleanup"],
-                    "description": "Action to perform"
+                    "description": "Action."
                 },
                 "task_id": {
                     "type": "string",
-                    "description": "Task ID (required for status, output, cancel)"
+                    "description": "Task ID."
                 },
                 "max_age_hours": {
                     "type": "integer",
-                    "description": "For cleanup: remove tasks older than this many hours (default: 24)"
+                    "description": "Cleanup age in hours."
                 }
             }
         })

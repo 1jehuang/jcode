@@ -34,9 +34,7 @@ impl Tool for EditTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file by replacing text. Finds old_string in the file and replaces it with new_string. \
-         The old_string must be unique in the file unless replace_all is true. \
-         Preserves exact indentation and whitespace."
+        "Replace text in a file."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -46,19 +44,19 @@ impl Tool for EditTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "The path to the file to edit"
+                    "description": "File path."
                 },
                 "old_string": {
                     "type": "string",
-                    "description": "The exact text to find and replace"
+                    "description": "Text to replace."
                 },
                 "new_string": {
                     "type": "string",
-                    "description": "The text to replace it with"
+                    "description": "Replacement text."
                 },
                 "replace_all": {
                     "type": "boolean",
-                    "description": "Replace all occurrences (default: false)"
+                    "description": "Replace all matches."
                 }
             }
         })

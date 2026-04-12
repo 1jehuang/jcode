@@ -53,8 +53,7 @@ impl Tool for CodeSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search for code snippets and documentation using Exa code search. \
-         Use for API usage examples or library references."
+        "Search code examples and docs."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -64,13 +63,13 @@ impl Tool for CodeSearchTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search query for APIs, libraries, or SDK usage"
+                    "description": "Search query."
                 },
                 "tokensNum": {
                     "type": "integer",
                     "minimum": MIN_TOKENS,
                     "maximum": MAX_TOKENS,
-                    "description": "Number of tokens to return (1000-50000, default 5000)"
+                    "description": "Max tokens."
                 }
             }
         })

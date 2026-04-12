@@ -30,8 +30,7 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "Find files matching a glob pattern. Supports patterns like '**/*.rs', 'src/**/*.ts', etc. \
-         Returns files sorted by modification time (newest first)."
+        "Find files by glob."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -41,11 +40,11 @@ impl Tool for GlobTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "The glob pattern to match (e.g., '**/*.rs', 'src/**/*.ts')"
+                    "description": "Glob pattern."
                 },
                 "path": {
                     "type": "string",
-                    "description": "Base directory to search in (default: current directory)"
+                    "description": "Base path."
                 }
             }
         })

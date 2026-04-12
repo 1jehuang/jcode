@@ -41,8 +41,7 @@ impl Tool for PatchTool {
     }
 
     fn description(&self) -> &str {
-        "Apply a unified diff patch to modify files. Supports adding, updating, and deleting files. \
-         The patch should be in standard unified diff format (like output from git diff)."
+        "Apply a unified diff patch."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -52,7 +51,7 @@ impl Tool for PatchTool {
             "properties": {
                 "patch_text": {
                     "type": "string",
-                    "description": "The unified diff patch text to apply"
+                    "description": "Patch text."
                 }
             }
         })

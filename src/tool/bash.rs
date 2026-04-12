@@ -110,13 +110,9 @@ impl Tool for BashTool {
 
     fn description(&self) -> &str {
         if cfg!(windows) {
-            "Execute a shell command (cmd.exe). Use for system commands, git operations, running scripts, etc. \
-             Avoid using for file operations (reading, writing, editing) - use dedicated tools instead. \
-             Set run_in_background=true for long-running commands - you'll get a task_id to check later."
+            "Run a shell command."
         } else {
-            "Execute a bash command. Use for system commands, git operations, running scripts, etc. \
-             Avoid using for file operations (reading, writing, editing) - use dedicated tools instead. \
-             Set run_in_background=true for long-running commands - you'll get a task_id to check later."
+            "Run a bash command."
         }
     }
 
@@ -136,23 +132,23 @@ impl Tool for BashTool {
                 },
                 "description": {
                     "type": "string",
-                    "description": "A brief (5-10 word) description of what this command does"
+                    "description": "Short command description."
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in milliseconds (max 600000, default 120000). Ignored for background tasks."
+                    "description": "Timeout in ms."
                 },
                 "run_in_background": {
                     "type": "boolean",
-                    "description": "Run the command in the background. Returns immediately with task_id and output_file path. Use the bg tool or Read tool to check on progress."
+                    "description": "Run in background."
                 },
                 "notify": {
                     "type": "boolean",
-                    "description": "For background tasks: send a notification to the agent when the task completes (default: true). Set to false to suppress completion notifications."
+                    "description": "Notify on completion."
                 },
                 "wake": {
                     "type": "boolean",
-                    "description": "For background tasks: wake the agent/session when the task completes. If the session is idle it continues immediately; otherwise the completion is queued as a soft interrupt. Defaults to false."
+                    "description": "Wake on completion."
                 }
             }
         })

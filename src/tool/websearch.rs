@@ -38,8 +38,7 @@ impl Tool for WebSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search the web using DuckDuckGo. Returns a list of search results with titles, URLs, and snippets. \
-         Useful for finding current information, documentation, or resources."
+        "Search the web."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -49,11 +48,11 @@ impl Tool for WebSearchTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "The search query"
+                    "description": "Search query."
                 },
                 "num_results": {
                     "type": "integer",
-                    "description": "Number of results to return (default: 8, max: 20)"
+                    "description": "Max results."
                 }
             }
         })

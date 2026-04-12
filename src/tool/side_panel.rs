@@ -36,7 +36,7 @@ impl Tool for SidePanelTool {
     }
 
     fn description(&self) -> &str {
-        "Manage session-scoped side panel pages. Use it to create, update, append to, focus, or delete markdown pages rendered in the right-hand side panel. Markdown pages support inline mermaid code blocks."
+        "Manage side panel pages."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -47,27 +47,27 @@ impl Tool for SidePanelTool {
                 "action": {
                     "type": "string",
                     "enum": ["status", "write", "append", "load", "focus", "delete"],
-                    "description": "What to do with the session side panel"
+                    "description": "Action."
                 },
                 "page_id": {
                     "type": "string",
-                    "description": "Stable page identifier (letters, digits, underscore, dash, dot). Required for write/append/focus/delete. Optional for load; defaults to a slug derived from the file name."
+                    "description": "Page ID."
                 },
                 "file_path": {
                     "type": "string",
-                    "description": "Path to a markdown file to load into the side panel. Used by load. Loaded files stay linked so side-panel rendering reflects file changes."
+                    "description": "File path."
                 },
                 "title": {
                     "type": "string",
-                    "description": "Optional page title shown in the side panel header. Used by write/append/load."
+                    "description": "Page title."
                 },
                 "content": {
                     "type": "string",
-                    "description": "Markdown content to write or append. Required for write/append. Mermaid code blocks render inline in the side panel."
+                    "description": "Page content."
                 },
                 "focus": {
                     "type": "boolean",
-                    "description": "Whether to focus/show the target page after write/append (default: true)."
+                    "description": "Focus the page."
                 }
             }
         })

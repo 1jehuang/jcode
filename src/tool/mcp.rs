@@ -51,7 +51,7 @@ impl Tool for McpManagementTool {
     }
 
     fn description(&self) -> &str {
-        "Manage MCP (Model Context Protocol) servers. Connect to new servers, disconnect, list available servers and tools, or reload configuration."
+        "Manage MCP servers."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -61,25 +61,25 @@ impl Tool for McpManagementTool {
                 "action": {
                     "type": "string",
                     "enum": ["list", "connect", "disconnect", "reload"],
-                    "description": "Action to perform: 'list' shows connected servers and their tools, 'connect' adds a new server, 'disconnect' removes a server, 'reload' reloads from config file"
+                    "description": "Action."
                 },
                 "server": {
                     "type": "string",
-                    "description": "Server name (required for connect/disconnect)"
+                    "description": "Server name."
                 },
                 "command": {
                     "type": "string",
-                    "description": "Command to run the MCP server (required for connect)"
+                    "description": "Server command."
                 },
                 "args": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Arguments to pass to the command (optional, for connect)"
+                    "description": "Command args."
                 },
                 "env": {
                     "type": "object",
                     "additionalProperties": {"type": "string"},
-                    "description": "Environment variables for the server (optional, for connect)"
+                    "description": "Server env."
                 }
             },
             "required": ["action"]

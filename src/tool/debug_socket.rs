@@ -37,11 +37,7 @@ impl Tool for DebugSocketTool {
     }
 
     fn description(&self) -> &str {
-        "Send commands to the jcode debug socket. Supports namespaced commands: \
-         'server:*' for agent commands (state, history, tools, message, tool execution), \
-         'client:*' for TUI/visual debug (frame, enable, disable), \
-         'tester:*' for test instances (spawn, list, control). \
-         Unnamespaced commands default to server namespace."
+        "Send a debug socket command."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -50,21 +46,15 @@ impl Tool for DebugSocketTool {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "Debug command to execute. Examples: \
-                                   'state' (agent state), \
-                                   'client:frame' (visual debug frame), \
-                                   'client:enable' (enable visual debug), \
-                                   'tester:spawn' (spawn test instance), \
-                                   'tester:list' (list testers), \
-                                   'help' (full command list)"
+                    "description": "Debug command."
                 },
                 "session_id": {
                     "type": "string",
-                    "description": "Optional session ID to target (for server commands)"
+                    "description": "Target session ID."
                 },
                 "timeout_secs": {
                     "type": "integer",
-                    "description": "Timeout in seconds (default: 30)"
+                    "description": "Timeout in seconds."
                 }
             },
             "required": ["command"]

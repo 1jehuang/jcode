@@ -35,11 +35,11 @@ impl Tool for InvalidTool {
             "properties": {
                 "tool": {
                     "type": "string",
-                    "description": "Tool name that failed validation"
+                    "description": "Tool name."
                 },
                 "error": {
                     "type": "string",
-                    "description": "Validation error message"
+                    "description": "Validation error."
                 }
             }
         })

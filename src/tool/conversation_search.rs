@@ -49,9 +49,7 @@ impl Tool for ConversationSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search previous conversation history for details that may have been summarized. \
-         Use when you need exact error messages, file contents, code snippets, or specific \
-         details from earlier in the conversation that aren't in the current context."
+        "Search conversation history."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -60,20 +58,20 @@ impl Tool for ConversationSearchTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Keyword to search for in conversation history"
+                    "description": "Search query."
                 },
                 "turns": {
                     "type": "object",
                     "properties": {
-                        "start": {"type": "integer", "description": "Start turn (inclusive)"},
-                        "end": {"type": "integer", "description": "End turn (exclusive)"}
+                        "start": {"type": "integer", "description": "Start turn."},
+                        "end": {"type": "integer", "description": "End turn."}
                     },
                     "required": ["start", "end"],
-                    "description": "Get specific turns by range"
+                    "description": "Turn range."
                 },
                 "stats": {
                     "type": "boolean",
-                    "description": "Get stats about conversation (total turns, compaction status)"
+                    "description": "Return stats."
                 }
             }
         })
