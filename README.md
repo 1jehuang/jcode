@@ -69,38 +69,33 @@ jcode is built to be as performant and resource efficient as possible. Every met
         <tbody>
           <tr>
             <td><strong>jcode</strong></td>
-            <td align="right"><strong>8.9 MB</strong></td>
+            <td align="right"><strong>184.8 MB</strong></td>
             <td align="right">baseline</td>
           </tr>
           <tr>
-            <td><strong>pi</strong></td>
-            <td align="right"><strong>156.2 MB</strong></td>
-            <td align="right"><strong>17.6× more RAM</strong></td>
-          </tr>
-          <tr>
             <td><strong>Codex CLI</strong></td>
-            <td align="right"><strong>48.8 MB</strong></td>
-            <td align="right"><strong>5.5× more RAM</strong></td>
+            <td align="right"><strong>136.7 MB</strong></td>
+            <td align="right"><strong>0.7× as much RAM</strong></td>
           </tr>
           <tr>
             <td><strong>OpenCode</strong></td>
-            <td align="right"><strong>372.6 MB</strong></td>
-            <td align="right"><strong>41.9× more RAM</strong></td>
+            <td align="right"><strong>364.7 MB</strong></td>
+            <td align="right"><strong>2.0× more RAM</strong></td>
           </tr>
           <tr>
             <td><strong>GitHub Copilot CLI</strong></td>
-            <td align="right"><strong>43.5 MB</strong></td>
-            <td align="right"><strong>4.9× more RAM</strong></td>
+            <td align="right"><strong>253.3 MB</strong></td>
+            <td align="right"><strong>1.4× more RAM</strong></td>
           </tr>
           <tr>
             <td><strong>Cursor Agent</strong></td>
-            <td align="right"><strong>268.6 MB</strong></td>
-            <td align="right"><strong>30.2× more RAM</strong></td>
+            <td align="right"><strong>313.0 MB</strong></td>
+            <td align="right"><strong>1.7× more RAM</strong></td>
           </tr>
           <tr>
             <td><strong>Claude Code</strong></td>
-            <td align="right"><strong>674.1 MB</strong></td>
-            <td align="right"><strong>75.7× more RAM</strong></td>
+            <td align="right"><strong>815.0 MB</strong></td>
+            <td align="right"><strong>4.4× more RAM</strong></td>
           </tr>
         </tbody>
       </table>
@@ -119,38 +114,33 @@ jcode is built to be as performant and resource efficient as possible. Every met
         <tbody>
           <tr>
             <td><strong>jcode</strong></td>
-            <td align="right"><strong>140.7 MB</strong></td>
+            <td align="right"><strong>271.8 MB</strong></td>
             <td align="right">baseline</td>
           </tr>
           <tr>
-            <td><strong>pi</strong></td>
-            <td align="right"><strong>1010.6 MB</strong></td>
-            <td align="right"><strong>7.2× more RAM</strong></td>
-          </tr>
-          <tr>
             <td><strong>Codex CLI</strong></td>
-            <td align="right"><strong>181.4 MB</strong></td>
-            <td align="right"><strong>1.3× more RAM</strong></td>
+            <td align="right"><strong>469.5 MB</strong></td>
+            <td align="right"><strong>1.7× more RAM</strong></td>
           </tr>
           <tr>
             <td><strong>OpenCode</strong></td>
-            <td align="right"><strong>3135.1 MB</strong></td>
-            <td align="right"><strong>22.3× more RAM</strong></td>
+            <td align="right"><strong>3047.5 MB</strong></td>
+            <td align="right"><strong>11.2× more RAM</strong></td>
           </tr>
           <tr>
             <td><strong>GitHub Copilot CLI</strong></td>
-            <td align="right"><strong>218.9 MB</strong></td>
-            <td align="right"><strong>1.6× more RAM</strong></td>
+            <td align="right"><strong>1787.3 MB</strong></td>
+            <td align="right"><strong>6.6× more RAM</strong></td>
           </tr>
           <tr>
             <td><strong>Cursor Agent</strong></td>
-            <td align="right"><strong>2481.1 MB</strong></td>
-            <td align="right"><strong>17.6× more RAM</strong></td>
+            <td align="right"><strong>2592.6 MB</strong></td>
+            <td align="right"><strong>9.5× more RAM</strong></td>
           </tr>
           <tr>
             <td><strong>Claude Code</strong></td>
-            <td align="right"><strong>3460.2 MB</strong></td>
-            <td align="right"><strong>24.6× more RAM</strong></td>
+            <td align="right"><strong>2464.2 MB</strong></td>
+            <td align="right"><strong>9.1× more RAM</strong></td>
           </tr>
         </tbody>
       </table>
@@ -160,9 +150,9 @@ jcode is built to be as performant and resource efficient as possible. Every met
 
 </div>
 
-Measured on this Linux machine using real interactive PTY sessions and Linux `/proc` memory stats. For jcode, the PSS number includes both client memory and the incremental memory growth of the shared server, which is the fair comparison for many active sessions.
+Measured on this Linux machine using real interactive PTY sessions and Linux `/proc` memory stats. These RAM rows were remeasured using full launched process-tree PSS accounting, so launcher and child runtime processes are included instead of only the top-level PID.
 
-The comparison columns compare each tool's PSS against jcode for the corresponding session count.
+The comparison columns compare each tool's PSS against jcode for the corresponding session count. `pi` is omitted from this corrected rerun because it was not installed on this machine.
 
 ### Time to first frame
 
@@ -208,24 +198,22 @@ A 10-session snapshot is useful, but the scaling story matters just as much. The
 
 | Tool | Extra PSS per added session | Comparison |
 |---|---:|---:|
-| **jcode** | **~14.6 MB** | baseline |
-| **pi** | **~94.9 MB** | **6.5× more RAM** |
-| **Codex CLI** | **~14.7 MB** | **1.0× more RAM** |
-| **OpenCode** | **~306.9 MB** | **21.0× more RAM** |
-| **GitHub Copilot CLI** | **~19.5 MB** | **1.3× more RAM** |
-| **Cursor Agent** | **~245.8 MB** | **16.8× more RAM** |
-| **Claude Code** | **~309.6 MB** | **21.2× more RAM** |
+| **jcode** | **~9.7 MB** | baseline |
+| **Codex CLI** | **~37.0 MB** | **3.8× more RAM** |
+| **OpenCode** | **~298.1 MB** | **30.8× more RAM** |
+| **GitHub Copilot CLI** | **~170.4 MB** | **17.6× more RAM** |
+| **Cursor Agent** | **~253.3 MB** | **26.2× more RAM** |
+| **Claude Code** | **~183.2 MB** | **19.0× more RAM** |
 
 </div>
-versions tested:
+versions tested for this corrected memory rerun:
 
-- `jcode v0.9.366-dev (dbd480c, dirty)`
-- `pi 0.62.0`
+- `jcode v0.9.8 (07969902)`
+- `codex-cli 0.120.0`
 - `opencode 1.0.203`
-- `codex-cli 0.118.0`
-- `Claude Code 2.1.86`
+- `GitHub Copilot CLI 1.0.24`
 - `Cursor Agent 2026.03.18-f6873f7`
-- `GitHub Copilot CLI 0.0.421`
+- `Claude Code 2.1.86`
 
 <div align="center">
 
