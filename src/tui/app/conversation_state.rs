@@ -2,12 +2,28 @@ use super::*;
 
 impl App {
     pub(super) fn ensure_provider_messages_hydrated(&mut self) {
-        if self.is_remote || !self.messages.is_empty() || self.session.messages.is_empty() {
+        if !self.is_remote || !self.messages.is_empty() || self.session.messages.is_empty() {
             return;
         }
 
         let provider_messages = self.session.messages_for_provider_uncached();
         self.replace_provider_messages(provider_messages);
+    }
+
+    pub(super) fn materialized_provider_messages(&self) -> Vec<Message> {
+        if self.is_remote || !self.messages.is_empty() {
+            self.messages.clone()
+        } else {
+            self.session.messages_for_provider_uncached()
+        }
+    }
+
+    pub(super) fn local_transcript_message_count(&self) -> usize {
+        if self.is_remote {
+            self.messages.len()
+        } else {
+            self.session.messages.len()
+        }
     }
 
     pub(super) fn format_compaction_strategy_label(trigger: &str) -> &'static str {
@@ -199,11 +215,23 @@ impl App {
 
     pub(super) fn rebuild_tool_result_index(&mut self) {
         self.reset_tool_output_tracking();
-        for msg in &self.messages {
-            if let Role::User = msg.role {
-                for block in &msg.content {
-                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
-                        self.tool_result_ids.insert(tool_use_id.clone());
+        if self.is_remote {
+            for msg in &self.messages {
+                if let Role::User = msg.role {
+                    for block in &msg.content {
+                        if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                            self.tool_result_ids.insert(tool_use_id.clone());
+                        }
+                    }
+                }
+            }
+        } else {
+            for msg in &self.session.messages {
+                if let Role::User = msg.role {
+                    for block in &msg.content {
+                        if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                            self.tool_result_ids.insert(tool_use_id.clone());
+                        }
                     }
                 }
             }
@@ -215,14 +243,15 @@ impl App {
         if self.is_remote || !self.provider.uses_jcode_compaction() {
             return;
         }
+        let provider_messages = self.materialized_provider_messages();
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
             manager.reset();
             manager.set_budget(self.context_limit as usize);
             if let Some(state) = self.session.compaction.as_ref() {
-                manager.restore_persisted_state_with(state, &self.messages);
+                manager.restore_persisted_state_with(state, &provider_messages);
             } else {
-                manager.seed_restored_messages_with(&self.messages);
+                manager.seed_restored_messages_with(&provider_messages);
             }
         };
     }
@@ -257,10 +286,11 @@ impl App {
         };
 
         self.session.compaction = Some(state.clone());
+        let provider_messages = self.materialized_provider_messages();
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
             manager.set_budget(self.context_limit as usize);
-            manager.restore_persisted_state_with(&state, &self.messages);
+            manager.restore_persisted_state_with(&state, &provider_messages);
         }
 
         self.provider_session_id = None;
@@ -276,14 +306,15 @@ impl App {
         if self.is_remote {
             return (self.messages.clone(), None);
         }
+        let base_messages = self.materialized_provider_messages();
         if !self.provider.uses_jcode_compaction() && self.session.compaction.is_none() {
-            return (self.messages.clone(), None);
+            return (base_messages, None);
         }
         let compaction = self.registry.compaction();
         let result = match compaction.try_write() {
             Ok(mut manager) => {
                 if self.provider.uses_jcode_compaction() {
-                    let action = manager.ensure_context_fits(&self.messages, self.provider.clone());
+                    let action = manager.ensure_context_fits(&base_messages, self.provider.clone());
                     match action {
                         crate::compaction::CompactionAction::BackgroundStarted { trigger } => {
                             self.push_display_message(DisplayMessage::system(
@@ -295,7 +326,7 @@ impl App {
                         crate::compaction::CompactionAction::None => {}
                     }
                 }
-                let messages = manager.messages_for_api_with(&self.messages);
+                let messages = manager.messages_for_api_with(&base_messages);
                 let event = if self.provider.uses_jcode_compaction() {
                     manager.take_compaction_event()
                 } else {
@@ -306,7 +337,7 @@ impl App {
                 }
                 (messages, event)
             }
-            Err(_) => (self.messages.clone(), None),
+            Err(_) => (base_messages, None),
         };
         result
     }
@@ -315,9 +346,10 @@ impl App {
         if self.is_remote || !self.provider.uses_jcode_compaction() {
             return false;
         }
+        let provider_messages = self.materialized_provider_messages();
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
-            if let Some(event) = manager.poll_compaction_event_with(&self.messages) {
+            if let Some(event) = manager.poll_compaction_event_with(&provider_messages) {
                 self.sync_session_compaction_state_from_manager(&manager);
                 self.handle_compaction_event(event);
                 return true;
@@ -378,11 +410,12 @@ impl App {
     }
 
     pub(super) fn trigger_save_memory_extraction(&self) {
-        if self.is_remote || !self.memory_enabled || self.messages.len() < 4 {
+        let provider_messages = self.materialized_provider_messages();
+        if self.is_remote || !self.memory_enabled || provider_messages.len() < 4 {
             return;
         }
 
-        let transcript = crate::memory_agent::build_transcript_for_extraction(&self.messages);
+        let transcript = crate::memory_agent::build_transcript_for_extraction(&provider_messages);
         crate::memory_agent::trigger_final_extraction_with_dir(
             transcript,
             self.session.id.clone(),
@@ -461,7 +494,8 @@ impl App {
     }
 
     fn collect_missing_tool_outputs_since_last_scan(&mut self) -> Vec<(usize, Vec<String>)> {
-        if self.tool_output_scan_index > self.messages.len() {
+        let message_len = self.local_transcript_message_count();
+        if self.tool_output_scan_index > message_len {
             self.reset_tool_output_tracking();
         }
 
@@ -469,26 +503,53 @@ impl App {
         let mut new_result_ids = Vec::new();
         let mut assistant_tool_uses: Vec<(usize, Vec<String>)> = Vec::new();
 
-        for (index, msg) in self.messages.iter().enumerate().skip(scan_start) {
-            match msg.role {
-                Role::User => {
-                    for block in &msg.content {
-                        if let ContentBlock::ToolResult { tool_use_id, .. } = block {
-                            new_result_ids.push(tool_use_id.clone());
+        if self.is_remote {
+            for (index, msg) in self.messages.iter().enumerate().skip(scan_start) {
+                match msg.role {
+                    Role::User => {
+                        for block in &msg.content {
+                            if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                                new_result_ids.push(tool_use_id.clone());
+                            }
+                        }
+                    }
+                    Role::Assistant => {
+                        let tool_uses = msg
+                            .content
+                            .iter()
+                            .filter_map(|block| match block {
+                                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>();
+                        if !tool_uses.is_empty() {
+                            assistant_tool_uses.push((index, tool_uses));
                         }
                     }
                 }
-                Role::Assistant => {
-                    let tool_uses = msg
-                        .content
-                        .iter()
-                        .filter_map(|block| match block {
-                            ContentBlock::ToolUse { id, .. } => Some(id.clone()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>();
-                    if !tool_uses.is_empty() {
-                        assistant_tool_uses.push((index, tool_uses));
+            }
+        } else {
+            for (index, msg) in self.session.messages.iter().enumerate().skip(scan_start) {
+                match msg.role {
+                    Role::User => {
+                        for block in &msg.content {
+                            if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                                new_result_ids.push(tool_use_id.clone());
+                            }
+                        }
+                    }
+                    Role::Assistant => {
+                        let tool_uses = msg
+                            .content
+                            .iter()
+                            .filter_map(|block| match block {
+                                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>();
+                        if !tool_uses.is_empty() {
+                            assistant_tool_uses.push((index, tool_uses));
+                        }
                     }
                 }
             }
@@ -510,7 +571,7 @@ impl App {
             }
         }
 
-        self.tool_output_scan_index = self.messages.len();
+        self.tool_output_scan_index = message_len;
         missing_repairs
     }
 
@@ -567,18 +628,18 @@ impl App {
                     tool_duration_ms: None,
                     token_usage: None,
                 };
-                self.messages
-                    .insert(index + 1 + inserted + offset, inserted_message);
-                self.session
-                    .messages
-                    .insert(index + 1 + inserted + offset, stored_message);
+                if self.is_remote || !self.messages.is_empty() {
+                    self.messages
+                        .insert(index + 1 + inserted + offset, inserted_message);
+                }
+                self.session.insert_message(index + 1 + inserted + offset, stored_message);
                 self.tool_result_ids.insert(id.clone());
                 repaired += 1;
             }
             inserted += missing_for_message.len();
         }
 
-        self.tool_output_scan_index = self.messages.len();
+        self.tool_output_scan_index = self.local_transcript_message_count();
 
         if repaired > 0 {
             self.reseed_compaction_from_provider_messages();

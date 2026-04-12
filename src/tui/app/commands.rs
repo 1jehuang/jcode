@@ -3143,7 +3143,8 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
         let compaction = app.registry.compaction();
         match compaction.try_write() {
             Ok(mut manager) => {
-                let stats = manager.stats_with(&app.messages);
+                let provider_messages = app.materialized_provider_messages();
+                let stats = manager.stats_with(&provider_messages);
                 let status_msg = format!(
                     "**Context Status:**\n\
                     • Messages: {} (active), {} (total history)\n\
@@ -3164,7 +3165,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                     }
                 );
 
-                match manager.force_compact_with(&app.messages, app.provider.clone()) {
+                match manager.force_compact_with(&provider_messages, app.provider.clone()) {
                     Ok(()) => {
                         app.push_display_message(DisplayMessage {
                             role: "system".to_string(),

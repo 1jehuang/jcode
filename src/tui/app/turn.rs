@@ -298,7 +298,9 @@ impl App {
                     } => {
                         if let Some(encrypted_content) = openai_encrypted_content {
                             openai_native_compaction
-                                .get_or_insert_with(|| (encrypted_content, self.messages.len()));
+                                .get_or_insert_with(|| {
+                                    (encrypted_content, self.local_transcript_message_count())
+                                });
                         }
                         // Flush any pending buffered text first
                         if let Some(chunk) = self.stream_buffer.flush() {
@@ -1126,7 +1128,9 @@ impl App {
                                     } => {
                                         if let Some(encrypted_content) = openai_encrypted_content {
                                             openai_native_compaction
-                                                .get_or_insert_with(|| (encrypted_content, self.messages.len()));
+                                                .get_or_insert_with(|| {
+                                                    (encrypted_content, self.local_transcript_message_count())
+                                                });
                                         }
                                         // Flush any pending buffered text first
                                         if let Some(chunk) = self.stream_buffer.flush() {
@@ -1724,18 +1728,19 @@ impl App {
     /// Extract and store memories from the session transcript at end of session
     pub(super) async fn extract_session_memories(&self) {
         // Skip if remote mode or not enough messages
-        if self.is_remote || !self.memory_enabled || self.messages.len() < 4 {
+        let provider_messages = self.materialized_provider_messages();
+        if self.is_remote || !self.memory_enabled || provider_messages.len() < 4 {
             return;
         }
 
         crate::logging::info(&format!(
             "Extracting memories from {} messages",
-            self.messages.len()
+            provider_messages.len()
         ));
 
         // Build transcript from messages
         let mut transcript = String::new();
-        for msg in &self.messages {
+        for msg in &provider_messages {
             let role = match msg.role {
                 Role::User => "User",
                 Role::Assistant => "Assistant",

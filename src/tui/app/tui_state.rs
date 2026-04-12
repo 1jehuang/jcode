@@ -582,7 +582,7 @@ impl crate::tui::TuiState for App {
         let message_count = if self.is_remote {
             self.display_messages.len()
         } else {
-            self.messages.len()
+            self.session.messages.len()
         };
         if let Ok(cache) = CACHE.lock()
             && let Some((ts, cached)) = &*cache
@@ -649,7 +649,7 @@ impl crate::tui::TuiState for App {
                 0
             };
 
-            for msg in self.messages.iter().skip(skip) {
+            for msg in self.session.messages.iter().skip(skip) {
                 match msg.role {
                     Role::User => user_count += 1,
                     Role::Assistant => asst_count += 1,

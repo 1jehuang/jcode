@@ -2767,7 +2767,8 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
         let compaction_summary = if app.provider.supports_compaction() {
             let manager = app.registry.compaction();
             if let Ok(manager) = manager.try_read() {
-                let stats = manager.stats_with(&app.messages);
+                let provider_messages = app.materialized_provider_messages();
+                let stats = manager.stats_with(&provider_messages);
                 let mode = if app.is_remote {
                     app.remote_compaction_mode
                         .as_ref()
