@@ -71,6 +71,39 @@ impl App {
     }
 }
 
+async fn recover_stranded_soft_interrupts(app: &mut App, remote: &mut RemoteConnection) -> bool {
+    if app.is_processing || app.pending_soft_interrupts.is_empty() {
+        return false;
+    }
+
+    let recovered_interrupts = std::mem::take(&mut app.pending_soft_interrupts);
+    if recovered_interrupts.is_empty() {
+        return false;
+    }
+
+    if let Err(err) = remote.cancel_soft_interrupts().await {
+        app.pending_soft_interrupts = recovered_interrupts;
+        app.push_display_message(DisplayMessage::error(format!(
+            "Failed to recover queued interleave message: {}",
+            err
+        )));
+        app.set_status_notice("Queued interleave recovery failed");
+        return false;
+    }
+
+    crate::logging::info(&format!(
+        "Recovering {} stranded soft interrupt(s) into queued follow-ups after turn boundary",
+        recovered_interrupts.len()
+    ));
+    app.pending_soft_interrupt_requests.clear();
+
+    let mut recovered_queue = recovered_interrupts;
+    recovered_queue.append(&mut app.queued_messages);
+    app.queued_messages = recovered_queue;
+    app.set_status_notice("Recovered queued interleave after turn finished");
+    true
+}
+
 pub(super) enum RemoteEventOutcome {
     Continue,
     Reconnect,
@@ -785,6 +818,8 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         app.replay_processing_started_ms = None;
         app.replay_elapsed_override = None;
     }
+
+    let _ = recover_stranded_soft_interrupts(app, remote).await;
 
     if app.submit_input_on_startup && !app.is_processing {
         app.submit_input_on_startup = false;

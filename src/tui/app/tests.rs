@@ -7673,6 +7673,49 @@ fn test_remote_interrupted_defers_queued_followup_dispatch_by_one_cycle() {
 }
 
 #[test]
+fn test_remote_done_recovers_stranded_soft_interrupt_as_queued_followup() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(42);
+    app.pending_soft_interrupts = vec!["late interleave".to_string()];
+    app.pending_soft_interrupt_requests = vec![(55, "late interleave".to_string())];
+    app.queued_messages.push("queued later".to_string());
+
+    app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
+
+    assert!(!app.is_processing);
+    assert_eq!(app.pending_soft_interrupts, vec!["late interleave"]);
+    assert_eq!(
+        app.pending_soft_interrupt_requests,
+        vec![(55, "late interleave".to_string())]
+    );
+    assert_eq!(app.queued_messages(), &["queued later"]);
+
+    rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+
+    assert!(app.pending_soft_interrupts.is_empty());
+    assert!(app.pending_soft_interrupt_requests.is_empty());
+    assert!(app.queued_messages().is_empty());
+    assert!(app.is_processing);
+    assert!(matches!(app.status, ProcessingStatus::Sending));
+    assert!(app.current_message_id.is_some());
+
+    let user_messages: Vec<&str> = app
+        .display_messages()
+        .iter()
+        .filter(|msg| msg.role == "user")
+        .map(|msg| msg.content.as_str())
+        .collect();
+    assert_eq!(user_messages, vec!["late interleave", "queued later"]);
+}
+
+#[test]
 fn test_handle_server_event_tool_start_flushes_streaming_text_before_tool_message() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
