@@ -400,12 +400,18 @@ impl SessionPicker {
             .map(|info| info.session_ids.iter().cloned().collect())
             .unwrap_or_default();
 
+        let (all_sessions, all_orphan_sessions) = if server_groups.is_empty() {
+            (orphan_sessions, Vec::new())
+        } else {
+            (Vec::new(), orphan_sessions)
+        };
+
         let mut picker = Self {
             items: Vec::new(),
             visible_sessions: Vec::new(),
-            all_sessions: Vec::new(),
+            all_sessions,
             all_server_groups: server_groups,
-            all_orphan_sessions: orphan_sessions,
+            all_orphan_sessions,
             item_to_session: Vec::new(),
             list_state: ListState::default(),
             scroll_offset: 0,
@@ -1582,6 +1588,28 @@ mod tests {
         assert_eq!(picker.hidden_test_count, 0);
         assert!(picker.visible_session_iter().any(|s| s.is_debug));
         assert!(picker.visible_session_iter().any(|s| s.is_canary));
+    }
+
+    #[test]
+    fn test_new_grouped_without_servers_shows_orphan_sessions() {
+        let normal = make_session("session_normal", "normal", false, SessionStatus::Closed);
+        let debug = make_session("session_debug", "debug", true, SessionStatus::Closed);
+
+        let mut picker = SessionPicker::new_grouped(Vec::new(), vec![normal, debug]);
+
+        assert!(!picker.show_test_sessions);
+        assert_eq!(picker.visible_sessions.len(), 1);
+        assert!(picker.visible_session_iter().all(|s| !s.is_debug));
+        assert_eq!(picker.hidden_test_count, 1);
+        assert_eq!(picker.items.len(), 1);
+        assert_eq!(picker.list_state.selected(), Some(0));
+
+        picker.toggle_test_sessions();
+        assert!(picker.show_test_sessions);
+        assert_eq!(picker.visible_sessions.len(), 2);
+        assert_eq!(picker.hidden_test_count, 0);
+        assert_eq!(picker.items.len(), 2);
+        assert!(picker.visible_session_iter().any(|s| s.is_debug));
     }
 
     #[test]
