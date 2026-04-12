@@ -6,7 +6,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Map provider-side tool names to internal display names.
 /// Mirrors `Registry::resolve_tool_name` so the TUI shows friendly names.
-pub(super) fn resolve_display_tool_name(name: &str) -> &str {
+pub(crate) fn resolve_display_tool_name(name: &str) -> &str {
     match name {
         "task" | "task_runner" => "subagent",
         "shell_exec" => "bash",
@@ -106,7 +106,7 @@ pub(super) fn parse_batch_sub_outputs(content: &str) -> Vec<BatchSubResult> {
 /// Normalize a batch sub-call object to the effective parameters payload.
 /// Supports both canonical shape ({"tool": "...", "parameters": {...}})
 /// and recovered flat shape ({"tool": "...", "file_path": "...", ...}).
-pub(super) fn batch_subcall_params(call: &serde_json::Value) -> serde_json::Value {
+pub(crate) fn batch_subcall_params(call: &serde_json::Value) -> serde_json::Value {
     if let Some(params) = call.get("parameters") {
         return params.clone();
     }
@@ -190,7 +190,7 @@ pub(super) fn summarize_apply_patch_input(patch_text: &str) -> String {
     }
 }
 
-pub(super) fn extract_apply_patch_primary_file(patch_text: &str) -> Option<String> {
+pub(crate) fn extract_apply_patch_primary_file(patch_text: &str) -> Option<String> {
     for line in patch_text.lines() {
         let trimmed = line.trim();
         let path = trimmed
@@ -208,7 +208,7 @@ pub(super) fn extract_apply_patch_primary_file(patch_text: &str) -> Option<Strin
     None
 }
 
-pub(super) fn extract_unified_patch_primary_file(patch_text: &str) -> Option<String> {
+pub(crate) fn extract_unified_patch_primary_file(patch_text: &str) -> Option<String> {
     for line in patch_text.lines() {
         let Some(rest) = line
             .strip_prefix("+++ ")
@@ -574,7 +574,7 @@ pub(super) fn is_memory_recall_tool(tc: &ToolCall) -> bool {
 }
 
 /// Extract a brief summary from a tool call input (file path, command, etc.)
-pub(super) fn get_tool_summary(tool: &ToolCall) -> String {
+pub(crate) fn get_tool_summary(tool: &ToolCall) -> String {
     get_tool_summary_with_budget(tool, 50, None)
 }
 
@@ -588,6 +588,12 @@ pub(super) fn get_tool_summary_with_budget(
     max_width: Option<usize>,
 ) -> String {
     let bounded = |preferred: usize| max_width.unwrap_or(preferred);
+
+    if let Some(intent) = tool.intent.as_deref().filter(|value| !value.is_empty()) {
+        return max_width
+            .map(|width| truncate_middle_display(intent, width))
+            .unwrap_or_else(|| intent.to_string());
+    }
 
     match tool.name.as_str() {
         "bash" => tool

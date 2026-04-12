@@ -1112,7 +1112,10 @@ pub(crate) fn render_tool_message(
                     id: String::new(),
                     name: tools_ui::resolve_display_tool_name(raw_name).to_string(),
                     input: params,
-                    intent: None,
+                    intent: call
+                        .get("intent")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
                 };
 
                 let sub_result = sub_results.get(i);

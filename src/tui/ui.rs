@@ -54,7 +54,7 @@ mod pinned_ui;
 #[path = "ui_prepare.rs"]
 mod prepare;
 #[path = "ui_tools.rs"]
-mod tools_ui;
+pub(crate) mod tools_ui;
 #[path = "ui_viewport.rs"]
 mod viewport;
 
