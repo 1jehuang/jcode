@@ -130,7 +130,11 @@ impl App {
 
     pub(super) fn compute_streaming_tps(&self) -> Option<f32> {
         let mut elapsed = self.streaming_tps_elapsed;
-        let total_tokens = self.streaming_total_output_tokens;
+        let total_tokens = if self.streaming_total_output_tokens > 0 {
+            self.streaming_total_output_tokens
+        } else {
+            self.streaming_output_tokens
+        };
         if let Some(start) = self.streaming_tps_start {
             elapsed += start.elapsed();
         }

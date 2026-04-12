@@ -2463,6 +2463,27 @@ fn test_accumulate_streaming_output_tokens_ignores_hidden_output_phase() {
 }
 
 #[test]
+fn test_compute_streaming_tps_falls_back_to_output_usage_when_total_not_accumulated() {
+    let mut app = create_test_app();
+    app.streaming_output_tokens = 440;
+    app.streaming_tps_start = Some(Instant::now() - Duration::from_secs(220));
+
+    let tps = app.compute_streaming_tps().expect("tps");
+    assert!(tps > 1.9 && tps < 2.1, "unexpected tps: {tps}");
+}
+
+#[test]
+fn test_compute_streaming_tps_prefers_accumulated_visible_output_tokens() {
+    let mut app = create_test_app();
+    app.streaming_output_tokens = 60;
+    app.streaming_total_output_tokens = 40;
+    app.streaming_tps_start = Some(Instant::now() - Duration::from_secs(20));
+
+    let tps = app.compute_streaming_tps().expect("tps");
+    assert!(tps > 1.9 && tps < 2.1, "unexpected tps: {tps}");
+}
+
+#[test]
 fn test_initial_state() {
     let app = create_test_app();
 
