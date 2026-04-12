@@ -725,17 +725,7 @@ fn collect_pinned_content(
             continue;
         }
 
-        if !matches!(
-            tc.name.as_str(),
-            "edit"
-                | "Edit"
-                | "write"
-                | "multiedit"
-                | "patch"
-                | "Patch"
-                | "apply_patch"
-                | "ApplyPatch"
-        ) {
+        if !tools_ui::is_edit_tool_name(&tc.name) {
             continue;
         }
 
@@ -748,13 +738,9 @@ fn collect_pinned_content(
                 tc.input
                     .get("patch_text")
                     .and_then(|v| v.as_str())
-                    .and_then(|patch_text| match tc.name.as_str() {
-                        "apply_patch" | "ApplyPatch" => {
-                            tools_ui::extract_apply_patch_primary_file(patch_text)
-                        }
-                        "patch" | "Patch" => {
-                            tools_ui::extract_unified_patch_primary_file(patch_text)
-                        }
+                    .and_then(|patch_text| match tools_ui::canonical_tool_name(&tc.name) {
+                        "apply_patch" => tools_ui::extract_apply_patch_primary_file(patch_text),
+                        "patch" => tools_ui::extract_unified_patch_primary_file(patch_text),
                         _ => None,
                     })
             })

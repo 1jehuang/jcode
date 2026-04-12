@@ -1021,10 +1021,7 @@ pub(crate) fn render_tool_message(
         ("✓", rgb(100, 180, 100))
     };
 
-    let is_edit_tool = matches!(
-        tc.name.as_str(),
-        "edit" | "Edit" | "write" | "multiedit" | "patch" | "Patch" | "apply_patch" | "ApplyPatch"
-    );
+    let is_edit_tool = tools_ui::is_edit_tool_name(&tc.name);
     let (additions, deletions) = if is_edit_tool {
         diff_change_counts_for_tool(tc, &msg.content)
     } else {
@@ -1148,13 +1145,9 @@ pub(crate) fn render_tool_message(
                 tc.input
                     .get("patch_text")
                     .and_then(|v| v.as_str())
-                    .and_then(|patch_text| match tc.name.as_str() {
-                        "apply_patch" | "ApplyPatch" => {
-                            tools_ui::extract_apply_patch_primary_file(patch_text)
-                        }
-                        "patch" | "Patch" => {
-                            tools_ui::extract_unified_patch_primary_file(patch_text)
-                        }
+                    .and_then(|patch_text| match tools_ui::canonical_tool_name(&tc.name) {
+                        "apply_patch" => tools_ui::extract_apply_patch_primary_file(patch_text),
+                        "patch" => tools_ui::extract_unified_patch_primary_file(patch_text),
                         _ => None,
                     })
             });
@@ -1804,6 +1797,40 @@ mod tests {
             .expect("missing token badge");
 
         assert_eq!(badge_span.style.fg, Some(rgb(224, 118, 118)));
+    }
+
+    #[test]
+    fn render_tool_message_shows_inline_diff_for_pascal_case_multiedit() {
+        let msg = DisplayMessage {
+            role: "tool".to_string(),
+            content: "Edited demo.txt\n\nApplied:\n  ✓ Edit 1: replaced 1 occurrence\n\nTotal: 1 applied, 0 failed\n"
+                .to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: Some("demo.txt".to_string()),
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_multiedit_pascal".to_string(),
+                name: "MultiEdit".to_string(),
+                input: serde_json::json!({
+                    "file_path": "demo.txt",
+                    "edits": [
+                        {"old_string": "old line\n", "new_string": "new line\n"}
+                    ]
+                }),
+                intent: None,
+            }),
+        };
+
+        let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
+        let plain = lines
+            .iter()
+            .map(extract_line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("┌─ diff"), "plain={plain}");
+        assert!(plain.contains("old line"), "plain={plain}");
+        assert!(plain.contains("new line"), "plain={plain}");
     }
 
     #[test]

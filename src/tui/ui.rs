@@ -2494,19 +2494,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         && app.display_messages().iter().any(|m| {
             m.tool_data
                 .as_ref()
-                .map(|tc| {
-                    matches!(
-                        tc.name.as_str(),
-                        "edit"
-                            | "Edit"
-                            | "write"
-                            | "multiedit"
-                            | "patch"
-                            | "Patch"
-                            | "apply_patch"
-                            | "ApplyPatch"
-                    )
-                })
+                .map(|tc| tools_ui::is_edit_tool_name(&tc.name))
                 .unwrap_or(false)
         });
 

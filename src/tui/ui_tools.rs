@@ -20,6 +20,24 @@ pub(crate) fn resolve_display_tool_name(name: &str) -> &str {
     }
 }
 
+pub(crate) fn canonical_tool_name(name: &str) -> &str {
+    match name {
+        "Write" => "write",
+        "Edit" => "edit",
+        "MultiEdit" => "multiedit",
+        "Patch" => "patch",
+        "ApplyPatch" => "apply_patch",
+        other => other,
+    }
+}
+
+pub(crate) fn is_edit_tool_name(name: &str) -> bool {
+    matches!(
+        canonical_tool_name(name),
+        "write" | "edit" | "multiedit" | "patch" | "apply_patch"
+    )
+}
+
 /// Parse batch result content to determine per-sub-call success/error.
 /// Returns a Vec<bool> where `true` means that sub-call errored.
 /// The batch output format is:
@@ -594,7 +612,7 @@ pub(super) fn get_tool_summary_with_budget(
             .unwrap_or_else(|| intent.to_string());
     }
 
-    match tool.name.as_str() {
+    match canonical_tool_name(&tool.name) {
         "bash" => tool
             .input
             .get("command")
@@ -804,13 +822,13 @@ pub(super) fn get_tool_summary_with_budget(
                 .map(|w| truncate_end_display(summary.as_str(), w))
                 .unwrap_or(summary)
         }
-        "patch" | "Patch" => tool
+        "patch" => tool
             .input
             .get("patch_text")
             .and_then(|v| v.as_str())
             .map(summarize_unified_patch_input)
             .unwrap_or_default(),
-        "apply_patch" | "ApplyPatch" => tool
+        "apply_patch" => tool
             .input
             .get("patch_text")
             .and_then(|v| v.as_str())

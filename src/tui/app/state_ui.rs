@@ -11,7 +11,7 @@ fn compact_tool_input_for_display(name: &str, input: &serde_json::Value) -> serd
         serde_json::Value::Object(map)
     };
 
-    match name {
+    match crate::tui::ui::tools_ui::canonical_tool_name(name) {
         "bash" => obj(vec![(
             "command",
             input
@@ -69,14 +69,20 @@ fn compact_tool_input_for_display(name: &str, input: &serde_json::Value) -> serd
                 input
                     .get("patch_text")
                     .and_then(|v| v.as_str())
-                    .and_then(|patch_text| match name {
-                        "apply_patch" => {
-                            crate::tui::ui::tools_ui::extract_apply_patch_primary_file(patch_text)
+                    .and_then(|patch_text| {
+                        match crate::tui::ui::tools_ui::canonical_tool_name(name) {
+                            "apply_patch" => {
+                                crate::tui::ui::tools_ui::extract_apply_patch_primary_file(
+                                    patch_text,
+                                )
+                            }
+                            "patch" => {
+                                crate::tui::ui::tools_ui::extract_unified_patch_primary_file(
+                                    patch_text,
+                                )
+                            }
+                            _ => None,
                         }
-                        "patch" => {
-                            crate::tui::ui::tools_ui::extract_unified_patch_primary_file(patch_text)
-                        }
-                        _ => None,
                     })
                     .map(serde_json::Value::String)
             });

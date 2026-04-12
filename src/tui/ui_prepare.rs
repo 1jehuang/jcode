@@ -851,17 +851,7 @@ fn prepare_body_incremental(
                     new_line_copy_offsets.push(0);
                 }
                 if let Some(ref tc) = msg.tool_data {
-                    let is_edit_tool = matches!(
-                        tc.name.as_str(),
-                        "edit"
-                            | "Edit"
-                            | "write"
-                            | "multiedit"
-                            | "patch"
-                            | "Patch"
-                            | "apply_patch"
-                            | "ApplyPatch"
-                    );
+                    let is_edit_tool = tools_ui::is_edit_tool_name(&tc.name);
                     if is_edit_tool {
                         let file_path = tc
                             .input
@@ -872,14 +862,20 @@ fn prepare_body_incremental(
                                 tc.input
                                     .get("patch_text")
                                     .and_then(|v| v.as_str())
-                                    .and_then(|patch_text| match tc.name.as_str() {
-                                        "apply_patch" | "ApplyPatch" => {
-                                            tools_ui::extract_apply_patch_primary_file(patch_text)
+                                    .and_then(|patch_text| {
+                                        match tools_ui::canonical_tool_name(&tc.name) {
+                                            "apply_patch" => {
+                                                tools_ui::extract_apply_patch_primary_file(
+                                                    patch_text,
+                                                )
+                                            }
+                                            "patch" => {
+                                                tools_ui::extract_unified_patch_primary_file(
+                                                    patch_text,
+                                                )
+                                            }
+                                            _ => None,
                                         }
-                                        "patch" | "Patch" => {
-                                            tools_ui::extract_unified_patch_primary_file(patch_text)
-                                        }
-                                        _ => None,
                                     })
                             })
                             .unwrap_or_else(|| "unknown".to_string());

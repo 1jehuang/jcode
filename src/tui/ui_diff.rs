@@ -1,4 +1,4 @@
-use crate::message::ToolCall;
+use crate::{message::ToolCall, tui::ui::tools_ui};
 use ratatui::prelude::*;
 
 pub(super) fn diff_add_color() -> Color {
@@ -41,8 +41,8 @@ pub(super) fn diff_change_counts_for_tool(tool: &ToolCall, content: &str) -> (us
         return (additions, deletions);
     }
 
-    match tool.name.as_str() {
-        "edit" | "Edit" => {
+    match tools_ui::canonical_tool_name(&tool.name) {
+        "edit" => {
             diff_counts_from_input_pair(&tool.input, "old_string", "new_string").unwrap_or((0, 0))
         }
         "write" => {
@@ -54,10 +54,8 @@ pub(super) fn diff_change_counts_for_tool(tool: &ToolCall, content: &str) -> (us
             diff_counts_from_strings("", content)
         }
         "multiedit" => diff_counts_from_multiedit(&tool.input).unwrap_or((0, 0)),
-        "patch" | "Patch" => diff_counts_from_unified_patch_input(&tool.input).unwrap_or((0, 0)),
-        "apply_patch" | "ApplyPatch" => {
-            diff_counts_from_apply_patch_input(&tool.input).unwrap_or((0, 0))
-        }
+        "patch" => diff_counts_from_unified_patch_input(&tool.input).unwrap_or((0, 0)),
+        "apply_patch" => diff_counts_from_apply_patch_input(&tool.input).unwrap_or((0, 0)),
         _ => (additions, deletions),
     }
 }
@@ -159,8 +157,8 @@ fn diff_counts_from_strings(old: &str, new: &str) -> (usize, usize) {
 }
 
 pub(super) fn generate_diff_lines_from_tool_input(tool: &ToolCall) -> Vec<ParsedDiffLine> {
-    match tool.name.as_str() {
-        "edit" | "Edit" => {
+    match tools_ui::canonical_tool_name(&tool.name) {
+        "edit" => {
             let old = tool
                 .input
                 .get("old_string")
@@ -199,7 +197,7 @@ pub(super) fn generate_diff_lines_from_tool_input(tool: &ToolCall) -> Vec<Parsed
                 .unwrap_or("");
             generate_diff_lines_from_strings("", content)
         }
-        "patch" | "Patch" => {
+        "patch" => {
             let patch_text = tool
                 .input
                 .get("patch_text")
@@ -207,7 +205,7 @@ pub(super) fn generate_diff_lines_from_tool_input(tool: &ToolCall) -> Vec<Parsed
                 .unwrap_or("");
             collect_diff_lines(patch_text)
         }
-        "apply_patch" | "ApplyPatch" => {
+        "apply_patch" => {
             let patch_text = tool
                 .input
                 .get("patch_text")
@@ -370,6 +368,24 @@ mod tests {
         };
 
         assert_eq!(diff_change_counts_for_tool(&tool, ""), (2, 0));
+    }
+
+    #[test]
+    fn multiedit_pascal_case_falls_back_to_input_diff_counts() {
+        let tool = ToolCall {
+            id: "tool_2".to_string(),
+            name: "MultiEdit".to_string(),
+            input: json!({
+                "file_path": "demo.txt",
+                "edits": [
+                    {"old_string": "two\n", "new_string": "TWO\n"},
+                    {"old_string": "three\n", "new_string": "THREE\n"}
+                ]
+            }),
+            intent: None,
+        };
+
+        assert_eq!(diff_change_counts_for_tool(&tool, ""), (2, 2));
     }
 
     #[test]

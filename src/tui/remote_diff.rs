@@ -33,7 +33,12 @@ impl RemoteDiffTracker {
     }
 
     pub(crate) fn handle_tool_exec(&mut self, id: &str, name: &str) {
-        if show_diffs_enabled() && matches!(name, "edit" | "write" | "multiedit") {
+        if show_diffs_enabled()
+            && matches!(
+                crate::tui::ui::tools_ui::canonical_tool_name(name),
+                "edit" | "write" | "multiedit"
+            )
+        {
             if let Ok(input) = serde_json::from_str::<Value>(&self.current_tool_input) {
                 if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
                     let resolved = resolve_diff_path(file_path);
