@@ -90,8 +90,7 @@ fn map_tool_name_for_oauth(name: &str) -> String {
         "glob" => "file_glob",
         "grep" => "file_grep",
         "task" | "subagent" => "task_runner",
-        "todoread" => "todo_read",
-        "todowrite" => "todo_write",
+        "todo" => "todo",
         _ => name,
     }
     .to_string()
@@ -106,8 +105,7 @@ fn map_tool_name_from_oauth(name: &str) -> String {
         "file_glob" => "glob",
         "file_grep" => "grep",
         "task_runner" => "subagent",
-        "todo_read" => "todoread",
-        "todo_write" => "todowrite",
+        "todo" | "todo_read" | "todo_write" => "todo",
         _ => name,
     }
     .to_string()
@@ -508,6 +506,8 @@ impl AnthropicProvider {
                 } else {
                     tool.name.clone()
                 },
+                // Prompt-visible. Approximate token cost for this field:
+                // tool.description_token_estimate().
                 description: tool.description.clone(),
                 input_schema: tool.input_schema.clone(),
                 // Add cache_control to the last tool to cache all tool definitions

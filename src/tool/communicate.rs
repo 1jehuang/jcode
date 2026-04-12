@@ -316,36 +316,11 @@ impl CommunicateInput {
 #[async_trait]
 impl Tool for CommunicateTool {
     fn name(&self) -> &str {
-        "communicate"
+        "swarm"
     }
 
     fn description(&self) -> &str {
-        "Communicate with other agents working in the same codebase. Use this when you receive \
-         a notification about another agent's activity, or to proactively coordinate with other agents.\n\n\
-         Actions:\n\
-         - \"share\": Share context (key/value) with other agents. They'll be notified.\n\
-         - \"share_append\": Append text to an existing shared context key.\n\
-         - \"read\": Read shared context from other agents.\n\
-         - \"broadcast\"/\"message\": Send a message to all other agents in the codebase. Supports explicit delivery mode and defaults to notification-only delivery.\n\
-         - \"dm\": Send a direct message to a specific session. Defaults to waking the target immediately.\n\
-         - \"channel\": Send a message to a named channel in this swarm. Defaults to notification-only delivery unless you request interrupt/wake.\n\
-         - \"list\": See who else is working in this codebase, what they're doing, and what files they've touched.\n\
-         - \"list_channels\": List active channels in this swarm and subscriber counts.\n\
-         - \"channel_members\": List members currently subscribed to a channel.\n\
-         - \"propose_plan\": Propose plan items to the swarm coordinator.\n\
-         - \"approve_plan\": (Coordinator only) Approve a plan proposal from another agent.\n\
-         - \"reject_plan\": (Coordinator only) Reject a plan proposal with an optional reason.\n\
-         - \"spawn\": (Coordinator only) Spawn a new agent session.\n\
-         - \"stop\": (Coordinator only) Stop/destroy an agent session.\n\
-         - \"assign_role\": (Coordinator only) Assign a role to an agent.\n\
-         - \"summary\": Get a summary of another agent's recent tool calls.\n\
-         - \"read_context\": Read another agent's full conversation context.\n\
-         - \"resync_plan\": Attach your session to the current swarm plan and re-sync.\n\
-         - \"assign_task\": (Coordinator only) Assign a plan task to a specific agent.\n\
-         - \"subscribe_channel\": Subscribe to a named channel.\n\
-         - \"unsubscribe_channel\": Unsubscribe from a named channel.\n\
-         - \"await_members\": Block until other agents reach a target status (e.g. ready/completed/stopped). \
-         Use this to wait for other agents to finish before proceeding with a task like cutting a release."
+        "Coordinate agents."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -359,120 +334,66 @@ impl Tool for CommunicateTool {
                              "propose_plan", "approve_plan", "reject_plan", "spawn", "stop", "assign_role",
                              "summary", "read_context", "resync_plan", "assign_task",
                              "subscribe_channel", "unsubscribe_channel", "await_members"],
-                    "description": "The communication action to perform"
+                    "description": "Action."
                 },
                 "key": {
-                    "type": "string",
-                    "description": "For 'share': the context key. For 'read': optional specific key to read."
+                    "type": "string"
                 },
                 "value": {
-                    "type": "string",
-                    "description": "For 'share': the context value to share."
+                    "type": "string"
                 },
                 "message": {
-                    "type": "string",
-                    "description": "For 'message'/'broadcast'/'dm'/'channel': the message to send. For 'assign_task': optional additional message."
+                    "type": "string"
                 },
                 "wake": {
-                    "type": "boolean",
-                    "description": "Backward-compatible alias for delivery choice on 'message'/'broadcast'/'dm'/'channel'. true => delivery='wake'; false => delivery='notify'. If omitted, per-action defaults apply."
+                    "type": "boolean"
                 },
                 "delivery": {
                     "type": "string",
                     "enum": ["notify", "interrupt", "wake"],
-                    "description": "For 'message'/'broadcast'/'dm'/'channel': explicit delivery mode. 'notify' only shows the notification, 'interrupt' queues it for safe-point ingestion, 'wake' starts processing immediately if idle otherwise queues an interrupt. Defaults: dm=wake, channel/broadcast=notify."
+                    "description": "Delivery."
                 },
-                "to_session": {
-                    "type": "string",
-                    "description": "For 'dm': the target session ID."
-                },
-                "channel": {
-                    "type": "string",
-                    "description": "For 'channel'/'subscribe_channel'/'unsubscribe_channel': the channel name (without #)."
-                },
-                "proposer_session": {
-                    "type": "string",
-                    "description": "For 'approve_plan'/'reject_plan': the session ID of the agent who proposed the plan."
-                },
-                "reason": {
-                    "type": "string",
-                    "description": "For 'reject_plan': optional reason for rejection."
-                },
-                "target_session": {
-                    "type": "string",
-                    "description": "For 'stop'/'assign_role'/'summary'/'read_context'/'assign_task': the target session ID."
-                },
+                "to_session": { "type": "string" },
+                "channel": { "type": "string" },
+                "proposer_session": { "type": "string" },
+                "reason": { "type": "string" },
+                "target_session": { "type": "string" },
                 "role": {
                     "type": "string",
-                    "enum": ["agent", "coordinator", "worktree_manager"],
-                    "description": "For 'assign_role': the role to assign."
+                    "enum": ["agent", "coordinator", "worktree_manager"]
                 },
-                "working_dir": {
-                    "type": "string",
-                    "description": "For 'spawn': optional working directory for the new agent."
-                },
-                "initial_message": {
-                    "type": "string",
-                    "description": "For 'spawn': optional initial message to send to the new agent."
-                },
-                "prompt": {
-                    "type": "string",
-                    "description": "Alias for 'initial_message' when spawning: optional prompt to send to the new agent after it opens."
-                },
+                "working_dir": { "type": "string" },
+                "initial_message": { "type": "string" },
+                "prompt": { "type": "string" },
                 "limit": {
                     "type": "integer",
-                    "description": "For 'summary': max number of tool calls to return (default 10)."
+                    "description": "Max results."
                 },
-                "task_id": {
-                    "type": "string",
-                    "description": "For 'assign_task': the ID of the task in the swarm plan to assign."
-                },
+                "task_id": { "type": "string" },
                 "target_status": {
                     "type": "array",
-                    "items": {"type": "string"},
-                    "description": "For 'await_members': statuses that count as done (e.g. ['ready', 'completed', 'stopped']). Defaults to ['ready', 'completed', 'stopped', 'failed']."
+                    "items": {"type": "string"}
                 },
                 "session_ids": {
                     "type": "array",
-                    "items": {"type": "string"},
-                    "description": "For 'await_members': specific session IDs to watch. If omitted, watches all other members in the swarm."
+                    "items": {"type": "string"}
                 },
-                "timeout_minutes": {
-                    "type": "integer",
-                    "description": "For 'await_members': max minutes to wait (default: 60)."
-                },
+                "timeout_minutes": { "type": "integer" },
                 "plan_items": {
                     "type": "array",
-                    "description": "For 'propose_plan': plan items to propose to the coordinator.",
                     "items": {
                         "type": "object",
                         "required": ["content", "status", "priority", "id"],
                         "properties": {
-                            "content": {
-                                "type": "string",
-                                "description": "Brief description of the plan item"
-                            },
-                            "status": {
-                                "type": "string",
-                                "description": "queued, running, done, blocked, failed, etc."
-                            },
-                            "priority": {
-                                "type": "string",
-                                "description": "high, medium, low"
-                            },
-                            "id": {
-                                "type": "string",
-                                "description": "Unique identifier for the plan item"
-                            },
+                            "content": { "type": "string" },
+                            "status": { "type": "string" },
+                            "priority": { "type": "string" },
+                            "id": { "type": "string" },
                             "blocked_by": {
                                 "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Optional item IDs this item depends on"
-                            },
-                            "assigned_to": {
-                                "type": "string",
-                                "description": "Optional session ID owner"
+                                "items": {"type": "string"}
                             }
+                            ,"assigned_to": { "type": "string" }
                         }
                     }
                 }
@@ -1042,6 +963,17 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     use super::CommunicateTool;
+
+    #[test]
+    fn tool_is_named_swarm() {
+        assert_eq!(CommunicateTool::new().name(), "swarm");
+    }
+
+    #[test]
+    fn schema_still_requires_action() {
+        let schema = CommunicateTool::new().parameters_schema();
+        assert_eq!(schema["required"], json!(["action"]));
+    }
 
     struct EnvGuard {
         key: &'static str,

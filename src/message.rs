@@ -731,8 +731,33 @@ pub fn redact_secrets(text: &str) -> String {
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolDefinition {
     pub name: String,
+    // Prompt-visible text sent to the model by provider adapters.
+    // Approximate prompt cost: description.len() / 4. Use
+    // ToolDefinition::description_token_estimate() when reviewing tool bloat.
     pub description: String,
     pub input_schema: serde_json::Value,
+}
+
+impl ToolDefinition {
+    /// Approximate prompt-token cost of this tool's top-level description.
+    ///
+    /// This uses jcode's standard chars/4 heuristic, matching other token
+    /// budget estimates in the codebase.
+    pub fn description_token_estimate(&self) -> usize {
+        crate::util::estimate_tokens(&self.description)
+    }
+
+    /// Approximate prompt-token cost of the full tool definition payload.
+    pub fn prompt_token_estimate(&self) -> usize {
+        crate::util::estimate_tokens(
+            &serde_json::json!({
+                "name": self.name,
+                "description": self.description,
+                "input_schema": self.input_schema,
+            })
+            .to_string(),
+        )
+    }
 }
 
 /// A tool call from the model
@@ -1163,6 +1188,17 @@ mod tests {
         assert!(rendered.contains("↻ superseded"));
         assert!(rendered.contains("exit 0"));
         assert!(rendered.contains("source changed before activation"));
+    }
+
+    #[test]
+    fn description_token_estimate_uses_chars_per_token_heuristic() {
+        let def = ToolDefinition {
+            name: "read".to_string(),
+            description: "abcdwxyz".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+
+        assert_eq!(def.description_token_estimate(), 2);
     }
 
     #[test]

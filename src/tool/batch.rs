@@ -1,6 +1,6 @@
 use super::{Registry, Tool, ToolContext, ToolOutput};
 use crate::bus::{BatchSubcallProgress, BatchSubcallState};
-use crate::message::{ToolCall, ToolDefinition};
+use crate::message::ToolCall;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -16,115 +16,16 @@ pub(crate) fn generic_batch_schema() -> Value {
         "properties": {
             "tool_calls": {
                 "type": "array",
-                "description": "Array of tool calls to execute in parallel",
                 "items": {
                     "type": "object",
                     "required": ["tool"],
-                    "description": "Preferred shape: {\"tool\": \"read\", \"file_path\": \"src/main.rs\"}. Also accepts {\"tool\": \"read\", \"parameters\": {\"file_path\": \"src/main.rs\"}}.",
                     "properties": {
                         "tool": {
                             "type": "string",
-                            "description": "Name of the tool to execute"
-                        },
-                        "parameters": {
-                            "type": "object",
-                            "description": "Optional explicit parameter object. You may also place tool arguments directly on the sub-call object.",
-                            "additionalProperties": true
+                            "description": "Tool name."
                         }
                     },
                     "additionalProperties": true
-                },
-                "minItems": 1,
-                "maxItems": 10
-            }
-        }
-    })
-}
-
-fn batch_item_branch_from_tool(def: &ToolDefinition) -> Option<Value> {
-    if def.name == "batch" {
-        return None;
-    }
-
-    let schema = def.input_schema.as_object()?;
-    let is_object = match schema.get("type") {
-        Some(Value::String(t)) => t == "object",
-        Some(Value::Array(types)) => types.iter().any(|v| v.as_str() == Some("object")),
-        _ => false,
-    };
-    if !is_object {
-        return None;
-    }
-
-    let properties = schema.get("properties")?.as_object()?;
-    if properties.is_empty() {
-        return None;
-    }
-
-    let mut branch_properties = serde_json::Map::new();
-    branch_properties.insert(
-        "tool".to_string(),
-        json!({
-            "type": "string",
-            "const": def.name,
-            "description": format!("Use the '{}' tool", def.name),
-        }),
-    );
-    for (key, value) in properties {
-        if key == "tool" {
-            continue;
-        }
-        branch_properties.insert(key.clone(), value.clone());
-    }
-
-    let mut required = vec![Value::String("tool".to_string())];
-    let mut required_names: Vec<String> = schema
-        .get("required")
-        .and_then(|v| v.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|v| v.as_str())
-        .filter(|name| *name != "tool")
-        .map(ToString::to_string)
-        .collect();
-    required_names.sort();
-    required_names.dedup();
-    required.extend(required_names.into_iter().map(Value::String));
-
-    Some(json!({
-        "type": "object",
-        "description": format!(
-            "Call '{}' inside batch. Use the same flat arguments as the normal '{}' tool.",
-            def.name, def.name
-        ),
-        "properties": branch_properties,
-        "required": required,
-        "additionalProperties": false,
-    }))
-}
-
-pub(crate) fn dynamic_batch_schema(tool_defs: &[ToolDefinition]) -> Value {
-    let mut sorted_defs: Vec<&ToolDefinition> = tool_defs.iter().collect();
-    sorted_defs.sort_by(|a, b| a.name.cmp(&b.name));
-
-    let branches: Vec<Value> = sorted_defs
-        .into_iter()
-        .filter_map(batch_item_branch_from_tool)
-        .collect();
-
-    if branches.is_empty() {
-        return generic_batch_schema();
-    }
-
-    json!({
-        "type": "object",
-        "required": ["tool_calls"],
-        "properties": {
-            "tool_calls": {
-                "type": "array",
-                "description": "Array of tool calls to execute in parallel. Each item uses the same flat argument shape as the target tool, plus a required 'tool' field.",
-                "items": {
-                    "oneOf": branches
                 },
                 "minItems": 1,
                 "maxItems": 10
@@ -251,10 +152,7 @@ impl Tool for BatchTool {
     }
 
     fn description(&self) -> &str {
-        "Execute multiple tools in parallel. Maximum 10 tool calls. \
-         Cannot batch the 'batch' tool itself. Returns results for each tool call. \
-         Each sub-call may use either {\"tool\": \"read\", \"file_path\": \"...\"} \
-         or {\"tool\": \"read\", \"parameters\": {\"file_path\": \"...\"}}."
+        "Run tools in parallel."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -519,81 +417,25 @@ mod tests {
             schema["properties"]["tool_calls"]["items"]["additionalProperties"],
             json!(true)
         );
+        assert_eq!(
+            schema["properties"]["tool_calls"]["items"]["properties"]["tool"]["description"],
+            json!("Tool name.")
+        );
+        assert!(schema["properties"]["tool_calls"]["items"]["properties"]["parameters"].is_null());
     }
 
     #[test]
-    fn test_dynamic_batch_schema_embeds_concrete_tool_branches() {
-        let schema = dynamic_batch_schema(&[
-            ToolDefinition {
-                name: "read".to_string(),
-                description: "Read a file".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "file_path": { "type": "string" },
-                        "offset": { "type": "integer" }
-                    },
-                    "required": ["file_path"]
-                }),
-            },
-            ToolDefinition {
-                name: "grep".to_string(),
-                description: "Search files".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "pattern": { "type": "string" },
-                        "path": { "type": "string" }
-                    },
-                    "required": ["pattern"]
-                }),
-            },
-        ]);
+    fn test_schema_keeps_flat_generic_subcall_shape() {
+        let schema = generic_batch_schema();
 
-        let branches = schema["properties"]["tool_calls"]["items"]["oneOf"]
-            .as_array()
-            .expect("dynamic batch schema should use oneOf branches");
-
-        assert_eq!(branches.len(), 2);
-        let read_branch = branches
-            .iter()
-            .find(|branch| branch["properties"]["tool"]["const"] == "read")
-            .expect("read branch should exist");
-        let grep_branch = branches
-            .iter()
-            .find(|branch| branch["properties"]["tool"]["const"] == "grep")
-            .expect("grep branch should exist");
-
+        assert!(schema["properties"]["tool_calls"]["description"].is_null());
+        assert!(schema["properties"]["tool_calls"]["items"]["description"].is_null());
         assert_eq!(
-            read_branch["properties"]["file_path"]["type"],
-            json!("string")
+            schema["properties"]["tool_calls"]["items"]["properties"]
+                .as_object()
+                .map(|props| props.len()),
+            Some(1)
         );
-        assert_eq!(read_branch["required"], json!(["tool", "file_path"]));
-        assert_eq!(
-            grep_branch["properties"]["pattern"]["type"],
-            json!("string")
-        );
-    }
-
-    #[test]
-    fn test_dynamic_batch_schema_skips_non_object_tools_and_batch_itself() {
-        let schema = dynamic_batch_schema(&[
-            ToolDefinition {
-                name: "batch".to_string(),
-                description: "Batch tools".to_string(),
-                input_schema: generic_batch_schema(),
-            },
-            ToolDefinition {
-                name: "weird".to_string(),
-                description: "Not an object schema".to_string(),
-                input_schema: json!({ "type": "string" }),
-            },
-        ]);
-
         assert!(schema["properties"]["tool_calls"]["items"]["oneOf"].is_null());
-        assert_eq!(
-            schema["properties"]["tool_calls"]["items"]["required"],
-            json!(["tool"])
-        );
     }
 }

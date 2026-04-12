@@ -183,7 +183,10 @@ fn fenced_block(language: &str, text: &str) -> String {
 }
 
 fn is_noise_tool(name: &str) -> bool {
-    matches!(name, "side_panel" | "goal" | "todoread" | "todowrite")
+    matches!(
+        name,
+        "side_panel" | "goal" | "todo" | "todoread" | "todowrite"
+    )
 }
 
 fn now_ms() -> u64 {

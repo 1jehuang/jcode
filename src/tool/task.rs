@@ -65,7 +65,7 @@ impl Tool for SubagentTool {
     }
 
     fn description(&self) -> &str {
-        "Run a focused subagent session. Returns subagent output and session metadata."
+        "Run a subagent."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -75,27 +75,27 @@ impl Tool for SubagentTool {
             "properties": {
                 "description": {
                     "type": "string",
-                    "description": "A short (3-5 words) description of the task"
+                    "description": "Task description."
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "The task for the subagent to perform"
+                    "description": "Task prompt."
                 },
                 "subagent_type": {
                     "type": "string",
-                    "description": "The type of specialized agent to use for this task"
+                    "description": "Subagent type."
                 },
                 "model": {
                     "type": "string",
-                    "description": "Optional model override for the subagent session"
+                    "description": "Model override."
                 },
                 "session_id": {
                     "type": "string",
-                    "description": "Existing Task session to continue"
+                    "description": "Existing session ID."
                 },
                 "command": {
                     "type": "string",
-                    "description": "The command that triggered this task"
+                    "description": "Source command."
                 }
             }
         })
@@ -128,7 +128,7 @@ impl Tool for SubagentTool {
         session.save()?;
 
         let mut allowed: HashSet<String> = self.registry.tool_names().await.into_iter().collect();
-        for blocked in ["subagent", "task", "todowrite", "todoread"] {
+        for blocked in ["subagent", "task", "todo", "todowrite", "todoread"] {
             allowed.remove(blocked);
         }
 

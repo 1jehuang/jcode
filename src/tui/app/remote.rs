@@ -1543,7 +1543,8 @@ pub(super) fn handle_server_event(
             remote.handle_tool_exec(&id, &name);
             app.observe_tool_call(&tool_call);
             eager_stream_redraw
-                || app.side_panel.focused_page_id.as_deref() == Some(super::observe::OBSERVE_PAGE_ID)
+                || app.side_panel.focused_page_id.as_deref()
+                    == Some(super::observe::OBSERVE_PAGE_ID)
         }
         ServerEvent::ToolDone {
             id,
@@ -4195,7 +4196,7 @@ async fn handle_remote_key_internal(
                         "Your todo list has {} incomplete item{}:\n\n{}\n\
                         Please continue your work. Either:\n\
                         1. Keep working and complete the remaining tasks\n\
-                        2. Update the todo list with `todo_write` if items are already done or no longer needed\n\
+                        2. Update the todo list with `todo` if items are already done or no longer needed\n\
                         3. If you genuinely need user input to proceed, say so clearly and specifically — \
                         but only if truly blocked (this should be rare; prefer making reasonable assumptions)",
                         incomplete.len(),

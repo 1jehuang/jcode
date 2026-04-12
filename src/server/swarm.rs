@@ -718,7 +718,7 @@ pub(super) async fn run_swarm_task(
     session.save()?;
 
     let mut allowed: HashSet<String> = registry.tool_names().await.into_iter().collect();
-    for blocked in ["subagent", "task", "todowrite", "todoread"] {
+    for blocked in ["subagent", "task", "todo", "todowrite", "todoread"] {
         allowed.remove(blocked);
     }
 

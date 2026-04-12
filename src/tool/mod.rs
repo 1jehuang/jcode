@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 
-mod browser;
 mod agentgrep;
 pub mod ambient;
 mod apply_patch;
 mod bash;
 mod batch;
 mod bg;
+mod browser;
 mod codesearch;
 mod communicate;
 mod conversation_search;
@@ -314,23 +314,12 @@ impl Registry {
             );
             Self::insert_tool_timed(&mut m, &mut timings, "invalid", invalid::InvalidTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "lsp", lsp::LspTool::new);
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
-                "todowrite",
-                todo::TodoWriteTool::new,
-            );
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
-                "todoread",
-                todo::TodoReadTool::new,
-            );
+            Self::insert_tool_timed(&mut m, &mut timings, "todo", todo::TodoTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "bg", bg::BgTool::new);
             Self::insert_tool_timed(
                 &mut m,
                 &mut timings,
-                "communicate",
+                "swarm",
                 communicate::CommunicateTool::new,
             );
             Self::insert_tool_timed(
@@ -342,18 +331,8 @@ impl Registry {
             Self::insert_tool_timed(&mut m, &mut timings, "memory", memory::MemoryTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "goal", goal::GoalTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "gmail", gmail::GmailTool::new);
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
-                "schedule",
-                ambient::ScheduleTool::new,
-            );
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
-                "selfdev",
-                selfdev::SelfDevTool::new,
-            );
+            Self::insert_tool_timed(&mut m, &mut timings, "schedule", ambient::ScheduleTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "selfdev", selfdev::SelfDevTool::new);
             let nonzero: Vec<String> = timings
                 .iter()
                 .filter(|(_, ms)| *ms > 0)
@@ -453,11 +432,6 @@ impl Registry {
             })
             .collect();
 
-        let batch_schema = batch::dynamic_batch_schema(&defs);
-        if let Some(batch_def) = defs.iter_mut().find(|def| def.name == "batch") {
-            batch_def.input_schema = batch_schema;
-        }
-
         // Sort by name for deterministic ordering - critical for prompt cache hits
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs
@@ -491,6 +465,7 @@ impl Registry {
     /// correctly.
     fn resolve_tool_name(name: &str) -> &str {
         match name {
+            "communicate" => "swarm",
             "task" | "task_runner" => "subagent",
             "launch" => "open",
             "shell_exec" => "bash",
@@ -499,8 +474,7 @@ impl Registry {
             "file_edit" => "edit",
             "file_glob" => "glob",
             "file_grep" => "grep",
-            "todo_read" => "todoread",
-            "todo_write" => "todowrite",
+            "todoread" | "todowrite" | "todo_read" | "todo_write" => "todo",
             other => other,
         }
     }
@@ -879,8 +853,10 @@ mod tests {
         assert_eq!(Registry::resolve_tool_name("task_runner"), "subagent");
         assert_eq!(Registry::resolve_tool_name("task"), "subagent");
         assert_eq!(Registry::resolve_tool_name("launch"), "open");
-        assert_eq!(Registry::resolve_tool_name("todo_read"), "todoread");
-        assert_eq!(Registry::resolve_tool_name("todo_write"), "todowrite");
+        assert_eq!(Registry::resolve_tool_name("todo_read"), "todo");
+        assert_eq!(Registry::resolve_tool_name("todo_write"), "todo");
+        assert_eq!(Registry::resolve_tool_name("todoread"), "todo");
+        assert_eq!(Registry::resolve_tool_name("todowrite"), "todo");
         assert_eq!(Registry::resolve_tool_name("bash"), "bash");
         assert_eq!(Registry::resolve_tool_name("grep"), "grep");
         assert_eq!(Registry::resolve_tool_name("batch"), "batch");
@@ -915,7 +891,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_definitions_expand_batch_schema_from_tool_definitions() {
+    async fn test_definitions_keep_batch_schema_generic() {
         let provider: Arc<dyn Provider> = Arc::new(MockProvider);
         let registry = Registry::new(provider).await;
 
@@ -925,22 +901,41 @@ mod tests {
             .find(|def| def.name == "batch")
             .expect("batch definition should exist");
 
-        let branches = batch_def.input_schema["properties"]["tool_calls"]["items"]["oneOf"]
-            .as_array()
-            .expect("batch schema should expand to oneOf branches");
-
-        let read_branch = branches
-            .iter()
-            .find(|branch| branch["properties"]["tool"]["const"] == "read")
-            .expect("batch schema should include read branch");
-
-        assert_eq!(read_branch["properties"]["file_path"]["type"], "string");
+        assert!(batch_def.input_schema["properties"]["tool_calls"]["items"]["oneOf"].is_null());
         assert!(
-            read_branch["required"]
+            batch_def.input_schema["properties"]["tool_calls"]["items"]["required"]
                 .as_array()
                 .map(|required| required.iter().any(|value| value == "tool"))
                 .unwrap_or(false)
         );
+        assert!(
+            batch_def.input_schema["properties"]["tool_calls"]["items"]["properties"]["parameters"]
+                .is_null()
+        );
+    }
+
+    #[test]
+    fn resolve_tool_name_maps_communicate_to_swarm() {
+        assert_eq!(Registry::resolve_tool_name("communicate"), "swarm");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn print_tool_definition_token_report() {
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+        let registry = Registry::new(provider).await;
+        let mut defs = registry.definitions(None).await;
+        defs.sort_by_key(|def| std::cmp::Reverse(def.prompt_token_estimate()));
+
+        println!("name,total_tokens,description_tokens");
+        for def in defs {
+            println!(
+                "{},{},{}",
+                def.name,
+                def.prompt_token_estimate(),
+                def.description_token_estimate()
+            );
+        }
     }
 
     fn schema_type_includes(schema: &Value, expected: &str) -> bool {

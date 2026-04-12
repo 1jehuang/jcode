@@ -149,13 +149,13 @@ async fn main() -> Result<()> {
         input: json!({"tool": "unknown", "error": "missing required field"}),
     });
     cases.push(ToolCase {
-        name: "todowrite",
-        label: "todowrite",
+        name: "todo",
+        label: "todo write",
         input: json!({"todos": [{"content": "harness task", "status": "pending", "priority": "low", "id": "1"}]}),
     });
     cases.push(ToolCase {
-        name: "todoread",
-        label: "todoread",
+        name: "todo",
+        label: "todo read",
         input: json!({}),
     });
     cases.push(ToolCase {

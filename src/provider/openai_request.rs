@@ -24,6 +24,8 @@ pub(crate) fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
             serde_json::json!({
                 "type": "function",
                 "name": t.name,
+                // Prompt-visible. Approximate token cost for this field:
+                // t.description_token_estimate().
                 "description": t.description,
                 "strict": supports_strict,
                 "parameters": parameters,

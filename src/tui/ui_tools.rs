@@ -15,8 +15,7 @@ pub(crate) fn resolve_display_tool_name(name: &str) -> &str {
         "file_edit" => "edit",
         "file_glob" => "glob",
         "file_grep" => "grep",
-        "todo_read" => "todoread",
-        "todo_write" => "todowrite",
+        "todo_read" | "todo_write" | "todoread" | "todowrite" => "todo",
         other => other,
     }
 }
@@ -869,15 +868,17 @@ pub(super) fn get_tool_summary_with_budget(
                 action.to_string()
             }
         }
-        "todoread" => "todos".to_string(),
-        "todowrite" => {
-            let count = tool
+        "todo" => {
+            if let Some(count) = tool
                 .input
                 .get("todos")
                 .and_then(|v| v.as_array())
                 .map(|a| a.len())
-                .unwrap_or(0);
-            format!("{} items", count)
+            {
+                format!("{} items", count)
+            } else {
+                "todos".to_string()
+            }
         }
         "skill" => tool
             .input

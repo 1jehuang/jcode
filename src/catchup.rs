@@ -453,7 +453,7 @@ fn tool_use_step(block: &ContentBlock) -> Option<String> {
         "communicate" => Some("Coordinated with other agents".to_string()),
         "subagent" => Some("Spawned a subagent".to_string()),
         "memory" => Some("Queried memory context".to_string()),
-        "side_panel" | "todoread" | "todowrite" | "goal" => None,
+        "side_panel" | "todo" | "todoread" | "todowrite" | "goal" => None,
         other => Some(format!("Used `{}`", other)),
     }
 }

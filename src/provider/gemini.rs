@@ -807,6 +807,8 @@ fn build_tools(tools: &[ToolDefinition]) -> Option<Vec<GeminiTool>> {
             .iter()
             .map(|tool| GeminiFunctionDeclaration {
                 name: tool.name.clone(),
+                // Prompt-visible. Approximate token cost for this field:
+                // tool.description_token_estimate().
                 description: tool.description.clone(),
                 parameters: gemini_compatible_schema(&tool.input_schema),
             })

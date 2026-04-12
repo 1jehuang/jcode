@@ -594,6 +594,8 @@ impl CopilotApiProvider {
                     "type": "function",
                     "function": {
                         "name": t.name,
+                        // Prompt-visible. Approximate token cost for this field:
+                        // t.description_token_estimate().
                         "description": t.description,
                         "parameters": t.input_schema,
                     }

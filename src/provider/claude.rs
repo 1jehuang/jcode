@@ -1075,8 +1075,7 @@ fn to_claude_tool_name(name: &str) -> String {
         "conversation_search" => "ConversationSearch",
         "lsp" => "Lsp",
         "task" | "subagent" => "Task",
-        "todowrite" => "TodoWrite",
-        "todoread" => "TodoRead",
+        "todo" | "todowrite" | "todoread" => "Todo",
         "batch" => "Batch",
         _ => name,
     }
@@ -1107,8 +1106,7 @@ fn to_internal_tool_name(name: &str) -> String {
         "ConversationSearch" => "conversation_search",
         "Lsp" => "lsp",
         "Task" => "subagent",
-        "TodoWrite" => "todowrite",
-        "TodoRead" => "todoread",
+        "Todo" | "TodoWrite" | "TodoRead" => "todo",
         "Batch" => "batch",
         _ => name,
     }

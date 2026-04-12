@@ -2028,7 +2028,7 @@ fn test_improve_command_starts_improvement_loop() {
         &msg.content[0],
         ContentBlock::Text { text, .. }
             if text.contains("You are entering improvement mode for this repository")
-                && text.contains("write a concise ranked todo list using `todowrite`")
+                && text.contains("write a concise ranked todo list using `todo`")
     ));
 
     let display = app
@@ -4817,7 +4817,10 @@ fn test_new_for_remote_restores_spawn_startup_hints_and_dispatch_state() {
         assert!(app.pending_queued_dispatch);
         assert!(app.is_processing());
         assert!(app.processing_started.is_some());
-        assert!(matches!(crate::tui::TuiState::status(&app), ProcessingStatus::Sending));
+        assert!(matches!(
+            crate::tui::TuiState::status(&app),
+            ProcessingStatus::Sending
+        ));
         assert_eq!(app.status_notice(), Some("Autojudge starting".to_string()));
         assert_eq!(app.hidden_queued_system_messages.len(), 1);
 
@@ -4902,11 +4905,17 @@ fn test_remote_startup_judge_hidden_prompt_dispatches_once_history_is_loaded() {
         assert_eq!(app.current_message_id, None);
 
         app.pending_queued_dispatch = false;
-        rt.block_on(super::remote::process_remote_followups(&mut app, &mut remote));
+        rt.block_on(super::remote::process_remote_followups(
+            &mut app,
+            &mut remote,
+        ));
 
         assert!(app.hidden_queued_system_messages.is_empty());
         assert!(app.is_processing());
-        assert!(matches!(crate::tui::TuiState::status(&app), ProcessingStatus::Sending));
+        assert!(matches!(
+            crate::tui::TuiState::status(&app),
+            ProcessingStatus::Sending
+        ));
         assert!(app.current_message_id.is_some());
     });
 }
@@ -7780,7 +7789,9 @@ fn test_handle_remote_event_redraws_observe_tool_exec_immediately() {
         ))
         .expect("tool start should succeed");
     if needs_redraw {
-        terminal.draw(|frame| crate::tui::ui::draw(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &app))
+            .unwrap();
     }
     assert!(matches!(
         outcome,
@@ -7799,7 +7810,9 @@ fn test_handle_remote_event_redraws_observe_tool_exec_immediately() {
         ))
         .expect("tool input should succeed");
     if needs_redraw {
-        terminal.draw(|frame| crate::tui::ui::draw(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &app))
+            .unwrap();
     }
     assert!(matches!(
         outcome,
@@ -7820,7 +7833,9 @@ fn test_handle_remote_event_redraws_observe_tool_exec_immediately() {
         .expect("tool exec should succeed");
     assert!(needs_redraw, "observe tool exec should request redraw");
     if needs_redraw {
-        terminal.draw(|frame| crate::tui::ui::draw(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &app))
+            .unwrap();
     }
     assert!(matches!(
         outcome,
@@ -7849,46 +7864,55 @@ fn test_handle_remote_event_redraws_observe_tool_done_immediately() {
     app.input = "/observe on".to_string();
     app.submit_input();
 
-    let (_, needs_redraw) = rt.block_on(super::remote::handle_remote_event(
-        &mut app,
-        &mut terminal,
-        &mut remote,
-        &mut state,
-        crate::tui::backend::RemoteRead::Event(crate::protocol::ServerEvent::ToolStart {
-            id: "tool_read".to_string(),
-            name: "read".to_string(),
-        }),
-    ))
-    .expect("tool start should succeed");
+    let (_, needs_redraw) = rt
+        .block_on(super::remote::handle_remote_event(
+            &mut app,
+            &mut terminal,
+            &mut remote,
+            &mut state,
+            crate::tui::backend::RemoteRead::Event(crate::protocol::ServerEvent::ToolStart {
+                id: "tool_read".to_string(),
+                name: "read".to_string(),
+            }),
+        ))
+        .expect("tool start should succeed");
     if needs_redraw {
-        terminal.draw(|frame| crate::tui::ui::draw(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &app))
+            .unwrap();
     }
-    let (_, needs_redraw) = rt.block_on(super::remote::handle_remote_event(
-        &mut app,
-        &mut terminal,
-        &mut remote,
-        &mut state,
-        crate::tui::backend::RemoteRead::Event(crate::protocol::ServerEvent::ToolInput {
-            delta: r#"{"file_path":"src/main.rs","start_line":1,"end_line":10}"#.to_string(),
-        }),
-    ))
-    .expect("tool input should succeed");
+    let (_, needs_redraw) = rt
+        .block_on(super::remote::handle_remote_event(
+            &mut app,
+            &mut terminal,
+            &mut remote,
+            &mut state,
+            crate::tui::backend::RemoteRead::Event(crate::protocol::ServerEvent::ToolInput {
+                delta: r#"{"file_path":"src/main.rs","start_line":1,"end_line":10}"#.to_string(),
+            }),
+        ))
+        .expect("tool input should succeed");
     if needs_redraw {
-        terminal.draw(|frame| crate::tui::ui::draw(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &app))
+            .unwrap();
     }
-    let (_, needs_redraw) = rt.block_on(super::remote::handle_remote_event(
-        &mut app,
-        &mut terminal,
-        &mut remote,
-        &mut state,
-        crate::tui::backend::RemoteRead::Event(crate::protocol::ServerEvent::ToolExec {
-            id: "tool_read".to_string(),
-            name: "read".to_string(),
-        }),
-    ))
-    .expect("tool exec should succeed");
+    let (_, needs_redraw) = rt
+        .block_on(super::remote::handle_remote_event(
+            &mut app,
+            &mut terminal,
+            &mut remote,
+            &mut state,
+            crate::tui::backend::RemoteRead::Event(crate::protocol::ServerEvent::ToolExec {
+                id: "tool_read".to_string(),
+                name: "read".to_string(),
+            }),
+        ))
+        .expect("tool exec should succeed");
     if needs_redraw {
-        terminal.draw(|frame| crate::tui::ui::draw(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &app))
+            .unwrap();
     }
 
     let (outcome, needs_redraw) = rt
@@ -7907,7 +7931,9 @@ fn test_handle_remote_event_redraws_observe_tool_done_immediately() {
         .expect("tool done should succeed");
     assert!(needs_redraw, "observe tool done should request redraw");
     if needs_redraw {
-        terminal.draw(|frame| crate::tui::ui::draw(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &app))
+            .unwrap();
     }
     assert!(matches!(
         outcome,

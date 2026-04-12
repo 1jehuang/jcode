@@ -121,38 +121,25 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read the contents of a file. Returns lines with line numbers. \
-         Supports reading specific ranges with offset/limit (0-based) or \
-         start_line/end_line (1-based, inclusive). \
-         Can read text files, and will indicate if a file is binary. \
-         Image files are attached for vision-capable model analysis when supported."
+        "Read a file."
     }
 
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
             "required": ["file_path"],
-            "description": "Read file contents by line range. Use either start_line/end_line (1-based, inclusive) or offset/limit (0-based). Do not combine offset with start_line or end_line. If both end_line and limit are provided, end_line takes precedence.",
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "The path to the file to read (absolute or relative)"
+                    "description": "File path."
                 },
                 "start_line": {
                     "type": "integer",
-                    "description": "1-based line number to start reading from (inclusive). Use with end_line or limit, and do not combine with offset."
-                },
-                "end_line": {
-                    "type": "integer",
-                    "description": "1-based line number to stop reading at (inclusive). Use only with start_line. If limit is also provided, end_line takes precedence."
-                },
-                "offset": {
-                    "type": "integer",
-                    "description": "0-based line offset to start reading from. Use with limit, and do not combine with start_line or end_line."
+                    "description": "1-based start line."
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of lines to read (default 5000). With start_line, this is used when end_line is omitted."
+                    "description": "Max lines to read. Default 5000."
                 }
             }
         })
@@ -427,6 +414,20 @@ mod tests {
         assert_eq!(schema.get("type"), Some(&json!("object")));
         assert!(schema.get("allOf").is_none());
         assert!(schema.get("not").is_none());
+    }
+
+    #[test]
+    fn read_tool_schema_advertises_only_canonical_public_fields() {
+        let schema = ReadTool::new().parameters_schema();
+        let properties = schema["properties"]
+            .as_object()
+            .expect("read schema properties should be an object");
+
+        assert!(properties.contains_key("file_path"));
+        assert!(properties.contains_key("start_line"));
+        assert!(properties.contains_key("limit"));
+        assert!(!properties.contains_key("end_line"));
+        assert!(!properties.contains_key("offset"));
     }
 
     #[tokio::test]

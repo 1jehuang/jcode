@@ -6,63 +6,55 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-pub struct TodoWriteTool;
-pub struct TodoReadTool;
+pub struct TodoTool;
 
-impl TodoWriteTool {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl TodoReadTool {
+impl TodoTool {
     pub fn new() -> Self {
         Self
     }
 }
 
 #[derive(Deserialize)]
-struct TodoWriteInput {
-    todos: Vec<TodoItem>,
+struct TodoInput {
+    todos: Option<Vec<TodoItem>>,
 }
 
 #[async_trait]
-impl Tool for TodoWriteTool {
+impl Tool for TodoTool {
     fn name(&self) -> &str {
-        "todowrite"
+        "todo"
     }
 
     fn description(&self) -> &str {
-        "Update the current todo list. Provide the full list of todos."
+        "Read or update the todo list."
     }
 
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
-            "required": ["todos"],
             "properties": {
                 "todos": {
                     "type": "array",
-                    "description": "The updated todo list",
+                    "description": "Todo list to save.",
                     "items": {
                         "type": "object",
                         "required": ["content", "status", "priority", "id"],
                         "properties": {
                             "content": {
                                 "type": "string",
-                                "description": "Brief description of the task"
+                                "description": "Task."
                             },
                             "status": {
                                 "type": "string",
-                                "description": "pending, in_progress, completed, cancelled"
+                                "description": "Status."
                             },
                             "priority": {
                                 "type": "string",
-                                "description": "high, medium, low"
+                                "description": "Priority."
                             },
                             "id": {
                                 "type": "string",
-                                "description": "Unique identifier for the todo item"
+                                "description": "ID."
                             }
                         }
                     }
@@ -72,49 +64,49 @@ impl Tool for TodoWriteTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
-        let params: TodoWriteInput = serde_json::from_value(input)?;
-        save_todos(&ctx.session_id, &params.todos)?;
+        let params: TodoInput = serde_json::from_value(input)?;
+        match params.todos {
+            Some(todos) => {
+                save_todos(&ctx.session_id, &todos)?;
 
-        Bus::global().publish(BusEvent::TodoUpdated(TodoEvent {
-            session_id: ctx.session_id.clone(),
-            todos: params.todos.clone(),
-        }));
+                Bus::global().publish(BusEvent::TodoUpdated(TodoEvent {
+                    session_id: ctx.session_id.clone(),
+                    todos: todos.clone(),
+                }));
 
-        let remaining = params
-            .todos
-            .iter()
-            .filter(|t| t.status != "completed")
-            .count();
-        Ok(
-            ToolOutput::new(serde_json::to_string_pretty(&params.todos)?)
-                .with_title(format!("{} todos", remaining))
-                .with_metadata(json!({"todos": params.todos})),
-        )
+                let remaining = todos.iter().filter(|t| t.status != "completed").count();
+                Ok(ToolOutput::new(serde_json::to_string_pretty(&todos)?)
+                    .with_title(format!("{} todos", remaining))
+                    .with_metadata(json!({"todos": todos})))
+            }
+            None => {
+                let todos = load_todos(&ctx.session_id)?;
+                let remaining = todos.iter().filter(|t| t.status != "completed").count();
+                Ok(ToolOutput::new(serde_json::to_string_pretty(&todos)?)
+                    .with_title(format!("{} todos", remaining))
+                    .with_metadata(json!({"todos": todos})))
+            }
+        }
     }
 }
 
-#[async_trait]
-impl Tool for TodoReadTool {
-    fn name(&self) -> &str {
-        "todoread"
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_is_named_todo() {
+        assert_eq!(TodoTool::new().name(), "todo");
     }
 
-    fn description(&self) -> &str {
-        "Read the current todo list."
-    }
-
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {}
-        })
-    }
-
-    async fn execute(&self, _input: Value, ctx: ToolContext) -> Result<ToolOutput> {
-        let todos = load_todos(&ctx.session_id)?;
-        let remaining = todos.iter().filter(|t| t.status != "completed").count();
-        Ok(ToolOutput::new(serde_json::to_string_pretty(&todos)?)
-            .with_title(format!("{} todos", remaining))
-            .with_metadata(json!({"todos": todos})))
+    #[test]
+    fn schema_only_advertises_todos() {
+        let schema = TodoTool::new().parameters_schema();
+        let props = schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .expect("todo schema should have properties");
+        assert_eq!(props.len(), 1);
+        assert!(props.contains_key("todos"));
     }
 }

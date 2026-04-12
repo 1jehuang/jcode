@@ -1206,7 +1206,7 @@ pub(super) fn build_improve_prompt(plan_only: bool, focus: Option<&str>) -> Stri
             "You are entering improvement planning mode for this repository.\n\
 Your job is to inspect the project and identify the highest-leverage improvements worth doing next.\n\
 \n\
-First inspect the codebase and current repo state. Then write a concise ranked todo list using `todowrite` with the best 3-7 candidate improvements. Prefer work that is high-impact, low-risk, and easy to validate. Consider refactors, reliability issues, missing tests, UX papercuts, docs gaps, startup/runtime performance, and profiling opportunities.\n\
+First inspect the codebase and current repo state. Then write a concise ranked todo list using `todo` with the best 3-7 candidate improvements. Prefer work that is high-impact, low-risk, and easy to validate. Consider refactors, reliability issues, missing tests, UX papercuts, docs gaps, startup/runtime performance, and profiling opportunities.\n\
 \n\
 This is plan-only mode: do not edit files, write patches, or otherwise modify source code or git state. Read/search/analyze freely, and you may run builds/tests/profiling commands if that helps you rank the work, but stop after presenting the todo list and brief rationale.\n\
 \n\
@@ -1218,7 +1218,7 @@ Avoid broad speculative rewrites, cosmetic churn, and busywork. If the repo alre
             "You are entering improvement mode for this repository.\n\
 Your job is to identify and implement the highest-leverage safe improvements to this project, then reassess and continue only while further work is clearly worthwhile.\n\
 \n\
-First inspect the codebase and current repo state. Then write a concise ranked todo list using `todowrite` with the best 3-7 improvements to tackle next. Prefer work that is high-impact, low-risk, locally scoped, and easy to validate. Consider refactors, reliability issues, missing tests, UX papercuts, docs gaps, startup/runtime performance, and profiling opportunities.{}\n\
+First inspect the codebase and current repo state. Then write a concise ranked todo list using `todo` with the best 3-7 improvements to tackle next. Prefer work that is high-impact, low-risk, locally scoped, and easy to validate. Consider refactors, reliability issues, missing tests, UX papercuts, docs gaps, startup/runtime performance, and profiling opportunities.{}\n\
 \n\
 Execute the strongest items, updating the todo list as you go. Validate meaningful changes with builds, tests, or measurements. If you make performance claims, measure before and after when possible.\n\
 \n\
@@ -1245,7 +1245,7 @@ pub(super) fn build_refactor_prompt(plan_only: bool, focus: Option<&str>) -> Str
             "You are entering refactor planning mode for this repository.\n\
 Your job is to inspect the project and identify the highest-leverage safe refactors worth doing next.\n\
 \n\
-First inspect the codebase, current repo state, and the in-repo quality docs if they exist, especially `docs/REFACTORING.md`, `docs/CODE_QUALITY_10_10_PLAN.md`, and `docs/CODE_QUALITY_TODO.md`. Then write a concise ranked todo list using `todowrite` with the best 3-7 candidate refactors. Prefer behavior-preserving extraction, file splits, dead-code deletion, warning reduction, test isolation, and clearer module boundaries.\n\
+First inspect the codebase, current repo state, and the in-repo quality docs if they exist, especially `docs/REFACTORING.md`, `docs/CODE_QUALITY_10_10_PLAN.md`, and `docs/CODE_QUALITY_TODO.md`. Then write a concise ranked todo list using `todo` with the best 3-7 candidate refactors. Prefer behavior-preserving extraction, file splits, dead-code deletion, warning reduction, test isolation, and clearer module boundaries.\n\
 \n\
 This is plan-only mode: do not edit files, write patches, or otherwise modify source code or git state. Read/search/analyze freely, and you may run builds/tests if that helps rank the work, but stop after presenting the ranked refactor plan and brief rationale.\n\
 \n\
@@ -1257,7 +1257,7 @@ Avoid broad speculative rewrites, cosmetic churn, and risky busywork. If the rep
             "You are entering refactor mode for this repository.\n\
 Your job is to move the codebase closer to a practical 10/10 by making the highest-leverage safe refactors, validating them, getting an independent review, and only continuing while the next batch is clearly worth the churn.\n\
 \n\
-First inspect the codebase, current repo state, and the in-repo quality docs if they exist, especially `docs/REFACTORING.md`, `docs/CODE_QUALITY_10_10_PLAN.md`, and `docs/CODE_QUALITY_TODO.md`. Then write a concise ranked todo list using `todowrite` with the best 3-7 refactors to tackle next. Prefer behavior-preserving extraction, splitting oversized modules, dead-code deletion, warning reduction, test improvements, and boundary clarification.{}\n\
+First inspect the codebase, current repo state, and the in-repo quality docs if they exist, especially `docs/REFACTORING.md`, `docs/CODE_QUALITY_10_10_PLAN.md`, and `docs/CODE_QUALITY_TODO.md`. Then write a concise ranked todo list using `todo` with the best 3-7 refactors to tackle next. Prefer behavior-preserving extraction, splitting oversized modules, dead-code deletion, warning reduction, test improvements, and boundary clarification.{}\n\
 \n\
 For v1, do the implementation work yourself in this main session. Do not create a swarm for ordinary execution. Keep changes locally scoped and easy to validate.\n\
 \n\
@@ -1377,10 +1377,10 @@ pub(super) fn build_improve_resume_prompt(
 ) -> String {
     if incomplete.is_empty() {
         return match mode {
-            ImproveMode::ImproveRun => "Resume improvement mode for this repository. Start by inspecting the current repo state, writing or refreshing a ranked todo list with `todowrite`, then continue implementing the highest-leverage safe improvements until the next ideas have diminishing returns.".to_string(),
-            ImproveMode::ImprovePlan => "Resume improvement planning mode for this repository. Reinspect the current repo state, refresh the ranked improve todo list with `todowrite`, and stop after presenting the updated plan without editing files.".to_string(),
+            ImproveMode::ImproveRun => "Resume improvement mode for this repository. Start by inspecting the current repo state, writing or refreshing a ranked todo list with `todo`, then continue implementing the highest-leverage safe improvements until the next ideas have diminishing returns.".to_string(),
+            ImproveMode::ImprovePlan => "Resume improvement planning mode for this repository. Reinspect the current repo state, refresh the ranked improve todo list with `todo`, and stop after presenting the updated plan without editing files.".to_string(),
             ImproveMode::RefactorRun | ImproveMode::RefactorPlan => {
-                "Resume improvement mode for this repository by first writing an improve-oriented todo list with `todowrite`, then continue only with high-leverage safe improvements.".to_string()
+                "Resume improvement mode for this repository by first writing an improve-oriented todo list with `todo`, then continue only with high-leverage safe improvements.".to_string()
             }
         };
     }
@@ -1400,19 +1400,19 @@ pub(super) fn build_improve_resume_prompt(
 
     match mode {
         ImproveMode::ImproveRun => format!(
-            "Resume improvement mode. Your current improve todo list still has {} incomplete item{}:\n\n{}\nContinue the highest-leverage work, keep the todo list accurate with `todowrite`, validate meaningful changes, and once this batch is done reassess whether another batch is still worth doing.",
+            "Resume improvement mode. Your current improve todo list still has {} incomplete item{}:\n\n{}\nContinue the highest-leverage work, keep the todo list accurate with `todo`, validate meaningful changes, and once this batch is done reassess whether another batch is still worth doing.",
             incomplete.len(),
             if incomplete.len() == 1 { "" } else { "s" },
             todo_list,
         ),
         ImproveMode::ImprovePlan => format!(
-            "Resume improvement planning mode. The current improve todo list has {} pending item{}:\n\n{}\nRefresh or tighten this plan using `todowrite`, keeping it ranked and concrete, then stop without editing files.",
+            "Resume improvement planning mode. The current improve todo list has {} pending item{}:\n\n{}\nRefresh or tighten this plan using `todo`, keeping it ranked and concrete, then stop without editing files.",
             incomplete.len(),
             if incomplete.len() == 1 { "" } else { "s" },
             todo_list,
         ),
         ImproveMode::RefactorRun | ImproveMode::RefactorPlan => format!(
-            "Resume improvement mode with these incomplete items:\n\n{}\nContinue only the highest-leverage safe improvements and keep the todo list accurate with `todowrite`.",
+            "Resume improvement mode with these incomplete items:\n\n{}\nContinue only the highest-leverage safe improvements and keep the todo list accurate with `todo`.",
             todo_list,
         ),
     }
@@ -1424,10 +1424,10 @@ pub(super) fn build_refactor_resume_prompt(
 ) -> String {
     if incomplete.is_empty() {
         return match mode {
-            ImproveMode::RefactorRun => "Resume refactor mode for this repository. Start by inspecting the current repo state and relevant quality docs, write or refresh a ranked refactor todo list with `todowrite`, implement the highest-leverage safe refactors yourself, validate them, run an independent read-only review subagent after each meaningful batch, and continue only while more work is clearly worth the churn.".to_string(),
-            ImproveMode::RefactorPlan => "Resume refactor planning mode for this repository. Reinspect the current repo state and quality docs, refresh the ranked refactor todo list with `todowrite`, and stop after presenting the updated plan without editing files.".to_string(),
+            ImproveMode::RefactorRun => "Resume refactor mode for this repository. Start by inspecting the current repo state and relevant quality docs, write or refresh a ranked refactor todo list with `todo`, implement the highest-leverage safe refactors yourself, validate them, run an independent read-only review subagent after each meaningful batch, and continue only while more work is clearly worth the churn.".to_string(),
+            ImproveMode::RefactorPlan => "Resume refactor planning mode for this repository. Reinspect the current repo state and quality docs, refresh the ranked refactor todo list with `todo`, and stop after presenting the updated plan without editing files.".to_string(),
             ImproveMode::ImproveRun | ImproveMode::ImprovePlan => {
-                "Resume refactor mode for this repository by first producing a ranked refactor todo list with `todowrite`, then continue only with high-leverage safe refactors.".to_string()
+                "Resume refactor mode for this repository by first producing a ranked refactor todo list with `todo`, then continue only with high-leverage safe refactors.".to_string()
             }
         };
     }
@@ -1447,13 +1447,13 @@ pub(super) fn build_refactor_resume_prompt(
 
     match mode {
         ImproveMode::RefactorRun => format!(
-            "Resume refactor mode. Your current refactor todo list still has {} incomplete item{}:\n\n{}\nContinue the highest-leverage safe refactors yourself in this session, keep the todo list accurate with `todowrite`, validate meaningful changes, run one independent read-only review subagent after each meaningful batch, and then reassess whether another batch is still worth doing.",
+            "Resume refactor mode. Your current refactor todo list still has {} incomplete item{}:\n\n{}\nContinue the highest-leverage safe refactors yourself in this session, keep the todo list accurate with `todo`, validate meaningful changes, run one independent read-only review subagent after each meaningful batch, and then reassess whether another batch is still worth doing.",
             incomplete.len(),
             if incomplete.len() == 1 { "" } else { "s" },
             todo_list,
         ),
         ImproveMode::RefactorPlan => format!(
-            "Resume refactor planning mode. The current refactor todo list has {} pending item{}:\n\n{}\nRefresh or tighten this plan using `todowrite`, keeping it ranked and concrete, then stop without editing files.",
+            "Resume refactor planning mode. The current refactor todo list has {} pending item{}:\n\n{}\nRefresh or tighten this plan using `todo`, keeping it ranked and concrete, then stop without editing files.",
             incomplete.len(),
             if incomplete.len() == 1 { "" } else { "s" },
             todo_list,
@@ -2689,7 +2689,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
             "Your todo list has {} incomplete item{}:\n\n{}\n\
             Please continue your work. Either:\n\
             1. Keep working and complete the remaining tasks\n\
-            2. Update the todo list with `todo_write` if items are already done or no longer needed\n\
+            2. Update the todo list with `todo` if items are already done or no longer needed\n\
             3. If you genuinely need user input to proceed, say so clearly and specifically — \
             but only if truly blocked (this should be rare; prefer making reasonable assumptions)",
             incomplete.len(),
