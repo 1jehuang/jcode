@@ -83,20 +83,20 @@ fn goal_step_schema() -> Value {
     json!({
         "type": "object",
         "required": ["id", "content"],
-        "properties": {
-            "id": {
-                "type": "string",
-                "description": "Stable step identifier within the milestone"
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "ID."
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Content."
+                },
+                "status": {
+                    "type": "string",
+                    "description": "Status."
+                }
             },
-            "content": {
-                "type": "string",
-                "description": "What needs to be done for this step"
-            },
-            "status": {
-                "type": "string",
-                "description": "Step status (default: pending)"
-            }
-        },
         "additionalProperties": false
     })
 }
@@ -105,25 +105,25 @@ fn goal_milestone_schema() -> Value {
     json!({
         "type": "object",
         "required": ["id", "title"],
-        "properties": {
-            "id": {
-                "type": "string",
-                "description": "Stable milestone identifier"
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "ID."
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Title."
+                },
+                "status": {
+                    "type": "string",
+                    "description": "Status."
+                },
+                "steps": {
+                    "type": "array",
+                    "items": goal_step_schema(),
+                    "description": "Steps."
+                }
             },
-            "title": {
-                "type": "string",
-                "description": "Short milestone title"
-            },
-            "status": {
-                "type": "string",
-                "description": "Milestone status (default: pending)"
-            },
-            "steps": {
-                "type": "array",
-                "items": goal_step_schema(),
-                "description": "Optional checklist steps for this milestone"
-            }
-        },
         "additionalProperties": false
     })
 }
@@ -135,33 +135,32 @@ impl Tool for GoalTool {
     }
 
     fn description(&self) -> &str {
-        "Manage persistent long-term goals. Use this to create, list, resume, inspect, or update goals that should survive across sessions. Goal details are not preloaded into context; call this tool when goal context becomes relevant."
+        "Manage goals."
     }
 
     fn parameters_schema(&self) -> Value {
         json!({
         "type": "object",
         "required": ["action"],
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["create", "list", "show", "resume", "update", "checkpoint", "focus"],
-                "description": "Goal action to perform"
-            },
-            "id": {"type": "string", "description": "Goal id for show/update/checkpoint/focus"},
-            "title": {"type": "string", "description": "Goal title for create/update"},
-            "scope": {"type": "string", "enum": ["project", "global"], "description": "Goal scope (default: project)"},
-            "status": {"type": "string", "enum": ["draft", "active", "paused", "blocked", "completed", "archived", "abandoned"], "description": "Goal status for update"},
-            "description": {"type": "string", "description": "Longer description"},
-            "why": {"type": "string", "description": "Why the goal matters"},
-            "success_criteria": {"type": "array", "items": {"type": "string"}, "description": "Success criteria list"},
-            "milestones": {"type": "array", "items": goal_milestone_schema(), "description": "Milestones for the goal"},
-            "next_steps": {"type": "array", "items": {"type": "string"}, "description": "Ordered next steps"},
-            "blockers": {"type": "array", "items": {"type": "string"}, "description": "Current blockers"},
-            "current_milestone_id": {"type": "string", "description": "Current milestone id"},
-            "progress_percent": {"type": "integer", "description": "Approximate progress percent"},
-            "checkpoint_summary": {"type": "string", "description": "Checkpoint/update summary"},
-                "display": {"type": "string", "enum": ["auto", "focus", "update_only", "none"], "description": "Side panel display behavior. Defaults: list/create/show/resume focus the relevant page; update/checkpoint refresh open goal pages; none disables side-panel updates."}
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["create", "list", "show", "resume", "update", "checkpoint", "focus"],
+                    "description": "Action."
+                },
+                "id": {"type": "string"},
+                "title": {"type": "string"},
+                "scope": {"type": "string", "enum": ["project", "global"]},
+                "status": {"type": "string", "enum": ["draft", "active", "paused", "blocked", "completed", "archived", "abandoned"]},
+                "description": {"type": "string"},
+                "why": {"type": "string"},
+                "success_criteria": {"type": "array", "items": {"type": "string"}},
+                "milestones": {"type": "array", "items": goal_milestone_schema()},
+                "next_steps": {"type": "array", "items": {"type": "string"}},
+                "blockers": {"type": "array", "items": {"type": "string"}},
+                "current_milestone_id": {"type": "string"},
+                "progress_percent": {"type": "integer"},
+                "checkpoint_summary": {"type": "string"}
             }
         })
     }
@@ -573,5 +572,11 @@ mod schema_tests {
             milestone_items["properties"]["steps"]["items"]["required"],
             json!(["id", "content"])
         );
+    }
+
+    #[test]
+    fn test_goal_schema_omits_display_override() {
+        let schema = GoalTool::new().parameters_schema();
+        assert!(schema["properties"]["display"].is_null());
     }
 }

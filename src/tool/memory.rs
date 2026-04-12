@@ -89,7 +89,7 @@ impl Tool for MemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Store and recall information across sessions. Use this to remember important facts about the codebase, user preferences, or lessons learned. IMPORTANT: When the user asks 'do you remember X?' or 'what do you know about X?', use recall with a query to search your memories."
+        "Manage memory."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -99,24 +99,20 @@ impl Tool for MemoryTool {
                 "action": {
                     "type": "string",
                     "enum": ["remember", "recall", "search", "list", "forget", "tag", "link", "related"],
-                    "description": "Action: remember (store), recall (retrieve memories - use query for semantic search), search (keyword), list, forget, tag, link, related"
+                    "description": "Action."
                 },
-                "content": { "type": "string", "description": "For remember: what to store" },
+                "content": { "type": "string" },
                 "category": {
                     "type": "string",
-                    "enum": ["fact", "preference", "entity", "correction"],
-                    "description": "Category of memory"
+                    "enum": ["fact", "preference", "entity", "correction"]
                 },
-                "query": { "type": "string", "description": "For recall/search: what to look for. For recall, enables semantic search with graph traversal" },
-                "id": { "type": "string", "description": "For forget/tag/related: memory ID" },
-                "tags": { "type": "array", "items": { "type": "string" }, "description": "For remember/tag/recall: tags to apply or filter by" },
-                "scope": { "type": "string", "enum": ["project", "global", "all"], "description": "Memory scope (default: project for remember, all for recall)" },
-                "from_id": { "type": "string", "description": "For link: source memory ID" },
-                "to_id": { "type": "string", "description": "For link: target memory ID" },
-                "weight": { "type": "number", "description": "For link: relationship strength (0.0-1.0, default 0.5)" },
-                "depth": { "type": "integer", "description": "For related: traversal depth (default 2)" },
-                "limit": { "type": "integer", "description": "For recall: max results (default 10)" },
-                "mode": { "type": "string", "enum": ["recent", "semantic", "cascade"], "description": "For recall: recent (by time), semantic (embedding similarity), cascade (semantic + graph traversal, default when query provided)" }
+                "query": { "type": "string" },
+                "id": { "type": "string" },
+                "tags": { "type": "array", "items": { "type": "string" } },
+                "scope": { "type": "string", "enum": ["project", "global", "all"] },
+                "from_id": { "type": "string" },
+                "to_id": { "type": "string" },
+                "limit": { "type": "integer", "description": "Max results." }
             },
             "required": ["action"]
         })
@@ -429,5 +425,32 @@ fn truncate_for_widget(s: &str, max: usize) -> String {
         format!("{}…", truncated)
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_only_advertises_core_memory_fields() {
+        let schema = MemoryTool::new().parameters_schema();
+        let props = schema["properties"]
+            .as_object()
+            .expect("memory schema should have properties");
+
+        assert!(props.contains_key("action"));
+        assert!(props.contains_key("content"));
+        assert!(props.contains_key("category"));
+        assert!(props.contains_key("query"));
+        assert!(props.contains_key("id"));
+        assert!(props.contains_key("tags"));
+        assert!(props.contains_key("scope"));
+        assert!(props.contains_key("from_id"));
+        assert!(props.contains_key("to_id"));
+        assert!(props.contains_key("limit"));
+        assert!(!props.contains_key("weight"));
+        assert!(!props.contains_key("depth"));
+        assert!(!props.contains_key("mode"));
     }
 }

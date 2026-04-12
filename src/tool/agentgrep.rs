@@ -157,7 +157,7 @@ impl Tool for AgentGrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search a codebase using agentgrep. Supports exact grep, ranked file discovery, file outlines, and relation-aware trace search. Best for replacing the agent's first burst of grep/read calls with more grouped, structure-aware results."
+        "Search code."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -168,69 +168,46 @@ impl Tool for AgentGrepTool {
                 "mode": {
                     "type": "string",
                     "enum": ["grep", "find", "outline", "trace", "smart"],
-                    "description": "Search mode: grep for exact content search, find for ranked file discovery, outline for known-file structure, trace for relation-aware investigation (smart is an alias)"
+                    "description": "Mode."
                 },
                 "query": {
-                    "type": "string",
-                    "description": "Query string for grep and find modes"
+                    "type": "string"
                 },
                 "file": {
-                    "type": "string",
-                    "description": "File path for outline mode"
+                    "type": "string"
                 },
                 "terms": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Structured smart DSL terms for smart mode, e.g. [\"subject:auth_status\", \"relation:rendered\"]"
+                    "description": "Terms."
                 },
                 "regex": {
                     "type": "boolean",
-                    "description": "For grep mode: treat query as a regular expression"
+                    "description": "Regex."
                 },
                 "path": {
                     "type": "string",
-                    "description": "Optional root path to search instead of the current working directory"
+                    "description": "Root path."
                 },
                 "glob": {
                     "type": "string",
-                    "description": "Restrict candidate files by glob"
+                    "description": "Glob."
                 },
                 "type": {
                     "type": "string",
-                    "description": "Restrict to a known file type"
-                },
-                "hidden": {
-                    "type": "boolean",
-                    "description": "Include hidden files"
-                },
-                "no_ignore": {
-                    "type": "boolean",
-                    "description": "Ignore .gitignore and related ignore files"
+                    "description": "File type."
                 },
                 "max_files": {
                     "type": "integer",
-                    "description": "For find/smart: maximum files to return"
+                    "description": "Max files."
                 },
                 "max_regions": {
                     "type": "integer",
-                    "description": "For smart: maximum regions to return"
-                },
-                "full_region": {
-                    "type": "string",
-                    "enum": ["auto", "always", "never"],
-                    "description": "For smart: region expansion mode"
-                },
-                "debug_plan": {
-                    "type": "boolean",
-                    "description": "For smart: print planner details"
-                },
-                "debug_score": {
-                    "type": "boolean",
-                    "description": "For find/smart: print score details"
+                    "description": "Max regions."
                 },
                 "paths_only": {
                     "type": "boolean",
-                    "description": "Print only matching file paths"
+                    "description": "Paths only."
                 }
             }
         })
@@ -1622,6 +1599,31 @@ mod tests {
                 "path:src/tui"
             ]
         );
+    }
+
+    #[test]
+    fn schema_only_advertises_common_public_fields() {
+        let schema = AgentGrepTool::new().parameters_schema();
+        let props = schema["properties"]
+            .as_object()
+            .expect("agentgrep schema should have properties");
+
+        assert!(props.contains_key("mode"));
+        assert!(props.contains_key("query"));
+        assert!(props.contains_key("file"));
+        assert!(props.contains_key("terms"));
+        assert!(props.contains_key("regex"));
+        assert!(props.contains_key("path"));
+        assert!(props.contains_key("glob"));
+        assert!(props.contains_key("type"));
+        assert!(props.contains_key("max_files"));
+        assert!(props.contains_key("max_regions"));
+        assert!(props.contains_key("paths_only"));
+        assert!(!props.contains_key("hidden"));
+        assert!(!props.contains_key("no_ignore"));
+        assert!(!props.contains_key("full_region"));
+        assert!(!props.contains_key("debug_plan"));
+        assert!(!props.contains_key("debug_score"));
     }
 
     #[test]

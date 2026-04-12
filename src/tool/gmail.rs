@@ -57,9 +57,7 @@ impl Tool for GmailTool {
     }
 
     fn description(&self) -> &str {
-        "Interact with Gmail. Search, read, draft, and send emails. \
-         Send and delete actions require user confirmation. \
-         Requires Google OAuth setup via `jcode login google`."
+        "Use Gmail."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -70,62 +68,23 @@ impl Tool for GmailTool {
                 "action": {
                     "type": "string",
                     "enum": ["search", "read", "list", "draft", "send", "send_draft", "threads", "thread", "labels", "trash", "modify_labels"],
-                    "description": "Action to perform. search: search messages. read: read a specific message. list: list recent messages. draft: create a draft. send: send a new email (requires confirmation). send_draft: send an existing draft (requires confirmation). threads: list threads. thread: read a thread. labels: list labels. trash: move to trash (requires confirmation). modify_labels: add/remove labels."
+                    "description": "Action."
                 },
-                "query": {
-                    "type": "string",
-                    "description": "Search query (same syntax as Gmail search box). Used by search, list, threads."
-                },
-                "message_id": {
-                    "type": "string",
-                    "description": "Message ID for read, trash, modify_labels."
-                },
-                "thread_id": {
-                    "type": "string",
-                    "description": "Thread ID for thread action, or to place a draft/send in a thread."
-                },
-                "draft_id": {
-                    "type": "string",
-                    "description": "Draft ID for send_draft."
-                },
-                "to": {
-                    "type": "string",
-                    "description": "Recipient email address for draft and send."
-                },
-                "subject": {
-                    "type": "string",
-                    "description": "Email subject for draft and send."
-                },
-                "body": {
-                    "type": "string",
-                    "description": "Email body text for draft and send."
-                },
-                "in_reply_to": {
-                    "type": "string",
-                    "description": "Message-ID header value to reply to."
-                },
-                "max_results": {
-                    "type": "integer",
-                    "description": "Maximum results to return (default: 10, max: 50)."
-                },
-                "label_ids": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Filter by label IDs (for list action)."
-                },
-                "add_labels": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Label IDs to add (for modify_labels)."
-                },
-                "remove_labels": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Label IDs to remove (for modify_labels)."
-                },
+                "query": { "type": "string" },
+                "message_id": { "type": "string" },
+                "thread_id": { "type": "string" },
+                "draft_id": { "type": "string" },
+                "to": { "type": "string" },
+                "subject": { "type": "string" },
+                "body": { "type": "string" },
+                "in_reply_to": { "type": "string" },
+                "max_results": { "type": "integer" },
+                "label_ids": { "type": "array", "items": { "type": "string" } },
+                "add_labels": { "type": "array", "items": { "type": "string" } },
+                "remove_labels": { "type": "array", "items": { "type": "string" } },
                 "confirmed": {
                     "type": "boolean",
-                    "description": "Set to true to confirm a send, send_draft, or trash action. Must explicitly confirm destructive actions."
+                    "description": "Confirm."
                 }
             }
         })
