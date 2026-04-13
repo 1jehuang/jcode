@@ -1,6 +1,6 @@
 use super::*;
 use crate::tui::mermaid;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::hash::Hasher as _;
 
 /// Format tokens compactly (1.2M, 45K, 123)
@@ -58,46 +58,6 @@ pub(super) fn lru_touch<K: PartialEq>(order: &mut VecDeque<K>, key: &K) {
     if let Some(pos) = order.iter().position(|existing| existing == key) {
         order.remove(pos);
     }
-}
-
-pub(super) fn lru_get<K, V>(entries: &HashMap<K, V>, order: &mut VecDeque<K>, key: &K) -> Option<V>
-where
-    K: Clone + Eq + std::hash::Hash,
-    V: Clone,
-{
-    let value = entries.get(key).cloned();
-    if value.is_some() {
-        lru_touch(order, key);
-        order.push_back(key.clone());
-    }
-    value
-}
-
-pub(super) fn lru_insert<K, V>(
-    entries: &mut HashMap<K, V>,
-    order: &mut VecDeque<K>,
-    key: K,
-    value: V,
-    limit: usize,
-) where
-    K: Clone + Eq + std::hash::Hash,
-{
-    lru_touch(order, &key);
-    entries.insert(key.clone(), value);
-    order.push_back(key);
-    while order.len() > limit {
-        if let Some(oldest) = order.pop_front() {
-            entries.remove(&oldest);
-        }
-    }
-}
-
-pub(super) fn hash_content(content: &str) -> u64 {
-    use std::hash::{Hash as _, Hasher as _};
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    content.hash(&mut hasher);
-    hasher.finish()
 }
 
 pub(super) fn side_panel_content_signature(page: &crate::side_panel::SidePanelPage) -> u64 {
