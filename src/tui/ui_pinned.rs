@@ -364,9 +364,6 @@ fn build_side_pane_snapshot_cache(
         left_margins,
     )
 }
-const SIDE_PANEL_FOLLOWING_CONTENT_PREVIEW_MIN_ROWS: u16 = 6;
-const SIDE_PANEL_FOLLOWING_CONTENT_PREVIEW_MAX_ROWS: u16 = 10;
-
 static PINNED_CACHE: OnceLock<Mutex<PinnedCacheState>> = OnceLock::new();
 static SIDE_PANEL_MARKDOWN_CACHE: OnceLock<Mutex<SidePanelMarkdownCacheState>> = OnceLock::new();
 static SIDE_PANEL_RENDER_CACHE: OnceLock<Mutex<SidePanelRenderCacheState>> = OnceLock::new();

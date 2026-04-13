@@ -1,61 +1,6 @@
 use super::*;
 use unicode_width::UnicodeWidthStr;
 
-pub(super) fn split_native_scrollbar_area(area: Rect, enabled: bool) -> (Rect, Option<Rect>) {
-    if !enabled || area.width <= 1 {
-        return (area, None);
-    }
-
-    (
-        Rect {
-            x: area.x,
-            y: area.y,
-            width: area.width.saturating_sub(1),
-            height: area.height,
-        },
-        Some(Rect {
-            x: area.x + area.width.saturating_sub(1),
-            y: area.y,
-            width: 1,
-            height: area.height,
-        }),
-    )
-}
-
-pub(super) fn render_native_scrollbar(
-    frame: &mut Frame,
-    area: Rect,
-    position: usize,
-    content_length: usize,
-    viewport_content_length: usize,
-    focused: bool,
-) {
-    use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
-
-    if area.width == 0
-        || area.height == 0
-        || content_length <= viewport_content_length
-        || viewport_content_length == 0
-    {
-        return;
-    }
-
-    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-        .begin_symbol(None)
-        .end_symbol(None)
-        .track_symbol(None)
-        .thumb_symbol("▐")
-        .thumb_style(Style::default().fg(if focused {
-            tool_color()
-        } else {
-            queued_color()
-        }));
-    let mut state = ScrollbarState::new(content_length)
-        .position(position)
-        .viewport_content_length(viewport_content_length);
-    frame.render_stateful_widget(scrollbar, area, &mut state);
-}
-
 fn lower_bound(values: &[usize], target: usize) -> usize {
     values.partition_point(|&v| v < target)
 }
