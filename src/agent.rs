@@ -162,7 +162,7 @@ impl Agent {
             cache_tracker: CacheTracker::new(),
             last_usage: TokenUsage::default(),
             locked_tools: None,
-            system_prompt_override: None,
+            system_prompt_override: crate::config::config().provider.system_prompt.clone(),
             memory_enabled: crate::config::config().features.memory,
             stdin_request_tx: None,
         }
