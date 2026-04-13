@@ -796,15 +796,30 @@ pub async fn run_browser(action: &str) -> Result<()> {
             );
             println!(
                 "  bridge: {}",
-                if status.ready {
+                if status.responding {
                     "responding"
                 } else {
                     "not responding"
                 }
             );
+            println!(
+                "  compatibility: {}",
+                if status.compatible {
+                    "ok"
+                } else {
+                    "extension/bridge mismatch"
+                }
+            );
+            if !status.missing_actions.is_empty() {
+                println!("  missing actions: {}", status.missing_actions.join(", "));
+            }
 
             if status.ready {
                 println!("\nBuilt-in browser tool is ready.");
+            } else if status.responding && !status.compatible {
+                println!(
+                    "\nThe browser bridge is connected, but the installed Firefox extension is out of date for this jcode build. Run `jcode browser setup` to repair or update it."
+                );
             } else {
                 println!("\nRun `jcode browser setup` to install or repair it.");
             }

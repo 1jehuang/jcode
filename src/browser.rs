@@ -16,8 +16,21 @@ pub struct BrowserStatus {
     pub browser: &'static str,
     pub setup_complete: bool,
     pub binary_installed: bool,
+    pub responding: bool,
+    pub compatible: bool,
+    pub missing_actions: Vec<String>,
     pub ready: bool,
 }
+
+const REQUIRED_BRIDGE_ACTION_PROBES: &[(&str, &str)] = &[
+    ("evaluate", r#"{"script":"return 1"}"#),
+    ("listFrames", "{}"),
+    ("scroll", r#"{"position":"top"}"#),
+    (
+        "uploadFile",
+        r#"{"selector":"input[type=file]","path":"/tmp/jcode-browser-capability-probe"}"#,
+    ),
+];
 
 fn jcode_dir() -> PathBuf {
     storage::jcode_dir().unwrap_or_else(|_| {
@@ -183,14 +196,25 @@ pub async fn ensure_browser_setup() -> Result<String> {
         return Ok(log);
     }
 
-    if initial_status.binary_installed {
-        log.push_str("Browser bridge is installed but not fully ready. Attempting repair steps...\n");
+    if initial_status.responding && !initial_status.compatible {
+        log.push_str("Browser bridge is connected, but the live Firefox extension is out of date for this jcode build. Attempting repair steps...\n");
+        if !initial_status.missing_actions.is_empty() {
+            log.push_str(&format!(
+                "Missing actions: {}\n",
+                initial_status.missing_actions.join(", ")
+            ));
+        }
+    } else if initial_status.binary_installed {
+        log.push_str(
+            "Browser bridge is installed but not fully ready. Attempting repair steps...\n",
+        );
     } else {
         log.push_str("Browser bridge is not installed yet. Starting setup...\n");
     }
 
     // Step 1: Check/download browser CLI binary
-    if !browser_binary_path().exists() {
+    if !browser_binary_path().exists() || (initial_status.responding && !initial_status.compatible)
+    {
         log.push_str("[1/3] Downloading browser CLI... ");
         match download_browser_binary().await {
             Ok(()) => log.push_str("done\n"),
@@ -224,7 +248,32 @@ pub async fn ensure_browser_setup() -> Result<String> {
     match check_browser_ping().await {
         Ok(true) => {
             log.push_str("connected!\n");
-            mark_setup_complete().ok();
+            if initial_status.responding && !initial_status.compatible {
+                log.push_str("       Existing extension is missing required actions. Opening Firefox install/update prompt...\n");
+                match install_extension().await {
+                    Ok(msg) => {
+                        log.push_str(&msg);
+                        log.push_str("       Waiting for extension update to become ready... ");
+                        match wait_for_ready(15).await {
+                            Ok(true) => {
+                                log.push_str("ready!\n");
+                                mark_setup_complete().ok();
+                            }
+                            Ok(false) => {
+                                log.push_str("timed out\n");
+                            }
+                            Err(e) => {
+                                log.push_str(&format!("error: {}\n", e));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log.push_str(&format!("       Could not auto-update extension: {}\n", e));
+                    }
+                }
+            } else {
+                mark_setup_complete().ok();
+            }
         }
         Ok(false) => {
             log.push_str("not connected\n");
@@ -275,9 +324,20 @@ pub async fn ensure_browser_setup() -> Result<String> {
     let final_status = ensure_browser_ready_noninteractive().await?;
     if final_status.ready {
         log.push_str("\nSetup complete. Browser bridge is ready.\n");
+    } else if final_status.responding && !final_status.compatible {
+        log.push_str("\nSetup is not complete yet. The Firefox extension is connected, but it is still missing required actions for this jcode build.\n");
+        if !final_status.missing_actions.is_empty() {
+            log.push_str(&format!(
+                "Missing actions: {}\n",
+                final_status.missing_actions.join(", ")
+            ));
+        }
+        log.push_str("Use `jcode browser status` to verify readiness after updating the extension in Firefox.\n");
     } else if final_status.binary_installed {
         log.push_str("\nSetup is not complete yet. Browser bridge binaries are installed, but the Firefox extension/bridge is not responding.\n");
-        log.push_str("Use `jcode browser status` to re-check readiness after any manual Firefox step.\n");
+        log.push_str(
+            "Use `jcode browser status` to re-check readiness after any manual Firefox step.\n",
+        );
     } else {
         log.push_str("\nSetup is not complete yet. Browser bridge binary is still missing.\n");
     }
@@ -343,12 +403,7 @@ async fn download_browser_binary() -> Result<()> {
         .context("Failed to download browser binary")?;
 
     let bin_path = browser_binary_path();
-    std::fs::write(&bin_path, &browser_bytes)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755))?;
-    }
+    write_file_atomically(&bin_path, &browser_bytes, true)?;
 
     // Download XPI
     let xpi_bytes = reqwest::Client::new()
@@ -360,7 +415,7 @@ async fn download_browser_binary() -> Result<()> {
         .await
         .context("Failed to download XPI")?;
 
-    std::fs::write(xpi_path(), &xpi_bytes)?;
+    write_file_atomically(&xpi_path(), &xpi_bytes, false)?;
 
     // Download host binary if available
     if let Some(host) = host_asset
@@ -376,14 +431,39 @@ async fn download_browser_binary() -> Result<()> {
             .context("Failed to download host binary")?;
 
         let host_path = host_binary_path();
-        std::fs::write(&host_path, &host_bytes)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&host_path, std::fs::Permissions::from_mode(0o755))?;
-        }
+        write_file_atomically(&host_path, &host_bytes, true)?;
     }
 
+    Ok(())
+}
+
+fn write_file_atomically(path: &PathBuf, bytes: &[u8], executable: bool) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("Target file has no parent directory")?;
+    std::fs::create_dir_all(parent)?;
+
+    let ts = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    let pid = std::process::id();
+    let tmp_path = parent.join(format!(
+        ".{}.tmp-{}-{}",
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("download"),
+        pid,
+        ts
+    ));
+
+    std::fs::write(&tmp_path, bytes)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if executable { 0o755 } else { 0o644 };
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(mode))?;
+    }
+
+    std::fs::rename(&tmp_path, path)?;
     Ok(())
 }
 
@@ -568,20 +648,65 @@ async fn check_browser_ping() -> Result<bool> {
     }
 }
 
+async fn probe_bridge_action_support(action: &str, params_json: &str) -> Result<bool> {
+    let bin = browser_binary_path();
+    if !bin.exists() {
+        return Ok(false);
+    }
+
+    let output = tokio::process::Command::new(&bin)
+        .arg(action)
+        .arg(params_json)
+        .output()
+        .await?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = if stderr.trim().is_empty() {
+        stdout.trim().to_string()
+    } else if stdout.trim().is_empty() {
+        stderr.trim().to_string()
+    } else {
+        format!("{}\n{}", stderr.trim(), stdout.trim())
+    };
+
+    Ok(!combined.contains(&format!("Unknown action: {}", action)))
+}
+
+async fn probe_bridge_missing_actions() -> Result<Vec<String>> {
+    let mut missing = Vec::new();
+    for (action, params_json) in REQUIRED_BRIDGE_ACTION_PROBES {
+        if !probe_bridge_action_support(action, params_json).await? {
+            missing.push((*action).to_string());
+        }
+    }
+    Ok(missing)
+}
+
 pub async fn inspect_browser_status() -> Result<BrowserStatus> {
     let binary_installed = browser_binary_path().exists();
     let setup_complete = is_setup_complete();
-    let ready = if binary_installed {
+    let responding = if binary_installed {
         check_browser_ping().await.unwrap_or(false)
     } else {
         false
     };
+    let missing_actions = if responding {
+        probe_bridge_missing_actions().await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let compatible = responding && missing_actions.is_empty();
+    let ready = responding && compatible;
 
     Ok(BrowserStatus {
         backend: "firefox_agent_bridge",
         browser: "firefox",
         setup_complete,
         binary_installed,
+        responding,
+        compatible,
+        missing_actions,
         ready,
     })
 }
@@ -601,6 +726,22 @@ async fn wait_for_ping(timeout_secs: u64) -> Result<bool> {
 
     while start.elapsed() < timeout {
         if let Ok(true) = check_browser_ping().await {
+            return Ok(true);
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+
+    Ok(false)
+}
+
+async fn wait_for_ready(timeout_secs: u64) -> Result<bool> {
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+
+    while start.elapsed() < timeout {
+        if let Ok(status) = ensure_browser_ready_noninteractive().await
+            && status.ready
+        {
             return Ok(true);
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;

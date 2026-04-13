@@ -343,11 +343,17 @@ fn resolve_provider(browser: Option<&str>) -> Result<&'static dyn BrowserProvide
     )
 }
 
-async fn firefox_status(provider: &FirefoxBridgeProvider, _ctx: &ToolContext) -> Result<ToolOutput> {
+async fn firefox_status(
+    provider: &FirefoxBridgeProvider,
+    _ctx: &ToolContext,
+) -> Result<ToolOutput> {
     let status = crate::browser::ensure_browser_ready_noninteractive().await?;
     let mut metadata = json!({
         "setup_complete": status.setup_complete,
         "binary_installed": status.binary_installed,
+        "responding": status.responding,
+        "compatible": status.compatible,
+        "missing_actions": status.missing_actions,
         "ready": status.ready,
         "backend": if status.binary_installed || status.setup_complete || status.ready {
             provider.id()
@@ -358,9 +364,23 @@ async fn firefox_status(provider: &FirefoxBridgeProvider, _ctx: &ToolContext) ->
     });
 
     if status.ready {
-        return Ok(ToolOutput::new(
-            "Browser bridge is installed and responding.",
-        )
+        return Ok(
+            ToolOutput::new("Browser bridge is installed and responding.")
+                .with_title("browser status")
+                .with_metadata(metadata),
+        );
+    }
+
+    if status.responding && !status.compatible {
+        let missing = if status.missing_actions.is_empty() {
+            "unknown required actions".to_string()
+        } else {
+            status.missing_actions.join(", ")
+        };
+        return Ok(ToolOutput::new(format!(
+            "Browser bridge is connected, but the live Firefox extension is out of date and does not support required actions: {}. Use action='setup' only to repair or update the existing install. You do not need to run setup before every browser task.",
+            missing
+        ))
         .with_title("browser status")
         .with_metadata(metadata));
     }
@@ -392,6 +412,9 @@ async fn firefox_setup(provider: &FirefoxBridgeProvider) -> Result<ToolOutput> {
     Ok(ToolOutput::new(log).with_title(title).with_metadata(json!({
         "setup_complete": status.setup_complete,
         "binary_installed": status.binary_installed,
+        "responding": status.responding,
+        "compatible": status.compatible,
+        "missing_actions": status.missing_actions,
         "ready": status.ready,
         "backend": provider.id(),
         "browser": "firefox"
@@ -413,6 +436,15 @@ async fn ensure_firefox_ready() -> Result<Option<String>> {
     );
     if !status.binary_installed {
         message.push_str("Browser bridge binary is not installed yet.\n");
+    } else if status.responding && !status.compatible {
+        message.push_str("Browser bridge is connected, but the live Firefox extension is missing required actions.");
+        if !status.missing_actions.is_empty() {
+            message.push_str(&format!(
+                " Missing actions: {}.",
+                status.missing_actions.join(", ")
+            ));
+        }
+        message.push('\n');
     } else {
         message.push_str("Browser bridge binaries are installed, but the live Firefox bridge is not responding.\n");
     }
@@ -738,6 +770,13 @@ async fn firefox_run_bridge_command(
         } else {
             format!("{}\n{}", stderr, stdout)
         };
+        if details.contains("Unknown action:") {
+            anyhow::bail!(
+                "The connected Firefox browser bridge is missing required support for action '{}'. This usually means the installed extension is older than the browser CLI expected by jcode. Use browser action='status' to confirm, then action='setup' to repair or update the extension.\n\nOriginal bridge error: {}",
+                action,
+                details
+            );
+        }
         anyhow::bail!(details);
     }
 
