@@ -1512,8 +1512,10 @@ workspace_right = "alt+l"
 [dictation]
 # External speech-to-text command.
 # The command should record/transcribe speech and print the final transcript to stdout.
-# Example:
+# You can include any tool-specific flags here too, for example a grammar target.
+# Examples:
 # command = "~/.local/bin/my-whisper-script"
+# command = "~/.local/bin/my-whisper-script --grammar-target code"
 command = ""
 
 # How to apply the transcript inside jcode: insert|append|replace|send
