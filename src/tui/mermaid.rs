@@ -13,6 +13,8 @@
 //! - Clear only on render failure, not before every render
 
 use super::color_support::rgb;
+#[path = "mermaid_active.rs"]
+mod active;
 #[path = "mermaid_debug.rs"]
 mod debug_support;
 #[path = "mermaid_svg.rs"]
@@ -43,6 +45,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, mpsc};
 use std::time::Instant;
+
+pub use active::{
+    active_diagram_count, clear_active_diagrams, clear_streaming_preview_diagram,
+    get_active_diagrams, register_active_diagram, restore_active_diagrams,
+    set_streaming_preview_diagram, snapshot_active_diagrams,
+};
 
 /// Render Mermaid source images a bit denser than the immediate terminal-pixel
 /// target so the terminal image protocol scales down from a sharper PNG.
@@ -129,27 +137,8 @@ static LAST_RENDER: LazyLock<Mutex<HashMap<u64, LastRenderState>>> =
 static RENDER_ERRORS: LazyLock<Mutex<HashMap<u64, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Active diagrams for info widget display
-/// Updated during markdown rendering, queried by info_widget_data()
-static ACTIVE_DIAGRAMS: LazyLock<Mutex<Vec<ActiveDiagram>>> =
-    LazyLock::new(|| Mutex::new(Vec::new()));
-
-/// Ephemeral diagram preview for in-flight streaming markdown.
-/// This should never persist once a streaming segment is committed.
-static STREAMING_PREVIEW_DIAGRAM: LazyLock<Mutex<Option<ActiveDiagram>>> =
-    LazyLock::new(|| Mutex::new(None));
-
 /// Prevent unbounded growth when a long session contains many unique diagrams.
 const ACTIVE_DIAGRAMS_MAX: usize = 128;
-
-/// Info about an active diagram (for info widget)
-#[derive(Clone)]
-struct ActiveDiagram {
-    hash: u64,
-    width: u32,
-    height: u32,
-    label: Option<String>,
-}
 
 /// State for a rendered image
 struct ImageState {
@@ -586,125 +575,6 @@ fn parse_proc_status_value_bytes(status: &str, key: &str) -> Option<u64> {
     debug_support::parse_proc_status_value_bytes(status, key)
 }
 
-pub fn register_active_diagram(hash: u64, width: u32, height: u32, label: Option<String>) {
-    if let Ok(mut diagrams) = ACTIVE_DIAGRAMS.lock() {
-        if let Some(pos) = diagrams.iter().position(|d| d.hash == hash) {
-            let mut existing = diagrams.remove(pos);
-            existing.width = width;
-            existing.height = height;
-            if label.is_some() {
-                existing.label = label;
-            }
-            diagrams.push(existing);
-        } else {
-            diagrams.push(ActiveDiagram {
-                hash,
-                width,
-                height,
-                label,
-            });
-        }
-        while diagrams.len() > ACTIVE_DIAGRAMS_MAX {
-            diagrams.remove(0);
-        }
-    }
-}
-
-/// Register or replace the current streaming preview diagram.
-pub fn set_streaming_preview_diagram(hash: u64, width: u32, height: u32, label: Option<String>) {
-    if let Ok(mut preview) = STREAMING_PREVIEW_DIAGRAM.lock() {
-        *preview = Some(ActiveDiagram {
-            hash,
-            width,
-            height,
-            label,
-        });
-    }
-}
-
-/// Clear the current streaming preview diagram.
-pub fn clear_streaming_preview_diagram() {
-    if let Ok(mut preview) = STREAMING_PREVIEW_DIAGRAM.lock() {
-        *preview = None;
-    }
-}
-
-/// Get active diagrams for info widget display
-pub fn get_active_diagrams() -> Vec<super::info_widget::DiagramInfo> {
-    let preview = STREAMING_PREVIEW_DIAGRAM
-        .lock()
-        .ok()
-        .and_then(|preview| preview.clone());
-    let preview_hash = preview.as_ref().map(|d| d.hash);
-
-    let mut out = Vec::new();
-    if let Some(d) = preview {
-        out.push(super::info_widget::DiagramInfo {
-            hash: d.hash,
-            width: d.width,
-            height: d.height,
-            label: d.label,
-        });
-    }
-
-    if let Ok(diagrams) = ACTIVE_DIAGRAMS.lock() {
-        out.extend(
-            diagrams
-                .iter()
-                .rev()
-                .filter(|d| Some(d.hash) != preview_hash)
-                .map(|d| super::info_widget::DiagramInfo {
-                    hash: d.hash,
-                    width: d.width,
-                    height: d.height,
-                    label: d.label.clone(),
-                }),
-        );
-    }
-
-    out
-}
-
-/// Snapshot active diagrams (internal order) for temporary overrides in tests/debug
-pub fn snapshot_active_diagrams() -> Vec<super::info_widget::DiagramInfo> {
-    if let Ok(diagrams) = ACTIVE_DIAGRAMS.lock() {
-        return diagrams
-            .iter()
-            .map(|d| super::info_widget::DiagramInfo {
-                hash: d.hash,
-                width: d.width,
-                height: d.height,
-                label: d.label.clone(),
-            })
-            .collect();
-    }
-    Vec::new()
-}
-
-/// Restore active diagrams from a snapshot
-pub fn restore_active_diagrams(snapshot: Vec<super::info_widget::DiagramInfo>) {
-    if let Ok(mut diagrams) = ACTIVE_DIAGRAMS.lock() {
-        diagrams.clear();
-        diagrams.extend(snapshot.into_iter().map(|d| ActiveDiagram {
-            hash: d.hash,
-            width: d.width,
-            height: d.height,
-            label: d.label,
-        }));
-        while diagrams.len() > ACTIVE_DIAGRAMS_MAX {
-            diagrams.remove(0);
-        }
-    }
-}
-
-/// Clear active diagrams (call at start of render cycle)
-pub fn clear_active_diagrams() {
-    if let Ok(mut diagrams) = ACTIVE_DIAGRAMS.lock() {
-        diagrams.clear();
-    }
-    clear_streaming_preview_diagram();
-}
-
 pub fn clear_cache() -> Result<(), String> {
     let cache_dir = if let Ok(cache) = RENDER_CACHE.lock() {
         cache.cache_dir.clone()
@@ -730,9 +600,7 @@ pub fn clear_cache() -> Result<(), String> {
     if let Ok(mut last) = LAST_RENDER.lock() {
         last.clear();
     }
-    if let Ok(mut diagrams) = ACTIVE_DIAGRAMS.lock() {
-        diagrams.clear();
-    }
+    clear_active_diagrams();
     if let Ok(mut pending) = PENDING_RENDER_REQUESTS.lock() {
         pending.clear();
     }

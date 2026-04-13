@@ -162,9 +162,7 @@ pub fn debug_memory_profile() -> MermaidMemoryProfile {
         }
     }
 
-    if let Ok(diagrams) = ACTIVE_DIAGRAMS.lock() {
-        out.active_diagrams = diagrams.len();
-    }
+    out.active_diagrams = active_diagram_count();
 
     out.mermaid_working_set_estimate_bytes = out
         .render_cache_metadata_estimate_bytes
