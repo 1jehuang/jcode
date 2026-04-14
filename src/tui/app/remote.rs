@@ -446,7 +446,9 @@ pub(super) async fn handle_terminal_event(
 #[cfg(test)]
 mod tests {
     use super::reconnect;
-    use super::{RemoteRunState, handle_post_connect, handle_server_event, process_remote_followups};
+    use super::{
+        RemoteRunState, handle_post_connect, handle_server_event, process_remote_followups,
+    };
     use crate::protocol::{
         MemoryActivitySnapshot, MemoryPipelineSnapshot, MemoryStateSnapshot,
         MemoryStepStatusSnapshot, ServerEvent,
@@ -614,7 +616,10 @@ mod tests {
             app.hidden_queued_system_messages.is_empty(),
             "reload continuation should dispatch instead of staying hidden"
         );
-        assert!(matches!(app.status, crate::tui::app::ProcessingStatus::Sending));
+        assert!(matches!(
+            app.status,
+            crate::tui::app::ProcessingStatus::Sending
+        ));
         assert!(app.current_message_id.is_some());
         assert!(app.rate_limit_pending_message.is_some());
 
@@ -2725,6 +2730,7 @@ fn queue_message_for_reconnect(app: &mut App) {
     ));
 }
 
+#[allow(dead_code)]
 pub(super) fn handle_disconnected_key(
     app: &mut App,
     code: KeyCode,

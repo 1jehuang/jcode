@@ -1447,6 +1447,7 @@ impl App {
     /// then falls back to HTML clipboard for <img> URLs, then arboard text.
     /// Used by Alt+V handlers in both local and remote mode.
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(super) fn paste_image_from_clipboard(&mut self) {
         paste_image_from_clipboard(self);
     }

@@ -365,8 +365,11 @@ fn build_side_pane_snapshot_cache(
     )
 }
 static PINNED_CACHE: OnceLock<Mutex<PinnedCacheState>> = OnceLock::new();
+#[allow(dead_code)]
 static SIDE_PANEL_MARKDOWN_CACHE: OnceLock<Mutex<SidePanelMarkdownCacheState>> = OnceLock::new();
+#[allow(dead_code)]
 static SIDE_PANEL_RENDER_CACHE: OnceLock<Mutex<SidePanelRenderCacheState>> = OnceLock::new();
+#[allow(dead_code)]
 static SIDE_PANEL_DEBUG: OnceLock<Mutex<SidePanelDebugState>> = OnceLock::new();
 
 #[cfg(test)]
@@ -383,14 +386,17 @@ fn pinned_cache() -> &'static Mutex<PinnedCacheState> {
     PINNED_CACHE.get_or_init(|| Mutex::new(PinnedCacheState::default()))
 }
 
+#[allow(dead_code)]
 fn side_panel_markdown_cache() -> &'static Mutex<SidePanelMarkdownCacheState> {
     SIDE_PANEL_MARKDOWN_CACHE.get_or_init(|| Mutex::new(SidePanelMarkdownCacheState::default()))
 }
 
+#[allow(dead_code)]
 fn side_panel_render_cache() -> &'static Mutex<SidePanelRenderCacheState> {
     SIDE_PANEL_RENDER_CACHE.get_or_init(|| Mutex::new(SidePanelRenderCacheState::default()))
 }
 
+#[allow(dead_code)]
 fn side_panel_debug() -> &'static Mutex<SidePanelDebugState> {
     SIDE_PANEL_DEBUG.get_or_init(|| Mutex::new(SidePanelDebugState::default()))
 }

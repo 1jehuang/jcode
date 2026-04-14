@@ -175,6 +175,7 @@ pub(super) fn active_batch_progress_hash(app: &dyn TuiState) -> u64 {
     hasher.finish()
 }
 
+#[allow(dead_code)]
 fn pad_lines_for_centered_mode(lines: &mut [Line<'static>], width: u16) {
     let max_line_width = lines
         .iter()

@@ -205,6 +205,7 @@ fn abbreviate_home(path: &str) -> String {
     path.to_string()
 }
 
+#[allow(dead_code)]
 fn truncate_to_width(text: &str, width: usize) -> String {
     let char_count = text.chars().count();
     if char_count <= width {
@@ -225,6 +226,7 @@ fn truncate_to_width(text: &str, width: usize) -> String {
     truncated
 }
 
+#[allow(dead_code)]
 fn choose_header_candidate(width: usize, candidates: Vec<String>) -> String {
     let mut last_non_empty = String::new();
     for candidate in candidates
@@ -240,6 +242,7 @@ fn choose_header_candidate(width: usize, candidates: Vec<String>) -> String {
     truncate_to_width(&last_non_empty, width)
 }
 
+#[allow(dead_code)]
 fn path_display_candidates(path: &str) -> Vec<String> {
     let display = abbreviate_home(path);
     let mut candidates = vec![display.clone()];
@@ -260,6 +263,7 @@ fn path_display_candidates(path: &str) -> Vec<String> {
     candidates
 }
 
+#[allow(dead_code)]
 fn semver_core() -> String {
     semver()
         .split('-')
@@ -288,6 +292,7 @@ fn version_display_candidates() -> Vec<String> {
     vec![full, core, minor, shortest]
 }
 
+#[allow(dead_code)]
 fn provider_model_display_candidates(provider_name: &str, model: &str) -> Vec<String> {
     let trimmed_model = model.trim();
     if trimmed_model.is_empty() {
@@ -321,6 +326,7 @@ fn provider_model_display_candidates(provider_name: &str, model: &str) -> Vec<St
     candidates
 }
 
+#[allow(dead_code)]
 fn configured_auth_count(auth: &AuthStatus) -> usize {
     [
         auth.jcode,

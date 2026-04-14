@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::hash::Hasher as _;
 
 /// Format tokens compactly (1.2M, 45K, 123)
+#[allow(dead_code)]
 pub(super) fn format_tokens_compact(tokens: u64) -> String {
     if tokens >= 1_000_000 {
         format!("{:.1}M", tokens as f64 / 1_000_000.0)
@@ -14,6 +15,7 @@ pub(super) fn format_tokens_compact(tokens: u64) -> String {
     }
 }
 
+#[allow(dead_code)]
 pub(super) fn format_usage_line(tokens_str: String, cache_status: Option<String>) -> String {
     let mut parts = Vec::new();
     if !tokens_str.is_empty() {
@@ -29,6 +31,7 @@ pub(super) fn format_usage_line(tokens_str: String, cache_status: Option<String>
     }
 }
 
+#[allow(dead_code)]
 pub(super) fn format_cache_status(
     cache_read_tokens: Option<u64>,
     cache_creation_tokens: Option<u64>,

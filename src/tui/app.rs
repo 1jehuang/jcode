@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use super::keybind::{
     CenteredToggleKeys, ModelSwitchKeys, OptionalBinding, ScrollKeys, WorkspaceNavigationKeys,
 };

@@ -623,6 +623,7 @@ fn render_rabbit(elapsed: f32, width: usize, height: usize) -> Vec<String> {
     })
 }
 
+#[allow(dead_code)]
 fn render_dna_helix(elapsed: f32, width: usize, height: usize) -> Vec<String> {
     with_render_buffers(width, height, |output, zbuffer| {
         let cx = width as f32 / 2.0;
@@ -1007,6 +1008,7 @@ fn idle_animation_variant() -> &'static str {
     choose_animation_variant(IDLE_VARIANTS, 0x4944_4c45_414e_494d)
 }
 
+#[allow(dead_code)]
 fn sample_dna(
     elapsed: f32,
     sw: usize,
