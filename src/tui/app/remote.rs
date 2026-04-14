@@ -446,7 +446,7 @@ pub(super) async fn handle_terminal_event(
 #[cfg(test)]
 mod tests {
     use super::reconnect;
-    use super::{RemoteRunState, handle_server_event, process_remote_followups};
+    use super::{RemoteRunState, handle_post_connect, handle_server_event, process_remote_followups};
     use crate::protocol::{
         MemoryActivitySnapshot, MemoryPipelineSnapshot, MemoryStateSnapshot,
         MemoryStepStatusSnapshot, ServerEvent,
@@ -556,6 +556,76 @@ mod tests {
         let last = app.display_messages().last().expect("missing info message");
         assert_eq!(last.role, "system");
         assert!(last.content.contains("display.auto_server_reload = false"));
+    }
+
+    #[test]
+    fn handle_post_connect_dispatches_reload_followup_even_if_history_snapshot_looks_busy() {
+        let _guard = crate::storage::lock_test_env();
+        let temp_home = tempfile::TempDir::new().expect("create temp home");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp_home.path());
+
+        let session_id = "session_reload_busy_snapshot";
+        crate::tool::selfdev::ReloadContext {
+            task_context: Some("Validate reload continuation after reconnect".to_string()),
+            version_before: "old-build".to_string(),
+            version_after: "new-build".to_string(),
+            session_id: session_id.to_string(),
+            timestamp: "2026-04-14T00:00:00Z".to_string(),
+        }
+        .save()
+        .expect("save reload context");
+
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let mut app = crate::tui::app::App::new_for_remote(Some(session_id.to_string()));
+        app.queue_mode = false;
+        app.diff_mode = crate::config::DiffDisplayMode::Inline;
+        app.is_processing = true;
+        app.status = crate::tui::app::ProcessingStatus::RunningTool("batch".to_string());
+        app.processing_started = Some(std::time::Instant::now());
+        app.remote_resume_activity = Some(crate::tui::app::RemoteResumeActivity {
+            session_id: session_id.to_string(),
+            observed_at: std::time::Instant::now(),
+            current_tool_name: Some("batch".to_string()),
+        });
+
+        let _enter = rt.enter();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        let mut state = super::RemoteRunState {
+            reconnect_attempts: 1,
+            ..Default::default()
+        };
+
+        let outcome = rt
+            .block_on(handle_post_connect(
+                &mut app,
+                &mut terminal,
+                &mut remote,
+                &mut state,
+                Some(session_id),
+            ))
+            .expect("post connect should succeed");
+
+        assert!(matches!(outcome, super::PostConnectOutcome::Ready));
+        assert!(
+            app.hidden_queued_system_messages.is_empty(),
+            "reload continuation should dispatch instead of staying hidden"
+        );
+        assert!(matches!(app.status, crate::tui::app::ProcessingStatus::Sending));
+        assert!(app.current_message_id.is_some());
+        assert!(app.rate_limit_pending_message.is_some());
+
+        if let Ok(path) = crate::tool::selfdev::ReloadContext::path_for_session(session_id) {
+            let _ = std::fs::remove_file(path);
+        }
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
     }
 
     #[test]

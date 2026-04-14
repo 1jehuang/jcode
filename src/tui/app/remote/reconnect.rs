@@ -1,5 +1,6 @@
 use super::{
-    App, DisplayMessage, handle_terminal_event_while_disconnected, process_remote_followups,
+    App, DisplayMessage, ProcessingStatus, handle_terminal_event_while_disconnected,
+    process_remote_followups,
 };
 use crate::tool::selfdev::ReloadContext;
 use crate::tui::backend::{RemoteConnection, RemoteDisconnectReason};
@@ -748,6 +749,21 @@ pub(in crate::tui::app) fn finalize_reload_reconnect(
         });
 
         if let Some(ctx) = reload_ctx {
+            if app.current_message_id.is_none()
+                && (app.remote_resume_activity.is_some() || app.is_processing)
+            {
+                crate::logging::info(
+                    "Reload reconnect: clearing stale resumed-processing state before dispatching continuation",
+                );
+                app.remote_resume_activity = None;
+                app.is_processing = false;
+                app.status = ProcessingStatus::Idle;
+                app.processing_started = None;
+                app.last_stream_activity = None;
+                app.replay_processing_started_ms = None;
+                app.replay_elapsed_override = None;
+            }
+
             let task_info = ctx
                 .task_context
                 .map(|t| format!("\nTask context: {}", t))
