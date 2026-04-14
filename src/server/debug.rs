@@ -112,13 +112,13 @@ async fn resolve_transcript_target_session(
 
     let connections = client_connections.read().await;
 
-    if let Ok(Some(session_id)) = crate::dictation::focused_jcode_session()
+    if let Ok(Some(session_id)) = crate::dictation::last_focused_session()
         && has_connected_tui(&session_id, &connections)
     {
         return Ok(session_id);
     }
 
-    if let Ok(Some(session_id)) = crate::dictation::last_focused_session()
+    if let Ok(Some(session_id)) = crate::dictation::focused_jcode_session()
         && has_connected_tui(&session_id, &connections)
     {
         return Ok(session_id);

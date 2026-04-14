@@ -638,6 +638,10 @@ pub struct App {
     dictation_session: Option<dictation::ActiveDictation>,
     // Whether an external dictation command is currently running
     dictation_in_flight: bool,
+    // Ownership token for the current dictation request.
+    dictation_request_id: Option<String>,
+    // Session that owned the current dictation request when it was started.
+    dictation_target_session_id: Option<String>,
     // Keep the current chat viewport while typing instead of snapping to bottom.
     typing_scroll_lock: bool,
     // Scroll bookmark: stashed scroll position for quick teleport back

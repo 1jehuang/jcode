@@ -699,13 +699,28 @@ pub(super) async fn handle_bus_event(
         Ok(BusEvent::SessionUpdateStatus(status)) => {
             app.handle_session_update_status(status);
         }
-        Ok(BusEvent::DictationCompleted { text, mode }) => {
+        Ok(BusEvent::DictationCompleted {
+            dictation_id,
+            session_id,
+            text,
+            mode,
+        }) => {
+            if !app.owns_dictation_event(&dictation_id, session_id.as_deref()) {
+                return;
+            }
             match remote.send_transcript(text, mode).await {
                 Ok(()) => app.mark_dictation_delivered(),
                 Err(error) => app.handle_dictation_failure(error.to_string()),
             }
         }
-        Ok(BusEvent::DictationFailed { message }) => {
+        Ok(BusEvent::DictationFailed {
+            dictation_id,
+            session_id,
+            message,
+        }) => {
+            if !app.owns_dictation_event(&dictation_id, session_id.as_deref()) {
+                return;
+            }
             app.handle_dictation_failure(message);
         }
         _ => {}

@@ -51,6 +51,7 @@ impl App {
     pub(crate) fn handle_dictation_trigger(&mut self) -> bool {
         let cfg = crate::config::config().dictation.clone();
         let command = cfg.command.trim().to_string();
+        let target_session_id = self.active_client_session_id().map(str::to_string);
 
         if command.is_empty() {
             self.push_display_message(DisplayMessage::error(
@@ -63,10 +64,16 @@ impl App {
 
         if self.dictation_in_flight {
             if let Some(active) = self.dictation_session.take() {
+                let dictation_id = self.dictation_request_id.clone().unwrap_or_default();
+                let session_id = self.dictation_target_session_id.clone();
                 self.set_status_notice("🎙 Stopping dictation...");
                 tokio::spawn(async move {
                     if let Err(error) = active.request_stop().await {
-                        Bus::global().publish(BusEvent::DictationFailed { message: error });
+                        Bus::global().publish(BusEvent::DictationFailed {
+                            dictation_id,
+                            session_id,
+                            message: error,
+                        });
                     }
                 });
             } else {
@@ -74,6 +81,8 @@ impl App {
             }
             return true;
         }
+
+        self.note_client_focus(true);
 
         let mut child = shell_command(&command);
         child.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -123,8 +132,11 @@ impl App {
         };
 
         let child = Arc::new(Mutex::new(Some(child)));
+        let dictation_id = crate::id::new_id("dictation");
         self.dictation_session = Some(ActiveDictation::new(pid, Arc::clone(&child)));
         self.dictation_in_flight = true;
+        self.dictation_request_id = Some(dictation_id.clone());
+        self.dictation_target_session_id = target_session_id.clone();
         self.set_status_notice("🎙 Dictation running — press again to stop");
 
         let stdout_buf = Arc::new(Mutex::new(Vec::new()));
@@ -136,7 +148,16 @@ impl App {
             let exit = wait_for_dictation_exit(Arc::clone(&child), cfg.timeout_secs).await;
             let _ = stdout_task.await;
             let _ = stderr_task.await;
-            publish_dictation_result(command, cfg.mode, exit, stdout_buf, stderr_buf).await;
+            publish_dictation_result(
+                dictation_id,
+                target_session_id,
+                command,
+                cfg.mode,
+                exit,
+                stdout_buf,
+                stderr_buf,
+            )
+            .await;
         });
 
         true
@@ -166,8 +187,7 @@ impl App {
     }
 
     pub(crate) fn handle_dictation_failure(&mut self, message: String) {
-        self.dictation_in_flight = false;
-        self.dictation_session = None;
+        self.clear_dictation_tracking();
         self.push_display_message(DisplayMessage::error(format!(
             "Dictation failed: {}",
             message
@@ -180,14 +200,29 @@ impl App {
         text: String,
         mode: crate::protocol::TranscriptMode,
     ) {
-        self.dictation_in_flight = false;
-        self.dictation_session = None;
+        self.clear_dictation_tracking();
         super::remote::apply_transcript_event(self, text, mode);
     }
 
     pub(crate) fn mark_dictation_delivered(&mut self) {
+        self.clear_dictation_tracking();
+    }
+
+    pub(crate) fn owns_dictation_event(
+        &self,
+        dictation_id: &str,
+        session_id: Option<&str>,
+    ) -> bool {
+        self.dictation_in_flight
+            && self.dictation_request_id.as_deref() == Some(dictation_id)
+            && self.dictation_target_session_id.as_deref() == session_id
+    }
+
+    fn clear_dictation_tracking(&mut self) {
         self.dictation_in_flight = false;
         self.dictation_session = None;
+        self.dictation_request_id = None;
+        self.dictation_target_session_id = None;
     }
 }
 
@@ -274,6 +309,8 @@ async fn wait_for_dictation_exit(
 }
 
 async fn publish_dictation_result(
+    dictation_id: String,
+    session_id: Option<String>,
     command: String,
     mode: crate::protocol::TranscriptMode,
     exit: DictationExit,
@@ -285,7 +322,12 @@ async fn publish_dictation_result(
 
     match transcript_from_command_output(&stdout) {
         Some(text) => {
-            Bus::global().publish(BusEvent::DictationCompleted { text, mode });
+            Bus::global().publish(BusEvent::DictationCompleted {
+                dictation_id,
+                session_id,
+                text,
+                mode,
+            });
         }
         None => {
             let message = match exit {
@@ -313,7 +355,11 @@ async fn publish_dictation_result(
                     }
                 }
             };
-            Bus::global().publish(BusEvent::DictationFailed { message });
+            Bus::global().publish(BusEvent::DictationFailed {
+                dictation_id,
+                session_id,
+                message,
+            });
         }
     }
 }
