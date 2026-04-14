@@ -206,6 +206,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "/refactor resume",
         "Resume the last saved refactor loop/plan",
     ));
+    lines.push(help_entry(
+        "/splitview [on|off|status]",
+        "Mirror the current chat in the side panel",
+    ));
     lines.push(help_entry("/split", "Clone session into a new window"));
     lines.push(help_entry(
         "/workspace [status|on|off|add]",

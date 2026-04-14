@@ -853,6 +853,24 @@ fn test_help_topic_shows_observe_command_details() {
 }
 
 #[test]
+fn test_help_topic_shows_splitview_command_details() {
+    let mut app = create_test_app();
+    app.input = "/help splitview".to_string();
+    app.submit_input();
+
+    let msg = app
+        .display_messages()
+        .last()
+        .expect("missing help response");
+    assert_eq!(msg.role, "system");
+    assert!(msg.content.contains("`/splitview`"));
+    assert!(
+        msg.content
+            .contains("mirrors the current chat in the side panel")
+    );
+}
+
+#[test]
 fn test_help_topic_shows_refactor_command_details() {
     let mut app = create_test_app();
     app.input = "/help refactor".to_string();
@@ -1060,6 +1078,84 @@ fn test_observe_command_enables_transient_page_without_persisting() {
         assert!(persisted.pages.is_empty());
         assert!(persisted.focused_page_id.is_none());
     });
+}
+
+#[test]
+fn test_splitview_command_enables_transient_page_without_persisting() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.input = "/splitview on".to_string();
+        app.submit_input();
+
+        assert_eq!(
+            app.side_panel.focused_page_id.as_deref(),
+            Some("split_view")
+        );
+        let page = app
+            .side_panel
+            .focused_page()
+            .expect("missing split view page");
+        assert_eq!(page.title, "Split View");
+        assert_eq!(
+            page.source,
+            crate::side_panel::SidePanelPageSource::Ephemeral
+        );
+        assert!(page.content.contains("Mirror of the current chat"));
+
+        let persisted = crate::side_panel::snapshot_for_session(&app.session.id)
+            .expect("load persisted side panel");
+        assert!(persisted.pages.is_empty());
+        assert!(persisted.focused_page_id.is_none());
+    });
+}
+
+#[test]
+fn test_splitview_command_off_restores_previous_side_panel_page() {
+    let mut app = create_test_app();
+    app.set_side_panel_snapshot(test_side_panel_snapshot("plan", "Plan"));
+
+    app.input = "/splitview on".to_string();
+    app.submit_input();
+    assert_eq!(
+        app.side_panel.focused_page_id.as_deref(),
+        Some("split_view")
+    );
+    assert!(app.side_panel.pages.iter().any(|page| page.id == "plan"));
+
+    app.input = "/splitview off".to_string();
+    app.submit_input();
+    assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
+    assert!(
+        !app.side_panel
+            .pages
+            .iter()
+            .any(|page| page.id == "split_view")
+    );
+}
+
+#[test]
+fn test_splitview_mirrors_chat_and_streaming_text() {
+    let mut app = create_test_app();
+    app.display_messages = vec![
+        DisplayMessage::system("System note".to_string()),
+        DisplayMessage::user("What did we decide?".to_string()),
+        DisplayMessage::assistant("We decided to ship it.".to_string()),
+    ];
+    app.bump_display_messages_version();
+    app.streaming_text = "Working on the follow-up now...".to_string();
+    app.set_split_view_enabled(true, true);
+
+    let page = app
+        .side_panel
+        .focused_page()
+        .expect("missing split view page");
+    assert!(page.content.contains("## System"));
+    assert!(page.content.contains("## Prompt 1"));
+    assert!(page.content.contains("What did we decide?"));
+    assert!(page.content.contains("## Response 1"));
+    assert!(page.content.contains("We decided to ship it."));
+    assert!(page.content.contains("## Live response"));
+    assert!(page.content.contains("Working on the follow-up now..."));
 }
 
 #[test]
@@ -6838,6 +6934,18 @@ fn test_save_and_restore_reload_state_preserves_observe_mode() {
 }
 
 #[test]
+fn test_save_and_restore_reload_state_preserves_split_view_mode() {
+    let mut app = create_test_app();
+    let session_id = format!("test-reload-splitview-{}", std::process::id());
+
+    app.set_split_view_enabled(true, true);
+    app.save_input_for_reload(&session_id);
+
+    let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
+    assert!(restored.split_view_enabled);
+}
+
+#[test]
 fn test_new_for_remote_restores_observe_mode_from_reload_state() {
     let mut app = create_test_app();
     let session_id = format!("test-remote-observe-{}", std::process::id());
@@ -6855,6 +6963,24 @@ fn test_new_for_remote_restores_observe_mode_from_reload_state() {
         .expect("observe page should be focused");
     assert_eq!(page.id, "observe");
     assert!(page.content.contains("Restored after reload."));
+}
+
+#[test]
+fn test_new_for_remote_restores_split_view_from_reload_state() {
+    let mut app = create_test_app();
+    let session_id = format!("test-remote-splitview-{}", std::process::id());
+
+    app.set_split_view_enabled(true, true);
+    app.save_input_for_reload(&session_id);
+
+    let restored = App::new_for_remote(Some(session_id));
+    assert!(restored.split_view_enabled());
+    let page = restored
+        .side_panel()
+        .focused_page()
+        .expect("split view page should be focused");
+    assert_eq!(page.id, "split_view");
+    assert!(page.content.contains("Split View"));
 }
 
 #[test]

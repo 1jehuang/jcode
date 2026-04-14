@@ -24,6 +24,7 @@ impl App {
         self.observe_page_markdown = restored.observe_page_markdown;
         self.observe_page_updated_at_ms = restored.observe_page_updated_at_ms;
         self.set_observe_mode_enabled(restored.observe_mode_enabled, restored.observe_mode_enabled);
+        self.set_split_view_enabled(restored.split_view_enabled, restored.split_view_enabled);
 
         let mut queued_messages = restored.queued_messages;
         let mut recovered_followups = Vec::new();
@@ -311,6 +312,11 @@ impl App {
             observe_mode_enabled: false,
             observe_page_markdown: String::new(),
             observe_page_updated_at_ms: 0,
+            split_view_enabled: false,
+            split_view_markdown: String::new(),
+            split_view_updated_at_ms: 0,
+            split_view_rendered_display_version: 0,
+            split_view_rendered_streaming_hash: 0,
             last_side_panel_refresh: None,
             last_client_focus_recorded_at: None,
             last_client_focus_session_id: None,
@@ -602,6 +608,11 @@ impl App {
             observe_mode_enabled: false,
             observe_page_markdown: String::new(),
             observe_page_updated_at_ms: 0,
+            split_view_enabled: false,
+            split_view_markdown: String::new(),
+            split_view_updated_at_ms: 0,
+            split_view_rendered_display_version: 0,
+            split_view_rendered_streaming_hash: 0,
             last_side_panel_refresh: None,
             last_client_focus_recorded_at: None,
             last_client_focus_session_id: None,

@@ -142,6 +142,10 @@ impl App {
                 "/observe".into(),
                 "Show the latest tool context in the side panel",
             ),
+            (
+                "/splitview".into(),
+                "Mirror the current chat in the side panel",
+            ),
             ("/btw".into(), "Ask a side question in the side panel"),
             (
                 "/git".into(),
@@ -1031,6 +1035,8 @@ impl App {
                 | "/btw"
                 | "/git"
                 | "/observe"
+                | "/splitview"
+                | "/split-view"
                 | "/model"
                 | "/agents"
                 | "/effort"

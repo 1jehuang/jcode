@@ -190,6 +190,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     app.progress_mouse_scroll_animation();
     if let Some(chunk) = app.stream_buffer.flush() {
         app.streaming_text.push_str(&chunk);
+        app.refresh_split_view_if_needed();
         needs_redraw = true;
     }
 
@@ -865,6 +866,7 @@ pub(super) fn handle_disconnect(
     app.remote_resume_activity = None;
     if let Some(chunk) = app.stream_buffer.flush() {
         app.streaming_text.push_str(&chunk);
+        app.refresh_split_view_if_needed();
     }
     if !app.streaming_text.is_empty() {
         let content = app.take_streaming_text();
@@ -1630,6 +1632,7 @@ pub(super) fn handle_server_event(
             if let Some(thought_line) = App::extract_thought_line(&text) {
                 if let Some(chunk) = app.stream_buffer.flush() {
                     app.streaming_text.push_str(&chunk);
+                    app.refresh_split_view_if_needed();
                 }
                 app.insert_thought_line(thought_line);
                 return eager_stream_redraw;
@@ -1648,6 +1651,7 @@ pub(super) fn handle_server_event(
             app.resume_streaming_tps();
             if let Some(chunk) = app.stream_buffer.push(&text) {
                 app.streaming_text.push_str(&chunk);
+                app.refresh_split_view_if_needed();
                 needs_redraw = true;
             }
             app.last_stream_activity = Some(Instant::now());
@@ -1656,6 +1660,7 @@ pub(super) fn handle_server_event(
         ServerEvent::TextReplace { text } => {
             app.stream_buffer.flush();
             app.streaming_text = text;
+            app.refresh_split_view_if_needed();
             app.resume_streaming_tps();
             true
         }
@@ -1817,6 +1822,7 @@ pub(super) fn handle_server_event(
             let recovered_local = recover_local_interleave_to_queue(app, "interrupt");
             if let Some(chunk) = app.stream_buffer.flush() {
                 app.streaming_text.push_str(&chunk);
+                app.refresh_split_view_if_needed();
             }
             if !app.streaming_text.is_empty() {
                 let content = app.take_streaming_text();
@@ -1861,6 +1867,7 @@ pub(super) fn handle_server_event(
                 app.clear_pending_remote_retry();
                 if let Some(chunk) = app.stream_buffer.flush() {
                     app.streaming_text.push_str(&chunk);
+                    app.refresh_split_view_if_needed();
                 }
                 app.pause_streaming_tps(false);
                 if !app.streaming_text.is_empty() {
@@ -2426,6 +2433,7 @@ pub(super) fn handle_server_event(
         } => {
             if let Some(chunk) = app.stream_buffer.flush() {
                 app.streaming_text.push_str(&chunk);
+                app.refresh_split_view_if_needed();
             }
             if !app.streaming_text.is_empty() {
                 let duration = app.processing_started.map(|s| s.elapsed().as_secs_f32());
@@ -4099,6 +4107,14 @@ async fn handle_remote_key_internal(
                     || trimmed == "/observe on"
                     || trimmed == "/observe off"
                     || trimmed == "/observe status"
+                    || trimmed == "/splitview"
+                    || trimmed == "/splitview on"
+                    || trimmed == "/splitview off"
+                    || trimmed == "/splitview status"
+                    || trimmed == "/split-view"
+                    || trimmed == "/split-view on"
+                    || trimmed == "/split-view off"
+                    || trimmed == "/split-view status"
                 {
                     let _ = super::commands::handle_session_command(app, trimmed);
                     return Ok(());

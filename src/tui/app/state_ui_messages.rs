@@ -1,5 +1,7 @@
+use super::state_ui_storage::{
+    compact_display_message_tool_data, compact_display_messages_for_storage,
+};
 use super::*;
-use super::state_ui_storage::{compact_display_message_tool_data, compact_display_messages_for_storage};
 
 impl App {
     pub fn push_display_message(&mut self, mut message: DisplayMessage) {
@@ -10,6 +12,7 @@ impl App {
         let is_tool = message.role == "tool";
         self.display_messages.push(message);
         self.bump_display_messages_version();
+        self.refresh_split_view_if_needed();
         if is_tool && self.diff_mode.has_side_pane() && self.diff_pane_auto_scroll {
             self.diff_pane_scroll = usize::MAX;
         }
@@ -19,6 +22,7 @@ impl App {
         compact_display_messages_for_storage(&mut messages);
         self.display_messages = messages;
         self.bump_display_messages_version();
+        self.refresh_split_view_if_needed();
     }
 
     pub(super) fn replace_display_message_content(&mut self, idx: usize, content: String) -> bool {
@@ -26,6 +30,7 @@ impl App {
             if message.content != content {
                 message.content = content;
                 self.bump_display_messages_version();
+                self.refresh_split_view_if_needed();
             }
             true
         } else {
@@ -44,6 +49,7 @@ impl App {
                 message.title = title;
                 message.content = content;
                 self.bump_display_messages_version();
+                self.refresh_split_view_if_needed();
             }
             true
         } else {
@@ -70,6 +76,7 @@ impl App {
         if idx < self.display_messages.len() {
             let removed = self.display_messages.remove(idx);
             self.bump_display_messages_version();
+            self.refresh_split_view_if_needed();
             Some(removed)
         } else {
             None

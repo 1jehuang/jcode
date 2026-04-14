@@ -57,10 +57,11 @@ mod remote;
 mod remote_notifications;
 mod replay;
 mod run_shell;
+mod split_view;
 mod state_ui;
 mod state_ui_input_helpers;
-mod state_ui_messages;
 mod state_ui_maintenance;
+mod state_ui_messages;
 mod state_ui_storage;
 mod tui_lifecycle;
 mod tui_state;
@@ -608,6 +609,11 @@ pub struct App {
     observe_mode_enabled: bool,
     observe_page_markdown: String,
     observe_page_updated_at_ms: u64,
+    split_view_enabled: bool,
+    split_view_markdown: String,
+    split_view_updated_at_ms: u64,
+    split_view_rendered_display_version: u64,
+    split_view_rendered_streaming_hash: u64,
     last_side_panel_refresh: Option<Instant>,
     // Most recently persisted focus target for dictation routing.
     last_client_focus_recorded_at: Option<Instant>,

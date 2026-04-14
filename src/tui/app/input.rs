@@ -1501,16 +1501,19 @@ impl App {
         } else {
             self.streaming_text = format!("{}{}", prefix, self.streaming_text);
         }
+        self.refresh_split_view_if_needed();
     }
 
     pub(super) fn clear_streaming_render_state(&mut self) {
         self.streaming_text.clear();
+        self.refresh_split_view_if_needed();
         self.streaming_md_renderer.borrow_mut().reset();
         crate::tui::mermaid::clear_streaming_preview_diagram();
     }
 
     pub(super) fn take_streaming_text(&mut self) -> String {
         let content = std::mem::take(&mut self.streaming_text);
+        self.refresh_split_view_if_needed();
         self.streaming_md_renderer.borrow_mut().reset();
         crate::tui::mermaid::clear_streaming_preview_diagram();
         content
@@ -1519,6 +1522,7 @@ impl App {
     pub(super) fn commit_pending_streaming_assistant_message(&mut self) -> bool {
         if let Some(chunk) = self.stream_buffer.flush() {
             self.streaming_text.push_str(&chunk);
+            self.refresh_split_view_if_needed();
         }
 
         if self.streaming_text.is_empty() {
@@ -1579,6 +1583,9 @@ impl App {
             }
             "observe" => {
                 "`/observe`\nToggle transient observe mode for the side panel.\n\n`/observe on`\nEnable observe mode and focus the observe page.\n\n`/observe off`\nDisable observe mode.\n\n`/observe status`\nShow whether observe mode is enabled.\n\nObserve mode shows only the latest tool call or tool result added to context, and it is not persisted to disk."
+            }
+            "splitview" | "split-view" => {
+                "`/splitview`\nToggle a transient split view that mirrors the current chat in the side panel.\n\n`/splitview on`\nEnable split view and focus the mirrored chat page.\n\n`/splitview off`\nDisable split view.\n\n`/splitview status`\nShow whether split view is enabled.\n\nThis gives the side panel its own scroll position for the same conversation so you can read older context while keeping the main composer active."
             }
             "btw" => {
                 "`/btw <question>`\nAsk a side question about the current session and route the answer into the side panel.\n\nCurrent v1 behavior:\n- uses the side panel as the response surface\n- asks only from current session context\n- should not read files or run tools other than `side_panel`"

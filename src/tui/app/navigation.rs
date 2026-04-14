@@ -146,7 +146,13 @@ impl App {
         self.diff_pane_focus = focus;
         self.diagram_focus = false;
         if focus {
-            if self.side_panel.focused_page().is_some() {
+            if self.side_panel.focused_page_id.as_deref()
+                == Some(super::split_view::SPLIT_VIEW_PAGE_ID)
+            {
+                self.set_status_notice(
+                    "Focus: split view (j/k scroll, Esc to return, Ctrl+H back to chat)",
+                );
+            } else if self.side_panel.focused_page().is_some() {
                 self.set_status_notice(
                     "Focus: side pane (j/k scroll, h/l pan diagrams, Esc to return)",
                 );

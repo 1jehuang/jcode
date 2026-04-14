@@ -1,26 +1,24 @@
-use super::{App, DisplayMessage, ProcessingStatus};
-pub(super) use super::commands_review::{
-    ImproveCommand, ManualSubagentSpec, RefactorCommand, autojudge_status_message,
-    autoreview_status_message, build_autojudge_startup_message, build_autoreview_startup_message,
-    build_judge_startup_message, build_review_startup_message,
-    current_feedback_target_session_id, handle_autojudge_command_local,
-    handle_autoreview_command_local, handle_judge_command_local, handle_observe_command,
-    handle_review_command_local, launch_prompt_in_new_session_local,
-    maybe_trigger_autojudge_local, maybe_trigger_autoreview_local,
-    preferred_one_shot_review_override, prepare_review_spawned_session,
-    queue_review_spawn_remote, reset_current_session,
-};
 pub(super) use super::commands_improve::{
     build_improve_prompt, build_improve_resume_prompt, build_refactor_prompt,
     build_refactor_resume_prompt, format_improve_status, format_refactor_status,
     handle_improve_command_local, handle_refactor_command_local, improve_launch_notice,
-    improve_mode_for, improve_stop_notice, improve_stop_prompt,
-    parse_improve_command, parse_refactor_command, refactor_launch_notice,
-    refactor_mode_for, refactor_stop_notice, refactor_stop_prompt,
-    restore_improve_mode, session_improve_mode_for,
+    improve_mode_for, improve_stop_notice, improve_stop_prompt, parse_improve_command,
+    parse_refactor_command, refactor_launch_notice, refactor_mode_for, refactor_stop_notice,
+    refactor_stop_prompt, restore_improve_mode, session_improve_mode_for,
 };
 #[cfg(test)]
 pub(super) use super::commands_review::queue_autojudge_remote;
+pub(super) use super::commands_review::{
+    ImproveCommand, ManualSubagentSpec, RefactorCommand, autojudge_status_message,
+    autoreview_status_message, build_autojudge_startup_message, build_autoreview_startup_message,
+    build_judge_startup_message, build_review_startup_message, current_feedback_target_session_id,
+    handle_autojudge_command_local, handle_autoreview_command_local, handle_judge_command_local,
+    handle_observe_command, handle_review_command_local, launch_prompt_in_new_session_local,
+    maybe_trigger_autojudge_local, maybe_trigger_autoreview_local,
+    preferred_one_shot_review_override, prepare_review_spawned_session, queue_review_spawn_remote,
+    reset_current_session,
+};
+use super::{App, DisplayMessage, ProcessingStatus};
 use crate::bus::{Bus, BusEvent, ManualToolCompleted, ToolEvent, ToolStatus};
 use crate::id;
 use crate::message::{ContentBlock, Message, Role};
@@ -30,10 +28,6 @@ use std::time::Instant;
 
 const BTW_PAGE_ID: &str = "btw";
 pub(super) const REVIEW_PREFERRED_MODEL: &str = "gpt-5.4";
-
-
-
-
 
 pub(super) fn current_subagent_model_summary(app: &App) -> String {
     match app.session.subagent_model.as_deref() {
@@ -585,6 +579,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
     if handle_subagent_model_command(app, trimmed)
         || handle_subagent_command(app, trimmed)
         || handle_observe_command(app, trimmed)
+        || super::split_view::handle_split_view_command(app, trimmed)
         || handle_btw_command(app, trimmed)
         || handle_git_command(app, trimmed)
         || handle_catchup_command(app, trimmed)

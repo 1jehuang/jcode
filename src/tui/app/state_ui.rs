@@ -1,5 +1,5 @@
-use super::*;
 use super::state_ui_storage::infer_spawned_session_startup_hints;
+use super::*;
 use crate::tui::{TuiState, backend};
 
 pub(super) struct RestoredReloadInput {
@@ -19,6 +19,7 @@ pub(super) struct RestoredReloadInput {
     pub observe_mode_enabled: bool,
     pub observe_page_markdown: String,
     pub observe_page_updated_at_ms: u64,
+    pub split_view_enabled: bool,
 }
 
 impl App {
@@ -65,8 +66,6 @@ impl App {
         self.display_messages_version = self.display_messages_version.wrapping_add(1);
     }
 
-
-
     pub(super) fn save_input_for_reload(&self, session_id: &str) {
         let resume_prompt = self.rate_limit_pending_message.as_ref().filter(|pending| {
             !pending.auto_retry
@@ -83,6 +82,7 @@ impl App {
             && self.rate_limit_pending_message.is_none()
             && resume_prompt.is_none()
             && !self.observe_mode_enabled
+            && !self.split_view_enabled
         {
             return;
         }
@@ -141,6 +141,7 @@ impl App {
                 "observe_mode_enabled": self.observe_mode_enabled,
                 "observe_page_markdown": self.observe_page_markdown,
                 "observe_page_updated_at_ms": self.observe_page_updated_at_ms,
+                "split_view_enabled": self.split_view_enabled,
             });
             let _ = std::fs::write(&path, data.to_string());
         }
@@ -171,6 +172,7 @@ impl App {
                 "observe_mode_enabled": false,
                 "observe_page_markdown": "",
                 "observe_page_updated_at_ms": 0,
+                "split_view_enabled": false,
             });
             let _ = std::fs::write(&path, data.to_string());
         }
@@ -207,6 +209,7 @@ impl App {
                 "observe_mode_enabled": false,
                 "observe_page_markdown": "",
                 "observe_page_updated_at_ms": 0,
+                "split_view_enabled": false,
             });
             let _ = std::fs::write(&path, data.to_string());
         }
@@ -375,6 +378,10 @@ impl App {
                 .get("observe_page_updated_at_ms")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
+            let split_view_enabled = value
+                .get("split_view_enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let cursor = cursor.min(input.len());
             return Some(RestoredReloadInput {
                 input,
@@ -393,6 +400,7 @@ impl App {
                 observe_mode_enabled,
                 observe_page_markdown,
                 observe_page_updated_at_ms,
+                split_view_enabled,
             });
         }
 
@@ -416,6 +424,7 @@ impl App {
             observe_mode_enabled: false,
             observe_page_markdown: String::new(),
             observe_page_updated_at_ms: 0,
+            split_view_enabled: false,
         })
     }
 
@@ -446,8 +455,17 @@ impl App {
         &mut self,
         snapshot: crate::side_panel::SidePanelSnapshot,
     ) {
+        self.refresh_split_view_if_needed();
+        let focus_split = self.split_view_enabled
+            && self.side_panel.focused_page_id.as_deref()
+                == Some(super::split_view::SPLIT_VIEW_PAGE_ID);
         let focus_observe = self.observe_mode_enabled
             && self.side_panel.focused_page_id.as_deref() == Some(super::observe::OBSERVE_PAGE_ID);
+        let snapshot = if self.split_view_enabled {
+            self.decorate_side_panel_with_split_view(snapshot, focus_split)
+        } else {
+            snapshot
+        };
         let snapshot = if self.observe_mode_enabled {
             self.decorate_side_panel_with_observe(snapshot, focus_observe)
         } else {
@@ -480,6 +498,9 @@ impl App {
         }
         if focused_changed {
             match (focused_after.as_deref(), focused_title_after.as_deref()) {
+                (Some(super::split_view::SPLIT_VIEW_PAGE_ID), _) => {
+                    self.set_status_notice("Split view")
+                }
                 (Some(super::observe::OBSERVE_PAGE_ID), _) => self.set_status_notice("Observe"),
                 (Some("goals"), _) => self.set_status_notice("Goals"),
                 (Some(id), Some(title)) if id.starts_with("goal.") => self.set_status_notice(title),
