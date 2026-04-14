@@ -7,7 +7,7 @@
 - **Push when done** - Push all commits to remote when finishing a task or session
 - **Use fast iteration by default** - Prefer `cargo check`, targeted tests, and dev builds while iterating
 - **Rebuild when done** - When you are done making changes, build the source.
-- **Bump version for releases** - Update version in `Cargo.toml` when making releases. When cutting a new release, look at all the changes that happened since the last release and determine what the version bump should be ie patch or minor, etc. 
+- **Bump version for releases** - Update version in `Cargo.toml` when making releases. Before choosing the next version, identify the last semver tag on the current branch history, count the full delta from that tag to `HEAD`, and verify whether you are releasing `HEAD` or just the commits ahead of `origin/master`. Do not infer the release scope from only the newest few local commits. Also confirm that `Cargo.toml` matches the intended release version before tagging.
 - **Remote builds available** - Use `scripts/remote_build.sh` to offload heavy cargo work to another machine. If your build is terminated, likely is because there are not enough resources on this machine to build. use remote build in that case. Try checking the resource avaliablity on the machine before you run a build. 
 
 ## Logs

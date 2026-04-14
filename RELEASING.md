@@ -29,6 +29,54 @@ Already set up on the dev laptop (xps13):
 - **`~/.cargo/config.toml`** has the osxcross linker configured
 - **`gh` CLI** authenticated with GitHub
 
+## Before choosing a release version
+
+Always verify the release base before deciding the bump.
+
+### 1. Find the last semver tag on the current branch history
+
+Use first-parent history and match only real release tags:
+
+```bash
+git describe --tags --abbrev=0 --first-parent --match 'v[0-9]*' HEAD
+```
+
+Do not use the newest tag by date or name alone. Non-release tags such as `readme-assets` can exist, and some release tags may exist on other branches.
+
+### 2. Measure the real release delta
+
+Count the full unreleased range from that tag to `HEAD`:
+
+```bash
+git rev-list --count <last-release-tag>..HEAD
+git log --oneline <last-release-tag>..HEAD
+```
+
+If you also want to know what is only local and unpublished, check that separately:
+
+```bash
+git rev-list --count origin/master..HEAD
+git log --oneline origin/master..HEAD
+```
+
+Do not confuse "commits ahead of `origin/master`" with "commits since the last release". They answer different questions.
+
+### 3. Confirm `Cargo.toml` matches the intended release
+
+Check the version at `HEAD` and at the last release tag:
+
+```bash
+sed -n '1,8p' Cargo.toml
+git show <last-release-tag>:Cargo.toml | sed -n '1,8p'
+```
+
+If the tag history and `Cargo.toml` version have drifted, fix `Cargo.toml` before tagging the next release.
+
+### 4. Pick the bump from the full delta, not the newest few commits
+
+Patch releases should be small and incremental. If the unreleased range includes large user-visible features, broad behavior changes, or many weeks of work, prefer a minor bump.
+
+
 ### Timeline
 
 ```
