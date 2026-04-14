@@ -1497,10 +1497,15 @@ pub fn deferred_render_epoch() -> u64 {
 fn deferred_render_sender() -> &'static mpsc::Sender<DeferredRenderTask> {
     DEFERRED_RENDER_TX.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<DeferredRenderTask>();
-        std::thread::Builder::new()
+        if let Err(err) = std::thread::Builder::new()
             .name("jcode-mermaid-deferred".to_string())
             .spawn(move || deferred_render_worker(rx))
-            .expect("spawn mermaid deferred worker");
+        {
+            crate::logging::warn(&format!(
+                "Failed to spawn mermaid deferred worker, falling back to synchronous rendering: {}",
+                err
+            ));
+        }
         tx
     })
 }
@@ -1729,7 +1734,9 @@ fn render_mermaid_sized_internal(
 
     // Get cache path
     let png_path = {
-        let cache = RENDER_CACHE.lock().unwrap();
+        let cache = RENDER_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         cache.cache_path(hash, target_width_u32)
     };
     let png_path_clone = png_path.clone();
@@ -1885,7 +1892,9 @@ fn render_mermaid_sized_internal(
 
     // Cache the result
     {
-        let mut cache = RENDER_CACHE.lock().unwrap();
+        let mut cache = RENDER_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         cache.insert(
             hash,
             CachedDiagram {
@@ -2071,7 +2080,9 @@ pub fn render_image_widget(
 
     // Try to render from existing state - single lock for the whole operation
     {
-        let mut state = IMAGE_STATE.lock().unwrap();
+        let mut state = IMAGE_STATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let needs_reset = state
             .get(&hash)
             .map(|s| {
@@ -2154,7 +2165,9 @@ pub fn render_image_widget(
         }
         let protocol = picker.new_resize_protocol(img);
 
-        let mut state = IMAGE_STATE.lock().unwrap();
+        let mut state = IMAGE_STATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.insert(
             hash,
             ImageState {
@@ -2290,7 +2303,9 @@ fn render_image_widget_fit_inner(
     };
 
     {
-        let mut state = IMAGE_STATE.lock().unwrap();
+        let mut state = IMAGE_STATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let target_mode = if scale_up {
             ResizeMode::Scale
         } else {
@@ -2375,7 +2390,9 @@ fn render_image_widget_fit_inner(
         };
         let protocol = picker.new_resize_protocol(img);
 
-        let mut state = IMAGE_STATE.lock().unwrap();
+        let mut state = IMAGE_STATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.insert(
             hash,
             ImageState {
@@ -2430,8 +2447,6 @@ fn kitty_is_tmux() -> bool {
 }
 
 fn kitty_transmit_virtual(img: &DynamicImage, id: u32) -> String {
-    use std::fmt::Write;
-
     let (w, h) = (img.width(), img.height());
     let img_rgba8 = img.to_rgba8();
     let bytes = img_rgba8.as_raw();
@@ -2448,21 +2463,19 @@ fn kitty_transmit_virtual(img: &DynamicImage, id: u32) -> String {
         match i {
             0 => {
                 let more = if chunk_count > 1 { 1 } else { 0 };
-                write!(
-                    data,
+                data.push_str(&format!(
                     "_Gq=2,i={id},a=T,U=1,f=32,t=d,s={w},v={h},m={more};{payload}"
-                )
-                .unwrap();
+                ));
             }
             n if n + 1 == chunk_count => {
-                write!(data, "_Gq=2,m=0;{payload}").unwrap();
+                data.push_str(&format!("_Gq=2,m=0;{payload}"));
             }
             _ => {
-                write!(data, "_Gq=2,m=1;{payload}").unwrap();
+                data.push_str(&format!("_Gq=2,m=1;{payload}"));
             }
         }
         data.push_str(escape);
-        write!(data, "\\").unwrap();
+        data.push('\\');
     }
     data.push_str(end);
 
@@ -2560,8 +2573,6 @@ fn render_kitty_virtual_viewport(
     visible_width: u16,
     visible_height: u16,
 ) -> bool {
-    use std::fmt::Write;
-
     if visible_width == 0 || visible_height == 0 {
         return true;
     }
@@ -2624,7 +2635,7 @@ fn render_kitty_virtual_viewport(
                 }
             }
         }
-        write!(symbol, "\x1b[u\x1b[{right}C\x1b[{down}B").unwrap();
+        symbol.push_str(&format!("\x1b[u\x1b[{right}C\x1b[{down}B"));
         if let Some(cell) = buf.cell_mut((area.left(), y)) {
             cell.set_symbol(&symbol);
         }
@@ -3096,7 +3107,9 @@ pub fn render_image_widget_viewport(
     }
 
     {
-        let mut state = IMAGE_STATE.lock().unwrap();
+        let mut state = IMAGE_STATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let needs_reset = state
             .get(&hash)
             .map(|s| {
@@ -3133,7 +3146,9 @@ pub fn render_image_widget_viewport(
     }
     let protocol = picker.new_resize_protocol(cropped);
 
-    let mut state = IMAGE_STATE.lock().unwrap();
+    let mut state = IMAGE_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     state.insert(
         hash,
         ImageState {
