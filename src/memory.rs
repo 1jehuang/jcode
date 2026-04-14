@@ -1255,14 +1255,32 @@ impl MemoryManager {
             return Ok(Vec::new());
         }
 
-        let emb_refs: Vec<&[f32]> = entries
+        let mut filtered_entries = Vec::with_capacity(entries.len());
+        let mut skipped_missing_embeddings = 0usize;
+        for entry in entries {
+            if entry.embedding.is_some() {
+                filtered_entries.push(entry);
+            } else {
+                skipped_missing_embeddings += 1;
+            }
+        }
+        if skipped_missing_embeddings > 0 {
+            crate::logging::warn(&format!(
+                "Skipped {} retrieval candidate(s) without embeddings during similarity scoring",
+                skipped_missing_embeddings
+            ));
+        }
+        if filtered_entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let emb_refs: Vec<&[f32]> = filtered_entries
             .iter()
-            .map(|e| e.embedding.as_ref().unwrap().as_slice())
+            .filter_map(|entry| entry.embedding.as_deref())
             .collect();
         let scores = crate::embedding::batch_cosine_similarity(query_embedding, &emb_refs);
 
         let scored = top_k_by_score(
-            entries
+            filtered_entries
                 .into_iter()
                 .zip(scores)
                 .filter(|(_, sim)| *sim >= threshold),

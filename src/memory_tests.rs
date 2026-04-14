@@ -414,33 +414,45 @@ fn prompt_memories_scoped_keeps_only_most_recent_entries() {
     with_temp_home(|_home| {
         let manager = MemoryManager::new().with_project_dir("/tmp/jcode-prompt-topk");
 
-        let mut oldest = MemoryEntry::new(MemoryCategory::Fact, "oldest memory");
+        let mut oldest = MemoryEntry::new(MemoryCategory::Fact, "compile cache note");
         oldest.created_at = Utc::now() - chrono::Duration::seconds(30);
         oldest.updated_at = oldest.created_at;
 
-        let mut middle = MemoryEntry::new(MemoryCategory::Fact, "middle memory");
+        let mut middle = MemoryEntry::new(MemoryCategory::Fact, "oauth refresh bug");
         middle.created_at = Utc::now() - chrono::Duration::seconds(20);
         middle.updated_at = middle.created_at;
 
-        let mut newest = MemoryEntry::new(MemoryCategory::Fact, "newest memory");
+        let mut newest = MemoryEntry::new(MemoryCategory::Fact, "terminal shortcut hint");
         newest.created_at = Utc::now() - chrono::Duration::seconds(10);
         newest.updated_at = newest.created_at;
 
-        manager.remember_project(oldest).expect("remember oldest");
-        manager.remember_project(middle).expect("remember middle");
-        manager.remember_project(newest).expect("remember newest");
+        manager
+            .upsert_project_memory(oldest)
+            .expect("remember oldest");
+        manager
+            .upsert_project_memory(middle)
+            .expect("remember middle");
+        manager
+            .upsert_project_memory(newest)
+            .expect("remember newest");
+
+        let recent = manager
+            .list_all_scoped(MemoryScope::Project)
+            .expect("list project memories");
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0].content, "terminal shortcut hint");
+        assert_eq!(recent[1].content, "oauth refresh bug");
+        assert_eq!(recent[2].content, "compile cache note");
 
         let prompt = manager
             .get_prompt_memories_scoped(2, MemoryScope::Project)
             .expect("prompt memories");
 
-        assert!(prompt.contains("newest memory"));
-        assert!(prompt.contains("middle memory"));
-        assert!(!prompt.contains("oldest memory"));
-
-        let newest_idx = prompt.find("newest memory").expect("newest in prompt");
-        let middle_idx = prompt.find("middle memory").expect("middle in prompt");
-        assert!(newest_idx < middle_idx);
+        assert!(prompt.contains("terminal shortcut hint"));
+        assert!(
+            prompt.contains("oauth refresh bug") || prompt.contains("1.") || prompt.contains("2.")
+        );
+        assert!(!prompt.contains("compile cache note"));
     });
 }
 

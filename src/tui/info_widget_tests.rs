@@ -122,7 +122,7 @@ fn memory_widget_renders_current_cycle_activity() {
         ..Default::default()
     };
 
-    let text = render_memory_widget(&data, Rect::new(0, 0, 40, 7))
+    let text = render_memory_widget(&data, Rect::new(0, 0, 40, 8))
         .iter()
         .flat_map(|line| line.spans.iter())
         .map(|span| span.content.as_ref())

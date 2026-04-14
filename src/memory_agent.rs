@@ -818,10 +818,17 @@ impl MemoryAgent {
                             if let Ok(mut graph) = memory_manager.load_project_graph()
                                 && graph.get_memory(&existing_id).is_some()
                             {
-                                let strength = {
-                                    let entry = graph.get_memory_mut(&existing_id).unwrap();
+                                let strength = if let Some(entry) =
+                                    graph.get_memory_mut(&existing_id)
+                                {
                                     entry.reinforce("incremental", 0);
                                     entry.strength
+                                } else {
+                                    crate::logging::warn(&format!(
+                                        "Expected project memory {} during reinforcement, but it disappeared before update",
+                                        existing_id
+                                    ));
+                                    continue;
                                 };
                                 if memory_manager.save_project_graph(&graph).is_ok() {
                                     did_reinforce = true;
@@ -836,12 +843,16 @@ impl MemoryAgent {
                                 && let Ok(mut graph) = memory_manager.load_global_graph()
                                 && graph.get_memory(&existing_id).is_some()
                             {
-                                graph
-                                    .get_memory_mut(&existing_id)
-                                    .unwrap()
-                                    .reinforce("incremental", 0);
-                                let _ = memory_manager.save_global_graph(&graph);
-                                did_reinforce = true;
+                                if let Some(entry) = graph.get_memory_mut(&existing_id) {
+                                    entry.reinforce("incremental", 0);
+                                    let _ = memory_manager.save_global_graph(&graph);
+                                    did_reinforce = true;
+                                } else {
+                                    crate::logging::warn(&format!(
+                                        "Expected global memory {} during reinforcement, but it disappeared before update",
+                                        existing_id
+                                    ));
+                                }
                             }
 
                             if did_reinforce {

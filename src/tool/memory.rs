@@ -124,8 +124,12 @@ impl Tool for MemoryTool {
                 let content = input
                     .content
                     .ok_or_else(|| anyhow::anyhow!("content required"))?;
-                let category: MemoryCategory =
-                    input.category.as_deref().unwrap_or("fact").parse().unwrap();
+                let category: MemoryCategory = input
+                    .category
+                    .as_deref()
+                    .unwrap_or("fact")
+                    .parse()
+                    .map_err(|err| anyhow::anyhow!("invalid memory category: {}", err))?;
                 let scope = input.scope.as_deref().unwrap_or("project");
                 memory::set_state(MemoryState::ToolAction {
                     action: "remember".into(),

@@ -123,8 +123,10 @@ fn memory_recent_done(activity: &MemoryActivity) -> bool {
 }
 
 fn memory_should_render_pipeline(activity: &MemoryActivity) -> bool {
-    activity.pipeline.is_some()
-        && (!matches!(activity.state, MemoryState::Idle) || memory_recent_done(activity))
+    if activity.pipeline.is_some() {
+        return !matches!(activity.state, MemoryState::Idle) || memory_recent_done(activity);
+    }
+    activity.is_processing()
 }
 
 fn memory_compact_summary(info: &MemoryInfo) -> String {
