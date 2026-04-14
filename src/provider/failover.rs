@@ -55,6 +55,29 @@ impl FailoverDecision {
 }
 
 impl MultiProvider {
+    pub(super) fn provider_is_configured(&self, provider: ActiveProvider) -> bool {
+        match provider {
+            ActiveProvider::Claude => self.has_claude_runtime(),
+            ActiveProvider::OpenAI => self.openai_provider().is_some(),
+            ActiveProvider::Copilot => self.copilot_api.read().unwrap().is_some(),
+            ActiveProvider::Gemini => self.gemini_provider().is_some(),
+            ActiveProvider::Cursor => self.cursor.read().unwrap().is_some(),
+            ActiveProvider::OpenRouter => self.openrouter.read().unwrap().is_some(),
+        }
+    }
+
+    pub(super) fn provider_precheck_unavailable_reason(
+        &self,
+        provider: ActiveProvider,
+    ) -> Option<String> {
+        match provider {
+            ActiveProvider::Claude if self.is_claude_usage_exhausted() => {
+                Some(crate::provider::account_failover::usage_exhausted_reason(provider))
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn fallback_sequence_for(
         active: ActiveProvider,
         forced_provider: Option<ActiveProvider>,
@@ -243,5 +266,27 @@ impl MultiProvider {
         }
 
         FailoverDecision::None
+    }
+
+    pub(super) fn additional_no_provider_guidance(&self) -> Vec<String> {
+        [ActiveProvider::Claude, ActiveProvider::OpenAI]
+            .into_iter()
+            .filter_map(crate::provider::account_failover::account_switch_guidance)
+            .collect()
+    }
+
+    pub(super) fn no_provider_available_error(&self, notes: &[String]) -> anyhow::Error {
+        let mut msg = "No tokens/providers left: no usable provider right now. Anthropic/OpenAI usage may be exhausted and GitHub Copilot is not authenticated or currently unavailable.".to_string();
+        if !notes.is_empty() {
+            msg.push_str(" Details: ");
+            msg.push_str(&notes.join(" | "));
+        }
+        let extra_guidance = self.additional_no_provider_guidance();
+        if !extra_guidance.is_empty() {
+            msg.push(' ');
+            msg.push_str(&extra_guidance.join(" "));
+        }
+        msg.push_str(" Use `/usage` to check limits and `/login <provider>` to re-authenticate.");
+        anyhow::anyhow!(msg)
     }
 }

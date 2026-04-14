@@ -20,10 +20,9 @@ mod startup;
 use crate::auth;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
 use account_failover::{
-    account_switch_guidance, account_usage_probe, active_account_label_for_provider,
-    maybe_annotate_limit_summary, same_provider_account_candidates,
-    same_provider_account_failover_enabled, set_account_override_for_provider,
-    usage_exhausted_reason,
+    account_usage_probe, active_account_label_for_provider, maybe_annotate_limit_summary,
+    same_provider_account_candidates, same_provider_account_failover_enabled,
+    set_account_override_for_provider,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -538,26 +537,6 @@ impl MultiProvider {
         });
     }
 
-    fn provider_is_configured(&self, provider: ActiveProvider) -> bool {
-        match provider {
-            ActiveProvider::Claude => self.has_claude_runtime(),
-            ActiveProvider::OpenAI => self.openai_provider().is_some(),
-            ActiveProvider::Copilot => self.copilot_api.read().unwrap().is_some(),
-            ActiveProvider::Gemini => self.gemini_provider().is_some(),
-            ActiveProvider::Cursor => self.cursor.read().unwrap().is_some(),
-            ActiveProvider::OpenRouter => self.openrouter.read().unwrap().is_some(),
-        }
-    }
-
-    fn provider_precheck_unavailable_reason(&self, provider: ActiveProvider) -> Option<String> {
-        match provider {
-            ActiveProvider::Claude if self.is_claude_usage_exhausted() => {
-                Some(usage_exhausted_reason(provider))
-            }
-            _ => None,
-        }
-    }
-
     async fn invalidate_provider_credentials_for_account_switch(&self, provider: ActiveProvider) {
         match provider {
             ActiveProvider::Claude => {
@@ -688,31 +667,9 @@ impl MultiProvider {
         Ok(None)
     }
 
-    fn additional_no_provider_guidance(&self) -> Vec<String> {
-        [ActiveProvider::Claude, ActiveProvider::OpenAI]
-            .into_iter()
-            .filter_map(account_switch_guidance)
-            .collect()
-    }
-
     #[cfg(test)]
     fn same_provider_account_candidates(provider: ActiveProvider) -> Vec<String> {
         account_failover::same_provider_account_candidates(provider)
-    }
-
-    fn no_provider_available_error(&self, notes: &[String]) -> anyhow::Error {
-        let mut msg = "No tokens/providers left: no usable provider right now. Anthropic/OpenAI usage may be exhausted and GitHub Copilot is not authenticated or currently unavailable.".to_string();
-        if !notes.is_empty() {
-            msg.push_str(" Details: ");
-            msg.push_str(&notes.join(" | "));
-        }
-        let extra_guidance = self.additional_no_provider_guidance();
-        if !extra_guidance.is_empty() {
-            msg.push(' ');
-            msg.push_str(&extra_guidance.join(" "));
-        }
-        msg.push_str(" Use `/usage` to check limits and `/login <provider>` to re-authenticate.");
-        anyhow::anyhow!(msg)
     }
 
     async fn complete_with_failover(
