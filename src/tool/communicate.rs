@@ -350,14 +350,42 @@ impl Tool for CommunicateTool {
                     "type": "string",
                     "enum": ["agent", "coordinator", "worktree_manager"]
                 },
+                "working_dir": {
+                    "type": "string",
+                    "description": "Optional working directory for spawn."
+                },
                 "prompt": {
                     "type": "string",
                     "description": "Preferred for spawn. Initial task/instructions for the new agent. Spawning without prompt usually creates an idle agent that needs follow-up assignment."
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional max items for summary-style reads."
                 },
                 "task_id": { "type": "string" },
                 "session_ids": {
                     "type": "array",
                     "items": {"type": "string"}
+                },
+                "target_status": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional completion statuses for await_members. Defaults to ready/completed/stopped/failed."
+                },
+                "timeout_minutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional timeout for await_members."
+                },
+                "wake": {
+                    "type": "boolean",
+                    "description": "Optional wake hint for messages."
+                },
+                "delivery": {
+                    "type": "string",
+                    "enum": ["notify", "interrupt", "wake"],
+                    "description": "Optional delivery mode for dm/channel messaging."
                 },
                 "plan_items": {
                     "type": "array",
@@ -945,7 +973,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_only_advertises_core_swarm_fields() {
+    fn schema_advertises_supported_swarm_fields() {
         let schema = CommunicateTool::new().parameters_schema();
         let props = schema["properties"]
             .as_object()
@@ -962,16 +990,17 @@ mod tests {
         assert!(props.contains_key("target_session"));
         assert!(props.contains_key("role"));
         assert!(props.contains_key("prompt"));
+        assert!(props.contains_key("working_dir"));
+        assert!(props.contains_key("limit"));
         assert!(props.contains_key("task_id"));
         assert!(props.contains_key("session_ids"));
+        assert!(props.contains_key("target_status"));
+        assert!(props.contains_key("timeout_minutes"));
+        assert!(props.contains_key("wake"));
+        assert!(props.contains_key("delivery"));
         assert!(props.contains_key("plan_items"));
-        assert!(!props.contains_key("wake"));
-        assert!(!props.contains_key("delivery"));
-        assert!(!props.contains_key("working_dir"));
         assert!(!props.contains_key("initial_message"));
-        assert!(!props.contains_key("limit"));
-        assert!(!props.contains_key("target_status"));
-        assert!(!props.contains_key("timeout_minutes"));
+        assert_eq!(props["delivery"]["enum"], json!(["notify", "interrupt", "wake"]));
         assert_eq!(
             props["plan_items"]["items"]["additionalProperties"],
             json!(true)
