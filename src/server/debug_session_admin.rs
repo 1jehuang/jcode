@@ -86,6 +86,7 @@ pub(super) async fn maybe_handle_session_admin_command(
                 selfdev_requested,
                 None,
                 mcp_pool,
+                None,
             )
             .await?,
         ));

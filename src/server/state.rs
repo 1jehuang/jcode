@@ -68,6 +68,8 @@ pub struct SwarmMember {
     pub detail: Option<String>,
     /// Friendly name like "fox"
     pub friendly_name: Option<String>,
+    /// Session that should receive direct completion report-back for this member, if any.
+    pub report_back_to_session_id: Option<String>,
     /// Role: "agent", "coordinator", "worktree_manager"
     pub role: String,
     /// When this member joined the swarm

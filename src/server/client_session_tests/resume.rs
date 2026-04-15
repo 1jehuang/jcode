@@ -754,6 +754,7 @@ async fn handle_resume_session_registers_live_events_before_history_replay() -> 
             status: "ready".to_string(),
             detail: None,
             friendly_name: Some("restore".to_string()),
+            report_back_to_session_id: None,
             role: "agent".to_string(),
             joined_at: now,
             last_status_change: now,

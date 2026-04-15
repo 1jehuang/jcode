@@ -49,7 +49,12 @@ fn session_display_suffix(session_id: &str) -> &str {
 
 fn dm_target_label(session_id: &str, member: Option<&SwarmMember>) -> String {
     if let Some(name) = member.and_then(|member| member.friendly_name.as_deref()) {
-        format!("{} [{}] ({})", name, session_display_suffix(session_id), session_id)
+        format!(
+            "{} [{}] ({})",
+            name,
+            session_display_suffix(session_id),
+            session_id
+        )
     } else {
         session_id.to_string()
     }
@@ -894,6 +899,7 @@ mod tests {
                     status: "ready".to_string(),
                     detail: None,
                     friendly_name: Some("falcon".to_string()),
+                    report_back_to_session_id: None,
                     role: "coordinator".to_string(),
                     joined_at: Instant::now(),
                     last_status_change: Instant::now(),
@@ -912,6 +918,7 @@ mod tests {
                     status: "ready".to_string(),
                     detail: None,
                     friendly_name: Some("bear".to_string()),
+                    report_back_to_session_id: None,
                     role: "agent".to_string(),
                     joined_at: Instant::now(),
                     last_status_change: Instant::now(),
@@ -1042,6 +1049,7 @@ mod tests {
                     status: "ready".to_string(),
                     detail: None,
                     friendly_name: Some("falcon".to_string()),
+                    report_back_to_session_id: None,
                     role: "coordinator".to_string(),
                     joined_at: Instant::now(),
                     last_status_change: Instant::now(),
@@ -1060,6 +1068,7 @@ mod tests {
                     status: "ready".to_string(),
                     detail: None,
                     friendly_name: Some("bear".to_string()),
+                    report_back_to_session_id: None,
                     role: "agent".to_string(),
                     joined_at: Instant::now(),
                     last_status_change: Instant::now(),
@@ -1175,6 +1184,7 @@ mod tests {
                     status: "ready".to_string(),
                     detail: None,
                     friendly_name: Some("falcon".to_string()),
+                    report_back_to_session_id: None,
                     role: "coordinator".to_string(),
                     joined_at: Instant::now(),
                     last_status_change: Instant::now(),
@@ -1193,6 +1203,7 @@ mod tests {
                     status: "running".to_string(),
                     detail: Some("working on tests".to_string()),
                     friendly_name: Some("bear".to_string()),
+                    report_back_to_session_id: None,
                     role: "agent".to_string(),
                     joined_at: Instant::now(),
                     last_status_change: Instant::now(),
@@ -1262,6 +1273,7 @@ mod tests {
                     status: "ready".to_string(),
                     detail: None,
                     friendly_name: Some("falcon".to_string()),
+                    report_back_to_session_id: None,
                     role: "coordinator".to_string(),
                     joined_at: Instant::now(),
                     last_status_change: Instant::now(),
@@ -1280,6 +1292,7 @@ mod tests {
                     status: "ready".to_string(),
                     detail: None,
                     friendly_name: Some("bear".to_string()),
+                    report_back_to_session_id: None,
                     role: "agent".to_string(),
                     joined_at: Instant::now(),
                     last_status_change: Instant::now(),
@@ -1382,6 +1395,7 @@ mod tests {
                     status: "ready".to_string(),
                     detail: None,
                     friendly_name: Some("falcon".to_string()),
+                    report_back_to_session_id: None,
                     role: "coordinator".to_string(),
                     joined_at: Instant::now(),
                     last_status_change: Instant::now(),
@@ -1400,6 +1414,7 @@ mod tests {
                     status: "ready".to_string(),
                     detail: None,
                     friendly_name: Some("bear".to_string()),
+                    report_back_to_session_id: None,
                     role: "agent".to_string(),
                     joined_at: Instant::now(),
                     last_status_change: Instant::now(),
@@ -1418,6 +1433,7 @@ mod tests {
                     status: "ready".to_string(),
                     detail: None,
                     friendly_name: Some("bear".to_string()),
+                    report_back_to_session_id: None,
                     role: "agent".to_string(),
                     joined_at: Instant::now(),
                     last_status_change: Instant::now(),

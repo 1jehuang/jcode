@@ -31,6 +31,7 @@ pub(super) async fn create_headless_session(
     selfdev_requested: bool,
     model_override: Option<String>,
     mcp_pool: Option<Arc<crate::mcp::SharedMcpPool>>,
+    report_back_to_session_id: Option<String>,
 ) -> Result<String> {
     let memory_enabled = crate::config::config().features.memory;
     let swarm_enabled = crate::config::config().features.swarm;
@@ -145,6 +146,7 @@ pub(super) async fn create_headless_session(
                 status: "ready".to_string(),
                 detail: None,
                 friendly_name: Some(friendly_name.clone()),
+                report_back_to_session_id: report_back_to_session_id.clone(),
                 role: "agent".to_string(),
                 joined_at: now,
                 last_status_change: now,

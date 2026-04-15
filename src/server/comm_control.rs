@@ -781,6 +781,7 @@ mod tests {
             status: status.to_string(),
             detail: None,
             friendly_name: Some(session_id.to_string()),
+            report_back_to_session_id: None,
             role: "agent".to_string(),
             joined_at: Instant::now(),
             last_status_change: Instant::now(),

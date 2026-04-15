@@ -121,6 +121,7 @@ async fn register_visible_spawned_member(
     swarm_id: &str,
     working_dir: Option<&str>,
     has_startup_message: bool,
+    report_back_to_session_id: Option<&str>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
     event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
@@ -152,6 +153,7 @@ async fn register_visible_spawned_member(
                 status,
                 detail,
                 friendly_name: Some(friendly_name),
+                report_back_to_session_id: report_back_to_session_id.map(str::to_string),
                 role: "agent".to_string(),
                 joined_at: now,
                 last_status_change: now,
@@ -275,6 +277,7 @@ pub(super) async fn handle_comm_spawn(
                 coordinator_is_canary,
                 spawn_model.clone(),
                 Some(Arc::clone(mcp_pool)),
+                Some(req_session_id.clone()),
             )
             .await
             .and_then(|result_json| {
@@ -319,6 +322,7 @@ pub(super) async fn handle_comm_spawn(
                     &swarm_id,
                     working_dir.as_deref(),
                     startup_message.is_some(),
+                    Some(&req_session_id),
                     swarm_members,
                     swarms_by_id,
                     event_history,
@@ -715,6 +719,7 @@ mod tests {
                 status: "ready".to_string(),
                 detail: None,
                 friendly_name: Some(session_id.to_string()),
+                report_back_to_session_id: None,
                 role: role.to_string(),
                 joined_at: Instant::now(),
                 last_status_change: Instant::now(),
@@ -737,6 +742,7 @@ mod tests {
             "swarm-1",
             Some("/tmp/worktree"),
             true,
+            Some("owner"),
             &swarm_members,
             &swarms_by_id,
             &event_history,
@@ -861,9 +867,7 @@ mod tests {
             None,
             false,
             Some("Do the thing."),
-            |_session_id, _cwd: &std::path::Path, _selfdev| {
-                Err(anyhow::anyhow!("launch failed"))
-            },
+            |_session_id, _cwd: &std::path::Path, _selfdev| Err(anyhow::anyhow!("launch failed")),
         )
         .expect_err("visible spawn preparation should surface launch error");
 

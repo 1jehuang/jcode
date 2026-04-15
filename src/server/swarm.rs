@@ -571,7 +571,15 @@ pub(super) async fn update_member_status(
     event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
     swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
 ) {
-    let (swarm_id, agent_name, member_changed, status_changed, old_status, is_headless) = {
+    let (
+        swarm_id,
+        agent_name,
+        member_changed,
+        status_changed,
+        old_status,
+        is_headless,
+        report_back_to_session_id,
+    ) = {
         let mut members = swarm_members.write().await;
         if let Some(member) = members.get_mut(session_id) {
             let previous_status = member.status.clone();
@@ -583,6 +591,7 @@ pub(super) async fn update_member_status(
             }
             let name = member.friendly_name.clone();
             let is_headless = member.is_headless;
+            let report_back_to_session_id = member.report_back_to_session_id.clone();
             member.status = status.to_string();
             member.detail = detail;
             (
@@ -592,9 +601,10 @@ pub(super) async fn update_member_status(
                 status_changed,
                 previous_status,
                 is_headless,
+                report_back_to_session_id,
             )
         } else {
-            (None, None, false, false, String::new(), false)
+            (None, None, false, false, String::new(), false, None)
         }
     };
     if let Some(ref id) = swarm_id {
@@ -625,9 +635,13 @@ pub(super) async fn update_member_status(
 
         let should_notify_coordinator = status_changed
             && ((status == "completed")
-                || (is_headless && old_status == "running" && matches!(status, "ready" | "failed" | "stopped")));
+                || (is_headless
+                    && old_status == "running"
+                    && matches!(status, "ready" | "failed" | "stopped")));
         if should_notify_coordinator {
-            let coordinator_id = {
+            let fallback_coordinator_id = if report_back_to_session_id.as_deref() == Some(session_id) {
+                None
+            } else {
                 let members = swarm_members.read().await;
                 members
                     .values()
@@ -638,7 +652,11 @@ pub(super) async fn update_member_status(
                     })
                     .map(|m| m.session_id.clone())
             };
-            if let Some(coord_id) = coordinator_id {
+            let recipient_session_id = report_back_to_session_id
+                .clone()
+                .filter(|owner_id| owner_id != session_id)
+                .or(fallback_coordinator_id);
+            if let Some(recipient_session_id) = recipient_session_id {
                 let name = agent_name
                     .as_deref()
                     .unwrap_or(&session_id[..8.min(session_id.len())]);
@@ -662,7 +680,7 @@ pub(super) async fn update_member_status(
                 };
                 let _ = fanout_session_event(
                     swarm_members,
-                    &coord_id,
+                    &recipient_session_id,
                     ServerEvent::Notification {
                         from_session: session_id.to_string(),
                         from_name: agent_name.clone(),
@@ -908,6 +926,7 @@ mod tests {
                 status: "ready".to_string(),
                 detail: None,
                 friendly_name: Some(session_id.to_string()),
+                report_back_to_session_id: None,
                 role: role.to_string(),
                 joined_at: Instant::now(),
                 last_status_change: Instant::now(),
@@ -1038,6 +1057,7 @@ mod tests {
         let (mut worker, _worker_rx) = swarm_member("worker", "agent", true);
         worker.status = "running".to_string();
         worker.detail = Some("doing task".to_string());
+        worker.report_back_to_session_id = Some("coord".to_string());
         {
             let mut members = swarm_members.write().await;
             members.insert("coord".to_string(), coord);
@@ -1059,6 +1079,67 @@ mod tests {
         let events: Vec<_> = std::iter::from_fn(|| coord_rx.try_recv().ok()).collect();
         assert!(events.iter().any(|event| {
             matches!(
+                event,
+                ServerEvent::Notification {
+                    notification_type: NotificationType::Message { .. },
+                    message,
+                    ..
+                } if message.contains("finished their work and is ready for more")
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn update_member_status_prefers_explicit_report_back_owner_over_coordinator() {
+        let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+            "swarm-1".to_string(),
+            HashSet::from([
+                "coord".to_string(),
+                "owner".to_string(),
+                "worker".to_string(),
+            ]),
+        )])));
+
+        let (coord, mut coord_rx) = swarm_member("coord", "coordinator", false);
+        let (owner, mut owner_rx) = swarm_member("owner", "agent", false);
+        let (mut worker, _worker_rx) = swarm_member("worker", "agent", true);
+        worker.status = "running".to_string();
+        worker.detail = Some("doing task".to_string());
+        worker.report_back_to_session_id = Some("owner".to_string());
+        {
+            let mut members = swarm_members.write().await;
+            members.insert("coord".to_string(), coord);
+            members.insert("owner".to_string(), owner);
+            members.insert("worker".to_string(), worker);
+        }
+
+        update_member_status(
+            "worker",
+            "ready",
+            None,
+            &swarm_members,
+            &swarms_by_id,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let owner_events: Vec<_> = std::iter::from_fn(|| owner_rx.try_recv().ok()).collect();
+        assert!(owner_events.iter().any(|event| {
+            matches!(
+                event,
+                ServerEvent::Notification {
+                    notification_type: NotificationType::Message { .. },
+                    message,
+                    ..
+                } if message.contains("finished their work and is ready for more")
+            )
+        }));
+        let coord_events: Vec<_> = std::iter::from_fn(|| coord_rx.try_recv().ok()).collect();
+        assert!(coord_events.iter().all(|event| {
+            !matches!(
                 event,
                 ServerEvent::Notification {
                     notification_type: NotificationType::Message { .. },
