@@ -48,6 +48,7 @@ pub mod provider_catalog;
 pub mod registry;
 pub mod replay;
 pub mod restart_snapshot;
+pub mod runtime_memory_log;
 pub mod safety;
 pub mod server;
 pub mod session;

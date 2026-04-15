@@ -50,6 +50,11 @@ use crate::bus::{Bus, BusEvent, FileOp};
 use crate::message::format_background_task_notification_markdown;
 use crate::protocol::{NotificationType, ServerEvent};
 use crate::provider::Provider;
+use crate::runtime_memory_log::{
+    ServerRuntimeMemoryBackground, ServerRuntimeMemoryClients, ServerRuntimeMemoryEmbeddings,
+    ServerRuntimeMemorySample, ServerRuntimeMemoryServer, ServerRuntimeMemorySessions,
+    ServerRuntimeMemoryTopSession,
+};
 use crate::transport::Listener;
 use anyhow::Result;
 use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource};
@@ -179,6 +184,152 @@ async fn dispatch_background_task_completion(
             "Failed to deliver background task completion to session {}",
             task.session_id
         ));
+    }
+}
+
+fn json_u64_field(value: Option<&serde_json::Value>, field: &str) -> u64 {
+    value
+        .and_then(|value| value.get(field))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0)
+}
+
+fn json_bool_field(value: Option<&serde_json::Value>, field: &str) -> bool {
+    value
+        .and_then(|value| value.get(field))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+async fn capture_runtime_memory_sample(
+    identity: &ServerIdentity,
+    sessions: &SessionAgents,
+    client_count: &Arc<RwLock<usize>>,
+    server_start_time: Instant,
+    source: &str,
+) -> ServerRuntimeMemorySample {
+    let now = chrono::Utc::now();
+    let process = crate::process_memory::snapshot_with_source(format!("server:runtime-log:{source}"));
+    let connected_count = *client_count.read().await;
+    let background_task_count = crate::background::global().list().await.len();
+    let embedder_stats = crate::embedding::stats();
+    let embedding_model_available = crate::embedding::is_model_available();
+
+    let sessions_guard = sessions.read().await;
+    let live_count = sessions_guard.len();
+    let mut sampled_count = 0usize;
+    let mut contended_count = 0usize;
+    let mut memory_enabled_session_count = 0usize;
+    let mut total_message_count = 0u64;
+    let mut total_provider_cache_message_count = 0u64;
+    let mut total_json_bytes = 0u64;
+    let mut total_payload_text_bytes = 0u64;
+    let mut total_provider_cache_json_bytes = 0u64;
+    let mut total_tool_result_bytes = 0u64;
+    let mut total_provider_cache_tool_result_bytes = 0u64;
+    let mut total_large_blob_bytes = 0u64;
+    let mut total_provider_cache_large_blob_bytes = 0u64;
+    let mut top_sessions: Vec<ServerRuntimeMemoryTopSession> = Vec::new();
+
+    for (session_id, agent_arc) in sessions_guard.iter() {
+        let Ok(agent) = agent_arc.try_lock() else {
+            contended_count += 1;
+            continue;
+        };
+
+        sampled_count += 1;
+        let profile = agent.debug_memory_profile();
+        let session_profile = profile.get("session");
+        let totals = session_profile.and_then(|value| value.get("totals"));
+        let messages = session_profile.and_then(|value| value.get("messages"));
+        let provider_cache = session_profile.and_then(|value| value.get("provider_messages_cache"));
+        let agent_profile = profile.get("agent");
+        let memory_enabled = json_bool_field(agent_profile, "memory_enabled");
+        if memory_enabled {
+            memory_enabled_session_count += 1;
+        }
+
+        let message_count = json_u64_field(messages, "count");
+        let provider_cache_message_count = json_u64_field(provider_cache, "count");
+        let json_bytes = json_u64_field(totals, "json_bytes");
+        let payload_text_bytes = json_u64_field(totals, "payload_text_bytes");
+        let provider_cache_json_bytes = json_u64_field(totals, "provider_cache_json_bytes");
+        let tool_result_bytes = json_u64_field(totals, "canonical_tool_result_bytes");
+        let provider_cache_tool_result_bytes =
+            json_u64_field(totals, "provider_cache_tool_result_bytes");
+        let large_blob_bytes = json_u64_field(totals, "canonical_large_blob_bytes");
+        let provider_cache_large_blob_bytes =
+            json_u64_field(totals, "provider_cache_large_blob_bytes");
+
+        total_message_count += message_count;
+        total_provider_cache_message_count += provider_cache_message_count;
+        total_json_bytes += json_bytes;
+        total_payload_text_bytes += payload_text_bytes;
+        total_provider_cache_json_bytes += provider_cache_json_bytes;
+        total_tool_result_bytes += tool_result_bytes;
+        total_provider_cache_tool_result_bytes += provider_cache_tool_result_bytes;
+        total_large_blob_bytes += large_blob_bytes;
+        total_provider_cache_large_blob_bytes += provider_cache_large_blob_bytes;
+
+        top_sessions.push(ServerRuntimeMemoryTopSession {
+            session_id: session_id.clone(),
+            provider: agent.provider_name(),
+            model: agent.provider_model(),
+            memory_enabled,
+            message_count,
+            provider_cache_message_count,
+            json_bytes,
+            payload_text_bytes,
+            provider_cache_json_bytes,
+            tool_result_bytes,
+            provider_cache_tool_result_bytes,
+            large_blob_bytes,
+            provider_cache_large_blob_bytes,
+        });
+    }
+    drop(sessions_guard);
+
+    top_sessions.sort_by(|left, right| right.json_bytes.cmp(&left.json_bytes));
+    top_sessions.truncate(5);
+
+    ServerRuntimeMemorySample {
+        schema_version: 1,
+        timestamp: now.to_rfc3339(),
+        timestamp_ms: now.timestamp_millis(),
+        source: source.to_string(),
+        server: ServerRuntimeMemoryServer {
+            id: identity.id.clone(),
+            name: identity.name.clone(),
+            icon: identity.icon.clone(),
+            version: identity.version.clone(),
+            git_hash: identity.git_hash.clone(),
+            uptime_secs: server_start_time.elapsed().as_secs(),
+        },
+        process,
+        clients: ServerRuntimeMemoryClients { connected_count },
+        sessions: ServerRuntimeMemorySessions {
+            live_count,
+            sampled_count,
+            contended_count,
+            memory_enabled_session_count,
+            total_message_count,
+            total_provider_cache_message_count,
+            total_json_bytes,
+            total_payload_text_bytes,
+            total_provider_cache_json_bytes,
+            total_tool_result_bytes,
+            total_provider_cache_tool_result_bytes,
+            total_large_blob_bytes,
+            total_provider_cache_large_blob_bytes,
+            top_by_json_bytes: top_sessions,
+        },
+        background: ServerRuntimeMemoryBackground {
+            task_count: background_task_count,
+        },
+        embeddings: ServerRuntimeMemoryEmbeddings {
+            model_available: embedding_model_available,
+            stats: embedder_stats,
+        },
     }
 }
 
@@ -424,7 +575,7 @@ impl Server {
         });
     }
 
-    fn spawn_background_tasks(&self) {
+    fn spawn_background_tasks(&self, server_start_time: Instant) {
         // Preload the embedding model in background so warm startups get fast
         // memory recall. On a cold install, skip eager preload because the
         // first-time model download can make the first spawned client look hung
@@ -558,6 +709,78 @@ impl Server {
                 }
             }
         });
+
+        if crate::runtime_memory_log::server_logging_enabled() {
+            let log_identity = self.identity.clone();
+            let log_sessions = Arc::clone(&self.sessions);
+            let log_client_count = Arc::clone(&self.client_count);
+            tokio::spawn(async move {
+                match crate::runtime_memory_log::prune_old_server_logs() {
+                    Ok(removed) if removed > 0 => {
+                        crate::logging::info(&format!(
+                            "Runtime memory logging pruned {} old log files",
+                            removed
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        crate::logging::info(&format!(
+                            "Runtime memory logging could not prune old logs: {}",
+                            err
+                        ));
+                    }
+                }
+
+                let log_interval = crate::runtime_memory_log::server_logging_interval();
+                match crate::runtime_memory_log::current_server_log_path() {
+                    Ok(path) => crate::logging::info(&format!(
+                        "Runtime memory logging enabled every {}s -> {}",
+                        log_interval.as_secs(),
+                        path.display()
+                    )),
+                    Err(err) => crate::logging::info(&format!(
+                        "Runtime memory logging enabled every {}s (path unavailable: {})",
+                        log_interval.as_secs(),
+                        err
+                    )),
+                }
+
+                let startup_sample = capture_runtime_memory_sample(
+                    &log_identity,
+                    &log_sessions,
+                    &log_client_count,
+                    server_start_time,
+                    "startup",
+                )
+                .await;
+                if let Err(err) = crate::runtime_memory_log::append_server_sample(&startup_sample) {
+                    crate::logging::info(&format!(
+                        "Runtime memory logging startup sample failed: {}",
+                        err
+                    ));
+                }
+
+                let mut interval = tokio::time::interval(log_interval);
+                interval.tick().await;
+                loop {
+                    interval.tick().await;
+                    let sample = capture_runtime_memory_sample(
+                        &log_identity,
+                        &log_sessions,
+                        &log_client_count,
+                        server_start_time,
+                        "interval",
+                    )
+                    .await;
+                    if let Err(err) = crate::runtime_memory_log::append_server_sample(&sample) {
+                        crate::logging::info(&format!(
+                            "Runtime memory logging interval sample failed: {}",
+                            err
+                        ));
+                    }
+                }
+            });
+        }
 
         if debug_control_allowed() {
             crate::logging::info("Debug control enabled; idle timeout monitor disabled.");
@@ -966,15 +1189,16 @@ impl Server {
         crate::logging::info(&format!("Server listening on {:?}", self.socket_path));
         crate::logging::info(&format!("Debug socket on {:?}", self.debug_socket_path));
 
+        let server_start_time = Instant::now();
+
         self.spawn_registry_prewarm();
         let registry_info = self.build_registry_info();
-        self.spawn_background_tasks();
+        self.spawn_background_tasks(server_start_time);
 
         // Note: No default session created here - each client creates its own session
         let runtime = self.runtime();
         let main_handle = runtime.spawn_main_accept_loop(main_listener);
-        let debug_handle =
-            runtime.spawn_debug_accept_loop(debug_listener, std::time::Instant::now());
+        let debug_handle = runtime.spawn_debug_accept_loop(debug_listener, server_start_time);
 
         crate::logging::info("Accept loop tasks spawned");
 
