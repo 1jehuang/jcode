@@ -577,7 +577,7 @@ pub(super) async fn update_member_status(
         member_changed,
         status_changed,
         old_status,
-        is_headless,
+        _is_headless,
         report_back_to_session_id,
     ) = {
         let mut members = swarm_members.write().await;
@@ -635,23 +635,24 @@ pub(super) async fn update_member_status(
 
         let should_notify_coordinator = status_changed
             && ((status == "completed")
-                || (is_headless
+                || (report_back_to_session_id.is_some()
                     && old_status == "running"
                     && matches!(status, "ready" | "failed" | "stopped")));
         if should_notify_coordinator {
-            let fallback_coordinator_id = if report_back_to_session_id.as_deref() == Some(session_id) {
-                None
-            } else {
-                let members = swarm_members.read().await;
-                members
-                    .values()
-                    .find(|m| {
-                        m.swarm_id.as_deref() == Some(id)
-                            && m.role == "coordinator"
-                            && m.session_id != session_id
-                    })
-                    .map(|m| m.session_id.clone())
-            };
+            let fallback_coordinator_id =
+                if report_back_to_session_id.as_deref() == Some(session_id) {
+                    None
+                } else {
+                    let members = swarm_members.read().await;
+                    members
+                        .values()
+                        .find(|m| {
+                            m.swarm_id.as_deref() == Some(id)
+                                && m.role == "coordinator"
+                                && m.session_id != session_id
+                        })
+                        .map(|m| m.session_id.clone())
+                };
             let recipient_session_id = report_back_to_session_id
                 .clone()
                 .filter(|owner_id| owner_id != session_id)

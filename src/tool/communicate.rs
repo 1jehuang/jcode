@@ -27,8 +27,8 @@ async fn send_request_with_timeout(
     let (reader, mut writer) = stream.into_split();
 
     let request_id = request.id();
-    let deadline = tokio::time::Instant::now()
-        + timeout.unwrap_or(std::time::Duration::from_secs(30));
+    let deadline =
+        tokio::time::Instant::now() + timeout.unwrap_or(std::time::Duration::from_secs(30));
 
     let json = serde_json::to_string(&request)? + "\n";
     writer.write_all(json.as_bytes()).await?;
@@ -126,7 +126,9 @@ fn format_context_entries(entries: &[ContextEntry]) -> ToolOutput {
     }
 }
 
-fn duplicate_friendly_names<'a>(names: impl IntoIterator<Item = Option<&'a str>>) -> std::collections::HashSet<&'a str> {
+fn duplicate_friendly_names<'a>(
+    names: impl IntoIterator<Item = Option<&'a str>>,
+) -> std::collections::HashSet<&'a str> {
     let mut counts = std::collections::HashMap::<&'a str, usize>::new();
     for name in names.into_iter().flatten() {
         *counts.entry(name).or_default() += 1;
@@ -164,11 +166,8 @@ fn format_members(ctx: &ToolContext, members: &[AgentInfo]) -> ToolOutput {
     if members.is_empty() {
         ToolOutput::new("No other agents in this codebase.")
     } else {
-        let duplicate_names = duplicate_friendly_names(
-            members
-                .iter()
-                .map(|member| member.friendly_name.as_deref()),
-        );
+        let duplicate_names =
+            duplicate_friendly_names(members.iter().map(|member| member.friendly_name.as_deref()));
         let mut output = String::from("Agents in this codebase:\n\n");
         for member in members {
             let name = display_friendly_name(
@@ -259,11 +258,8 @@ fn format_awaited_members(
     };
 
     if !members.is_empty() {
-        let duplicate_names = duplicate_friendly_names(
-            members
-                .iter()
-                .map(|member| member.friendly_name.as_deref()),
-        );
+        let duplicate_names =
+            duplicate_friendly_names(members.iter().map(|member| member.friendly_name.as_deref()));
         output.push_str("\nMember statuses:\n");
         for member in members {
             let name = display_friendly_name(
@@ -1002,8 +998,8 @@ impl Tool for CommunicateTool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommunicateInput, CommunicateTool, default_await_target_statuses,
-        format_awaited_members, format_members,
+        CommunicateInput, CommunicateTool, default_await_target_statuses, format_awaited_members,
+        format_members,
     };
     use crate::message::{Message, StreamEvent, ToolDefinition};
     use crate::protocol::{AgentInfo, AwaitedMemberStatus, Request, ServerEvent, ToolCallSummary};
@@ -1019,7 +1015,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
 
     #[test]
     fn tool_is_named_swarm() {
@@ -1066,7 +1061,10 @@ mod tests {
         assert!(props.contains_key("delivery"));
         assert!(props.contains_key("plan_items"));
         assert!(!props.contains_key("initial_message"));
-        assert_eq!(props["delivery"]["enum"], json!(["notify", "interrupt", "wake"]));
+        assert_eq!(
+            props["delivery"]["enum"],
+            json!(["notify", "interrupt", "wake"])
+        );
         assert_eq!(
             props["plan_items"]["items"]["additionalProperties"],
             json!(true)
@@ -1333,7 +1331,10 @@ mod tests {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             let members = client.comm_list(requester_session).await?;
-            if members.iter().any(|member| member.session_id == target_session) {
+            if members
+                .iter()
+                .any(|member| member.session_id == target_session)
+            {
                 return Ok(members);
             }
             if tokio::time::Instant::now() >= deadline {
@@ -1515,7 +1516,9 @@ mod tests {
         let _env_lock = crate::storage::lock_test_env();
         let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
         let repo_dir = std::env::current_dir().expect("repo cwd");
+        let socket_path = runtime_dir.path().join("jcode.sock");
         let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
+        let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
         let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
 
         let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
@@ -1615,11 +1618,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn communicate_spawn_reports_completion_back_to_spawner() {
+        let _env_lock = crate::storage::lock_test_env();
+        let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
+        let repo_dir = std::env::current_dir().expect("repo cwd");
+        let socket_path = runtime_dir.path().join("jcode.sock");
+        let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
+        let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
+        let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+
+        let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
+            delay: Duration::from_millis(100),
+        });
+        let server = Arc::new(Server::new(provider));
+        let mut server_task = {
+            let server = Arc::clone(&server);
+            tokio::spawn(async move { server.run().await })
+        };
+
+        let socket_path = runtime_dir.path().join("jcode.sock");
+        wait_for_server_socket(&socket_path, &mut server_task)
+            .await
+            .expect("server socket should be ready");
+
+        let mut watcher = RawClient::connect(&socket_path)
+            .await
+            .expect("watcher should connect");
+        watcher
+            .subscribe(&repo_dir)
+            .await
+            .expect("watcher subscribe");
+
+        let watcher_session = watcher.session_id().await.expect("watcher session id");
+        let tool = CommunicateTool::new();
+        let ctx = test_ctx(&watcher_session, &repo_dir);
+
+        let spawn_output = tool
+            .execute(
+                json!({
+                    "action": "spawn",
+                    "prompt": "Reply with exactly AUTH_TEST_OK and nothing else."
+                }),
+                ctx,
+            )
+            .await
+            .expect("spawn with prompt should succeed");
+        let spawned_session = spawn_output
+            .output
+            .strip_prefix("Spawned new agent: ")
+            .expect("spawn output should include session id")
+            .trim()
+            .to_string();
+
+        watcher
+            .read_until(Duration::from_secs(15), |event| {
+                matches!(
+                    event,
+                    ServerEvent::Notification {
+                        from_session,
+                        notification_type: crate::protocol::NotificationType::Message {
+                            scope: Some(scope),
+                            channel: None,
+                        },
+                        message,
+                        ..
+                    } if from_session == &spawned_session
+                        && scope == "swarm"
+                        && message.contains("finished their work and is ready for more")
+                )
+            })
+            .await
+            .expect("spawner should receive completion report-back notification");
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
     async fn communicate_spawn_with_prompt_and_summary_work_end_to_end() {
         let _env_lock = crate::storage::lock_test_env();
         let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
         let repo_dir = std::env::current_dir().expect("repo cwd");
+        let socket_path = runtime_dir.path().join("jcode.sock");
         let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
+        let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
         let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
 
         let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
@@ -1664,7 +1745,10 @@ mod tests {
             .expect("spawn output should include session id")
             .trim()
             .to_string();
-        assert!(!spawned_session.is_empty(), "spawned session id should not be empty");
+        assert!(
+            !spawned_session.is_empty(),
+            "spawned session id should not be empty"
+        );
 
         wait_for_member_presence(&mut watcher, &watcher_session, &spawned_session)
             .await
