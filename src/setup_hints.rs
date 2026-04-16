@@ -8,6 +8,8 @@
 //! State is persisted in `~/.jcode/setup_hints.json`.
 
 use crate::storage;
+#[cfg(target_os = "macos")]
+use anyhow::Context;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 #[cfg(any(windows, target_os = "macos"))]
@@ -32,7 +34,8 @@ use macos_terminal::{
 };
 #[cfg(windows)]
 use windows_setup::{
-    create_windows_desktop_shortcut, maybe_show_windows_setup_hints, run_setup_hotkey_windows,
+    create_windows_desktop_shortcut, find_alacritty_path, maybe_show_windows_setup_hints,
+    run_setup_hotkey_windows,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -466,7 +469,7 @@ fn macos_guided_ghostty_message(current_terminal: MacTerminalKind) -> String {
 
 #[cfg(target_os = "macos")]
 fn nudge_macos_ghostty(state: &mut SetupHintsState) -> Option<String> {
-    let terminal = detect_macos_terminal();
+    let terminal = effective_macos_terminal();
     let using_ghostty = terminal == MacTerminalKind::Ghostty;
     let ghostty_installed = is_ghostty_installed();
 

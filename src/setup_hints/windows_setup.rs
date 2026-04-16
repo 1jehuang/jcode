@@ -35,7 +35,7 @@ fn is_winget_available() -> bool {
         .unwrap_or(false)
 }
 
-fn find_alacritty_path() -> Option<String> {
+pub(super) fn find_alacritty_path() -> Option<String> {
     let candidates = [
         r"C:\Program Files\Alacritty\alacritty.exe",
         r"C:\Program Files (x86)\Alacritty\alacritty.exe",
