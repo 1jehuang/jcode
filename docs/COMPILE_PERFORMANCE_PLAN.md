@@ -3,6 +3,11 @@
 This document tracks the plan to make jcode's self-dev / refactor loop much faster
 without sacrificing full-feature builds.
 
+See also:
+
+- [`REFACTORING.md`](./REFACTORING.md)
+- [`MODULAR_ARCHITECTURE_RFC.md`](./MODULAR_ARCHITECTURE_RFC.md)
+
 ## Goals
 
 - Keep full-featured builds available for normal usage and self-dev reloads.
@@ -89,6 +94,11 @@ even if they cannot reach the same fast path.
   normal release/distribution profile unchanged.
 
 ### Phase 3 — Workspace boundary design
+
+The refined layered target, dependency rules, and migration guidance live in
+[`docs/MODULAR_ARCHITECTURE_RFC.md`](MODULAR_ARCHITECTURE_RFC.md). The crate list
+below is the compile-performance-oriented destination sketch and should be read
+as compatible with that RFC, not as the only acceptable final packaging.
 
 Proposed destination layout:
 
