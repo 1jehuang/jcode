@@ -164,6 +164,18 @@ impl App {
     }
 
     fn debug_app_owned_memory_profile(&self) -> serde_json::Value {
+        let streaming_markdown_renderer =
+            self.streaming_md_renderer.borrow().debug_memory_profile();
+        let inline_view = self
+            .inline_view_state
+            .as_ref()
+            .map(|state| state.debug_memory_profile())
+            .unwrap_or_else(|| serde_json::json!({"present": false, "total_estimate_bytes": 0}));
+        let inline_interactive = self
+            .inline_interactive_state
+            .as_ref()
+            .map(|state| state.debug_memory_profile())
+            .unwrap_or_else(|| serde_json::json!({"present": false, "total_estimate_bytes": 0}));
         let pending_remote_message_bytes = self
             .rate_limit_pending_message
             .as_ref()
@@ -413,6 +425,9 @@ impl App {
             "login_picker_bytes": nested_usize(&login_picker, &["total_estimate_bytes"]),
             "account_picker_bytes": nested_usize(&account_picker, &["total_estimate_bytes"]),
             "usage_overlay_bytes": nested_usize(&usage_overlay, &["total_estimate_bytes"]),
+            "inline_view_bytes": nested_usize(&inline_view, &["total_estimate_bytes"]),
+            "inline_interactive_bytes": nested_usize(&inline_interactive, &["total_estimate_bytes"]),
+            "streaming_markdown_renderer_bytes": nested_usize(&streaming_markdown_renderer, &["total_estimate_bytes"]),
         });
 
         let total_estimate_bytes = totals
@@ -479,6 +494,11 @@ impl App {
                 "account_picker": account_picker,
                 "usage_overlay": usage_overlay,
             },
+            "inline": {
+                "view": inline_view,
+                "interactive": inline_interactive,
+            },
+            "streaming_markdown_renderer": streaming_markdown_renderer,
             "totals": totals,
             "total_estimate_bytes": total_estimate_bytes,
         })
@@ -601,6 +621,31 @@ fn build_debug_summary(payload: &serde_json::Value) -> serde_json::Value {
         (
             "app_owned_extra_bytes".to_string(),
             nested_usize(payload, &["app_owned", "total_estimate_bytes"]),
+        ),
+        (
+            "streaming_markdown_renderer_bytes".to_string(),
+            nested_usize(
+                payload,
+                &[
+                    "app_owned",
+                    "streaming_markdown_renderer",
+                    "total_estimate_bytes",
+                ],
+            ),
+        ),
+        (
+            "inline_view_bytes".to_string(),
+            nested_usize(
+                payload,
+                &["app_owned", "inline", "view", "total_estimate_bytes"],
+            ),
+        ),
+        (
+            "inline_interactive_bytes".to_string(),
+            nested_usize(
+                payload,
+                &["app_owned", "inline", "interactive", "total_estimate_bytes"],
+            ),
         ),
     ];
 

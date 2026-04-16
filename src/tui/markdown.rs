@@ -357,6 +357,19 @@ impl IncrementalMarkdownRenderer {
         with_streaming_render_context(|| self.update_internal(full_text))
     }
 
+    pub fn debug_memory_profile(&self) -> serde_json::Value {
+        let rendered_lines_estimate_bytes = estimate_lines_bytes(&self.rendered_lines);
+        let rendered_text_bytes = self.rendered_text.capacity();
+        serde_json::json!({
+            "rendered_lines_count": self.rendered_lines.len(),
+            "rendered_lines_estimate_bytes": rendered_lines_estimate_bytes,
+            "rendered_text_bytes": rendered_text_bytes,
+            "last_checkpoint": self.last_checkpoint,
+            "lines_at_checkpoint": self.lines_at_checkpoint,
+            "total_estimate_bytes": rendered_lines_estimate_bytes + rendered_text_bytes,
+        })
+    }
+
     fn update_internal(&mut self, full_text: &str) -> Vec<Line<'static>> {
         // Fast path: text unchanged
         if full_text == self.rendered_text {

@@ -414,6 +414,25 @@ pub struct InlineViewState {
     pub lines: Vec<String>,
 }
 
+impl InlineViewState {
+    pub fn debug_memory_profile(&self) -> serde_json::Value {
+        let title_bytes = self.title.capacity();
+        let status_bytes = self
+            .status
+            .as_ref()
+            .map(|value| value.capacity())
+            .unwrap_or(0);
+        let lines_bytes: usize = self.lines.iter().map(|value| value.capacity()).sum();
+        serde_json::json!({
+            "lines_count": self.lines.len(),
+            "title_bytes": title_bytes,
+            "status_bytes": status_bytes,
+            "lines_bytes": lines_bytes,
+            "total_estimate_bytes": title_bytes + status_bytes + lines_bytes,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum InlineUiStateRef<'a> {
     View(&'a InlineViewState),
@@ -572,6 +591,92 @@ pub struct InlineInteractiveState {
     pub filter: String,
     /// Preview mode: picker is visible but input stays in main text box
     pub preview: bool,
+}
+
+impl InlineInteractiveState {
+    pub fn debug_memory_profile(&self) -> serde_json::Value {
+        let entries_bytes: usize = self.entries.iter().map(estimate_picker_entry_bytes).sum();
+        let filtered_bytes = self.filtered.capacity() * std::mem::size_of::<usize>();
+        let filter_bytes = self.filter.capacity();
+        serde_json::json!({
+            "entries_count": self.entries.len(),
+            "filtered_count": self.filtered.len(),
+            "entries_bytes": entries_bytes,
+            "filtered_bytes": filtered_bytes,
+            "filter_bytes": filter_bytes,
+            "total_estimate_bytes": entries_bytes + filtered_bytes + filter_bytes,
+        })
+    }
+}
+
+fn estimate_picker_action_bytes(action: &PickerAction) -> usize {
+    match action {
+        PickerAction::Model
+        | PickerAction::AgentTarget(_)
+        | PickerAction::AgentModelChoice { .. } => 0,
+        PickerAction::Account(AccountPickerAction::Switch { provider_id, label }) => {
+            provider_id.capacity() + label.capacity()
+        }
+        PickerAction::Account(AccountPickerAction::Add { provider_id }) => provider_id.capacity(),
+        PickerAction::Account(AccountPickerAction::Replace { provider_id, label }) => {
+            provider_id.capacity() + label.capacity()
+        }
+        PickerAction::Account(AccountPickerAction::OpenCenter { provider_filter }) => {
+            provider_filter
+                .as_ref()
+                .map(|value| value.capacity())
+                .unwrap_or(0)
+        }
+        PickerAction::Login(descriptor) => {
+            descriptor.id.len()
+                + descriptor.display_name.len()
+                + descriptor
+                    .aliases
+                    .iter()
+                    .map(|value| value.len())
+                    .sum::<usize>()
+                + descriptor.menu_detail.len()
+        }
+        PickerAction::Usage {
+            id,
+            title,
+            subtitle,
+            detail_lines,
+            ..
+        } => {
+            id.capacity()
+                + title.capacity()
+                + subtitle.capacity()
+                + detail_lines
+                    .iter()
+                    .map(|value| value.capacity())
+                    .sum::<usize>()
+        }
+    }
+}
+
+fn estimate_picker_option_bytes(option: &PickerOption) -> usize {
+    option.provider.capacity() + option.api_method.capacity() + option.detail.capacity()
+}
+
+fn estimate_picker_entry_bytes(entry: &PickerEntry) -> usize {
+    entry.name.capacity()
+        + entry
+            .options
+            .iter()
+            .map(estimate_picker_option_bytes)
+            .sum::<usize>()
+        + estimate_picker_action_bytes(&entry.action)
+        + entry
+            .created_date
+            .as_ref()
+            .map(|value| value.capacity())
+            .unwrap_or(0)
+        + entry
+            .effort
+            .as_ref()
+            .map(|value| value.capacity())
+            .unwrap_or(0)
 }
 
 impl InlineInteractiveState {
