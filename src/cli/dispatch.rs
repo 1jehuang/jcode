@@ -246,7 +246,7 @@ fn resolve_resume_arg(args: &mut Args) -> Result<()> {
             return tui_launch::list_sessions();
         }
 
-        match session::find_session_by_name_or_id(resume_id) {
+        match resolve_resume_id(resume_id) {
             Ok(full_id) => {
                 args.resume = Some(full_id);
             }
@@ -261,6 +261,16 @@ fn resolve_resume_arg(args: &mut Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn resolve_resume_id(resume_id: &str) -> Result<String> {
+    match session::find_session_by_name_or_id(resume_id) {
+        Ok(full_id) => Ok(full_id),
+        Err(native_err) => match crate::import::import_external_resume_id(resume_id)? {
+            Some(imported_id) => Ok(imported_id),
+            None => Err(native_err),
+        },
+    }
 }
 
 fn map_memory_subcommand(subcmd: MemoryCommand) -> commands::MemorySubcommand {
@@ -754,6 +764,34 @@ mod tests {
             !lock_path.exists(),
             "lock file should be cleaned up when the guard drops"
         );
+    }
+
+    #[test]
+    fn resolve_resume_id_imports_raw_codex_session_ids() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let codex_dir = temp.path().join("external/.codex/sessions/2026/04/16");
+        std::fs::create_dir_all(&codex_dir).expect("create codex dir");
+        std::fs::write(
+            codex_dir.join("rollout.jsonl"),
+            concat!(
+                "{\"timestamp\":\"2026-04-16T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"codex-cli-resume-test\",\"timestamp\":\"2026-04-16T09:59:00Z\",\"cwd\":\"/tmp/codex-cli-resume\"}}\n",
+                "{\"timestamp\":\"2026-04-16T10:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Resume this Codex session\"}]}}\n",
+                "{\"timestamp\":\"2026-04-16T10:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Imported\"}]}}\n"
+            ),
+        )
+        .expect("write codex transcript");
+
+        let resolved = resolve_resume_id("codex-cli-resume-test").expect("resolve codex id");
+        let imported_id = crate::import::imported_codex_session_id("codex-cli-resume-test");
+        assert_eq!(resolved, imported_id);
+
+        let session = crate::session::Session::load(&resolved).expect("load imported session");
+        assert_eq!(session.messages.len(), 2);
+
+        crate::env::remove_var("JCODE_HOME");
     }
 
     #[tokio::test]

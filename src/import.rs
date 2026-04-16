@@ -709,6 +709,31 @@ pub fn resolve_resume_target_to_jcode(
     Ok(ResumeTarget::JcodeSession { session_id })
 }
 
+pub fn import_external_resume_id(resume_id: &str) -> Result<Option<String>> {
+    if let Ok(path) = find_codex_session_file(resume_id) {
+        let session = import_codex_session_from_path(&path, Some(resume_id))?;
+        return Ok(Some(session.id));
+    }
+
+    if let Ok(path) = find_session_file(resume_id) {
+        let session = import_session_from_file(&path, resume_id)?;
+        return Ok(Some(session.id));
+    }
+
+    if let Ok(path) = find_opencode_session_file(resume_id) {
+        let session = import_opencode_session_from_path(&path, Some(resume_id))?;
+        return Ok(Some(session.id));
+    }
+
+    let pi_path = Path::new(resume_id);
+    if pi_path.exists() {
+        let session = import_pi_session(resume_id)?;
+        return Ok(Some(session.id));
+    }
+
+    Ok(None)
+}
+
 /// Import a Claude Code session from a file path
 pub fn import_session_from_file(path: &Path, session_id: &str) -> Result<Session> {
     let content = std::fs::read_to_string(path)
