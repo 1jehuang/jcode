@@ -8,6 +8,13 @@ const GOOGLE_USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v1/userinfo
 pub const DEFAULT_PORT: u16 = 51121;
 const LOOPBACK_HOST: &str = "127.0.0.1";
 const REDIRECT_PATH: &str = "/oauth-callback";
+// OAuth credentials from Google's Antigravity desktop app.
+// These are for a desktop OAuth client where the client secret is safe to embed.
+// Env vars remain available as optional overrides.
+// gitleaks:allow - public desktop OAuth credentials, safe to embed
+const ANTIGRAVITY_CLIENT_ID: &str =
+    "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"; // gitleaks:allow
+const ANTIGRAVITY_CLIENT_SECRET: &str = "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"; // gitleaks:allow
 const CLIENT_ID_ENV: &str = "JCODE_ANTIGRAVITY_CLIENT_ID";
 const CLIENT_SECRET_ENV: &str = "JCODE_ANTIGRAVITY_CLIENT_SECRET";
 const VERSION_ENV: &str = "JCODE_ANTIGRAVITY_VERSION";
@@ -26,28 +33,20 @@ const LOAD_ENDPOINTS: &[&str] = &[
 ];
 const GOOGLE_OAUTH_USER_AGENT: &str = "google-api-nodejs-client/9.15.1";
 
-fn antigravity_client_id() -> Result<String> {
+fn antigravity_client_id() -> String {
     std::env::var(CLIENT_ID_ENV)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Antigravity OAuth client ID is not configured. Set {CLIENT_ID_ENV} before logging in."
-            )
-        })
+        .unwrap_or_else(|| ANTIGRAVITY_CLIENT_ID.to_string())
 }
 
-fn antigravity_client_secret() -> Result<String> {
+fn antigravity_client_secret() -> String {
     std::env::var(CLIENT_SECRET_ENV)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Antigravity OAuth client secret is not configured. Set {CLIENT_SECRET_ENV} before logging in."
-            )
-        })
+        .unwrap_or_else(|| ANTIGRAVITY_CLIENT_SECRET.to_string())
 }
 
 fn antigravity_version() -> String {
@@ -170,8 +169,8 @@ pub async fn load_or_refresh_tokens() -> Result<AntigravityTokens> {
 pub async fn refresh_tokens(tokens: &AntigravityTokens) -> Result<AntigravityTokens> {
     let result: Result<AntigravityTokens> = async {
         let client = reqwest::Client::new();
-        let client_id = antigravity_client_id()?;
-        let client_secret = antigravity_client_secret()?;
+        let client_id = antigravity_client_id();
+        let client_secret = antigravity_client_secret();
         let resp = client
             .post(GOOGLE_TOKEN_URL)
             .header(reqwest::header::USER_AGENT, GOOGLE_OAUTH_USER_AGENT)
@@ -367,8 +366,8 @@ async fn exchange_authorization_code(
     redirect_uri: &str,
 ) -> Result<AntigravityTokens> {
     let client = reqwest::Client::new();
-    let client_id = antigravity_client_id()?;
-    let client_secret = antigravity_client_secret()?;
+    let client_id = antigravity_client_id();
+    let client_secret = antigravity_client_secret();
     let resp = client
         .post(GOOGLE_TOKEN_URL)
         .header(reqwest::header::USER_AGENT, GOOGLE_OAUTH_USER_AGENT)
@@ -492,7 +491,7 @@ pub async fn fetch_project_id(access_token: &str) -> Result<String> {
 
 pub fn build_auth_url(redirect_uri: &str, challenge: &str, state: &str) -> Result<String> {
     let scope = ANTIGRAVITY_SCOPES.join(" ");
-    let client_id = antigravity_client_id()?;
+    let client_id = antigravity_client_id();
     Ok(format!(
         "{base}?response_type=code&client_id={client_id}&redirect_uri={redirect_uri}&scope={scope}&code_challenge={challenge}&code_challenge_method=S256&state={state}&access_type=offline&prompt=consent",
         base = GOOGLE_AUTHORIZE_URL,
@@ -582,16 +581,32 @@ mod tests {
     }
 
     #[test]
-    fn build_auth_url_requires_client_id_env() {
+    fn build_auth_url_uses_default_client_id_when_env_missing() {
         let _guard = lock_test_env();
         crate::env::remove_var(CLIENT_ID_ENV);
-        let err = build_auth_url(
+        let url = build_auth_url(
             "http://127.0.0.1:51121/oauth-callback",
             "challenge",
             "state",
         )
-        .expect_err("missing client id should fail");
-        assert!(err.to_string().contains(CLIENT_ID_ENV));
+        .expect("missing env should use built-in client id");
+        assert!(url.contains(&format!(
+            "client_id={}",
+            urlencoding::encode(ANTIGRAVITY_CLIENT_ID)
+        )));
+    }
+
+    #[test]
+    fn blank_env_vars_fall_back_to_built_in_credentials() {
+        let _guard = lock_test_env();
+        crate::env::set_var(CLIENT_ID_ENV, "   ");
+        crate::env::set_var(CLIENT_SECRET_ENV, "   ");
+
+        assert_eq!(antigravity_client_id(), ANTIGRAVITY_CLIENT_ID);
+        assert_eq!(antigravity_client_secret(), ANTIGRAVITY_CLIENT_SECRET);
+
+        crate::env::remove_var(CLIENT_ID_ENV);
+        crate::env::remove_var(CLIENT_SECRET_ENV);
     }
 
     #[test]
