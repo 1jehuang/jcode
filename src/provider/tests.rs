@@ -981,6 +981,55 @@ fn test_anthropic_live_catalog_replaces_static_fallback_list() {
 }
 
 #[test]
+fn test_openai_model_catalog_hydrates_from_disk_cache() {
+    with_clean_provider_test_env(|| {
+        crate::auth::codex::set_active_account_override(Some("disk-openai".to_string()));
+        persist_openai_model_catalog(&OpenAIModelCatalog {
+            available_models: vec!["openai-disk-only-model".to_string()],
+            context_limits: [("openai-disk-only-model".to_string(), 424_242)]
+                .into_iter()
+                .collect(),
+        });
+
+        assert_eq!(
+            cached_openai_model_ids(),
+            Some(vec!["openai-disk-only-model".to_string()])
+        );
+        assert_eq!(
+            context_limit_for_model("openai-disk-only-model"),
+            Some(424_242)
+        );
+
+        crate::auth::codex::set_active_account_override(None);
+    });
+}
+
+#[test]
+fn test_anthropic_model_catalog_hydrates_from_disk_cache() {
+    with_clean_provider_test_env(|| {
+        crate::env::remove_var("ANTHROPIC_API_KEY");
+        crate::auth::claude::set_active_account_override(Some("disk-claude".to_string()));
+        persist_anthropic_model_catalog(&AnthropicModelCatalog {
+            available_models: vec!["claude-opus-4-7".to_string()],
+            context_limits: [("claude-opus-4-7".to_string(), 1_048_576)]
+                .into_iter()
+                .collect(),
+        });
+
+        assert_eq!(
+            cached_anthropic_model_ids(),
+            Some(vec![
+                "claude-opus-4-7".to_string(),
+                "claude-opus-4-7[1m]".to_string()
+            ])
+        );
+        assert_eq!(context_limit_for_model("claude-opus-4-7"), Some(1_048_576));
+
+        crate::auth::claude::set_active_account_override(None);
+    });
+}
+
+#[test]
 fn test_same_provider_account_candidates_include_other_openai_accounts() {
     with_clean_provider_test_env(|| {
         let now_ms = chrono::Utc::now().timestamp_millis() + 60_000;

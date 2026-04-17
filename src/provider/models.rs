@@ -13,9 +13,27 @@ pub use catalog::{
     fetch_anthropic_model_catalog_oauth, fetch_openai_context_limits, fetch_openai_model_catalog,
 };
 use jcode_provider_core::{ModelRoute, shared_http_client};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::RwLock;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const OPENAI_MODEL_CATALOG_CACHE_FILE: &str = "openai_model_catalog_cache.json";
+const ANTHROPIC_MODEL_CATALOG_CACHE_FILE: &str = "anthropic_model_catalog_cache.json";
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct PersistedModelCatalogStore {
+    scopes: HashMap<String, PersistedModelCatalogScope>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedModelCatalogScope {
+    models: Vec<String>,
+    #[serde(default)]
+    context_limits: HashMap<String, usize>,
+    observed_at_unix_secs: u64,
+}
 
 pub(crate) fn filtered_display_models(models: impl IntoIterator<Item = String>) -> Vec<String> {
     models
@@ -304,12 +322,6 @@ fn fallback_context_limit_for_model(model: &str, provider_hint: Option<&str>) ->
     let (model, is_1m) = model_id_for_capability_lookup(model, provider);
     let model = model.as_str();
 
-    if !matches!(provider, Some("claude" | "copilot"))
-        && let Some(limit) = get_cached_context_limit(model)
-    {
-        return Some(limit);
-    }
-
     if matches!(provider, Some("copilot")) {
         return Some(copilot_context_limit_for_model(model));
     }
@@ -357,6 +369,10 @@ fn fallback_context_limit_for_model(model: &str, provider_hint: Option<&str>) ->
 
     if model.starts_with("claude-opus-4-5") || model.starts_with("claude-opus-4.5") {
         return Some(200_000);
+    }
+
+    if let Some(limit) = get_cached_context_limit(model) {
+        return Some(limit);
     }
 
     if model.starts_with("gemini-2.0-flash")
@@ -432,15 +448,153 @@ fn live_catalog_model_ids(
     Some(model_ids_with_context_aliases(models))
 }
 
-pub fn cached_anthropic_model_ids() -> Option<Vec<String>> {
-    live_catalog_model_ids(
-        &ANTHROPIC_AVAILABLE_MODELS,
-        &current_anthropic_catalog_scope(),
+fn load_openai_catalog_from_disk(scope: &str) -> Option<Vec<String>> {
+    hydrate_catalog_cache_from_disk(
+        OPENAI_MODEL_CATALOG_CACHE_FILE,
+        scope,
+        &ACCOUNT_AVAILABLE_MODELS,
+        &ACCOUNT_AVAILABLE_MODELS_FETCHED_AT,
+        &ACCOUNT_AVAILABLE_MODELS_OBSERVED_AT,
     )
 }
 
+fn load_anthropic_catalog_from_disk(scope: &str) -> Option<Vec<String>> {
+    hydrate_catalog_cache_from_disk(
+        ANTHROPIC_MODEL_CATALOG_CACHE_FILE,
+        scope,
+        &ANTHROPIC_AVAILABLE_MODELS,
+        &ANTHROPIC_AVAILABLE_MODELS_FETCHED_AT,
+        &ANTHROPIC_AVAILABLE_MODELS_OBSERVED_AT,
+    )
+}
+
+fn observed_at_unix_secs(observed_at: SystemTime) -> u64 {
+    observed_at
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn system_time_from_unix_secs(secs: u64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(secs)
+}
+
+fn model_catalog_cache_path(file_name: &str) -> Result<PathBuf> {
+    Ok(crate::storage::app_config_dir()?.join(file_name))
+}
+
+fn load_persisted_model_catalog_store(file_name: &str) -> Option<PersistedModelCatalogStore> {
+    let path = model_catalog_cache_path(file_name).ok()?;
+    crate::storage::read_json(&path).ok()
+}
+
+fn save_persisted_model_catalog_store(file_name: &str, store: &PersistedModelCatalogStore) {
+    let Ok(path) = model_catalog_cache_path(file_name) else {
+        return;
+    };
+    if let Err(err) = crate::storage::write_json(&path, store) {
+        crate::logging::warn(&format!(
+            "Failed to persist model catalog cache {}: {}",
+            path.display(),
+            err
+        ));
+    }
+}
+
+fn persist_scoped_model_catalog(
+    file_name: &str,
+    scope: &str,
+    models: &[String],
+    context_limits: &HashMap<String, usize>,
+    observed_at: SystemTime,
+) {
+    if models.is_empty() {
+        return;
+    }
+
+    let mut store = load_persisted_model_catalog_store(file_name).unwrap_or_default();
+    store.scopes.insert(
+        scope.to_string(),
+        PersistedModelCatalogScope {
+            models: models.to_vec(),
+            context_limits: context_limits.clone(),
+            observed_at_unix_secs: observed_at_unix_secs(observed_at),
+        },
+    );
+    save_persisted_model_catalog_store(file_name, &store);
+}
+
+fn hydrate_catalog_cache_from_disk(
+    file_name: &str,
+    scope: &str,
+    available_cache: &RwLock<HashMap<String, HashSet<String>>>,
+    fetched_at_cache: &RwLock<HashMap<String, Instant>>,
+    observed_at_cache: &RwLock<HashMap<String, SystemTime>>,
+) -> Option<Vec<String>> {
+    let store = load_persisted_model_catalog_store(file_name)?;
+    let persisted = store.scopes.get(scope)?.clone();
+    if persisted.models.is_empty() {
+        return None;
+    }
+
+    let mut normalized = HashSet::new();
+    for model in &persisted.models {
+        let normalized_model = normalize_model_id(model);
+        if !normalized_model.is_empty() {
+            normalized.insert(normalized_model);
+        }
+    }
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let observed_at = system_time_from_unix_secs(persisted.observed_at_unix_secs);
+    if let Ok(mut cache) = available_cache.write() {
+        cache.insert(scope.to_string(), normalized);
+    }
+    if let Ok(mut fetched_at) = fetched_at_cache.write() {
+        fetched_at.insert(scope.to_string(), Instant::now());
+    }
+    if let Ok(mut observed_at_map) = observed_at_cache.write() {
+        observed_at_map.insert(scope.to_string(), observed_at);
+    }
+    if !persisted.context_limits.is_empty() {
+        populate_context_limits(persisted.context_limits.clone());
+    }
+
+    Some(model_ids_with_context_aliases(persisted.models))
+}
+
+pub fn cached_anthropic_model_ids() -> Option<Vec<String>> {
+    let scope = current_anthropic_catalog_scope();
+    live_catalog_model_ids(&ANTHROPIC_AVAILABLE_MODELS, &scope)
+        .or_else(|| load_anthropic_catalog_from_disk(&scope))
+}
+
 pub fn cached_openai_model_ids() -> Option<Vec<String>> {
-    live_catalog_model_ids(&ACCOUNT_AVAILABLE_MODELS, &current_openai_account_scope())
+    let scope = current_openai_account_scope();
+    live_catalog_model_ids(&ACCOUNT_AVAILABLE_MODELS, &scope)
+        .or_else(|| load_openai_catalog_from_disk(&scope))
+}
+
+pub fn persist_openai_model_catalog(catalog: &OpenAIModelCatalog) {
+    persist_scoped_model_catalog(
+        OPENAI_MODEL_CATALOG_CACHE_FILE,
+        &current_openai_account_scope(),
+        &catalog.available_models,
+        &catalog.context_limits,
+        SystemTime::now(),
+    );
+}
+
+pub fn persist_anthropic_model_catalog(catalog: &AnthropicModelCatalog) {
+    persist_scoped_model_catalog(
+        ANTHROPIC_MODEL_CATALOG_CACHE_FILE,
+        &current_anthropic_catalog_scope(),
+        &catalog.available_models,
+        &catalog.context_limits,
+        SystemTime::now(),
+    );
 }
 
 /// Look up a cached context limit for a model.
@@ -810,6 +964,7 @@ pub fn refresh_openai_model_catalog_in_background(access_token: String, context:
                     catalog.available_models.len(),
                     catalog.context_limits.len()
                 ));
+                persist_openai_model_catalog(&catalog);
                 if !catalog.context_limits.is_empty() {
                     populate_context_limits(catalog.context_limits.clone());
                 }

@@ -829,6 +829,7 @@ impl Provider for ClaudeProvider {
 
         match crate::provider::fetch_anthropic_model_catalog_oauth(&access_token).await {
             Ok(catalog) => {
+                crate::provider::persist_anthropic_model_catalog(&catalog);
                 if !catalog.context_limits.is_empty() {
                     crate::provider::populate_context_limits(catalog.context_limits);
                 }

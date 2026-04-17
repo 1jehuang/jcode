@@ -370,6 +370,7 @@ impl Provider for OpenAIProvider {
     async fn prefetch_models(&self) -> Result<()> {
         let access_token = openai_access_token(&self.credentials).await?;
         let catalog = crate::provider::fetch_openai_model_catalog(&access_token).await?;
+        crate::provider::persist_openai_model_catalog(&catalog);
         if !catalog.context_limits.is_empty() {
             crate::provider::populate_context_limits(catalog.context_limits);
         }
