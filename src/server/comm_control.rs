@@ -16,6 +16,7 @@ use super::{
     queue_soft_interrupt_for_session, record_swarm_event, truncate_detail, update_member_status,
 };
 use crate::agent::Agent;
+use crate::plan::next_runnable_item_ids;
 use crate::protocol::{AwaitedMemberStatus, NotificationType, ServerEvent};
 use jcode_agent_runtime::SoftInterruptSource;
 use std::collections::{HashMap, HashSet};
@@ -922,7 +923,7 @@ pub(super) async fn handle_comm_assign_task(
     id: u64,
     req_session_id: String,
     target_session: String,
-    task_id: String,
+    task_id: Option<String>,
     message: Option<String>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     sessions: &SessionAgents,
@@ -937,6 +938,11 @@ pub(super) async fn handle_comm_assign_task(
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     swarm_mutation_runtime: &SwarmMutationRuntime,
 ) {
+    let requested_task_id = task_id.and_then(|task_id| {
+        let trimmed = task_id.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    });
+
     let swarm_id = match require_coordinator_swarm(
         id,
         &req_session_id,
@@ -957,7 +963,9 @@ pub(super) async fn handle_comm_assign_task(
         &[
             swarm_id.clone(),
             target_session.clone(),
-            task_id.clone(),
+            requested_task_id
+                .clone()
+                .unwrap_or_else(|| "__next_runnable__".to_string()),
             message.clone().unwrap_or_default(),
         ],
     );
@@ -974,19 +982,31 @@ pub(super) async fn handle_comm_assign_task(
         return;
     };
 
-    let (task_content, participant_ids, plan_item_count) = {
+    let (selected_task_id, task_content, participant_ids, plan_item_count) = {
         let now_ms = now_unix_ms();
         let mut plans = swarm_plans.write().await;
         let plan = plans
             .entry(swarm_id.clone())
             .or_insert_with(VersionedPlan::new);
-        let found = plan.items.iter_mut().find(|item| item.id == task_id);
+        let selected_task_id = requested_task_id.clone().or_else(|| {
+            let next_ids = next_runnable_item_ids(&plan.items, None);
+            next_ids.into_iter().find(|candidate_id| {
+                plan.items
+                    .iter()
+                    .find(|item| item.id == *candidate_id)
+                    .map(|item| item.assigned_to.is_none())
+                    .unwrap_or(false)
+            })
+        });
+        let found = selected_task_id
+            .as_ref()
+            .and_then(|selected_task_id| plan.items.iter_mut().find(|item| item.id == *selected_task_id));
         if let Some(item) = found {
             let content = item.content.clone();
             item.assigned_to = Some(target_session.clone());
             item.status = "queued".to_string();
             plan.task_progress.insert(
-                task_id.clone(),
+                item.id.clone(),
                 SwarmTaskProgress {
                     assigned_session_id: Some(target_session.clone()),
                     assignment_summary: Some(truncate_detail(
@@ -1000,24 +1020,34 @@ pub(super) async fn handle_comm_assign_task(
             plan.version += 1;
             plan.participants.insert(req_session_id.clone());
             plan.participants.insert(target_session.clone());
-            (Some(content), plan.participants.clone(), plan.items.len())
+            (
+                Some(item.id.clone()),
+                Some(content),
+                plan.participants.clone(),
+                plan.items.len(),
+            )
         } else {
-            (None, HashSet::new(), 0)
+            (None, None, HashSet::new(), 0)
         }
     };
 
-    let Some(content) = task_content else {
+    let Some(selected_task_id) = selected_task_id else {
+        let message = requested_task_id.as_ref().map_or_else(
+            || "No runnable unassigned tasks are available in the swarm plan".to_string(),
+            |task_id| format!("Task '{}' not found in swarm plan", task_id),
+        );
         finish_swarm_mutation_request(
             swarm_mutation_runtime,
             &mutation_state,
             PersistedSwarmMutationResponse::Error {
-                message: format!("Task '{}' not found in swarm plan", task_id),
+                message,
                 retry_after_secs: None,
             },
         )
         .await;
         return;
     };
+    let content = task_content.expect("selected task should include content");
 
     let swarm_state = SwarmState {
         members: Arc::clone(swarm_members),
@@ -1102,7 +1132,7 @@ pub(super) async fn handle_comm_assign_task(
         let swarm_plans_for_run = Arc::clone(swarm_plans);
         let swarm_coordinators_for_run = Arc::clone(swarm_coordinators);
         let swarm_id_for_run = swarm_id.clone();
-        let task_id_for_run = task_id.clone();
+        let task_id_for_run = selected_task_id.clone();
         let event_history_for_run = Arc::clone(event_history);
         let event_counter_for_run = Arc::clone(event_counter);
         let swarm_event_tx_for_run = swarm_event_tx.clone();
@@ -1125,7 +1155,7 @@ pub(super) async fn handle_comm_assign_task(
 
     let plan_msg = format!(
         "Plan updated: task '{}' assigned to {}.",
-        task_id, target_session
+        selected_task_id, target_session
     );
     let members = swarm_members.read().await;
     for sid in participant_ids {
@@ -1380,7 +1410,7 @@ pub(super) async fn handle_comm_task_control(
                 id,
                 req_session_id,
                 assignee,
-                task_id,
+                Some(task_id),
                 Some(retry_note),
                 client_event_tx,
                 sessions,
@@ -1493,7 +1523,7 @@ pub(super) async fn handle_comm_task_control(
                 id,
                 req_session_id,
                 new_target,
-                task_id,
+                Some(task_id),
                 forwarded_message,
                 client_event_tx,
                 sessions,
@@ -1632,11 +1662,16 @@ pub(super) async fn handle_comm_await_members(
 
 #[cfg(test)]
 mod tests {
-    use super::handle_comm_await_members;
+    use super::{handle_comm_assign_task, handle_comm_await_members};
+    use crate::plan::PlanItem;
     use crate::protocol::ServerEvent;
-    use crate::server::{AwaitMembersRuntime, SwarmEvent, SwarmEventType, SwarmMember};
-    use std::collections::{HashMap, HashSet};
+    use crate::server::{
+        AwaitMembersRuntime, SwarmEvent, SwarmEventType, SwarmMember, SwarmMutationRuntime,
+        VersionedPlan,
+    };
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use tokio::sync::{RwLock, broadcast, mpsc};
 
@@ -1691,6 +1726,17 @@ mod tests {
         }
     }
 
+    fn plan_item(id: &str, status: &str, priority: &str, blocked_by: &[&str]) -> PlanItem {
+        PlanItem {
+            content: format!("task {id}"),
+            status: status.to_string(),
+            priority: priority.to_string(),
+            id: id.to_string(),
+            blocked_by: blocked_by.iter().map(|value| value.to_string()).collect(),
+            assigned_to: None,
+        }
+    }
+
     fn swarm_event(session_id: &str, swarm_id: &str, event: SwarmEventType) -> SwarmEvent {
         SwarmEvent {
             id: 1,
@@ -1701,6 +1747,96 @@ mod tests {
             timestamp: Instant::now(),
             absolute_time: SystemTime::now(),
         }
+    }
+
+    #[tokio::test]
+    async fn assign_task_without_task_id_picks_highest_priority_runnable_task() {
+        let (_env, _runtime) = RuntimeEnvGuard::new();
+        let swarm_id = "swarm-assign";
+        let requester = "coord";
+        let worker = "worker";
+        let (client_tx, mut client_rx) = mpsc::unbounded_channel();
+        let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
+        let client_connections = Arc::new(RwLock::new(HashMap::new()));
+        let swarm_members = Arc::new(RwLock::new(HashMap::from([
+            (
+                requester.to_string(),
+                {
+                    let mut member = member(requester, swarm_id, "ready");
+                    member.role = "coordinator".to_string();
+                    member
+                },
+            ),
+            (worker.to_string(), member(worker, swarm_id, "ready")),
+        ])));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+            swarm_id.to_string(),
+            HashSet::from([requester.to_string(), worker.to_string()]),
+        )])));
+        let swarm_plans = Arc::new(RwLock::new(HashMap::from([(
+            swarm_id.to_string(),
+            VersionedPlan {
+                items: vec![
+                    plan_item("done", "completed", "high", &[]),
+                    plan_item("blocked", "queued", "high", &["high-ready"]),
+                    plan_item("low-ready", "queued", "low", &["done"]),
+                    plan_item("high-ready", "queued", "high", &["done"]),
+                ],
+                version: 1,
+                participants: HashSet::from([requester.to_string(), worker.to_string()]),
+                task_progress: HashMap::new(),
+            },
+        )])));
+        let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(
+            swarm_id.to_string(),
+            requester.to_string(),
+        )])));
+        let event_history = Arc::new(RwLock::new(VecDeque::new()));
+        let event_counter = Arc::new(AtomicU64::new(1));
+        let (swarm_event_tx, _swarm_event_rx) = broadcast::channel(32);
+        let mutation_runtime = SwarmMutationRuntime::default();
+
+        handle_comm_assign_task(
+            77,
+            requester.to_string(),
+            worker.to_string(),
+            None,
+            Some("Pick the next task".to_string()),
+            &client_tx,
+            &sessions,
+            &soft_interrupt_queues,
+            &client_connections,
+            &swarm_members,
+            &swarms_by_id,
+            &swarm_plans,
+            &swarm_coordinators,
+            &event_history,
+            &event_counter,
+            &swarm_event_tx,
+            &mutation_runtime,
+        )
+        .await;
+
+        let response = client_rx.recv().await.expect("response");
+        assert!(matches!(response, ServerEvent::Done { id: 77 }));
+
+        let plans = swarm_plans.read().await;
+        let plan = plans.get(swarm_id).expect("plan exists");
+        let selected = plan
+            .items
+            .iter()
+            .find(|item| item.id == "high-ready")
+            .expect("selected task exists");
+        assert_eq!(selected.assigned_to.as_deref(), Some(worker));
+        assert_eq!(selected.status, "queued");
+
+        let blocked = plan
+            .items
+            .iter()
+            .find(|item| item.id == "blocked")
+            .expect("blocked task exists");
+        assert!(blocked.assigned_to.is_none(), "blocked task should not be auto-assigned");
     }
 
     #[tokio::test]

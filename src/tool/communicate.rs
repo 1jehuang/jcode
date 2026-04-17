@@ -500,7 +500,10 @@ impl Tool for CommunicateTool {
                     "minimum": 1,
                     "description": "Optional max items for summary-style reads."
                 },
-                "task_id": { "type": "string" },
+                "task_id": {
+                    "type": "string",
+                    "description": "Optional plan task ID. If omitted for assign_task, the coordinator assigns the next runnable unassigned task."
+                },
                 "session_ids": {
                     "type": "array",
                     "items": {"type": "string"}
@@ -994,25 +997,23 @@ impl Tool for CommunicateTool {
                 let target = params.target_session.ok_or_else(|| {
                     anyhow::anyhow!("'target_session' is required for assign_task action")
                 })?;
-                let task_id = params.task_id.ok_or_else(|| {
-                    anyhow::anyhow!("'task_id' is required for assign_task action")
-                })?;
 
                 let request = Request::CommAssignTask {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
                     target_session: target.clone(),
-                    task_id: task_id.clone(),
+                    task_id: params.task_id.clone(),
                     message: params.message.clone(),
                 };
 
                 match send_request(request).await {
                     Ok(response) => {
                         ensure_success(&response)?;
-                        Ok(ToolOutput::new(format!(
-                            "Task '{}' assigned to {}",
-                            task_id, target
-                        )))
+                        let msg = params.task_id.as_deref().map_or_else(
+                            || format!("Assigned next runnable task to {}", target),
+                            |task_id| format!("Task '{}' assigned to {}", task_id, target),
+                        );
+                        Ok(ToolOutput::new(msg))
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to assign task: {}", e)),
                 }

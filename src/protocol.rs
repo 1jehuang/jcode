@@ -461,7 +461,8 @@ pub enum Request {
         id: u64,
         session_id: String,
         target_session: String,
-        task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },

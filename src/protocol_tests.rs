@@ -397,6 +397,40 @@ fn test_comm_task_control_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn test_comm_assign_task_roundtrip_without_explicit_task_id() -> Result<()> {
+    let req = Request::CommAssignTask {
+        id: 57,
+        session_id: "sess_coord".to_string(),
+        target_session: "sess_worker".to_string(),
+        task_id: None,
+        message: Some("Take the next highest-priority runnable task.".to_string()),
+    };
+    let json = serde_json::to_string(&req)?;
+    assert!(json.contains("\"type\":\"comm_assign_task\""));
+    assert!(!json.contains("\"task_id\""));
+    let decoded = parse_request_json(&json)?;
+    assert_eq!(decoded.id(), 57);
+    let Request::CommAssignTask {
+        session_id,
+        target_session,
+        task_id,
+        message,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("expected CommAssignTask"));
+    };
+    assert_eq!(session_id, "sess_coord");
+    assert_eq!(target_session, "sess_worker");
+    assert_eq!(task_id, None);
+    assert_eq!(
+        message.as_deref(),
+        Some("Take the next highest-priority runnable task.")
+    );
+    Ok(())
+}
+
+#[test]
 fn test_comm_status_roundtrip() -> Result<()> {
     let req = Request::CommStatus {
         id: 56,
