@@ -1298,12 +1298,14 @@ pub(super) async fn handle_client(
                 session_id: req_session_id,
                 working_dir,
                 initial_message,
+                request_nonce,
             } => {
                 handle_comm_spawn(
                     id,
                     req_session_id,
                     working_dir,
                     initial_message,
+                    request_nonce,
                     &client_event_tx,
                     &sessions,
                     &global_session_id,

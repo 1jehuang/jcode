@@ -195,6 +195,7 @@ pub(super) async fn handle_comm_spawn(
     req_session_id: String,
     working_dir: Option<String>,
     initial_message: Option<String>,
+    request_nonce: Option<String>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     sessions: &SessionAgents,
     global_session_id: &Arc<RwLock<String>>,
@@ -262,6 +263,7 @@ pub(super) async fn handle_comm_spawn(
             swarm_id.clone(),
             working_dir.clone().unwrap_or_default(),
             initial_message.clone().unwrap_or_default(),
+            request_nonce.clone().unwrap_or_default(),
         ],
     );
     let Some(mutation_state) = begin_or_replay(

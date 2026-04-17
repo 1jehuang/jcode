@@ -406,6 +406,8 @@ pub enum Request {
         working_dir: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         initial_message: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_nonce: Option<String>,
     },
 
     /// Stop/destroy an agent session (coordinator only)

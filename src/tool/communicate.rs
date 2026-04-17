@@ -94,6 +94,14 @@ async fn send_request_with_timeout(
     }
 }
 
+fn fresh_spawn_request_nonce(ctx: &ToolContext) -> String {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("{}-{}-{}", ctx.session_id, ctx.message_id, now_ms)
+}
+
 fn check_error(response: &ServerEvent) -> Option<&str> {
     if let ServerEvent::Error { message, .. } = response {
         Some(message)
@@ -114,6 +122,66 @@ fn auto_assignment_needs_spawn(response: &ServerEvent) -> bool {
     check_error(response).is_some_and(|message| {
         message.contains("No ready or completed swarm agents are available for automatic task assignment")
     })
+}
+
+async fn spawn_assignment_session(ctx: &ToolContext, params: &CommunicateInput) -> Result<String> {
+    let spawn_request = Request::CommSpawn {
+        id: REQUEST_ID,
+        session_id: ctx.session_id.clone(),
+        working_dir: params.working_dir.clone(),
+        initial_message: None,
+        request_nonce: Some(fresh_spawn_request_nonce(ctx)),
+    };
+
+    match send_request(spawn_request).await {
+        Ok(ServerEvent::CommSpawnResponse { new_session_id, .. }) if !new_session_id.is_empty() => {
+            Ok(new_session_id)
+        }
+        Ok(spawn_response) => {
+            ensure_success(&spawn_response)?;
+            Err(anyhow::anyhow!(
+                "Spawn succeeded but new session ID was not returned."
+            ))
+        }
+        Err(e) => Err(anyhow::anyhow!(
+            "Failed to spawn agent for task assignment: {}",
+            e
+        )),
+    }
+}
+
+async fn assign_task_to_session(
+    ctx: &ToolContext,
+    params: &CommunicateInput,
+    target_session: String,
+    spawned_suffix: &str,
+) -> Result<ToolOutput> {
+    let retry_request = Request::CommAssignTask {
+        id: REQUEST_ID,
+        session_id: ctx.session_id.clone(),
+        target_session: Some(target_session.clone()),
+        task_id: params.task_id.clone(),
+        message: params.message.clone(),
+    };
+
+    match send_request(retry_request).await {
+        Ok(ServerEvent::CommAssignTaskResponse { task_id, .. }) => Ok(ToolOutput::new(format!(
+            "Task '{}' assigned to {}{}",
+            task_id, target_session, spawned_suffix
+        ))),
+        Ok(retry_response) => {
+            ensure_success(&retry_response)?;
+            Ok(ToolOutput::new(format!(
+                "Assigned next runnable task to {}{}",
+                target_session, spawned_suffix
+            )))
+        }
+        Err(e) => Err(anyhow::anyhow!(
+            "Failed to assign task after selecting {}: {}",
+            target_session,
+            e
+        )),
+    }
 }
 
 fn format_context_entries(entries: &[ContextEntry]) -> ToolOutput {
@@ -479,6 +547,8 @@ struct CommunicateInput {
     #[serde(default)]
     spawn_if_needed: Option<bool>,
     #[serde(default)]
+    prefer_spawn: Option<bool>,
+    #[serde(default)]
     plan_items: Option<Vec<PlanItem>>,
     #[serde(default)]
     target_status: Option<Vec<String>>,
@@ -565,6 +635,10 @@ impl Tool for CommunicateTool {
                 "spawn_if_needed": {
                     "type": "boolean",
                     "description": "For assign_task without an explicit target_session: if no reusable agent is available, spawn a fresh agent and retry the assignment automatically."
+                },
+                "prefer_spawn": {
+                    "type": "boolean",
+                    "description": "For assign_task without an explicit target_session: prefer a fresh spawned agent even if reusable workers are available."
                 },
                 "session_ids": {
                     "type": "array",
@@ -900,6 +974,7 @@ impl Tool for CommunicateTool {
                     session_id: ctx.session_id.clone(),
                     working_dir: params.working_dir.clone(),
                     initial_message: params.spawn_initial_message(),
+                    request_nonce: None,
                 };
 
                 match send_request(request).await {
@@ -1084,6 +1159,18 @@ impl Tool for CommunicateTool {
                     .clone()
                     .unwrap_or_else(|| "next available agent".to_string());
                 let spawn_if_needed = params.spawn_if_needed.unwrap_or(false);
+                let prefer_spawn = params.prefer_spawn.unwrap_or(false);
+
+                if prefer_spawn && params.target_session.is_none() {
+                    let spawned_session = spawn_assignment_session(&ctx, &params).await?;
+                    return assign_task_to_session(
+                        &ctx,
+                        &params,
+                        spawned_session,
+                        " (spawned by planner preference)",
+                    )
+                    .await;
+                }
 
                 let request = Request::CommAssignTask {
                     id: REQUEST_ID,
@@ -1107,61 +1194,14 @@ impl Tool for CommunicateTool {
                             && params.target_session.is_none()
                             && auto_assignment_needs_spawn(&response) =>
                     {
-                        let spawn_request = Request::CommSpawn {
-                            id: REQUEST_ID,
-                            session_id: ctx.session_id.clone(),
-                            working_dir: params.working_dir.clone(),
-                            initial_message: None,
-                        };
-
-                        let spawned_session = match send_request(spawn_request).await {
-                            Ok(ServerEvent::CommSpawnResponse { new_session_id, .. })
-                                if !new_session_id.is_empty() =>
-                            {
-                                new_session_id
-                            }
-                            Ok(spawn_response) => {
-                                ensure_success(&spawn_response)?;
-                                return Err(anyhow::anyhow!(
-                                    "Spawn succeeded but new session ID was not returned."
-                                ));
-                            }
-                            Err(e) => {
-                                return Err(anyhow::anyhow!(
-                                    "Failed to spawn fallback agent for task assignment: {}",
-                                    e
-                                ));
-                            }
-                        };
-
-                        let retry_request = Request::CommAssignTask {
-                            id: REQUEST_ID,
-                            session_id: ctx.session_id.clone(),
-                            target_session: Some(spawned_session.clone()),
-                            task_id: params.task_id.clone(),
-                            message: params.message.clone(),
-                        };
-
-                        match send_request(retry_request).await {
-                            Ok(ServerEvent::CommAssignTaskResponse { task_id, .. }) => {
-                                Ok(ToolOutput::new(format!(
-                                    "Task '{}' assigned to {} (spawned automatically)",
-                                    task_id, spawned_session
-                                )))
-                            }
-                            Ok(retry_response) => {
-                                ensure_success(&retry_response)?;
-                                Ok(ToolOutput::new(format!(
-                                    "Assigned next runnable task to {} (spawned automatically)",
-                                    spawned_session
-                                )))
-                            }
-                            Err(e) => Err(anyhow::anyhow!(
-                                "Failed to assign task after spawning {}: {}",
-                                spawned_session,
-                                e
-                            )),
-                        }
+                        let spawned_session = spawn_assignment_session(&ctx, &params).await?;
+                        assign_task_to_session(
+                            &ctx,
+                            &params,
+                            spawned_session,
+                            " (spawned automatically)",
+                        )
+                        .await
                     }
                     Ok(response) => {
                         ensure_success(&response)?;
@@ -1381,6 +1421,7 @@ mod tests {
         assert!(props.contains_key("limit"));
         assert!(props.contains_key("task_id"));
         assert!(props.contains_key("spawn_if_needed"));
+        assert!(props.contains_key("prefer_spawn"));
         assert!(props.contains_key("session_ids"));
         assert!(props.contains_key("mode"));
         assert!(props.contains_key("target_status"));
@@ -1783,6 +1824,16 @@ mod tests {
         }))
         .expect("spawn_if_needed should deserialize");
         assert_eq!(parsed.spawn_if_needed, Some(true));
+    }
+
+    #[test]
+    fn communicate_input_accepts_prefer_spawn() {
+        let parsed: CommunicateInput = serde_json::from_value(serde_json::json!({
+            "action": "assign_task",
+            "prefer_spawn": true
+        }))
+        .expect("prefer_spawn should deserialize");
+        assert_eq!(parsed.prefer_spawn, Some(true));
     }
 
     #[test]
@@ -2407,6 +2458,130 @@ mod tests {
             .find(|member| member.session_id == spawned_session)
             .expect("spawned worker should be listed");
         assert_eq!(spawned_member.role.as_deref(), Some("agent"));
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn communicate_assign_task_can_prefer_fresh_spawn_over_reuse() {
+        let _env_lock = crate::storage::lock_test_env();
+        let runtime_dir = tempfile::TempDir::new().expect("runtime tempdir");
+        let repo_dir = std::env::current_dir().expect("repo cwd");
+        let socket_path = runtime_dir.path().join("jcode.sock");
+        let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
+        let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
+        let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+
+        let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
+            delay: Duration::from_millis(100),
+        });
+        let server = Arc::new(Server::new(provider));
+        let mut server_task = {
+            let server = Arc::clone(&server);
+            tokio::spawn(async move { server.run().await })
+        };
+
+        wait_for_server_socket(&socket_path, &mut server_task)
+            .await
+            .expect("server socket should be ready");
+
+        let mut watcher = RawClient::connect(&socket_path)
+            .await
+            .expect("watcher should connect");
+        watcher
+            .subscribe(&repo_dir)
+            .await
+            .expect("watcher subscribe");
+
+        let watcher_session = watcher.session_id().await.expect("watcher session id");
+        let tool = CommunicateTool::new();
+        let ctx = test_ctx(&watcher_session, &repo_dir);
+
+        tool.execute(
+            json!({
+                "action": "assign_role",
+                "target_session": watcher_session,
+                "role": "coordinator"
+            }),
+            ctx.clone(),
+        )
+        .await
+        .expect("self-promotion to coordinator should succeed");
+
+        let existing_output = tool
+            .execute(
+                json!({
+                    "action": "spawn"
+                }),
+                ctx.clone(),
+            )
+            .await
+            .expect("existing reusable worker should spawn");
+        let existing_worker = existing_output
+            .output
+            .strip_prefix("Spawned new agent: ")
+            .expect("spawn output should include session id")
+            .trim()
+            .to_string();
+        wait_for_member_presence(&mut watcher, &watcher_session, &existing_worker)
+            .await
+            .expect("existing worker should appear in swarm");
+
+        tool.execute(
+            json!({
+                "action": "propose_plan",
+                "plan_items": [{
+                    "id": "task-b",
+                    "content": "Investigate a separate subsystem",
+                    "status": "queued",
+                    "priority": "high"
+                }]
+            }),
+            ctx.clone(),
+        )
+        .await
+        .expect("plan proposal should succeed");
+
+        let assign_output = tool
+            .execute(
+                json!({
+                    "action": "assign_task",
+                    "prefer_spawn": true
+                }),
+                ctx,
+            )
+            .await
+            .expect("assign_task with prefer_spawn should succeed");
+
+        assert!(
+            assign_output
+                .output
+                .contains("spawned by planner preference"),
+            "expected planner-preference spawn in output, got: {}",
+            assign_output.output
+        );
+        assert!(
+            assign_output.output.contains("task-b"),
+            "expected selected task id in output, got: {}",
+            assign_output.output
+        );
+
+        let preferred_session = assign_output
+            .output
+            .strip_prefix("Task 'task-b' assigned to ")
+            .and_then(|rest| rest.strip_suffix(" (spawned by planner preference)"))
+            .expect("assign output should include preferred spawned session id")
+            .trim()
+            .to_string();
+
+        assert_ne!(
+            preferred_session, existing_worker,
+            "prefer_spawn should choose a fresh worker instead of reusing the existing one"
+        );
+
+        wait_for_member_presence(&mut watcher, &watcher_session, &preferred_session)
+            .await
+            .expect("preferred spawned worker should appear in swarm");
 
         server_task.abort();
     }
