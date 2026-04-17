@@ -24,6 +24,7 @@ pub(in crate::tui::app) fn handle_server_event(
             | ServerEvent::ConnectionType { .. }
             | ServerEvent::ConnectionPhase { .. }
             | ServerEvent::StatusDetail { .. }
+            | ServerEvent::MessageEnd
             | ServerEvent::UpstreamProvider { .. }
             | ServerEvent::Interrupted
             | ServerEvent::Done { .. }
@@ -207,6 +208,11 @@ pub(in crate::tui::app) fn handle_server_event(
             app.status_detail = Some(detail);
             eager_stream_redraw
         }
+        ServerEvent::MessageEnd => {
+            app.pause_streaming_tps(true);
+            app.stream_message_ended = true;
+            true
+        }
         ServerEvent::UpstreamProvider { provider } => {
             app.upstream_provider = Some(provider);
             false
@@ -255,6 +261,7 @@ pub(in crate::tui::app) fn handle_server_event(
             app.push_display_message(DisplayMessage::system("Interrupted"));
             app.is_processing = false;
             app.status = ProcessingStatus::Idle;
+            app.stream_message_ended = false;
             app.processing_started = None;
             app.current_message_id = None;
             remote.clear_pending();
@@ -288,6 +295,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 crate::tui::mermaid::clear_streaming_preview_diagram();
                 app.is_processing = false;
                 app.status = ProcessingStatus::Idle;
+                app.stream_message_ended = false;
                 app.processing_started = None;
                 app.replay_processing_started_ms = None;
                 app.replay_elapsed_override = None;
@@ -342,6 +350,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     }
                     app.is_processing = false;
                     app.status = ProcessingStatus::Idle;
+                    app.stream_message_ended = false;
                     app.processing_started = None;
                     app.current_message_id = None;
                     remote.clear_pending();
@@ -361,6 +370,7 @@ pub(in crate::tui::app) fn handle_server_event(
             });
             app.is_processing = false;
             app.status = ProcessingStatus::Idle;
+            app.stream_message_ended = false;
             let recovered_local = recover_local_interleave_to_queue(app, "request error");
             crate::tui::mermaid::clear_streaming_preview_diagram();
             app.thought_line_inserted = false;
@@ -483,6 +493,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.replay_elapsed_override = None;
                 app.reset_streaming_tps();
                 app.last_stream_activity = None;
+                app.stream_message_ended = false;
                 app.remote_resume_activity = None;
                 app.is_processing = false;
                 app.status = ProcessingStatus::Idle;

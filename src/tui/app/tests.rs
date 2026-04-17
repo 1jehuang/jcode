@@ -8044,6 +8044,26 @@ fn test_handle_server_event_tool_start_pauses_tps_and_excludes_hidden_output_tok
 }
 
 #[test]
+fn test_handle_server_event_message_end_marks_stream_as_finalizing_without_stall_mode() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.streaming_tps_collect_output = true;
+
+    let needs_redraw =
+        app.handle_server_event(crate::protocol::ServerEvent::MessageEnd, &mut remote);
+
+    assert!(needs_redraw);
+    assert!(app.stream_message_ended);
+    assert!(matches!(app.status, ProcessingStatus::Streaming));
+    assert!(app.streaming_tps_collect_output);
+}
+
+#[test]
 fn test_handle_server_event_interrupted_clears_stream_state_and_sets_idle() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

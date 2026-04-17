@@ -168,6 +168,11 @@ pub trait TuiState {
     /// Progress of a currently-running batch tool call.
     fn batch_progress(&self) -> Option<crate::bus::BatchProgress>;
     fn time_since_activity(&self) -> Option<Duration>;
+    /// Whether the provider/server has ended the visible assistant message while turn cleanup
+    /// still finishes in the background.
+    fn stream_message_ended(&self) -> bool {
+        false
+    }
     /// Total session token usage (input, output) - used for high usage warnings
     fn total_session_tokens(&self) -> Option<(u64, u64)>;
     /// Whether running in remote (client-server) mode

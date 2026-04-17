@@ -518,7 +518,11 @@ impl App {
                                     }
                                     StreamEvent::MessageEnd { .. } => {
                                         self.pause_streaming_tps(true);
+                                        self.stream_message_ended = true;
                                         saw_message_end = true;
+                                        if eager_stream_redraw {
+                                            self.redraw_now(terminal)?;
+                                        }
                                     }
                                     StreamEvent::SessionId(sid) => {
                                         self.provider_session_id = Some(sid);

@@ -163,6 +163,7 @@ pub(in crate::tui::app) fn finish_remote_split_launch(app: &mut App) {
     }
     app.is_processing = false;
     app.status = ProcessingStatus::Idle;
+    app.stream_message_ended = false;
     app.processing_started = None;
     app.last_stream_activity = None;
     app.reset_streaming_tps();

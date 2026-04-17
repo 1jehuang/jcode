@@ -334,6 +334,21 @@ fn append_transport_context(status_text: &mut String, app: &dyn TuiState) {
     }
 }
 
+fn streaming_liveness_label(
+    time_str: String,
+    stale_secs: Option<f32>,
+    stream_message_ended: bool,
+) -> String {
+    if stream_message_ended {
+        return time_str;
+    }
+    match stale_secs {
+        Some(s) if s > 10.0 => format!("(stalled {:.0}s) · {}", s, time_str),
+        Some(s) if s > 2.0 => format!("(no tokens {:.0}s) · {}", s, time_str),
+        _ => time_str,
+    }
+}
+
 fn batch_progress_state(
     batch_prog: Option<crate::bus::BatchProgress>,
     initial_total: Option<usize>,
@@ -494,11 +509,8 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
             ProcessingStatus::Streaming => {
                 let time_str = format_elapsed(elapsed);
                 let (input_tokens, output_tokens) = app.streaming_tokens();
-                let mut status_text = match stale_secs {
-                    Some(s) if s > 10.0 => format!("(stalled {:.0}s) · {}", s, time_str),
-                    Some(s) if s > 2.0 => format!("(no tokens {:.0}s) · {}", s, time_str),
-                    _ => time_str,
-                };
+                let mut status_text =
+                    streaming_liveness_label(time_str, stale_secs, app.stream_message_ended());
                 if let Some(tps) = app.output_tps() {
                     status_text = format!("{} · {:.1} tps", status_text, tps);
                 }
@@ -840,6 +852,30 @@ mod tests {
         assert_eq!(
             connection_phase_label(&ConnectionPhase::WaitingForResponse),
             "waiting for response"
+        );
+    }
+
+    #[test]
+    fn streaming_liveness_label_shows_quiet_stream_warning_before_message_end() {
+        assert_eq!(
+            streaming_liveness_label("4.2s".to_string(), Some(3.4), false),
+            "(no tokens 3s) · 4.2s"
+        );
+        assert_eq!(
+            streaming_liveness_label("12.0s".to_string(), Some(12.1), false),
+            "(stalled 12s) · 12.0s"
+        );
+    }
+
+    #[test]
+    fn streaming_liveness_label_suppresses_quiet_stream_warning_after_message_end() {
+        assert_eq!(
+            streaming_liveness_label("4.2s".to_string(), Some(3.4), true),
+            "4.2s"
+        );
+        assert_eq!(
+            streaming_liveness_label("12.0s".to_string(), Some(12.1), true),
+            "12.0s"
         );
     }
 

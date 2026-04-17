@@ -763,6 +763,7 @@ pub(super) fn handle_disconnect(
     app.reset_streaming_tps();
     app.is_processing = false;
     app.status = ProcessingStatus::Idle;
+    app.stream_message_ended = false;
     state.disconnect_start = Some(Instant::now());
     state.reconnect_attempts = state.reconnect_attempts.max(1);
     state.reload_recovery_attempted = false;

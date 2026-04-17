@@ -1518,6 +1518,7 @@ impl App {
 
     pub(super) fn clear_streaming_render_state(&mut self) {
         self.streaming_text.clear();
+        self.stream_message_ended = false;
         self.refresh_split_view_if_needed();
         self.streaming_md_renderer.borrow_mut().reset();
         crate::tui::mermaid::clear_streaming_preview_diagram();
@@ -1525,6 +1526,7 @@ impl App {
 
     pub(super) fn take_streaming_text(&mut self) -> String {
         let content = std::mem::take(&mut self.streaming_text);
+        self.stream_message_ended = false;
         self.refresh_split_view_if_needed();
         self.streaming_md_renderer.borrow_mut().reset();
         crate::tui::mermaid::clear_streaming_preview_diagram();

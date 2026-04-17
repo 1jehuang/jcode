@@ -590,6 +590,16 @@ pub enum ServerEvent {
     #[serde(rename = "status_detail")]
     StatusDetail { detail: String },
 
+    /// Provider has finished the visible assistant message, but the turn may still be
+    /// finalizing bookkeeping such as session IDs or completion trailers.
+    #[serde(rename = "message_end")]
+    MessageEnd,
+
+    /// Provider has finished the visible assistant message, but the turn may still be
+    /// finalizing bookkeeping such as session IDs or completion trailers.
+    #[serde(rename = "message_end")]
+    MessageEnd,
+
     /// Upstream provider info (e.g., which provider OpenRouter routed to)
     #[serde(rename = "upstream_provider")]
     UpstreamProvider { provider: String },

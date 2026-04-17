@@ -406,6 +406,8 @@ pub struct App {
     context_info: crate::prompt::ContextInfo,
     // Track last streaming activity for "stale" detection
     last_stream_activity: Option<Instant>,
+    // Provider has emitted MessageEnd, but the turn is still finalizing bookkeeping.
+    stream_message_ended: bool,
     // Server-reported processing snapshot captured from resume/history before live events arrive.
     remote_resume_activity: Option<RemoteResumeActivity>,
     // Accurate TPS tracking: only counts actual token streaming time, not tool execution

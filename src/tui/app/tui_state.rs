@@ -449,6 +449,10 @@ impl crate::tui::TuiState for App {
         self.last_stream_activity.map(|t| t.elapsed())
     }
 
+    fn stream_message_ended(&self) -> bool {
+        self.stream_message_ended
+    }
+
     fn has_pending_mouse_scroll_animation(&self) -> bool {
         self.mouse_scroll_queue != 0
     }

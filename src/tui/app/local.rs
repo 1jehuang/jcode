@@ -301,6 +301,7 @@ pub(super) fn finish_turn(app: &mut App) {
     app.update_cost_impl();
     app.is_processing = false;
     app.status = ProcessingStatus::Idle;
+    app.stream_message_ended = false;
     app.processing_started = None;
     app.interleave_message = None;
     app.pending_soft_interrupts.clear();
