@@ -5,10 +5,10 @@ use tokio::sync::RwLock;
 
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
-pub(super) async fn remove_session_channel_subscriptions(
-    session_id: &str,
+async fn with_channel_index_mut(
     channel_subscriptions: &ChannelSubscriptions,
     channel_subscriptions_by_session: &ChannelSubscriptions,
+    mutate: impl FnOnce(&mut ChannelIndex),
 ) {
     let mut subs = channel_subscriptions.write().await;
     let mut reverse = channel_subscriptions_by_session.write().await;
@@ -16,9 +16,22 @@ pub(super) async fn remove_session_channel_subscriptions(
         by_swarm_channel: std::mem::take(&mut *subs),
         by_session: std::mem::take(&mut *reverse),
     };
-    index.remove_session(session_id);
+    mutate(&mut index);
     *subs = index.by_swarm_channel;
     *reverse = index.by_session;
+}
+
+pub(super) async fn remove_session_channel_subscriptions(
+    session_id: &str,
+    channel_subscriptions: &ChannelSubscriptions,
+    channel_subscriptions_by_session: &ChannelSubscriptions,
+) {
+    with_channel_index_mut(
+        channel_subscriptions,
+        channel_subscriptions_by_session,
+        |index| index.remove_session(session_id),
+    )
+    .await;
 }
 
 pub(super) async fn subscribe_session_to_channel(
@@ -28,15 +41,12 @@ pub(super) async fn subscribe_session_to_channel(
     channel_subscriptions: &ChannelSubscriptions,
     channel_subscriptions_by_session: &ChannelSubscriptions,
 ) {
-    let mut subs = channel_subscriptions.write().await;
-    let mut reverse = channel_subscriptions_by_session.write().await;
-    let mut index = ChannelIndex {
-        by_swarm_channel: std::mem::take(&mut *subs),
-        by_session: std::mem::take(&mut *reverse),
-    };
-    index.subscribe(session_id, swarm_id, channel);
-    *subs = index.by_swarm_channel;
-    *reverse = index.by_session;
+    with_channel_index_mut(
+        channel_subscriptions,
+        channel_subscriptions_by_session,
+        |index| index.subscribe(session_id, swarm_id, channel),
+    )
+    .await;
 }
 
 pub(super) async fn unsubscribe_session_from_channel(
@@ -46,15 +56,12 @@ pub(super) async fn unsubscribe_session_from_channel(
     channel_subscriptions: &ChannelSubscriptions,
     channel_subscriptions_by_session: &ChannelSubscriptions,
 ) {
-    let mut subs = channel_subscriptions.write().await;
-    let mut reverse = channel_subscriptions_by_session.write().await;
-    let mut index = ChannelIndex {
-        by_swarm_channel: std::mem::take(&mut *subs),
-        by_session: std::mem::take(&mut *reverse),
-    };
-    index.unsubscribe(session_id, swarm_id, channel);
-    *subs = index.by_swarm_channel;
-    *reverse = index.by_session;
+    with_channel_index_mut(
+        channel_subscriptions,
+        channel_subscriptions_by_session,
+        |index| index.unsubscribe(session_id, swarm_id, channel),
+    )
+    .await;
 }
 
 pub(super) async fn list_channels_for_swarm(
