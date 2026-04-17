@@ -13,7 +13,11 @@ pub(super) struct RemoteSwarmPlanSnapshot {
 
 impl RemoteSwarmPlanSnapshot {
     pub fn status_notice(&self) -> String {
-        let mut notice = format!("Swarm plan synced (v{}, {} items)", self.version, self.items.len());
+        let mut notice = format!(
+            "Swarm plan synced (v{}, {} items)",
+            self.version,
+            self.items.len()
+        );
         if let Some(summary) = &self.summary {
             if !summary.next_ready_ids.is_empty() {
                 notice.push_str(&format!(" · next: {}", summary.next_ready_ids.join(", ")));

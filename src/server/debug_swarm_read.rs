@@ -1,8 +1,8 @@
+use super::swarm_channels::list_channels_for_swarm;
 use super::{
     FileAccess, ServerIdentity, SharedContext, SwarmMember, SwarmState, VersionedPlan,
     git_common_dir_for, swarm_id_for_dir,
 };
-use super::swarm_channels::list_channels_for_swarm;
 use crate::agent::Agent;
 use crate::plan::{next_runnable_item_ids, summarize_plan_graph};
 use anyhow::Result;

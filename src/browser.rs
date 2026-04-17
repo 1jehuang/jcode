@@ -954,6 +954,5 @@ mod tests {
         } else {
             crate::env::remove_var("JCODE_HOME");
         }
-
     }
 }

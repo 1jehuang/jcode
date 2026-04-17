@@ -1,4 +1,7 @@
-use super::{SharedContext, SwarmEvent, SwarmEventType, SwarmMember, fanout_session_event, record_swarm_event};
+use super::{
+    SharedContext, SwarmEvent, SwarmEventType, SwarmMember, fanout_session_event,
+    record_swarm_event,
+};
 use crate::protocol::{AgentInfo, ContextEntry, NotificationType, ServerEvent};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -233,7 +236,10 @@ pub(super) async fn handle_comm_list(
             })
             .collect();
 
-        let _ = client_event_tx.send(ServerEvent::CommMembers { id, members: member_list });
+        let _ = client_event_tx.send(ServerEvent::CommMembers {
+            id,
+            members: member_list,
+        });
     } else {
         let _ = client_event_tx.send(ServerEvent::Error {
             id,

@@ -1,5 +1,5 @@
-use super::{SwarmMember, SwarmTaskProgress, VersionedPlan};
 use super::state::{SwarmLifecycleStatus, SwarmMemberRecord};
+use super::{SwarmMember, SwarmTaskProgress, VersionedPlan};
 use crate::protocol::ServerEvent;
 use crate::storage;
 use std::collections::{HashMap, HashSet};
@@ -199,7 +199,10 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
                 .entry(member_swarm_id.clone())
                 .or_insert_with(HashSet::new)
                 .insert(member.record.session_id.clone());
-            members.insert(member.record.session_id.clone(), from_persisted_member(member));
+            members.insert(
+                member.record.session_id.clone(),
+                from_persisted_member(member),
+            );
         }
     }
     LoadedSwarmRuntimeState {

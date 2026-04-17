@@ -140,7 +140,10 @@ fn format_plan_followup(summary: &PlanGraphStatus) -> String {
         parts.push(format!("next={}", summary.next_ready_ids.join(", ")));
     }
     if !summary.newly_ready_ids.is_empty() {
-        parts.push(format!("newly_ready={}", summary.newly_ready_ids.join(", ")));
+        parts.push(format!(
+            "newly_ready={}",
+            summary.newly_ready_ids.join(", ")
+        ));
     }
     parts.join(" · ")
 }
@@ -1215,7 +1218,8 @@ impl Tool for CommunicateTool {
                         target_session,
                         ..
                     }) => {
-                        let mut output = format!("Task '{}' assigned to {}", task_id, target_session);
+                        let mut output =
+                            format!("Task '{}' assigned to {}", task_id, target_session);
                         if let Ok(summary) = fetch_plan_status(&ctx.session_id).await {
                             output.push_str(&format!("\n{}", format_plan_followup(&summary)));
                         }
@@ -1383,11 +1387,7 @@ impl Tool for CommunicateTool {
                         summary,
                         ..
                     }) => {
-                        let mut output = format!(
-                            "Task '{}' {}",
-                            task_id,
-                            action
-                        );
+                        let mut output = format!("Task '{}' {}", task_id, action);
                         if let Some(target_session) = target_session {
                             output.push_str(&format!(" -> {}", target_session));
                         }

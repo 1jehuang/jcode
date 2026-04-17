@@ -151,12 +151,7 @@ pub(super) fn load_state(key: &str) -> Option<PersistedAwaitMembersState> {
 }
 
 pub(super) fn save_state(state: &PersistedAwaitMembersState) {
-    save_json_state(
-        AWAIT_MEMBERS_DIR,
-        &state.key,
-        state,
-        "await_members state",
-    )
+    save_json_state(AWAIT_MEMBERS_DIR, &state.key, state, "await_members state")
 }
 
 pub(super) fn ensure_pending_state(

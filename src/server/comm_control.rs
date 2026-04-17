@@ -6,8 +6,8 @@ use super::swarm_mutation_state::{
     finish_request as finish_swarm_mutation_request, request_key as swarm_mutation_request_key,
 };
 use super::{
-    ClientConnectionInfo, SwarmEvent, SwarmEventType, SwarmMember,
-    SwarmMutationRuntime, SwarmState, SwarmTaskProgress, VersionedPlan, broadcast_swarm_plan,
+    ClientConnectionInfo, SwarmEvent, SwarmEventType, SwarmMember, SwarmMutationRuntime,
+    SwarmState, SwarmTaskProgress, VersionedPlan, broadcast_swarm_plan,
     broadcast_swarm_plan_with_previous, broadcast_swarm_status, fanout_session_event,
     persist_swarm_state_for, queue_soft_interrupt_for_session, record_swarm_event, truncate_detail,
     update_member_status,
@@ -24,12 +24,35 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
 
 type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
-type AssignmentScoreState = (
-    HashMap<String, usize>,
-    HashMap<String, usize>,
-    HashMap<String, usize>,
-    bool,
-);
+
+fn compute_assignment_loads(plan: &VersionedPlan) -> HashMap<String, usize> {
+    let mut loads = HashMap::new();
+    for item in &plan.items {
+        if is_terminal_status(&item.status) {
+            continue;
+        }
+        if let Some(assignee) = item.assigned_to.as_ref() {
+            *loads.entry(assignee.clone()).or_default() += 1;
+        }
+    }
+    loads
+}
+
+fn filter_swarm_agent_candidates<'a>(
+    members: &'a HashMap<String, SwarmMember>,
+    req_session_id: &str,
+    swarm_id: &str,
+) -> Vec<&'a SwarmMember> {
+    members
+        .values()
+        .filter(|member| {
+            member.session_id != req_session_id
+                && member.swarm_id.as_deref() == Some(swarm_id)
+                && member.role == "agent"
+                && matches!(member.status.as_str(), "ready" | "completed")
+        })
+        .collect()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TaskControlAction {
@@ -226,24 +249,6 @@ async fn resolve_assignment_target_session(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
 ) -> Result<String, String> {
-    let assignment_loads: HashMap<String, usize> = {
-        let plans = swarm_plans.read().await;
-        plans
-            .get(swarm_id)
-            .map(|plan| {
-                let mut loads = HashMap::<String, usize>::new();
-                for item in &plan.items {
-                    if is_terminal_status(&item.status) {
-                        continue;
-                    }
-                    if let Some(assignee) = item.assigned_to.as_ref() {
-                        *loads.entry(assignee.clone()).or_default() += 1;
-                    }
-                }
-                loads
-            })
-            .unwrap_or_default()
-    };
     let members = swarm_members.read().await;
 
     if let Some(target) = requested_target {
@@ -262,15 +267,15 @@ async fn resolve_assignment_target_session(
         return Ok(target.to_string());
     }
 
-    let mut candidates: Vec<&SwarmMember> = members
-        .values()
-        .filter(|member| {
-            member.session_id != req_session_id
-                && member.swarm_id.as_deref() == Some(swarm_id)
-                && member.role == "agent"
-                && matches!(member.status.as_str(), "ready" | "completed")
-        })
-        .collect();
+    let assignment_loads = {
+        let plans = swarm_plans.read().await;
+        plans
+            .get(swarm_id)
+            .map(|plan| compute_assignment_loads(plan))
+            .unwrap_or_default()
+    };
+
+    let mut candidates = filter_swarm_agent_candidates(&members, req_session_id, swarm_id);
 
     candidates.sort_by(|left, right| {
         let left_load = assignment_loads.get(&left.session_id).copied().unwrap_or(0);
@@ -330,20 +335,12 @@ async fn resolve_assignment_target_for_task(
         .await;
     }
 
-    let (assignment_loads, dependency_carryover, metadata_carryover, known_task): AssignmentScoreState = {
+    let (assignment_loads, dependency_carryover, metadata_carryover) = {
         let plans = swarm_plans.read().await;
         let Some(plan) = plans.get(swarm_id) else {
             return Err("No runnable unassigned tasks are available in the swarm plan".to_string());
         };
-        let mut loads = HashMap::<String, usize>::new();
-        for item in &plan.items {
-            if is_terminal_status(&item.status) {
-                continue;
-            }
-            if let Some(assignee) = item.assigned_to.as_ref() {
-                *loads.entry(assignee.clone()).or_default() += 1;
-            }
-        }
+        let loads = compute_assignment_loads(plan);
 
         let Some(task) = plan.items.iter().find(|item| item.id == task_id) else {
             return Err(format!("Task '{}' not found in swarm plan", task_id));
@@ -390,31 +387,34 @@ async fn resolve_assignment_target_for_task(
             }
         }
 
-        (loads, carryover, metadata, true)
+        (loads, carryover, metadata)
     };
 
-    if !known_task {
-        return Err(format!("Task '{}' not found in swarm plan", task_id));
-    }
-
     let members = swarm_members.read().await;
-    let mut candidates: Vec<&SwarmMember> = members
-        .values()
-        .filter(|member| {
-            member.session_id != req_session_id
-                && member.swarm_id.as_deref() == Some(swarm_id)
-                && member.role == "agent"
-                && matches!(member.status.as_str(), "ready" | "completed")
-        })
-        .collect();
+    let mut candidates = filter_swarm_agent_candidates(&members, req_session_id, swarm_id);
 
     candidates.sort_by(|left, right| {
-        let left_carry = dependency_carryover.get(&left.session_id).copied().unwrap_or(0);
-        let right_carry = dependency_carryover.get(&right.session_id).copied().unwrap_or(0);
-        let left_meta = metadata_carryover.get(&left.session_id).copied().unwrap_or(0);
-        let right_meta = metadata_carryover.get(&right.session_id).copied().unwrap_or(0);
+        let left_carry = dependency_carryover
+            .get(&left.session_id)
+            .copied()
+            .unwrap_or(0);
+        let right_carry = dependency_carryover
+            .get(&right.session_id)
+            .copied()
+            .unwrap_or(0);
+        let left_meta = metadata_carryover
+            .get(&left.session_id)
+            .copied()
+            .unwrap_or(0);
+        let right_meta = metadata_carryover
+            .get(&right.session_id)
+            .copied()
+            .unwrap_or(0);
         let left_load = assignment_loads.get(&left.session_id).copied().unwrap_or(0);
-        let right_load = assignment_loads.get(&right.session_id).copied().unwrap_or(0);
+        let right_load = assignment_loads
+            .get(&right.session_id)
+            .copied()
+            .unwrap_or(0);
         let left_rank = if left.status == "ready" { 0 } else { 1 };
         let right_rank = if right.status == "ready" { 0 } else { 1 };
         right_carry
@@ -1947,15 +1947,13 @@ pub(super) async fn handle_comm_task_control(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        handle_comm_assign_next, handle_comm_assign_task, handle_comm_task_control,
-    };
-    use crate::server::comm_await::handle_comm_await_members;
+    use super::{handle_comm_assign_next, handle_comm_assign_task, handle_comm_task_control};
     use crate::agent::Agent;
     use crate::message::{Message, StreamEvent, ToolDefinition};
     use crate::plan::PlanItem;
     use crate::protocol::ServerEvent;
     use crate::provider::{EventStream, Provider};
+    use crate::server::comm_await::handle_comm_await_members;
     use crate::server::{
         AwaitMembersRuntime, SwarmEvent, SwarmEventType, SwarmMember, SwarmMutationRuntime,
         VersionedPlan,
@@ -2574,7 +2572,10 @@ mod tests {
                 context_worker.to_string(),
                 member(context_worker, swarm_id, "ready"),
             ),
-            (other_worker.to_string(), member(other_worker, swarm_id, "ready")),
+            (
+                other_worker.to_string(),
+                member(other_worker, swarm_id, "ready"),
+            ),
         ])));
         let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
             swarm_id.to_string(),
@@ -2671,7 +2672,10 @@ mod tests {
                 metadata_worker.to_string(),
                 member(metadata_worker, swarm_id, "ready"),
             ),
-            (other_worker.to_string(), member(other_worker, swarm_id, "ready")),
+            (
+                other_worker.to_string(),
+                member(other_worker, swarm_id, "ready"),
+            ),
         ])));
         let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
             swarm_id.to_string(),

@@ -383,6 +383,7 @@ pub const ALL_OPENAI_MODELS: &[&str] = &[
     "gpt-5",
 ];
 
+use self::dispatch::CompletionMode;
 pub use self::models::{
     AccountModelAvailability, AccountModelAvailabilityState, AnthropicModelCatalog,
     DEFAULT_CONTEXT_LIMIT, ModelCapabilities, OpenAIModelCatalog,
@@ -409,7 +410,6 @@ use self::models::{
     normalize_copilot_model_name,
 };
 use self::pricing::{cheapness_for_route, openrouter_pricing_from_model_pricing};
-use self::dispatch::CompletionMode;
 use self::selection::ActiveProvider;
 
 /// MultiProvider wraps multiple providers and allows seamless model switching

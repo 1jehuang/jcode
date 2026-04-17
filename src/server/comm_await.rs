@@ -310,7 +310,8 @@ pub(super) async fn handle_comm_await_members(
                 .as_millis() as u64
         {
             let summary = timeout_summary(&initial_statuses);
-            let _ = persist_final_response(&state, false, initial_statuses.clone(), summary.clone());
+            let _ =
+                persist_final_response(&state, false, initial_statuses.clone(), summary.clone());
             respond_to_waiters(
                 await_members_runtime,
                 &key,

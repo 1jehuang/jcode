@@ -1,5 +1,5 @@
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::time::Duration;

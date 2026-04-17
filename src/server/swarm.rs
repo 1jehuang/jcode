@@ -1,7 +1,5 @@
 use super::state::{MAX_EVENT_HISTORY, fanout_session_event};
-use super::{
-    FileAccess, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan,
-};
+use super::{FileAccess, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan};
 use super::{persist_swarm_state_for, remove_persisted_swarm_state_for};
 use crate::agent::Agent;
 use crate::plan::{PlanItem, newly_ready_item_ids, next_runnable_item_ids, summarize_plan_graph};

@@ -95,7 +95,10 @@ pub(super) async fn handle_comm_channel_members(
             })
             .collect();
 
-        let _ = client_event_tx.send(ServerEvent::CommMembers { id, members: entries });
+        let _ = client_event_tx.send(ServerEvent::CommMembers {
+            id,
+            members: entries,
+        });
     } else {
         let _ = client_event_tx.send(ServerEvent::Error {
             id,

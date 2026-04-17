@@ -3,8 +3,8 @@ use crate::plan::PlanItem;
 use crate::protocol::ServerEvent;
 use jcode_agent_runtime::{SoftInterruptMessage, SoftInterruptQueue, SoftInterruptSource};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::{HashMap, HashSet};
 use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -352,8 +352,14 @@ mod channel_index_tests {
         index.subscribe("worker-1", "swarm-a", "tests");
         index.subscribe("worker-2", "swarm-a", "build");
 
-        assert_eq!(index.members("swarm-a", "build"), vec!["worker-1", "worker-2"]);
-        assert_eq!(index.channels_for_session("worker-1", "swarm-a"), vec!["build", "tests"]);
+        assert_eq!(
+            index.members("swarm-a", "build"),
+            vec!["worker-1", "worker-2"]
+        );
+        assert_eq!(
+            index.channels_for_session("worker-1", "swarm-a"),
+            vec!["build", "tests"]
+        );
 
         index.unsubscribe("worker-1", "swarm-a", "build");
         assert_eq!(index.members("swarm-a", "build"), vec!["worker-2"]);
