@@ -17,7 +17,8 @@ use super::{
 };
 use crate::agent::Agent;
 use crate::plan::{
-    cycle_item_ids, missing_dependencies, next_runnable_item_ids, unresolved_dependencies,
+    cycle_item_ids, is_terminal_status, missing_dependencies, next_runnable_item_ids,
+    unresolved_dependencies,
 };
 use crate::protocol::{AwaitedMemberStatus, NotificationType, ServerEvent};
 use jcode_agent_runtime::SoftInterruptSource;
@@ -183,7 +184,25 @@ async fn resolve_assignment_target_session(
     swarm_id: &str,
     requested_target: Option<&str>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
 ) -> Result<String, String> {
+    let assignment_loads: HashMap<String, usize> = {
+        let plans = swarm_plans.read().await;
+        plans.get(swarm_id)
+            .map(|plan| {
+                let mut loads = HashMap::<String, usize>::new();
+                for item in &plan.items {
+                    if is_terminal_status(&item.status) {
+                        continue;
+                    }
+                    if let Some(assignee) = item.assigned_to.as_ref() {
+                        *loads.entry(assignee.clone()).or_default() += 1;
+                    }
+                }
+                loads
+            })
+            .unwrap_or_default()
+    };
     let members = swarm_members.read().await;
 
     if let Some(target) = requested_target {
@@ -213,10 +232,13 @@ async fn resolve_assignment_target_session(
         .collect();
 
     candidates.sort_by(|left, right| {
+        let left_load = assignment_loads.get(&left.session_id).copied().unwrap_or(0);
+        let right_load = assignment_loads.get(&right.session_id).copied().unwrap_or(0);
         let left_rank = if left.status == "ready" { 0 } else { 1 };
         let right_rank = if right.status == "ready" { 0 } else { 1 };
-        left_rank
-            .cmp(&right_rank)
+        left_load
+            .cmp(&right_load)
+            .then_with(|| left_rank.cmp(&right_rank))
             .then_with(|| left.session_id.cmp(&right.session_id))
     });
 
@@ -1080,6 +1102,7 @@ pub(super) async fn handle_comm_assign_task(
         &swarm_id,
         requested_target_session.as_deref(),
         swarm_members,
+        swarm_plans,
     )
     .await
     {
@@ -2201,6 +2224,100 @@ mod tests {
                 assert_eq!(id, 99);
                 assert_eq!(task_id, "next");
                 assert_eq!(target_session, ready_worker);
+            }
+            other => panic!("expected CommAssignTaskResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn assign_task_without_target_prefers_less_loaded_ready_agent() {
+        let (_env, _runtime) = RuntimeEnvGuard::new();
+        let swarm_id = "swarm-auto-target-load";
+        let requester = "coord";
+        let less_loaded = "worker-light";
+        let more_loaded = "worker-busy";
+        let (client_tx, mut client_rx) = mpsc::unbounded_channel();
+        let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let soft_interrupt_queues = Arc::new(RwLock::new(HashMap::new()));
+        let client_connections = Arc::new(RwLock::new(HashMap::new()));
+        let swarm_members = Arc::new(RwLock::new(HashMap::from([
+            (
+                requester.to_string(),
+                {
+                    let mut member = member(requester, swarm_id, "ready");
+                    member.role = "coordinator".to_string();
+                    member
+                },
+            ),
+            (less_loaded.to_string(), member(less_loaded, swarm_id, "ready")),
+            (more_loaded.to_string(), member(more_loaded, swarm_id, "ready")),
+        ])));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+            swarm_id.to_string(),
+            HashSet::from([
+                requester.to_string(),
+                less_loaded.to_string(),
+                more_loaded.to_string(),
+            ]),
+        )])));
+        let mut busy_existing = plan_item("busy-existing", "running", "high", &[]);
+        busy_existing.assigned_to = Some(more_loaded.to_string());
+        let swarm_plans = Arc::new(RwLock::new(HashMap::from([(
+            swarm_id.to_string(),
+            VersionedPlan {
+                items: vec![
+                    plan_item("setup", "completed", "high", &[]),
+                    busy_existing,
+                    plan_item("next", "queued", "high", &["setup"]),
+                ],
+                version: 1,
+                participants: HashSet::from([
+                    requester.to_string(),
+                    less_loaded.to_string(),
+                    more_loaded.to_string(),
+                ]),
+                task_progress: HashMap::new(),
+            },
+        )])));
+        let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(
+            swarm_id.to_string(),
+            requester.to_string(),
+        )])));
+        let event_history = Arc::new(RwLock::new(VecDeque::new()));
+        let event_counter = Arc::new(AtomicU64::new(1));
+        let (swarm_event_tx, _swarm_event_rx) = broadcast::channel(32);
+        let mutation_runtime = SwarmMutationRuntime::default();
+
+        handle_comm_assign_task(
+            100,
+            requester.to_string(),
+            None,
+            None,
+            Some("Pick the least-loaded worker".to_string()),
+            &client_tx,
+            &sessions,
+            &soft_interrupt_queues,
+            &client_connections,
+            &swarm_members,
+            &swarms_by_id,
+            &swarm_plans,
+            &swarm_coordinators,
+            &event_history,
+            &event_counter,
+            &swarm_event_tx,
+            &mutation_runtime,
+        )
+        .await;
+
+        match client_rx.recv().await.expect("response") {
+            ServerEvent::CommAssignTaskResponse {
+                id,
+                task_id,
+                target_session,
+            } => {
+                assert_eq!(id, 100);
+                assert_eq!(task_id, "next");
+                assert_eq!(target_session, less_loaded);
             }
             other => panic!("expected CommAssignTaskResponse, got {other:?}"),
         }
