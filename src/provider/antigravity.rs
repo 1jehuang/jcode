@@ -9,7 +9,29 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 const DEFAULT_MODEL: &str = "default";
-const AVAILABLE_MODELS: &[&str] = &["default"];
+const AVAILABLE_MODELS: &[&str] = &[
+    "default",
+    "claude-opus-4-6-thinking",
+    "claude-sonnet-4-6",
+    "gemini-3.1-pro-high",
+    "gemini-3.1-pro-low",
+    "gemini-3-flash-agent",
+];
+
+fn merge_antigravity_model_lists(models: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut merged = Vec::new();
+    for model in models {
+        let trimmed = model.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let owned = trimmed.to_string();
+        if !merged.contains(&owned) {
+            merged.push(owned);
+        }
+    }
+    merged
+}
 
 pub struct AntigravityCliProvider {
     cli_path: String,
@@ -125,6 +147,33 @@ impl Provider for AntigravityCliProvider {
         AVAILABLE_MODELS.to_vec()
     }
 
+    fn available_models_display(&self) -> Vec<String> {
+        merge_antigravity_model_lists(
+            AVAILABLE_MODELS
+                .iter()
+                .map(|model| (*model).to_string())
+                .chain(std::iter::once(self.model())),
+        )
+    }
+
+    fn available_models_for_switching(&self) -> Vec<String> {
+        self.available_models_display()
+    }
+
+    fn model_routes(&self) -> Vec<super::ModelRoute> {
+        self.available_models_display()
+            .into_iter()
+            .map(|model| super::ModelRoute {
+                model,
+                provider: "Antigravity".to_string(),
+                api_method: "cli".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            })
+            .collect()
+    }
+
     fn supports_compaction(&self) -> bool {
         false
     }
@@ -136,5 +185,37 @@ impl Provider for AntigravityCliProvider {
             prompt_flag: self.prompt_flag.clone(),
             model_flag: self.model_flag.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn available_models_display_includes_curated_models_and_current_override() {
+        let provider = AntigravityCliProvider::new();
+        provider
+            .set_model("custom-antigravity-model")
+            .expect("set custom model");
+
+        let models = provider.available_models_display();
+
+        assert!(models.contains(&"default".to_string()));
+        assert!(models.contains(&"claude-opus-4-6-thinking".to_string()));
+        assert!(models.contains(&"claude-sonnet-4-6".to_string()));
+        assert!(models.contains(&"gemini-3.1-pro-high".to_string()));
+        assert!(models.contains(&"custom-antigravity-model".to_string()));
+    }
+
+    #[test]
+    fn model_routes_expose_antigravity_provider_entries() {
+        let provider = AntigravityCliProvider::new();
+        let routes = provider.model_routes();
+
+        assert!(!routes.is_empty());
+        assert!(routes.iter().all(|route| route.provider == "Antigravity"));
+        assert!(routes.iter().all(|route| route.api_method == "cli"));
+        assert!(routes.iter().any(|route| route.model == "claude-opus-4-6-thinking"));
     }
 }
