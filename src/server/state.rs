@@ -328,7 +328,7 @@ impl ChannelIndex {
         members
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn channels_for_session(&self, session_id: &str, swarm_id: &str) -> Vec<String> {
         let mut channels = self
             .by_session
