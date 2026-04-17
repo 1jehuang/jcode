@@ -859,8 +859,9 @@ struct BodyCacheEntry {
 }
 
 const BODY_CACHE_MAX_ENTRIES: usize = 8;
-const BODY_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
-const BODY_CACHE_MAX_ENTRY_BYTES: usize = 4 * 1024 * 1024;
+// Keep enough room for a single large transcript snapshot so long sessions do not
+// fall off a hard per-entry cache cliff and get rebuilt every frame.
+const BODY_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Default)]
 struct BodyCacheState {
@@ -901,7 +902,7 @@ impl BodyCacheState {
 
     fn insert(&mut self, key: BodyCacheKey, prepared: Arc<PreparedMessages>, msg_count: usize) {
         let prepared_bytes = estimate_prepared_messages_bytes(&prepared);
-        if prepared_bytes > BODY_CACHE_MAX_ENTRY_BYTES {
+        if prepared_bytes > BODY_CACHE_MAX_BYTES {
             return;
         }
         if let Some(pos) = self.entries.iter().position(|entry| entry.key == key) {
@@ -949,8 +950,9 @@ struct FullPrepCacheEntry {
 }
 
 const FULL_PREP_CACHE_MAX_ENTRIES: usize = 4;
-const FULL_PREP_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
-const FULL_PREP_CACHE_MAX_ENTRY_BYTES: usize = 4 * 1024 * 1024;
+// Full prepared frames duplicate some body data, so give them enough headroom to
+// retain the active large transcript instead of forcing full recomposition.
+const FULL_PREP_CACHE_MAX_BYTES: usize = 24 * 1024 * 1024;
 
 #[derive(Default)]
 struct FullPrepCacheState {
@@ -972,7 +974,7 @@ impl FullPrepCacheState {
 
     fn insert(&mut self, key: FullPrepCacheKey, prepared: Arc<PreparedMessages>) {
         let prepared_bytes = estimate_prepared_messages_bytes(&prepared);
-        if prepared_bytes > FULL_PREP_CACHE_MAX_ENTRY_BYTES {
+        if prepared_bytes > FULL_PREP_CACHE_MAX_BYTES {
             return;
         }
         if let Some(pos) = self.entries.iter().position(|entry| entry.key == key) {

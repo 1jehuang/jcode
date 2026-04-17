@@ -40,6 +40,28 @@ fn record_test_chat_snapshot(text: &str) {
     );
 }
 
+fn make_prepared_messages_with_content_bytes(bytes: usize, marker: &str) -> Arc<PreparedMessages> {
+    let content = format!(
+        "{}{}",
+        marker,
+        "x".repeat(bytes.saturating_sub(marker.len()))
+    );
+    Arc::new(PreparedMessages {
+        wrapped_lines: vec![Line::from(content.clone())],
+        wrapped_plain_lines: Arc::new(vec![content.clone()]),
+        wrapped_copy_offsets: Arc::new(vec![0]),
+        raw_plain_lines: Arc::new(vec![content]),
+        wrapped_line_map: Arc::new(Vec::new()),
+        wrapped_user_indices: Vec::new(),
+        wrapped_user_prompt_starts: Vec::new(),
+        wrapped_user_prompt_ends: Vec::new(),
+        user_prompt_texts: Vec::new(),
+        image_regions: Vec::new(),
+        edit_tool_ranges: Vec::new(),
+        copy_targets: Vec::new(),
+    })
+}
+
 #[test]
 fn test_calculate_input_lines_empty() {
     assert_eq!(calculate_input_lines("", 80), 1);
@@ -298,6 +320,29 @@ fn test_body_cache_state_evicts_oldest_entries() {
 }
 
 #[test]
+fn test_body_cache_state_accepts_large_single_entry_within_total_budget() {
+    let key = BodyCacheKey {
+        width: 120,
+        diff_mode: crate::config::DiffDisplayMode::Off,
+        messages_version: 99,
+        diagram_mode: crate::config::DiagramDisplayMode::Pinned,
+        centered: false,
+    };
+    let prepared = make_prepared_messages_with_content_bytes(3 * 1024 * 1024, "body-large-");
+
+    assert!(estimate_prepared_messages_bytes(&prepared) > 4 * 1024 * 1024);
+    assert!(estimate_prepared_messages_bytes(&prepared) < BODY_CACHE_MAX_BYTES);
+
+    let mut cache = BodyCacheState::default();
+    cache.insert(key.clone(), prepared.clone(), 60);
+
+    let hit = cache
+        .get_exact(&key)
+        .expect("expected large body cache entry to be retained");
+    assert!(Arc::ptr_eq(&hit, &prepared));
+}
+
+#[test]
 fn test_full_prep_cache_state_keeps_multiple_width_entries() {
     let key_a = FullPrepCacheKey {
         width: 40,
@@ -400,6 +445,34 @@ fn test_full_prep_cache_state_evicts_oldest_entries() {
         cache.entries.iter().all(|entry| entry.key.width >= 42),
         "oldest widths should be evicted"
     );
+}
+
+#[test]
+fn test_full_prep_cache_state_accepts_large_single_entry_within_total_budget() {
+    let key = FullPrepCacheKey {
+        width: 120,
+        height: 40,
+        diff_mode: crate::config::DiffDisplayMode::Off,
+        messages_version: 99,
+        diagram_mode: crate::config::DiagramDisplayMode::Pinned,
+        centered: false,
+        is_processing: false,
+        streaming_text_len: 0,
+        streaming_text_hash: 0,
+        batch_progress_hash: 0,
+    };
+    let prepared = make_prepared_messages_with_content_bytes(3 * 1024 * 1024, "full-large-");
+
+    assert!(estimate_prepared_messages_bytes(&prepared) > 4 * 1024 * 1024);
+    assert!(estimate_prepared_messages_bytes(&prepared) < FULL_PREP_CACHE_MAX_BYTES);
+
+    let mut cache = FullPrepCacheState::default();
+    cache.insert(key.clone(), prepared.clone());
+
+    let hit = cache
+        .get_exact(&key)
+        .expect("expected large full prep cache entry to be retained");
+    assert!(Arc::ptr_eq(&hit, &prepared));
 }
 
 #[test]
