@@ -209,6 +209,8 @@ fn model_entry_saved_spec(entry: &PickerEntry) -> String {
             format!("copilot:{}", bare_name)
         } else if route.api_method == "cursor" {
             format!("cursor:{}", bare_name)
+        } else if route.provider == "Antigravity" {
+            format!("antigravity:{}", bare_name)
         } else if route.api_method == "openrouter" && route.provider != "auto" {
             if bare_name.contains('/') {
                 format!("{}@{}", bare_name, route.provider)
@@ -741,7 +743,8 @@ impl App {
                 None => false,
                 Some(default) => {
                     let bare = default.strip_prefix("copilot:").unwrap_or(default);
-                    let bare = bare.strip_prefix("cursor:").unwrap_or(bare);
+                    let bare = default.strip_prefix("cursor:").unwrap_or(bare);
+                    let bare = bare.strip_prefix("antigravity:").unwrap_or(bare);
                     let bare = bare.split('@').next().unwrap_or(bare);
                     name == default || name == bare
                 }
@@ -1673,6 +1676,8 @@ impl App {
                             format!("copilot:{}", bare_name)
                         } else if r.api_method == "cursor" {
                             format!("cursor:{}", bare_name)
+                        } else if r.provider == "Antigravity" {
+                            format!("antigravity:{}", bare_name)
                         } else if r.api_method == "openrouter" && r.provider != "auto" {
                             if bare_name.contains('/') {
                                 format!("{}@{}", bare_name, r.provider)
@@ -1692,6 +1697,7 @@ impl App {
                             "openai-oauth" => Some("openai"),
                             "copilot" => Some("copilot"),
                             "cursor" => Some("cursor"),
+                            "cli" if r.provider == "Antigravity" => Some("antigravity"),
                             "openrouter" => Some("openrouter"),
                             _ => None,
                         };
@@ -1839,7 +1845,9 @@ impl App {
 
                         let bare_name = model_entry_base_name(&entry);
 
-                        let spec = if route.api_method == "openrouter" && route.provider != "auto" {
+                        let spec = if route.provider == "Antigravity" {
+                            format!("antigravity:{}", bare_name)
+                        } else if route.api_method == "openrouter" && route.provider != "auto" {
                             if entry.name.contains('/') {
                                 format!("{}@{}", entry.name, route.provider)
                             } else {

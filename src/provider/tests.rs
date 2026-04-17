@@ -57,10 +57,28 @@ fn test_multi_provider_with_cursor() -> MultiProvider {
         anthropic: RwLock::new(None),
         openai: RwLock::new(None),
         copilot_api: RwLock::new(None),
+        antigravity: RwLock::new(None),
         gemini: RwLock::new(None),
         cursor: RwLock::new(Some(Arc::new(cursor::CursorCliProvider::new()))),
         openrouter: RwLock::new(None),
         active: RwLock::new(ActiveProvider::Cursor),
+        use_claude_cli: false,
+        startup_notices: RwLock::new(Vec::new()),
+        forced_provider: None,
+    }
+}
+
+fn test_multi_provider_with_antigravity() -> MultiProvider {
+    MultiProvider {
+        claude: RwLock::new(None),
+        anthropic: RwLock::new(None),
+        openai: RwLock::new(None),
+        copilot_api: RwLock::new(None),
+        antigravity: RwLock::new(Some(Arc::new(antigravity::AntigravityCliProvider::new()))),
+        gemini: RwLock::new(None),
+        cursor: RwLock::new(None),
+        openrouter: RwLock::new(None),
+        active: RwLock::new(ActiveProvider::Antigravity),
         use_claude_cli: false,
         startup_notices: RwLock::new(Vec::new()),
         forced_provider: None,
@@ -78,6 +96,7 @@ fn test_on_auth_changed_hot_initializes_openai_and_marks_routes_available() {
             anthropic: RwLock::new(None),
             openai: RwLock::new(None),
             copilot_api: RwLock::new(None),
+            antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
             openrouter: RwLock::new(None),
@@ -138,6 +157,7 @@ fn test_on_auth_changed_refreshes_existing_openai_provider_credentials() {
             anthropic: RwLock::new(None),
             openai: RwLock::new(Some(existing.clone())),
             copilot_api: RwLock::new(None),
+            antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
             openrouter: RwLock::new(None),
@@ -168,6 +188,7 @@ fn test_on_auth_changed_hot_initializes_anthropic_and_marks_routes_available() {
             anthropic: RwLock::new(None),
             openai: RwLock::new(None),
             copilot_api: RwLock::new(None),
+            antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
             openrouter: RwLock::new(None),
@@ -207,6 +228,7 @@ fn test_anthropic_model_routes_keep_plain_4_6_available_without_extra_usage() {
             anthropic: RwLock::new(None),
             openai: RwLock::new(None),
             copilot_api: RwLock::new(None),
+            antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
             openrouter: RwLock::new(None),
@@ -266,6 +288,7 @@ fn test_on_auth_changed_hot_initializes_openrouter_and_marks_routes_available() 
                     anthropic: RwLock::new(None),
                     openai: RwLock::new(None),
                     copilot_api: RwLock::new(None),
+                    antigravity: RwLock::new(None),
                     gemini: RwLock::new(None),
                     cursor: RwLock::new(None),
                     openrouter: RwLock::new(None),
@@ -302,6 +325,7 @@ fn test_on_auth_changed_hot_initializes_copilot_and_marks_routes_available() {
                 anthropic: RwLock::new(None),
                 openai: RwLock::new(None),
                 copilot_api: RwLock::new(None),
+                antigravity: RwLock::new(None),
                 gemini: RwLock::new(None),
                 cursor: RwLock::new(None),
                 openrouter: RwLock::new(None),
@@ -340,6 +364,7 @@ fn test_on_auth_changed_hot_initializes_gemini_and_marks_routes_available() {
             anthropic: RwLock::new(None),
             openai: RwLock::new(None),
             copilot_api: RwLock::new(None),
+            antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
             openrouter: RwLock::new(None),
@@ -371,6 +396,7 @@ fn test_on_auth_changed_hot_initializes_cursor_and_marks_routes_available() {
                 anthropic: RwLock::new(None),
                 openai: RwLock::new(None),
                 copilot_api: RwLock::new(None),
+                antigravity: RwLock::new(None),
                 gemini: RwLock::new(None),
                 cursor: RwLock::new(None),
                 openrouter: RwLock::new(None),
@@ -410,6 +436,12 @@ fn test_provider_for_model_gemini() {
     assert_eq!(provider_for_model("gemini-2.5-pro"), Some("gemini"));
     assert_eq!(provider_for_model("gemini-2.5-flash"), Some("gemini"));
     assert_eq!(provider_for_model("gemini-3-pro-preview"), Some("gemini"));
+}
+
+#[test]
+fn test_resolve_model_capabilities_respects_antigravity_provider_hint() {
+    let caps = resolve_model_capabilities("gpt-oss-120b-medium", Some("antigravity"));
+    assert_eq!(caps.provider.as_deref(), Some("antigravity"));
 }
 
 #[test]
@@ -753,6 +785,55 @@ fn test_set_model_supports_explicit_cursor_prefix() {
 }
 
 #[test]
+fn test_antigravity_models_are_included_in_model_routes_when_configured() {
+    with_clean_provider_test_env(|| {
+        let cache_path = crate::storage::app_config_dir()
+            .expect("app config dir")
+            .join("antigravity_models_cache.json");
+        crate::storage::write_json(
+            &cache_path,
+            &serde_json::json!({
+                "models": [
+                    {
+                        "id": "claude-sonnet-4-6",
+                        "display_name": "Claude Sonnet 4.6",
+                        "recommended": true,
+                        "available": true,
+                        "remaining_fraction_milli": 1000
+                    }
+                ],
+                "fetched_at_rfc3339": "2026-04-17T20:53:26Z"
+            }),
+        )
+        .expect("write antigravity cache");
+
+        let provider = test_multi_provider_with_antigravity();
+        let routes = provider.model_routes();
+        assert!(routes.iter().any(|route| {
+            route.model == "claude-sonnet-4-6"
+                && route.provider == "Antigravity"
+                && route.api_method == "cli"
+                && route.available
+        }));
+    });
+}
+
+#[test]
+fn test_set_model_supports_explicit_antigravity_prefix() {
+    with_clean_provider_test_env(|| {
+        let provider = test_multi_provider_with_antigravity();
+        *provider.active.write().unwrap() = ActiveProvider::OpenAI;
+
+        provider
+            .set_model("antigravity:claude-sonnet-4-6")
+            .expect("explicit antigravity prefix should force Antigravity route");
+
+        assert_eq!(provider.active_provider(), ActiveProvider::Antigravity);
+        assert_eq!(provider.model(), "claude-sonnet-4-6");
+    });
+}
+
+#[test]
 fn test_forced_provider_disables_cross_provider_fallback_sequence() {
     assert_eq!(
         MultiProvider::fallback_sequence_for(ActiveProvider::Claude, Some(ActiveProvider::OpenAI)),
@@ -780,6 +861,7 @@ fn test_set_model_rejects_cross_provider_without_creds() {
         anthropic: RwLock::new(None),
         openai: RwLock::new(None),
         copilot_api: RwLock::new(None),
+        antigravity: RwLock::new(None),
         gemini: RwLock::new(None),
         cursor: RwLock::new(None),
         openrouter: RwLock::new(None),
@@ -802,13 +884,13 @@ fn test_set_model_rejects_cross_provider_without_creds() {
 #[test]
 fn test_auto_default_prefers_openai_over_claude_when_both_available() {
     let active =
-        MultiProvider::auto_default_provider(true, true, false, false, false, false, false);
+        MultiProvider::auto_default_provider(true, true, false, false, false, false, false, false);
     assert_eq!(active, ActiveProvider::OpenAI);
 }
 
 #[test]
 fn test_auto_default_prefers_copilot_when_zero_premium_mode_enabled() {
-    let active = MultiProvider::auto_default_provider(true, true, true, true, true, true, true);
+    let active = MultiProvider::auto_default_provider(true, true, true, true, true, true, true, true);
     assert_eq!(active, ActiveProvider::Copilot);
 }
 
@@ -872,6 +954,7 @@ fn test_no_provider_error_mentions_tokens_and_details() {
         anthropic: RwLock::new(None),
         openai: RwLock::new(None),
         copilot_api: RwLock::new(None),
+        antigravity: RwLock::new(None),
         gemini: RwLock::new(None),
         cursor: RwLock::new(None),
         openrouter: RwLock::new(None),

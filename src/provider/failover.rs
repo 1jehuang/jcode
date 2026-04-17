@@ -64,6 +64,7 @@ impl MultiProvider {
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .is_some(),
+            ActiveProvider::Antigravity => self.antigravity_provider().is_some(),
             ActiveProvider::Gemini => self.gemini_provider().is_some(),
             ActiveProvider::Cursor => self
                 .cursor
@@ -151,6 +152,18 @@ impl MultiProvider {
                     ActiveProvider::Copilot,
                     ActiveProvider::Claude,
                     ActiveProvider::OpenAI,
+                    ActiveProvider::Antigravity,
+                    ActiveProvider::Gemini,
+                    ActiveProvider::Cursor,
+                    ActiveProvider::OpenRouter,
+                ]
+            }
+            ActiveProvider::Antigravity => {
+                vec![
+                    ActiveProvider::Antigravity,
+                    ActiveProvider::Claude,
+                    ActiveProvider::OpenAI,
+                    ActiveProvider::Copilot,
                     ActiveProvider::Gemini,
                     ActiveProvider::Cursor,
                     ActiveProvider::OpenRouter,
@@ -161,6 +174,7 @@ impl MultiProvider {
                     ActiveProvider::Gemini,
                     ActiveProvider::Claude,
                     ActiveProvider::OpenAI,
+                    ActiveProvider::Antigravity,
                     ActiveProvider::Copilot,
                     ActiveProvider::Cursor,
                     ActiveProvider::OpenRouter,
@@ -172,6 +186,7 @@ impl MultiProvider {
                     ActiveProvider::Claude,
                     ActiveProvider::OpenAI,
                     ActiveProvider::Copilot,
+                    ActiveProvider::Antigravity,
                     ActiveProvider::Gemini,
                     ActiveProvider::OpenRouter,
                 ]
@@ -182,6 +197,7 @@ impl MultiProvider {
                     ActiveProvider::Claude,
                     ActiveProvider::OpenAI,
                     ActiveProvider::Copilot,
+                    ActiveProvider::Antigravity,
                     ActiveProvider::Gemini,
                     ActiveProvider::Cursor,
                 ]

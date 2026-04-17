@@ -168,6 +168,11 @@ fn merge_antigravity_model_ids(models: impl IntoIterator<Item = String>) -> Vec<
     preferred
 }
 
+pub(crate) fn is_known_model(model: &str) -> bool {
+    let normalized = model.trim();
+    !normalized.is_empty() && AVAILABLE_MODELS.contains(&normalized)
+}
+
 fn parse_fetch_available_models_response(
     response: &FetchAvailableModelsResponse,
 ) -> Vec<CatalogModel> {

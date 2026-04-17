@@ -275,6 +275,7 @@ fn provider_key_from_hint(provider_hint: Option<&str>) -> Option<&'static str> {
         "openai" => Some("openai"),
         "openrouter" => Some("openrouter"),
         "copilot" | "github copilot" => Some("copilot"),
+        "antigravity" => Some("antigravity"),
         "gemini" | "google gemini" => Some("gemini"),
         "cursor" => Some("cursor"),
         _ => None,
@@ -1247,6 +1248,8 @@ pub fn provider_for_model_with_hint(
         Some("openai")
     } else if model.starts_with("gemini-") {
         Some("gemini")
+    } else if crate::provider::antigravity::is_known_model(model) {
+        Some("antigravity")
     } else if cursor::is_known_model(model) {
         Some("cursor")
     } else {

@@ -520,6 +520,86 @@ fn create_auth_refresh_test_app() -> App {
 }
 
 #[derive(Clone)]
+struct AntigravityMockProvider {
+    model: StdArc<StdMutex<String>>,
+}
+
+#[async_trait::async_trait]
+impl Provider for AntigravityMockProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        unimplemented!("AntigravityMockProvider")
+    }
+
+    fn name(&self) -> &str {
+        "Antigravity"
+    }
+
+    fn model(&self) -> String {
+        self.model.lock().unwrap().clone()
+    }
+
+    fn set_model(&self, model: &str) -> Result<()> {
+        let resolved = model.strip_prefix("antigravity:").unwrap_or(model).to_string();
+        *self.model.lock().unwrap() = resolved;
+        Ok(())
+    }
+
+    fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
+        vec![
+            crate::provider::ModelRoute {
+                model: "claude-sonnet-4-6".to_string(),
+                provider: "Antigravity".to_string(),
+                api_method: "cli".to_string(),
+                available: true,
+                detail: "cached catalog".to_string(),
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "gpt-oss-120b-medium".to_string(),
+                provider: "Antigravity".to_string(),
+                api_method: "cli".to_string(),
+                available: true,
+                detail: "cached catalog".to_string(),
+                cheapness: None,
+            },
+        ]
+    }
+
+    fn available_models_display(&self) -> Vec<String> {
+        vec![
+            "claude-sonnet-4-6".to_string(),
+            "gpt-oss-120b-medium".to_string(),
+        ]
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+fn create_antigravity_picker_test_app() -> App {
+    ensure_test_jcode_home_if_unset();
+    clear_persisted_test_ui_state();
+    crate::tui::ui::clear_test_render_state_for_tests();
+
+    let provider: Arc<dyn Provider> = Arc::new(AntigravityMockProvider {
+        model: StdArc::new(StdMutex::new("default".to_string())),
+    });
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let mut app = App::new(provider, registry);
+    app.queue_mode = false;
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app
+}
+
+#[derive(Clone)]
 struct FailingModelSwitchProvider;
 
 #[async_trait::async_trait]
@@ -4685,6 +4765,57 @@ fn test_login_completed_surfaces_new_provider_models_in_local_model_picker() {
     assert!(copilot_entry.options.iter().any(|route| {
         route.provider == "Copilot" && route.api_method == "copilot" && route.available
     }));
+}
+
+#[test]
+fn test_local_model_picker_surfaces_antigravity_models_from_multiprovider() {
+    let mut app = create_antigravity_picker_test_app();
+    app.open_model_picker();
+
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("model picker should be open");
+
+    let antigravity_entry = picker
+        .entries
+        .iter()
+        .find(|entry| entry.name == "claude-sonnet-4-6")
+        .expect("antigravity model should be shown after login");
+
+    assert!(antigravity_entry.options.iter().any(|route| {
+        route.provider == "Antigravity" && route.api_method == "cli" && route.available
+    }));
+}
+
+#[test]
+fn test_local_antigravity_model_picker_selection_preserves_antigravity_provider() {
+    let mut app = create_antigravity_picker_test_app();
+    app.open_model_picker();
+
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("model picker should be open");
+
+    let model_idx = picker
+        .entries
+        .iter()
+        .position(|entry| entry.name == "claude-sonnet-4-6")
+        .expect("antigravity model should be in picker");
+    let filtered_pos = picker
+        .filtered
+        .iter()
+        .position(|&i| i == model_idx)
+        .expect("antigravity model should be in filtered list");
+
+    app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+
+    assert_eq!(app.provider.name(), "Antigravity");
+    assert_eq!(app.provider.model(), "claude-sonnet-4-6");
+    assert!(app.inline_interactive_state.is_none());
 }
 
 #[test]

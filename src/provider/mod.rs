@@ -421,6 +421,8 @@ pub struct MultiProvider {
     openai: RwLock<Option<Arc<openai::OpenAIProvider>>>,
     /// GitHub Copilot API provider (direct API, hot-swappable after login)
     copilot_api: RwLock<Option<Arc<copilot::CopilotApiProvider>>>,
+    /// Antigravity provider (direct API catalog + CLI completion, hot-swappable after login)
+    antigravity: RwLock<Option<Arc<antigravity::AntigravityCliProvider>>>,
     /// Gemini provider (hot-swappable after login)
     gemini: RwLock<Option<Arc<gemini::GeminiProvider>>>,
     /// Cursor provider (native/direct API, hot-swappable after login)
@@ -770,6 +772,7 @@ impl Provider for MultiProvider {
             ActiveProvider::Claude => "Claude",
             ActiveProvider::OpenAI => "OpenAI",
             ActiveProvider::Copilot => "Copilot",
+            ActiveProvider::Antigravity => "Antigravity",
             ActiveProvider::Gemini => "Gemini",
             ActiveProvider::Cursor => "Cursor",
             ActiveProvider::OpenRouter => "OpenRouter",
@@ -796,6 +799,10 @@ impl Provider for MultiProvider {
                 .copilot_provider()
                 .map(|o| o.model())
                 .unwrap_or_else(|| "claude-sonnet-4".to_string()),
+            ActiveProvider::Antigravity => self
+                .antigravity_provider()
+                .map(|o| o.model())
+                .unwrap_or_else(|| "default".to_string()),
             ActiveProvider::Gemini => self
                 .gemini_provider()
                 .map(|o| o.model())
@@ -869,6 +876,54 @@ impl Provider for MultiProvider {
             return self.set_model(copilot_model);
         }
 
+        if let Some(antigravity_model) = model.strip_prefix("antigravity:") {
+            if let Some(forced) = self.forced_provider
+                && forced != ActiveProvider::Antigravity
+            {
+                let antigravity_guard = self
+                    .antigravity
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if antigravity_guard.is_none() {
+                    anyhow::bail!(
+                        "Model '{}' requires Antigravity but Antigravity credentials are not configured. Run `jcode login --provider antigravity` first.",
+                        antigravity_model
+                    );
+                }
+                drop(antigravity_guard);
+                crate::logging::info(&format!(
+                    "Switching from {} to Antigravity for model '{}'",
+                    Self::provider_label(forced),
+                    antigravity_model,
+                ));
+            }
+            let antigravity_guard = self
+                .antigravity
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if antigravity_guard.is_some() {
+                *self
+                    .active
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = ActiveProvider::Antigravity;
+                if let Some(ref antigravity) = *antigravity_guard {
+                    antigravity.set_model(antigravity_model)?;
+                }
+                return Ok(());
+            }
+            drop(antigravity_guard);
+            if self.forced_provider == Some(ActiveProvider::Antigravity) {
+                return Err(anyhow::anyhow!(
+                    "Antigravity is locked by --provider but is not configured. Run `jcode login --provider antigravity`."
+                ));
+            }
+            crate::logging::info(&format!(
+                "Antigravity not available for '{}', trying other providers",
+                antigravity_model
+            ));
+            return self.set_model(antigravity_model);
+        }
+
         // Handle explicit "cursor:" prefix from model picker/default config
         if let Some(cursor_model) = model.strip_prefix("cursor:") {
             if let Some(forced) = self.forced_provider
@@ -935,6 +990,7 @@ impl Provider for MultiProvider {
                 "claude" => ActiveProvider::Claude,
                 "openai" => ActiveProvider::OpenAI,
                 "gemini" => ActiveProvider::Gemini,
+                "antigravity" => ActiveProvider::Antigravity,
                 "cursor" => ActiveProvider::Cursor,
                 "openrouter" => ActiveProvider::OpenRouter,
                 _ => forced,
@@ -943,6 +999,7 @@ impl Provider for MultiProvider {
                 let has_target_creds = match target_active {
                     ActiveProvider::Claude => self.has_claude_runtime(),
                     ActiveProvider::OpenAI => self.openai_provider().is_some(),
+                    ActiveProvider::Antigravity => self.antigravity_provider().is_some(),
                     ActiveProvider::Gemini => self.gemini_provider().is_some(),
                     ActiveProvider::Cursor => self.cursor_provider().is_some(),
                     ActiveProvider::OpenRouter => self.openrouter_provider().is_some(),
@@ -1017,6 +1074,22 @@ impl Provider for MultiProvider {
             } else {
                 Ok(())
             }
+        } else if target_provider == Some("antigravity") {
+            let antigravity = self.antigravity_provider();
+            if antigravity.is_none() {
+                return Err(anyhow::anyhow!(
+                    "Antigravity credentials not available. Run `jcode login --provider antigravity` first."
+                ));
+            }
+            *self
+                .active
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = ActiveProvider::Antigravity;
+            if let Some(antigravity) = antigravity {
+                antigravity.set_model(model)
+            } else {
+                Ok(())
+            }
         } else if target_provider == Some("cursor") {
             let cursor_guard = self
                 .cursor
@@ -1083,6 +1156,13 @@ impl Provider for MultiProvider {
                         Err(anyhow::anyhow!("Unknown model: {}", model))
                     }
                 }
+                ActiveProvider::Antigravity => {
+                    if let Some(antigravity) = self.antigravity_provider() {
+                        antigravity.set_model(model)
+                    } else {
+                        Err(anyhow::anyhow!("Unknown model: {}", model))
+                    }
+                }
                 ActiveProvider::Gemini => {
                     if let Some(gemini) = self.gemini_provider() {
                         gemini.set_model(model)
@@ -1134,6 +1214,10 @@ impl Provider for MultiProvider {
                 .copilot_provider()
                 .map(|copilot| copilot.available_models_for_switching())
                 .unwrap_or_default(),
+            ActiveProvider::Antigravity => self
+                .antigravity_provider()
+                .map(|antigravity| antigravity.available_models_for_switching())
+                .unwrap_or_default(),
             ActiveProvider::Gemini => self
                 .gemini_provider()
                 .map(|gemini| gemini.available_models_for_switching())
@@ -1166,6 +1250,19 @@ impl Provider for MultiProvider {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(ref copilot) = *copilot_guard {
                 for m in copilot.available_models_display() {
+                    if !models.contains(&m) {
+                        models.push(m);
+                    }
+                }
+            }
+        }
+        {
+            let antigravity_guard = self
+                .antigravity
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(ref antigravity) = *antigravity_guard {
+                for m in antigravity.available_models_display() {
                     if !models.contains(&m) {
                         models.push(m);
                     }
@@ -1389,6 +1486,13 @@ impl Provider for MultiProvider {
             }
         }
 
+        // Antigravity models
+        {
+            if let Some(antigravity) = self.antigravity_provider() {
+                routes.extend(antigravity.model_routes());
+            }
+        }
+
         // Cursor models
         {
             if let Some(cursor) = self.cursor_provider() {
@@ -1574,6 +1678,12 @@ impl Provider for MultiProvider {
             }
         }
         {
+            let antigravity = self.antigravity_provider();
+            if let Some(antigravity) = antigravity {
+                antigravity.prefetch_models().await?;
+            }
+        }
+        {
             let gemini = self.gemini_provider();
             if let Some(gemini) = gemini {
                 gemini.prefetch_models().await?;
@@ -1668,6 +1778,18 @@ impl Provider for MultiProvider {
             }
         }
 
+        let already_has_antigravity = self.antigravity_provider().is_some();
+        if !already_has_antigravity
+            && matches!(crate::auth::AuthStatus::check().antigravity, crate::auth::AuthState::Available)
+        {
+            crate::logging::info("Hot-initialized Antigravity provider after login");
+            *self
+                .antigravity
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some(Arc::new(antigravity::AntigravityCliProvider::new()));
+        }
+
         let already_has_gemini = self.gemini_provider().is_some();
         if !already_has_gemini && crate::auth::gemini::load_tokens().is_ok() {
             crate::logging::info("Hot-initialized Gemini provider after login");
@@ -1700,6 +1822,9 @@ impl Provider for MultiProvider {
         }
         if let Some(openai) = self.openai_provider() {
             Self::spawn_post_auth_model_refresh(openai, "OpenAI");
+        }
+        if let Some(antigravity) = self.antigravity_provider() {
+            Self::spawn_post_auth_model_refresh(antigravity, "Antigravity");
         }
         if let Some(gemini) = self.gemini_provider() {
             Self::spawn_post_auth_model_refresh(gemini, "Gemini");
@@ -1741,6 +1866,10 @@ impl Provider for MultiProvider {
                 .copilot_provider()
                 .map(|o| o.handles_tools_internally())
                 .unwrap_or(false),
+            ActiveProvider::Antigravity => self
+                .antigravity_provider()
+                .map(|o| o.handles_tools_internally())
+                .unwrap_or(false),
             ActiveProvider::Gemini => false,
             ActiveProvider::Cursor => self
                 .cursor_provider()
@@ -1755,6 +1884,7 @@ impl Provider for MultiProvider {
             ActiveProvider::Claude => None,
             ActiveProvider::OpenAI => self.openai_provider().and_then(|o| o.reasoning_effort()),
             ActiveProvider::Copilot => None,
+            ActiveProvider::Antigravity => None,
             ActiveProvider::Gemini => None,
             ActiveProvider::Cursor => None,
             ActiveProvider::OpenRouter => None,
@@ -1780,6 +1910,7 @@ impl Provider for MultiProvider {
                 .map(|o| o.available_efforts())
                 .unwrap_or_default(),
             ActiveProvider::Copilot => vec![],
+            ActiveProvider::Antigravity => vec![],
             ActiveProvider::Gemini => vec![],
             ActiveProvider::Cursor => vec![],
             _ => vec![],
@@ -1883,6 +2014,10 @@ impl Provider for MultiProvider {
                 .copilot_provider()
                 .map(|o| o.supports_compaction())
                 .unwrap_or(false),
+            ActiveProvider::Antigravity => self
+                .antigravity_provider()
+                .map(|o| o.supports_compaction())
+                .unwrap_or(false),
             ActiveProvider::Gemini => self
                 .gemini_provider()
                 .map(|o| o.supports_compaction())
@@ -1915,6 +2050,10 @@ impl Provider for MultiProvider {
                 .unwrap_or(false),
             ActiveProvider::Copilot => self
                 .copilot_provider()
+                .map(|o| o.uses_jcode_compaction())
+                .unwrap_or(false),
+            ActiveProvider::Antigravity => self
+                .antigravity_provider()
                 .map(|o| o.uses_jcode_compaction())
                 .unwrap_or(false),
             ActiveProvider::Gemini => self
@@ -1987,6 +2126,9 @@ impl Provider for MultiProvider {
                     Err(anyhow::anyhow!("Copilot provider unavailable"))
                 }
             }
+            ActiveProvider::Antigravity => Err(anyhow::anyhow!(
+                "Antigravity provider does not support native compaction"
+            )),
             ActiveProvider::Gemini => {
                 let provider = self.gemini_provider();
                 if let Some(gemini) = provider {
@@ -2074,6 +2216,10 @@ impl Provider for MultiProvider {
                 .copilot_provider()
                 .map(|o| o.context_window())
                 .unwrap_or(DEFAULT_CONTEXT_LIMIT),
+            ActiveProvider::Antigravity => self
+                .antigravity_provider()
+                .map(|o| o.context_window())
+                .unwrap_or(DEFAULT_CONTEXT_LIMIT),
             ActiveProvider::Gemini => self
                 .gemini_provider()
                 .map(|o| o.context_window())
@@ -2117,6 +2263,11 @@ impl Provider for MultiProvider {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
+        let antigravity = self
+            .antigravity
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         let gemini_provider = self
             .gemini
             .read()
@@ -2148,6 +2299,7 @@ impl Provider for MultiProvider {
             anthropic: RwLock::new(anthropic),
             openai: RwLock::new(openai),
             copilot_api: RwLock::new(copilot_api),
+            antigravity: RwLock::new(antigravity),
             gemini: RwLock::new(gemini_provider),
             cursor: RwLock::new(cursor_provider),
             openrouter: RwLock::new(openrouter),
@@ -2161,6 +2313,8 @@ impl Provider for MultiProvider {
         provider.spawn_openai_catalog_refresh_if_needed();
         if matches!(active, ActiveProvider::Copilot) {
             let _ = provider.set_model(&format!("copilot:{}", current_model));
+        } else if matches!(active, ActiveProvider::Antigravity) {
+            let _ = provider.set_model(&format!("antigravity:{}", current_model));
         } else if matches!(active, ActiveProvider::Cursor) {
             let _ = provider.set_model(&format!("cursor:{}", current_model));
         } else {
@@ -2182,6 +2336,7 @@ impl Provider for MultiProvider {
             }
             ActiveProvider::OpenAI => None,
             ActiveProvider::Copilot => None,
+            ActiveProvider::Antigravity => None,
             ActiveProvider::Gemini => None,
             ActiveProvider::Cursor => None,
             ActiveProvider::OpenRouter => None,

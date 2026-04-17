@@ -120,6 +120,12 @@ impl MultiProvider {
             None
         };
 
+        let antigravity_provider = if matches!(auth_status.antigravity, auth::AuthState::Available) {
+            Some(Arc::new(antigravity::AntigravityCliProvider::new()))
+        } else {
+            None
+        };
+
         let gemini_provider = if has_gemini_creds {
             Some(Arc::new(gemini::GeminiProvider::new()))
         } else {
@@ -152,6 +158,7 @@ impl MultiProvider {
             openai.is_some(),
             claude.is_some() || anthropic.is_some(),
             copilot_api.is_some(),
+            antigravity_provider.is_some(),
             gemini_provider.is_some(),
             cursor_provider.is_some(),
             openrouter.is_some(),
@@ -172,6 +179,7 @@ impl MultiProvider {
                 ActiveProvider::Claude => claude.is_some() || anthropic.is_some(),
                 ActiveProvider::OpenAI => openai.is_some(),
                 ActiveProvider::Copilot => copilot_api.is_some(),
+                ActiveProvider::Antigravity => antigravity_provider.is_some(),
                 ActiveProvider::Gemini => gemini_provider.is_some(),
                 ActiveProvider::Cursor => cursor_provider.is_some(),
                 ActiveProvider::OpenRouter => openrouter.is_some(),
@@ -193,6 +201,7 @@ impl MultiProvider {
                     ActiveProvider::Claude => claude.is_some() || anthropic.is_some(),
                     ActiveProvider::OpenAI => openai.is_some(),
                     ActiveProvider::Copilot => copilot_api.is_some(),
+                    ActiveProvider::Antigravity => antigravity_provider.is_some(),
                     ActiveProvider::Gemini => gemini_provider.is_some(),
                     ActiveProvider::Cursor => cursor_provider.is_some(),
                     ActiveProvider::OpenRouter => openrouter.is_some(),
@@ -222,6 +231,7 @@ impl MultiProvider {
             anthropic: RwLock::new(anthropic),
             openai: RwLock::new(openai),
             copilot_api: RwLock::new(copilot_api),
+            antigravity: RwLock::new(antigravity_provider),
             gemini: RwLock::new(gemini_provider),
             cursor: RwLock::new(cursor_provider),
             openrouter: RwLock::new(openrouter),

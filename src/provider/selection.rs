@@ -5,6 +5,7 @@ pub(super) enum ActiveProvider {
     Claude,
     OpenAI,
     Copilot,
+    Antigravity,
     Gemini,
     Cursor,
     OpenRouter,
@@ -15,6 +16,7 @@ impl MultiProvider {
         openai: bool,
         claude: bool,
         copilot: bool,
+        antigravity: bool,
         gemini: bool,
         cursor: bool,
         openrouter: bool,
@@ -28,6 +30,8 @@ impl MultiProvider {
             ActiveProvider::Claude
         } else if copilot {
             ActiveProvider::Copilot
+        } else if antigravity {
+            ActiveProvider::Antigravity
         } else if gemini {
             ActiveProvider::Gemini
         } else if cursor {
@@ -44,6 +48,7 @@ impl MultiProvider {
             "claude" | "anthropic" => Some(ActiveProvider::Claude),
             "openai" => Some(ActiveProvider::OpenAI),
             "copilot" => Some(ActiveProvider::Copilot),
+            "antigravity" => Some(ActiveProvider::Antigravity),
             "gemini" => Some(ActiveProvider::Gemini),
             "cursor" => Some(ActiveProvider::Cursor),
             "openrouter" => Some(ActiveProvider::OpenRouter),
@@ -70,6 +75,7 @@ impl MultiProvider {
             ActiveProvider::Claude => "Anthropic",
             ActiveProvider::OpenAI => "OpenAI",
             ActiveProvider::Copilot => "GitHub Copilot",
+            ActiveProvider::Antigravity => "Antigravity",
             ActiveProvider::Gemini => "Gemini",
             ActiveProvider::Cursor => "Cursor",
             ActiveProvider::OpenRouter => "OpenRouter",
@@ -81,6 +87,7 @@ impl MultiProvider {
             ActiveProvider::Claude => "claude",
             ActiveProvider::OpenAI => "openai",
             ActiveProvider::Copilot => "copilot",
+            ActiveProvider::Antigravity => "antigravity",
             ActiveProvider::Gemini => "gemini",
             ActiveProvider::Cursor => "cursor",
             ActiveProvider::OpenRouter => "openrouter",
