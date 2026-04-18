@@ -196,6 +196,35 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
 }
 
 #[test]
+fn test_side_panel_state_event_roundtrip() -> Result<()> {
+    let event = ServerEvent::SidePanelState {
+        snapshot: crate::side_panel::SidePanelSnapshot {
+            focused_page_id: Some("page-1".to_string()),
+            pages: vec![crate::side_panel::SidePanelPage {
+                id: "page-1".to_string(),
+                title: "Notes".to_string(),
+                file_path: "/tmp/notes.md".to_string(),
+                format: crate::side_panel::SidePanelPageFormat::Markdown,
+                source: crate::side_panel::SidePanelPageSource::Managed,
+                content: "updated".to_string(),
+                updated_at_ms: 99,
+            }],
+        },
+    };
+    let json = encode_event(&event);
+    assert!(json.contains("\"type\":\"side_panel_state\""));
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::SidePanelState { snapshot } = decoded else {
+        return Err(anyhow!("expected SidePanelState event"));
+    };
+    assert_eq!(snapshot.focused_page_id.as_deref(), Some("page-1"));
+    assert_eq!(snapshot.pages.len(), 1);
+    assert_eq!(snapshot.pages[0].title, "Notes");
+    assert_eq!(snapshot.pages[0].content, "updated");
+    Ok(())
+}
+
+#[test]
 fn test_error_event_retry_after_roundtrip() -> Result<()> {
     let event = ServerEvent::Error {
         id: 42,
