@@ -424,9 +424,7 @@ async fn run_burst_resume_attach_stress(burst_size: usize) -> Result<()> {
     );
 
     drop(connected_clients);
-    server_handle.abort();
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_file(&debug_socket_path);
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
 
     Ok(())
 }
@@ -533,9 +531,7 @@ async fn burst_retry_takeover_without_local_history_keeps_existing_live_clients_
     );
 
     drop(live_clients);
-    server_handle.abort();
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_file(&debug_socket_path);
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
 
     Ok(())
 }

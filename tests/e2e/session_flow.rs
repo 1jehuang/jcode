@@ -117,9 +117,7 @@ async fn resume_session_restores_persisted_compaction_for_provider_context() -> 
     }
     .await;
 
-    server_handle.abort();
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_file(&debug_socket_path);
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
     result
 }
 
@@ -194,9 +192,7 @@ async fn test_debug_create_session_marks_debug() -> Result<()> {
     let session = Session::load(&session_id)?;
     assert!(session.is_debug);
 
-    server_handle.abort();
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_file(&debug_socket_path);
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
 
     Ok(())
 }
@@ -232,9 +228,7 @@ async fn test_debug_create_selfdev_session_marks_canary() -> Result<()> {
     assert!(session.is_debug);
     assert!(session.is_canary);
 
-    server_handle.abort();
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_file(&debug_socket_path);
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
 
     Ok(())
 }
@@ -308,9 +302,7 @@ async fn test_clear_preserves_debug_for_resumed_debug_session() -> Result<()> {
     let session = Session::load(&new_session_id)?;
     assert!(session.is_debug);
 
-    server_handle.abort();
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_file(&debug_socket_path);
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
 
     Ok(())
 }

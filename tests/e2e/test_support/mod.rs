@@ -578,9 +578,7 @@ pub(crate) async fn run_unix_transport_scenario() -> Result<TransportScenarioRes
     }
     .await;
 
-    server_handle.abort();
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_file(&debug_socket_path);
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
     result
 }
 
@@ -653,9 +651,7 @@ pub(crate) async fn run_websocket_transport_scenario() -> Result<TransportScenar
     }
     .await;
 
-    server_handle.abort();
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_file(&debug_socket_path);
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
     result
 }
 
@@ -889,7 +885,16 @@ pub(crate) fn set_file_mtime(path: &std::path::Path, when: std::time::SystemTime
     Ok(())
 }
 
-#[cfg(unix)]
+pub(crate) fn abort_server_and_cleanup<T>(
+    server_handle: &tokio::task::JoinHandle<T>,
+    socket_path: &std::path::Path,
+    debug_socket_path: &std::path::Path,
+) {
+    server_handle.abort();
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_file(debug_socket_path);
+}
+
 pub(crate) async fn wait_for_connected_client_session(
     debug_socket_path: &std::path::Path,
     timeout: Duration,

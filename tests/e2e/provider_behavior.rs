@@ -142,9 +142,7 @@ async fn test_socket_model_cycle_supported_models() -> Result<()> {
         }
     }
 
-    server_handle.abort();
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_file(&debug_socket_path);
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
 
     assert!(saw_model_changed, "Did not receive model_changed event");
     Ok(())
@@ -227,9 +225,7 @@ async fn test_resume_restores_model_and_tool_history() -> Result<()> {
         }
     }
 
-    server_handle.abort();
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_file(&debug_socket_path);
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
 
     let (messages, provider_model) =
         history_event.ok_or_else(|| anyhow::anyhow!("Did not receive history event"))?;
@@ -390,9 +386,7 @@ async fn test_resume_session_with_local_history_uses_metadata_only_history() -> 
         Some(Some("provider-resume-123".to_string()))
     );
 
-    server_handle.abort();
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_file(&debug_socket_path);
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
 
     Ok(())
 }
@@ -466,9 +460,7 @@ async fn test_resume_session_reports_reload_interruption_for_peer_sessions() -> 
         "reload-interrupted peer sessions should be marked interrupted so clients auto-continue"
     );
 
-    server_handle.abort();
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_file(&debug_socket_path);
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
 
     Ok(())
 }
@@ -516,9 +508,7 @@ async fn test_subscribe_selfdev_hint_marks_canary() -> Result<()> {
         _ => anyhow::bail!("Expected history event after subscribe"),
     }
 
-    server_handle.abort();
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_file(&debug_socket_path);
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
 
     Ok(())
 }
@@ -581,9 +571,7 @@ async fn test_subscribe_working_dir_without_selfdev_hint_stays_normal() -> Resul
         _ => anyhow::bail!("Expected history event after subscribe"),
     }
 
-    server_handle.abort();
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_file(&debug_socket_path);
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
 
     Ok(())
 }
@@ -670,9 +658,7 @@ async fn test_model_switch_resets_provider_session() -> Result<()> {
     assert_eq!(resume_ids[0], None);
     assert_eq!(resume_ids[1], None);
 
-    server_handle.abort();
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_file(&debug_socket_path);
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
 
     Ok(())
 }
@@ -781,9 +767,7 @@ async fn test_model_switch_is_per_session() -> Result<()> {
     assert!(models.len() >= 3, "Expected at least 3 model captures");
     assert_eq!(models[2], "model-a");
 
-    server_handle.abort();
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_file(&debug_socket_path);
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
 
     Ok(())
 }
