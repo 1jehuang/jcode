@@ -103,7 +103,11 @@ impl Tool for SubagentTool {
         let params: SubagentInput = serde_json::from_value(input)?;
 
         let mut session = if let Some(session_id) = &params.session_id {
-            Session::load(session_id).unwrap_or_else(|_| {
+            Session::load(session_id).unwrap_or_else(|err| {
+                logging::warn(&format!(
+                    "[tool:subagent] failed to load existing session {}; creating a new subagent session instead: {}",
+                    session_id, err
+                ));
                 Session::create(Some(ctx.session_id.clone()), Some(subagent_title(&params)))
             })
         } else {
@@ -184,7 +188,17 @@ impl Tool for SubagentTool {
         );
 
         let start = std::time::Instant::now();
-        let final_text = agent.run_once_capture(&params.prompt).await?;
+        let final_text = agent.run_once_capture(&params.prompt).await.map_err(|err| {
+            logging::warn(&format!(
+                "[tool:subagent] subagent failed description={} type={} session_id={} model={} error={}",
+                params.description,
+                params.subagent_type,
+                agent.session_id(),
+                resolved_model,
+                err
+            ));
+            err
+        })?;
         let sub_session_id = agent.session_id().to_string();
 
         logging::info(&format!(
