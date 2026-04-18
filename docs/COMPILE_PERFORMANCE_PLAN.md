@@ -123,6 +123,10 @@ Use it when capturing comparable before/after numbers for refactors.
   - warm touched-file `cargo check`: **9.339s**
   - warm touched-file `selfdev-jcode` build: **18.844s**
   - skipped checkpoints reported explicitly: `cold_check`, `cold_selfdev_build`
+- 2026-04-18: additional warm-only checkpoint on a broader shared edit target with
+  `--skip-cold --touch src/server.rs --runs 1`:
+  - warm touched-file `cargo check`: **8.711s**
+  - warm touched-file `selfdev-jcode` build: **18.969s**
 
 ### Phase 3 — Workspace boundary design
 
