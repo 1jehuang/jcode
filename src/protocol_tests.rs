@@ -122,6 +122,80 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
 }
 
 #[test]
+fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
+    let event = ServerEvent::History {
+        id: 101,
+        session_id: "ses_test_456".to_string(),
+        messages: vec![HistoryMessage {
+            role: "assistant".to_string(),
+            content: "hello".to_string(),
+            tool_calls: None,
+            tool_data: None,
+        }],
+        images: Vec::new(),
+        provider_name: Some("openai".to_string()),
+        provider_model: Some("gpt-5.4".to_string()),
+        available_models: vec!["gpt-5.4".to_string()],
+        available_model_routes: Vec::new(),
+        mcp_servers: Vec::new(),
+        skills: Vec::new(),
+        total_tokens: None,
+        all_sessions: Vec::new(),
+        client_count: None,
+        is_canary: None,
+        server_version: None,
+        server_name: None,
+        server_icon: None,
+        server_has_update: None,
+        was_interrupted: None,
+        connection_type: Some("websocket".to_string()),
+        status_detail: None,
+        upstream_provider: None,
+        reasoning_effort: None,
+        service_tier: None,
+        subagent_model: None,
+        autoreview_enabled: None,
+        autojudge_enabled: None,
+        compaction_mode: crate::config::CompactionMode::Reactive,
+        activity: None,
+        side_panel: crate::side_panel::SidePanelSnapshot {
+            focused_page_id: Some("page-1".to_string()),
+            pages: vec![crate::side_panel::SidePanelPage {
+                id: "page-1".to_string(),
+                title: "Notes".to_string(),
+                file_path: "/tmp/notes.md".to_string(),
+                format: crate::side_panel::SidePanelPageFormat::Markdown,
+                source: crate::side_panel::SidePanelPageSource::Managed,
+                content: "# Notes".to_string(),
+                updated_at_ms: 42,
+            }],
+        },
+    };
+    let json = encode_event(&event);
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::History {
+        id,
+        side_panel,
+        messages,
+        provider_name,
+        provider_model,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("expected History event"));
+    };
+    assert_eq!(id, 101);
+    assert_eq!(provider_name.as_deref(), Some("openai"));
+    assert_eq!(provider_model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(messages.len(), 1);
+    assert_eq!(side_panel.focused_page_id.as_deref(), Some("page-1"));
+    assert_eq!(side_panel.pages.len(), 1);
+    assert_eq!(side_panel.pages[0].title, "Notes");
+    assert_eq!(side_panel.pages[0].content, "# Notes");
+    Ok(())
+}
+
+#[test]
 fn test_error_event_retry_after_roundtrip() -> Result<()> {
     let event = ServerEvent::Error {
         id: 42,
