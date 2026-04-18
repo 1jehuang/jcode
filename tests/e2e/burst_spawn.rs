@@ -23,25 +23,6 @@ enum BurstAttachOutcome {
     Rejected(String),
 }
 
-#[cfg(unix)]
-fn current_process_cpu_time() -> Result<Duration> {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
-    let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let usage = unsafe { usage.assume_init() };
-    let to_duration = |tv: libc::timeval| {
-        Duration::from_secs(tv.tv_sec as u64) + Duration::from_micros(tv.tv_usec as u64)
-    };
-    Ok(to_duration(usage.ru_utime) + to_duration(usage.ru_stime))
-}
-
-#[cfg(not(unix))]
-fn current_process_cpu_time() -> Result<Duration> {
-    Ok(Duration::ZERO)
-}
-
 async fn burst_attach_resumed_client(
     socket_path: PathBuf,
     target_session_id: String,
