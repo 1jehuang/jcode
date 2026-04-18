@@ -23,28 +23,6 @@ enum BurstAttachOutcome {
     Rejected(String),
 }
 
-fn client_id_map(
-    client_map: &serde_json::Value,
-) -> Result<std::collections::HashMap<String, String>> {
-    let clients = client_map
-        .get("clients")
-        .and_then(|value| value.as_array())
-        .context("clients:map missing clients array")?;
-    let mut mapping = std::collections::HashMap::new();
-    for client in clients {
-        let session_id = client
-            .get("session_id")
-            .and_then(|value| value.as_str())
-            .context("clients:map entry missing session_id")?;
-        let client_id = client
-            .get("client_id")
-            .and_then(|value| value.as_str())
-            .context("clients:map entry missing client_id")?;
-        mapping.insert(session_id.to_string(), client_id.to_string());
-    }
-    Ok(mapping)
-}
-
 #[cfg(unix)]
 fn current_process_cpu_time() -> Result<Duration> {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
@@ -62,14 +40,6 @@ fn current_process_cpu_time() -> Result<Duration> {
 #[cfg(not(unix))]
 fn current_process_cpu_time() -> Result<Duration> {
     Ok(Duration::ZERO)
-}
-
-fn percentile_ms(sorted: &[u128], percentile: usize) -> u128 {
-    if sorted.is_empty() {
-        return 0;
-    }
-    let idx = ((sorted.len() - 1) * percentile) / 100;
-    sorted[idx]
 }
 
 async fn burst_attach_resumed_client(

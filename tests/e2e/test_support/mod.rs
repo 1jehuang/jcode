@@ -751,6 +751,36 @@ pub(crate) async fn debug_run_command_json(
     Ok(serde_json::from_str(&output)?)
 }
 
+pub(crate) fn client_id_map(
+    client_map: &serde_json::Value,
+) -> Result<std::collections::HashMap<String, String>> {
+    let clients = client_map
+        .get("clients")
+        .and_then(|value| value.as_array())
+        .context("clients:map missing clients array")?;
+    let mut mapping = std::collections::HashMap::new();
+    for client in clients {
+        let session_id = client
+            .get("session_id")
+            .and_then(|value| value.as_str())
+            .context("clients:map entry missing session_id")?;
+        let client_id = client
+            .get("client_id")
+            .and_then(|value| value.as_str())
+            .context("clients:map entry missing client_id")?;
+        mapping.insert(session_id.to_string(), client_id.to_string());
+    }
+    Ok(mapping)
+}
+
+pub(crate) fn percentile_ms(sorted: &[u128], percentile: usize) -> u128 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let idx = ((sorted.len() - 1) * percentile) / 100;
+    sorted[idx]
+}
+
 pub(crate) async fn wait_for_server_client(
     socket_path: &std::path::Path,
 ) -> Result<server::Client> {
