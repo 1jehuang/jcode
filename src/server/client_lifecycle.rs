@@ -1,7 +1,7 @@
 use super::client_actions::{
-    AgentTaskContext, handle_agent_task, handle_compact, handle_input_shell, handle_notify_session,
-    handle_run_subagent, handle_set_feature, handle_set_subagent_model, handle_split,
-    handle_stdin_response, handle_trigger_memory_extraction,
+    AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
+    handle_notify_session, handle_run_subagent, handle_set_feature, handle_set_subagent_model,
+    handle_split, handle_stdin_response, handle_trigger_memory_extraction,
 };
 use super::client_comm::{
     handle_comm_channel_members, handle_comm_list, handle_comm_list_channels, handle_comm_message,
@@ -1731,11 +1731,13 @@ pub(super) async fn handle_client(
                     id,
                     session_id,
                     message,
-                    &sessions,
-                    &soft_interrupt_queues,
-                    &client_connections,
-                    &swarm_members,
-                    &client_event_tx,
+                    NotifySessionContext {
+                        sessions: &sessions,
+                        soft_interrupt_queues: &soft_interrupt_queues,
+                        client_connections: &client_connections,
+                        swarm_members: &swarm_members,
+                        client_event_tx: &client_event_tx,
+                    },
                 )
                 .await;
             }
