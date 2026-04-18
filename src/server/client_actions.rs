@@ -690,7 +690,9 @@ mod tests {
             _system: &str,
             _resume_session_id: Option<&str>,
         ) -> Result<EventStream> {
-            unimplemented!("Mock provider")
+            Err(anyhow::anyhow!(
+                "mock provider complete should not be called in client_actions tests"
+            ))
         }
 
         fn name(&self) -> &str {

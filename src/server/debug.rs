@@ -903,7 +903,9 @@ mod debug_execution_tests {
             _system: &str,
             _session_id: Option<&str>,
         ) -> anyhow::Result<crate::provider::EventStream> {
-            unimplemented!()
+            Err(anyhow::anyhow!(
+                "test provider complete should not be called in debug tests"
+            ))
         }
 
         fn fork(&self) -> Arc<dyn provider::Provider> {

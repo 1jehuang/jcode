@@ -630,7 +630,9 @@ mod tests {
             _system: &str,
             _resume_session_id: Option<&str>,
         ) -> Result<EventStream> {
-            unimplemented!("not needed for debug command test")
+            Err(anyhow::anyhow!(
+                "test provider complete should not be called in debug command tests"
+            ))
         }
 
         fn name(&self) -> &str {

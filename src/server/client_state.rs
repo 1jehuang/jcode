@@ -573,7 +573,9 @@ mod tests {
             _system: &str,
             _resume_session_id: Option<&str>,
         ) -> Result<EventStream> {
-            unimplemented!("mock provider complete should not be called in client_state tests")
+            Err(anyhow::anyhow!(
+                "mock provider complete should not be called in client_state tests"
+            ))
         }
 
         fn name(&self) -> &str {

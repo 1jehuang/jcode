@@ -34,7 +34,9 @@ mod tests {
             _system: &str,
             _resume_session_id: Option<&str>,
         ) -> Result<EventStream> {
-            unimplemented!("test provider")
+            Err(anyhow::anyhow!(
+                "test provider complete should not be called in client_comm tests"
+            ))
         }
 
         fn name(&self) -> &str {
