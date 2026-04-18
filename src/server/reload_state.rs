@@ -647,4 +647,23 @@ mod tests {
 
         assert_eq!(status, ReloadWaitStatus::Ready);
     }
+    #[tokio::test]
+    async fn wait_for_reload_ack_returns_matching_ack() {
+        let request_id = crate::id::new_id("reload-test");
+        let ack = ReloadAck {
+            hash: "hash-test".to_string(),
+            request_id: request_id.clone(),
+        };
+        let (tx, _) = reload_ack();
+        let _ = tx.send(Some(ack.clone()));
+
+        let received = wait_for_reload_ack(&request_id, Duration::from_millis(50))
+            .await
+            .expect("ack should be received");
+
+        assert_eq!(received.request_id, ack.request_id);
+        assert_eq!(received.hash, ack.hash);
+    }
+
+
 }
