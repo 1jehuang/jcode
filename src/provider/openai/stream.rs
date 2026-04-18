@@ -636,6 +636,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parse_text_wrapped_tool_call_rejects_non_object_json() {
+        let text = "prefix to=functions.read [1,2,3]";
+        let parsed = parse_text_wrapped_tool_call(text);
+        assert!(parsed.is_none());
+    }
+
+    #[test]
     fn parse_openai_response_event_ignores_malformed_json_chunks() {
         let mut saw_text_delta = false;
         let mut streaming_tool_calls = HashMap::new();
