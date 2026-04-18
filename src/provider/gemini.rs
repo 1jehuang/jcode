@@ -906,7 +906,9 @@ mod tests {
             _system: &str,
             _resume_session_id: Option<&str>,
         ) -> anyhow::Result<EventStream> {
-            unimplemented!("Mock provider")
+            Err(anyhow::anyhow!(
+                "Mock provider should not be used for streaming completions in Gemini tests"
+            ))
         }
 
         fn name(&self) -> &str {
