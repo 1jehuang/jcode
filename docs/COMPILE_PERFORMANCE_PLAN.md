@@ -135,6 +135,10 @@ Use it when capturing comparable before/after numbers for refactors.
   `--skip-cold --touch src/provider/openai.rs --runs 1`:
   - warm touched-file `cargo check`: **8.750s**
   - warm touched-file `selfdev-jcode` build: **21.386s**
+- 2026-04-18: additional warm-only checkpoint on the shared provider module with
+  `--skip-cold --touch src/provider/mod.rs --runs 1`:
+  - warm touched-file `cargo check`: **9.772s**
+  - warm touched-file `selfdev-jcode` build: **17.917s**
 
 ### Phase 3 — Workspace boundary design
 
