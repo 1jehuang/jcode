@@ -132,10 +132,11 @@ pub fn cycle_item_ids(items: &[PlanItem]) -> Vec<String> {
         }
         if let Some(children) = dependents.get(id) {
             for child in children {
-                let degree = indegree.get_mut(child).expect("child indegree missing");
-                *degree = degree.saturating_sub(1);
-                if *degree == 0 {
-                    queue.push(child);
+                if let Some(degree) = indegree.get_mut(child) {
+                    *degree = degree.saturating_sub(1);
+                    if *degree == 0 {
+                        queue.push(child);
+                    }
                 }
             }
         }
