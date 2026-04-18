@@ -445,11 +445,13 @@ async fn wait_for_existing_reload_server(context: &str) -> bool {
             }
             server::ReloadPhase::Failed => {
                 crate::logging::warn(&format!(
-                    "Reload state=failed during {}: {}",
+                    "Reload state=failed during {} on {}: {}; recent_state={}",
                     context,
+                    server::socket_path().display(),
                     state
                         .detail
-                        .unwrap_or_else(|| "unknown reload failure".to_string())
+                        .unwrap_or_else(|| "unknown reload failure".to_string()),
+                    server::reload_state_summary(std::time::Duration::from_secs(60))
                 ));
             }
             server::ReloadPhase::SocketReady => {}
@@ -496,8 +498,10 @@ pub(crate) async fn wait_for_reloading_server() -> bool {
         server::ReloadWaitStatus::Ready => true,
         server::ReloadWaitStatus::Failed(detail) => {
             crate::logging::warn(&format!(
-                "Reload handoff failed while waiting for server: {}",
-                detail.unwrap_or_else(|| "unknown reload failure".to_string())
+                "Reload handoff failed while waiting for server on {}: {}; recent_state={}",
+                server::socket_path().display(),
+                detail.unwrap_or_else(|| "unknown reload failure".to_string()),
+                server::reload_state_summary(std::time::Duration::from_secs(60))
             ));
             false
         }

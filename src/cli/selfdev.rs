@@ -23,8 +23,10 @@ async fn wait_for_reloading_server() -> bool {
         crate::server::ReloadWaitStatus::Ready => true,
         crate::server::ReloadWaitStatus::Failed(detail) => {
             logging::warn(&format!(
-                "Reload handoff failed while resuming self-dev session: {}",
-                detail.unwrap_or_else(|| "unknown reload failure".to_string())
+                "Reload handoff failed while resuming self-dev session on {}: {}; recent_state={}",
+                crate::server::socket_path().display(),
+                detail.unwrap_or_else(|| "unknown reload failure".to_string()),
+                crate::server::reload_state_summary(std::time::Duration::from_secs(60))
             ));
             false
         }
