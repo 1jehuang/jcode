@@ -156,6 +156,27 @@ Use it when capturing comparable before/after numbers for refactors.
   - warm touched-file `cargo check`: **13.693s**
   - warm touched-file `selfdev-jcode` build: **18.874s**
 
+Warm-only touched-file checkpoints captured so far on this machine:
+
+| Touched file | Warm `cargo check` | Warm `selfdev-jcode` build |
+| --- | ---: | ---: |
+| `src/tool/session_search.rs` | 7.009s | 12.874s |
+| `src/agent.rs` | 7.318s | 30.928s |
+| `src/tool/memory.rs` | 7.787s | 12.798s |
+| `src/tool/communicate.rs` | 8.496s | 21.400s |
+| `src/server.rs` | 8.711s | 18.969s |
+| `src/provider/openai.rs` | 8.750s | 21.386s |
+| `src/tool/read.rs` | 9.339s | 18.844s |
+| `src/provider/mod.rs` | 9.772s | 17.917s |
+| `src/tool/browser.rs` | 13.693s | 18.874s |
+
+Observed spread from these warm-only checkpoints:
+- warm touched-file `cargo check`: **7.009s to 13.693s**
+- warm touched-file `selfdev-jcode` build: **12.798s to 30.928s**
+- fastest measured warm self-dev rebuilds so far are on smaller tool-path edits
+- `src/agent.rs` currently stands out as the most expensive warm self-dev rebuild in this sample set
+- `src/tool/browser.rs` currently stands out as the slowest warm `cargo check` in this sample set
+
 ### Phase 3 — Workspace boundary design
 
 The refined layered target, dependency rules, and migration guidance live in
