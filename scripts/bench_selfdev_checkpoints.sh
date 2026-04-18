@@ -75,7 +75,41 @@ fi
 run_bench() {
   local name="$1"
   shift
-  scripts/bench_compile.sh "$@" --json
+
+  local stdout_file stderr_file status
+  stdout_file=$(mktemp)
+  stderr_file=$(mktemp)
+  if scripts/bench_compile.sh "$@" --json >"$stdout_file" 2>"$stderr_file"; then
+    python3 - "$name" "$stdout_file" <<'PY'
+import json
+import pathlib
+import sys
+
+name = sys.argv[1]
+payload = json.loads(pathlib.Path(sys.argv[2]).read_text())
+payload["checkpoint"] = name
+payload["ok"] = True
+print(json.dumps(payload))
+PY
+  else
+    status=$?
+    python3 - "$name" "$status" "$stderr_file" <<'PY'
+import json
+import pathlib
+import sys
+
+name = sys.argv[1]
+status = int(sys.argv[2])
+stderr = pathlib.Path(sys.argv[3]).read_text().strip()
+print(json.dumps({
+    "checkpoint": name,
+    "ok": False,
+    "exit_code": status,
+    "error": stderr,
+}))
+PY
+  fi
+  rm -f "$stdout_file" "$stderr_file"
 }
 
 cold_check_json=$(run_bench cold_check check --cold)
@@ -103,6 +137,15 @@ summary = {
         "cold_selfdev_build": cold_selfdev,
         "warm_selfdev_edit": warm_selfdev,
     },
+    "failed_checkpoints": [
+        name for name, payload in {
+            "cold_check": cold_check,
+            "warm_check_edit": warm_check,
+            "cold_selfdev_build": cold_selfdev,
+            "warm_selfdev_edit": warm_selfdev,
+        }.items()
+        if not payload.get("ok", False)
+    ],
 }
 print(json.dumps(summary))
 PY
@@ -120,10 +163,17 @@ print("selfdev compile checkpoints")
 print(f"  touch_path: {summary['touch_path']}")
 print(f"  warm_runs:  {summary['warm_runs']}")
 for name, payload in summary["checkpoints"].items():
-    print(
-        f"  {name}: min={payload['min_seconds']:.3f}s "
-        f"median={payload['median_seconds']:.3f}s avg={payload['avg_seconds']:.3f}s "
-        f"max={payload['max_seconds']:.3f}s"
-    )
+    if payload.get("ok", False):
+        print(
+            f"  {name}: min={payload['min_seconds']:.3f}s "
+            f"median={payload['median_seconds']:.3f}s avg={payload['avg_seconds']:.3f}s "
+            f"max={payload['max_seconds']:.3f}s"
+        )
+    else:
+        print(
+            f"  {name}: FAILED exit={payload.get('exit_code')} error={payload.get('error', '')[:160]}"
+        )
+if summary["failed_checkpoints"]:
+    print(f"  failed_checkpoints: {', '.join(summary['failed_checkpoints'])}")
 PY
 fi

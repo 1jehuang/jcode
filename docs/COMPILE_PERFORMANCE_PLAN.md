@@ -111,6 +111,12 @@ Use it when capturing comparable before/after numbers for refactors.
     authoritative checkpoint
   - follow-up required: fix the `target/release` permission issue, rerun cold checkpoints, and
     rerun warm self-dev measurements until they are stable enough to compare against future waves
+- 2026-04-18: updated `scripts/bench_selfdev_checkpoints.sh` to keep running after individual
+  checkpoint failures and report them in JSON/text output instead of aborting early. Verified local
+  output on this machine with `--touch src/tool/read.rs --runs 1`:
+  - warm touched-file `cargo check`: **9.582s**
+  - warm touched-file `selfdev-jcode` build: **59.898s**
+  - failed checkpoints reported cleanly: `cold_check`, `cold_selfdev_build`
 
 ### Phase 3 — Workspace boundary design
 
