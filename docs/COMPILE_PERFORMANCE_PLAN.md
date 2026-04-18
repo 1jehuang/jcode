@@ -143,6 +143,10 @@ Use it when capturing comparable before/after numbers for refactors.
   `--skip-cold --touch src/agent.rs --runs 1`:
   - warm touched-file `cargo check`: **7.318s**
   - warm touched-file `selfdev-jcode` build: **30.928s**
+- 2026-04-18: additional warm-only checkpoint on the memory tool with
+  `--skip-cold --touch src/tool/memory.rs --runs 1`:
+  - warm touched-file `cargo check`: **7.787s**
+  - warm touched-file `selfdev-jcode` build: **12.798s**
 
 ### Phase 3 — Workspace boundary design
 
