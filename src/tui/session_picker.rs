@@ -333,6 +333,10 @@ pub struct SessionPicker {
     /// Sessions explicitly selected for multi-resume / multi-catchup.
     selected_session_ids: HashSet<String>,
     last_mouse_scroll: Option<std::time::Instant>,
+    /// Normalized query from the most recent search pass.
+    cached_search_query: String,
+    /// Session refs that matched the cached search query.
+    cached_search_refs: Vec<SessionRef>,
 }
 
 impl SessionPicker {
@@ -367,6 +371,8 @@ impl SessionPicker {
             focus: PaneFocus::Sessions,
             selected_session_ids: HashSet::new(),
             last_mouse_scroll: None,
+            cached_search_query: String::new(),
+            cached_search_refs: Vec::new(),
         };
         picker.rebuild_items();
         picker
@@ -491,6 +497,8 @@ impl SessionPicker {
             focus: PaneFocus::Sessions,
             selected_session_ids: HashSet::new(),
             last_mouse_scroll: None,
+            cached_search_query: String::new(),
+            cached_search_refs: Vec::new(),
         };
         picker.rebuild_items();
         picker
@@ -1874,6 +1882,61 @@ mod tests {
         picker.search_query = "not-in-preview".to_string();
         picker.rebuild_items();
         assert!(picker.visible_sessions.is_empty());
+    }
+
+    #[test]
+    fn benchmark_resume_search_reports_incremental_timings() {
+        let sessions = (0..500)
+            .map(|idx| {
+                let mut session = make_session(
+                    &format!("session_bench_{idx:03}"),
+                    &format!("bench-{idx:03}"),
+                    false,
+                    SessionStatus::Closed,
+                );
+                session.messages_preview = vec![PreviewMessage {
+                    role: "user".to_string(),
+                    content: format!(
+                        "benchmark transcript content alpha beta zebra-token-{idx:03}"
+                    ),
+                    tool_calls: Vec::new(),
+                    tool_data: None,
+                    timestamp: None,
+                }];
+                session.search_index = build_search_index(
+                    &session.id,
+                    &session.short_name,
+                    &session.title,
+                    session.working_dir.as_deref(),
+                    None,
+                    &session.messages_preview,
+                );
+                session
+            })
+            .collect::<Vec<_>>();
+
+        let mut picker = SessionPicker::new(sessions);
+
+        let first_start = std::time::Instant::now();
+        picker.search_query = "z".to_string();
+        picker.rebuild_items();
+        let first_ms = first_start.elapsed().as_secs_f64() * 1000.0;
+
+        let second_start = std::time::Instant::now();
+        picker.search_query = "ze".to_string();
+        picker.rebuild_items();
+        let second_ms = second_start.elapsed().as_secs_f64() * 1000.0;
+
+        let third_start = std::time::Instant::now();
+        picker.search_query = "zebra-token-499".to_string();
+        picker.rebuild_items();
+        let third_ms = third_start.elapsed().as_secs_f64() * 1000.0;
+
+        assert_eq!(picker.visible_sessions.len(), 1);
+        eprintln!(
+            "resume search bench: first_char={:.3}ms second_char={:.3}ms full_query={:.3}ms sessions=500",
+            first_ms, second_ms, third_ms
+        );
     }
 
     #[test]

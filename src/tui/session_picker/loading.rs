@@ -2059,4 +2059,67 @@ mod tests {
         assert!(session_matches_query(loaded, "kiwi comet"));
         assert!(!session_matches_query(loaded, "dragonfruit meteor"));
     }
+
+    #[test]
+    fn benchmark_resume_loading_reports_timings() {
+        let _env_lock = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+        let sessions_dir = temp.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+
+        for idx in 0..120 {
+            let mut session = Session::create_with_id(
+                format!("session_resume_bench_{idx:03}"),
+                Some(format!("/tmp/resume-bench-{idx:03}")),
+                Some(format!("Resume Bench {idx:03}")),
+            );
+            session.append_stored_message(crate::session::StoredMessage {
+                id: format!("msg-{idx}-1"),
+                role: crate::message::Role::User,
+                content: vec![crate::message::ContentBlock::Text {
+                    text: format!(
+                        "session {idx:03} says benchmark transcript token zebra-{idx:03}"
+                    ),
+                    cache_control: None,
+                }],
+                display_role: None,
+                timestamp: None,
+                tool_duration_ms: None,
+                token_usage: None,
+            });
+            session.append_stored_message(crate::session::StoredMessage {
+                id: format!("msg-{idx}-2"),
+                role: crate::message::Role::Assistant,
+                content: vec![crate::message::ContentBlock::Text {
+                    text: "assistant reply for benchmark coverage".to_string(),
+                    cache_control: None,
+                }],
+                display_role: None,
+                timestamp: None,
+                tool_duration_ms: None,
+                token_usage: None,
+            });
+            session.save().expect("save benchmark session");
+        }
+
+        let load_start = std::time::Instant::now();
+        let sessions = load_sessions().expect("load sessions");
+        let load_elapsed = load_start.elapsed();
+
+        let group_start = std::time::Instant::now();
+        let grouped = load_sessions_grouped().expect("load grouped sessions");
+        let group_elapsed = group_start.elapsed();
+
+        assert!(sessions.len() >= 100);
+        assert!(!grouped.0.is_empty() || !grouped.1.is_empty());
+
+        eprintln!(
+            "resume bench: load_sessions={}ms load_sessions_grouped={}ms count={}",
+            load_elapsed.as_millis(),
+            group_elapsed.as_millis(),
+            sessions.len()
+        );
+    }
 }

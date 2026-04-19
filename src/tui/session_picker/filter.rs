@@ -2,9 +2,116 @@ use super::loading::session_matches_query;
 use super::*;
 
 impl SessionPicker {
+    fn normalized_search_query(query: &str) -> String {
+        query.trim().to_lowercase()
+    }
+
     /// Check if a session matches the current search query.
     fn session_matches_search(session: &SessionInfo, query: &str) -> bool {
         session_matches_query(session, query)
+    }
+
+    fn all_session_refs(&self) -> Vec<SessionRef> {
+        let mut refs = Vec::new();
+        if !self.all_server_groups.is_empty() {
+            for (group_idx, group) in self.all_server_groups.iter().enumerate() {
+                refs.extend(
+                    (0..group.sessions.len()).map(|session_idx| SessionRef::Group {
+                        group_idx,
+                        session_idx,
+                    }),
+                );
+            }
+            refs.extend((0..self.all_orphan_sessions.len()).map(SessionRef::Orphan));
+        } else {
+            refs.extend((0..self.all_sessions.len()).map(SessionRef::Flat));
+        }
+        refs
+    }
+
+    fn search_matched_session_refs(&mut self, query: &str) -> Vec<SessionRef> {
+        let normalized = Self::normalized_search_query(query);
+        if normalized.is_empty() {
+            self.cached_search_query.clear();
+            self.cached_search_refs.clear();
+            return self.all_session_refs();
+        }
+
+        let can_narrow_cached = !self.cached_search_query.is_empty()
+            && normalized.starts_with(&self.cached_search_query);
+        let candidates = if can_narrow_cached {
+            self.cached_search_refs.clone()
+        } else {
+            self.all_session_refs()
+        };
+
+        let matches = candidates
+            .into_iter()
+            .filter(|session_ref| {
+                self.session_by_ref(*session_ref)
+                    .is_some_and(|session| Self::session_matches_search(session, &normalized))
+            })
+            .collect::<Vec<_>>();
+
+        self.cached_search_query = normalized;
+        self.cached_search_refs = matches.clone();
+        matches
+    }
+
+    fn filtered_session_refs(
+        &self,
+        search_matches: &[SessionRef],
+        show_test: bool,
+        filter_mode: SessionFilterMode,
+    ) -> Vec<SessionRef> {
+        let mut filtered = search_matches
+            .iter()
+            .copied()
+            .filter(|session_ref| {
+                self.session_by_ref(*session_ref).is_some_and(|session| {
+                    (show_test || !session.is_debug)
+                        && Self::session_matches_filter_mode(session, filter_mode)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        filtered.sort_by(|a, b| {
+            let a = self
+                .session_by_ref(*a)
+                .map(|session| session.last_message_time)
+                .unwrap_or_default();
+            let b = self
+                .session_by_ref(*b)
+                .map(|session| session.last_message_time)
+                .unwrap_or_default();
+            b.cmp(&a)
+        });
+        filtered
+    }
+
+    fn hidden_test_count_for_refs(
+        &self,
+        refs: &[SessionRef],
+        show_test: bool,
+        filter_mode: SessionFilterMode,
+    ) -> usize {
+        if show_test {
+            return 0;
+        }
+        refs.iter()
+            .filter_map(|session_ref| self.session_by_ref(*session_ref))
+            .filter(|session| {
+                session.is_debug && Self::session_matches_filter_mode(session, filter_mode)
+            })
+            .count()
+    }
+
+    fn visible_session_ids(&self) -> std::collections::HashSet<String> {
+        self.visible_sessions
+            .iter()
+            .filter_map(|session_ref| self.session_by_ref(*session_ref))
+            .map(|session| session.id.clone())
+            .collect()
     }
 
     pub(super) fn session_is_claude_code(session: &SessionInfo) -> bool {
@@ -74,95 +181,28 @@ impl SessionPicker {
         }
     }
 
-    fn collect_filtered_sessions(
-        &self,
-        session_visible: impl Fn(&SessionInfo) -> bool,
-    ) -> Vec<SessionRef> {
-        let mut filtered = Vec::new();
-
-        if !self.all_server_groups.is_empty() {
-            for (group_idx, group) in self.all_server_groups.iter().enumerate() {
-                for (session_idx, session) in group.sessions.iter().enumerate() {
-                    if session_visible(session) {
-                        filtered.push(SessionRef::Group {
-                            group_idx,
-                            session_idx,
-                        });
-                    }
-                }
-            }
-            for (idx, session) in self.all_orphan_sessions.iter().enumerate() {
-                if session_visible(session) {
-                    filtered.push(SessionRef::Orphan(idx));
-                }
-            }
-        } else {
-            for (idx, session) in self.all_sessions.iter().enumerate() {
-                if session_visible(session) {
-                    filtered.push(SessionRef::Flat(idx));
-                }
-            }
-        }
-
-        filtered.sort_by(|a, b| {
-            let a = self
-                .session_by_ref(*a)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            let b = self
-                .session_by_ref(*b)
-                .map(|session| session.last_message_time)
-                .unwrap_or_default();
-            b.cmp(&a)
-        });
-        filtered
-    }
-
     /// Rebuild the items list based on current filters.
     pub(super) fn rebuild_items(&mut self) {
         let current_selected_id = self.selected_session().map(|session| session.id.clone());
         let show_test = self.show_test_sessions;
         let filter_mode = self.filter_mode;
-        let query = self.search_query.clone();
-
-        let session_visible = |s: &SessionInfo| -> bool {
-            (show_test || !s.is_debug)
-                && Self::session_matches_search(s, &query)
-                && Self::session_matches_filter_mode(s, filter_mode)
-        };
+        let search_query = self.search_query.clone();
+        let search_matches = self.search_matched_session_refs(&search_query);
+        let filtered_refs = self.filtered_session_refs(&search_matches, show_test, filter_mode);
 
         self.items.clear();
         self.visible_sessions.clear();
         self.item_to_session.clear();
 
         if filter_mode != SessionFilterMode::All {
-            let filtered = self.collect_filtered_sessions(session_visible);
-            for session_ref in filtered {
+            for session_ref in filtered_refs {
                 self.push_visible_session(session_ref);
             }
 
-            self.hidden_test_count = if show_test {
-                0
-            } else {
-                self.all_server_groups
-                    .iter()
-                    .flat_map(|g| g.sessions.iter())
-                    .chain(self.all_orphan_sessions.iter())
-                    .chain(self.all_sessions.iter())
-                    .filter(|s| {
-                        s.is_debug
-                            && Self::session_matches_search(s, &query)
-                            && Self::session_matches_filter_mode(s, filter_mode)
-                    })
-                    .count()
-            };
+            self.hidden_test_count =
+                self.hidden_test_count_for_refs(&search_matches, show_test, filter_mode);
 
-            let visible_ids: std::collections::HashSet<String> = self
-                .visible_sessions
-                .iter()
-                .filter_map(|session_ref| self.session_by_ref(*session_ref))
-                .map(|session| session.id.clone())
-                .collect();
+            let visible_ids = self.visible_session_ids();
             self.selected_session_ids
                 .retain(|id| visible_ids.contains(id));
 
@@ -179,30 +219,12 @@ impl SessionPicker {
         let mut saved_sessions: Vec<SessionRef> = Vec::new();
         let mut saved_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        if !self.all_server_groups.is_empty() {
-            for (group_idx, group) in self.all_server_groups.iter().enumerate() {
-                for (session_idx, s) in group.sessions.iter().enumerate() {
-                    if s.saved && session_visible(s) {
-                        saved_ids.insert(s.id.clone());
-                        saved_sessions.push(SessionRef::Group {
-                            group_idx,
-                            session_idx,
-                        });
-                    }
-                }
-            }
-            for (idx, s) in self.all_orphan_sessions.iter().enumerate() {
-                if s.saved && session_visible(s) {
-                    saved_ids.insert(s.id.clone());
-                    saved_sessions.push(SessionRef::Orphan(idx));
-                }
-            }
-        } else {
-            for (idx, s) in self.all_sessions.iter().enumerate() {
-                if s.saved && session_visible(s) {
-                    saved_ids.insert(s.id.clone());
-                    saved_sessions.push(SessionRef::Flat(idx));
-                }
+        for session_ref in &filtered_refs {
+            if let Some(session) = self.session_by_ref(*session_ref)
+                && session.saved
+            {
+                saved_ids.insert(session.id.clone());
+                saved_sessions.push(*session_ref);
             }
         }
 
@@ -235,17 +257,23 @@ impl SessionPicker {
                 .iter()
                 .enumerate()
                 .filter_map(|(group_idx, group)| {
-                    let visible: Vec<SessionRef> = group
-                        .sessions
+                    let visible: Vec<SessionRef> = filtered_refs
                         .iter()
-                        .enumerate()
-                        .filter_map(|(session_idx, s)| {
-                            (session_visible(s) && !saved_ids.contains(&s.id)).then_some(
-                                SessionRef::Group {
-                                    group_idx,
-                                    session_idx,
-                                },
-                            )
+                        .copied()
+                        .filter(|session_ref| match session_ref {
+                            SessionRef::Group {
+                                group_idx: ref_group_idx,
+                                session_idx,
+                            } => {
+                                if *ref_group_idx != group_idx {
+                                    return false;
+                                }
+                                group
+                                    .sessions
+                                    .get(*session_idx)
+                                    .is_some_and(|session| !saved_ids.contains(&session.id))
+                            }
+                            _ => false,
                         })
                         .collect();
 
@@ -276,13 +304,15 @@ impl SessionPicker {
                 }
             }
 
-            let visible_orphans: Vec<SessionRef> = self
-                .all_orphan_sessions
+            let visible_orphans: Vec<SessionRef> = filtered_refs
                 .iter()
-                .enumerate()
-                .filter_map(|(idx, s)| {
-                    (session_visible(s) && !saved_ids.contains(&s.id))
-                        .then_some(SessionRef::Orphan(idx))
+                .copied()
+                .filter(|session_ref| match session_ref {
+                    SessionRef::Orphan(idx) => self
+                        .all_orphan_sessions
+                        .get(*idx)
+                        .is_some_and(|session| !saved_ids.contains(&session.id)),
+                    _ => false,
                 })
                 .collect();
             if !visible_orphans.is_empty() {
@@ -296,13 +326,15 @@ impl SessionPicker {
                 }
             }
         } else {
-            let visible_sessions: Vec<SessionRef> = self
-                .all_sessions
+            let visible_sessions: Vec<SessionRef> = filtered_refs
                 .iter()
-                .enumerate()
-                .filter_map(|(idx, session)| {
-                    (session_visible(session) && !saved_ids.contains(&session.id))
-                        .then_some(SessionRef::Flat(idx))
+                .copied()
+                .filter(|session_ref| match session_ref {
+                    SessionRef::Flat(idx) => self
+                        .all_sessions
+                        .get(*idx)
+                        .is_some_and(|session| !saved_ids.contains(&session.id)),
+                    _ => false,
                 })
                 .collect();
             for session_ref in visible_sessions {
@@ -310,24 +342,10 @@ impl SessionPicker {
             }
         }
 
-        self.hidden_test_count = if show_test {
-            0
-        } else {
-            self.all_server_groups
-                .iter()
-                .flat_map(|g| g.sessions.iter())
-                .chain(self.all_orphan_sessions.iter())
-                .chain(self.all_sessions.iter())
-                .filter(|s| s.is_debug && Self::session_matches_search(s, &query))
-                .count()
-        };
+        self.hidden_test_count =
+            self.hidden_test_count_for_refs(&search_matches, show_test, filter_mode);
 
-        let visible_ids: std::collections::HashSet<String> = self
-            .visible_sessions
-            .iter()
-            .filter_map(|session_ref| self.session_by_ref(*session_ref))
-            .map(|session| session.id.clone())
-            .collect();
+        let visible_ids = self.visible_session_ids();
         self.selected_session_ids
             .retain(|id| visible_ids.contains(id));
 
