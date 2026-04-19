@@ -223,7 +223,7 @@ def completed_recorded_jobs(campaign_dir: Path) -> dict[str, dict[str, Any]]:
 
 
 def adopt_existing_job(campaign_dir: Path, task: str, task_jobs_dir: Path) -> dict[str, Any] | None:
-    for job_dir in sorted([p for p in task_jobs_dir.iterdir() if p.is_dir()]):
+    for job_dir in sorted([p for p in task_jobs_dir.iterdir() if p.is_dir()], reverse=True):
         job_result_path = job_dir / "result.json"
         if not job_result_path.exists():
             continue
