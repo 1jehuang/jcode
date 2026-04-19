@@ -1481,17 +1481,15 @@ async fn handle_remote_key_internal(
                     }
 
                     app.auto_poke_incomplete_todos = true;
-                    let poke_msg = app_mod::commands::build_poke_message(&incomplete);
 
                     if app.is_processing {
                         app.set_status_notice("Poke queued after current turn");
-                        app.push_display_message(DisplayMessage::system(format!(
-                            "👉 Queued poke with {} incomplete todo{} for after the current turn.",
-                            incomplete.len(),
-                            if incomplete.len() == 1 { "" } else { "s" },
-                        )));
-                        app.queued_messages.push(poke_msg);
+                        app.push_display_message(DisplayMessage::system(
+                            "👉 Queued /poke for after the current turn. Incomplete todos will be re-checked then."
+                                .to_string(),
+                        ));
                     } else {
+                        let poke_msg = app_mod::commands::build_poke_message(&incomplete);
                         app.push_display_message(DisplayMessage::system(format!(
                             "👉 Poking model with {} incomplete todo{}...",
                             incomplete.len(),

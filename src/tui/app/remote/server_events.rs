@@ -268,7 +268,7 @@ pub(in crate::tui::app) fn handle_server_event(
             app.current_message_id = None;
             remote.clear_pending();
             remote.reset_call_output_tokens_seen();
-            false
+            app.schedule_auto_poke_followup_if_needed()
         }
         ServerEvent::Done { id } => {
             let mut auto_poked = false;
@@ -391,6 +391,7 @@ pub(in crate::tui::app) fn handle_server_event(
             if !is_failover_prompt && !app.schedule_pending_remote_retry("⚠ Remote request failed.")
             {
                 app.clear_pending_remote_retry();
+                return app.schedule_auto_poke_followup_if_needed();
             }
             false
         }

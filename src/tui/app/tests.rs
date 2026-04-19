@@ -5033,12 +5033,41 @@ fn test_poke_queues_when_turn_is_in_progress() {
             app.status_notice(),
             Some("Poke queued after current turn".to_string())
         );
-        assert_eq!(app.queued_messages().len(), 1);
-        assert!(app.queued_messages()[0].contains("Please continue your work"));
+        assert!(app.queued_messages().is_empty());
         assert!(app.display_messages().iter().any(|msg| {
             msg.content
-                .contains("Queued poke with 1 incomplete todo for after the current turn")
+                .contains("Queued /poke for after the current turn")
         }));
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[
+                crate::todo::TodoItem {
+                    id: "todo-1".to_string(),
+                    content: "Finish the remaining task".to_string(),
+                    status: "pending".to_string(),
+                    priority: "high".to_string(),
+                    blocked_by: Vec::new(),
+                    assigned_to: None,
+                },
+                crate::todo::TodoItem {
+                    id: "todo-2".to_string(),
+                    content: "Pick up the newly discovered task".to_string(),
+                    status: "pending".to_string(),
+                    priority: "medium".to_string(),
+                    blocked_by: Vec::new(),
+                    assigned_to: None,
+                },
+            ],
+        )
+        .expect("save updated todos");
+
+        super::local::finish_turn(&mut app);
+
+        assert!(app.pending_queued_dispatch);
+        assert_eq!(app.queued_messages().len(), 1);
+        assert!(app.queued_messages()[0].contains("Your todo list has 2 incomplete items"));
+        assert!(app.queued_messages()[0].contains("Pick up the newly discovered task"));
     });
 }
 
@@ -8680,12 +8709,80 @@ fn test_remote_poke_queues_when_turn_is_in_progress() {
             app.status_notice(),
             Some("Poke queued after current turn".to_string())
         );
-        assert_eq!(app.queued_messages().len(), 1);
-        assert!(app.queued_messages()[0].contains("Please continue your work"));
+        assert!(app.queued_messages().is_empty());
         assert!(app.display_messages().iter().any(|msg| {
             msg.content
-                .contains("Queued poke with 1 incomplete todo for after the current turn")
+                .contains("Queued /poke for after the current turn")
         }));
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[
+                crate::todo::TodoItem {
+                    id: "todo-1".to_string(),
+                    content: "Continue working".to_string(),
+                    status: "pending".to_string(),
+                    priority: "high".to_string(),
+                    blocked_by: Vec::new(),
+                    assigned_to: None,
+                },
+                crate::todo::TodoItem {
+                    id: "todo-2".to_string(),
+                    content: "Handle the newly discovered follow-up".to_string(),
+                    status: "pending".to_string(),
+                    priority: "medium".to_string(),
+                    blocked_by: Vec::new(),
+                    assigned_to: None,
+                },
+            ],
+        )
+        .expect("save updated todos");
+
+        let needs_redraw =
+            app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
+
+        assert!(needs_redraw);
+        assert!(app.pending_queued_dispatch);
+        assert_eq!(app.queued_messages().len(), 1);
+        assert!(app.queued_messages()[0].contains("Your todo list has 2 incomplete items"));
+        assert!(app.queued_messages()[0].contains("Handle the newly discovered follow-up"));
+    });
+}
+
+#[test]
+fn test_remote_interrupted_auto_poke_requeues_after_deferred_poke() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Resume after interrupt".to_string(),
+                status: "pending".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+            }],
+        )
+        .expect("save todos");
+
+        app.is_remote = true;
+        app.auto_poke_incomplete_todos = true;
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.current_message_id = Some(42);
+
+        let needs_redraw =
+            app.handle_server_event(crate::protocol::ServerEvent::Interrupted, &mut remote);
+
+        assert!(needs_redraw);
+        assert!(app.pending_queued_dispatch);
+        assert_eq!(app.queued_messages().len(), 1);
+        assert!(app.queued_messages()[0].contains("Resume after interrupt"));
     });
 }
 
