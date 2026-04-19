@@ -175,12 +175,19 @@ def collect_trial_results(job_dir: Path) -> list[dict[str, Any]]:
     trial_results: list[dict[str, Any]] = []
     for result_path in sorted(job_dir.glob("*__*/result.json")):
         payload = json.loads(result_path.read_text())
+        verifier_result = payload.get("verifier_result") or {}
+        rewards = verifier_result.get("rewards") or {}
+        exception_info = payload.get("exception_info") or {}
+        agent_result = payload.get("agent_result") or {}
+        metadata = agent_result.get("metadata") or {}
         trial_results.append(
             {
                 "task_name": payload["task_name"],
                 "trial_name": payload["trial_name"],
-                "reward": payload.get("verifier_result", {}).get("rewards", {}).get("reward"),
-                "agent_return_code": payload.get("agent_result", {}).get("metadata", {}).get("return_code"),
+                "reward": rewards.get("reward"),
+                "exception_type": exception_info.get("exception_type"),
+                "exception_message": exception_info.get("exception_message"),
+                "agent_return_code": metadata.get("return_code"),
                 "started_at": payload.get("started_at"),
                 "finished_at": payload.get("finished_at"),
                 "result_path": str(result_path),
@@ -221,6 +228,9 @@ def adopt_existing_job(campaign_dir: Path, task: str, task_jobs_dir: Path) -> di
             continue
         trial_results = collect_trial_results(job_dir)
         if not trial_results:
+            continue
+        numeric_rewards = [t.get("reward") for t in trial_results if isinstance(t.get("reward"), (int, float))]
+        if not numeric_rewards:
             continue
         record = {
             "task_name": task,
