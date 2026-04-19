@@ -17,6 +17,8 @@ members = [
     "crates/jcode-provider-openrouter",
     "crates/jcode-provider-gemini",
     "crates/jcode-tui-workspace",
+    "crates/jcode-mobile-core",
+    "crates/jcode-mobile-sim",
 ]
 
 [lib]
