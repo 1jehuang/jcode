@@ -104,8 +104,18 @@ fn side_panel_mermaid_keeps_fit_mode_when_zoom_stays_readable() {
         estimate_side_panel_image_layout_with_font(300, 480, 36, 30, 0, true, Some((8, 16)));
 
     assert_eq!(layout.render_mode, SidePanelImageRenderMode::Fit);
-    assert_eq!(layout.rows, 20);
+    assert_eq!(layout.rows, 29);
     assert!(!layout.render_mode.is_scrollable());
+}
+
+#[test]
+fn fit_side_panel_image_area_scales_up_small_image_to_use_available_width() {
+    let area = Rect::new(0, 0, 36, 30);
+    let fitted = fit_image_area_with_font(area, 160, 240, Some((8, 16)), true, false);
+
+    assert_eq!(fitted.x, area.x);
+    assert_eq!(fitted.width, area.width);
+    assert_eq!(fitted.height, 27);
 }
 
 #[test]
