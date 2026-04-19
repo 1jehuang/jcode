@@ -783,6 +783,7 @@ struct AutoProviderAvailability {
     has_claude: bool,
     has_openai: bool,
     has_copilot: bool,
+    has_antigravity: bool,
     has_gemini: bool,
     has_cursor: bool,
     has_openrouter: bool,
@@ -793,6 +794,7 @@ impl AutoProviderAvailability {
         self.has_claude
             || self.has_openai
             || self.has_copilot
+            || self.has_antigravity
             || self.has_gemini
             || self.has_cursor
             || self.has_openrouter
@@ -805,6 +807,7 @@ async fn detect_auto_provider_flags() -> AutoProviderAvailability {
         has_claude: auth_status.anthropic.has_oauth || auth_status.anthropic.has_api_key,
         has_openai: auth_status.openai_has_oauth || auth_status.openai_has_api_key,
         has_copilot: auth_status.copilot_has_api_token,
+        has_antigravity: auth::antigravity::load_tokens().is_ok(),
         has_gemini: auth_status.gemini == auth::AuthState::Available,
         has_cursor: auth_status.cursor == auth::AuthState::Available,
         has_openrouter: auth_status.openrouter == auth::AuthState::Available,
@@ -1599,11 +1602,16 @@ async fn init_provider_with_options(
                 let mut has_claude = availability.has_claude;
                 let mut has_openai = availability.has_openai;
                 let mut has_copilot = availability.has_copilot;
+                let has_antigravity = availability.has_antigravity;
                 let mut has_gemini = availability.has_gemini;
                 let mut has_cursor = availability.has_cursor;
                 let mut has_openrouter = availability.has_openrouter;
-                let mut has_other_provider =
-                    has_claude || has_copilot || has_gemini || has_cursor || has_openrouter;
+                let mut has_other_provider = has_claude
+                    || has_copilot
+                    || has_antigravity
+                    || has_gemini
+                    || has_cursor
+                    || has_openrouter;
 
                 if !has_openai {
                     has_openai = maybe_enable_legacy_codex_auth_for_auto(has_other_provider)?;
@@ -1611,6 +1619,7 @@ async fn init_provider_with_options(
                 has_other_provider = has_openai
                     || has_claude
                     || has_copilot
+                    || has_antigravity
                     || has_gemini
                     || has_cursor
                     || has_openrouter;
@@ -1622,6 +1631,7 @@ async fn init_provider_with_options(
                 has_other_provider = has_openai
                     || has_claude
                     || has_copilot
+                    || has_antigravity
                     || has_gemini
                     || has_cursor
                     || has_openrouter;
@@ -1633,6 +1643,7 @@ async fn init_provider_with_options(
                 has_other_provider = has_openai
                     || has_claude
                     || has_copilot
+                    || has_antigravity
                     || has_gemini
                     || has_cursor
                     || has_openrouter;
@@ -1644,6 +1655,7 @@ async fn init_provider_with_options(
                 has_other_provider = has_openai
                     || has_claude
                     || has_copilot
+                    || has_antigravity
                     || has_gemini
                     || has_cursor
                     || has_openrouter;
@@ -1656,6 +1668,7 @@ async fn init_provider_with_options(
                 has_other_provider = has_openai
                     || has_claude
                     || has_copilot
+                    || has_antigravity
                     || has_gemini
                     || has_cursor
                     || has_openrouter;
@@ -1671,6 +1684,7 @@ async fn init_provider_with_options(
                     has_claude,
                     has_openai,
                     has_copilot,
+                    has_antigravity,
                     has_gemini,
                     has_cursor,
                     has_openrouter,

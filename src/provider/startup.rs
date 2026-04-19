@@ -52,6 +52,7 @@ impl MultiProvider {
         let has_claude_creds = auth::claude::load_credentials().is_ok();
         let has_openai_creds = auth::codex::load_credentials().is_ok();
         let has_copilot_api = auth_status.copilot_has_api_token;
+        let has_antigravity_creds = auth::antigravity::load_tokens().is_ok();
         let has_gemini_creds = auth::gemini::load_tokens().is_ok();
         let has_cursor_creds = matches!(auth_status.cursor, auth::AuthState::Available);
         let has_openrouter_creds = openrouter::OpenRouterProvider::has_credentials();
@@ -120,7 +121,7 @@ impl MultiProvider {
             None
         };
 
-        let antigravity_provider = if auth::antigravity::load_tokens().is_ok() {
+        let antigravity_provider = if has_antigravity_creds {
             Some(Arc::new(antigravity::AntigravityCliProvider::new()))
         } else {
             None
@@ -205,7 +206,7 @@ impl MultiProvider {
                 }
             } else {
                 crate::logging::warn(&format!(
-                    "Unknown default_provider '{}' in config (expected: claude|openai|copilot|gemini|cursor|openrouter)",
+                    "Unknown default_provider '{}' in config (expected: claude|openai|copilot|antigravity|gemini|cursor|openrouter)",
                     pref
                 ));
             }
@@ -241,7 +242,7 @@ impl MultiProvider {
         result.spawn_openai_catalog_refresh_if_needed();
         result.auto_select_active_multi_account();
         crate::logging::info(&format!(
-            "[TIMING] provider_init: claude={}, anthropic={}, openai={}, copilot={}, gemini={}, cursor={}, openrouter={}, total={}ms",
+            "[TIMING] provider_init: claude={}, anthropic={}, openai={}, copilot={}, antigravity={}, gemini={}, cursor={}, openrouter={}, total={}ms",
             result
                 .claude
                 .read()
@@ -259,6 +260,11 @@ impl MultiProvider {
                 .is_some(),
             result
                 .copilot_api
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some(),
+            result
+                .antigravity
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .is_some(),

@@ -143,6 +143,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         all_sessions: Vec::new(),
         client_count: None,
         is_canary: None,
+        reload_recovery: None,
         server_version: None,
         server_name: None,
         server_icon: None,

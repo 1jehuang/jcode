@@ -106,11 +106,7 @@ impl MultiProvider {
                 }
             }
             ActiveProvider::Antigravity => {
-                let antigravity = self
-                    .antigravity
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .clone();
+                let antigravity = self.antigravity_provider();
                 if let Some(antigravity) = antigravity {
                     antigravity
                         .complete(messages, tools, system, resume_session_id)
@@ -249,11 +245,7 @@ impl MultiProvider {
                 }
             }
             ActiveProvider::Antigravity => {
-                let antigravity = self
-                    .antigravity
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .clone();
+                let antigravity = self.antigravity_provider();
                 if let Some(antigravity) = antigravity {
                     antigravity
                         .complete_split(

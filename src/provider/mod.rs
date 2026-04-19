@@ -418,7 +418,7 @@ pub struct MultiProvider {
     openai: RwLock<Option<Arc<openai::OpenAIProvider>>>,
     /// GitHub Copilot API provider (direct API, hot-swappable after login)
     copilot_api: RwLock<Option<Arc<copilot::CopilotApiProvider>>>,
-    /// Antigravity provider (direct API catalog + CLI completion, hot-swappable after login)
+    /// Antigravity provider (CLI-backed, hot-swappable after login)
     antigravity: RwLock<Option<Arc<antigravity::AntigravityCliProvider>>>,
     /// Gemini provider (hot-swappable after login)
     gemini: RwLock<Option<Arc<gemini::GeminiProvider>>>,
@@ -984,8 +984,8 @@ impl Provider for MultiProvider {
             let target_active = match target {
                 "claude" => ActiveProvider::Claude,
                 "openai" => ActiveProvider::OpenAI,
-                "gemini" => ActiveProvider::Gemini,
                 "antigravity" => ActiveProvider::Antigravity,
+                "gemini" => ActiveProvider::Gemini,
                 "cursor" => ActiveProvider::Cursor,
                 "openrouter" => ActiveProvider::OpenRouter,
                 _ => forced,
@@ -1465,6 +1465,22 @@ impl Provider for MultiProvider {
             }
         }
 
+        // Antigravity models
+        {
+            if let Some(antigravity) = self.antigravity_provider() {
+                for model in antigravity.available_models_display() {
+                    routes.push(ModelRoute {
+                        model,
+                        provider: "Antigravity".to_string(),
+                        api_method: "antigravity".to_string(),
+                        available: true,
+                        detail: String::new(),
+                        cheapness: None,
+                    });
+                }
+            }
+        }
+
         // Gemini models
         {
             if let Some(gemini) = self.gemini_provider() {
@@ -1859,10 +1875,7 @@ impl Provider for MultiProvider {
                 .copilot_provider()
                 .map(|o| o.handles_tools_internally())
                 .unwrap_or(false),
-            ActiveProvider::Antigravity => self
-                .antigravity_provider()
-                .map(|o| o.handles_tools_internally())
-                .unwrap_or(false),
+            ActiveProvider::Antigravity => false,
             ActiveProvider::Gemini => false,
             ActiveProvider::Cursor => self
                 .cursor_provider()
@@ -2120,7 +2133,7 @@ impl Provider for MultiProvider {
                 }
             }
             ActiveProvider::Antigravity => Err(anyhow::anyhow!(
-                "Antigravity provider does not support native compaction"
+                "Antigravity does not support native compaction"
             )),
             ActiveProvider::Gemini => {
                 let provider = self.gemini_provider();
@@ -2256,7 +2269,7 @@ impl Provider for MultiProvider {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let antigravity = self
+        let antigravity_provider = self
             .antigravity
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -2292,7 +2305,7 @@ impl Provider for MultiProvider {
             anthropic: RwLock::new(anthropic),
             openai: RwLock::new(openai),
             copilot_api: RwLock::new(copilot_api),
-            antigravity: RwLock::new(antigravity),
+            antigravity: RwLock::new(antigravity_provider),
             gemini: RwLock::new(gemini_provider),
             cursor: RwLock::new(cursor_provider),
             openrouter: RwLock::new(openrouter),
