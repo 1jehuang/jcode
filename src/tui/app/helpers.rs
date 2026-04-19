@@ -1359,7 +1359,7 @@ pub(super) fn gather_ambient_info(ambient_enabled: bool) -> Option<AmbientWidget
     let next_queue_item = queue_items.iter().min_by_key(|item| item.scheduled_for);
     let reminder_items: Vec<_> = queue_items
         .iter()
-        .filter(|item| matches!(item.target, crate::ambient::ScheduleTarget::Session { .. }))
+        .filter(|item| item.target.is_direct_delivery())
         .collect();
     let reminder_count = reminder_items.len();
     let next_reminder_item = reminder_items

@@ -82,6 +82,14 @@ pub enum ScheduleTarget {
     Ambient,
     /// Deliver the reminder back into a specific interactive session.
     Session { session_id: String },
+    /// Spawn a single new session derived from the originating session.
+    Spawn { parent_session_id: String },
+}
+
+impl ScheduleTarget {
+    pub fn is_direct_delivery(&self) -> bool {
+        matches!(self, Self::Session { .. } | Self::Spawn { .. })
+    }
 }
 
 /// A scheduled ambient task
@@ -356,18 +364,18 @@ impl ScheduledQueue {
         ready
     }
 
-    /// Remove and return ready items targeted at sessions, leaving ambient-targeted
-    /// queue items intact for the ambient agent to process.
-    pub fn take_ready_session_items(&mut self) -> Vec<ScheduledItem> {
+    /// Remove and return ready items targeted at a specific direct-delivery session,
+    /// leaving ambient-targeted queue items intact for the ambient agent to process.
+    pub fn take_ready_direct_items(&mut self) -> Vec<ScheduledItem> {
         let now = Utc::now();
-        let mut ready_session = Vec::new();
+        let mut ready_direct = Vec::new();
         let mut remaining = Vec::with_capacity(self.items.len());
 
         for item in self.items.drain(..) {
             let is_ready = item.scheduled_for <= now;
-            let is_session_target = matches!(item.target, ScheduleTarget::Session { .. });
-            if is_ready && is_session_target {
-                ready_session.push(item);
+            let is_direct_target = item.target.is_direct_delivery();
+            if is_ready && is_direct_target {
+                ready_direct.push(item);
             } else {
                 remaining.push(item);
             }
@@ -375,17 +383,17 @@ impl ScheduledQueue {
 
         self.items = remaining;
 
-        if !ready_session.is_empty() {
+        if !ready_direct.is_empty() {
             let _ = self.save();
         }
 
-        ready_session.sort_by(|a, b| {
+        ready_direct.sort_by(|a, b| {
             b.priority
                 .cmp(&a.priority)
                 .then_with(|| a.scheduled_for.cmp(&b.scheduled_for))
         });
 
-        ready_session
+        ready_direct
     }
 
     pub fn peek_next(&self) -> Option<&ScheduledItem> {
@@ -515,9 +523,10 @@ impl AmbientManager {
         self.queue.pop_ready()
     }
 
-    /// Remove and return only ready items targeted at specific sessions.
-    pub fn take_ready_session_items(&mut self) -> Vec<ScheduledItem> {
-        self.queue.take_ready_session_items()
+    /// Remove and return only ready items targeted at direct delivery into a
+    /// specific resumed or spawned session.
+    pub fn take_ready_direct_items(&mut self) -> Vec<ScheduledItem> {
+        self.queue.take_ready_direct_items()
     }
 
     /// Add a schedule request to the queue. Returns the item ID.
@@ -852,6 +861,9 @@ pub fn build_ambient_system_prompt(
                 ScheduleTarget::Ambient => {}
                 ScheduleTarget::Session { session_id } => {
                     prompt.push_str(&format!("  Target session: {}\n", session_id));
+                }
+                ScheduleTarget::Spawn { parent_session_id } => {
+                    prompt.push_str(&format!("  Spawn from session: {}\n", parent_session_id));
                 }
             }
             if let Some(ref dir) = item.working_dir {
@@ -1214,7 +1226,7 @@ mod tests {
     }
 
     #[test]
-    fn test_take_ready_session_items_only_removes_session_targets() {
+    fn test_take_ready_direct_items_only_removes_direct_targets() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_path_buf();
 
@@ -1228,6 +1240,23 @@ mod tests {
             priority: Priority::Normal,
             target: ScheduleTarget::Session {
                 session_id: "session_123".into(),
+            },
+            created_by_session: "session_123".into(),
+            created_at: Utc::now(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+        });
+
+        queue.push(ScheduledItem {
+            id: "spawn_due".into(),
+            scheduled_for: past,
+            context: "spawned session task".into(),
+            priority: Priority::High,
+            target: ScheduleTarget::Spawn {
+                parent_session_id: "session_123".into(),
             },
             created_by_session: "session_123".into(),
             created_at: Utc::now(),
@@ -1253,9 +1282,10 @@ mod tests {
             additional_context: None,
         });
 
-        let ready_session = queue.take_ready_session_items();
-        assert_eq!(ready_session.len(), 1);
-        assert_eq!(ready_session[0].id, "session_due");
+        let ready_direct = queue.take_ready_direct_items();
+        assert_eq!(ready_direct.len(), 2);
+        assert_eq!(ready_direct[0].id, "spawn_due");
+        assert_eq!(ready_direct[1].id, "session_due");
         assert_eq!(queue.len(), 1);
         assert_eq!(queue.items()[0].id, "ambient_due");
     }

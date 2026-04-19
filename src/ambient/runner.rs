@@ -196,7 +196,7 @@ impl AmbientRunnerHandle {
                     .count();
                 let reminder_items: Vec<_> = items
                     .iter()
-                    .filter(|item| matches!(item.target, ScheduleTarget::Session { .. }))
+                    .filter(|item| item.target.is_direct_delivery())
                     .collect();
                 let reminder_count = reminder_items.len();
                 let next_reminder = reminder_items
@@ -282,12 +282,16 @@ impl AmbientRunnerHandle {
                     .items()
                     .iter()
                     .map(|item| {
-                        let (target_kind, target_session_id) = match &item.target {
-                            ScheduleTarget::Ambient => ("ambient", None),
-                            ScheduleTarget::Session { session_id } => {
-                                ("session", Some(session_id.clone()))
-                            }
-                        };
+                        let (target_kind, target_session_id, target_parent_session_id) =
+                            match &item.target {
+                                ScheduleTarget::Ambient => ("ambient", None, None),
+                                ScheduleTarget::Session { session_id } => {
+                                    ("session", Some(session_id.clone()), None)
+                                }
+                                ScheduleTarget::Spawn { parent_session_id } => {
+                                    ("spawn", None, Some(parent_session_id.clone()))
+                                }
+                            };
                         let overdue_seconds =
                             (Utc::now() - item.scheduled_for).num_seconds().max(0);
                         serde_json::json!({
@@ -299,6 +303,7 @@ impl AmbientRunnerHandle {
                             "created_at": item.created_at.to_rfc3339(),
                             "target_kind": target_kind,
                             "target_session_id": target_session_id,
+                            "target_parent_session_id": target_parent_session_id,
                             "working_dir": item.working_dir,
                             "relevant_files": item.relevant_files,
                             "git_branch": item.git_branch,
@@ -395,44 +400,125 @@ impl AmbientRunnerHandle {
         Ok(())
     }
 
-    async fn deliver_scheduled_session_item(
+    async fn spawn_session_for_scheduled_item(
+        &self,
+        provider: &Arc<dyn Provider>,
+        item: &ScheduledItem,
+        parent_session_id: &str,
+    ) -> anyhow::Result<String> {
+        let mut child = match Session::load(parent_session_id) {
+            Ok(parent) => {
+                let mut child = Session::create(
+                    Some(parent_session_id.to_string()),
+                    Some(
+                        item.task_description
+                            .clone()
+                            .unwrap_or_else(|| "Scheduled task".to_string()),
+                    ),
+                );
+                child.replace_messages(parent.messages.clone());
+                child.compaction = parent.compaction.clone();
+                child.provider_key = parent.provider_key.clone();
+                child.model = parent.model.clone();
+                child.subagent_model = parent.subagent_model.clone();
+                child.improve_mode = parent.improve_mode;
+                child.autoreview_enabled = parent.autoreview_enabled;
+                child.autojudge_enabled = parent.autojudge_enabled;
+                child.is_canary = parent.is_canary;
+                child.testing_build = parent.testing_build.clone();
+                child.is_debug = parent.is_debug;
+                child.memory_injections = parent.memory_injections.clone();
+                child.replay_events = parent.replay_events.clone();
+                child.working_dir = item.working_dir.clone().or(parent.working_dir.clone());
+                child
+            }
+            Err(err) => {
+                logging::warn(&format!(
+                    "Ambient runner: failed to load parent session {} for spawned scheduled task {}; creating a fresh child instead: {}",
+                    parent_session_id, item.id, err
+                ));
+                let mut child = Session::create(
+                    Some(parent_session_id.to_string()),
+                    Some(
+                        item.task_description
+                            .clone()
+                            .unwrap_or_else(|| "Scheduled task".to_string()),
+                    ),
+                );
+                child.working_dir = item.working_dir.clone();
+                child
+            }
+        };
+        child.status = crate::session::SessionStatus::Closed;
+        child.save()?;
+
+        let child_session_id = child.id.clone();
+        let child_is_canary = child.is_canary;
+        let child_is_debug = child.is_debug;
+        let cycle_provider = provider.fork();
+        let registry = tool::Registry::new(cycle_provider.clone()).await;
+        if child_is_canary {
+            registry.register_selfdev_tools().await;
+        }
+
+        let mut agent = Agent::new_with_session(cycle_provider, registry, child, None);
+        agent.set_debug(child_is_debug);
+
+        let reminder = ambient::format_scheduled_session_message(item);
+        let _ = agent.run_once_capture(&reminder).await?;
+        agent.mark_closed();
+        Ok(child_session_id)
+    }
+
+    async fn deliver_scheduled_direct_item(
         &self,
         provider: &Arc<dyn Provider>,
         item: &ScheduledItem,
     ) -> anyhow::Result<()> {
-        let ScheduleTarget::Session { session_id } = &item.target else {
-            return Ok(());
-        };
-
-        let reminder = ambient::format_scheduled_session_message(item);
-        match self.notify_live_session(session_id, &reminder).await {
-            Ok(()) => {
+        match &item.target {
+            ScheduleTarget::Ambient => Ok(()),
+            ScheduleTarget::Session { session_id } => {
+                let reminder = ambient::format_scheduled_session_message(item);
+                match self.notify_live_session(session_id, &reminder).await {
+                    Ok(()) => {
+                        logging::info(&format!(
+                            "Ambient runner: delivered scheduled task {} to live session {}",
+                            item.id, session_id
+                        ));
+                        Ok(())
+                    }
+                    Err(err) => {
+                        logging::info(&format!(
+                            "Ambient runner: live delivery for {} fell back to headless resume: {}",
+                            session_id, err
+                        ));
+                        self.resume_dead_session_with_reminder(provider, item, session_id)
+                            .await
+                    }
+                }
+            }
+            ScheduleTarget::Spawn { parent_session_id } => {
+                let spawned_session_id = self
+                    .spawn_session_for_scheduled_item(provider, item, parent_session_id)
+                    .await?;
                 logging::info(&format!(
-                    "Ambient runner: delivered scheduled task {} to live session {}",
-                    item.id, session_id
+                    "Ambient runner: spawned scheduled task {} into child session {} from {}",
+                    item.id, spawned_session_id, parent_session_id
                 ));
                 Ok(())
-            }
-            Err(err) => {
-                logging::info(&format!(
-                    "Ambient runner: live delivery for {} fell back to headless resume: {}",
-                    session_id, err
-                ));
-                self.resume_dead_session_with_reminder(provider, item, session_id)
-                    .await
             }
         }
     }
 
-    async fn deliver_ready_session_items(
+    async fn deliver_ready_direct_items(
         &self,
         provider: &Arc<dyn Provider>,
         items: Vec<ScheduledItem>,
     ) {
         for item in items {
-            if let Err(e) = self.deliver_scheduled_session_item(provider, &item).await {
+            if let Err(e) = self.deliver_scheduled_direct_item(provider, &item).await {
                 logging::error(&format!(
-                    "Ambient runner: failed to deliver scheduled session item {}: {}",
+                    "Ambient runner: failed to deliver scheduled direct item {}: {}",
                     item.id, e
                 ));
             }
@@ -534,14 +620,14 @@ impl AmbientRunnerHandle {
             }
 
             // Load manager to check should_run and update queue info
-            let (should_run, ready_session_items, next_session_due) = match AmbientManager::new() {
+            let (should_run, ready_direct_items, next_direct_due) = match AmbientManager::new() {
                 Ok(mut mgr) => {
-                    let ready_session_items = mgr.take_ready_session_items();
-                    let next_session_due = mgr
+                    let ready_direct_items = mgr.take_ready_direct_items();
+                    let next_direct_due = mgr
                         .queue()
                         .items()
                         .iter()
-                        .filter(|item| matches!(item.target, ScheduleTarget::Session { .. }))
+                        .filter(|item| item.target.is_direct_delivery())
                         .map(|item| item.scheduled_for)
                         .min();
                     // Update queue info for widget
@@ -556,8 +642,8 @@ impl AmbientRunnerHandle {
                     // Also run if there are pending email reply directives
                     (
                         ambient_allowed && (mgr.should_run() || ambient::has_pending_directives()),
-                        ready_session_items,
-                        next_session_due,
+                        ready_direct_items,
+                        next_direct_due,
                     )
                 }
                 Err(e) => {
@@ -566,8 +652,8 @@ impl AmbientRunnerHandle {
                 }
             };
 
-            if !ready_session_items.is_empty() {
-                self.deliver_ready_session_items(&provider, ready_session_items)
+            if !ready_direct_items.is_empty() {
+                self.deliver_ready_direct_items(&provider, ready_direct_items)
                     .await;
             }
 
@@ -577,12 +663,12 @@ impl AmbientRunnerHandle {
                         .calculate_interval(None)
                         .as_secs()
                         .max(MAX_IDLE_POLL_SECS);
-                    let next_session_secs = next_session_due
+                    let next_direct_secs = next_direct_due
                         .map(|next| (next - Utc::now()).num_seconds().max(0) as u64)
                         .unwrap_or(interval);
-                    interval.min(next_session_secs.max(1))
+                    interval.min(next_direct_secs.max(1))
                 } else {
-                    next_session_due
+                    next_direct_due
                         .map(|next| (next - Utc::now()).num_seconds().max(0) as u64)
                         .map(|secs| secs.clamp(1, MAX_IDLE_POLL_SECS))
                         .unwrap_or(MAX_IDLE_POLL_SECS)
@@ -982,11 +1068,15 @@ impl AmbientRunnerHandle {
 #[cfg(test)]
 mod tests {
     use super::AmbientRunnerHandle;
-    use crate::message::{Message, ToolDefinition};
+    use crate::ambient::{Priority, ScheduleTarget, ScheduledItem};
+    use crate::message::{Message, Role, StreamEvent, ToolDefinition};
     use crate::provider::{EventStream, Provider};
+    use crate::session::Session;
     use anyhow::Result;
+    use async_stream::stream;
     use async_trait::async_trait;
-    use std::sync::Arc;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
 
     struct EnvVarGuard {
@@ -1014,6 +1104,17 @@ mod tests {
 
     struct TestProvider;
 
+    #[derive(Clone, Default)]
+    struct StreamingTestProvider {
+        responses: Arc<StdMutex<VecDeque<Vec<StreamEvent>>>>,
+    }
+
+    impl StreamingTestProvider {
+        fn queue_response(&self, events: Vec<StreamEvent>) {
+            self.responses.lock().unwrap().push_back(events);
+        }
+    }
+
     #[async_trait]
     impl Provider for TestProvider {
         async fn complete(
@@ -1037,6 +1138,38 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl Provider for StreamingTestProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<EventStream> {
+            let events = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_default();
+            let stream = stream! {
+                for event in events {
+                    yield Ok(event);
+                }
+            };
+            Ok(Box::pin(stream))
+        }
+
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+    }
+
     #[tokio::test]
     async fn runner_stays_alive_to_service_schedules_when_ambient_disabled() {
         let _guard = crate::storage::lock_test_env();
@@ -1055,5 +1188,67 @@ mod tests {
 
         task.abort();
         let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn spawn_target_creates_one_child_session_and_runs_task() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+        let provider = StreamingTestProvider::default();
+        provider.queue_response(vec![
+            StreamEvent::TextDelta("Spawned session handled task.".to_string()),
+            StreamEvent::MessageEnd { stop_reason: None },
+        ]);
+        let provider: Arc<dyn Provider> = Arc::new(provider);
+
+        let mut parent = Session::create_with_id(
+            "session_parent_spawn_test".to_string(),
+            None,
+            Some("Parent".to_string()),
+        );
+        parent.working_dir = Some(temp.path().display().to_string());
+        parent.save().expect("save parent session");
+
+        let item = ScheduledItem {
+            id: "sched_spawn_test".to_string(),
+            scheduled_for: chrono::Utc::now(),
+            context: "Follow up later".to_string(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Spawn {
+                parent_session_id: parent.id.clone(),
+            },
+            created_by_session: parent.id.clone(),
+            created_at: chrono::Utc::now(),
+            working_dir: parent.working_dir.clone(),
+            task_description: Some("Follow up later".to_string()),
+            relevant_files: vec!["src/lib.rs".to_string()],
+            git_branch: None,
+            additional_context: Some("Background: spawned schedule test".to_string()),
+        };
+
+        let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+        let child_session_id = runner
+            .spawn_session_for_scheduled_item(&provider, &item, &parent.id)
+            .await
+            .expect("spawned scheduled task should succeed");
+
+        assert_ne!(child_session_id, parent.id);
+
+        let child = Session::load(&child_session_id).expect("load spawned child session");
+        assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
+        assert_eq!(child.working_dir, parent.working_dir);
+        assert!(child.messages.iter().any(|message| {
+            message.role == Role::User
+                && message.content_preview().contains("[Scheduled task]")
+                && message.content_preview().contains("Follow up later")
+        }));
+        assert!(child.messages.iter().any(|message| {
+            message.role == Role::Assistant
+                && message
+                    .content_preview()
+                    .contains("Spawned session handled task.")
+        }));
     }
 }
