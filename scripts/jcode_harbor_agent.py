@@ -161,8 +161,7 @@ class JcodeHarborAgent(BaseAgent):
                 f'> {IN_CONTAINER_OUTPUT}/events.ndjson 2> {IN_CONTAINER_OUTPUT}/stderr.txt'
             ),
             cwd="/app",
-            env=env,
-            timeout_sec=600,
+            env=env
         )
 
         (self.logs_dir / "exec_stdout.txt").write_text(result.stdout or "")
