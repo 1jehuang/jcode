@@ -211,6 +211,110 @@ pub fn listable_model_names_from_routes(routes: &[ModelRoute]) -> Vec<String> {
     models
 }
 
+pub fn build_anthropic_oauth_route(
+    model: &str,
+    available: bool,
+    detail: impl Into<String>,
+) -> ModelRoute {
+    ModelRoute {
+        model: model.to_string(),
+        provider: "Anthropic".to_string(),
+        api_method: "claude-oauth".to_string(),
+        available,
+        detail: detail.into(),
+        cheapness: cheapness_for_route(model, "Anthropic", "claude-oauth"),
+    }
+}
+
+pub fn build_openai_oauth_route(
+    model: &str,
+    available: bool,
+    detail: impl Into<String>,
+) -> ModelRoute {
+    ModelRoute {
+        model: model.to_string(),
+        provider: "OpenAI".to_string(),
+        api_method: "openai-oauth".to_string(),
+        available,
+        detail: detail.into(),
+        cheapness: cheapness_for_route(model, "OpenAI", "openai-oauth"),
+    }
+}
+
+pub fn build_copilot_route(model: &str, available: bool, detail: impl Into<String>) -> ModelRoute {
+    ModelRoute {
+        model: model.to_string(),
+        provider: "Copilot".to_string(),
+        api_method: "copilot".to_string(),
+        available,
+        detail: detail.into(),
+        cheapness: cheapness_for_route(model, "Copilot", "copilot"),
+    }
+}
+
+pub fn build_openrouter_auto_route(
+    model: &str,
+    available: bool,
+    auto_detail: impl Into<String>,
+) -> ModelRoute {
+    ModelRoute {
+        model: model.to_string(),
+        provider: "auto".to_string(),
+        api_method: "openrouter".to_string(),
+        available,
+        detail: auto_detail.into(),
+        cheapness: cheapness_for_route(model, "auto", "openrouter"),
+    }
+}
+
+pub fn build_openrouter_endpoint_route(
+    model: &str,
+    endpoint: &crate::provider::openrouter::EndpointInfo,
+    available: bool,
+    age_suffix: Option<&str>,
+) -> ModelRoute {
+    let mut detail = endpoint.detail_string();
+    if let Some(age_suffix) = age_suffix.map(str::trim).filter(|value| !value.is_empty()) {
+        if !detail.is_empty() {
+            detail = format!("{}, {}", detail, age_suffix);
+        } else {
+            detail = age_suffix.to_string();
+        }
+    }
+
+    ModelRoute {
+        model: model.to_string(),
+        provider: endpoint.provider_name.clone(),
+        api_method: "openrouter".to_string(),
+        available,
+        detail,
+        cheapness: openrouter_pricing_from_model_pricing(
+            &endpoint.pricing,
+            RouteCostSource::OpenRouterEndpoint,
+            RouteCostConfidence::High,
+            Some(format!(
+                "OpenRouter endpoint pricing for {}",
+                endpoint.provider_name
+            )),
+        ),
+    }
+}
+
+pub fn build_openrouter_fallback_provider_route(
+    display_model: &str,
+    catalog_model: &str,
+    provider: &str,
+) -> ModelRoute {
+    ModelRoute {
+        model: display_model.to_string(),
+        provider: provider.to_string(),
+        api_method: "openrouter".to_string(),
+        available: true,
+        detail: String::new(),
+        cheapness: cheapness_for_route(catalog_model, provider, "openrouter"),
+    }
+}
+
 /// Provider trait for LLM backends
 #[async_trait]
 pub trait Provider: Send + Sync {
@@ -1476,14 +1580,11 @@ impl Provider for MultiProvider {
             };
 
             if has_oauth {
-                routes.push(ModelRoute {
-                    model: model.to_string(),
-                    provider: "Anthropic".to_string(),
-                    api_method: "claude-oauth".to_string(),
+                routes.push(build_anthropic_oauth_route(
+                    &model,
                     available,
-                    detail: detail.clone(),
-                    cheapness: cheapness_for_route(&model, "Anthropic", "claude-oauth"),
-                });
+                    detail.clone(),
+                ));
             }
             if has_api_key {
                 let (ak_available, ak_detail) = anthropic_api_key_route_availability(&model);
@@ -1528,15 +1629,7 @@ impl Provider for MultiProvider {
                     }
                 }
             };
-            let cheapness = cheapness_for_route(&model, "OpenAI", "openai-oauth");
-            routes.push(ModelRoute {
-                model,
-                provider: "OpenAI".to_string(),
-                api_method: "openai-oauth".to_string(),
-                available,
-                detail,
-                cheapness,
-            });
+            routes.push(build_openai_oauth_route(&model, available, detail));
         }
 
         // GitHub Copilot models
@@ -1546,35 +1639,17 @@ impl Provider for MultiProvider {
                 let detail = copilot.model_catalog_detail();
                 let copilot_models_empty = copilot_models.is_empty();
                 for model in copilot_models {
-                    let cheapness = cheapness_for_route(&model, "Copilot", "copilot");
-                    routes.push(ModelRoute {
-                        model,
-                        provider: "Copilot".to_string(),
-                        api_method: "copilot".to_string(),
-                        available: true,
-                        detail: detail.clone(),
-                        cheapness,
-                    });
+                    routes.push(build_copilot_route(&model, true, detail.clone()));
                 }
                 if copilot_models_empty && copilot::CopilotApiProvider::has_credentials() {
-                    routes.push(ModelRoute {
-                        model: "copilot models".to_string(),
-                        provider: "Copilot".to_string(),
-                        api_method: "copilot".to_string(),
-                        available: false,
-                        detail,
-                        cheapness: cheapness_for_route("claude-sonnet-4-6", "Copilot", "copilot"),
-                    });
+                    routes.push(build_copilot_route("copilot models", false, detail));
                 }
             } else if copilot::CopilotApiProvider::has_credentials() {
-                routes.push(ModelRoute {
-                    model: "copilot models".to_string(),
-                    provider: "Copilot".to_string(),
-                    api_method: "copilot".to_string(),
-                    available: false,
-                    detail: "not initialized yet".to_string(),
-                    cheapness: cheapness_for_route("claude-sonnet-4-6", "Copilot", "copilot"),
-                });
+                routes.push(build_copilot_route(
+                    "copilot models",
+                    false,
+                    "not initialized yet",
+                ));
             }
         }
 
@@ -1648,40 +1723,21 @@ impl Provider for MultiProvider {
                     .as_ref()
                     .and_then(|(eps, _)| eps.first().map(|ep| format!("→ {}", ep.provider_name)))
                     .unwrap_or_default();
-                routes.push(ModelRoute {
-                    model: model.clone(),
-                    provider: "auto".to_string(),
-                    api_method: "openrouter".to_string(),
-                    available: has_openrouter,
-                    detail: auto_detail,
-                    cheapness: cheapness_for_route(&model, "auto", "openrouter"),
-                });
+                routes.push(build_openrouter_auto_route(
+                    &model,
+                    has_openrouter,
+                    auto_detail,
+                ));
                 // Add per-provider routes from endpoints cache
                 if let Some((ref endpoints, _)) = cached {
                     let stale_suffix = age_str.as_deref().unwrap_or("");
                     for ep in endpoints {
-                        let mut detail = ep.detail_string();
-                        if !stale_suffix.is_empty() && !detail.is_empty() {
-                            detail = format!("{}, {}", detail, stale_suffix);
-                        } else if !stale_suffix.is_empty() {
-                            detail = stale_suffix.to_string();
-                        }
-                        routes.push(ModelRoute {
-                            model: model.clone(),
-                            provider: ep.provider_name.clone(),
-                            api_method: "openrouter".to_string(),
-                            available: has_openrouter,
-                            detail,
-                            cheapness: openrouter_pricing_from_model_pricing(
-                                &ep.pricing,
-                                RouteCostSource::OpenRouterEndpoint,
-                                RouteCostConfidence::High,
-                                Some(format!(
-                                    "OpenRouter endpoint pricing for {}",
-                                    ep.provider_name
-                                )),
-                            ),
-                        });
+                        routes.push(build_openrouter_endpoint_route(
+                            &model,
+                            ep,
+                            has_openrouter,
+                            Some(stale_suffix),
+                        ));
                     }
                 }
             }
@@ -1705,32 +1761,14 @@ impl Provider for MultiProvider {
                     openrouter::load_endpoints_disk_cache_public(&or_model)
                 {
                     for ep in &endpoints {
-                        routes.push(ModelRoute {
-                            model: model.to_string(),
-                            provider: ep.provider_name.clone(),
-                            api_method: "openrouter".to_string(),
-                            available: true,
-                            detail: ep.detail_string(),
-                            cheapness: openrouter_pricing_from_model_pricing(
-                                &ep.pricing,
-                                RouteCostSource::OpenRouterEndpoint,
-                                RouteCostConfidence::High,
-                                Some(format!(
-                                    "OpenRouter endpoint pricing for {}",
-                                    ep.provider_name
-                                )),
-                            ),
-                        });
+                        routes.push(build_openrouter_endpoint_route(&model, ep, true, None));
                     }
                 } else {
-                    routes.push(ModelRoute {
-                        model: model.to_string(),
-                        provider: "Anthropic".to_string(),
-                        api_method: "openrouter".to_string(),
-                        available: true,
-                        detail: String::new(),
-                        cheapness: cheapness_for_route(&or_model, "Anthropic", "openrouter"),
-                    });
+                    routes.push(build_openrouter_fallback_provider_route(
+                        &model,
+                        &or_model,
+                        "Anthropic",
+                    ));
                 }
             }
 
@@ -1740,32 +1778,12 @@ impl Provider for MultiProvider {
                     openrouter::load_endpoints_disk_cache_public(&or_model)
                 {
                     for ep in &endpoints {
-                        routes.push(ModelRoute {
-                            model: model.to_string(),
-                            provider: ep.provider_name.clone(),
-                            api_method: "openrouter".to_string(),
-                            available: true,
-                            detail: ep.detail_string(),
-                            cheapness: openrouter_pricing_from_model_pricing(
-                                &ep.pricing,
-                                RouteCostSource::OpenRouterEndpoint,
-                                RouteCostConfidence::High,
-                                Some(format!(
-                                    "OpenRouter endpoint pricing for {}",
-                                    ep.provider_name
-                                )),
-                            ),
-                        });
+                        routes.push(build_openrouter_endpoint_route(model, ep, true, None));
                     }
                 } else {
-                    routes.push(ModelRoute {
-                        model: model.to_string(),
-                        provider: "OpenAI".to_string(),
-                        api_method: "openrouter".to_string(),
-                        available: true,
-                        detail: String::new(),
-                        cheapness: cheapness_for_route(&or_model, "OpenAI", "openrouter"),
-                    });
+                    routes.push(build_openrouter_fallback_provider_route(
+                        model, &or_model, "OpenAI",
+                    ));
                 }
             }
         }

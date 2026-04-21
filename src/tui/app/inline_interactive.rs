@@ -1015,18 +1015,11 @@ impl App {
                     .as_ref()
                     .and_then(|(eps, _)| eps.first().map(|ep| format!("→ {}", ep.provider_name)))
                     .unwrap_or_default();
-                routes.push(crate::provider::ModelRoute {
-                    model: model.clone(),
-                    provider: "auto".to_string(),
-                    api_method: "openrouter".to_string(),
-                    available: auth.openrouter != crate::auth::AuthState::NotConfigured,
-                    detail: auto_detail,
-                    cheapness: crate::provider::pricing::cheapness_for_route(
-                        model,
-                        "auto",
-                        "openrouter",
-                    ),
-                });
+                routes.push(crate::provider::build_openrouter_auto_route(
+                    model,
+                    auth.openrouter != crate::auth::AuthState::NotConfigured,
+                    auto_detail,
+                ));
                 if let Some((endpoints, age)) = cached {
                     let age_str = if age < 3600 {
                         format!("{}m ago", age / 60)
@@ -1036,29 +1029,12 @@ impl App {
                         format!("{}d ago", age / 86400)
                     };
                     for ep in &endpoints {
-                        let mut detail = ep.detail_string();
-                        if !age_str.is_empty() && !detail.is_empty() {
-                            detail = format!("{}, {}", detail, age_str);
-                        } else if !age_str.is_empty() {
-                            detail = age_str.clone();
-                        }
-                        routes.push(crate::provider::ModelRoute {
-                            model: model.clone(),
-                            provider: ep.provider_name.clone(),
-                            api_method: "openrouter".to_string(),
-                            available: auth.openrouter != crate::auth::AuthState::NotConfigured,
-                            detail,
-                            cheapness:
-                                crate::provider::pricing::openrouter_pricing_from_model_pricing(
-                                    &ep.pricing,
-                                    crate::provider::RouteCostSource::OpenRouterEndpoint,
-                                    crate::provider::RouteCostConfidence::High,
-                                    Some(format!(
-                                        "OpenRouter endpoint pricing for {}",
-                                        ep.provider_name
-                                    )),
-                                ),
-                        });
+                        routes.push(crate::provider::build_openrouter_endpoint_route(
+                            model,
+                            ep,
+                            auth.openrouter != crate::auth::AuthState::NotConfigured,
+                            Some(&age_str),
+                        ));
                     }
                 }
                 continue;
@@ -1071,18 +1047,9 @@ impl App {
             {
                 let (available, detail) =
                     crate::provider::anthropic_oauth_route_availability(model);
-                routes.push(crate::provider::ModelRoute {
-                    model: model.clone(),
-                    provider: "Anthropic".to_string(),
-                    api_method: "claude-oauth".to_string(),
-                    available,
-                    detail,
-                    cheapness: crate::provider::pricing::cheapness_for_route(
-                        model,
-                        "Anthropic",
-                        "claude-oauth",
-                    ),
-                });
+                routes.push(crate::provider::build_anthropic_oauth_route(
+                    model, available, detail,
+                ));
                 added_any = true;
             }
 
@@ -1111,18 +1078,9 @@ impl App {
                         ),
                     }
                 };
-                routes.push(crate::provider::ModelRoute {
-                    model: model.clone(),
-                    provider: "OpenAI".to_string(),
-                    api_method: "openai-oauth".to_string(),
-                    available,
-                    detail,
-                    cheapness: crate::provider::pricing::cheapness_for_route(
-                        model,
-                        "OpenAI",
-                        "openai-oauth",
-                    ),
-                });
+                routes.push(crate::provider::build_openai_oauth_route(
+                    model, available, detail,
+                ));
                 added_any = true;
             }
 
@@ -1133,58 +1091,26 @@ impl App {
                 ) {
                     (_, Some((endpoints, _age))) => {
                         for ep in endpoints {
-                            routes.push(crate::provider::ModelRoute {
-                                model: model.clone(),
-                                provider: ep.provider_name.clone(),
-                                api_method: "openrouter".to_string(),
-                                available: true,
-                                detail: ep.detail_string(),
-                                cheapness:
-                                    crate::provider::pricing::openrouter_pricing_from_model_pricing(
-                                        &ep.pricing,
-                                        crate::provider::RouteCostSource::OpenRouterEndpoint,
-                                        crate::provider::RouteCostConfidence::High,
-                                        Some(format!(
-                                            "OpenRouter endpoint pricing for {}",
-                                            ep.provider_name
-                                        )),
-                                    ),
-                            });
+                            routes.push(crate::provider::build_openrouter_endpoint_route(
+                                model, ep, true, None,
+                            ));
                         }
                         added_any = true;
                     }
                     (Some("claude"), None) => {
-                        routes.push(crate::provider::ModelRoute {
-                            model: model.clone(),
-                            provider: "Anthropic".to_string(),
-                            api_method: "openrouter".to_string(),
-                            available: true,
-                            detail: String::new(),
-                            cheapness: openrouter_catalog_model.as_deref().and_then(|or_model| {
-                                crate::provider::pricing::cheapness_for_route(
-                                    or_model,
-                                    "Anthropic",
-                                    "openrouter",
-                                )
-                            }),
-                        });
+                        routes.push(crate::provider::build_openrouter_fallback_provider_route(
+                            model,
+                            openrouter_catalog_model.as_deref().unwrap_or(model),
+                            "Anthropic",
+                        ));
                         added_any = true;
                     }
                     (Some("openai"), None) => {
-                        routes.push(crate::provider::ModelRoute {
-                            model: model.clone(),
-                            provider: "OpenAI".to_string(),
-                            api_method: "openrouter".to_string(),
-                            available: true,
-                            detail: String::new(),
-                            cheapness: openrouter_catalog_model.as_deref().and_then(|or_model| {
-                                crate::provider::pricing::cheapness_for_route(
-                                    or_model,
-                                    "OpenAI",
-                                    "openrouter",
-                                )
-                            }),
-                        });
+                        routes.push(crate::provider::build_openrouter_fallback_provider_route(
+                            model,
+                            openrouter_catalog_model.as_deref().unwrap_or(model),
+                            "OpenAI",
+                        ));
                         added_any = true;
                     }
                     _ => {}
@@ -1192,17 +1118,12 @@ impl App {
             }
 
             if Self::remote_model_should_offer_copilot_route(model) && !model.contains("[1m]") {
-                routes.push(crate::provider::ModelRoute {
-                    model: model.clone(),
-                    provider: "Copilot".to_string(),
-                    api_method: "copilot".to_string(),
-                    available: auth.copilot == crate::auth::AuthState::Available
+                routes.push(crate::provider::build_copilot_route(
+                    model,
+                    auth.copilot == crate::auth::AuthState::Available
                         || Self::remote_model_is_server_copilot_only(model),
-                    detail: String::new(),
-                    cheapness: crate::provider::pricing::cheapness_for_route(
-                        model, "Copilot", "copilot",
-                    ),
-                });
+                    String::new(),
+                ));
                 added_any = true;
             }
 
