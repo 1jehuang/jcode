@@ -331,13 +331,15 @@ impl App {
         if model.is_empty() {
             return Vec::new();
         }
+        let openrouter_model = crate::provider::openrouter_catalog_model_id(model)
+            .unwrap_or_else(|| model.to_string());
 
         let mut seen = std::collections::HashSet::new();
         let mut suggestions = Vec::new();
         push_unique(
             &mut seen,
             &mut suggestions,
-            format!("/model {}@auto", model),
+            format!("/model {}@auto", openrouter_model),
             "Use automatic OpenRouter provider routing",
         );
 
@@ -358,7 +360,7 @@ impl App {
                     push_unique(
                         &mut seen,
                         &mut suggestions,
-                        format!("/model {}@{}", model, route.provider),
+                        format!("/model {}@{}", openrouter_model, route.provider),
                         help,
                     );
                 }
@@ -368,7 +370,7 @@ impl App {
                 push_unique(
                     &mut seen,
                     &mut suggestions,
-                    format!("/model {}@{}", model, provider),
+                    format!("/model {}@{}", openrouter_model, provider),
                     "Pin OpenRouter provider",
                 );
             }

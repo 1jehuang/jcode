@@ -590,6 +590,92 @@ fn test_provider_for_model_openrouter() {
 }
 
 #[test]
+fn test_openrouter_catalog_model_id_normalizes_bare_openai_and_claude_models() {
+    assert_eq!(
+        openrouter_catalog_model_id("gpt-5.4").as_deref(),
+        Some("openai/gpt-5.4")
+    );
+    assert_eq!(
+        openrouter_catalog_model_id("claude-sonnet-4-6").as_deref(),
+        Some("anthropic/claude-sonnet-4-6")
+    );
+    assert_eq!(
+        openrouter_catalog_model_id("anthropic/claude-sonnet-4").as_deref(),
+        Some("anthropic/claude-sonnet-4")
+    );
+    assert_eq!(openrouter_catalog_model_id("composer-2-fast"), None);
+}
+
+#[test]
+fn test_available_models_display_uses_route_models_and_filters_placeholder_rows() {
+    let provider = MultiProvider {
+        claude: RwLock::new(None),
+        anthropic: RwLock::new(None),
+        openai: RwLock::new(None),
+        copilot_api: RwLock::new(None),
+        antigravity: RwLock::new(None),
+        gemini: RwLock::new(None),
+        cursor: RwLock::new(None),
+        openrouter: RwLock::new(None),
+        active: RwLock::new(ActiveProvider::OpenAI),
+        use_claude_cli: false,
+        startup_notices: RwLock::new(Vec::new()),
+        forced_provider: None,
+    };
+
+    let models = provider.available_models_display();
+    assert!(
+        models
+            .iter()
+            .any(|model| known_openai_model_ids().contains(model)),
+        "route-backed display models should include OpenAI picker rows: {:?}",
+        models
+    );
+    assert!(
+        models
+            .iter()
+            .any(|model| known_anthropic_model_ids().contains(model)),
+        "route-backed display models should include Anthropic picker rows: {:?}",
+        models
+    );
+    assert!(!models.iter().any(|model| model == "openrouter models"));
+    assert!(!models.iter().any(|model| model == "copilot models"));
+}
+
+#[test]
+fn test_set_model_accepts_bare_openai_openrouter_pin_when_openrouter_available() {
+    with_clean_provider_test_env(|| {
+        with_env_var("OPENROUTER_API_KEY", "test-openrouter-key", || {
+            let openrouter = Arc::new(
+                openrouter::OpenRouterProvider::new()
+                    .expect("openrouter provider should initialize"),
+            );
+            let provider = MultiProvider {
+                claude: RwLock::new(None),
+                anthropic: RwLock::new(None),
+                openai: RwLock::new(None),
+                copilot_api: RwLock::new(None),
+                antigravity: RwLock::new(None),
+                gemini: RwLock::new(None),
+                cursor: RwLock::new(None),
+                openrouter: RwLock::new(Some(openrouter)),
+                active: RwLock::new(ActiveProvider::OpenAI),
+                use_claude_cli: false,
+                startup_notices: RwLock::new(Vec::new()),
+                forced_provider: None,
+            };
+
+            provider
+                .set_model("gpt-5.4@OpenAI")
+                .expect("bare pinned OpenRouter spec should normalize");
+
+            assert_eq!(provider.active_provider(), ActiveProvider::OpenRouter);
+            assert_eq!(provider.model(), "openai/gpt-5.4");
+        })
+    });
+}
+
+#[test]
 fn test_provider_for_model_unknown() {
     assert_eq!(provider_for_model("unknown-model"), None);
 }

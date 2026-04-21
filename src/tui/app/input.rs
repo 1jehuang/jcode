@@ -1962,7 +1962,7 @@ impl App {
                 self.session.add_message(
                     Role::User,
                     vec![ContentBlock::Text {
-                        text: combined,
+                        text: combined.clone(),
                         cache_control: None,
                     }],
                 );

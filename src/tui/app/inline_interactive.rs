@@ -202,15 +202,7 @@ fn model_entry_base_name(entry: &PickerEntry) -> String {
 }
 
 fn openrouter_route_model_id(model: &str) -> String {
-    if model.contains('/') {
-        return model.to_string();
-    }
-
-    match crate::provider::provider_for_model(model) {
-        Some("claude") => format!("anthropic/{}", model),
-        Some("openai") => format!("openai/{}", model),
-        _ => model.to_string(),
-    }
+    crate::provider::openrouter_catalog_model_id(model).unwrap_or_else(|| model.to_string())
 }
 
 fn picker_route_model_spec(entry: &PickerEntry, route: &PickerOption) -> String {

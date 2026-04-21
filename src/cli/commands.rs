@@ -1017,7 +1017,7 @@ fn collect_cli_model_names(
 
     fn push_model(deduped: &mut Vec<String>, seen: &mut BTreeSet<String>, model: &str) {
         let trimmed = model.trim();
-        if !is_listable_model_name(trimmed) {
+        if !crate::provider::is_listable_model_name(trimmed) {
             return;
         }
         if seen.insert(trimmed.to_string()) {
@@ -1041,11 +1041,6 @@ fn collect_cli_model_names(
 
     deduped
 }
-
-fn is_listable_model_name(model: &str) -> bool {
-    !model.is_empty() && !matches!(model, "copilot models" | "openrouter models")
-}
-
 #[cfg(test)]
 #[path = "commands_tests.rs"]
 mod tests;

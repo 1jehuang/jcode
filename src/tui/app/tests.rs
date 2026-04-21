@@ -4716,11 +4716,17 @@ fn test_model_command_provider_suggestions_normalize_bare_openai_model_to_openro
         suggestions.first().map(|(cmd, _)| cmd.as_str()),
         Some("/model openai/gpt-5.4@OpenAI")
     );
-    assert!(
-        suggestions
-            .iter()
-            .any(|(cmd, _)| cmd == "/model openai/gpt-5.4@auto")
-    );
+}
+
+#[test]
+fn test_model_command_provider_suggestions_include_auto_for_normalized_bare_openai_model() {
+    let (app, _set_model_calls) = create_openrouter_spec_capture_test_app();
+
+    let suggestions = app.get_suggestions_for("/model gpt-5.4@");
+    let commands: Vec<&str> = suggestions.iter().map(|(cmd, _)| cmd.as_str()).collect();
+
+    assert!(commands.contains(&"/model openai/gpt-5.4@auto"));
+    assert!(commands.contains(&"/model openai/gpt-5.4@OpenAI"));
 }
 
 #[test]

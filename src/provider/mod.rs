@@ -178,6 +178,39 @@ pub fn summarize_model_catalog_refresh(
     }
 }
 
+pub fn is_listable_model_name(model: &str) -> bool {
+    let trimmed = model.trim();
+    !trimmed.is_empty() && !matches!(trimmed, "copilot models" | "openrouter models")
+}
+
+pub fn openrouter_catalog_model_id(model: &str) -> Option<String> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.contains('/') {
+        return Some(trimmed.to_string());
+    }
+
+    match provider_for_model(trimmed) {
+        Some("claude") => Some(format!("anthropic/{}", trimmed)),
+        Some("openai") => Some(format!("openai/{}", trimmed)),
+        Some("openrouter") => Some(trimmed.to_string()),
+        _ => None,
+    }
+}
+
+pub fn listable_model_names_from_routes(routes: &[ModelRoute]) -> Vec<String> {
+    let mut models = Vec::new();
+    let mut seen = BTreeSet::new();
+    for route in routes {
+        if is_listable_model_name(&route.model) && seen.insert(route.model.clone()) {
+            models.push(route.model.clone());
+        }
+    }
+    models
+}
+
 /// Provider trait for LLM backends
 #[async_trait]
 pub trait Provider: Send + Sync {
@@ -240,6 +273,7 @@ pub trait Provider: Send + Sync {
         self.available_models()
             .iter()
             .map(|m| (*m).to_string())
+            .filter(|model| is_listable_model_name(model))
             .collect()
     }
 
@@ -1101,6 +1135,29 @@ impl Provider for MultiProvider {
             model
         };
 
+        if let Some((base_model, provider_pin)) = model.rsplit_once('@')
+            && !provider_pin.trim().is_empty()
+            && let Some(openrouter_model) = openrouter_catalog_model_id(base_model)
+        {
+            let openrouter = self
+                .openrouter
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            if openrouter.is_none() {
+                return Err(anyhow::anyhow!(
+                    "OpenRouter credentials not available. Set OPENROUTER_API_KEY environment variable."
+                ));
+            }
+            *self
+                .active
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = ActiveProvider::OpenRouter;
+            if let Some(openrouter) = openrouter {
+                return openrouter.set_model(&format!("{}@{}", openrouter_model, provider_pin));
+            }
+        }
+
         // Detect which provider this model belongs to
         let target_provider = provider_for_model(model);
         if let Some(forced) = self.forced_provider
@@ -1354,92 +1411,23 @@ impl Provider for MultiProvider {
     }
 
     fn available_models_display(&self) -> Vec<String> {
-        let mut models = Vec::new();
-        if let Some(anthropic) = self.anthropic_provider() {
-            models.extend(anthropic.available_models_display());
-        } else if let Some(claude) = self.claude_provider() {
-            models.extend(claude.available_models_display());
-        }
-        if let Some(openai) = self.openai_provider() {
-            models.extend(openai.available_models_display());
-        }
-        {
-            let copilot_guard = self
-                .copilot_api
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(ref copilot) = *copilot_guard {
-                for m in copilot.available_models_display() {
-                    if !models.contains(&m) {
-                        models.push(m);
-                    }
-                }
-            }
-        }
-        {
-            let antigravity_guard = self
-                .antigravity
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(ref antigravity) = *antigravity_guard {
-                for m in antigravity.available_models_display() {
-                    if !models.contains(&m) {
-                        models.push(m);
-                    }
-                }
-            }
-        }
-        {
-            let gemini_guard = self
-                .gemini
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(ref gemini) = *gemini_guard {
-                for m in gemini.available_models_display() {
-                    if !models.contains(&m) {
-                        models.push(m);
-                    }
-                }
-            }
-        }
-        {
-            let cursor_guard = self
-                .cursor
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(ref cursor) = *cursor_guard {
-                for m in cursor.available_models_display() {
-                    if !models.contains(&m) {
-                        models.push(m);
-                    }
-                }
-            }
-        }
-        if let Some(openrouter) = self
-            .openrouter
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-        {
-            models.extend(openrouter.available_models_display());
-        }
-        models
+        listable_model_names_from_routes(&self.model_routes())
     }
 
     fn available_providers_for_model(&self, model: &str) -> Vec<String> {
-        if model.contains('/')
+        if let Some(model) = openrouter_catalog_model_id(model)
             && let Some(openrouter) = self.openrouter_provider()
         {
-            return openrouter.available_providers_for_model(model);
+            return openrouter.available_providers_for_model(&model);
         }
         Vec::new()
     }
 
     fn provider_details_for_model(&self, model: &str) -> Vec<(String, String)> {
-        if model.contains('/')
+        if let Some(model) = openrouter_catalog_model_id(model)
             && let Some(openrouter) = self.openrouter_provider()
         {
-            return openrouter.provider_details_for_model(model);
+            return openrouter.provider_details_for_model(&model);
         }
         Vec::new()
     }
