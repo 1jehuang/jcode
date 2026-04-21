@@ -748,7 +748,7 @@ impl Session {
         session.replay_events.clear();
         session.env_snapshots.clear();
         session.memory_injections.clear();
-        session.rebuild_memory_profile_cache();
+        session.mark_memory_profile_dirty();
         session.reset_persist_state(true);
         session.reset_provider_messages_cache();
         session
@@ -1089,10 +1089,12 @@ impl Session {
 
     pub fn load_from_path(path: &Path) -> Result<Self> {
         let load_start = Instant::now();
+        let snapshot_bytes = file_len_or_zero(path);
         let snapshot_start = Instant::now();
         let mut session: Session = storage::read_json(path)?;
         let snapshot_ms = snapshot_start.elapsed().as_millis();
         let journal_path = session_journal_path_from_snapshot(path);
+        let journal_bytes = file_len_or_zero(&journal_path);
         let journal_start = Instant::now();
         let mut journal_entries = 0usize;
         if journal_path.exists() {
@@ -1125,14 +1127,16 @@ impl Session {
         let finalize_start = Instant::now();
         session.reset_persist_state(path.exists());
         session.reset_provider_messages_cache();
-        session.rebuild_memory_profile_cache();
+        session.mark_memory_profile_dirty();
         let finalize_ms = finalize_start.elapsed().as_millis();
         crate::logging::info(&format!(
-            "[TIMING] session_load: session={}, snapshot={}ms, journal={}ms, finalize={}ms, journal_entries={}, messages={}, env_snapshots={}, replay_events={}, total={}ms",
+            "[TIMING] session_load: session={}, snapshot={}ms, journal={}ms, finalize={}ms, snapshot_bytes={}, journal_bytes={}, journal_entries={}, messages={}, env_snapshots={}, replay_events={}, total={}ms",
             session.id,
             snapshot_ms,
             journal_ms,
             finalize_ms,
+            snapshot_bytes,
+            journal_bytes,
             journal_entries,
             session.messages.len(),
             session.env_snapshots.len(),
@@ -1396,12 +1400,14 @@ impl Session {
     pub fn load_for_remote_startup(session_id: &str) -> Result<Self> {
         let path = session_path(session_id)?;
         let load_start = Instant::now();
+        let snapshot_bytes = file_len_or_zero(&path);
         let snapshot_start = Instant::now();
         let reader = BufReader::new(std::fs::File::open(&path)?);
         let snapshot: RemoteStartupSessionSnapshot = serde_json::from_reader(reader)?;
         let snapshot_ms = snapshot_start.elapsed().as_millis();
         let mut session = Self::session_from_remote_startup_snapshot(snapshot);
         let journal_path = session_journal_path_from_snapshot(&path);
+        let journal_bytes = file_len_or_zero(&journal_path);
         let journal_start = Instant::now();
         let mut journal_entries = 0usize;
         if journal_path.exists() {
@@ -1436,13 +1442,16 @@ impl Session {
         let finalize_start = Instant::now();
         session.reset_persist_state(path.exists());
         session.reset_provider_messages_cache();
+        session.mark_memory_profile_dirty();
         let finalize_ms = finalize_start.elapsed().as_millis();
         crate::logging::info(&format!(
-            "[TIMING] remote_startup_load: session={}, snapshot={}ms, journal={}ms, finalize={}ms, journal_entries={}, messages={}, total={}ms",
+            "[TIMING] remote_startup_load: session={}, snapshot={}ms, journal={}ms, finalize={}ms, snapshot_bytes={}, journal_bytes={}, journal_entries={}, messages={}, total={}ms",
             session.id,
             snapshot_ms,
             journal_ms,
             finalize_ms,
+            snapshot_bytes,
+            journal_bytes,
             journal_entries,
             session.messages.len(),
             load_start.elapsed().as_millis(),
@@ -1455,6 +1464,8 @@ impl Session {
         let path = session_path(&self.id)?;
         let journal_path = session_journal_path_from_snapshot(&path);
         let start = std::time::Instant::now();
+        let snapshot_bytes_before = file_len_or_zero(&path);
+        let journal_bytes_before = file_len_or_zero(&journal_path);
         let current_meta = self.journal_meta();
         let metadata_needs_snapshot = self
             .persist_state
@@ -1471,9 +1482,46 @@ impl Session {
             || self.memory_injections.len() < self.persist_state.memory_injections_len
             || self.replay_events.len() < self.persist_state.replay_events_len;
 
-        let result = if metadata_needs_snapshot || vectors_need_snapshot {
-            self.checkpoint_snapshot(&path, &journal_path)
+        let delta_messages = self
+            .messages
+            .len()
+            .saturating_sub(self.persist_state.messages_len);
+        let delta_env_snapshots = self
+            .env_snapshots
+            .len()
+            .saturating_sub(self.persist_state.env_snapshots_len);
+        let delta_memory_injections = self
+            .memory_injections
+            .len()
+            .saturating_sub(self.persist_state.memory_injections_len);
+        let delta_replay_events = self
+            .replay_events
+            .len()
+            .saturating_sub(self.persist_state.replay_events_len);
+        let (
+            result,
+            save_mode,
+            entry_build_ms,
+            append_ms,
+            journal_stat_ms,
+            checkpoint_ms,
+            journal_bytes_after,
+        ) = if metadata_needs_snapshot || vectors_need_snapshot {
+            let checkpoint_start = Instant::now();
+            let result = self.checkpoint_snapshot(&path, &journal_path);
+            let checkpoint_ms = checkpoint_start.elapsed().as_millis();
+            let journal_bytes_after = file_len_or_zero(&journal_path);
+            (
+                result,
+                "snapshot",
+                0,
+                0,
+                0,
+                checkpoint_ms,
+                journal_bytes_after,
+            )
         } else {
+            let entry_build_start = Instant::now();
             let entry = SessionJournalEntry {
                 meta: current_meta.clone(),
                 append_messages: self.messages[self.persist_state.messages_len..].to_vec(),
@@ -1485,17 +1533,40 @@ impl Session {
                 append_replay_events: self.replay_events[self.persist_state.replay_events_len..]
                     .to_vec(),
             };
+            let entry_build_ms = entry_build_start.elapsed().as_millis();
+            let append_start = Instant::now();
             let append_result = storage::append_json_line_fast(&journal_path, &entry);
+            let append_ms = append_start.elapsed().as_millis();
             match append_result {
                 Ok(()) => {
                     self.reset_persist_state(true);
-                    if std::fs::metadata(&journal_path)
-                        .map(|meta| meta.len() > MAX_SESSION_JOURNAL_BYTES)
-                        .unwrap_or(false)
-                    {
-                        self.checkpoint_snapshot(&path, &journal_path)
+                    let journal_stat_start = Instant::now();
+                    let journal_bytes_after = file_len_or_zero(&journal_path);
+                    let journal_stat_ms = journal_stat_start.elapsed().as_millis();
+                    if journal_bytes_after > MAX_SESSION_JOURNAL_BYTES {
+                        let checkpoint_start = Instant::now();
+                        let result = self.checkpoint_snapshot(&path, &journal_path);
+                        let checkpoint_ms = checkpoint_start.elapsed().as_millis();
+                        let journal_bytes_after = file_len_or_zero(&journal_path);
+                        (
+                            result,
+                            "append+checkpoint",
+                            entry_build_ms,
+                            append_ms,
+                            journal_stat_ms,
+                            checkpoint_ms,
+                            journal_bytes_after,
+                        )
                     } else {
-                        Ok(())
+                        (
+                            Ok(()),
+                            "append",
+                            entry_build_ms,
+                            append_ms,
+                            journal_stat_ms,
+                            0,
+                            journal_bytes_after,
+                        )
                     }
                 }
                 Err(err) => {
@@ -1503,16 +1574,42 @@ impl Session {
                         "Session journal append failed for {} ({}); checkpointing full snapshot",
                         self.id, err
                     ));
-                    self.checkpoint_snapshot(&path, &journal_path)
+                    let checkpoint_start = Instant::now();
+                    let result = self.checkpoint_snapshot(&path, &journal_path);
+                    let checkpoint_ms = checkpoint_start.elapsed().as_millis();
+                    let journal_bytes_after = file_len_or_zero(&journal_path);
+                    (
+                        result,
+                        "append_failed_fallback_snapshot",
+                        entry_build_ms,
+                        append_ms,
+                        0,
+                        checkpoint_ms,
+                        journal_bytes_after,
+                    )
                 }
             }
         };
         let elapsed = start.elapsed();
         if elapsed.as_millis() > 50 {
             crate::logging::info(&format!(
-                "Session save slow: {:.0}ms ({} messages)",
+                "Session save slow: total={:.0}ms mode={} metadata_snapshot={} vectors_snapshot={} entry_build={}ms append={}ms journal_stat={}ms checkpoint={}ms messages={} delta_messages={} delta_env_snapshots={} delta_memory_injections={} delta_replay_events={} snapshot_bytes_before={} journal_bytes_before={} journal_bytes_after={}",
                 elapsed.as_secs_f64() * 1000.0,
-                self.messages.len()
+                save_mode,
+                metadata_needs_snapshot,
+                vectors_need_snapshot,
+                entry_build_ms,
+                append_ms,
+                journal_stat_ms,
+                checkpoint_ms,
+                self.messages.len(),
+                delta_messages,
+                delta_env_snapshots,
+                delta_memory_injections,
+                delta_replay_events,
+                snapshot_bytes_before,
+                journal_bytes_before,
+                journal_bytes_after,
             ));
         }
         result
@@ -1759,12 +1856,11 @@ impl Session {
         if needs_full_rebuild {
             self.provider_messages_cache.clear();
             self.provider_message_prefix_hashes_cache.clear();
-            let rebuilt_messages: Vec<Message> = self
-                .messages
-                .iter()
-                .map(StoredMessage::to_message)
-                .collect();
-            for message in rebuilt_messages {
+            self.provider_messages_cache.reserve(self.messages.len());
+            self.provider_message_prefix_hashes_cache
+                .reserve(self.messages.len());
+            for index in 0..self.messages.len() {
+                let message = self.messages[index].to_message();
                 self.push_provider_message_cache_entry(message);
             }
             self.provider_messages_cache_len = self.messages.len();
@@ -1775,11 +1871,12 @@ impl Session {
         if self.provider_messages_cache_mode == PersistVectorMode::Append
             && self.provider_messages_cache_len < self.messages.len()
         {
-            let appended_messages: Vec<Message> = self.messages[self.provider_messages_cache_len..]
-                .iter()
-                .map(StoredMessage::to_message)
-                .collect();
-            for message in appended_messages {
+            let appended_len = self.messages.len() - self.provider_messages_cache_len;
+            self.provider_messages_cache.reserve(appended_len);
+            self.provider_message_prefix_hashes_cache
+                .reserve(appended_len);
+            for index in self.provider_messages_cache_len..self.messages.len() {
+                let message = self.messages[index].to_message();
                 self.push_provider_message_cache_entry(message);
             }
             self.provider_messages_cache_len = self.messages.len();
@@ -2135,6 +2232,10 @@ fn estimate_json_bytes<T: Serialize>(value: &T) -> usize {
     serde_json::to_vec(value)
         .map(|bytes| bytes.len())
         .unwrap_or(0)
+}
+
+fn file_len_or_zero(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
 
 fn persist_vector_mode_label(mode: PersistVectorMode) -> &'static str {

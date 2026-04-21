@@ -71,6 +71,10 @@ pub struct ClientRuntimeMemorySample {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub ui_render: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub side_panel_render: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub markdown: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mermaid: Option<serde_json::Value>,
@@ -105,6 +109,7 @@ pub struct ClientRuntimeMemoryTotals {
     pub display_large_tool_output_bytes: u64,
     pub side_panel_estimate_bytes: u64,
     pub side_panel_content_bytes: u64,
+    pub remote_side_pane_images_bytes: u64,
     pub input_text_bytes: u64,
     pub streaming_text_bytes: u64,
     pub thinking_buffer_bytes: u64,
@@ -115,6 +120,14 @@ pub struct ClientRuntimeMemoryTotals {
     pub remote_state_bytes: u64,
     pub mcp_estimate_bytes: u64,
     pub markdown_cache_estimate_bytes: u64,
+    pub ui_render_total_estimate_bytes: u64,
+    pub ui_body_cache_estimate_bytes: u64,
+    pub ui_full_prep_cache_estimate_bytes: u64,
+    pub ui_visible_copy_targets_estimate_bytes: u64,
+    pub side_panel_render_total_estimate_bytes: u64,
+    pub side_panel_pinned_cache_estimate_bytes: u64,
+    pub side_panel_markdown_cache_estimate_bytes: u64,
+    pub side_panel_render_cache_estimate_bytes: u64,
     pub mermaid_working_set_estimate_bytes: u64,
     pub mermaid_cache_metadata_estimate_bytes: u64,
     pub visual_debug_frame_estimate_bytes: u64,
@@ -867,6 +880,8 @@ mod tests {
             totals: ClientRuntimeMemoryTotals::default(),
             session: None,
             ui: None,
+            ui_render: None,
+            side_panel_render: None,
             markdown: None,
             mermaid: None,
             visual_debug: None,

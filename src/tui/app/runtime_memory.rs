@@ -206,6 +206,8 @@ impl App {
             totals: crate::runtime_memory_log::ClientRuntimeMemoryTotals::default(),
             session: None,
             ui: None,
+            ui_render: None,
+            side_panel_render: None,
             markdown: None,
             mermaid: None,
             visual_debug: None,
@@ -224,6 +226,8 @@ impl App {
         let profile = self.runtime_memory_profile();
         let session = profile.get("session").cloned();
         let ui = profile.get("ui").cloned();
+        let ui_render = profile.get("ui_render").cloned();
+        let side_panel_render = profile.get("side_panel_render").cloned();
         let markdown = profile.get("markdown").cloned();
         let mermaid = profile.get("mermaid").cloned();
         let visual_debug = profile.get("visual_debug").cloned();
@@ -243,6 +247,8 @@ impl App {
             totals,
             session,
             ui,
+            ui_render,
+            side_panel_render,
             markdown,
             mermaid,
             visual_debug,
@@ -294,9 +300,57 @@ fn client_runtime_totals_from_profile(
             );
     let markdown_cache_estimate_bytes =
         nested_u64(profile, &["markdown", "highlight_cache_estimate_bytes"]);
+    let ui_body_cache_estimate_bytes = nested_u64(
+        profile,
+        &["ui_render", "body_cache", "unique_prepared_bytes"],
+    );
+    let ui_full_prep_cache_estimate_bytes = nested_u64(
+        profile,
+        &["ui_render", "full_prep_cache", "unique_prepared_bytes"],
+    );
+    let ui_visible_copy_targets_estimate_bytes = nested_u64(
+        profile,
+        &["ui_render", "visible_copy_targets", "estimate_bytes"],
+    );
+    let ui_render_total_estimate_bytes =
+        nested_u64(profile, &["ui_render", "total_estimate_bytes"]);
+    let side_panel_pinned_cache_estimate_bytes = nested_u64(
+        profile,
+        &["side_panel_render", "pinned_cache", "entries_bytes"],
+    ) + nested_u64(
+        profile,
+        &["side_panel_render", "pinned_cache", "rendered_lines_bytes"],
+    );
+    let side_panel_markdown_cache_estimate_bytes = nested_u64(
+        profile,
+        &[
+            "side_panel_render",
+            "side_panel_markdown_cache",
+            "entries_bytes",
+        ],
+    ) + nested_u64(
+        profile,
+        &[
+            "side_panel_render",
+            "side_panel_markdown_cache",
+            "key_bytes",
+        ],
+    );
+    let side_panel_render_cache_estimate_bytes = nested_u64(
+        profile,
+        &[
+            "side_panel_render",
+            "side_panel_render_cache",
+            "entries_bytes",
+        ],
+    ) + nested_u64(
+        profile,
+        &["side_panel_render", "side_panel_render_cache", "key_bytes"],
+    );
+    let side_panel_render_total_estimate_bytes =
+        nested_u64(profile, &["side_panel_render", "total_estimate_bytes"]);
     let mermaid_working_set_estimate_bytes =
-        nested_u64(profile, &["mermaid", "mermaid_working_set_estimate_bytes"])
-            + nested_u64(profile, &["mermaid", "source_cache_decoded_estimate_bytes"]);
+        nested_u64(profile, &["mermaid", "mermaid_working_set_estimate_bytes"]);
     let mermaid_cache_metadata_estimate_bytes = nested_u64(
         profile,
         &["mermaid", "render_cache_metadata_estimate_bytes"],
@@ -388,6 +442,10 @@ fn client_runtime_totals_from_profile(
                 "side_panel_content_bytes",
             ],
         ),
+        remote_side_pane_images_bytes: nested_u64(
+            profile,
+            &["ui", "images_and_views", "remote_side_pane_images_bytes"],
+        ),
         input_text_bytes: nested_u64(profile, &["ui", "input", "text_bytes"]),
         streaming_text_bytes: nested_u64(profile, &["ui", "streaming", "streaming_text_bytes"]),
         thinking_buffer_bytes: nested_u64(profile, &["ui", "streaming", "thinking_buffer_bytes"]),
@@ -410,6 +468,14 @@ fn client_runtime_totals_from_profile(
         remote_state_bytes,
         mcp_estimate_bytes,
         markdown_cache_estimate_bytes,
+        ui_render_total_estimate_bytes,
+        ui_body_cache_estimate_bytes,
+        ui_full_prep_cache_estimate_bytes,
+        ui_visible_copy_targets_estimate_bytes,
+        side_panel_render_total_estimate_bytes,
+        side_panel_pinned_cache_estimate_bytes,
+        side_panel_markdown_cache_estimate_bytes,
+        side_panel_render_cache_estimate_bytes,
         mermaid_working_set_estimate_bytes,
         mermaid_cache_metadata_estimate_bytes,
         visual_debug_frame_estimate_bytes,
@@ -420,6 +486,7 @@ fn client_runtime_totals_from_profile(
         + totals.provider_messages_json_bytes
         + totals.display_messages_estimate_bytes
         + totals.side_panel_estimate_bytes
+        + totals.remote_side_pane_images_bytes
         + totals.input_text_bytes
         + totals.streaming_text_bytes
         + totals.thinking_buffer_bytes
@@ -430,8 +497,9 @@ fn client_runtime_totals_from_profile(
         + totals.remote_state_bytes
         + totals.mcp_estimate_bytes
         + totals.markdown_cache_estimate_bytes
+        + totals.ui_render_total_estimate_bytes
+        + totals.side_panel_render_total_estimate_bytes
         + totals.mermaid_working_set_estimate_bytes
-        + totals.mermaid_cache_metadata_estimate_bytes
         + totals.visual_debug_frame_estimate_bytes;
     totals
 }
@@ -445,4 +513,68 @@ fn nested_u64(value: &serde_json::Value, path: &[&str]) -> u64 {
         cursor = next;
     }
     cursor.as_u64().unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_runtime_totals_include_ui_render_side_panel_render_and_remote_images() {
+        let profile = serde_json::json!({
+            "ui": {
+                "images_and_views": {
+                    "remote_side_pane_images_bytes": 4096,
+                },
+            },
+            "ui_render": {
+                "body_cache": {
+                    "unique_prepared_bytes": 10,
+                },
+                "full_prep_cache": {
+                    "unique_prepared_bytes": 20,
+                },
+                "visible_copy_targets": {
+                    "estimate_bytes": 30,
+                },
+                "total_estimate_bytes": 60,
+            },
+            "side_panel_render": {
+                "pinned_cache": {
+                    "entries_bytes": 40,
+                    "rendered_lines_bytes": 2,
+                },
+                "side_panel_markdown_cache": {
+                    "entries_bytes": 50,
+                    "key_bytes": 3,
+                },
+                "side_panel_render_cache": {
+                    "entries_bytes": 60,
+                    "key_bytes": 4,
+                },
+                "total_estimate_bytes": 159,
+            },
+            "mermaid": {
+                "render_cache_metadata_estimate_bytes": 100,
+                "image_state_protocol_min_estimate_bytes": 200,
+                "source_cache_decoded_estimate_bytes": 300,
+                "mermaid_working_set_estimate_bytes": 600,
+            },
+        });
+
+        let totals = client_runtime_totals_from_profile(&profile);
+
+        assert_eq!(totals.remote_side_pane_images_bytes, 4096);
+        assert_eq!(totals.ui_body_cache_estimate_bytes, 10);
+        assert_eq!(totals.ui_full_prep_cache_estimate_bytes, 20);
+        assert_eq!(totals.ui_visible_copy_targets_estimate_bytes, 30);
+        assert_eq!(totals.ui_render_total_estimate_bytes, 60);
+        assert_eq!(totals.side_panel_pinned_cache_estimate_bytes, 42);
+        assert_eq!(totals.side_panel_markdown_cache_estimate_bytes, 53);
+        assert_eq!(totals.side_panel_render_cache_estimate_bytes, 64);
+        assert_eq!(totals.side_panel_render_total_estimate_bytes, 159);
+        assert_eq!(totals.mermaid_working_set_estimate_bytes, 600);
+        assert_eq!(totals.mermaid_cache_metadata_estimate_bytes, 300);
+        assert_eq!(totals.total_attributed_bytes, 4096 + 60 + 159 + 600);
+    }
 }

@@ -63,6 +63,8 @@ impl App {
             .iter()
             .map(crate::process_memory::estimate_json_bytes)
             .sum();
+        let remote_side_pane_images_bytes =
+            estimate_rendered_images_bytes(&self.remote_side_pane_images);
         let remote_model_options_json_bytes: usize = self
             .remote_model_options
             .iter()
@@ -136,6 +138,10 @@ impl App {
                     "pasted_contents_bytes": estimate_string_vec_bytes(&self.pasted_contents),
                     "pending_images_count": self.pending_images.len(),
                     "pending_images_bytes": estimate_pending_images_bytes(&self.pending_images),
+                },
+                "images_and_views": {
+                    "remote_side_pane_images_count": self.remote_side_pane_images.len(),
+                    "remote_side_pane_images_bytes": remote_side_pane_images_bytes,
                 },
                 "remote_state": {
                     "available_entries_count": self.remote_available_entries.len(),

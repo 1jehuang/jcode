@@ -804,6 +804,15 @@ impl CompactionManager {
         let msg_count = messages_to_summarize.len();
         let existing_summary = self.active_summary.clone();
         let mode_label = self.mode_trigger_label().to_string();
+        let estimated_tokens = self.effective_token_count_with(all_messages);
+        crate::logging::info(&format!(
+            "[TIMING] compaction_start: trigger={}, active_messages={}, cutoff={}, estimated_tokens={}, has_existing_summary={}",
+            mode_label,
+            active.len(),
+            cutoff,
+            estimated_tokens,
+            existing_summary.is_some(),
+        ));
 
         self.pending_cutoff = cutoff;
         self.pending_trigger = Some(mode_label.clone());
@@ -1082,6 +1091,23 @@ impl CompactionManager {
                         .map(|summary| summary.text.len()),
                     active_messages: Some(self.active_messages_count()),
                 });
+                crate::logging::info(&format!(
+                    "[TIMING] compaction_complete: trigger={}, duration={}ms, pre_tokens={}, post_tokens={}, tokens_saved={}, messages_compacted={}, summary_chars={}, active_messages={}",
+                    self.last_compaction
+                        .as_ref()
+                        .map(|event| event.trigger.as_str())
+                        .unwrap_or("unknown"),
+                    result.duration_ms,
+                    pre_tokens,
+                    post_tokens,
+                    pre_tokens.saturating_sub(post_tokens),
+                    result.summarized_messages,
+                    self.active_summary
+                        .as_ref()
+                        .map(|summary| summary.text.len())
+                        .unwrap_or(0),
+                    self.active_messages_count(),
+                ));
 
                 // Reset cooldown counter so proactive/semantic modes don't
                 // fire again immediately after a successful compaction.

@@ -1,7 +1,6 @@
 use super::*;
 use crate::tui::mermaid;
 use std::collections::VecDeque;
-use std::hash::Hasher as _;
 
 pub(super) fn lru_touch<K: PartialEq>(order: &mut VecDeque<K>, key: &K) {
     if let Some(pos) = order.iter().position(|existing| existing == key) {
