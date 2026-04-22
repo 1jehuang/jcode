@@ -616,7 +616,9 @@ fn smoke_test_server_request(
 }
 
 #[cfg(unix)]
-fn smoke_test_server_connect(path: &Path) -> Result<BufReader<std::os::unix::net::UnixStream>> {
+fn smoke_test_server_connect(
+    path: &Path,
+) -> std::io::Result<BufReader<std::os::unix::net::UnixStream>> {
     let stream = std::os::unix::net::UnixStream::connect(path)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
