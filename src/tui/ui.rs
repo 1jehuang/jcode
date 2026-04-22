@@ -1507,6 +1507,12 @@ struct FlickerEvent {
     current: FlickerFrameSample,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct FlickerUiNotice {
+    pub(crate) summary: String,
+    pub(crate) hint: String,
+}
+
 #[derive(Default)]
 struct SlowFrameHistory {
     samples: VecDeque<SlowFrameSample>,
@@ -1525,6 +1531,8 @@ const SLOW_FRAME_LOG_INTERVAL_MS: u64 = 1_000;
 const FLICKER_HISTORY_MAX_SAMPLES: usize = 256;
 const FLICKER_HISTORY_MAX_EVENTS: usize = 128;
 const FLICKER_LOG_INTERVAL_MS: u64 = 500;
+#[cfg(not(test))]
+const FLICKER_UI_NOTICE_MAX_AGE_MS: u64 = 30_000;
 
 static FRAME_PERF_STATS: OnceLock<Mutex<FramePerfStats>> = OnceLock::new();
 static SLOW_FRAME_HISTORY: OnceLock<Mutex<SlowFrameHistory>> = OnceLock::new();
@@ -1869,6 +1877,52 @@ pub(crate) fn debug_flicker_frame_history(limit: usize) -> serde_json::Value {
         "events": events,
         "samples": samples,
     })
+}
+
+fn flicker_event_label(kind: &str) -> &str {
+    match kind {
+        "layout_toggle_same_state" => "layout toggle",
+        "layout_oscillation" => "layout oscillation",
+        "visible_hash_changed_same_state" => "same-state redraw",
+        _ => kind,
+    }
+}
+
+fn abbreviate_flicker_log_path(path: &std::path::Path) -> String {
+    let rendered = path.display().to_string();
+    if let Some(home) = dirs::home_dir() {
+        let home = home.display().to_string();
+        if rendered == home {
+            return "~".to_string();
+        }
+        if let Some(rest) = rendered.strip_prefix(&home) {
+            return format!("~{}", rest);
+        }
+    }
+    rendered
+}
+
+pub(crate) fn recent_flicker_ui_notice() -> Option<FlickerUiNotice> {
+    let history = flicker_frame_history()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let event = history.events.back()?.clone();
+    drop(history);
+
+    #[cfg(not(test))]
+    {
+        let now = wall_clock_ms();
+        if now.saturating_sub(event.timestamp_ms) > FLICKER_UI_NOTICE_MAX_AGE_MS {
+            return None;
+        }
+    }
+
+    let log_hint = crate::logging::log_path()
+        .map(|path| abbreviate_flicker_log_path(&path))
+        .unwrap_or_else(|| "~/.jcode/logs/".to_string());
+    let summary = format!("⚠ flicker detected ({})", flicker_event_label(&event.kind));
+    let hint = format!("logs: {} · debug: client:flicker-frames 32", log_hint);
+    Some(FlickerUiNotice { summary, hint })
 }
 
 fn record_slow_frame_sample(sample: SlowFrameSample) {

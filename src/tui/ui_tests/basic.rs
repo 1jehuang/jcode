@@ -285,6 +285,79 @@ fn test_flicker_frame_history_detects_layout_oscillation() {
 }
 
 #[test]
+fn notification_spans_include_recent_flicker_warning_and_log_hint() {
+    clear_flicker_frame_history_for_tests();
+    record_flicker_frame_sample(FlickerFrameSample {
+        timestamp_ms: 10,
+        session_id: Some("session_test".to_string()),
+        session_name: Some("test".to_string()),
+        display_messages_version: 9,
+        diff_mode: "Off".to_string(),
+        centered: false,
+        is_processing: false,
+        auto_scroll_paused: false,
+        scroll: 100,
+        visible_end: 120,
+        visible_lines: 20,
+        total_wrapped_lines: 1000,
+        prompt_preview_lines: 0,
+        messages_area_width: 90,
+        messages_area_height: 24,
+        content_width: 89,
+        chat_scrollbar_visible: true,
+        visible_hash: 111,
+        total_ms: 5.0,
+        prepare_ms: 2.0,
+        draw_ms: 1.5,
+    });
+    record_flicker_frame_sample(FlickerFrameSample {
+        timestamp_ms: 11,
+        session_id: Some("session_test".to_string()),
+        session_name: Some("test".to_string()),
+        display_messages_version: 9,
+        diff_mode: "Off".to_string(),
+        centered: false,
+        is_processing: false,
+        auto_scroll_paused: false,
+        scroll: 100,
+        visible_end: 120,
+        visible_lines: 20,
+        total_wrapped_lines: 1000,
+        prompt_preview_lines: 0,
+        messages_area_width: 90,
+        messages_area_height: 24,
+        content_width: 89,
+        chat_scrollbar_visible: true,
+        visible_hash: 222,
+        total_ms: 5.5,
+        prepare_ms: 2.2,
+        draw_ms: 1.6,
+    });
+
+    let state = TestState::default();
+    let spans = input_ui::build_notification_spans(&state);
+    let rendered = spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+
+    assert!(
+        rendered.contains("flicker detected"),
+        "expected flicker warning in notification line, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("client:flicker-frames 32"),
+        "expected flicker debug hint in notification line, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("logs:"),
+        "expected log hint in notification line, got: {rendered}"
+    );
+
+    clear_flicker_frame_history_for_tests();
+}
+
+#[test]
 fn test_link_target_from_screen_detects_chat_url() {
     let _lock = viewport_snapshot_test_lock();
     record_test_chat_snapshot("Docs: https://example.com/docs).");

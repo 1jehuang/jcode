@@ -1018,6 +1018,19 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
         spans.push(Span::styled(label, Style::default().fg(rgb(140, 220, 200))));
     }
 
+    if let Some(flicker_notice) = super::recent_flicker_ui_notice() {
+        push_sep(&mut spans);
+        spans.push(Span::styled(
+            flicker_notice.summary,
+            Style::default().fg(rgb(255, 193, 7)),
+        ));
+        push_sep(&mut spans);
+        spans.push(Span::styled(
+            flicker_notice.hint,
+            Style::default().fg(rgb(140, 180, 255)),
+        ));
+    }
+
     if let Some(notice) = app.status_notice() {
         push_sep(&mut spans);
         spans.push(Span::styled(
