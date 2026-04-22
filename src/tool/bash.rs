@@ -24,6 +24,9 @@ const DEFAULT_TIMEOUT_MS: u64 = 120000;
 const STDIN_POLL_INTERVAL_MS: u64 = 500;
 const STDIN_INITIAL_DELAY_MS: u64 = 300;
 const PROGRESS_MARKER_PREFIX: &str = "JCODE_PROGRESS ";
+const BACKGROUND_PROGRESS_GUIDANCE: &str = "For long-running background commands, prefer scripts or commands that periodically print progress updates. Best format: print lines starting with `JCODE_PROGRESS ` followed by JSON like {\"percent\":42,\"message\":\"Running\"} or {\"current\":120,\"total\":1000,\"unit\":\"batches\",\"message\":\"Epoch 2/5\",\"eta_seconds\":30}. Supported JSON fields are `percent`, `message`, `current`, `total`, `unit`, `eta_seconds`, and optional `kind`=`indeterminate`. Generic fallback output that can be parsed includes `42%`, `3/10 tests`, `3 of 10 steps`, `1.5/3.0 GiB`, or phase lines like `Compiling ...`, `Downloading ...`, `Running ...`, and `Building ...`. If you are writing the script yourself, add these progress lines explicitly.";
+const BASH_TOOL_DESCRIPTION: &str = "Run a bash command. For long-running background commands, prefer scripts that emit progress lines. Print `JCODE_PROGRESS {json}` lines for reliable progress reporting, or at least output parseable progress like `42%`, `3/10 tests`, `3 of 10 steps`, `1.5/3.0 GiB`, or `Running ...`.";
+const WINDOWS_SHELL_TOOL_DESCRIPTION: &str = "Run a shell command. For long-running background commands, prefer scripts that emit progress lines. Print `JCODE_PROGRESS {json}` lines for reliable progress reporting, or at least output parseable progress like `42%`, `3/10 tests`, `3 of 10 steps`, `1.5/3.0 GiB`, or `Running ...`.";
 
 fn progress_ratio_regex() -> &'static regex::Regex {
     static REGEX: OnceLock<regex::Regex> = OnceLock::new();
@@ -402,17 +405,17 @@ impl Tool for BashTool {
 
     fn description(&self) -> &str {
         if cfg!(windows) {
-            "Run a shell command."
+            WINDOWS_SHELL_TOOL_DESCRIPTION
         } else {
-            "Run a bash command."
+            BASH_TOOL_DESCRIPTION
         }
     }
 
     fn parameters_schema(&self) -> Value {
         let cmd_desc = if cfg!(windows) {
-            "The shell command to execute (via cmd.exe)"
+            "The shell command to execute (via cmd.exe). If you write a long-running script or loop for run_in_background=true, make it print progress lines. Preferred format: `JCODE_PROGRESS {json}`."
         } else {
-            "The bash command to execute"
+            "The bash command to execute. If you write a long-running script or loop for run_in_background=true, make it print progress lines. Preferred format: `JCODE_PROGRESS {json}`."
         };
         json!({
             "type": "object",
@@ -432,7 +435,7 @@ impl Tool for BashTool {
                 },
                 "run_in_background": {
                     "type": "boolean",
-                    "description": "Run in background."
+                    "description": format!("Run in background. {}", BACKGROUND_PROGRESS_GUIDANCE)
                 },
                 "notify": {
                     "type": "boolean",
@@ -1348,6 +1351,30 @@ mod tests {
         assert!(
             saw_progress,
             "expected byte-ratio progress to be recorded for {task_id}"
+        );
+    }
+
+    #[test]
+    fn test_bash_tool_schema_advertises_background_progress_guidance() {
+        let schema = BashTool::new().parameters_schema();
+        let command_description = schema["properties"]["command"]["description"]
+            .as_str()
+            .expect("command description should be a string");
+        let background_description = schema["properties"]["run_in_background"]["description"]
+            .as_str()
+            .expect("run_in_background description should be a string");
+
+        assert!(
+            BashTool::new().description().contains("JCODE_PROGRESS"),
+            "tool description should teach cooperative progress output"
+        );
+        assert!(
+            command_description.contains("JCODE_PROGRESS"),
+            "command description should mention progress marker format"
+        );
+        assert!(
+            background_description.contains("3/10 tests"),
+            "background description should mention parseable fallback progress output"
         );
     }
 }
