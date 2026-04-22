@@ -13,7 +13,7 @@ use crate::tui::remote_diff::RemoteDiffTracker;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
@@ -236,6 +236,8 @@ pub struct RemoteConnection {
     call_output_tokens_seen: u64,
 }
 
+const DETACHED_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+
 pub(crate) trait RemoteEventState {
     fn handle_tool_start(&mut self, id: &str, name: &str);
     fn handle_tool_input(&mut self, delta: &str);
@@ -343,6 +345,43 @@ impl RemoteConnection {
         let mut w = self.writer.lock().await;
         w.write_all(json.as_bytes()).await?;
         Ok(())
+    }
+
+    fn send_request_detached(&self, request: Request, label: &'static str) {
+        let writer = Arc::clone(&self.writer);
+        tokio::spawn(async move {
+            let json = match serde_json::to_string(&request) {
+                Ok(json) => json + "\n",
+                Err(error) => {
+                    crate::logging::warn(&format!(
+                        "Failed to serialize detached remote request {}: {}",
+                        label, error
+                    ));
+                    return;
+                }
+            };
+
+            let write_future = async {
+                let mut w = writer.lock().await;
+                w.write_all(json.as_bytes()).await
+            };
+
+            match tokio::time::timeout(DETACHED_REQUEST_TIMEOUT, write_future).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    crate::logging::warn(&format!(
+                        "Detached remote request {} failed: {}",
+                        label, error
+                    ));
+                }
+                Err(_) => {
+                    crate::logging::warn(&format!(
+                        "Detached remote request {} timed out after {:?}",
+                        label, DETACHED_REQUEST_TIMEOUT
+                    ));
+                }
+            }
+        });
     }
 
     /// Send a message to the server
@@ -634,6 +673,13 @@ impl RemoteConnection {
         self.send_request(Request::NotifyAuthChanged { id }).await
     }
 
+    /// Notify the server about auth changes without blocking the caller.
+    pub fn notify_auth_changed_detached(&mut self) {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request_detached(Request::NotifyAuthChanged { id }, "notify_auth_changed");
+    }
+
     /// Ask server to switch active Anthropic account for this process/session.
     pub async fn switch_anthropic_account(&mut self, label: &str) -> Result<()> {
         let id = self.next_request_id;
@@ -878,4 +924,28 @@ impl RemoteEventState for ReplayRemoteState {
     }
 
     fn mark_history_loaded(&mut self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn detached_auth_changed_notification_does_not_wait_for_writer_lock() {
+        let mut remote = RemoteConnection::dummy();
+        let writer = remote.writer();
+        let _guard = writer.lock().await;
+
+        let start = Instant::now();
+        remote.notify_auth_changed_detached();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "detached notify_auth_changed should return immediately, took {:?}",
+            elapsed
+        );
+        assert_eq!(remote.next_request_id, 2);
+    }
 }

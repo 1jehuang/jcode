@@ -9,6 +9,7 @@ use crate::tui::TuiState;
 use ratatui::backend::Backend;
 use ratatui::layout::Rect;
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc as StdArc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -623,6 +624,40 @@ impl Provider for AuthRefreshingMockProvider {
 
     fn on_auth_changed(&self) {
         *self.logged_in.lock().unwrap() = true;
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[derive(Clone)]
+struct AsyncAuthRefreshingMockProvider {
+    started: StdArc<AtomicBool>,
+    completed: StdArc<AtomicBool>,
+    delay: Duration,
+}
+
+#[async_trait::async_trait]
+impl Provider for AsyncAuthRefreshingMockProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        unimplemented!("AsyncAuthRefreshingMockProvider")
+    }
+
+    fn name(&self) -> &str {
+        "async-auth-refresh-mock"
+    }
+
+    fn on_auth_changed(&self) {
+        self.started.store(true, Ordering::SeqCst);
+        std::thread::sleep(self.delay);
+        self.completed.store(true, Ordering::SeqCst);
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
@@ -4921,6 +4956,50 @@ fn test_local_model_picker_selection_failure_keeps_picker_open_and_shows_next_st
     assert!(last.content.contains("/model"));
     assert!(last.content.contains("/login"));
     assert!(last.content.contains("/account"));
+}
+
+#[test]
+fn test_login_completed_spawns_auth_refresh_when_runtime_is_available() {
+    ensure_test_jcode_home_if_unset();
+    clear_persisted_test_ui_state();
+    crate::tui::ui::clear_test_render_state_for_tests();
+
+    let started = StdArc::new(AtomicBool::new(false));
+    let completed = StdArc::new(AtomicBool::new(false));
+    let provider: Arc<dyn Provider> = Arc::new(AsyncAuthRefreshingMockProvider {
+        started: StdArc::clone(&started),
+        completed: StdArc::clone(&completed),
+        delay: Duration::from_millis(150),
+    });
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let mut app = App::new(provider, registry);
+    app.queue_mode = false;
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+
+    let _guard = rt.enter();
+    let start = Instant::now();
+    app.handle_login_completed(crate::bus::LoginCompleted {
+        provider: "openrouter".to_string(),
+        success: true,
+        message: "OpenRouter ready".to_string(),
+    });
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "login completion should not block on auth refresh, took {:?}",
+        elapsed
+    );
+
+    let wait_start = Instant::now();
+    while !started.load(Ordering::SeqCst) || !completed.load(Ordering::SeqCst) {
+        assert!(
+            wait_start.elapsed() < Duration::from_secs(2),
+            "background auth refresh did not complete"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]

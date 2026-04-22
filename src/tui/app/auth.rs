@@ -13,6 +13,7 @@ pub(super) use self::auth_types::{AccountCommand, PendingAccountInput, PendingLo
 
 use super::*;
 use crossterm::event::{KeyCode, KeyModifiers};
+use std::sync::Arc;
 
 impl App {
     fn open_auth_browser(url: &str) -> bool {
@@ -1665,6 +1666,17 @@ impl App {
         }
     }
 
+    fn trigger_provider_auth_changed(&self) {
+        let provider = Arc::clone(&self.provider);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                provider.on_auth_changed();
+            });
+        } else {
+            provider.on_auth_changed();
+        }
+    }
+
     pub(super) fn handle_login_completed(&mut self, login: LoginCompleted) {
         if login.provider == "copilot_code" {
             self.push_display_message(DisplayMessage::system(login.message.clone()));
@@ -1693,7 +1705,7 @@ impl App {
         if login.success {
             self.push_display_message(DisplayMessage::system(login.message));
             self.set_status_notice(format!("Login: {} ready", login.provider));
-            self.provider.on_auth_changed();
+            self.trigger_provider_auth_changed();
         } else {
             self.push_display_message(DisplayMessage::error(login.message));
             self.set_status_notice(format!("Login: {} failed", login.provider));
@@ -1775,15 +1787,8 @@ impl App {
         }
 
         let config_dir = crate::storage::app_config_dir()?;
-        std::fs::create_dir_all(&config_dir)?;
-        crate::platform::set_directory_permissions_owner_only(&config_dir)?;
-
         let file_path = config_dir.join(env_file);
-        let content = format!("{}={}\n", key_name, key);
-        std::fs::write(&file_path, &content)?;
-
-        crate::platform::set_permissions_owner_only(&file_path)?;
-
+        crate::storage::upsert_env_file_value(&file_path, key_name, Some(key))?;
         crate::env::set_var(key_name, key);
         Ok(())
     }
