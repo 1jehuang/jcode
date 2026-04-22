@@ -73,6 +73,35 @@ pub struct PendingActivation {
     pub requested_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DevBinarySourceMetadata {
+    pub version_label: String,
+    pub source_fingerprint: String,
+    pub short_hash: String,
+    pub full_hash: String,
+    pub dirty: bool,
+    pub changed_paths: usize,
+}
+
+impl From<&SourceState> for DevBinarySourceMetadata {
+    fn from(source: &SourceState) -> Self {
+        Self {
+            version_label: source.version_label.clone(),
+            source_fingerprint: source.fingerprint.clone(),
+            short_hash: source.short_hash.clone(),
+            full_hash: source.full_hash.clone(),
+            dirty: source.dirty,
+            changed_paths: source.changed_paths,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct BinaryVersionReport {
+    version: Option<String>,
+    git_hash: Option<String>,
+}
+
 /// Status of a canary build being tested
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -333,7 +362,31 @@ pub fn install_binary_at_version(source: &std::path::Path, version: &str) -> Res
     Ok(dest)
 }
 
-pub fn smoke_test_binary(binary: &Path) -> Result<()> {
+fn binary_source_metadata_path(binary: &Path) -> PathBuf {
+    let file_name = binary
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| binary_stem().to_string());
+    binary.with_file_name(format!("{file_name}.source.json"))
+}
+
+pub fn write_dev_binary_source_metadata(binary: &Path, source: &SourceState) -> Result<PathBuf> {
+    let path = binary_source_metadata_path(binary);
+    storage::write_json(&path, &DevBinarySourceMetadata::from(source))?;
+    Ok(path)
+}
+
+pub fn write_current_dev_binary_source_metadata(
+    repo_dir: &Path,
+    source: &SourceState,
+) -> Result<PathBuf> {
+    let binary = find_dev_binary(repo_dir)
+        .ok_or_else(|| anyhow::anyhow!("Binary not found in target/selfdev or target/release"))?;
+    write_dev_binary_source_metadata(&binary, source)
+}
+
+fn read_binary_version_report(binary: &Path) -> Result<BinaryVersionReport> {
     let output = Command::new(binary)
         .args(["version", "--json"])
         .env("JCODE_NON_INTERACTIVE", "1")
@@ -348,18 +401,182 @@ pub fn smoke_test_binary(binary: &Path) -> Result<()> {
         );
     }
 
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|err| {
+    serde_json::from_slice(&output.stdout).map_err(|err| {
         anyhow::anyhow!(
             "Binary smoke test for {} returned invalid JSON: {}",
             binary.display(),
             err
         )
-    })?;
-    if value.get("version").is_none() {
+    })
+}
+
+pub fn smoke_test_binary(binary: &Path) -> Result<()> {
+    let report = read_binary_version_report(binary)?;
+    if report.version.as_deref().unwrap_or_default().is_empty() {
         anyhow::bail!(
             "Binary smoke test for {} returned JSON without a version field",
             binary.display()
         );
+    }
+    Ok(())
+}
+
+fn validate_binary_version_matches_source_report(
+    report: &BinaryVersionReport,
+    binary: &Path,
+    source: &SourceState,
+) -> Result<()> {
+    let git_hash = report.git_hash.as_deref().unwrap_or_default();
+    if git_hash.is_empty() {
+        anyhow::bail!(
+            "Binary {} version report did not include git_hash; rebuild before publishing {}",
+            binary.display(),
+            source.version_label
+        );
+    }
+    if git_hash != source.short_hash {
+        anyhow::bail!(
+            "Refusing to publish {} as {}: binary was built from git hash {}, but source state is {}",
+            binary.display(),
+            source.version_label,
+            git_hash,
+            source.short_hash
+        );
+    }
+    Ok(())
+}
+
+fn dirty_status_paths(repo_dir: &Path) -> Result<Vec<(PathBuf, bool)>> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        .current_dir(repo_dir)
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git status failed while validating dirty build freshness with status {:?}",
+            output.status.code()
+        );
+    }
+
+    let mut entries = output.stdout.split(|byte| *byte == 0).peekable();
+    let mut paths = Vec::new();
+    while let Some(entry) = entries.next() {
+        if entry.is_empty() || entry.len() < 4 {
+            continue;
+        }
+        let x = entry[0];
+        let y = entry[1];
+        let path = String::from_utf8_lossy(&entry[3..]).to_string();
+        let deleted = x == b'D' || y == b'D';
+        paths.push((PathBuf::from(path), deleted));
+
+        if matches!(x, b'R' | b'C') || matches!(y, b'R' | b'C') {
+            let _ = entries.next();
+        }
+    }
+
+    Ok(paths)
+}
+
+fn validate_dirty_binary_freshness_without_metadata(
+    repo_dir: &Path,
+    binary: &Path,
+    source: &SourceState,
+) -> Result<()> {
+    if !source.dirty {
+        return Ok(());
+    }
+
+    let binary_mtime = std::fs::metadata(binary)
+        .and_then(|metadata| metadata.modified())
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "Could not read binary modification time for {}: {}",
+                binary.display(),
+                err
+            )
+        })?;
+    let dirty_paths = dirty_status_paths(repo_dir)?;
+    let mut unverifiable = Vec::new();
+    let mut newer_than_binary = Vec::new();
+
+    for (relative, deleted) in dirty_paths {
+        if deleted {
+            unverifiable.push(relative.display().to_string());
+            continue;
+        }
+        let path = repo_dir.join(&relative);
+        let modified = match std::fs::metadata(&path).and_then(|metadata| metadata.modified()) {
+            Ok(modified) => modified,
+            Err(_) => {
+                unverifiable.push(relative.display().to_string());
+                continue;
+            }
+        };
+        if modified > binary_mtime {
+            newer_than_binary.push(relative.display().to_string());
+        }
+    }
+
+    if !unverifiable.is_empty() {
+        anyhow::bail!(
+            "Refusing to publish dirty build {} without source metadata: these changed paths cannot be checked against the binary timestamp: {}",
+            source.version_label,
+            unverifiable.join(", ")
+        );
+    }
+    if !newer_than_binary.is_empty() {
+        anyhow::bail!(
+            "Refusing to publish stale dirty build {}: changed paths are newer than {}: {}",
+            source.version_label,
+            binary.display(),
+            newer_than_binary.join(", ")
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_dev_binary_source_metadata(binary: &Path, source: &SourceState) -> Result<bool> {
+    let path = binary_source_metadata_path(binary);
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let metadata: DevBinarySourceMetadata = storage::read_json(&path)?;
+    if metadata.source_fingerprint != source.fingerprint
+        || metadata.version_label != source.version_label
+        || metadata.short_hash != source.short_hash
+        || metadata.full_hash != source.full_hash
+        || metadata.dirty != source.dirty
+    {
+        anyhow::bail!(
+            "Refusing to publish {} as {}: source metadata at {} was for {} ({})",
+            binary.display(),
+            source.version_label,
+            path.display(),
+            metadata.version_label,
+            metadata.source_fingerprint
+        );
+    }
+    Ok(true)
+}
+
+fn validate_dev_binary_matches_source(
+    repo_dir: &Path,
+    binary: &Path,
+    source: &SourceState,
+) -> Result<()> {
+    let report = read_binary_version_report(binary)?;
+    if report.version.as_deref().unwrap_or_default().is_empty() {
+        anyhow::bail!(
+            "Binary smoke test for {} returned JSON without a version field",
+            binary.display()
+        );
+    }
+    validate_binary_version_matches_source_report(&report, binary, source)?;
+    if !validate_dev_binary_source_metadata(binary, source)? {
+        validate_dirty_binary_freshness_without_metadata(repo_dir, binary, source)?;
     }
     Ok(())
 }
@@ -399,9 +616,46 @@ fn smoke_test_server_request(
 }
 
 #[cfg(unix)]
+fn smoke_test_server_connect(path: &Path) -> Result<BufReader<std::os::unix::net::UnixStream>> {
+    let stream = std::os::unix::net::UnixStream::connect(path)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    Ok(BufReader::new(stream))
+}
+
+#[cfg(unix)]
+fn smoke_test_server_protocol(path: &Path, working_dir: &str) -> Result<()> {
+    // The server handles an initial Ping on a dedicated lightweight-control
+    // connection and closes it after replying, so the subscribed-client probe
+    // must use a fresh socket.
+    {
+        let mut stream = smoke_test_server_connect(path)?;
+        smoke_test_server_request(
+            &mut stream,
+            &serde_json::json!({
+                "type": "ping",
+                "id": 1
+            }),
+            1,
+        )?;
+    }
+
+    let mut stream = smoke_test_server_connect(path)?;
+    smoke_test_server_request(
+        &mut stream,
+        &serde_json::json!({
+            "type": "subscribe",
+            "id": 2,
+            "working_dir": working_dir
+        }),
+        2,
+    )?;
+    Ok(())
+}
+
+#[cfg(unix)]
 pub fn smoke_test_server_binary(binary: &Path) -> Result<()> {
     use std::fs::File;
-    use std::os::unix::net::UnixStream;
     use std::process::Stdio;
     use std::thread;
 
@@ -438,28 +692,9 @@ pub fn smoke_test_server_binary(binary: &Path) -> Result<()> {
                 );
             }
 
-            match UnixStream::connect(&socket_path) {
-                Ok(stream) => {
-                    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-                    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-                    let mut stream = BufReader::new(stream);
-                    smoke_test_server_request(
-                        &mut stream,
-                        &serde_json::json!({
-                            "type": "ping",
-                            "id": 1
-                        }),
-                        1,
-                    )?;
-                    smoke_test_server_request(
-                        &mut stream,
-                        &serde_json::json!({
-                            "type": "subscribe",
-                            "id": 2,
-                            "working_dir": env!("CARGO_MANIFEST_DIR")
-                        }),
-                        2,
-                    )?;
+            match smoke_test_server_connect(&socket_path) {
+                Ok(_) => {
+                    smoke_test_server_protocol(&socket_path, env!("CARGO_MANIFEST_DIR"))?;
                     return Ok(());
                 }
                 Err(err)
@@ -560,10 +795,22 @@ pub fn publish_local_current_build_for_source(
         anyhow::bail!("Binary not found at {:?}", binary);
     }
 
-    smoke_test_binary(&binary)?;
+    validate_dev_binary_matches_source(repo_dir, &binary, source)?;
     let previous_current_version = read_current_version()?;
     let versioned_path = install_binary_at_version(&binary, &source.version_label)?;
-    smoke_test_binary(&versioned_path)?;
+    let installed_report = read_binary_version_report(&versioned_path)?;
+    if installed_report
+        .version
+        .as_deref()
+        .unwrap_or_default()
+        .is_empty()
+    {
+        anyhow::bail!(
+            "Binary smoke test for {} returned JSON without a version field",
+            versioned_path.display()
+        );
+    }
+    validate_binary_version_matches_source_report(&installed_report, &versioned_path, source)?;
     let current_link = update_current_symlink(&source.version_label)?;
     let launcher_link = update_launcher_symlink_to_current()?;
 
@@ -676,12 +923,96 @@ mod tests {
         temp
     }
 
+    fn source_state_fixture(short_hash: &str, fingerprint: &str) -> SourceState {
+        SourceState {
+            repo_scope: "repo-scope".to_string(),
+            worktree_scope: "worktree-scope".to_string(),
+            short_hash: short_hash.to_string(),
+            full_hash: format!("{short_hash}-full"),
+            dirty: true,
+            fingerprint: fingerprint.to_string(),
+            version_label: format!("{short_hash}-dirty-{}", &fingerprint[..12]),
+            changed_paths: 1,
+        }
+    }
+
     #[test]
     fn test_build_manifest_default() {
         let manifest = BuildManifest::default();
         assert!(manifest.stable.is_none());
         assert!(manifest.canary.is_none());
         assert!(manifest.history.is_empty());
+    }
+
+    #[test]
+    fn test_binary_version_hash_mismatch_rejects_publish_candidate() {
+        let source = source_state_fixture("newhash", "123456789abcffff");
+        let report = BinaryVersionReport {
+            version: Some("v0.0.0-dev (oldhash, dirty)".to_string()),
+            git_hash: Some("oldhash".to_string()),
+        };
+
+        let error =
+            validate_binary_version_matches_source_report(&report, Path::new("jcode"), &source)
+                .expect_err("mismatched git hash should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("binary was built from git hash oldhash")
+        );
+    }
+
+    #[test]
+    fn test_dev_binary_source_metadata_mismatch_rejects_publish_candidate() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let binary = temp.path().join(binary_name());
+        std::fs::write(&binary, b"fake").expect("write fake binary");
+        let source = source_state_fixture("abc1234", "1111111111112222");
+        let stale_source = source_state_fixture("abc1234", "999999999999aaaa");
+        write_dev_binary_source_metadata(&binary, &stale_source).expect("write metadata");
+
+        let error = validate_dev_binary_source_metadata(&binary, &source)
+            .expect_err("mismatched source metadata should be rejected");
+
+        assert!(error.to_string().contains("source metadata"));
+        assert!(error.to_string().contains("999999999999aaaa"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_smoke_test_server_protocol_uses_fresh_connection_after_ping() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("smoke.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind unix listener");
+
+        let server = std::thread::spawn(move || {
+            let (first, _) = listener.accept().expect("accept ping client");
+            let mut first = BufReader::new(first);
+            let mut line = String::new();
+            first.read_line(&mut line).expect("read ping request");
+            assert!(line.contains("\"type\":\"ping\""));
+            first
+                .get_mut()
+                .write_all(b"{\"type\":\"pong\",\"id\":1}\n")
+                .expect("write pong");
+
+            let (second, _) = listener.accept().expect("accept subscribe client");
+            let mut second = BufReader::new(second);
+            line.clear();
+            second.read_line(&mut line).expect("read subscribe request");
+            assert!(line.contains("\"type\":\"subscribe\""));
+            second
+                .get_mut()
+                .write_all(b"{\"type\":\"ack\",\"id\":2}\n")
+                .expect("write subscribe ack");
+        });
+
+        smoke_test_server_protocol(&socket_path, "/tmp").expect("smoke test protocol succeeds");
+        server.join().expect("server thread join");
     }
 
     #[test]
