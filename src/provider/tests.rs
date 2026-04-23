@@ -559,6 +559,7 @@ fn test_provider_for_model_claude() {
 #[test]
 fn test_provider_for_model_openai() {
     assert_eq!(provider_for_model("gpt-5.2-codex"), Some("openai"));
+    assert_eq!(provider_for_model("gpt-5.5"), Some("openai"));
     assert_eq!(provider_for_model("gpt-5.4"), Some("openai"));
     assert_eq!(provider_for_model("gpt-5.4[1m]"), Some("openai"));
     assert_eq!(provider_for_model("gpt-5.4-pro"), Some("openai"));
@@ -694,6 +695,7 @@ fn test_context_limit_spark_vs_codex() {
         context_limit_for_model("gpt-5.3-codex-spark"),
         Some(128_000)
     );
+    assert_eq!(context_limit_for_model("gpt-5.5"), Some(272_000));
     assert_eq!(context_limit_for_model("gpt-5.3-codex"), Some(272_000));
     assert_eq!(context_limit_for_model("gpt-5.2-codex"), Some(272_000));
     assert_eq!(context_limit_for_model("gpt-5-codex"), Some(272_000));

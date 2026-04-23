@@ -1151,6 +1151,7 @@ pub fn model_availability_for_account(model: &str) -> AccountModelAvailability {
 /// Preferred model order for fallback selection.
 /// If the desired model isn't available, we try these in order.
 const OPENAI_MODEL_PREFERENCE: &[&str] = &[
+    "gpt-5.5",
     "gpt-5.4",
     "gpt-5.3-codex-spark",
     "gpt-5.3-codex",

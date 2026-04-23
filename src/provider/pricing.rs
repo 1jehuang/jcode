@@ -148,7 +148,7 @@ pub(crate) fn openai_effective_auth_mode() -> &'static str {
 pub(crate) fn openai_api_pricing(model: &str) -> Option<RouteCheapnessEstimate> {
     let base = model.strip_suffix("[1m]").unwrap_or(model);
     match base {
-        "gpt-5.4" | "gpt-5.4-pro" => Some(RouteCheapnessEstimate::metered(
+        "gpt-5.5" | "gpt-5.4" | "gpt-5.4-pro" => Some(RouteCheapnessEstimate::metered(
             RouteCostSource::PublicApiPricing,
             RouteCostConfidence::High,
             usd_to_micros(2.5),
@@ -194,7 +194,7 @@ pub(crate) fn openai_api_pricing(model: &str) -> Option<RouteCheapnessEstimate> 
 
 pub(crate) fn openai_oauth_pricing(model: &str) -> RouteCheapnessEstimate {
     let base = model.strip_suffix("[1m]").unwrap_or(model);
-    let likely_pro = base.contains("pro") || base == "gpt-5.4";
+    let likely_pro = base.contains("pro") || matches!(base, "gpt-5.5" | "gpt-5.4");
     RouteCheapnessEstimate::subscription(
         RouteCostSource::PublicPlanPricing,
         RouteCostConfidence::Low,
@@ -211,7 +211,8 @@ pub(crate) fn openai_oauth_pricing(model: &str) -> RouteCheapnessEstimate {
 pub(crate) fn copilot_pricing(model: &str) -> RouteCheapnessEstimate {
     let mode = std::env::var("JCODE_COPILOT_PREMIUM").ok();
     let is_zero = matches!(mode.as_deref(), Some("0"));
-    let likely_premium_model = model.contains("opus") || model.contains("gpt-5.4");
+    let likely_premium_model =
+        model.contains("opus") || model.contains("gpt-5.5") || model.contains("gpt-5.4");
     let monthly_price = if likely_premium_model {
         usd_to_micros(39.0)
     } else {

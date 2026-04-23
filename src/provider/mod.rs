@@ -524,6 +524,7 @@ pub const ALL_CLAUDE_MODELS: &[&str] = &[
 ];
 
 pub const ALL_OPENAI_MODELS: &[&str] = &[
+    "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-pro",
     "gpt-5.3-codex",
