@@ -105,6 +105,9 @@ use changelog::{ChangelogEntry, group_changelog_entries, parse_changelog_from};
 use debug_capture::{
     build_info_widget_summary, capture_widget_placements, rect_within_bounds, rects_overlap,
 };
+pub use diagram_pane::{
+    PinnedDiagramLiveDebugSnapshot, PinnedDiagramProbeRect, debug_probe_pinned_diagram,
+};
 #[cfg(test)]
 use diagram_pane::{
     div_ceil_u32, estimate_pinned_diagram_pane_width_with_font, is_diagram_poor_fit,
@@ -113,6 +116,7 @@ use diagram_pane::{
 use diagram_pane::{
     draw_pinned_diagram, estimate_pinned_diagram_pane_height, estimate_pinned_diagram_pane_width,
 };
+pub(crate) use diagram_pane::{pinned_diagram_debug_json, reset_pinned_diagram_debug_snapshot};
 use file_diff_ui::active_file_diff_context;
 use file_diff_ui::draw_file_diff_view;
 #[cfg(test)]
@@ -136,8 +140,8 @@ pub use pinned_ui::{
     debug_probe_side_panel_mermaid,
 };
 pub(crate) use pinned_ui::{
-    clear_side_panel_render_caches, prewarm_focused_side_panel, reset_side_panel_debug_stats,
-    side_panel_debug_stats,
+    clear_side_panel_debug_snapshot, clear_side_panel_render_caches, prewarm_focused_side_panel,
+    reset_side_panel_debug_stats, side_panel_debug_json, side_panel_debug_stats,
 };
 use pinned_ui::{
     collect_pinned_content_cached, draw_pinned_content_cached, draw_side_panel_markdown,
@@ -3470,6 +3474,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         chat_scrollbar_visible,
     );
 
+    crate::tui::reset_pinned_diagram_debug_snapshot();
     // Render pinned diagram if we have one
     if let (Some(diagram_info), Some(area)) = (&pinned_diagram, diagram_area) {
         if let Some(ref mut capture) = debug_capture {
@@ -3490,6 +3495,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         );
     }
 
+    crate::tui::clear_side_panel_debug_snapshot();
     if let Some(diff_area) = diff_pane_area {
         if has_side_panel_content {
             if let Some(ref mut capture) = debug_capture {
@@ -3659,6 +3665,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         let mut capture = capture;
         capture.render_timing = Some(render_timing);
         capture.mermaid = crate::tui::mermaid::debug_stats_json();
+        capture.side_panel = crate::tui::side_panel_debug_json();
         capture.markdown = crate::tui::markdown::debug_stats_json();
         capture.theme = overlays::debug_palette_json();
         visual_debug::record_frame(capture.build());

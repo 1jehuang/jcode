@@ -1,6 +1,190 @@
 use super::{accent_color, clear_area, dim_color, tool_color};
 use crate::tui::info_widget;
 use ratatui::{prelude::*, widgets::Paragraph};
+use serde::Serialize;
+use std::cell::RefCell;
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PinnedDiagramProbeRect {
+    pub width_cells: u16,
+    pub height_cells: u16,
+    pub width_utilization_percent: f64,
+    pub height_utilization_percent: f64,
+    pub area_utilization_percent: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PinnedDiagramLiveDebugSnapshot {
+    pub index: usize,
+    pub total: usize,
+    pub pane_width_cells: u16,
+    pub pane_height_cells: u16,
+    pub inner_width_cells: u16,
+    pub inner_height_cells: u16,
+    pub focused: bool,
+    pub scroll_x: i32,
+    pub scroll_y: i32,
+    pub zoom_percent: u8,
+    pub render_mode: String,
+    pub rendered_png_width_px: u32,
+    pub rendered_png_height_px: u32,
+    pub pane_utilization: PinnedDiagramProbeRect,
+    pub inner_utilization: PinnedDiagramProbeRect,
+    pub log: String,
+}
+
+#[derive(Default)]
+struct PinnedDiagramDebugState {
+    live_snapshot: Option<PinnedDiagramLiveDebugSnapshot>,
+}
+
+fn utilization_percent(used: u32, total: u32) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        (used as f64 * 100.0) / total as f64
+    }
+}
+
+fn probe_rect(
+    rendered_width: u16,
+    rendered_height: u16,
+    total_width: u16,
+    total_height: u16,
+) -> PinnedDiagramProbeRect {
+    PinnedDiagramProbeRect {
+        width_cells: rendered_width,
+        height_cells: rendered_height,
+        width_utilization_percent: utilization_percent(rendered_width as u32, total_width as u32),
+        height_utilization_percent: utilization_percent(
+            rendered_height as u32,
+            total_height as u32,
+        ),
+        area_utilization_percent: utilization_percent(
+            rendered_width as u32 * rendered_height as u32,
+            total_width as u32 * total_height as u32,
+        ),
+    }
+}
+
+fn pinned_diagram_render_mode_label(fit_mode: bool, zoom_percent: u8) -> String {
+    if fit_mode {
+        "fit".to_string()
+    } else {
+        format!("scrollable-viewport@{zoom_percent}%")
+    }
+}
+
+fn build_pinned_diagram_live_snapshot(
+    diagram: &info_widget::DiagramInfo,
+    area: Rect,
+    inner: Rect,
+    index: usize,
+    total: usize,
+    focused: bool,
+    scroll_x: i32,
+    scroll_y: i32,
+    zoom_percent: u8,
+) -> PinnedDiagramLiveDebugSnapshot {
+    let fit_mode = diagram_view_uses_fit_mode(focused, scroll_x, scroll_y, zoom_percent);
+    let visible_rect = if fit_mode {
+        vcenter_fitted_image(inner, diagram.width, diagram.height)
+    } else {
+        inner
+    };
+    let pane_utilization = probe_rect(
+        visible_rect.width,
+        visible_rect.height,
+        area.width,
+        area.height,
+    );
+    let inner_utilization = probe_rect(
+        visible_rect.width,
+        visible_rect.height,
+        inner.width,
+        inner.height,
+    );
+    let render_mode = pinned_diagram_render_mode_label(fit_mode, zoom_percent);
+
+    PinnedDiagramLiveDebugSnapshot {
+        index,
+        total,
+        pane_width_cells: area.width,
+        pane_height_cells: area.height,
+        inner_width_cells: inner.width,
+        inner_height_cells: inner.height,
+        focused,
+        scroll_x,
+        scroll_y,
+        zoom_percent,
+        render_mode: render_mode.clone(),
+        rendered_png_width_px: diagram.width,
+        rendered_png_height_px: diagram.height,
+        pane_utilization,
+        inner_utilization: inner_utilization.clone(),
+        log: format!(
+            "diagram#{}/{} {} visible={}x{} cells ({:.1}% inner area)",
+            index + 1,
+            total.max(1),
+            render_mode,
+            inner_utilization.width_cells,
+            inner_utilization.height_cells,
+            inner_utilization.area_utilization_percent,
+        ),
+    }
+}
+
+pub fn debug_probe_pinned_diagram(
+    diagram: &info_widget::DiagramInfo,
+    area: Rect,
+    inner: Rect,
+    focused: bool,
+    scroll_x: i32,
+    scroll_y: i32,
+    zoom_percent: u8,
+) -> PinnedDiagramLiveDebugSnapshot {
+    build_pinned_diagram_live_snapshot(
+        diagram,
+        area,
+        inner,
+        0,
+        1,
+        focused,
+        scroll_x,
+        scroll_y,
+        zoom_percent,
+    )
+}
+
+thread_local! {
+    static PINNED_DIAGRAM_DEBUG_STATE: RefCell<PinnedDiagramDebugState> = RefCell::new(PinnedDiagramDebugState::default());
+}
+
+fn with_pinned_diagram_debug<R>(f: impl FnOnce(&PinnedDiagramDebugState) -> R) -> R {
+    PINNED_DIAGRAM_DEBUG_STATE.with(|state| f(&state.borrow()))
+}
+
+fn with_pinned_diagram_debug_mut<R>(f: impl FnOnce(&mut PinnedDiagramDebugState) -> R) -> R {
+    PINNED_DIAGRAM_DEBUG_STATE.with(|state| f(&mut state.borrow_mut()))
+}
+
+pub(crate) fn pinned_diagram_debug_json() -> Option<serde_json::Value> {
+    let live_snapshot = with_pinned_diagram_debug(|state| state.live_snapshot.clone());
+    serde_json::to_value(serde_json::json!({
+        "live": live_snapshot,
+    }))
+    .ok()
+}
+
+pub(crate) fn clear_pinned_diagram_debug_snapshot() {
+    with_pinned_diagram_debug_mut(|debug| {
+        debug.live_snapshot = None;
+    });
+}
+
+pub(crate) fn reset_pinned_diagram_debug_snapshot() {
+    clear_pinned_diagram_debug_snapshot();
+}
 
 pub(crate) fn div_ceil_u32(value: u32, divisor: u32) -> u32 {
     if divisor == 0 {
@@ -308,6 +492,21 @@ pub(crate) fn draw_pinned_diagram(
     };
 
     if inner.width > 0 && inner.height > 0 {
+        let debug_snapshot = build_pinned_diagram_live_snapshot(
+            diagram,
+            area,
+            inner,
+            index,
+            total,
+            focused,
+            scroll_x,
+            scroll_y,
+            zoom_percent,
+        );
+        with_pinned_diagram_debug_mut(|debug| {
+            debug.live_snapshot = Some(debug_snapshot);
+        });
+
         let mut rendered = 0u16;
         if pane_animating {
             clear_area(frame, inner);
@@ -351,5 +550,7 @@ pub(crate) fn draw_pinned_diagram(
             let paragraph = Paragraph::new(placeholder).wrap(Wrap { trim: true });
             frame.render_widget(paragraph, inner);
         }
+    } else {
+        clear_pinned_diagram_debug_snapshot();
     }
 }

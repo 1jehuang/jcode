@@ -326,6 +326,17 @@ impl App {
         } else if cmd == "markdown:stats" {
             let stats = crate::tui::markdown::debug_stats();
             serde_json::to_string_pretty(&stats).unwrap_or_else(|_| "{}".to_string())
+        } else if cmd == "side-panel:stats" || cmd == "side-panel:debug" {
+            crate::tui::side_panel_debug_json()
+                .and_then(|value| serde_json::to_string_pretty(&value).ok())
+                .unwrap_or_else(|| "null".to_string())
+        } else if cmd == "diagram-pane:stats"
+            || cmd == "diagram-pane:debug"
+            || cmd == "pinned-diagram:stats"
+        {
+            crate::tui::pinned_diagram_debug_json()
+                .and_then(|value| serde_json::to_string_pretty(&value).ok())
+                .unwrap_or_else(|| "null".to_string())
         } else if cmd == "markdown:memory" {
             let profile = crate::tui::markdown::debug_memory_profile();
             serde_json::to_string_pretty(&profile).unwrap_or_else(|_| "{}".to_string())

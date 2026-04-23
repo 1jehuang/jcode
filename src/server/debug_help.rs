@@ -143,6 +143,8 @@ CLIENT COMMANDS (client: prefix):
   client:scroll-test[:<j>] - Run offscreen scroll+diagram test
   client:scroll-suite[:<j>] - Run scroll+diagram test suite
   client:side-panel-latency[:<j>] - Benchmark headless side-panel input->frame latency
+  client:side-panel:stats  - Current side-panel debug snapshot, including live Mermaid utilization
+  client:diagram-pane:stats - Current pinned diagram pane snapshot, including live Mermaid utilization
   client:wait              - Check if processing
   client:history           - Get display messages
   client:help              - Client command help

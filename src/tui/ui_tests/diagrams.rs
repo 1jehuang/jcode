@@ -977,6 +977,51 @@ fn test_hidpi_font_size_does_not_halve_diagram_width() {
 }
 
 #[test]
+fn test_pinned_diagram_probe_reports_fit_utilization() {
+    let area = Rect::new(0, 0, 46, 51);
+    let inner = Rect::new(1, 1, 44, 49);
+    let diagram = info_widget::DiagramInfo {
+        hash: 123,
+        width: 614,
+        height: 743,
+        label: None,
+    };
+
+    let probe = debug_probe_pinned_diagram(&diagram, area, inner, false, 0, 0, 100);
+
+    assert_eq!(probe.render_mode, "fit");
+    assert_eq!(probe.pane_width_cells, 46);
+    assert_eq!(probe.pane_height_cells, 51);
+    assert_eq!(probe.inner_width_cells, 44);
+    assert_eq!(probe.inner_height_cells, 49);
+    assert!(probe.inner_utilization.width_cells > 0);
+    assert!(probe.inner_utilization.height_cells > 0);
+    assert!(probe.inner_utilization.area_utilization_percent > 40.0);
+    assert!(probe.log.contains("fit"));
+}
+
+#[test]
+fn test_pinned_diagram_probe_reports_full_inner_usage_in_viewport_mode() {
+    let area = Rect::new(0, 0, 46, 51);
+    let inner = Rect::new(1, 1, 44, 49);
+    let diagram = info_widget::DiagramInfo {
+        hash: 124,
+        width: 614,
+        height: 743,
+        label: None,
+    };
+
+    let probe = debug_probe_pinned_diagram(&diagram, area, inner, true, 3, 7, 125);
+
+    assert_eq!(probe.render_mode, "scrollable-viewport@125%");
+    assert_eq!(probe.inner_utilization.width_cells, 44);
+    assert_eq!(probe.inner_utilization.height_cells, 49);
+    assert_eq!(probe.inner_utilization.width_utilization_percent, 100.0);
+    assert_eq!(probe.inner_utilization.height_utilization_percent, 100.0);
+    assert_eq!(probe.inner_utilization.area_utilization_percent, 100.0);
+}
+
+#[test]
 fn test_query_font_size_returns_valid_dimensions() {
     let font = crate::tui::mermaid::get_font_size();
     if let Some((w, h)) = font {

@@ -1031,7 +1031,8 @@ pub fn render_frame(frame: &mut Frame<'_>, state: &dyn TuiState) {
 }
 
 pub use ui::{
-    SidePanelDebugStats, SidePanelMermaidProbe, SidePanelMermaidProbeRect,
+    PinnedDiagramLiveDebugSnapshot, PinnedDiagramProbeRect, SidePanelDebugStats,
+    SidePanelMermaidProbe, SidePanelMermaidProbeRect, debug_probe_pinned_diagram,
     debug_probe_side_panel_mermaid,
 };
 
@@ -1073,8 +1074,24 @@ pub fn side_panel_debug_stats() -> SidePanelDebugStats {
     ui::side_panel_debug_stats()
 }
 
+pub fn side_panel_debug_json() -> Option<serde_json::Value> {
+    ui::side_panel_debug_json()
+}
+
+pub fn pinned_diagram_debug_json() -> Option<serde_json::Value> {
+    ui::pinned_diagram_debug_json()
+}
+
+pub(crate) fn clear_side_panel_debug_snapshot() {
+    ui::clear_side_panel_debug_snapshot();
+}
+
 pub fn reset_side_panel_debug_stats() {
     ui::reset_side_panel_debug_stats();
+}
+
+pub fn reset_pinned_diagram_debug_snapshot() {
+    ui::reset_pinned_diagram_debug_snapshot();
 }
 
 pub fn clear_side_panel_render_caches() {

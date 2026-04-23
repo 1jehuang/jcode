@@ -57,6 +57,8 @@ pub struct FrameCapture {
     pub render_order: Vec<String>,
     /// Mermaid debug stats snapshot (if available)
     pub mermaid: Option<Value>,
+    /// Side-panel debug snapshot, including live Mermaid utilization when available
+    pub side_panel: Option<Value>,
     /// Markdown debug stats snapshot (if available)
     pub markdown: Option<Value>,
     /// Theme/palette snapshot (if available)
@@ -319,6 +321,7 @@ pub fn record_frame(frame: FrameCapture) {
             && frame.rendered_text == last.rendered_text
             && frame.layout == last.layout
             && frame.info_widgets == last.info_widgets
+            && frame.side_panel == last.side_panel
             && frame.anomalies.is_empty();
         if dominated {
             return;
@@ -740,6 +743,9 @@ fn write_frame(file: &mut File, frame: &FrameCapture) -> std::io::Result<()> {
     if let Some(mermaid) = &frame.mermaid {
         writeln!(file, "Mermaid: {}", mermaid)?;
     }
+    if let Some(side_panel) = &frame.side_panel {
+        writeln!(file, "Side panel: {}", side_panel)?;
+    }
     if let Some(markdown) = &frame.markdown {
         writeln!(file, "Markdown: {}", markdown)?;
     }
@@ -771,6 +777,7 @@ pub struct FrameCaptureBuilder {
     pub info_widgets: Option<InfoWidgetCapture>,
     pub render_order: Vec<String>,
     pub mermaid: Option<Value>,
+    pub side_panel: Option<Value>,
     pub markdown: Option<Value>,
     pub theme: Option<Value>,
     terminal_size: (u16, u16),
@@ -811,6 +818,7 @@ impl FrameCaptureBuilder {
             info_widgets: self.info_widgets,
             render_order: self.render_order,
             mermaid: self.mermaid,
+            side_panel: self.side_panel,
             markdown: self.markdown,
             theme: self.theme,
         }
