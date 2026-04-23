@@ -75,17 +75,39 @@ fn pinned_diagram_render_mode_label(fit_mode: bool, zoom_percent: u8) -> String 
     }
 }
 
-fn build_pinned_diagram_live_snapshot(
-    diagram: &info_widget::DiagramInfo,
+#[derive(Clone, Copy)]
+struct PinnedDiagramSnapshotLayout {
     area: Rect,
     inner: Rect,
     index: usize,
     total: usize,
+}
+
+#[derive(Clone, Copy)]
+struct PinnedDiagramSnapshotView {
     focused: bool,
     scroll_x: i32,
     scroll_y: i32,
     zoom_percent: u8,
+}
+
+fn build_pinned_diagram_live_snapshot(
+    diagram: &info_widget::DiagramInfo,
+    layout: PinnedDiagramSnapshotLayout,
+    view: PinnedDiagramSnapshotView,
 ) -> PinnedDiagramLiveDebugSnapshot {
+    let PinnedDiagramSnapshotLayout {
+        area,
+        inner,
+        index,
+        total,
+    } = layout;
+    let PinnedDiagramSnapshotView {
+        focused,
+        scroll_x,
+        scroll_y,
+        zoom_percent,
+    } = view;
     let fit_mode = diagram_view_uses_fit_mode(focused, scroll_x, scroll_y, zoom_percent);
     let visible_rect = if fit_mode {
         vcenter_fitted_image(inner, diagram.width, diagram.height)
@@ -145,14 +167,18 @@ pub fn debug_probe_pinned_diagram(
 ) -> PinnedDiagramLiveDebugSnapshot {
     build_pinned_diagram_live_snapshot(
         diagram,
-        area,
-        inner,
-        0,
-        1,
-        focused,
-        scroll_x,
-        scroll_y,
-        zoom_percent,
+        PinnedDiagramSnapshotLayout {
+            area,
+            inner,
+            index: 0,
+            total: 1,
+        },
+        PinnedDiagramSnapshotView {
+            focused,
+            scroll_x,
+            scroll_y,
+            zoom_percent,
+        },
     )
 }
 
@@ -494,14 +520,18 @@ pub(crate) fn draw_pinned_diagram(
     if inner.width > 0 && inner.height > 0 {
         let debug_snapshot = build_pinned_diagram_live_snapshot(
             diagram,
-            area,
-            inner,
-            index,
-            total,
-            focused,
-            scroll_x,
-            scroll_y,
-            zoom_percent,
+            PinnedDiagramSnapshotLayout {
+                area,
+                inner,
+                index,
+                total,
+            },
+            PinnedDiagramSnapshotView {
+                focused,
+                scroll_x,
+                scroll_y,
+                zoom_percent,
+            },
         );
         with_pinned_diagram_debug_mut(|debug| {
             debug.live_snapshot = Some(debug_snapshot);

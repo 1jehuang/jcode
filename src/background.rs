@@ -1117,12 +1117,12 @@ mod tests {
                 .await
                 .expect("timed out waiting for progress event")
                 .expect("bus should stay open");
-            if let BusEvent::BackgroundTaskProgress(event) = event {
-                if event.task_id == info.task_id {
-                    assert_eq!(event.session_id, "session-progress");
-                    assert_eq!(event.progress, progress.normalize());
-                    return;
-                }
+            if let BusEvent::BackgroundTaskProgress(event) = event
+                && event.task_id == info.task_id
+            {
+                assert_eq!(event.session_id, "session-progress");
+                assert_eq!(event.progress, progress.normalize());
+                return;
             }
         }
 

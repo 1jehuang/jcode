@@ -1367,6 +1367,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "test intentionally serializes process-wide JCODE_HOME/env state across async tool execution"
+    )]
     async fn test_schedule_tool_defaults_to_resuming_originating_session() {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir().expect("tempdir");

@@ -289,19 +289,19 @@ pub(super) fn draw_messages(
         badge_assignments.push((target.badge_line, key));
     }
     set_visible_copy_targets(visible_copy_targets);
-    super::note_viewport_metrics(
+    super::note_viewport_metrics(super::ViewportMetrics {
         scroll,
         visible_end,
-        visible_lines.len(),
-        total_lines,
+        visible_lines: visible_lines.len(),
+        total_wrapped_lines: total_lines,
         prompt_preview_lines,
-        visible_user_indices.len(),
-        badge_assignments.len(),
-        content_area.width,
+        visible_user_prompts: visible_user_indices.len(),
+        visible_copy_targets: badge_assignments.len(),
+        content_width: content_area.width,
         stability_hash,
         visible_streaming_hash,
         visible_batch_progress_hash,
-    );
+    });
 
     let now_ms = app.now_millis();
     let policy = crate::perf::tui_policy();

@@ -108,8 +108,8 @@ pub fn raise_nofile_limit_best_effort(minimum_soft_limit: u64) {
             return;
         }
 
-        let current = limit.rlim_cur as u64;
-        let hard = limit.rlim_max as u64;
+        let current: u64 = limit.rlim_cur;
+        let hard: u64 = limit.rlim_max;
         let Some(desired) = desired_nofile_soft_limit(current, hard, minimum_soft_limit) else {
             return;
         };

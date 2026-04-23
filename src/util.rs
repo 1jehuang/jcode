@@ -159,10 +159,10 @@ pub fn process_fd_diagnostic_snapshot() -> String {
         let (soft_limit, hard_limit) = read_max_open_files_limits()
             .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
 
-        return format!(
+        format!(
             "pid={} fds={} soft_limit={} hard_limit={} kinds={{socket:{}, pipe:{}, anon_inode:{}, char:{}, file:{}, dir:{}, other:{}}}",
             pid, total, soft_limit, hard_limit, sockets, pipes, anon, chars, regs, dirs, other
-        );
+        )
     }
 
     #[cfg(not(unix))]

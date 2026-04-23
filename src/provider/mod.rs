@@ -106,6 +106,10 @@ pub(crate) fn anthropic_api_key_route_availability(model: &str) -> (bool, String
 /// Stream of events from a provider
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
 
+type CatalogRouteKey = (String, String, String);
+type CatalogRouteSnapshot = (bool, String, Option<u64>);
+type CatalogRouteMap = BTreeMap<CatalogRouteKey, CatalogRouteSnapshot>;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelCatalogRefreshSummary {
     pub model_count_before: usize,
@@ -152,36 +156,34 @@ pub fn summarize_model_catalog_refresh(
     let before_model_set: BTreeSet<String> = before_models.into_iter().collect();
     let after_model_set: BTreeSet<String> = after_models.into_iter().collect();
 
-    let before_route_map: BTreeMap<(String, String, String), (bool, String, Option<u64>)> =
-        before_routes
-            .into_iter()
-            .map(|route| {
-                let estimated_cost = route.estimated_reference_cost_micros();
+    let before_route_map: CatalogRouteMap = before_routes
+        .into_iter()
+        .map(|route| {
+            let estimated_cost = route.estimated_reference_cost_micros();
+            (
+                (route.model, route.provider, route.api_method),
                 (
-                    (route.model, route.provider, route.api_method),
-                    (
-                        route.available,
-                        normalize_route_refresh_detail(&route.detail),
-                        estimated_cost,
-                    ),
-                )
-            })
-            .collect();
-    let after_route_map: BTreeMap<(String, String, String), (bool, String, Option<u64>)> =
-        after_routes
-            .into_iter()
-            .map(|route| {
-                let estimated_cost = route.estimated_reference_cost_micros();
+                    route.available,
+                    normalize_route_refresh_detail(&route.detail),
+                    estimated_cost,
+                ),
+            )
+        })
+        .collect();
+    let after_route_map: CatalogRouteMap = after_routes
+        .into_iter()
+        .map(|route| {
+            let estimated_cost = route.estimated_reference_cost_micros();
+            (
+                (route.model, route.provider, route.api_method),
                 (
-                    (route.model, route.provider, route.api_method),
-                    (
-                        route.available,
-                        normalize_route_refresh_detail(&route.detail),
-                        estimated_cost,
-                    ),
-                )
-            })
-            .collect();
+                    route.available,
+                    normalize_route_refresh_detail(&route.detail),
+                    estimated_cost,
+                ),
+            )
+        })
+        .collect();
 
     let models_added = after_model_set.difference(&before_model_set).count();
     let models_removed = before_model_set.difference(&after_model_set).count();
@@ -1601,14 +1603,14 @@ impl Provider for MultiProvider {
             for model in openrouter.available_models_display() {
                 let cached = openrouter::load_endpoints_disk_cache_public(&model);
                 let cache_age = cached.as_ref().map(|(_, age)| *age);
-                if model == current_openrouter_model || scheduled_endpoint_refreshes < 8 {
-                    if openrouter.maybe_schedule_endpoint_refresh_for_display(
+                if (model == current_openrouter_model || scheduled_endpoint_refreshes < 8)
+                    && openrouter.maybe_schedule_endpoint_refresh_for_display(
                         &model,
                         cache_age,
                         "model picker route hydration",
-                    ) {
-                        scheduled_endpoint_refreshes += 1;
-                    }
+                    )
+                {
+                    scheduled_endpoint_refreshes += 1;
                 }
                 let age_str = cached.as_ref().map(|(_, age)| {
                     if *age < 3600 {

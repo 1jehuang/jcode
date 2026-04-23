@@ -1680,7 +1680,7 @@ fn note_body_built(prepared: &PreparedMessages) {
     });
 }
 
-fn note_chat_layout(
+pub(super) struct ChatLayoutMetrics {
     chat_area: Rect,
     messages_area: Rect,
     initial_content_height: usize,
@@ -1690,7 +1690,20 @@ fn note_chat_layout(
     has_side_panel_content: bool,
     has_pinned_content: bool,
     has_file_diff_edits: bool,
-) {
+}
+
+fn note_chat_layout(metrics: ChatLayoutMetrics) {
+    let ChatLayoutMetrics {
+        chat_area,
+        messages_area,
+        initial_content_height,
+        content_height,
+        chat_scrollbar_visible,
+        use_packed_layout,
+        has_side_panel_content,
+        has_pinned_content,
+        has_file_diff_edits,
+    } = metrics;
     with_frame_perf_stats_mut(|stats| {
         stats.chat_area_width = chat_area.width;
         stats.chat_area_height = chat_area.height;
@@ -1706,19 +1719,34 @@ fn note_chat_layout(
     });
 }
 
-fn note_viewport_metrics(
-    scroll: usize,
-    visible_end: usize,
-    visible_lines: usize,
-    total_wrapped_lines: usize,
-    prompt_preview_lines: u16,
-    visible_user_prompts: usize,
-    visible_copy_targets: usize,
-    content_width: u16,
-    stability_hash: u64,
-    visible_streaming_hash: u64,
-    visible_batch_progress_hash: u64,
-) {
+pub(super) struct ViewportMetrics {
+    pub scroll: usize,
+    pub visible_end: usize,
+    pub visible_lines: usize,
+    pub total_wrapped_lines: usize,
+    pub prompt_preview_lines: u16,
+    pub visible_user_prompts: usize,
+    pub visible_copy_targets: usize,
+    pub content_width: u16,
+    pub stability_hash: u64,
+    pub visible_streaming_hash: u64,
+    pub visible_batch_progress_hash: u64,
+}
+
+fn note_viewport_metrics(metrics: ViewportMetrics) {
+    let ViewportMetrics {
+        scroll,
+        visible_end,
+        visible_lines,
+        total_wrapped_lines,
+        prompt_preview_lines,
+        visible_user_prompts,
+        visible_copy_targets,
+        content_width,
+        stability_hash,
+        visible_streaming_hash,
+        visible_batch_progress_hash,
+    } = metrics;
     with_frame_perf_stats_mut(|stats| {
         stats.viewport_scroll = scroll;
         stats.viewport_visible_end = visible_end;
@@ -1876,14 +1904,11 @@ fn maybe_record_flicker_event(history: &mut FlickerFrameHistory, current: &Flick
                     kind: "layout_toggle_same_state".to_string(),
                     session_id: current.session_id.clone(),
                     session_name: current.session_name.clone(),
-                    previous,
+                    previous: previous.clone(),
                     current: current.clone(),
                 },
             );
-            return;
-        }
-
-        if previous.visible_hash != current.visible_hash {
+        } else if previous.visible_hash != current.visible_hash {
             push_flicker_event(
                 history,
                 FlickerEvent {
@@ -1895,7 +1920,6 @@ fn maybe_record_flicker_event(history: &mut FlickerFrameHistory, current: &Flick
                     current: current.clone(),
                 },
             );
-            return;
         }
     }
 }
@@ -1981,7 +2005,7 @@ pub(crate) fn debug_flicker_frame_history(limit: usize) -> serde_json::Value {
     let history = flicker_frame_history()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let take_samples = limit.max(1).min(FLICKER_HISTORY_MAX_SAMPLES);
+    let take_samples = limit.clamp(1, FLICKER_HISTORY_MAX_SAMPLES);
     let samples: Vec<FlickerFrameSample> = history
         .samples
         .iter()
@@ -1996,7 +2020,7 @@ pub(crate) fn debug_flicker_frame_history(limit: usize) -> serde_json::Value {
         .events
         .iter()
         .rev()
-        .take(limit.max(1).min(FLICKER_HISTORY_MAX_EVENTS))
+        .take(limit.clamp(1, FLICKER_HISTORY_MAX_EVENTS))
         .cloned()
         .collect::<Vec<_>>()
         .into_iter()
@@ -2112,7 +2136,7 @@ pub(crate) fn debug_slow_frame_history(limit: usize) -> serde_json::Value {
     let history = slow_frame_history()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let take = limit.max(1).min(SLOW_FRAME_HISTORY_MAX_SAMPLES);
+    let take = limit.clamp(1, SLOW_FRAME_HISTORY_MAX_SAMPLES);
     let samples: Vec<SlowFrameSample> = history
         .samples
         .iter()
@@ -3448,17 +3472,17 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     // Messages area is chunks[0] within the chat column (already excludes diagram).
     let messages_area = chunks[0];
-    note_chat_layout(
+    note_chat_layout(ChatLayoutMetrics {
         chat_area,
         messages_area,
-        initial_content_height as usize,
-        content_height as usize,
+        initial_content_height: initial_content_height as usize,
+        content_height: content_height as usize,
         chat_scrollbar_visible,
-        use_packed,
+        use_packed_layout: use_packed,
         has_side_panel_content,
         has_pinned_content,
         has_file_diff_edits,
-    );
+    });
 
     if let Some(ref mut capture) = debug_capture {
         capture.layout.messages_area = Some(messages_area.into());

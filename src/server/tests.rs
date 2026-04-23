@@ -365,6 +365,10 @@ async fn background_task_progress_notifies_attached_clients() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test intentionally serializes process-wide JCODE_HOME/env state across async recovery assertions"
+)]
 async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -> Result<()> {
     let _storage_guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new()?;
@@ -496,6 +500,10 @@ async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -
 }
 
 #[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test intentionally serializes process-wide JCODE_HOME/env state across async recovery assertions"
+)]
 async fn startup_recovery_preserves_headed_session_reload_context_for_later_reconnect() -> Result<()>
 {
     let _storage_guard = crate::storage::lock_test_env();
@@ -595,6 +603,10 @@ async fn startup_recovery_preserves_headed_session_reload_context_for_later_reco
 
 #[cfg(unix)]
 #[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test intentionally serializes process-wide JCODE_HOME/env state across async startup assertions"
+)]
 async fn startup_ready_signal_is_not_blocked_by_headless_recovery_delay() -> Result<()> {
     use std::os::unix::io::FromRawFd;
     use tokio::io::AsyncReadExt;
