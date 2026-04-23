@@ -547,10 +547,11 @@ pub(super) async fn execute_debug_command(
             )));
         }
 
-        let hash = crate::build::current_git_hash(&repo_dir)?;
-
-        crate::build::publish_local_current_build(&repo_dir)?;
-        crate::build::install_version(&repo_dir, &hash)?;
+        let source = crate::build::current_source_state(&repo_dir)?;
+        let hash = source.version_label.clone();
+        let published = crate::build::publish_local_current_build_for_source(&repo_dir, &source)?;
+        crate::build::smoke_test_server_binary(&published.versioned_path)?;
+        crate::build::update_shared_server_symlink(&hash)?;
         crate::build::update_canary_symlink(&hash)?;
 
         let mut manifest = crate::build::BuildManifest::load()?;
