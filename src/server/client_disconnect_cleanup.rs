@@ -291,4 +291,24 @@ mod tests {
         crate::server::clear_reload_marker();
         crate::env::remove_var("JCODE_RUNTIME_DIR");
     }
+
+    #[test]
+    fn running_disconnect_during_recent_socket_ready_reload_is_expected() {
+        let _guard = crate::storage::lock_test_env();
+        let runtime = tempfile::TempDir::new().expect("create runtime dir");
+        crate::env::set_var("JCODE_RUNTIME_DIR", runtime.path());
+        crate::server::clear_reload_marker();
+        crate::server::write_reload_state(
+            "test-request",
+            "test-hash",
+            crate::server::ReloadPhase::SocketReady,
+            None,
+        );
+        assert_eq!(
+            disconnect_disposition(true),
+            DisconnectDisposition::Reloading
+        );
+        crate::server::clear_reload_marker();
+        crate::env::remove_var("JCODE_RUNTIME_DIR");
+    }
 }

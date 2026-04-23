@@ -37,7 +37,11 @@ pub fn reload_marker_exists() -> bool {
 }
 
 pub fn reload_marker_active(max_age: Duration) -> bool {
-    matches!(recent_reload_state(max_age), Some(state) if state.phase == ReloadPhase::Starting)
+    matches!(
+        recent_reload_state(max_age),
+        Some(state)
+            if matches!(state.phase, ReloadPhase::Starting | ReloadPhase::SocketReady)
+    )
 }
 
 pub fn recent_reload_state(max_age: Duration) -> Option<ReloadState> {

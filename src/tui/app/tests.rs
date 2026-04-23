@@ -10709,6 +10709,32 @@ fn test_reload_handoff_active_when_reload_marker_present() {
 }
 
 #[test]
+fn test_reload_handoff_active_when_socket_ready_marker_present() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+
+    crate::server::write_reload_state(
+        "reload-marker-test",
+        "test-hash",
+        crate::server::ReloadPhase::SocketReady,
+        None,
+    );
+
+    let state = remote::RemoteRunState::default();
+
+    assert!(remote::reload_handoff_active(&state));
+
+    crate::server::clear_reload_marker();
+    if let Some(prev_runtime) = prev_runtime {
+        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+    } else {
+        crate::env::remove_var("JCODE_RUNTIME_DIR");
+    }
+}
+
+#[test]
 fn test_handle_server_event_history_with_interruption_queues_continuation() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

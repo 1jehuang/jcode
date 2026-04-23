@@ -140,6 +140,24 @@ fn reload_marker_active_expires_stale_marker() {
 }
 
 #[test]
+fn reload_marker_active_for_recent_socket_ready_marker() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+
+    write_reload_state("test-request", "test-hash", ReloadPhase::SocketReady, None);
+    assert!(reload_marker_active(Duration::from_secs(30)));
+
+    clear_reload_marker();
+    if let Some(prev_runtime) = prev_runtime {
+        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+    } else {
+        crate::env::remove_var("JCODE_RUNTIME_DIR");
+    }
+}
+
+#[test]
 fn publish_reload_socket_ready_updates_current_process_marker() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
