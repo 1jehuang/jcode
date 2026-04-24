@@ -181,7 +181,7 @@ fn command_exists_cached_on_second_call() {
 
 #[test]
 fn auth_status_check_returns_valid_struct() {
-    let status = AuthStatus::check();
+    let status = AuthStatus::check_fast();
     // Just verify it runs without panicking and has coherent state
     match status.anthropic.state {
         AuthState::Available | AuthState::Expired | AuthState::NotConfigured => {}
