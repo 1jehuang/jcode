@@ -145,9 +145,18 @@ pub fn format_reset_time(timestamp: &str) -> String {
         if duration.num_seconds() < 60 {
             return "1m".to_string();
         }
-        let hours = duration.num_hours();
+        let days = duration.num_days();
+        let hours = duration.num_hours() % 24;
         let minutes = duration.num_minutes() % 60;
-        if hours > 0 {
+        if days > 0 {
+            if hours > 0 {
+                format!("{}d {}h", days, hours)
+            } else if minutes > 0 {
+                format!("{}d {}m", days, minutes)
+            } else {
+                format!("{}d", days)
+            }
+        } else if hours > 0 {
             format!("{}h {}m", hours, minutes)
         } else {
             format!("{}m", minutes)

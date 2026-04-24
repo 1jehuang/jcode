@@ -187,6 +187,14 @@ fn test_format_reset_time_under_one_minute_rounds_up() {
 }
 
 #[test]
+fn test_format_reset_time_uses_days_for_long_windows() {
+    let timestamp =
+        (chrono::Utc::now() + chrono::TimeDelta::hours(109) + chrono::TimeDelta::minutes(5))
+            .to_rfc3339();
+    assert_eq!(format_reset_time(&timestamp), "4d 13h");
+}
+
+#[test]
 fn test_classify_openai_limits_recognizes_five_weekly_and_spark() {
     let limits = vec![
         UsageLimit {
