@@ -58,6 +58,22 @@ It answers:
 - Can we render a frame without a web view or UI framework?
 - Can fullscreen behavior be tested early?
 
+## Linux desktop entry
+
+The repository includes an install-oriented desktop entry at:
+
+```text
+packaging/linux/jcode-desktop.desktop
+```
+
+It expects a `jcode-desktop` binary to be available on `PATH`. For local testing after installing or copying the binary somewhere your desktop launcher can execute, copy the entry to your user applications directory:
+
+```bash
+mkdir -p ~/.local/share/applications
+cp packaging/linux/jcode-desktop.desktop ~/.local/share/applications/
+update-desktop-database ~/.local/share/applications 2>/dev/null || true
+```
+
 ## Phase 1 target after this
 
 Once Phase 0 works, the next prototype is the fake-data spatial workspace:
