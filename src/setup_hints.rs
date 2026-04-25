@@ -270,7 +270,7 @@ fn startup_hints_for_launch(state: &SetupHintsState) -> Option<StartupHints> {
 }
 
 /// Read a single-character choice from the user.
-#[cfg(target_os = "macos")]
+#[cfg(any(windows, target_os = "macos"))]
 fn read_choice() -> String {
     let mut input = String::new();
     let _ = io::stdin().read_line(&mut input);

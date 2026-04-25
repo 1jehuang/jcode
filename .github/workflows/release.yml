@@ -338,7 +338,7 @@ jobs:
 
           export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o ConnectTimeout=10 -o ConnectionAttempts=3"
 
-          retry 3 5 bash -lc 'rm -rf /tmp/jcode-aur && git clone --depth 1 https://aur.archlinux.org/jcode-bin.git /tmp/jcode-aur'
+          retry 3 5 bash -lc 'rm -rf /tmp/jcode-aur && git clone --depth 1 ssh://aur@aur.archlinux.org/jcode-bin.git /tmp/jcode-aur'
           cd /tmp/jcode-aur
           git remote set-url origin ssh://aur@aur.archlinux.org/jcode-bin.git
 
