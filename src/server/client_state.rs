@@ -148,6 +148,21 @@ fn history_reload_recovery_snapshot(
     session_id: &str,
     was_interrupted: Option<bool>,
 ) -> Option<crate::protocol::ReloadRecoverySnapshot> {
+    match super::reload_recovery::claim_pending_for_session(session_id) {
+        Ok(Some(directive)) => {
+            crate::logging::info(&format!(
+                "history_reload_recovery_snapshot: using server-owned recovery intent for session={}",
+                session_id
+            ));
+            return Some(directive);
+        }
+        Ok(None) => {}
+        Err(err) => crate::logging::warn(&format!(
+            "history_reload_recovery_snapshot: failed to claim server-owned recovery intent for session={}: {}",
+            session_id, err
+        )),
+    }
+
     let reload_ctx = crate::tool::selfdev::ReloadContext::peek_for_session(session_id)
         .ok()
         .flatten();
@@ -934,6 +949,35 @@ mod tests {
         write_pending_user_session(session_id, crate::session::SessionStatus::Active)?;
 
         assert!(super::history_reload_recovery_snapshot(session_id, None).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn history_reload_recovery_prefers_server_owned_intent_and_marks_delivered() -> Result<()> {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::TempDir::new()?;
+        let runtime = tempfile::TempDir::new()?;
+        let _guard = ReloadHistoryEnvGuard::new(home.path(), runtime.path());
+        let session_id = "session_history_store_owned";
+        super::super::reload_recovery::persist_intent(
+            "reload-store-owned",
+            session_id,
+            super::super::reload_recovery::ReloadRecoveryRole::InterruptedPeer,
+            crate::tool::selfdev::ReloadRecoveryDirective {
+                reconnect_notice: Some("stored notice".to_string()),
+                continuation_message: "stored continuation".to_string(),
+            },
+            "test store intent",
+        )?;
+
+        let snapshot = super::history_reload_recovery_snapshot(session_id, None)
+            .expect("server-owned recovery intent should be used");
+        assert_eq!(snapshot.continuation_message, "stored continuation");
+
+        assert!(
+            super::history_reload_recovery_snapshot(session_id, None).is_none(),
+            "delivered server-owned recovery intent should not be emitted twice"
+        );
         Ok(())
     }
 }

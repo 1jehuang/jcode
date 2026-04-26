@@ -29,6 +29,7 @@ mod durable_state;
 mod headless;
 mod provider_control;
 mod reload;
+mod reload_recovery;
 mod reload_state;
 mod runtime;
 mod socket;
@@ -804,7 +805,8 @@ impl Server {
                 shutdown_signals.insert(session_id.clone(), agent_guard.graceful_shutdown_signal());
             }
 
-            let should_resume = {
+            let has_stored_recovery_intent = reload_recovery::has_pending_for_session(&session_id);
+            let should_resume = has_stored_recovery_intent || {
                 let agent_guard = agent.lock().await;
                 self::client_session::restored_session_was_interrupted(
                     &session_id,
@@ -813,7 +815,6 @@ impl Server {
                 )
             };
 
-            let reload_ctx = ReloadContext::load_for_session(&session_id).ok().flatten();
             if !should_resume {
                 ReloadContext::log_recovery_outcome(
                     "server_startup_headless",
@@ -844,7 +845,18 @@ impl Server {
                 continue;
             }
 
-            let Some(reminder) = headless_reload_continuation_message(reload_ctx) else {
+            let stored_directive = reload_recovery::claim_pending_for_session(&session_id)
+                .ok()
+                .flatten();
+            let reload_ctx = if stored_directive.is_none() {
+                ReloadContext::load_for_session(&session_id).ok().flatten()
+            } else {
+                None
+            };
+            let reminder = stored_directive
+                .map(|directive| directive.continuation_message)
+                .or_else(|| headless_reload_continuation_message(reload_ctx));
+            let Some(reminder) = reminder else {
                 ReloadContext::log_recovery_outcome(
                     "server_startup_headless",
                     &session_id,

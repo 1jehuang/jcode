@@ -1,5 +1,7 @@
 use crate::agent::Agent;
+use crate::server::reload_recovery::ReloadRecoveryRole;
 use crate::server::{SwarmEvent, SwarmEventType, SwarmMember};
+use crate::tool::selfdev::ReloadContext;
 use jcode_agent_runtime::InterruptSignal;
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -87,6 +89,13 @@ pub(super) async fn await_reload_signal(
             continue;
         }
 
+        persist_reload_recovery_intents(
+            &signal.request_id,
+            &swarm_members,
+            signal.triggering_session.as_deref(),
+        )
+        .await;
+
         graceful_shutdown_sessions(
             &sessions,
             &swarm_members,
@@ -146,6 +155,77 @@ pub(super) async fn await_reload_signal(
             );
         }
         std::process::exit(42);
+    }
+}
+
+async fn persist_reload_recovery_intents(
+    reload_id: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    triggering_session: Option<&str>,
+) {
+    let mut candidates: Vec<(String, bool)> = {
+        let members = swarm_members.read().await;
+        members
+            .iter()
+            .filter(|(_, member)| member.status == "running")
+            .map(|(session_id, member)| (session_id.clone(), member.is_headless))
+            .collect()
+    };
+
+    if let Some(triggering_session) = triggering_session
+        && !candidates
+            .iter()
+            .any(|(session_id, _)| session_id == triggering_session)
+    {
+        candidates.push((triggering_session.to_string(), false));
+    }
+
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    candidates.dedup_by(|a, b| a.0 == b.0);
+
+    for (session_id, is_headless) in candidates {
+        let reload_ctx = ReloadContext::peek_for_session(&session_id).ok().flatten();
+        let is_triggering = Some(session_id.as_str()) == triggering_session;
+        let Some(directive) = ReloadContext::recovery_directive_for_session(
+            &session_id,
+            reload_ctx.as_ref(),
+            is_headless || !is_triggering,
+            None,
+        ) else {
+            crate::logging::info(&format!(
+                "reload recovery store: no directive generated for reload_id={} session={} triggering={} headless={} has_reload_ctx={}",
+                reload_id,
+                session_id,
+                is_triggering,
+                is_headless,
+                reload_ctx.is_some()
+            ));
+            continue;
+        };
+
+        let role = if is_headless {
+            ReloadRecoveryRole::Headless
+        } else if is_triggering {
+            ReloadRecoveryRole::Initiator
+        } else {
+            ReloadRecoveryRole::InterruptedPeer
+        };
+        let reason = if is_triggering {
+            "triggering session for reload"
+        } else if is_headless {
+            "headless session running during reload"
+        } else {
+            "attached peer session running during reload"
+        };
+
+        if let Err(err) =
+            super::reload_recovery::persist_intent(reload_id, &session_id, role, directive, reason)
+        {
+            crate::logging::warn(&format!(
+                "reload recovery store: failed to persist intent reload_id={} session={}: {}",
+                reload_id, session_id, err
+            ));
+        }
     }
 }
 
@@ -316,7 +396,8 @@ async fn graceful_shutdown_sessions_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::{
-        graceful_shutdown_sessions, graceful_shutdown_sessions_with_timeout, receive_reload_signal,
+        graceful_shutdown_sessions, graceful_shutdown_sessions_with_timeout,
+        persist_reload_recovery_intents, receive_reload_signal,
     };
     use crate::server::{ReloadSignal, SwarmEvent, SwarmEventType, SwarmMember};
     use jcode_agent_runtime::InterruptSignal;
@@ -395,6 +476,50 @@ mod tests {
         assert_eq!(signal.triggering_session.as_deref(), Some("sess-2"));
         assert!(!signal.prefer_selfdev_binary);
         assert_eq!(signal.request_id, "reload-2");
+    }
+
+    #[tokio::test]
+    async fn persist_reload_recovery_intents_records_running_peer_recovery() {
+        let _guard = crate::storage::lock_test_env();
+        let temp_home = tempfile::TempDir::new().expect("temp jcode home");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp_home.path());
+
+        let swarm_members = Arc::new(RwLock::new(HashMap::from([
+            ("initiator".to_string(), member("initiator", "running")),
+            ("peer".to_string(), member("peer", "running")),
+            ("idle".to_string(), member("idle", "ready")),
+        ])));
+
+        persist_reload_recovery_intents("reload-store-test", &swarm_members, Some("initiator"))
+            .await;
+
+        let peer_directive = crate::server::reload_recovery::claim_pending_for_session("peer")
+            .expect("claim peer recovery")
+            .expect("peer recovery intent should exist");
+        assert!(
+            peer_directive
+                .continuation_message
+                .contains("interrupted by a server reload")
+        );
+        assert!(
+            crate::server::reload_recovery::claim_pending_for_session("idle")
+                .expect("claim idle recovery")
+                .is_none(),
+            "idle sessions should not get reload recovery intents"
+        );
+        assert!(
+            crate::server::reload_recovery::claim_pending_for_session("initiator")
+                .expect("claim initiator recovery")
+                .is_none(),
+            "initiator without selfdev reload context should not get a generic interrupted-peer intent"
+        );
+
+        if let Some(prev_home) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
     }
 
     #[tokio::test]
