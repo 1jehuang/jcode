@@ -42,7 +42,11 @@ impl BgTool {
 #[derive(Deserialize)]
 struct BgInput {
     /// Action to perform: list, status, output, tail, cancel, cleanup, watch, delivery, subscribe, wait
-    action: String,
+    #[serde(default)]
+    action: Option<String>,
+    /// Short display label describing why this tool call is being made.
+    #[serde(default)]
+    intent: Option<String>,
     /// Task ID (for single-task actions)
     #[serde(default)]
     task_id: Option<String>,
@@ -91,6 +95,50 @@ struct BgInput {
     /// Optional grace period for detached cancellation before SIGKILL
     #[serde(default)]
     graceful_timeout_ms: Option<u64>,
+}
+
+fn infer_action_from_intent(intent: Option<&str>) -> Option<&'static str> {
+    let intent = intent?.trim().to_ascii_lowercase();
+    if intent.is_empty() {
+        return None;
+    }
+
+    if intent.contains("wait") || intent.contains("await") {
+        Some("wait")
+    } else if intent.contains("tail") {
+        Some("tail")
+    } else if intent.contains("output") || intent.contains("log") {
+        Some("output")
+    } else if intent.contains("status") || intent.contains("progress") || intent.contains("check") {
+        Some("status")
+    } else if intent.contains("cancel") || intent.contains("stop") {
+        Some("cancel")
+    } else if intent.contains("clean") {
+        Some("cleanup")
+    } else if intent.contains("list") || intent.contains("show") {
+        Some("list")
+    } else {
+        None
+    }
+}
+
+fn resolve_action(params: &BgInput) -> Result<String> {
+    if let Some(action) = params
+        .action
+        .as_deref()
+        .map(str::trim)
+        .filter(|action| !action.is_empty())
+    {
+        return Ok(action.to_ascii_lowercase());
+    }
+
+    if let Some(action) = infer_action_from_intent(params.intent.as_deref()) {
+        return Ok(action.to_string());
+    }
+
+    Err(anyhow::anyhow!(
+        "Missing required bg action. Use one of: list, status, output, tail, cancel, cleanup, delivery, subscribe, wait. For example: bg action="wait"."
+    ))
 }
 
 fn status_label(status: &BackgroundTaskStatus) -> &'static str {
@@ -455,9 +503,10 @@ impl Tool for BgTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: BgInput = serde_json::from_value(input)?;
+        let action = resolve_action(&params)?;
         let manager = background::global();
 
-        match params.action.as_str() {
+        match action.as_str() {
             "list" => {
                 let tasks = filtered_tasks(manager, &ctx, &params, false).await;
                 if tasks.is_empty() {
@@ -540,7 +589,7 @@ impl Tool for BgTool {
                 let task_id = resolve_task_ids(manager, &ctx, &params, "output", false)
                     .await?
                     .remove(0);
-                let tail = if params.action == "tail" {
+                let tail = if action == "tail" {
                     Some(
                         params
                             .tail_lines
@@ -559,7 +608,7 @@ impl Tool for BgTool {
                 let (rendered, truncated) = output_preview(&output, tail);
                 let status = manager.status(&task_id).await;
                 Ok(ToolOutput::new(rendered)
-                    .with_title(format!("bg {} {}", params.action, task_id))
+                    .with_title(format!("bg {} {}", action, task_id))
                     .with_metadata(json!({
                         "task_id": task_id,
                         "task": status.as_ref().map(|task| task_metadata(manager, task)),
@@ -773,7 +822,7 @@ impl Tool for BgTool {
 
             _ => Err(anyhow::anyhow!(
                 "Unknown action: {}. Valid actions: list, status, output, tail, cancel, cleanup, watch, delivery, subscribe, wait",
-                params.action
+                action
             )),
         }
     }
@@ -793,5 +842,30 @@ mod tests {
         assert_eq!(branches[0]["type"], json!("string"));
         assert_eq!(branches[1]["type"], json!("array"));
         assert_eq!(branches[1]["items"]["type"], json!("string"));
+    }
+
+    #[test]
+    fn resolve_action_infers_wait_from_intent_only_call() {
+        let params: BgInput = serde_json::from_value(json!({
+            "intent": "Wait for library tests",
+            "latest": true
+        }))
+        .expect("intent-only bg input should deserialize");
+
+        assert_eq!(resolve_action(&params).expect("action should be inferred"), "wait");
+    }
+
+    #[test]
+    fn resolve_action_reports_clear_error_when_missing_and_not_inferable() {
+        let params: BgInput = serde_json::from_value(json!({
+            "intent": "Background task",
+        }))
+        .expect("intent-only bg input should deserialize");
+
+        let err = resolve_action(&params).expect_err("action should be required");
+        assert!(
+            err.to_string().contains("Missing required bg action"),
+            "err={err:?}"
+        );
     }
 }

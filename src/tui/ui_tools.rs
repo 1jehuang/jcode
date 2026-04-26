@@ -61,6 +61,31 @@ fn parse_nonzero_exit_code_line(line: &str) -> bool {
     false
 }
 
+fn infer_bg_action_from_intent_for_display(intent: Option<&str>) -> Option<&'static str> {
+    let intent = intent?.trim().to_ascii_lowercase();
+    if intent.is_empty() {
+        return None;
+    }
+
+    if intent.contains("wait") || intent.contains("await") {
+        Some("wait")
+    } else if intent.contains("tail") {
+        Some("tail")
+    } else if intent.contains("output") || intent.contains("log") {
+        Some("output")
+    } else if intent.contains("status") || intent.contains("progress") || intent.contains("check") {
+        Some("status")
+    } else if intent.contains("cancel") || intent.contains("stop") {
+        Some("cancel")
+    } else if intent.contains("clean") {
+        Some("cleanup")
+    } else if intent.contains("list") || intent.contains("show") {
+        Some("list")
+    } else {
+        None
+    }
+}
+
 fn normalize_backticked_identifier(text: &str) -> String {
     text.replace('`', "").trim().to_string()
 }
@@ -1508,6 +1533,13 @@ pub(super) fn get_tool_summary_with_budget(
                 .input
                 .get("action")
                 .and_then(|v| v.as_str())
+                .or_else(|| {
+                    infer_bg_action_from_intent_for_display(
+                        tool.intent
+                            .as_deref()
+                            .or_else(|| tool.input.get("intent").and_then(|value| value.as_str())),
+                    )
+                })
                 .unwrap_or("action missing");
             let task_id = tool.input.get("task_id").and_then(|v| v.as_str());
             if let Some(id) = task_id {

@@ -690,6 +690,22 @@ fn test_tool_summary_agentgrep_smart_uses_query_subject_relation() {
 }
 
 #[test]
+fn test_tool_summary_bg_infers_wait_from_intent_when_action_missing() {
+    let tool = ToolCall {
+        id: "bg-intent-only".to_string(),
+        name: "bg".to_string(),
+        input: serde_json::json!({
+            "intent": "Wait for library tests",
+            "latest": true
+        }),
+        intent: Some("Wait for library tests".to_string()),
+    };
+
+    let summary = tools_ui::get_tool_summary_with_budget(&tool, 50, Some(200));
+    assert_eq!(summary, "wait");
+}
+
+#[test]
 fn test_render_tool_message_batch_rows_do_not_soft_wrap_on_narrow_width() {
     let msg = DisplayMessage {
         role: "tool".to_string(),
