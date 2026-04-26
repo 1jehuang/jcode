@@ -53,6 +53,7 @@ use serde::Serialize;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
+#[cfg(not(test))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -163,8 +164,6 @@ static LAST_MAX_SCROLL: AtomicUsize = AtomicUsize::new(0);
 /// Whether the chat viewport used a native scrollbar in the most recent frame.
 #[cfg(not(test))]
 static LAST_CHAT_SCROLLBAR_VISIBLE: AtomicUsize = AtomicUsize::new(0);
-/// Number of recovered panics while rendering the frame.
-static DRAW_PANIC_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// Total line count in the pinned diff/content pane (set during render).
 #[cfg(not(test))]
 static PINNED_PANE_TOTAL_LINES: AtomicUsize = AtomicUsize::new(0);
@@ -2414,12 +2413,15 @@ static LAST_COPY_VIEWPORT: OnceLock<Mutex<CopyViewportSnapshots>> = OnceLock::ne
 mod copy_selection;
 #[path = "ui/display_width.rs"]
 mod display_width;
+#[path = "ui/draw_recovery.rs"]
+mod draw_recovery;
 #[path = "ui/profile.rs"]
 mod profile;
 #[path = "ui/url.rs"]
 mod url_regex_support;
 use self::copy_selection::{copy_selection_text_from_raw_lines, link_target_from_snapshot};
 use self::display_width::{clamp_display_col, display_col_slice, line_display_width};
+use self::draw_recovery::render_recovered_panic_frame;
 use self::profile::{profile_enabled, record_profile};
 
 #[cfg(not(test))]
@@ -2859,42 +2861,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         crate::tui::markdown::with_deferred_mermaid_render_context(|| draw_inner(frame, app))
     })) {
         Ok(()) => {}
-        Err(payload) => {
-            let panic_count = DRAW_PANIC_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-            let msg = panic_payload_to_string(&payload);
-            if panic_count <= 3 || panic_count.is_multiple_of(50) {
-                crate::logging::error(&format!(
-                    "Recovered TUI draw panic #{}: {}",
-                    panic_count, msg
-                ));
-            }
-            let area = frame.area().intersection(*frame.buffer_mut().area());
-            if area.width == 0 || area.height == 0 {
-                return;
-            }
-            clear_area(frame, area);
-            let lines = vec![
-                Line::from(Span::styled(
-                    "rendering error recovered",
-                    Style::default().fg(Color::Red),
-                )),
-                Line::from(Span::styled(
-                    "continuing with a safe fallback frame",
-                    Style::default().fg(dim_color()),
-                )),
-            ];
-            frame.render_widget(Paragraph::new(lines), area);
-        }
-    }
-}
-
-fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "unknown panic payload".to_string()
+        Err(payload) => render_recovered_panic_frame(frame, &payload),
     }
 }
 

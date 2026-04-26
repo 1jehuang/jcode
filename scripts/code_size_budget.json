@@ -47,7 +47,7 @@
     "src/tui/markdown.rs": 1375,
     "src/tui/session_picker.rs": 2236,
     "src/tui/session_picker/loading.rs": 2143,
-    "src/tui/ui.rs": 3643,
+    "src/tui/ui.rs": 3610,
     "src/tui/ui_input.rs": 1626,
     "src/tui/ui_messages.rs": 1541,
     "src/tui/ui_pinned.rs": 1955,
