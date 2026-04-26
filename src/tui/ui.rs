@@ -48,7 +48,6 @@ use super::visual_debug::{
 use super::{DisplayMessage, ProcessingStatus, TuiState, is_unexpected_cache_miss};
 use crate::message::ToolCall;
 use ratatui::{prelude::*, widgets::Paragraph};
-use regex::Regex;
 use serde::Serialize;
 #[cfg(test)]
 use std::cell::{Cell, RefCell};
@@ -2425,18 +2424,13 @@ struct CopyViewportSnapshots {
 
 #[cfg(not(test))]
 static LAST_COPY_VIEWPORT: OnceLock<Mutex<CopyViewportSnapshots>> = OnceLock::new();
-static URL_REGEX: OnceLock<Regex> = OnceLock::new();
+#[path = "ui/url.rs"]
+mod url_regex_support;
+use self::url_regex_support::url_regex;
 
 #[cfg(not(test))]
 fn copy_viewport_state() -> &'static Mutex<CopyViewportSnapshots> {
     LAST_COPY_VIEWPORT.get_or_init(|| Mutex::new(CopyViewportSnapshots::default()))
-}
-
-fn url_regex() -> &'static Regex {
-    URL_REGEX.get_or_init(|| {
-        Regex::new(r#"(?i)(?:https?://|mailto:|file://)[^\s<>'\"]+"#)
-            .expect("URL regex should compile")
-    })
 }
 
 fn copy_snapshot_slot_mut(

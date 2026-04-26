@@ -158,3 +158,9 @@ impl ServerIdentity {
         format!("{} {}", self.icon, self.name)
     }
 }
+
+pub(crate) fn startup_headless_recovery_test_delay() -> Option<std::time::Duration> {
+    let raw = std::env::var("JCODE_TEST_HEADLESS_STARTUP_RECOVERY_DELAY_MS").ok()?;
+    let delay_ms = raw.trim().parse::<u64>().ok()?;
+    (delay_ms > 0).then(|| std::time::Duration::from_millis(delay_ms))
+}

@@ -1,3 +1,4 @@
+use super::hash_display_message;
 use super::*;
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
