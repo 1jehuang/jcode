@@ -3,6 +3,171 @@ use super::*;
 use crate::tui::ui::tools_ui;
 use crate::tui::{TuiState, backend};
 
+/// Markdown printed by `/help-cmds`. Cheat sheet: features, configuration,
+/// multi-window/session workflow. Kept here as a single static string so the
+/// handler stays a one-liner and the doc renders in the chat with markdown.
+const HELP_CMDS_MARKDOWN: &str = r#"# jcode cheat sheet
+
+## Features
+
+- **Single server, many clients.** `jcode serve` runs once; every `jcode`
+  in any terminal is a client. Sessions/state survive disconnects, reloads,
+  and self-dev rebuilds.
+- **Multi-provider.** Claude / OpenAI / Gemini / Copilot / OpenRouter / Cursor /
+  Antigravity / OpenAI-compatible (vLLM, LM Studio, Ollama, Groq, Cerebras…).
+  Switch live with `/account` (account) or `/model` (model).
+- **Memory.** Every turn is embedded; relevant past memories pop in
+  automatically. `/memory` to inspect/manage.
+- **MCP servers.** Pool shared across all sessions. Configure in
+  `~/.jcode/mcp.json`.
+- **Skills.** Loaded on demand via embedding hits or `/<skill-name>`.
+- **Side panel.** Second pane next to chat. Render files, mermaid diagrams,
+  diffs, or have the agent write to it. `/splitview` mirrors chat;
+  ask the agent to load/write files there directly.
+- **Browser.** Built-in tool with Firefox Agent Bridge backend.
+  `jcode browser status` / `jcode browser setup`.
+- **Ambient mode.** Proactive background work (memory consolidation,
+  optional proactive tasks). Off by default.
+- **Swarm.** Multiple agents in the same repo coordinate via file-change
+  notifications + DM/broadcast channels.
+- **Self-dev.** The agent can edit, build, and reload its own binary while
+  you keep working — `/reload`, `/rebuild`, `/selfdev`.
+- **Resume.** `jcode --resume <name>` reattaches by memorable name.
+  Also resumes Claude Code, Codex, OpenCode, and pi sessions.
+- **Dictate.** `jcode dictate` runs whatever STT command you put in
+  `[dictation].command`.
+
+## Configuration — `~/.jcode/config.toml`
+
+```toml
+[provider]
+default_provider = "claude"            # claude | openai | copilot | gemini | openrouter | cursor | antigravity
+default_model    = ""                  # leave empty for provider default
+cross_provider_failover     = "countdown"  # "off" to never prompt to switch providers
+same_provider_account_failover = true       # try other accounts on the same provider first
+
+[features]
+memory   = true
+swarm    = true
+update_channel = "stable"              # "stable" | "main" | "canary"
+
+[display]
+diff_mode      = "inline"              # "inline" | "side"
+centered       = false                 # Alt+C also toggles
+diagram_mode   = "pinned"              # mermaid renders in side panel
+prompt_preview = true
+animation_fps  = 60
+performance    = ""                    # "reduced" if redraws hitch
+
+[display.native_scrollbars]
+chat       = true
+side_panel = true
+
+[ambient]
+enabled = false                        # flip true to enable proactive background work
+allow_api_keys = false                 # ambient defaults to OAuth-only
+
+[gateway]
+enabled  = false                       # iOS / web client gateway. Off unless you want remote.
+port     = 7643
+bind_addr = "0.0.0.0"
+
+[autoreview]
+enabled = false                        # auto end-of-turn code review
+
+[autojudge]
+enabled = false                        # auto end-of-turn correctness judging
+```
+
+**Provider auth** lives separately:
+- Claude: `ANTHROPIC_API_KEY` env var, OR `jcode login --provider claude` for OAuth
+- OpenAI: `OPENAI_API_KEY`, OR `jcode login --provider openai`
+- Others: `jcode login --provider <name>`
+- `jcode auth-test --all-configured` validates everything
+
+**MCP servers** — `~/.jcode/mcp.json`:
+
+```json
+{"servers": {"<name>": {"command": "/path/to/mcp", "args": [], "env": {}, "shared": true}}}
+```
+
+## Multiple terminals / vertical windows
+
+Two layers stacked: your terminal emulator's panes + jcode's own session/split features.
+
+### Windows Terminal (or any modern terminal)
+
+| Action                                | Windows Terminal default       |
+|---------------------------------------|--------------------------------|
+| Vertical split (pane to the right)    | `Alt + Shift + +`              |
+| Horizontal split (pane below)         | `Alt + Shift + -`              |
+| New tab                               | `Ctrl + Shift + T`             |
+| Move focus between panes              | `Alt + ←/→/↑/↓`                |
+| Resize pane                           | `Alt + Shift + ←/→/↑/↓`        |
+| Close pane                            | `Ctrl + Shift + W`             |
+| Zoom focused pane                     | `Ctrl + Shift + Z`             |
+
+In each pane, just type `jcode`. Each one auto-attaches to the same daemon
+as a separate session. They show up in each other's swarm member lists.
+Status bar's `server: 1 client` becomes `server: N clients`.
+
+### Same session in two windows
+
+`jcode connect` in another pane attaches as another client to the most-recently-used
+session — same scrollback, mirrored live. Useful for watching a long turn while
+you do something else.
+
+### jcode's own splits
+
+- **`/split`** — split the *session* into a new window (spawns a new client).
+- **`/splitview`** — mirror the current chat in the side panel.
+- **`/workspace`** — Niri-style session workspace navigation (see `Alt+H/J/K/L`).
+- **Side panel** — ask the agent inside the TUI: *"load README.md into the
+  side panel"* or *"write the test plan to the side panel as you go"*.
+  Mermaid blocks in chat auto-render there.
+
+### Practical recipe
+
+```
+1. Open Windows Terminal.
+2. Alt+Shift++   →  vertical split.
+3. Left pane:    jcode                     (main session)
+4. Right pane:   jcode                     (peer session — they see each other)
+5. (optional) Alt+Shift+-                  for a 3rd horizontal pane and run
+                 jcode connect             (mirror most-recent session)
+              OR jcode --resume <name>     (jump into a specific session)
+6. Inside any TUI:  "write the plan to the side panel"
+   Mermaid + diffs render there in real time.
+```
+
+## Status-bar legend
+
+```
+(oauth:copilot)  claude-sonnet-4-6  · /model to switch  ← active provider/model
+· anthropic(key)                                         ← other available providers
+- Updates  · windows: fix auto-spawn timeout ...         ← latest commit on active channel
+mcp: ida-pro-mcp ( ... ), codefire ( ... )               ← connected MCP servers
+skills: 26 loaded                                        ← active skills count
+server: 1 client                                         ← clients connected to your daemon
+```
+
+## Slash command quick reference
+
+`/help` (overlay) · `/help-cmds` (this card) · `/help <topic>` (per-command help)
+· `/model` `/account` `/login` `/auth` `/usage`
+· `/memory` `/skills` `/swarm` `/agents` `/subagent`
+· `/split` `/splitview` `/workspace` `/observe` `/todos` `/btw` `/git`
+· `/reload` `/restart` `/rebuild` `/selfdev` `/update`
+· `/resume` `/sessions` `/save` `/unsave` `/catchup` `/back` `/transfer`
+· `/version` `/changelog` `/info` `/context` `/feedback`
+· `/clear` `/rewind` `/poke` `/improve` `/refactor` `/compact` `/fix`
+· `/effort` `/fast` `/transport` `/cache` `/alignment` `/dictate`
+· `/autoreview` `/autojudge` `/review` `/judge`
+· `/config` `/quit`
+
+Type `/` in the composer to autocomplete; `/help <name>` for details on any one.
+"#;
+
 pub(super) struct RestoredReloadInput {
     pub input: String,
     pub cursor: usize,
@@ -785,6 +950,18 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             tool_calls: vec![],
             duration_secs: None,
             title: None,
+            tool_data: None,
+        });
+        return true;
+    }
+
+    if trimmed == "/help-cmds" {
+        app.push_display_message(DisplayMessage {
+            role: "system".to_string(),
+            content: HELP_CMDS_MARKDOWN.to_string(),
+            tool_calls: vec![],
+            duration_secs: None,
+            title: Some("/help-cmds".to_string()),
             tool_data: None,
         });
         return true;

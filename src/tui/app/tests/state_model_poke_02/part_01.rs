@@ -444,6 +444,49 @@ fn test_top_level_command_suggestions_include_config_and_subscription() {
 }
 
 #[test]
+fn test_help_cmds_command_is_registered_and_runs() {
+    let mut app = create_test_app();
+
+    // Autocomplete: typing `/help-` should suggest `/help-cmds`.
+    let suggestions = app.get_suggestions_for("/help-");
+    assert!(
+        suggestions.iter().any(|(cmd, _)| cmd == "/help-cmds"),
+        "expected /help-cmds in autocomplete suggestions, got: {:?}",
+        suggestions
+            .iter()
+            .map(|(c, _)| c.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // Handler: invoking it pushes a system message containing the cheat
+    // sheet markdown (we sniff for distinctive headings rather than the
+    // full body so the test stays robust to wording tweaks).
+    let messages_before = app.display_messages.len();
+    let handled = crate::tui::app::state_ui::handle_info_command(&mut app, "/help-cmds");
+    assert!(handled, "/help-cmds handler should claim the input");
+    assert_eq!(
+        app.display_messages.len(),
+        messages_before + 1,
+        "/help-cmds should push exactly one display message"
+    );
+    let pushed = app.display_messages.last().expect("pushed message");
+    assert_eq!(pushed.role, "system");
+    assert_eq!(pushed.title.as_deref(), Some("/help-cmds"));
+    assert!(
+        pushed.content.contains("# jcode cheat sheet"),
+        "expected cheat-sheet header in message body"
+    );
+    assert!(
+        pushed.content.contains("Multiple terminals / vertical windows"),
+        "expected multi-window section in message body"
+    );
+    assert!(
+        pushed.content.contains("`~/.jcode/config.toml`"),
+        "expected config path in message body"
+    );
+}
+
+#[test]
 fn test_top_level_command_suggestions_include_catchup_and_back() {
     let app = create_test_app();
 
