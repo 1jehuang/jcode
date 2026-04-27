@@ -30,6 +30,12 @@ const STATUS_PREVIEW_HEIGHT: f32 = 14.0;
 const STATUS_PREVIEW_PANEL_WIDTH: f32 = 9.0;
 const STATUS_PREVIEW_PANEL_GAP: f32 = 2.0;
 const STATUS_PREVIEW_GROUP_GAP: f32 = 10.0;
+const STATUS_PREVIEW_SIDE_RESERVE: f32 = 74.0;
+const WORKSPACE_NUMBER_LEFT_PADDING: f32 = 14.0;
+const WORKSPACE_NUMBER_DIGIT_WIDTH: f32 = 8.0;
+const WORKSPACE_NUMBER_DIGIT_HEIGHT: f32 = 14.0;
+const WORKSPACE_NUMBER_DIGIT_GAP: f32 = 4.0;
+const WORKSPACE_NUMBER_STROKE: f32 = 2.0;
 const VIEWPORT_ANIMATION_DURATION: Duration = Duration::from_millis(150);
 const VIEWPORT_ANIMATION_EPSILON: f32 = 0.5;
 
@@ -50,11 +56,19 @@ const UNFOCUSED_BORDER_COLOR: [f32; 4] = [0.235, 0.260, 0.305, 0.40];
 const NAV_STATUS_COLOR: [f32; 4] = [0.184, 0.204, 0.251, 1.0];
 const INSERT_STATUS_COLOR: [f32; 4] = [0.310, 0.435, 0.376, 1.0];
 const STATUS_PREVIEW_ACTIVE_GROUP_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.16];
-const STATUS_PREVIEW_INACTIVE_SURFACE_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.28];
-const STATUS_PREVIEW_ACTIVE_SURFACE_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.58];
-const STATUS_PREVIEW_FOCUSED_SURFACE_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.92];
 const STATUS_PREVIEW_EMPTY_FOCUSED_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.50];
 const STATUS_PREVIEW_VIEWPORT_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.78];
+const WORKSPACE_NUMBER_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.76];
+const STATUS_PREVIEW_ACCENTS: [[f32; 3]; 8] = [
+    [0.560, 0.690, 0.980],
+    [0.780, 0.610, 0.910],
+    [0.520, 0.760, 0.620],
+    [0.900, 0.650, 0.450],
+    [0.600, 0.780, 0.840],
+    [0.880, 0.580, 0.690],
+    [0.720, 0.740, 0.820],
+    [0.810, 0.760, 0.520],
+];
 
 const SHADER: &str = r#"
 struct VertexOutput {
@@ -548,6 +562,7 @@ fn build_vertices(
 
     let active_workspace = workspace.current_workspace();
     let visible_layout = render_layout.visible;
+    push_workspace_number(&mut vertices, active_workspace, status_rect, size);
     push_status_preview(
         &mut vertices,
         workspace,
@@ -671,6 +686,137 @@ fn inferred_visible_column_count(
     ((window_width as f32 / target_panel_width + PANEL_FIT_TOLERANCE).floor() as u32).clamp(1, 4)
 }
 
+fn push_workspace_number(
+    vertices: &mut Vec<Vertex>,
+    active_workspace: i32,
+    status_rect: Rect,
+    size: PhysicalSize<u32>,
+) {
+    let label = active_workspace.to_string();
+    let digit_count = label.chars().count() as f32;
+    let total_width = digit_count * WORKSPACE_NUMBER_DIGIT_WIDTH
+        + (digit_count - 1.0).max(0.0) * WORKSPACE_NUMBER_DIGIT_GAP;
+    let mut x = status_rect.x + WORKSPACE_NUMBER_LEFT_PADDING;
+    let y = status_rect.y + (status_rect.height - WORKSPACE_NUMBER_DIGIT_HEIGHT) / 2.0;
+    if x + total_width > status_rect.x + status_rect.width {
+        return;
+    }
+
+    for ch in label.chars() {
+        match ch {
+            '-' => push_workspace_minus(vertices, x, y, size),
+            digit if digit.is_ascii_digit() => {
+                let digit = digit.to_digit(10).unwrap_or_default() as usize;
+                push_workspace_digit(vertices, digit, x, y, size);
+            }
+            _ => {}
+        }
+        x += WORKSPACE_NUMBER_DIGIT_WIDTH + WORKSPACE_NUMBER_DIGIT_GAP;
+    }
+}
+
+fn push_workspace_minus(vertices: &mut Vec<Vertex>, x: f32, y: f32, size: PhysicalSize<u32>) {
+    let thickness = WORKSPACE_NUMBER_STROKE;
+    push_rounded_rect(
+        vertices,
+        Rect {
+            x,
+            y: y + WORKSPACE_NUMBER_DIGIT_HEIGHT / 2.0 - thickness / 2.0,
+            width: WORKSPACE_NUMBER_DIGIT_WIDTH,
+            height: thickness,
+        },
+        thickness / 2.0,
+        WORKSPACE_NUMBER_COLOR,
+        size,
+    );
+}
+
+fn push_workspace_digit(
+    vertices: &mut Vec<Vertex>,
+    digit: usize,
+    x: f32,
+    y: f32,
+    size: PhysicalSize<u32>,
+) {
+    const DIGIT_SEGMENTS: [[bool; 7]; 10] = [
+        [true, true, true, true, true, true, false],
+        [false, true, true, false, false, false, false],
+        [true, true, false, true, true, false, true],
+        [true, true, true, true, false, false, true],
+        [false, true, true, false, false, true, true],
+        [true, false, true, true, false, true, true],
+        [true, false, true, true, true, true, true],
+        [true, true, true, false, false, false, false],
+        [true, true, true, true, true, true, true],
+        [true, true, true, true, false, true, true],
+    ];
+    let segments = DIGIT_SEGMENTS[digit % DIGIT_SEGMENTS.len()];
+    for rect in workspace_digit_segment_rects(x, y)
+        .into_iter()
+        .zip(segments)
+        .filter_map(|(rect, enabled)| enabled.then_some(rect))
+    {
+        push_rounded_rect(
+            vertices,
+            rect,
+            WORKSPACE_NUMBER_STROKE / 2.0,
+            WORKSPACE_NUMBER_COLOR,
+            size,
+        );
+    }
+}
+
+fn workspace_digit_segment_rects(x: f32, y: f32) -> [Rect; 7] {
+    let w = WORKSPACE_NUMBER_DIGIT_WIDTH;
+    let h = WORKSPACE_NUMBER_DIGIT_HEIGHT;
+    let t = WORKSPACE_NUMBER_STROKE;
+    let vertical_height = (h - t * 3.0) / 2.0;
+    [
+        Rect {
+            x,
+            y,
+            width: w,
+            height: t,
+        },
+        Rect {
+            x: x + w - t,
+            y,
+            width: t,
+            height: vertical_height + t,
+        },
+        Rect {
+            x: x + w - t,
+            y: y + h / 2.0,
+            width: t,
+            height: vertical_height + t,
+        },
+        Rect {
+            x,
+            y: y + h - t,
+            width: w,
+            height: t,
+        },
+        Rect {
+            x,
+            y: y + h / 2.0,
+            width: t,
+            height: vertical_height + t,
+        },
+        Rect {
+            x,
+            y,
+            width: t,
+            height: vertical_height + t,
+        },
+        Rect {
+            x,
+            y: y + h / 2.0 - t / 2.0,
+            width: w,
+            height: t,
+        },
+    ]
+}
+
 fn push_status_preview(
     vertices: &mut Vec<Vertex>,
     workspace: &Workspace,
@@ -692,7 +838,11 @@ fn push_status_preview(
 
     let full_width = lanes.iter().map(StatusPreviewLane::width).sum::<f32>()
         + STATUS_PREVIEW_GROUP_GAP * lanes.len().saturating_sub(1) as f32;
-    let max_width = STATUS_PREVIEW_MAX_WIDTH.min((status_rect.width - 24.0).max(1.0));
+    let preview_area = inset_rect(
+        status_rect,
+        STATUS_PREVIEW_SIDE_RESERVE.min(status_rect.width / 4.0),
+    );
+    let max_width = STATUS_PREVIEW_MAX_WIDTH.min((preview_area.width - 24.0).max(1.0));
     if max_width < 24.0 {
         return;
     }
@@ -707,7 +857,7 @@ fn push_status_preview(
         + group_gap * lanes.len().saturating_sub(1) as f32;
     let strip_height = STATUS_PREVIEW_HEIGHT.min((status_rect.height - 8.0).max(1.0));
     let strip_y = status_rect.y + (status_rect.height - strip_height) / 2.0;
-    let mut cursor_x = status_rect.x + (status_rect.width - scaled_width) / 2.0;
+    let mut cursor_x = preview_area.x + (preview_area.width - scaled_width) / 2.0;
 
     for lane in lanes {
         let lane_width = lane.scaled_width(panel_width, panel_gap);
@@ -753,13 +903,7 @@ fn push_status_preview(
             let column_offset = (surface.column - lane.min_column) as f32;
             let surface_x = cursor_x + column_offset * (panel_width + panel_gap);
             let focused = workspace.is_focused(surface.id);
-            let color = if focused {
-                STATUS_PREVIEW_FOCUSED_SURFACE_COLOR
-            } else if lane.is_active {
-                STATUS_PREVIEW_ACTIVE_SURFACE_COLOR
-            } else {
-                STATUS_PREVIEW_INACTIVE_SURFACE_COLOR
-            };
+            let color = status_preview_surface_color(surface.color_index, focused, lane.is_active);
             let tick_width = if focused {
                 panel_width
             } else {
@@ -802,6 +946,18 @@ fn push_status_preview(
 
         cursor_x += lane_width + group_gap;
     }
+}
+
+fn status_preview_surface_color(color_index: usize, focused: bool, active_lane: bool) -> [f32; 4] {
+    let accent = STATUS_PREVIEW_ACCENTS[color_index % STATUS_PREVIEW_ACCENTS.len()];
+    let alpha = if focused {
+        0.94
+    } else if active_lane {
+        0.72
+    } else {
+        0.34
+    };
+    [accent[0], accent[1], accent[2], alpha]
 }
 
 #[derive(Clone, Copy)]
