@@ -1,6 +1,7 @@
 {
-  "total": 1102,
+  "total": 1104,
   "tracked_files": {
+    "crates/jcode-mobile-core/src/lib.rs": 3,
     "crates/jcode-provider-openrouter/src/lib.rs": 3,
     "crates/jcode-tui-workspace/src/color_support.rs": 1,
     "crates/jcode-tui-workspace/src/workspace_map.rs": 4,
@@ -58,7 +59,7 @@
     "src/server/debug_command_exec.rs": 4,
     "src/server/debug_testers.rs": 7,
     "src/server/provider_control.rs": 9,
-    "src/server/reload.rs": 23,
+    "src/server/reload.rs": 22,
     "src/server/reload_state.rs": 5,
     "src/server/swarm.rs": 5,
     "src/server/swarm_mutation_state.rs": 11,

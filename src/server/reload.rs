@@ -406,6 +406,18 @@ mod tests {
     use std::time::Instant;
     use tokio::sync::{RwLock, broadcast, mpsc, watch};
 
+    fn set_member_status(
+        members: &mut HashMap<String, SwarmMember>,
+        session_id: &str,
+        status: &str,
+    ) {
+        if let Some(member) = members.get_mut(session_id) {
+            member.status = status.to_string();
+        } else {
+            assert!(false, "missing test member {session_id}");
+        }
+    }
+
     fn member(session_id: &str, status: &str) -> SwarmMember {
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
         SwarmMember {
@@ -543,8 +555,8 @@ mod tests {
             tokio::task::yield_now().await;
             {
                 let mut members = swarm_members_for_task.write().await;
-                members.get_mut("initiator").expect("initiator").status = "ready".to_string();
-                members.get_mut("peer").expect("peer").status = "ready".to_string();
+                set_member_status(&mut members, "initiator", "ready");
+                set_member_status(&mut members, "peer", "ready");
             }
             let _ = swarm_event_tx_for_task.send(SwarmEvent {
                 id: 1,
@@ -613,7 +625,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             {
                 let mut members = swarm_members_for_task.write().await;
-                members.get_mut("peer").expect("peer").status = "ready".to_string();
+                set_member_status(&mut members, "peer", "ready");
             }
             let _ = swarm_event_tx_for_task.send(SwarmEvent {
                 id: 1,
@@ -763,7 +775,7 @@ mod tests {
 
         {
             let mut members = swarm_members.write().await;
-            members.get_mut("target").expect("target").status = "ready".to_string();
+            set_member_status(&mut members, "target", "ready");
         }
         let _ = swarm_event_tx.send(SwarmEvent {
             id: 1,
@@ -816,7 +828,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         {
             let mut members = swarm_members.write().await;
-            members.get_mut("other").expect("other").status = "ready".to_string();
+            set_member_status(&mut members, "other", "ready");
         }
         let _ = swarm_event_tx.send(SwarmEvent {
             id: 1,
@@ -840,7 +852,7 @@ mod tests {
 
         {
             let mut members = swarm_members.write().await;
-            members.get_mut("target").expect("target").status = "stopped".to_string();
+            set_member_status(&mut members, "target", "stopped");
         }
         let _ = swarm_event_tx.send(SwarmEvent {
             id: 2,

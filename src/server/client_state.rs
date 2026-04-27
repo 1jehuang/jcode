@@ -970,8 +970,9 @@ mod tests {
             "test store intent",
         )?;
 
-        let snapshot = super::history_reload_recovery_snapshot(session_id, None)
-            .expect("server-owned recovery intent should be used");
+        let Some(snapshot) = super::history_reload_recovery_snapshot(session_id, None) else {
+            anyhow::bail!("server-owned recovery intent should be used");
+        };
         assert_eq!(snapshot.continuation_message, "stored continuation");
 
         assert!(
