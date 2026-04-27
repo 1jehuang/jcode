@@ -66,6 +66,7 @@ pub enum KeyInput {
     Escape,
     Enter,
     Backspace,
+    SubmitDraft,
     SpawnPanel,
     HotkeyHelp,
     RefreshSessions,
@@ -78,8 +79,16 @@ pub enum KeyInput {
 pub enum KeyOutcome {
     None,
     Redraw,
-    OpenSession { session_id: String, title: String },
+    OpenSession {
+        session_id: String,
+        title: String,
+    },
     SpawnSession,
+    SendDraft {
+        session_id: String,
+        title: String,
+        message: String,
+    },
     Exit,
 }
 
@@ -281,7 +290,7 @@ impl Workspace {
             ),
             InputMode::Insert => {
                 format!(
-                    "Jcode Desktop · {mode}{zoom} · workspace {workspace} · {focused} · typing captured · Esc NAV"
+                    "Jcode Desktop · {mode}{zoom} · workspace {workspace} · {focused} · Ctrl+Enter send · Enter newline · Esc NAV"
                 )
             }
         }
@@ -383,6 +392,7 @@ impl Workspace {
                 self.panel_size = size;
                 return KeyOutcome::Redraw;
             }
+            KeyInput::SubmitDraft => return KeyOutcome::None,
             _ => {}
         }
 
@@ -454,6 +464,7 @@ impl Workspace {
                 self.panel_size = size;
                 KeyOutcome::Redraw
             }
+            KeyInput::SubmitDraft => self.submit_draft(),
             KeyInput::Escape => {
                 self.mode = InputMode::Navigation;
                 KeyOutcome::Redraw
@@ -471,6 +482,24 @@ impl Workspace {
                 KeyOutcome::Redraw
             }
             KeyInput::Other => KeyOutcome::None,
+        }
+    }
+
+    fn submit_draft(&mut self) -> KeyOutcome {
+        let message = self.draft.trim().to_string();
+        if message.is_empty() {
+            return KeyOutcome::None;
+        }
+        let Some((session_id, title)) = self.focused_session_target() else {
+            return KeyOutcome::None;
+        };
+
+        self.draft.clear();
+        self.mode = InputMode::Navigation;
+        KeyOutcome::SendDraft {
+            session_id,
+            title,
+            message,
         }
     }
 
@@ -696,6 +725,7 @@ impl Workspace {
             InputMode::Insert => vec![
                 "INSERT mode".to_string(),
                 "type appends draft text".to_string(),
+                "ctrl enter send draft".to_string(),
                 "enter newline".to_string(),
                 "backspace delete char".to_string(),
                 "esc nav mode".to_string(),
@@ -1092,6 +1122,37 @@ mod tests {
             KeyOutcome::Redraw
         );
         assert_eq!(placeholder_workspace.mode, InputMode::Insert);
+    }
+
+    #[test]
+    fn ctrl_enter_submits_insert_draft_to_focused_session() {
+        let mut workspace = Workspace::from_session_cards(vec![session_card("a", "alpha")]);
+        workspace.handle_key(KeyInput::Character("i".to_string()));
+        workspace.handle_key(KeyInput::Character(" hello ".to_string()));
+
+        assert_eq!(
+            workspace.handle_key(KeyInput::SubmitDraft),
+            KeyOutcome::SendDraft {
+                session_id: "a".to_string(),
+                title: "alpha".to_string(),
+                message: "hello".to_string()
+            }
+        );
+        assert_eq!(workspace.mode, InputMode::Navigation);
+        assert!(workspace.draft.is_empty());
+    }
+
+    #[test]
+    fn empty_or_placeholder_draft_does_not_submit() {
+        let mut workspace = Workspace::fake();
+        workspace.handle_key(KeyInput::Character("i".to_string()));
+        workspace.handle_key(KeyInput::Character("hello".to_string()));
+
+        assert_eq!(
+            workspace.handle_key(KeyInput::SubmitDraft),
+            KeyOutcome::None
+        );
+        assert_eq!(workspace.draft, "hello");
     }
 
     #[test]

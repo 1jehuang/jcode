@@ -194,6 +194,27 @@ async fn run() -> Result<()> {
                                 window.request_redraw();
                             }
                         }
+                        KeyOutcome::SendDraft {
+                            session_id,
+                            title,
+                            message,
+                        } => {
+                            if let Err(error) = session_launch::send_message_to_session(
+                                &session_id,
+                                &title,
+                                &message,
+                            ) {
+                                eprintln!(
+                                    "jcode-desktop: failed to send draft to {session_id}: {error:#}"
+                                );
+                            } else {
+                                std::thread::sleep(SESSION_SPAWN_REFRESH_DELAY);
+                                workspace.replace_session_cards(load_session_cards_for_desktop());
+                                save_desktop_preferences(&workspace);
+                                window.set_title(&workspace.status_title());
+                                window.request_redraw();
+                            }
+                        }
                         KeyOutcome::None => {}
                     }
                 }
@@ -259,6 +280,7 @@ fn save_desktop_preferences(workspace: &Workspace) {
 fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
     match key {
         Key::Named(NamedKey::Escape) => KeyInput::Escape,
+        Key::Named(NamedKey::Enter) if modifiers.control_key() => KeyInput::SubmitDraft,
         Key::Named(NamedKey::Enter) => KeyInput::Enter,
         Key::Named(NamedKey::Backspace) => KeyInput::Backspace,
         Key::Character(text) if modifiers.control_key() && text == ";" => KeyInput::SpawnPanel,
@@ -730,6 +752,7 @@ fn build_vertices(
                 focus_pulse,
                 size,
             );
+            let draft = focused_panel_draft(workspace, surface.id);
             push_panel_contents(
                 &mut vertices,
                 surface,
@@ -737,6 +760,7 @@ fn build_vertices(
                 size,
                 true,
                 workspace.detail_scroll,
+                draft.as_deref(),
             );
         }
         return vertices;
@@ -771,7 +795,16 @@ fn build_vertices(
             surface_pulse,
             size,
         );
-        push_panel_contents(&mut vertices, surface, rect, size, false, 0);
+        let draft = focused_panel_draft(workspace, surface.id);
+        push_panel_contents(
+            &mut vertices,
+            surface,
+            rect,
+            size,
+            false,
+            0,
+            draft.as_deref(),
+        );
     }
 
     vertices
@@ -905,6 +938,7 @@ fn push_panel_contents(
     size: PhysicalSize<u32>,
     expanded: bool,
     scroll_lines: usize,
+    draft: Option<&str>,
 ) {
     push_panel_title(vertices, surface.title.as_str(), rect, size);
 
@@ -940,6 +974,41 @@ fn push_panel_contents(
             );
             y += line_height;
         }
+    }
+
+    if let Some(draft) = draft {
+        let mut draft_y = (rect.y + rect.height - PANEL_BODY_TOP_PADDING).max(y + line_height);
+        let draft_text = normalize_bitmap_text(&format!("draft {draft}"));
+        for visual_line in wrap_bitmap_text(&draft_text, BITMAP_TEXT_PIXEL, max_width)
+            .into_iter()
+            .take(2)
+        {
+            if draft_y + bitmap_text_height(BITMAP_TEXT_PIXEL) > max_y {
+                break;
+            }
+            push_bitmap_text(
+                vertices,
+                &visual_line,
+                rect.x + PANEL_TITLE_LEFT_PADDING,
+                draft_y,
+                BITMAP_TEXT_PIXEL,
+                PANEL_SECTION_COLOR,
+                size,
+                max_width,
+            );
+            draft_y += line_height;
+        }
+    }
+}
+
+fn focused_panel_draft(workspace: &Workspace, surface_id: u64) -> Option<String> {
+    if workspace.mode == InputMode::Insert
+        && workspace.is_focused(surface_id)
+        && !workspace.draft.trim().is_empty()
+    {
+        Some(workspace.draft.trim().to_string())
+    } else {
+        None
     }
 }
 
@@ -2019,6 +2088,29 @@ mod tests {
         assert_eq!(
             wrap_bitmap_text("ABCDEFGHI", 1.0, bitmap_char_advance(1.0) * 4.0),
             vec!["ABCD", "EFGH", "I"]
+        );
+    }
+
+    #[test]
+    fn focused_panel_draft_only_shows_for_focused_insert_panel() {
+        let mut workspace = Workspace::from_session_cards(vec![workspace::SessionCard {
+            session_id: "a".to_string(),
+            title: "alpha".to_string(),
+            subtitle: "active".to_string(),
+            detail: "1 msg".to_string(),
+            preview_lines: Vec::new(),
+            detail_lines: Vec::new(),
+        }]);
+        workspace.handle_key(KeyInput::Character("i".to_string()));
+        workspace.handle_key(KeyInput::Character("draft text".to_string()));
+
+        assert_eq!(
+            focused_panel_draft(&workspace, workspace.focused_id),
+            Some("draft text".to_string())
+        );
+        assert_eq!(
+            focused_panel_draft(&workspace, workspace.focused_id + 1),
+            None
         );
     }
 }

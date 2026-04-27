@@ -13,6 +13,26 @@ pub fn launch_new_session() -> Result<()> {
     launch_first_available_terminal(candidates, "jcode")
 }
 
+pub fn send_message_to_session(session_id: &str, _title: &str, message: &str) -> Result<()> {
+    validate_resume_session_id(session_id).context("refusing to send to invalid session id")?;
+    if message.trim().is_empty() {
+        anyhow::bail!("empty draft message");
+    }
+
+    Command::new(jcode_bin())
+        .arg("--resume")
+        .arg(session_id)
+        .arg("run")
+        .arg(message)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to spawn jcode run for {session_id}"))?;
+
+    Ok(())
+}
+
 fn launch_first_available_terminal(candidates: Vec<Command>, description: &str) -> Result<()> {
     let mut failures = Vec::new();
 
