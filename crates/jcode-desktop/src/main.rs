@@ -14,7 +14,7 @@ use winit::event::{ElementState, Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Fullscreen, Window, WindowBuilder};
-use workspace::{DesktopLayoutMode, InputMode, KeyInput, KeyOutcome, PanelSizePreset, Workspace};
+use workspace::{InputMode, KeyInput, KeyOutcome, PanelSizePreset, Workspace};
 
 use std::time::{Duration, Instant};
 
@@ -303,12 +303,6 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         }
         Key::Character(text) if modifiers.control_key() && text == "4" => {
             KeyInput::SetPanelSize(PanelSizePreset::Full)
-        }
-        Key::Character(text) if modifiers.control_key() && text == "0" => {
-            KeyInput::SetLayoutMode(DesktopLayoutMode::SinglePanel)
-        }
-        Key::Character(text) if modifiers.control_key() && text == "9" => {
-            KeyInput::SetLayoutMode(DesktopLayoutMode::WorkspaceGrid)
         }
         Key::Character(text) => KeyInput::Character(text.to_string()),
         _ => KeyInput::Other,
@@ -713,36 +707,6 @@ fn build_vertices(
         size,
     );
 
-    if workspace.layout_mode() == DesktopLayoutMode::SinglePanel {
-        if let Some(surface) = workspace.focused_surface() {
-            let rect = Rect {
-                x: 0.0,
-                y: 0.0,
-                width: width.max(1.0),
-                height: height.max(1.0),
-            };
-            push_surface(
-                &mut vertices,
-                rect,
-                surface.color_index,
-                true,
-                focus_pulse,
-                size,
-            );
-            let draft = focused_panel_draft(workspace, surface.id);
-            push_panel_contents(
-                &mut vertices,
-                surface,
-                rect,
-                size,
-                true,
-                workspace.detail_scroll,
-                draft.as_deref(),
-            );
-        }
-        return vertices;
-    }
-
     let status_color = match workspace.mode {
         InputMode::Navigation => NAV_STATUS_COLOR,
         InputMode::Insert => INSERT_STATUS_COLOR,
@@ -857,20 +821,6 @@ fn workspace_render_layout(
     let workspace_height = (size.height as f32 - STATUS_BAR_HEIGHT - OUTER_PADDING * 3.0).max(1.0);
     let lane_pitch = workspace_height + GAP;
     let active_workspace = workspace.current_workspace();
-    if workspace.layout_mode() == DesktopLayoutMode::SinglePanel {
-        return WorkspaceRenderLayout {
-            visible: VisibleColumnLayout {
-                visible_columns: 1,
-                first_visible_column: workspace
-                    .focused_surface()
-                    .map(|surface| surface.column)
-                    .unwrap_or_default(),
-            },
-            column_width: workspace_width,
-            scroll_offset: 0.0,
-            vertical_scroll_offset: active_workspace as f32 * lane_pitch,
-        };
-    }
     let visible = visible_column_layout(
         workspace,
         size.width,

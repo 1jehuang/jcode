@@ -1,4 +1,4 @@
-use crate::workspace::{DesktopLayoutMode, DesktopPreferences, PanelSizePreset};
+use crate::workspace::{DesktopPreferences, PanelSizePreset};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::fs;
@@ -20,11 +20,6 @@ pub fn load_preferences() -> Result<Option<DesktopPreferences>> {
             .and_then(Value::as_str)
             .and_then(PanelSizePreset::from_storage_key)
             .unwrap_or(PanelSizePreset::Quarter),
-        layout_mode: value
-            .get("layout_mode")
-            .and_then(Value::as_str)
-            .and_then(DesktopLayoutMode::from_storage_key)
-            .unwrap_or(DesktopLayoutMode::SinglePanel),
         focused_session_id: value
             .get("focused_session_id")
             .and_then(Value::as_str)
@@ -46,7 +41,6 @@ pub fn save_preferences(preferences: &DesktopPreferences) -> Result<()> {
 
     let value = json!({
         "panel_size": preferences.panel_size.storage_key(),
-        "layout_mode": preferences.layout_mode.storage_key(),
         "focused_session_id": preferences.focused_session_id,
         "workspace_lane": preferences.workspace_lane,
     });
@@ -97,7 +91,6 @@ mod tests {
 
         let preferences = DesktopPreferences {
             panel_size: PanelSizePreset::Half,
-            layout_mode: DesktopLayoutMode::WorkspaceGrid,
             focused_session_id: Some("session_cow".to_string()),
             workspace_lane: 2,
         };

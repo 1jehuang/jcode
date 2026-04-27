@@ -229,43 +229,6 @@ fn panel_size_presets_update_preferred_screen_fraction() {
 }
 
 #[test]
-fn single_panel_mode_is_default_and_can_switch_to_grid() {
-    let mut workspace = Workspace::fake();
-
-    assert_eq!(workspace.layout_mode(), DesktopLayoutMode::SinglePanel);
-    assert_eq!(
-        workspace.handle_key(KeyInput::SetLayoutMode(DesktopLayoutMode::WorkspaceGrid)),
-        KeyOutcome::Redraw
-    );
-    assert_eq!(workspace.layout_mode(), DesktopLayoutMode::WorkspaceGrid);
-    assert_eq!(
-        workspace.handle_key(KeyInput::SetLayoutMode(DesktopLayoutMode::SinglePanel)),
-        KeyOutcome::Redraw
-    );
-    assert_eq!(workspace.layout_mode(), DesktopLayoutMode::SinglePanel);
-}
-
-#[test]
-fn layout_mode_is_preserved_in_preferences_and_refresh() {
-    let mut workspace = Workspace::from_session_cards(vec![session_card("a", "alpha")]);
-    workspace.handle_key(KeyInput::SetLayoutMode(DesktopLayoutMode::WorkspaceGrid));
-
-    let preferences = workspace.preferences();
-    assert_eq!(preferences.layout_mode, DesktopLayoutMode::WorkspaceGrid);
-
-    workspace.replace_session_cards(vec![session_card("b", "bravo")]);
-    assert_eq!(workspace.layout_mode(), DesktopLayoutMode::WorkspaceGrid);
-
-    workspace.apply_preferences(DesktopPreferences {
-        panel_size: PanelSizePreset::Quarter,
-        layout_mode: DesktopLayoutMode::SinglePanel,
-        focused_session_id: None,
-        workspace_lane: 0,
-    });
-    assert_eq!(workspace.layout_mode(), DesktopLayoutMode::SinglePanel);
-}
-
-#[test]
 fn session_cards_create_real_session_surfaces() {
     let workspace = Workspace::from_session_cards(vec![session_card("a", "alpha")]);
 

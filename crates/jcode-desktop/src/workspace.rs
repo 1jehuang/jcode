@@ -22,36 +22,6 @@ pub enum PanelSizePreset {
     Full,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DesktopLayoutMode {
-    SinglePanel,
-    WorkspaceGrid,
-}
-
-impl DesktopLayoutMode {
-    pub fn storage_key(self) -> &'static str {
-        match self {
-            Self::SinglePanel => "single_panel",
-            Self::WorkspaceGrid => "workspace_grid",
-        }
-    }
-
-    pub fn from_storage_key(raw: &str) -> Option<Self> {
-        match raw {
-            "single_panel" | "single" | "single-panel" => Some(Self::SinglePanel),
-            "workspace_grid" | "grid" | "workspace" | "workspace-grid" => Some(Self::WorkspaceGrid),
-            _ => None,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::SinglePanel => "single",
-            Self::WorkspaceGrid => "grid",
-        }
-    }
-}
-
 impl PanelSizePreset {
     pub fn screen_fraction(self) -> f32 {
         match self {
@@ -101,7 +71,6 @@ pub enum KeyInput {
     HotkeyHelp,
     RefreshSessions,
     SetPanelSize(PanelSizePreset),
-    SetLayoutMode(DesktopLayoutMode),
     Character(String),
     Other,
 }
@@ -136,7 +105,6 @@ pub struct SessionCard {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DesktopPreferences {
     pub panel_size: PanelSizePreset,
-    pub layout_mode: DesktopLayoutMode,
     pub focused_session_id: Option<String>,
     pub workspace_lane: i32,
 }
@@ -209,7 +177,6 @@ pub struct Workspace {
     pub detail_scroll: usize,
     pub draft: String,
     panel_size: PanelSizePreset,
-    layout_mode: DesktopLayoutMode,
     next_id: u64,
 }
 
@@ -234,7 +201,6 @@ impl Workspace {
             detail_scroll: 0,
             draft: String::new(),
             panel_size: PanelSizePreset::Quarter,
-            layout_mode: DesktopLayoutMode::SinglePanel,
             next_id: 8,
         }
     }
@@ -263,7 +229,6 @@ impl Workspace {
             detail_scroll: 0,
             draft: String::new(),
             panel_size: PanelSizePreset::Quarter,
-            layout_mode: DesktopLayoutMode::SinglePanel,
             next_id,
         }
     }
@@ -289,13 +254,8 @@ impl Workspace {
             detail_scroll: 0,
             draft: String::new(),
             panel_size: PanelSizePreset::Quarter,
-            layout_mode: DesktopLayoutMode::SinglePanel,
             next_id: 2,
         }
-    }
-
-    pub fn layout_mode(&self) -> DesktopLayoutMode {
-        self.layout_mode
     }
 
     pub fn preferred_panel_screen_fraction(&self) -> f32 {
@@ -320,17 +280,13 @@ impl Workspace {
             .unwrap_or("no surface");
         let workspace = self.current_workspace();
         let panel_size = self.panel_size.label();
-        let layout = self.layout_mode.label();
 
         match self.mode {
             InputMode::Navigation if self.zoomed => format!(
-                "Jcode Desktop · {mode}{zoom} · {layout} · workspace {workspace} · panel {panel_size} · {focused} · j/k scroll · g/G top/bottom · z unzoom · o/Enter open · Esc quit"
-            ),
-            InputMode::Navigation if self.layout_mode == DesktopLayoutMode::SinglePanel => format!(
-                "Jcode Desktop · {mode} · single panel · {focused} · h/l sessions · Ctrl+9 grid · Ctrl+R refresh · Ctrl+; new · i insert · Esc quit"
+                "Jcode Desktop · {mode}{zoom} · workspace {workspace} · panel {panel_size} · {focused} · j/k scroll · g/G top/bottom · z unzoom · o/Enter open · Esc quit"
             ),
             InputMode::Navigation => format!(
-                "Jcode Desktop · {mode}{zoom} · {layout} · workspace {workspace} · panel {panel_size} · {focused} · h/l columns · j/k workspaces · Ctrl+0 single · Ctrl+1-4 panel size · Ctrl+R refresh · Ctrl+; new · Ctrl+? help · z zoom · i insert · Esc quit"
+                "Jcode Desktop · {mode}{zoom} · workspace {workspace} · panel {panel_size} · {focused} · h/l columns · j/k workspaces · Ctrl+1-4 panel size · Ctrl+R refresh · Ctrl+; new · Ctrl+? help · z zoom · i insert · Esc quit"
             ),
             InputMode::Insert => {
                 format!(
@@ -350,7 +306,6 @@ impl Workspace {
     pub fn replace_session_cards(&mut self, cards: Vec<SessionCard>) {
         let previous_mode = self.mode;
         let previous_panel_size = self.panel_size;
-        let previous_layout_mode = self.layout_mode;
         let previous_session_id = self
             .focused_surface()
             .and_then(|surface| surface.session_id.clone());
@@ -358,7 +313,6 @@ impl Workspace {
         let mut replacement = Self::from_session_cards(cards);
         replacement.mode = previous_mode;
         replacement.panel_size = previous_panel_size;
-        replacement.layout_mode = previous_layout_mode;
         replacement.detail_scroll = self.detail_scroll;
         if let Some(previous_session_id) = previous_session_id
             && let Some(surface) = replacement
@@ -376,7 +330,6 @@ impl Workspace {
     pub fn preferences(&self) -> DesktopPreferences {
         DesktopPreferences {
             panel_size: self.panel_size,
-            layout_mode: self.layout_mode,
             focused_session_id: self
                 .focused_surface()
                 .and_then(|surface| surface.session_id.clone()),
@@ -386,7 +339,6 @@ impl Workspace {
 
     pub fn apply_preferences(&mut self, preferences: DesktopPreferences) {
         self.panel_size = preferences.panel_size;
-        self.layout_mode = preferences.layout_mode;
 
         if let Some(focused_session_id) = preferences.focused_session_id
             && let Some(surface) = self
@@ -438,11 +390,6 @@ impl Workspace {
             KeyInput::RefreshSessions => return KeyOutcome::Redraw,
             KeyInput::SetPanelSize(size) => {
                 self.panel_size = size;
-                return KeyOutcome::Redraw;
-            }
-            KeyInput::SetLayoutMode(mode) => {
-                self.layout_mode = mode;
-                self.zoomed = false;
                 return KeyOutcome::Redraw;
             }
             KeyInput::SubmitDraft => return KeyOutcome::None,
@@ -515,11 +462,6 @@ impl Workspace {
             KeyInput::RefreshSessions => KeyOutcome::Redraw,
             KeyInput::SetPanelSize(size) => {
                 self.panel_size = size;
-                KeyOutcome::Redraw
-            }
-            KeyInput::SetLayoutMode(mode) => {
-                self.layout_mode = mode;
-                self.zoomed = false;
                 KeyOutcome::Redraw
             }
             KeyInput::SubmitDraft => self.submit_draft(),
