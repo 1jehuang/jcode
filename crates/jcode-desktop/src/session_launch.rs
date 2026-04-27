@@ -141,10 +141,17 @@ fn run_server_session(
     let mut reader = BufReader::new(stream);
     let mut next_request_id = 1_u64;
 
-    subscribe_to_server(&mut writer, next_request_id, target_session_id)?;
+    let subscribe_request_id = next_request_id;
+    subscribe_to_server(&mut writer, subscribe_request_id, target_session_id)?;
     next_request_id += 1;
 
-    let session_id = read_session_id(&mut reader, SERVER_START_TIMEOUT, event_tx.as_ref())?;
+    let session_id = establish_session_id(
+        &mut reader,
+        &mut writer,
+        &mut next_request_id,
+        subscribe_request_id,
+        event_tx.as_ref(),
+    )?;
     send_desktop_event(
         &event_tx,
         DesktopSessionEvent::SessionStarted {
@@ -153,11 +160,12 @@ fn run_server_session(
     );
 
     send_desktop_status(&event_tx, "sending message");
+    let message_request_id = next_request_id;
     write_json_line(
         &mut writer,
         json!({
             "type": "message",
-            "id": next_request_id,
+            "id": message_request_id,
             "content": message,
             "images": [],
         }),
@@ -172,6 +180,7 @@ fn run_server_session(
             &mut next_request_id,
             event_tx.as_ref(),
             &command_rx,
+            message_request_id,
         )? {
             DrainOutcome::Terminal => break,
             DrainOutcome::Disconnected => {
@@ -190,9 +199,16 @@ fn run_server_session(
             .try_clone()
             .context("failed to clone reconnected server socket writer")?;
         reader = BufReader::new(stream);
-        subscribe_to_server(&mut writer, next_request_id, Some(&session_id))?;
+        let subscribe_request_id = next_request_id;
+        subscribe_to_server(&mut writer, subscribe_request_id, Some(&session_id))?;
         next_request_id += 1;
-        let _ = read_session_id(&mut reader, SERVER_START_TIMEOUT, event_tx.as_ref())?;
+        let _ = establish_session_id(
+            &mut reader,
+            &mut writer,
+            &mut next_request_id,
+            subscribe_request_id,
+            event_tx.as_ref(),
+        )?;
     }
     Ok(session_id)
 }
@@ -271,11 +287,41 @@ fn subscribe_to_server(
 }
 
 #[cfg(unix)]
-fn read_session_id(
+fn establish_session_id(
+    reader: &mut BufReader<UnixStream>,
+    writer: &mut UnixStream,
+    next_request_id: &mut u64,
+    subscribe_request_id: u64,
+    event_tx: Option<&DesktopSessionEventSender>,
+) -> Result<String> {
+    if let Some(session_id) = read_session_id_from_events(
+        reader,
+        SERVER_START_TIMEOUT,
+        event_tx,
+        Some(subscribe_request_id),
+    )? {
+        return Ok(session_id);
+    }
+
+    let state_request_id = *next_request_id;
+    write_json_line(
+        writer,
+        json!({
+            "type": "state",
+            "id": state_request_id,
+        }),
+    )?;
+    *next_request_id += 1;
+    read_session_id_from_state(reader, SERVER_START_TIMEOUT, event_tx, state_request_id)
+}
+
+#[cfg(unix)]
+fn read_session_id_from_events(
     reader: &mut BufReader<UnixStream>,
     timeout: Duration,
     event_tx: Option<&DesktopSessionEventSender>,
-) -> Result<String> {
+    complete_request_id: Option<u64>,
+) -> Result<Option<String>> {
     reader
         .get_ref()
         .set_read_timeout(Some(SERVER_CONNECT_RETRY_DELAY))
@@ -293,10 +339,12 @@ fn read_session_id(
                     let Some(session_id) = value.get("session_id").and_then(Value::as_str) else {
                         anyhow::bail!("jcode server sent malformed session event");
                     };
-                    return Ok(session_id.to_string());
+                    return Ok(Some(session_id.to_string()));
                 }
                 if let Some(event) = desktop_event_from_server_value(&value) {
-                    send_desktop_event_ref(event_tx, event);
+                    if !matches!(event, DesktopSessionEvent::Done) {
+                        send_desktop_event_ref(event_tx, event);
+                    }
                 }
                 if value.get("type").and_then(Value::as_str) == Some("error") {
                     let message = value
@@ -304,6 +352,12 @@ fn read_session_id(
                         .and_then(Value::as_str)
                         .unwrap_or("unknown server error");
                     anyhow::bail!("jcode server rejected fresh session: {message}");
+                }
+                if value.get("type").and_then(Value::as_str) == Some("done")
+                    && complete_request_id
+                        .is_some_and(|id| value.get("id").and_then(Value::as_u64) == Some(id))
+                {
+                    return Ok(None);
                 }
             }
             Err(error)
@@ -316,6 +370,61 @@ fn read_session_id(
     }
 
     anyhow::bail!("timed out waiting for jcode server session id")
+}
+
+#[cfg(unix)]
+fn read_session_id_from_state(
+    reader: &mut BufReader<UnixStream>,
+    timeout: Duration,
+    event_tx: Option<&DesktopSessionEventSender>,
+    state_request_id: u64,
+) -> Result<String> {
+    reader
+        .get_ref()
+        .set_read_timeout(Some(SERVER_CONNECT_RETRY_DELAY))
+        .context("failed to configure server socket timeout")?;
+    let started = Instant::now();
+    let mut line = String::new();
+    while started.elapsed() < timeout {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => anyhow::bail!("jcode server disconnected before returning state"),
+            Ok(_) => {
+                let value: Value = serde_json::from_str(line.trim())
+                    .context("failed to parse jcode server event")?;
+                if value.get("type").and_then(Value::as_str) == Some("state")
+                    && value.get("id").and_then(Value::as_u64) == Some(state_request_id)
+                {
+                    let Some(session_id) = value.get("session_id").and_then(Value::as_str) else {
+                        anyhow::bail!("jcode server sent malformed state event");
+                    };
+                    return Ok(session_id.to_string());
+                }
+                if let Some(event) = desktop_event_from_server_value(&value) {
+                    if !matches!(event, DesktopSessionEvent::Done) {
+                        send_desktop_event_ref(event_tx, event);
+                    }
+                }
+                if value.get("type").and_then(Value::as_str) == Some("error")
+                    && value.get("id").and_then(Value::as_u64) == Some(state_request_id)
+                {
+                    let message = value
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown server error");
+                    anyhow::bail!("jcode server rejected state request: {message}");
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => return Err(error).context("failed to read jcode server event"),
+        }
+    }
+
+    anyhow::bail!("timed out waiting for jcode server state")
 }
 
 #[cfg(unix)]
@@ -341,6 +450,7 @@ fn drain_session_events(
     next_request_id: &mut u64,
     event_tx: Option<&DesktopSessionEventSender>,
     command_rx: &Receiver<DesktopSessionCommand>,
+    terminal_request_id: u64,
 ) -> Result<DrainOutcome> {
     reader
         .get_ref()
@@ -376,10 +486,16 @@ fn drain_session_events(
                         );
                         return Ok(DrainOutcome::Reloading { new_socket });
                     }
-                    let is_terminal = matches!(
-                        value.get("type").and_then(Value::as_str),
-                        Some("done" | "error")
-                    );
+                    let is_terminal = match value.get("type").and_then(Value::as_str) {
+                        Some("done") => {
+                            value.get("id").and_then(Value::as_u64) == Some(terminal_request_id)
+                        }
+                        Some("error") => value
+                            .get("id")
+                            .and_then(Value::as_u64)
+                            .is_none_or(|id| id == terminal_request_id),
+                        _ => false,
+                    };
                     if let Some(event) = desktop_event_from_server_value(&value) {
                         send_desktop_event_ref(event_tx, event);
                     }
@@ -711,8 +827,9 @@ mod tests {
         assert_eq!(result?, "session_desktop_fake");
         let requests = server.join().unwrap()?;
         assert_eq!(requests[0]["type"], "subscribe");
-        assert_eq!(requests[1]["type"], "message");
-        assert_eq!(requests[1]["content"], "hello desktop");
+        assert_eq!(requests[1]["type"], "state");
+        assert_eq!(requests[2]["type"], "message");
+        assert_eq!(requests[2]["content"], "hello desktop");
         let events = event_rx.try_iter().collect::<Vec<_>>();
         assert!(events.contains(&DesktopSessionEvent::SessionStarted {
             session_id: "session_desktop_fake".to_string()
@@ -728,9 +845,19 @@ mod tests {
     fn fake_desktop_server_roundtrip(listener: UnixListener) -> Result<Vec<Value>> {
         let (mut reader, mut writer, subscribe) = accept_first_requesting_client(&listener)?;
         write_json_line(&mut writer, json!({"type": "ack", "id": subscribe["id"]}))?;
+        write_json_line(&mut writer, json!({"type": "mcp_status", "servers": []}))?;
+        write_json_line(&mut writer, json!({"type": "done", "id": subscribe["id"]}))?;
+
+        let state = read_fake_server_request(&mut reader)?;
         write_json_line(
             &mut writer,
-            json!({"type": "session", "session_id": "session_desktop_fake"}),
+            json!({
+                "type": "state",
+                "id": state["id"],
+                "session_id": "session_desktop_fake",
+                "message_count": 0,
+                "is_processing": false,
+            }),
         )?;
 
         let message = read_fake_server_request(&mut reader)?;
@@ -740,7 +867,7 @@ mod tests {
             json!({"type": "text_delta", "text": "fake assistant response"}),
         )?;
         write_json_line(&mut writer, json!({"type": "done", "id": message["id"]}))?;
-        Ok(vec![subscribe, message])
+        Ok(vec![subscribe, state, message])
     }
 
     #[cfg(unix)]
