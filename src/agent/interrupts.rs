@@ -345,7 +345,7 @@ impl Agent {
             flush_group(self, &mut injected, source, &mut current_parts);
         }
 
-        let _ = self.session.save();
+        self.persist_session_best_effort("soft interrupt injection");
         injected
     }
 

@@ -127,7 +127,7 @@ impl Agent {
         let preserve_working_dir = self.session.working_dir.clone();
 
         self.session.mark_closed();
-        let _ = self.session.save();
+        self.persist_session_best_effort("pre-clear session close state");
 
         let mut new_session = Session::create(None, None);
         new_session.mark_active();
@@ -147,7 +147,7 @@ impl Agent {
     pub fn reset_provider_session(&mut self) {
         self.provider_session_id = None;
         self.session.provider_session_id = None;
-        let _ = self.session.save();
+        self.persist_session_best_effort("provider session reset");
     }
 
     /// Unlock the tool list so the next API request picks up any new tools.

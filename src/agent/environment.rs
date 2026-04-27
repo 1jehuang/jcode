@@ -40,7 +40,7 @@ impl Agent {
         let snapshot = self.build_env_snapshot(reason, self.env_snapshot_detail());
         self.session.record_env_snapshot(snapshot.clone());
         if !self.session.messages.is_empty() {
-            let _ = self.session.save();
+            self.persist_session_best_effort("environment snapshot");
         }
         if let Ok(json) = serde_json::to_string(&snapshot) {
             logging::info(&format!("ENV_SNAPSHOT {}", json));

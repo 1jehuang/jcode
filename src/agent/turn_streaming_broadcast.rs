@@ -679,7 +679,7 @@ impl Agent {
                             }],
                         );
                     }
-                    let _ = self.session.save();
+                    self.persist_session_best_effort("streamed tool output");
                     break; // Skip remaining tools
                 }
                 let tc = &tool_calls[tool_index];

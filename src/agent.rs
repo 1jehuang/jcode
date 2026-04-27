@@ -295,6 +295,15 @@ impl Agent {
         }
     }
 
+    fn persist_session_best_effort(&mut self, context: &str) {
+        if let Err(err) = self.session.save() {
+            logging::warn(&format!(
+                "Failed to persist {} for session {}: {}",
+                context, self.session.id, err
+            ));
+        }
+    }
+
     fn reset_runtime_state_for_session_change(&mut self) {
         self.active_skill = None;
         self.last_upstream_provider = None;
@@ -566,7 +575,7 @@ impl Agent {
         self.tool_output_scan_index = self.session.messages.len();
 
         if repaired > 0 {
-            let _ = self.session.save();
+            self.persist_session_best_effort("missing tool-output repair");
             self.cache_tracker.reset();
             self.locked_tools = None;
         }
@@ -594,7 +603,7 @@ impl Agent {
         self.persist_soft_interrupt_snapshot();
         self.session.mark_closed();
         if !self.session.messages.is_empty() {
-            let _ = self.session.save();
+            self.persist_session_best_effort("session close state");
         }
     }
 
@@ -607,7 +616,7 @@ impl Agent {
         self.persist_soft_interrupt_snapshot();
         self.session.mark_crashed(message);
         if !self.session.messages.is_empty() {
-            let _ = self.session.save();
+            self.persist_session_best_effort("session crash state");
         }
     }
 
