@@ -1,7 +1,17 @@
 /target
-Cargo.lock
 __pycache__/
 ios_simulator_screenshot.png
 /.wrangler/
 /tmp/
 /.jcode/generated-images/
+
+# Editor / OS metadata
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local-only crash dumps and rejected merges
+*.orig
+*.rej

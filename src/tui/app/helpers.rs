@@ -566,19 +566,12 @@ fn sh_escape(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\"'\"'"))
 }
 
+#[cfg(unix)]
 fn shell_command(args: &[String]) -> String {
-    #[cfg(unix)]
-    {
-        args.iter()
-            .map(|arg| sh_escape(arg))
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-
-    #[cfg(not(unix))]
-    {
-        args.join(" ")
-    }
+    args.iter()
+        .map(|arg| sh_escape(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn push_unique_terminal(candidates: &mut Vec<String>, term: impl Into<String>) {
@@ -650,6 +643,7 @@ fn detected_resume_terminal() -> Option<&'static str> {
     }
 }
 
+#[cfg(unix)]
 fn resume_terminal_candidates_unix() -> Vec<String> {
     let mut candidates = Vec::new();
     if let Ok(term) = std::env::var("JCODE_TERMINAL") {
