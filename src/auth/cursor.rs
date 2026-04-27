@@ -310,13 +310,13 @@ pub fn cursor_auth_file_path() -> Result<PathBuf> {
             .map(PathBuf::from)
             .or_else(|| crate::storage::user_home_path("AppData/Roaming").ok())
             .ok_or_else(|| anyhow::anyhow!("No APPDATA directory found"))?;
-        return Ok(appdata.join("Cursor").join("auth.json"));
+        Ok(appdata.join("Cursor").join("auth.json"))
     }
 
     #[cfg(target_os = "macos")]
     {
-        return crate::storage::user_home_path(".cursor/auth.json")
-            .context("No home directory found for Cursor auth.json");
+        crate::storage::user_home_path(".cursor/auth.json")
+            .context("No home directory found for Cursor auth.json")
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]

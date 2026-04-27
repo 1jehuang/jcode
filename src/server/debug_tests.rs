@@ -103,6 +103,7 @@ mod transcript_routing_tests {
     use crate::protocol::ServerEvent;
     use crate::server::SwarmMember;
     use std::collections::HashMap;
+    #[cfg(target_os = "linux")]
     use std::ffi::OsString;
     use std::sync::Arc;
     use std::time::Instant;
@@ -147,11 +148,13 @@ mod transcript_routing_tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     struct EnvVarGuard {
         key: &'static str,
         previous: Option<OsString>,
     }
 
+    #[cfg(target_os = "linux")]
     impl EnvVarGuard {
         fn set<K: AsRef<std::ffi::OsStr>>(key: &'static str, value: K) -> Self {
             let previous = std::env::var_os(key);
@@ -160,6 +163,7 @@ mod transcript_routing_tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
             if let Some(previous) = &self.previous {

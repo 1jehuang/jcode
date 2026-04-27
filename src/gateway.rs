@@ -275,7 +275,7 @@ pub struct GatewayClient {
 }
 
 /// Handle a single incoming TCP connection: upgrade to WebSocket, auth, bridge.
-#[expect(
+#[allow(
     clippy::result_large_err,
     reason = "WebSocket handshake callback must return Tungstenite ErrorResponse directly"
 )]

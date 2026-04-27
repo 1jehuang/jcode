@@ -478,6 +478,10 @@ fn write_file_atomically(path: &PathBuf, bytes: &[u8], executable: bool) -> Resu
         let mode = if executable { 0o755 } else { 0o644 };
         std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(mode))?;
     }
+    #[cfg(not(unix))]
+    {
+        let _ = executable;
+    }
 
     std::fs::rename(&tmp_path, path)?;
     Ok(())

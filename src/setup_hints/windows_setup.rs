@@ -275,7 +275,7 @@ fn nudge_hotkey(state: &mut SetupHintsState) -> bool {
 
     match choice.as_str() {
         "y" | "yes" => {
-            eprint!("\n");
+            eprintln!();
             match create_hotkey_shortcut(using_alacritty) {
                 Ok(()) => {
                     state.hotkey_configured = true;
@@ -343,7 +343,7 @@ fn nudge_alacritty(state: &mut SetupHintsState) -> bool {
 
     match choice.as_str() {
         "y" | "yes" => {
-            eprint!("\n");
+            eprintln!();
             if !is_winget_available() {
                 eprintln!("  \x1b[33m⚠\x1b[0m  winget not found. Install Alacritty manually:");
                 eprintln!("     https://alacritty.org/");
@@ -424,7 +424,7 @@ pub(super) fn maybe_show_windows_setup_hints(
     state: &mut SetupHintsState,
     startup_hints: Option<StartupHints>,
 ) -> Option<StartupHints> {
-    if state.launch_count % 3 != 0 {
+    if !state.launch_count.is_multiple_of(3) {
         return startup_hints;
     }
 

@@ -15,6 +15,7 @@ pub(crate) use jcode::server;
 pub(crate) use jcode::session::{Session, StoredCompactionState};
 pub(crate) use jcode::tool::Registry;
 pub(crate) use std::ffi::OsString;
+#[cfg(unix)]
 pub(crate) use std::io::Read;
 pub(crate) use std::net::TcpListener as StdTcpListener;
 #[cfg(unix)]
@@ -112,11 +113,13 @@ pub(crate) fn setup_test_env() -> Result<TestEnvGuard> {
     TestEnvGuard::new()
 }
 
+#[cfg(unix)]
 pub(crate) struct EnvVarGuard {
     name: &'static str,
     prev: Option<OsString>,
 }
 
+#[cfg(unix)]
 impl EnvVarGuard {
     pub(crate) fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let prev = std::env::var_os(name);
@@ -125,6 +128,7 @@ impl EnvVarGuard {
     }
 }
 
+#[cfg(unix)]
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         if let Some(prev) = &self.prev {
@@ -655,6 +659,7 @@ pub(crate) async fn run_websocket_transport_scenario() -> Result<TransportScenar
     result
 }
 
+#[cfg(unix)]
 pub(crate) async fn wait_for_default_connected_client_session(
     debug_socket_path: &std::path::Path,
 ) -> Result<String> {
@@ -961,6 +966,7 @@ pub(crate) fn abort_server_and_cleanup<T>(
     let _ = std::fs::remove_file(debug_socket_path);
 }
 
+#[cfg(unix)]
 pub(crate) async fn wait_for_connected_client_session(
     debug_socket_path: &std::path::Path,
     timeout: Duration,

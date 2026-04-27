@@ -687,14 +687,13 @@ pub(crate) async fn spawn_server(
         cmd.spawn()?;
         let start = std::time::Instant::now();
         while start.elapsed() < std::time::Duration::from_millis(500) {
-            if crate::transport::is_socket_path(&server::socket_path()) {
-                if crate::transport::Stream::connect(server::socket_path())
+            if crate::transport::is_socket_path(&server::socket_path())
+                && crate::transport::Stream::connect(server::socket_path())
                     .await
                     .is_ok()
-                {
-                    startup_profile::mark("server_ready");
-                    break;
-                }
+            {
+                startup_profile::mark("server_ready");
+                break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }

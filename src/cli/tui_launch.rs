@@ -93,6 +93,7 @@ pub(crate) fn resumed_window_title(session_id: &str) -> String {
     }
 }
 
+#[cfg(unix)]
 fn applescript_escape(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -102,19 +103,12 @@ fn sh_escape(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\"'\"'"))
 }
 
+#[cfg(unix)]
 fn shell_command(args: &[String]) -> String {
-    #[cfg(unix)]
-    {
-        args.iter()
-            .map(|arg| sh_escape(arg))
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-
-    #[cfg(not(unix))]
-    {
-        args.join(" ")
-    }
+    args.iter()
+        .map(|arg| sh_escape(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -137,7 +131,7 @@ fn focus_title_best_effort(title: &str) {
     let _ = crate::platform::spawn_detached(&mut cmd);
 }
 
-#[cfg(any(not(unix), target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn focus_title_best_effort(_title: &str) {}
 
 fn push_unique_terminal(candidates: &mut Vec<String>, term: impl Into<String>) {
@@ -937,21 +931,20 @@ fn find_wezterm_gui_binary() -> Option<String> {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()
+            && output.status.success()
         {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Some(line) = stdout.lines().next() {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        if *bin == "wezterm" {
-                            let p = std::path::Path::new(trimmed);
-                            let gui = p.with_file_name("wezterm-gui.exe");
-                            if gui.exists() {
-                                return Some(gui.to_string_lossy().into_owned());
-                            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(line) = stdout.lines().next() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    if *bin == "wezterm" {
+                        let p = std::path::Path::new(trimmed);
+                        let gui = p.with_file_name("wezterm-gui.exe");
+                        if gui.exists() {
+                            return Some(gui.to_string_lossy().into_owned());
                         }
-                        return Some(trimmed.to_string());
                     }
+                    return Some(trimmed.to_string());
                 }
             }
         }
@@ -1271,6 +1264,7 @@ pub fn list_sessions() -> Result<()> {
                 "konsole" | "xterm" | "foot" => {
                     cmd.args(["-e"]).arg(&program).args(&args);
                 }
+                #[cfg(target_os = "macos")]
                 "iterm2" => {
                     cmd = Command::new("osascript");
                     cmd.args([
@@ -1287,6 +1281,7 @@ pub fn list_sessions() -> Result<()> {
                         ),
                     ]);
                 }
+                #[cfg(target_os = "macos")]
                 "terminal" => {
                     cmd = Command::new("open");
                     cmd.args([
