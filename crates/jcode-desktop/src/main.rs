@@ -52,6 +52,21 @@ const FOCUS_PULSE_DURATION: Duration = Duration::from_millis(180);
 const VIEWPORT_ANIMATION_EPSILON: f32 = 0.5;
 const SESSION_SPAWN_REFRESH_DELAY: Duration = Duration::from_millis(350);
 
+const SINGLE_SESSION_FONT_FAMILY: &str = "JetBrainsMono Nerd Font";
+const SINGLE_SESSION_FONT_WEIGHT: &str = "Light";
+const SINGLE_SESSION_FONT_FALLBACKS: &[&str] = &[
+    "JetBrainsMono Nerd Font Mono",
+    "JetBrains Mono",
+    "monospace",
+];
+const SINGLE_SESSION_TITLE_FONT_SIZE: f32 = 18.0;
+const SINGLE_SESSION_BODY_FONT_SIZE: f32 = 15.0;
+const SINGLE_SESSION_META_FONT_SIZE: f32 = 12.0;
+const SINGLE_SESSION_CODE_FONT_SIZE: f32 = 14.0;
+const SINGLE_SESSION_BODY_LINE_HEIGHT: f32 = 1.45;
+const SINGLE_SESSION_CODE_LINE_HEIGHT: f32 = 1.35;
+const SINGLE_SESSION_META_LINE_HEIGHT: f32 = 1.25;
+
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
     r: 0.955,
     g: 0.965,
@@ -1378,6 +1393,18 @@ mod tests {
             wrap_bitmap_text("ABCDEFGHI", 1.0, bitmap_char_advance(1.0) * 4.0),
             vec!["ABCD", "EFGH", "I"]
         );
+    }
+
+    #[test]
+    fn single_session_typography_targets_jetbrains_mono_light_nerd() {
+        assert_eq!(SINGLE_SESSION_FONT_FAMILY, "JetBrainsMono Nerd Font");
+        assert_eq!(SINGLE_SESSION_FONT_WEIGHT, "Light");
+        assert!(SINGLE_SESSION_FONT_FALLBACKS.contains(&"monospace"));
+        assert!(SINGLE_SESSION_TITLE_FONT_SIZE > SINGLE_SESSION_BODY_FONT_SIZE);
+        assert!(SINGLE_SESSION_BODY_FONT_SIZE > SINGLE_SESSION_META_FONT_SIZE);
+        assert!(SINGLE_SESSION_CODE_FONT_SIZE <= SINGLE_SESSION_BODY_FONT_SIZE);
+        assert!(SINGLE_SESSION_BODY_LINE_HEIGHT > SINGLE_SESSION_CODE_LINE_HEIGHT);
+        assert!(SINGLE_SESSION_CODE_LINE_HEIGHT > SINGLE_SESSION_META_LINE_HEIGHT);
     }
 
     #[test]
