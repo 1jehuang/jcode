@@ -706,15 +706,6 @@ impl App {
             // Clean up old socket
             let _ = std::fs::remove_file(&socket_path);
 
-            #[cfg(windows)]
-            let mut listener = match Listener::bind(&socket_path) {
-                Ok(l) => l,
-                Err(e) => {
-                    crate::logging::error(&format!("Failed to bind debug socket: {}", e));
-                    return;
-                }
-            };
-            #[cfg(not(windows))]
             let listener = match Listener::bind(&socket_path) {
                 Ok(l) => l,
                 Err(e) => {
