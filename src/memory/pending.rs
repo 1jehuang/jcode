@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Mutex;
 
 type LastInjectedMemorySetBySession = HashMap<String, (HashSet<String>, Instant)>;
 

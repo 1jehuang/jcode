@@ -29,7 +29,7 @@ pub(crate) async fn auth_test_choice_plan(
         return Ok(AuthTestChoicePlan::Run { model: None });
     };
     let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
-    if resolved.requires_api_key || resolved.default_model.is_some() {
+    if resolved.default_model.is_some() {
         return Ok(AuthTestChoicePlan::Run { model: None });
     }
 

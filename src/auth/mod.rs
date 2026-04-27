@@ -3,6 +3,7 @@ pub mod antigravity;
 pub mod azure;
 pub mod claude;
 pub mod codex;
+mod commands;
 pub mod copilot;
 pub mod cursor;
 pub mod doctor;
@@ -13,15 +14,27 @@ pub mod login_diagnostics;
 pub mod login_flows;
 pub mod oauth;
 pub mod refresh_state;
+mod status_types;
 pub mod validation;
+
+pub(crate) use commands::{command_available_from_env, command_exists};
+#[cfg(test)]
+pub(crate) use commands::{
+    command_candidates, contains_path_separator, dedup_preserve_order, has_extension,
+    is_wsl2_windows_path,
+};
+
+pub use status_types::{
+    AuthCredentialSource, AuthExpiryConfidence, AuthRefreshSupport, AuthState, AuthStatus,
+    AuthValidationMethod, ProviderAuth, ProviderAuthAssessment,
+};
 
 use crate::provider_catalog::LoginProviderAuthStateKey;
 use crate::provider_catalog::LoginProviderDescriptor;
 use crate::provider_catalog::openrouter_like_api_key_sources;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{Mutex, RwLock};
 use std::time::Instant;
 
 static AUTH_STATUS_CACHE: std::sync::LazyLock<RwLock<Option<(AuthStatus, Instant)>>> =
@@ -54,205 +67,6 @@ fn env_truthy(key: &str) -> bool {
 
 fn auth_timing_logging_enabled() -> bool {
     env_truthy("JCODE_AUTH_TIMING")
-}
-
-/// Authentication status for all supported providers
-#[derive(Debug, Clone, Default)]
-pub struct AuthStatus {
-    /// Jcode subscription router credentials
-    pub jcode: AuthState,
-    /// Anthropic provider (Claude models) - via OAuth or API key
-    pub anthropic: ProviderAuth,
-    /// OpenRouter provider - via API key
-    pub openrouter: AuthState,
-    /// Azure OpenAI provider - via Entra ID or API key
-    pub azure: AuthState,
-    /// OpenAI provider - via OAuth or API key
-    pub openai: AuthState,
-    /// OpenAI has OAuth credentials
-    pub openai_has_oauth: bool,
-    /// OpenAI has API key available
-    pub openai_has_api_key: bool,
-    /// Azure OpenAI has API key available
-    pub azure_has_api_key: bool,
-    /// Azure OpenAI is configured for Entra ID authentication
-    pub azure_uses_entra: bool,
-    /// Copilot API available (GitHub OAuth token found)
-    pub copilot: AuthState,
-    /// Copilot has API token (from hosts.json/apps.json/GITHUB_TOKEN)
-    pub copilot_has_api_token: bool,
-    /// Antigravity OAuth configured
-    pub antigravity: AuthState,
-    /// Gemini CLI available
-    pub gemini: AuthState,
-    /// Cursor provider configured via Cursor Agent plus API key or CLI session
-    pub cursor: AuthState,
-    /// Google/Gmail OAuth configured
-    pub google: AuthState,
-    /// Google Gmail has send capability (Full tier)
-    pub google_can_send: bool,
-}
-
-/// Auth state for Anthropic which has multiple auth methods
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ProviderAuth {
-    /// Overall state (best of available methods)
-    pub state: AuthState,
-    /// Has OAuth credentials
-    pub has_oauth: bool,
-    /// Has API key
-    pub has_api_key: bool,
-}
-
-/// State of a single auth credential
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AuthState {
-    /// Credential is available and valid
-    Available,
-    /// Partial configuration exists (or OAuth may be expired)
-    Expired,
-    /// Credential is not configured
-    #[default]
-    NotConfigured,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthCredentialSource {
-    #[default]
-    None,
-    EnvironmentVariable,
-    AppConfigFile,
-    JcodeManagedFile,
-    TrustedExternalFile,
-    TrustedExternalAppState,
-    LocalCliSession,
-    AzureDefaultCredential,
-    Mixed,
-}
-
-impl AuthCredentialSource {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::EnvironmentVariable => "environment variable",
-            Self::AppConfigFile => "app config file",
-            Self::JcodeManagedFile => "jcode-managed file",
-            Self::TrustedExternalFile => "trusted external file",
-            Self::TrustedExternalAppState => "trusted external app state",
-            Self::LocalCliSession => "local CLI session",
-            Self::AzureDefaultCredential => "Azure DefaultAzureCredential",
-            Self::Mixed => "mixed",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthExpiryConfidence {
-    #[default]
-    Unknown,
-    Exact,
-    PresenceOnly,
-    ConfigurationOnly,
-    NotApplicable,
-}
-
-impl AuthExpiryConfidence {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Unknown => "unknown",
-            Self::Exact => "exact timestamp",
-            Self::PresenceOnly => "presence only",
-            Self::ConfigurationOnly => "configuration only",
-            Self::NotApplicable => "not applicable",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthRefreshSupport {
-    #[default]
-    Unknown,
-    Automatic,
-    Conditional,
-    ManualRelogin,
-    ExternalManaged,
-    NotApplicable,
-}
-
-impl AuthRefreshSupport {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Unknown => "unknown",
-            Self::Automatic => "automatic",
-            Self::Conditional => "conditional",
-            Self::ManualRelogin => "manual re-login",
-            Self::ExternalManaged => "external/manual",
-            Self::NotApplicable => "not applicable",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthValidationMethod {
-    #[default]
-    Unknown,
-    PresenceCheck,
-    TimestampCheck,
-    ConfigurationCheck,
-    TrustedImportScan,
-    CommandProbe,
-    CompositeProbe,
-}
-
-impl AuthValidationMethod {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Unknown => "unknown",
-            Self::PresenceCheck => "presence check",
-            Self::TimestampCheck => "timestamp check",
-            Self::ConfigurationCheck => "configuration check",
-            Self::TrustedImportScan => "trusted import scan",
-            Self::CommandProbe => "command probe",
-            Self::CompositeProbe => "composite probe",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ProviderAuthAssessment {
-    pub state: AuthState,
-    pub method_detail: String,
-    pub credential_source: AuthCredentialSource,
-    pub credential_source_detail: String,
-    pub expiry_confidence: AuthExpiryConfidence,
-    pub refresh_support: AuthRefreshSupport,
-    pub validation_method: AuthValidationMethod,
-    pub last_validation: Option<crate::auth::validation::ProviderValidationRecord>,
-    pub last_refresh: Option<crate::auth::refresh_state::ProviderRefreshRecord>,
-}
-
-impl ProviderAuthAssessment {
-    pub fn health_summary(&self) -> String {
-        let mut parts = vec![
-            format!("source: {}", self.credential_source_detail),
-            format!("expiry: {}", self.expiry_confidence.label()),
-            format!("refresh: {}", self.refresh_support.label()),
-            format!("probe: {}", self.validation_method.label()),
-        ];
-
-        if let Some(record) = self.last_refresh.as_ref() {
-            parts.push(format!(
-                "last refresh: {}",
-                crate::auth::refresh_state::format_record_label(record)
-            ));
-        }
-
-        parts.join(" · ")
-    }
 }
 
 impl AuthStatus {
@@ -1424,186 +1238,6 @@ fn config_file_contains_assignment(path: &Path, env_key: &str) -> bool {
 
 fn api_key_available(env_key: &str, file_name: &str) -> bool {
     crate::provider_catalog::load_api_key_from_env_or_config(env_key, file_name).is_some()
-}
-
-pub(crate) fn command_available_from_env(env_var: &str, fallback: &str) -> bool {
-    if let Ok(cmd) = std::env::var(env_var) {
-        let trimmed = cmd.trim();
-        if !trimmed.is_empty() && command_exists(trimmed) {
-            return true;
-        }
-    }
-
-    command_exists(fallback)
-}
-
-fn command_exists(command: &str) -> bool {
-    let command = command.trim();
-    if command.is_empty() {
-        return false;
-    }
-
-    // Absolute/relative path: direct stat, no caching needed
-    let path = std::path::Path::new(command);
-    if path.is_absolute() || contains_path_separator(command) {
-        return explicit_command_exists(path);
-    }
-
-    // Check per-process cache first (O(1) on repeated calls)
-    if let Ok(cache) = COMMAND_EXISTS_CACHE.lock()
-        && let Some(&cached) = cache.get(command)
-    {
-        return cached;
-    }
-
-    let path_var = match std::env::var_os("PATH") {
-        Some(p) if !p.is_empty() => p,
-        _ => {
-            cache_command_result(command, false);
-            return false;
-        }
-    };
-
-    let wsl2 = is_wsl2();
-    let found = std::env::split_paths(&path_var)
-        // On WSL2 skip Windows DrvFs mounts (/mnt/c, /mnt/d, …) — they are
-        // accessed via the slow 9P filesystem and CLI tools are never there.
-        .filter(|dir| !(wsl2 && is_wsl2_windows_path(dir)))
-        .flat_map(|dir| {
-            command_candidates(command)
-                .into_iter()
-                .map(move |c| dir.join(c))
-        })
-        .any(|p| p.exists());
-
-    cache_command_result(command, found);
-    found
-}
-
-fn cache_command_result(command: &str, exists: bool) {
-    if let Ok(mut cache) = COMMAND_EXISTS_CACHE.lock() {
-        cache.insert(command.to_string(), exists);
-    }
-}
-
-/// Detect WSL2: reads `/proc/version` once and caches the result for the
-/// process lifetime.  Returns false on any platform without that file.
-fn is_wsl2() -> bool {
-    static IS_WSL2: OnceLock<bool> = OnceLock::new();
-    *IS_WSL2.get_or_init(|| {
-        std::fs::read_to_string("/proc/version")
-            .map(|s| s.to_ascii_lowercase().contains("microsoft"))
-            .unwrap_or(false)
-    })
-}
-
-/// Returns true for paths like `/mnt/c`, `/mnt/d`, … that are Windows drive
-/// mounts under WSL2 (DrvFs via 9P).
-fn is_wsl2_windows_path(dir: &std::path::Path) -> bool {
-    use std::path::Component;
-    let mut it = dir.components();
-    if !matches!(it.next(), Some(Component::RootDir)) {
-        return false;
-    }
-    if !matches!(it.next(), Some(Component::Normal(s)) if s == "mnt") {
-        return false;
-    }
-    if let Some(Component::Normal(drive)) = it.next() {
-        let s = drive.to_string_lossy();
-        return s.len() == 1 && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic());
-    }
-    false
-}
-
-fn explicit_command_exists(path: &std::path::Path) -> bool {
-    if path.exists() {
-        return true;
-    }
-
-    if has_extension(path) {
-        return false;
-    }
-
-    #[cfg(windows)]
-    {
-        let pathext =
-            std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-        for ext in pathext
-            .split(';')
-            .map(str::trim)
-            .filter(|ext| !ext.is_empty())
-        {
-            let candidate = path.with_extension(ext.trim_start_matches('.'));
-            if candidate.exists() {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-fn command_candidates(command: &str) -> Vec<std::ffi::OsString> {
-    let path = std::path::Path::new(command);
-    let file_name = match path.file_name() {
-        Some(name) => name.to_os_string(),
-        None => return Vec::new(),
-    };
-
-    if has_extension(path) {
-        return vec![file_name];
-    }
-
-    #[cfg(windows)]
-    let mut candidates = vec![file_name.clone()];
-    #[cfg(not(windows))]
-    let candidates = vec![file_name.clone()];
-
-    #[cfg(windows)]
-    {
-        let pathext =
-            std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-        let exts: Vec<&str> = pathext
-            .split(';')
-            .map(str::trim)
-            .filter(|ext| !ext.is_empty())
-            .collect();
-
-        for ext in exts {
-            let ext_no_dot = ext.trim_start_matches('.');
-            if ext_no_dot.is_empty() {
-                continue;
-            }
-            let mut candidate = path.to_path_buf();
-            candidate.set_extension(ext_no_dot);
-            if let Some(cand_name) = candidate.file_name() {
-                candidates.push(cand_name.to_os_string());
-            }
-        }
-    }
-
-    dedup_preserve_order(candidates)
-}
-
-fn contains_path_separator(command: &str) -> bool {
-    command.contains('/')
-        || command.contains('\\')
-        || std::path::Path::new(command).components().count() > 1
-}
-
-fn has_extension(path: &std::path::Path) -> bool {
-    path.extension().is_some()
-}
-
-fn dedup_preserve_order(mut values: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
-    let mut out = Vec::new();
-    for value in values.drain(..) {
-        if !out.iter().any(|v| v == &value) {
-            out.push(value);
-        }
-    }
-
-    out
 }
 
 #[cfg(test)]

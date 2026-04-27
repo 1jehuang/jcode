@@ -1,5 +1,6 @@
 use super::*;
 use crate::memory_types::PipelineState;
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// Global memory activity state - updated by sidecar, read by info widget

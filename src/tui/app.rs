@@ -51,6 +51,7 @@ mod handterm_native_scroll;
 mod helpers;
 mod inline_interactive;
 mod input;
+mod input_help;
 mod local;
 mod misc_ui;
 mod model_context;
