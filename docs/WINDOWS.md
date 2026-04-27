@@ -4,11 +4,13 @@ This document describes how jcode achieves cross-platform support for Linux, mac
 
 ## Status
 
-- **Transport layer**: Implemented (`src/transport/`)
-- **Platform module**: Implemented (`src/platform.rs`)
-- **Windows transport**: Implemented but untested (`src/transport/windows.rs`)
-- **Windows platform**: Implemented (`src/platform.rs` has `#[cfg(windows)]` branches)
-- **Windows CI**: Not yet set up
+- **Transport layer**: Implemented (`src/transport/`); pipe pair, pipe-name normalization, and round-trip tests run on Windows.
+- **Platform module**: Implemented (`src/platform.rs`); `is_process_running` (via `GetExitCodeProcess` + `STILL_ACTIVE`), `replace_process` (spawn + exit), symlink-or-copy, and atomic-swap have Windows code paths.
+- **Windows transport**: Implemented and exercised by the Windows CI smoke job (`src/transport/windows.rs`). `Listener::accept` uses interior mutability (`tokio::sync::Mutex<NamedPipeServer>`) so its signature matches `tokio::net::UnixListener::accept` on Unix — call sites stay portable.
+- **Windows platform**: Implemented.
+- **Windows CI**: x64 build, targeted unit tests, two e2e smoke tests, `--version` smoke, and PowerShell installer verification on every dispatch of `windows-smoke.yml`. ARM64 build + installer verification on the same workflow. The main `ci.yml` also has a `windows-build-test` matrix entry.
+- **Bash tool**: `build_shell_command` shells out via `cmd.exe /C` on Windows.
+- **Self-dev**: Build/reload paths exist but the binary swap on Windows is **not yet** atomic and cannot replace a running `jcode.exe` in place — see "Remaining Work" below.
 
 ## Design Principle
 
@@ -131,7 +133,10 @@ The vast majority of the codebase is platform-agnostic:
 
 ## Remaining Work
 
-1. **Windows CI** - Add GitHub Actions Windows runner, test compilation and basic IPC
-2. **Shell tool** - Detect platform and use `cmd.exe` or `pwsh.exe` on Windows
-3. **Self-update** - Handle Windows exe replacement (can't overwrite running binary)
-4. **Testing** - Run full test suite on Windows
+1. **Self-update** — Windows can't overwrite a running `.exe`. The Unix-style "rename + atomic swap" path in `src/update.rs` and `src/platform.rs::atomic_symlink_swap` falls back to `remove + copy` on Windows (best-effort) and will fail if the new launcher target is the currently-running binary. Proper fix: rename current to `.old` (allowed for a running exe), copy new in place, schedule the `.old` for delete-on-next-launch (or `MoveFileExW` with `MOVEFILE_DELAY_UNTIL_REBOOT`).
+2. **Self-dev / "current" channel on Windows** — `scripts/install.ps1` currently only installs the `stable` channel under `%LOCALAPPDATA%\jcode\builds\stable\jcode.exe`. There's no PowerShell equivalent of `scripts/install_release.sh` to install a local-build/`current` channel for self-dev. Either add one, or document that self-dev is Linux/macOS-only for now.
+3. **Symlinks** — `platform::symlink_or_copy` already falls back to `std::fs::copy` when `symlink_file/dir` fails (Developer Mode / elevation not available). Channels and versioned-binary directories therefore work but consume more disk and don't follow target updates the way Unix symlinks do.
+4. **`replace_process` semantics** — `src/platform.rs` Windows version `spawn + exit(0)` rather than `exec`, so `/reload` produces a new PID and the parent's exit status no longer reflects the child's. Acceptable as long as callers don't depend on exec semantics.
+5. **Windows CI gating** — `windows-smoke.yml` is `workflow_dispatch` only. Promote it to required-on-PR (or fold its targeted tests into `ci.yml`'s `windows-build-test` job) so future regressions like the `mut listener` cycle don't reach master.
+6. **Full test suite on Windows** — `windows-smoke.yml` runs ~10 named tests + 2 e2e. `cargo test --all-targets --all-features` is not yet verified green on Windows. Tests using `chmod`, `flock`, named pipes for fixtures, or PTY may need `#[cfg(unix)]` skips.
+7. **Browser tool / dictation** — Firefox Agent Bridge setup paths, dictation hotkeys, and screen-capture flows are still Unix-shaped. Functional, but the setup hints and helpers in `src/setup_hints/windows_setup.rs` only cover Alt+; hotkey + Alacritty install.

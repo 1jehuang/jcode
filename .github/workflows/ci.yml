@@ -214,6 +214,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+          components: clippy
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.7
@@ -237,6 +238,14 @@ jobs:
           & cargo build --locked --release --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) {
             throw 'Windows release build failed'
+          }
+
+      - name: Run clippy with warnings denied (Windows)
+        shell: pwsh
+        run: |
+          & cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets --no-default-features --features pdf -- -D warnings
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Windows clippy gate failed'
           }
 
       - name: Compile library and binary tests
