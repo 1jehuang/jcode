@@ -4,7 +4,16 @@ use std::process::{Command, Stdio};
 
 pub fn launch_resume_session(session_id: &str, title: &str) -> Result<()> {
     let title = format!("jcode · {}", compact_title(title));
-    let candidates = terminal_candidates(&title, session_id);
+    let candidates = terminal_candidates(&title, &["--resume", session_id]);
+    launch_first_available_terminal(candidates, &format!("jcode --resume {session_id}"))
+}
+
+pub fn launch_new_session() -> Result<()> {
+    let candidates = terminal_candidates("jcode · new session", &["--fresh-spawn"]);
+    launch_first_available_terminal(candidates, "jcode")
+}
+
+fn launch_first_available_terminal(candidates: Vec<Command>, description: &str) -> Result<()> {
     let mut failures = Vec::new();
 
     for mut candidate in candidates {
@@ -26,47 +35,50 @@ pub fn launch_resume_session(session_id: &str, title: &str) -> Result<()> {
     }
 
     anyhow::bail!(
-        "failed to launch a terminal for jcode --resume {session_id}: {}",
+        "failed to launch a terminal for {description}: {}",
         failures.join("; ")
     )
 }
 
-fn terminal_candidates(title: &str, session_id: &str) -> Vec<Command> {
+fn terminal_candidates(title: &str, jcode_args: &[&str]) -> Vec<Command> {
     let mut candidates = Vec::new();
 
     if let Ok(program) = std::env::var("JCODE_DESKTOP_TERMINAL") {
-        candidates.push(terminal_command(program, &[], session_id));
+        candidates.push(terminal_command(program, &[], jcode_args));
     }
 
     candidates.push(terminal_command(
         "footclient",
         &["-T", title, "--"],
-        session_id,
+        jcode_args,
     ));
-    candidates.push(terminal_command("foot", &["-T", title, "--"], session_id));
-    candidates.push(terminal_command("kitty", &["--title", title], session_id));
+    candidates.push(terminal_command("foot", &["-T", title, "--"], jcode_args));
+    candidates.push(terminal_command("kitty", &["--title", title], jcode_args));
     candidates.push(terminal_command(
         "alacritty",
         &["-t", title, "-e"],
-        session_id,
+        jcode_args,
     ));
-    candidates.push(terminal_command("wezterm", &["start", "--"], session_id));
+    candidates.push(terminal_command("wezterm", &["start", "--"], jcode_args));
     candidates.push(terminal_command(
         "x-terminal-emulator",
         &["-T", title, "-e"],
-        session_id,
+        jcode_args,
     ));
 
     candidates
 }
 
-fn terminal_command(program: impl AsRef<str>, prefix_args: &[&str], session_id: &str) -> Command {
+fn terminal_command(
+    program: impl AsRef<str>,
+    prefix_args: &[&str],
+    jcode_args: &[&str],
+) -> Command {
     let mut command = Command::new(program.as_ref());
     command
         .args(prefix_args)
         .arg(jcode_bin())
-        .arg("--resume")
-        .arg(session_id)
+        .args(jcode_args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

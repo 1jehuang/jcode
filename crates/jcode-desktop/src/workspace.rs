@@ -79,6 +79,7 @@ pub enum KeyOutcome {
     None,
     Redraw,
     OpenSession { session_id: String, title: String },
+    SpawnSession,
     Exit,
 }
 
@@ -348,8 +349,7 @@ impl Workspace {
     fn handle_navigation_key(&mut self, key: KeyInput) -> KeyOutcome {
         match key {
             KeyInput::SpawnPanel => {
-                self.add_surface();
-                return KeyOutcome::Redraw;
+                return KeyOutcome::SpawnSession;
             }
             KeyInput::HotkeyHelp => {
                 self.open_hotkey_help();
@@ -412,10 +412,7 @@ impl Workspace {
 
     fn handle_insert_key(&mut self, key: KeyInput) -> KeyOutcome {
         match key {
-            KeyInput::SpawnPanel => {
-                self.add_surface();
-                KeyOutcome::Redraw
-            }
+            KeyInput::SpawnPanel => KeyOutcome::SpawnSession,
             KeyInput::HotkeyHelp => {
                 self.open_hotkey_help();
                 KeyOutcome::Redraw
@@ -855,13 +852,9 @@ mod tests {
         let mut workspace = Workspace::fake();
         assert_eq!(
             workspace.handle_key(KeyInput::SpawnPanel),
-            KeyOutcome::Redraw
+            KeyOutcome::SpawnSession
         );
-        assert_eq!(workspace.focused_id, 8);
-        assert_eq!(
-            workspace.focused_surface().map(|surface| surface.lane),
-            Some(0)
-        );
+        assert_eq!(workspace.focused_id, 1);
         assert_unique_positions(&workspace);
     }
 

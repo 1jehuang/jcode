@@ -48,6 +48,7 @@ const PANEL_BODY_LINE_GAP: f32 = 8.0;
 const VIEWPORT_ANIMATION_DURATION: Duration = Duration::from_millis(150);
 const FOCUS_PULSE_DURATION: Duration = Duration::from_millis(180);
 const VIEWPORT_ANIMATION_EPSILON: f32 = 0.5;
+const SESSION_SPAWN_REFRESH_DELAY: Duration = Duration::from_millis(350);
 
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
     r: 0.955,
@@ -179,6 +180,17 @@ async fn run() -> Result<()> {
                                 eprintln!(
                                     "jcode-desktop: failed to open session {session_id}: {error:#}"
                                 );
+                            }
+                        }
+                        KeyOutcome::SpawnSession => {
+                            if let Err(error) = session_launch::launch_new_session() {
+                                eprintln!("jcode-desktop: failed to spawn session: {error:#}");
+                            } else {
+                                std::thread::sleep(SESSION_SPAWN_REFRESH_DELAY);
+                                workspace.replace_session_cards(load_session_cards_for_desktop());
+                                save_desktop_preferences(&workspace);
+                                window.set_title(&workspace.status_title());
+                                window.request_redraw();
                             }
                         }
                         KeyOutcome::None => {}
