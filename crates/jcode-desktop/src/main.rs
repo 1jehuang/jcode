@@ -72,6 +72,7 @@ const WORKSPACE_NUMBER_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.90];
 const STATUS_TEXT_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.88];
 const PANEL_TITLE_COLOR: [f32; 4] = [0.150, 0.170, 0.210, 0.68];
 const PANEL_BODY_COLOR: [f32; 4] = [0.150, 0.170, 0.210, 0.48];
+const PANEL_SECTION_COLOR: [f32; 4] = [0.150, 0.170, 0.210, 0.62];
 const STATUS_PREVIEW_ACCENTS: [[f32; 3]; 8] = [
     [0.560, 0.690, 0.980],
     [0.780, 0.610, 0.910],
@@ -917,21 +918,82 @@ fn push_panel_contents(
     let line_height = bitmap_text_height(BITMAP_TEXT_PIXEL) + PANEL_BODY_LINE_GAP;
     let max_y = rect.y + rect.height - PANEL_TITLE_TOP_PADDING;
     for line in lines.iter().skip(if expanded { scroll_lines } else { 0 }) {
-        if y + bitmap_text_height(BITMAP_TEXT_PIXEL) > max_y {
-            break;
-        }
         let text = normalize_bitmap_text(line);
-        push_bitmap_text(
-            vertices,
-            &text,
-            rect.x + PANEL_TITLE_LEFT_PADDING,
-            y,
-            BITMAP_TEXT_PIXEL,
-            PANEL_BODY_COLOR,
-            size,
-            max_width,
-        );
-        y += line_height;
+        let color = if is_panel_section_header(line) {
+            PANEL_SECTION_COLOR
+        } else {
+            PANEL_BODY_COLOR
+        };
+        for visual_line in wrap_bitmap_text(&text, BITMAP_TEXT_PIXEL, max_width) {
+            if y + bitmap_text_height(BITMAP_TEXT_PIXEL) > max_y {
+                return;
+            }
+            push_bitmap_text(
+                vertices,
+                &visual_line,
+                rect.x + PANEL_TITLE_LEFT_PADDING,
+                y,
+                BITMAP_TEXT_PIXEL,
+                color,
+                size,
+                max_width,
+            );
+            y += line_height;
+        }
+    }
+}
+
+fn is_panel_section_header(line: &str) -> bool {
+    matches!(
+        line,
+        "session metadata" | "recent transcript" | "expanded transcript"
+    )
+}
+
+fn wrap_bitmap_text(text: &str, pixel: f32, max_width: f32) -> Vec<String> {
+    let max_chars = ((max_width / bitmap_char_advance(pixel)).floor() as usize).max(1);
+    let words = text.split_whitespace().collect::<Vec<_>>();
+    if words.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in words {
+        if word.chars().count() > max_chars {
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            push_wrapped_long_word(&mut lines, word, max_chars);
+            continue;
+        }
+
+        let separator = usize::from(!current.is_empty());
+        if current.chars().count() + separator + word.chars().count() > max_chars {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+fn push_wrapped_long_word(lines: &mut Vec<String>, word: &str, max_chars: usize) {
+    let mut chunk = String::new();
+    for ch in word.chars() {
+        if chunk.chars().count() >= max_chars {
+            lines.push(std::mem::take(&mut chunk));
+        }
+        chunk.push(ch);
+    }
+    if !chunk.is_empty() {
+        lines.push(chunk);
     }
 }
 
@@ -1942,5 +2004,21 @@ mod tests {
         );
         assert_eq!(normalize_bitmap_text("agent-12"), "AGENT-12");
         assert_eq!(bitmap_text_width("NAV", 2.0), 34.0);
+    }
+
+    #[test]
+    fn bitmap_text_wrapping_breaks_on_words() {
+        assert_eq!(
+            wrap_bitmap_text("ONE TWO THREE", 1.0, bitmap_char_advance(1.0) * 7.0),
+            vec!["ONE TWO", "THREE"]
+        );
+    }
+
+    #[test]
+    fn bitmap_text_wrapping_splits_long_words() {
+        assert_eq!(
+            wrap_bitmap_text("ABCDEFGHI", 1.0, bitmap_char_advance(1.0) * 4.0),
+            vec!["ABCD", "EFGH", "I"]
+        );
     }
 }
