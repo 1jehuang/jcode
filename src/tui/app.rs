@@ -112,6 +112,13 @@ struct PendingSessionPickerLoad {
     >,
 }
 
+struct PendingModelPickerLoad {
+    request_id: u64,
+    signature: ModelPickerCacheSignature,
+    picker_started: Instant,
+    receiver: mpsc::Receiver<anyhow::Result<ModelPickerRoutesResult>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ModelPickerCacheSignature {
     is_remote: bool,
@@ -137,6 +144,11 @@ struct ModelPickerCache {
     entries: Vec<super::PickerEntry>,
     route_count: usize,
     model_count: usize,
+}
+
+struct ModelPickerRoutesResult {
+    routes: Vec<crate::provider::ModelRoute>,
+    routes_ms: u128,
 }
 
 #[derive(Debug, Clone)]
@@ -673,6 +685,8 @@ pub struct App {
     // Cached model picker entries. Building these can require hydrating large provider catalogs.
     model_picker_cache: Option<ModelPickerCache>,
     model_picker_catalog_revision: u64,
+    pending_model_picker_load: Option<PendingModelPickerLoad>,
+    model_picker_load_request_id: u64,
     // Pending model switch from picker (for remote mode async processing)
     pending_model_switch: Option<String>,
     // Pending account switch from inline picker (for remote mode async processing)

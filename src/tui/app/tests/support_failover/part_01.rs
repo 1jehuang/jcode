@@ -158,6 +158,18 @@ fn create_test_app() -> App {
     app
 }
 
+fn wait_for_model_picker_load(app: &mut App) {
+    let start = Instant::now();
+    while app.pending_model_picker_load.is_some() {
+        app.poll_model_picker_load();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "timed out waiting for async model picker load"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn create_refresh_summary_test_app(summary: crate::provider::ModelCatalogRefreshSummary) -> App {
     ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();

@@ -21,6 +21,8 @@ impl App {
     pub(super) fn invalidate_model_picker_cache(&mut self) {
         self.model_picker_cache = None;
         self.model_picker_catalog_revision = self.model_picker_catalog_revision.wrapping_add(1);
+        self.pending_model_picker_load = None;
+        self.model_picker_load_request_id = self.model_picker_load_request_id.wrapping_add(1);
     }
 
     fn model_route_cache_marker(route: &crate::provider::ModelRoute) -> String {
@@ -112,6 +114,13 @@ impl App {
             ));
         }
         true
+    }
+
+    fn should_cache_model_picker_entries(model_count: usize, route_count: usize) -> bool {
+        // A single model/route result is commonly a startup fallback (for example, the
+        // current model while the real provider catalog is still loading). Caching that
+        // fallback makes `/model` look permanently collapsed to just the active model.
+        model_count > 1 && route_count > 1
     }
 
     pub(super) fn model_picker_preview_filter(input: &str) -> Option<String> {
@@ -567,8 +576,6 @@ impl App {
     }
 
     pub(super) fn open_model_picker(&mut self) {
-        use std::collections::BTreeMap;
-
         let picker_started = std::time::Instant::now();
 
         let current_model = if self.is_remote {
@@ -602,6 +609,198 @@ impl App {
             return;
         }
 
+        if !self.is_remote && !crate::perf::tui_policy().simplified_model_picker {
+            self.open_loading_model_picker(&current_model);
+            self.start_model_picker_route_load(cache_signature, picker_started);
+            return;
+        }
+
+        let routes_started = std::time::Instant::now();
+        let routes: Vec<crate::provider::ModelRoute> = if self.is_remote {
+            if !self.remote_model_options.is_empty() {
+                self.remote_model_options.clone()
+            } else {
+                self.build_remote_model_routes_fallback()
+            }
+        } else {
+            self.simplified_model_routes_for_picker(&current_model)
+        };
+        let routes_ms = routes_started.elapsed().as_millis();
+
+        self.open_model_picker_with_routes(
+            cache_signature,
+            picker_started,
+            routes,
+            routes_ms,
+            false,
+        );
+    }
+
+    fn open_loading_model_picker(&mut self, current_model: &str) {
+        let model_label = if current_model.trim().is_empty() || current_model == "unknown" {
+            "Loading models…".to_string()
+        } else {
+            current_model.to_string()
+        };
+        self.inline_view_state = None;
+        self.inline_interactive_state = Some(InlineInteractiveState {
+            kind: PickerKind::Model,
+            filtered: vec![0],
+            entries: vec![PickerEntry {
+                name: model_label,
+                options: vec![PickerOption {
+                    provider: self.provider.name().to_string(),
+                    api_method: "current".to_string(),
+                    available: true,
+                    detail: "updating model list…".to_string(),
+                    estimated_reference_cost_micros: None,
+                }],
+                action: PickerAction::Model,
+                selected_option: 0,
+                is_current: true,
+                is_default: false,
+                recommended: false,
+                recommendation_rank: usize::MAX,
+                old: false,
+                created_date: None,
+                effort: None,
+            }],
+            selected: 0,
+            column: 0,
+            filter: String::new(),
+            preview: false,
+        });
+        self.set_status_notice("Updating model list…");
+    }
+
+    fn start_model_picker_route_load(
+        &mut self,
+        signature: ModelPickerCacheSignature,
+        picker_started: std::time::Instant,
+    ) {
+        self.model_picker_load_request_id = self.model_picker_load_request_id.wrapping_add(1);
+        let request_id = self.model_picker_load_request_id;
+        let provider = self.provider.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let build = move || {
+            let routes_started = std::time::Instant::now();
+            let routes = provider.model_routes();
+            let routes_ms = routes_started.elapsed().as_millis();
+            let _ = tx.send(Ok(ModelPickerRoutesResult { routes, routes_ms }));
+        };
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn_blocking(build);
+        } else {
+            std::thread::spawn(build);
+        }
+
+        self.pending_model_picker_load = Some(PendingModelPickerLoad {
+            request_id,
+            signature,
+            picker_started,
+            receiver: rx,
+        });
+    }
+
+    pub(super) fn poll_model_picker_load(&mut self) -> bool {
+        let Some(pending) = self.pending_model_picker_load.as_ref() else {
+            return false;
+        };
+
+        let received = match pending.receiver.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.pending_model_picker_load = None;
+                self.set_status_notice("Model list update failed");
+                return true;
+            }
+        };
+
+        let Some(pending) = self.pending_model_picker_load.take() else {
+            return false;
+        };
+        if pending.request_id != self.model_picker_load_request_id {
+            return false;
+        }
+
+        let current_model = if self.is_remote {
+            self.remote_provider_model
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string())
+        } else {
+            self.provider.model().to_string()
+        };
+        let config_default_model = crate::config::config().provider.default_model.clone();
+        let current_effort = if self.is_remote {
+            self.remote_reasoning_effort.clone()
+        } else {
+            self.provider.reasoning_effort()
+        };
+        let available_efforts = if self.is_remote {
+            Vec::new()
+        } else {
+            self.provider.available_efforts()
+        };
+        let current_signature = self.model_picker_cache_signature(
+            &current_model,
+            config_default_model,
+            current_effort,
+            &available_efforts,
+        );
+        if current_signature != pending.signature {
+            return false;
+        }
+
+        match received {
+            Ok(result) => {
+                self.open_model_picker_with_routes(
+                    pending.signature,
+                    pending.picker_started,
+                    result.routes,
+                    result.routes_ms,
+                    true,
+                );
+                self.set_status_notice("Model list updated");
+                true
+            }
+            Err(error) => {
+                self.set_status_notice(format!("Model list update failed: {}", error));
+                true
+            }
+        }
+    }
+
+    fn open_model_picker_with_routes(
+        &mut self,
+        cache_signature: ModelPickerCacheSignature,
+        picker_started: std::time::Instant,
+        routes: Vec<crate::provider::ModelRoute>,
+        routes_ms: u128,
+        preserve_input: bool,
+    ) {
+        use std::collections::BTreeMap;
+
+        let current_model = if self.is_remote {
+            self.remote_provider_model
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string())
+        } else {
+            self.provider.model().to_string()
+        };
+        let config_default_model = crate::config::config().provider.default_model.clone();
+        let current_effort = if self.is_remote {
+            self.remote_reasoning_effort.clone()
+        } else {
+            self.provider.reasoning_effort()
+        };
+        let available_efforts = if self.is_remote {
+            Vec::new()
+        } else {
+            self.provider.available_efforts()
+        };
+
         let is_config_default = |name: &str| -> bool {
             match &config_default_model {
                 None => false,
@@ -614,20 +813,6 @@ impl App {
                 }
             }
         };
-
-        let routes_started = std::time::Instant::now();
-        let routes: Vec<crate::provider::ModelRoute> = if self.is_remote {
-            if !self.remote_model_options.is_empty() {
-                self.remote_model_options.clone()
-            } else {
-                self.build_remote_model_routes_fallback()
-            }
-        } else if crate::perf::tui_policy().simplified_model_picker {
-            self.simplified_model_routes_for_picker(&current_model)
-        } else {
-            self.provider.model_routes()
-        };
-        let routes_ms = routes_started.elapsed().as_millis();
 
         let routes = if routes.is_empty() && self.is_remote && current_model != "unknown" {
             vec![crate::provider::ModelRoute {
@@ -646,6 +831,7 @@ impl App {
         };
 
         if routes.is_empty() {
+            self.inline_interactive_state = None;
             self.push_display_message(DisplayMessage::system(
                 crate::tui::app::model_context::no_models_available_message(self.is_remote),
             ));
@@ -871,13 +1057,35 @@ impl App {
             ));
         }
 
-        self.inline_view_state = None;
-        self.model_picker_cache = Some(ModelPickerCache {
-            signature: cache_signature,
-            entries: entries.clone(),
-            route_count: routes.len(),
-            model_count: model_order.len(),
+        let previous_picker = self.inline_interactive_state.as_ref().and_then(|picker| {
+            if picker.kind == PickerKind::Model {
+                Some((
+                    picker.preview,
+                    picker.filter.clone(),
+                    picker.selected,
+                    picker.column,
+                ))
+            } else {
+                None
+            }
         });
+        let saved_input = if preserve_input {
+            Some((self.input.clone(), self.cursor_pos))
+        } else {
+            None
+        };
+
+        self.inline_view_state = None;
+        if Self::should_cache_model_picker_entries(model_order.len(), routes.len()) {
+            self.model_picker_cache = Some(ModelPickerCache {
+                signature: cache_signature,
+                entries: entries.clone(),
+                route_count: routes.len(),
+                model_count: model_order.len(),
+            });
+        } else {
+            self.model_picker_cache = None;
+        }
         self.inline_interactive_state = Some(InlineInteractiveState {
             kind: PickerKind::Model,
             filtered: (0..entries.len()).collect(),
@@ -887,8 +1095,24 @@ impl App {
             filter: String::new(),
             preview: false,
         });
-        self.input.clear();
-        self.cursor_pos = 0;
+
+        if let Some((preview, filter, selected, column)) = previous_picker
+            && let Some(ref mut picker) = self.inline_interactive_state
+        {
+            picker.preview = preview;
+            picker.filter = filter;
+            picker.selected = selected.min(picker.filtered.len().saturating_sub(1));
+            picker.column = column.min(picker.max_navigable_column());
+            Self::apply_inline_interactive_filter(picker);
+        }
+
+        if let Some((input, cursor_pos)) = saved_input {
+            self.input = input;
+            self.cursor_pos = cursor_pos;
+        } else {
+            self.input.clear();
+            self.cursor_pos = 0;
+        }
     }
 
     pub(super) fn build_remote_model_routes_fallback(&self) -> Vec<crate::provider::ModelRoute> {

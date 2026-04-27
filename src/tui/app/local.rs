@@ -62,6 +62,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     }
     needs_redraw |= app.refresh_todos_view_if_needed();
     needs_redraw |= app.refresh_side_panel_linked_content_if_due();
+    needs_redraw |= app.poll_model_picker_load();
     needs_redraw |= app.poll_session_picker_load();
     needs_redraw |= app.poll_compaction_completion();
     needs_redraw |= super::commands::poll_local_transfer_prepare(app);

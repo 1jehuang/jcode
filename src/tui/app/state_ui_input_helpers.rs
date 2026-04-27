@@ -892,6 +892,16 @@ impl App {
 
     /// Get command suggestions based on current input
     pub fn command_suggestions(&self) -> Vec<(String, &'static str)> {
+        if self
+            .inline_interactive_state
+            .as_ref()
+            .is_some_and(|picker| picker.preview && picker.kind == crate::tui::PickerKind::Model)
+        {
+            let input = self.input.trim_start();
+            if input.starts_with("/model") || input.starts_with("/models") {
+                return Vec::new();
+            }
+        }
         self.get_suggestions_for(&self.input)
     }
 
