@@ -673,20 +673,31 @@ pub(crate) async fn spawn_server(
     if let Some(model) = model {
         cmd.arg("--model").arg(model);
     }
-    cmd.arg("serve")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+    cmd.arg("serve").stdout(Stdio::null());
 
     #[cfg(unix)]
     {
+        // Unix path keeps stderr piped because spawn_server_notify reads
+        // from the readiness fd (separate from stderr) and Unix has graceful
+        // pipe-broken semantics anyway.
+        cmd.stderr(Stdio::piped());
         let _child = server::spawn_server_notify(&mut cmd).await?;
         startup_profile::mark("server_ready");
     }
     #[cfg(not(unix))]
     {
-        cmd.spawn()?;
+        // Windows: piping stderr back to the parent and immediately dropping
+        // the Child closes the read end of the pipe and breaks the server's
+        // stderr writes mid-startup. Detach instead — let the daemon write
+        // diagnostics to its file logger, and give it enough time to bind
+        // the named pipe before we hand control to the client.
+        cmd.stderr(Stdio::null());
+        let _child = crate::platform::spawn_detached(&mut cmd)?;
         let start = std::time::Instant::now();
-        while start.elapsed() < std::time::Duration::from_millis(500) {
+        // Release builds with default features (embeddings + pdf) take 2-3s
+        // to bind the pipe on a cold start; allow up to 15s before falling
+        // through to the client reconnect loop.
+        while start.elapsed() < std::time::Duration::from_secs(15) {
             if crate::transport::is_socket_path(&server::socket_path())
                 && crate::transport::Stream::connect(server::socket_path())
                     .await
@@ -695,7 +706,7 @@ pub(crate) async fn spawn_server(
                 startup_profile::mark("server_ready");
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
 
