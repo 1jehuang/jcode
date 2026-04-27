@@ -90,6 +90,7 @@ pub struct SessionCard {
     pub subtitle: String,
     pub detail: String,
     pub preview_lines: Vec<String>,
+    pub detail_lines: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,6 +105,7 @@ pub struct Surface {
     pub id: u64,
     pub title: String,
     pub body_lines: Vec<String>,
+    pub detail_lines: Vec<String>,
     pub session_id: Option<String>,
     /// Vertical Niri-style workspace index. Each workspace is rendered as one
     /// full-height horizontal strip of columns.
@@ -118,6 +120,7 @@ impl Surface {
             id,
             title: title.into(),
             body_lines: Vec::new(),
+            detail_lines: Vec::new(),
             session_id: None,
             lane,
             column,
@@ -132,10 +135,18 @@ impl Surface {
             body_lines.extend(card.preview_lines);
         }
 
+        let mut detail_lines = vec!["session metadata".to_string()];
+        detail_lines.extend(body_lines.iter().take(2).cloned());
+        if !card.detail_lines.is_empty() {
+            detail_lines.push("expanded transcript".to_string());
+            detail_lines.extend(card.detail_lines);
+        }
+
         Self {
             id,
             title: card.title,
             body_lines,
+            detail_lines,
             session_id: Some(card.session_id),
             lane,
             column,
@@ -220,6 +231,7 @@ impl Workspace {
                     "start a session in the tui".to_string(),
                     "then restart this desktop prototype".to_string(),
                 ],
+                detail_lines: Vec::new(),
                 session_id: None,
                 lane: 0,
                 column: 0,
@@ -942,6 +954,16 @@ mod tests {
                 .body_lines
                 .contains(&"recent transcript".to_string())
         );
+        assert!(
+            workspace.surfaces[0]
+                .detail_lines
+                .contains(&"expanded transcript".to_string())
+        );
+        assert!(
+            workspace.surfaces[0]
+                .detail_lines
+                .contains(&"user expanded hello".to_string())
+        );
     }
 
     #[test]
@@ -1012,6 +1034,7 @@ mod tests {
             subtitle: "active · model".to_string(),
             detail: "1 msgs · workspace".to_string(),
             preview_lines: vec!["user hello".to_string()],
+            detail_lines: vec!["user expanded hello".to_string()],
         }
     }
 }

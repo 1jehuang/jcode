@@ -729,7 +729,7 @@ fn build_vertices(
                 focus_pulse,
                 size,
             );
-            push_panel_contents(&mut vertices, surface, rect, size);
+            push_panel_contents(&mut vertices, surface, rect, size, true);
         }
         return vertices;
     }
@@ -763,7 +763,7 @@ fn build_vertices(
             surface_pulse,
             size,
         );
-        push_panel_contents(&mut vertices, surface, rect, size);
+        push_panel_contents(&mut vertices, surface, rect, size, false);
     }
 
     vertices
@@ -895,14 +895,20 @@ fn push_panel_contents(
     surface: &workspace::Surface,
     rect: Rect,
     size: PhysicalSize<u32>,
+    expanded: bool,
 ) {
     push_panel_title(vertices, surface.title.as_str(), rect, size);
 
+    let lines = if expanded && !surface.detail_lines.is_empty() {
+        &surface.detail_lines
+    } else {
+        &surface.body_lines
+    };
     let max_width = (rect.width - PANEL_TITLE_LEFT_PADDING * 2.0).max(1.0);
     let mut y = rect.y + PANEL_BODY_TOP_PADDING;
     let line_height = bitmap_text_height(BITMAP_TEXT_PIXEL) + PANEL_BODY_LINE_GAP;
     let max_y = rect.y + rect.height - PANEL_TITLE_TOP_PADDING;
-    for line in &surface.body_lines {
+    for line in lines {
         if y + bitmap_text_height(BITMAP_TEXT_PIXEL) > max_y {
             break;
         }
