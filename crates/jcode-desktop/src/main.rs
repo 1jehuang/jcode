@@ -193,17 +193,6 @@ async fn run() -> Result<()> {
     let mut modifiers = ModifiersState::empty();
     let mut hot_reloader = DesktopHotReloader::new();
 
-    if !workspace_mode {
-        if let Err(error) = session_launch::launch_new_session() {
-            eprintln!("jcode-desktop: failed to spawn fresh session: {error:#}");
-        } else {
-            std::thread::sleep(SESSION_SPAWN_REFRESH_DELAY);
-            app.refresh_sessions();
-            window.set_title(&app.status_title());
-            window.request_redraw();
-        }
-    }
-
     event_loop.run(move |event, target| {
         target.set_control_flow(ControlFlow::Wait);
 
@@ -257,6 +246,13 @@ async fn run() -> Result<()> {
                             }
                         }
                         KeyOutcome::SpawnSession => {
+                            if let DesktopApp::SingleSession(app) = &mut app {
+                                app.reset_fresh_session();
+                                window.set_title(&app.status_title());
+                                window.request_redraw();
+                                return;
+                            }
+
                             if let Err(error) = session_launch::launch_new_session() {
                                 eprintln!("jcode-desktop: failed to spawn session: {error:#}");
                             } else {
@@ -505,12 +501,18 @@ impl SingleSessionApp {
         self.detail_scroll = 0;
     }
 
+    fn reset_fresh_session(&mut self) {
+        self.session = None;
+        self.draft.clear();
+        self.detail_scroll = 0;
+    }
+
     fn status_title(&self) -> String {
         let title = self
             .session
             .as_ref()
             .map(|session| session.title.as_str())
-            .unwrap_or("new session");
+            .unwrap_or("fresh session");
         format!(
             "Jcode Desktop · single session · {title} · Ctrl+Enter send · Enter newline · Ctrl+; spawn · Ctrl+R refresh · Esc quit · --workspace for Niri layout"
         )
@@ -1065,8 +1067,10 @@ fn single_session_lines(session: Option<&workspace::SessionCard>) -> Vec<String>
     let Some(session) = session else {
         return vec![
             "single session mode".to_string(),
-            "press ctrl+; to spawn a jcode session".to_string(),
-            "press ctrl+r after it starts to attach the newest session card".to_string(),
+            "fresh desktop-native session draft".to_string(),
+            "type here without nav or insert modes".to_string(),
+            "ctrl+enter will send once desktop-native execution is connected".to_string(),
+            "ctrl+; clears this draft and starts another fresh desktop session".to_string(),
             "run with --workspace for the niri layout wrapper".to_string(),
         ];
     };
@@ -1478,7 +1482,7 @@ mod tests {
     }
 
     #[test]
-    fn single_session_without_session_spawns_on_open() {
+    fn single_session_without_session_is_native_fresh_draft() {
         let mut app = SingleSessionApp::new(None);
 
         assert!(app.status_title().contains("single session"));
@@ -1489,7 +1493,7 @@ mod tests {
         assert!(
             single_session_lines(None)
                 .iter()
-                .any(|line| line.contains("ctrl+;"))
+                .any(|line| line.contains("desktop-native"))
         );
     }
 
@@ -1504,6 +1508,27 @@ mod tests {
             app.handle_key(KeyInput::SpawnPanel),
             KeyOutcome::SpawnSession
         );
+    }
+
+    #[test]
+    fn single_session_spawn_resets_to_fresh_native_draft() {
+        let card = workspace::SessionCard {
+            session_id: "session_alpha".to_string(),
+            title: "alpha".to_string(),
+            subtitle: "active".to_string(),
+            detail: "3 msgs".to_string(),
+            preview_lines: Vec::new(),
+            detail_lines: Vec::new(),
+        };
+        let mut app = SingleSessionApp::new(Some(card));
+        app.handle_key(KeyInput::Character("draft".to_string()));
+
+        app.reset_fresh_session();
+
+        assert!(app.session.is_none());
+        assert!(app.draft.is_empty());
+        assert_eq!(app.detail_scroll, 0);
+        assert!(app.status_title().contains("fresh session"));
     }
 
     #[test]
