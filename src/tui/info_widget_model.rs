@@ -21,34 +21,7 @@ pub(super) fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
         ),
     ];
 
-    if let Some(effort) = &data.reasoning_effort {
-        let effort_short = match effort.as_str() {
-            "xhigh" => "xhi",
-            "high" => "hi",
-            "medium" => "med",
-            "low" => "lo",
-            "none" => "∅",
-            other => other,
-        };
-        spans.push(Span::styled(" ", Style::default()));
-        spans.push(Span::styled(
-            format!("({})", effort_short),
-            Style::default().fg(rgb(255, 200, 100)),
-        ));
-    }
-
-    if let Some(service_tier) = &data.service_tier {
-        let tier_short = match service_tier.as_str() {
-            "priority" => "fast",
-            "flex" => "flex",
-            other => other,
-        };
-        spans.push(Span::styled(" ", Style::default()));
-        spans.push(Span::styled(
-            format!("[{}]", tier_short),
-            Style::default().fg(rgb(200, 140, 255)).bold(),
-        ));
-    }
+    append_model_runtime_metadata(&mut spans, data);
 
     lines.push(Line::from(spans));
 
@@ -184,21 +157,7 @@ pub(super) fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<
         Style::default().fg(rgb(180, 180, 190)).bold(),
     )];
 
-    if let Some(effort) = &data.reasoning_effort {
-        let effort_short = match effort.as_str() {
-            "xhigh" => "xhi",
-            "high" => "hi",
-            "medium" => "med",
-            "low" => "lo",
-            "none" => "∅",
-            other => other,
-        };
-        spans.push(Span::styled(" ", Style::default()));
-        spans.push(Span::styled(
-            format!("({})", effort_short),
-            Style::default().fg(rgb(255, 200, 100)),
-        ));
-    }
+    append_model_runtime_metadata(&mut spans, data);
 
     if let Some(mode) = &data.native_compaction_mode {
         let label = if let Some(tokens) = data.native_compaction_threshold_tokens {
@@ -325,5 +284,118 @@ pub(super) fn shorten_model_name(model: &str) -> String {
         format!("{}…", crate::util::truncate_str(model, 14))
     } else {
         model.to_string()
+    }
+}
+
+fn append_model_runtime_metadata(spans: &mut Vec<Span<'static>>, data: &InfoWidgetData) {
+    if let Some(effort) = data
+        .reasoning_effort
+        .as_deref()
+        .and_then(short_reasoning_effort)
+    {
+        spans.push(Span::styled(" ", Style::default()));
+        spans.push(Span::styled(
+            format!("({effort})"),
+            Style::default().fg(rgb(255, 200, 100)),
+        ));
+    }
+
+    if let Some(tier) = data.service_tier.as_deref().and_then(short_service_tier) {
+        spans.push(Span::styled(" ", Style::default()));
+        spans.push(Span::styled(
+            format!("[{tier}]"),
+            Style::default().fg(rgb(200, 140, 255)).bold(),
+        ));
+    }
+}
+
+fn short_reasoning_effort(effort: &str) -> Option<&str> {
+    let effort = effort.trim();
+    if effort.is_empty() {
+        return None;
+    }
+    Some(match effort {
+        "xhigh" => "xhi",
+        "high" => "hi",
+        "medium" => "med",
+        "low" => "lo",
+        "none" => "∅",
+        other => other,
+    })
+}
+
+fn short_service_tier(service_tier: &str) -> Option<&str> {
+    let service_tier = service_tier.trim();
+    if service_tier.is_empty() || service_tier == "off" || service_tier == "default" {
+        return None;
+    }
+    Some(match service_tier {
+        "priority" => "fast",
+        "flex" => "flex",
+        other => other,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::info_widget::InfoWidgetData;
+
+    fn data() -> InfoWidgetData {
+        InfoWidgetData {
+            todos: Vec::new(),
+            context_info: None,
+            queue_mode: None,
+            context_limit: None,
+            model: Some("gpt-5-codex".to_string()),
+            reasoning_effort: Some("high".to_string()),
+            service_tier: Some("priority".to_string()),
+            native_compaction_mode: None,
+            native_compaction_threshold_tokens: None,
+            session_count: None,
+            session_name: None,
+            client_count: None,
+            memory_info: None,
+            swarm_info: None,
+            background_info: None,
+            usage_info: None,
+            tokens_per_second: None,
+            provider_name: None,
+            auth_method: crate::tui::info_widget::AuthMethod::Unknown,
+            upstream_provider: None,
+            connection_type: None,
+            diagrams: Vec::new(),
+            workspace_rows: Vec::new(),
+            workspace_animation_tick: 0,
+            ambient_info: None,
+            observed_context_tokens: None,
+            is_compacting: false,
+            git_info: None,
+        }
+    }
+
+    fn first_line_text(lines: Vec<Line<'static>>) -> String {
+        lines
+            .into_iter()
+            .next()
+            .expect("first model line")
+            .spans
+            .into_iter()
+            .map(|span| span.content.into_owned())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn model_widget_and_overview_show_same_runtime_metadata() {
+        let rect = Rect::new(0, 0, 40, 8);
+        let data = data();
+
+        let standalone = first_line_text(render_model_widget(&data, rect));
+        let overview = first_line_text(render_model_info(&data, rect));
+
+        assert!(standalone.contains("(hi)"));
+        assert!(standalone.contains("[fast]"));
+        assert!(overview.contains("(hi)"));
+        assert!(overview.contains("[fast]"));
     }
 }
