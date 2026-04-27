@@ -62,9 +62,19 @@ pub enum KeyOutcome {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionCard {
+    pub session_id: String,
+    pub title: String,
+    pub subtitle: String,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Surface {
     pub id: u64,
     pub title: String,
+    pub body_lines: Vec<String>,
+    pub session_id: Option<String>,
     /// Vertical Niri-style workspace index. Each workspace is rendered as one
     /// full-height horizontal strip of columns.
     pub lane: i32,
@@ -73,6 +83,30 @@ pub struct Surface {
 }
 
 impl Surface {
+    fn new(id: u64, title: impl Into<String>, lane: i32, column: i32, color_index: usize) -> Self {
+        Self {
+            id,
+            title: title.into(),
+            body_lines: Vec::new(),
+            session_id: None,
+            lane,
+            column,
+            color_index,
+        }
+    }
+
+    fn session(id: u64, card: SessionCard, lane: i32, column: i32, color_index: usize) -> Self {
+        Self {
+            id,
+            title: card.title,
+            body_lines: vec![card.subtitle, card.detail],
+            session_id: Some(card.session_id),
+            lane,
+            column,
+            color_index,
+        }
+    }
+
     fn is_placeholder_workspace(&self) -> bool {
         self.title == format!("workspace {}", self.lane)
     }
@@ -90,57 +124,16 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    #[cfg(test)]
     pub fn fake() -> Self {
         let surfaces = vec![
-            Surface {
-                id: 1,
-                title: "fox · coordinator".to_string(),
-                lane: 0,
-                column: 0,
-                color_index: 0,
-            },
-            Surface {
-                id: 2,
-                title: "wolf · impl".to_string(),
-                lane: 0,
-                column: 1,
-                color_index: 1,
-            },
-            Surface {
-                id: 3,
-                title: "owl · review".to_string(),
-                lane: 0,
-                column: 2,
-                color_index: 2,
-            },
-            Surface {
-                id: 4,
-                title: "activity".to_string(),
-                lane: 0,
-                column: 3,
-                color_index: 3,
-            },
-            Surface {
-                id: 5,
-                title: "diff".to_string(),
-                lane: 0,
-                column: 4,
-                color_index: 4,
-            },
-            Surface {
-                id: 6,
-                title: "review workspace".to_string(),
-                lane: -1,
-                column: 0,
-                color_index: 5,
-            },
-            Surface {
-                id: 7,
-                title: "build workspace".to_string(),
-                lane: 1,
-                column: 0,
-                color_index: 6,
-            },
+            Surface::new(1, "fox · coordinator", 0, 0, 0),
+            Surface::new(2, "wolf · impl", 0, 1, 1),
+            Surface::new(3, "owl · review", 0, 2, 2),
+            Surface::new(4, "activity", 0, 3, 3),
+            Surface::new(5, "diff", 0, 4, 4),
+            Surface::new(6, "review workspace", -1, 0, 5),
+            Surface::new(7, "build workspace", 1, 0, 6),
         ];
 
         Self {
@@ -151,6 +144,56 @@ impl Workspace {
             draft: String::new(),
             panel_size: PanelSizePreset::Quarter,
             next_id: 8,
+        }
+    }
+
+    pub fn from_session_cards(cards: Vec<SessionCard>) -> Self {
+        if cards.is_empty() {
+            return Self::empty_sessions();
+        }
+
+        let mut next_id = 1;
+        let surfaces = cards
+            .into_iter()
+            .enumerate()
+            .map(|(index, card)| {
+                let id = next_id;
+                next_id += 1;
+                Surface::session(id, card, 0, index as i32, index)
+            })
+            .collect::<Vec<_>>();
+
+        Self {
+            mode: InputMode::Navigation,
+            focused_id: surfaces.first().map(|surface| surface.id).unwrap_or(1),
+            surfaces,
+            zoomed: false,
+            draft: String::new(),
+            panel_size: PanelSizePreset::Quarter,
+            next_id,
+        }
+    }
+
+    fn empty_sessions() -> Self {
+        Self {
+            mode: InputMode::Navigation,
+            surfaces: vec![Surface {
+                id: 1,
+                title: "no jcode sessions found".to_string(),
+                body_lines: vec![
+                    "start a session in the tui".to_string(),
+                    "then restart this desktop prototype".to_string(),
+                ],
+                session_id: None,
+                lane: 0,
+                column: 0,
+                color_index: 0,
+            }],
+            focused_id: 1,
+            zoomed: false,
+            draft: String::new(),
+            panel_size: PanelSizePreset::Quarter,
+            next_id: 2,
         }
     }
 
@@ -418,13 +461,13 @@ impl Workspace {
 
         let id = self.next_id;
         self.next_id += 1;
-        self.surfaces.push(Surface {
+        self.surfaces.push(Surface::new(
             id,
-            title: format!("workspace {lane}"),
+            format!("workspace {lane}"),
             lane,
-            column: preferred_column,
-            color_index: id as usize,
-        });
+            preferred_column,
+            id as usize,
+        ));
         id
     }
 
@@ -440,13 +483,13 @@ impl Workspace {
             + 1;
         let id = self.next_id;
         self.next_id += 1;
-        self.surfaces.push(Surface {
+        self.surfaces.push(Surface::new(
             id,
-            title: format!("agent-{id}"),
+            format!("new session {id}"),
             lane,
             column,
-            color_index: id as usize,
-        });
+            id as usize,
+        ));
         self.focused_id = id;
         self.zoomed = false;
     }
@@ -473,13 +516,15 @@ impl Workspace {
             + 1;
         let id = self.next_id;
         self.next_id += 1;
-        self.surfaces.push(Surface {
-            id,
-            title: "hotkey help".to_string(),
-            lane,
-            column,
-            color_index: id as usize,
-        });
+        let mut help = Surface::new(id, "hotkey help", lane, column, id as usize);
+        help.body_lines = vec![
+            "h l focus columns".to_string(),
+            "j k focus workspaces".to_string(),
+            "ctrl 1 2 3 4 panel width".to_string(),
+            "ctrl semicolon new panel".to_string(),
+            "ctrl slash help".to_string(),
+        ];
+        self.surfaces.push(help);
         self.focused_id = id;
         self.zoomed = false;
     }

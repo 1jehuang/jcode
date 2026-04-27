@@ -1,3 +1,4 @@
+mod session_data;
 mod workspace;
 
 use anyhow::{Context, Result};
@@ -40,6 +41,8 @@ const BITMAP_TEXT_PIXEL: f32 = 2.0;
 const STATUS_TEXT_RIGHT_PADDING: f32 = 14.0;
 const PANEL_TITLE_LEFT_PADDING: f32 = 12.0;
 const PANEL_TITLE_TOP_PADDING: f32 = 12.0;
+const PANEL_BODY_TOP_PADDING: f32 = 38.0;
+const PANEL_BODY_LINE_GAP: f32 = 8.0;
 const VIEWPORT_ANIMATION_DURATION: Duration = Duration::from_millis(150);
 const FOCUS_PULSE_DURATION: Duration = Duration::from_millis(180);
 const VIEWPORT_ANIMATION_EPSILON: f32 = 0.5;
@@ -65,6 +68,7 @@ const STATUS_PREVIEW_VIEWPORT_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.78];
 const WORKSPACE_NUMBER_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.90];
 const STATUS_TEXT_COLOR: [f32; 4] = [0.953, 0.965, 0.984, 0.88];
 const PANEL_TITLE_COLOR: [f32; 4] = [0.150, 0.170, 0.210, 0.68];
+const PANEL_BODY_COLOR: [f32; 4] = [0.150, 0.170, 0.210, 0.48];
 const STATUS_PREVIEW_ACCENTS: [[f32; 3]; 8] = [
     [0.560, 0.690, 0.980],
     [0.780, 0.610, 0.910],
@@ -120,7 +124,14 @@ async fn run() -> Result<()> {
             .context("failed to create desktop window")?,
     ));
 
-    let mut workspace = Workspace::fake();
+    let session_cards = match session_data::load_recent_session_cards() {
+        Ok(cards) => cards,
+        Err(error) => {
+            eprintln!("jcode-desktop: failed to load session metadata: {error:#}");
+            Vec::new()
+        }
+    };
+    let mut workspace = Workspace::from_session_cards(session_cards);
     window.set_title(&workspace.status_title());
     let mut canvas = Canvas::new(window).await?;
     let mut modifiers = ModifiersState::empty();
@@ -658,7 +669,7 @@ fn build_vertices(
                 focus_pulse,
                 size,
             );
-            push_panel_title(&mut vertices, surface.title.as_str(), rect, size);
+            push_panel_contents(&mut vertices, surface, rect, size);
         }
         return vertices;
     }
@@ -692,7 +703,7 @@ fn build_vertices(
             surface_pulse,
             size,
         );
-        push_panel_title(&mut vertices, surface.title.as_str(), rect, size);
+        push_panel_contents(&mut vertices, surface, rect, size);
     }
 
     vertices
@@ -817,6 +828,37 @@ fn push_panel_title(vertices: &mut Vec<Vertex>, title: &str, rect: Rect, size: P
         size,
         max_width,
     );
+}
+
+fn push_panel_contents(
+    vertices: &mut Vec<Vertex>,
+    surface: &workspace::Surface,
+    rect: Rect,
+    size: PhysicalSize<u32>,
+) {
+    push_panel_title(vertices, surface.title.as_str(), rect, size);
+
+    let max_width = (rect.width - PANEL_TITLE_LEFT_PADDING * 2.0).max(1.0);
+    let mut y = rect.y + PANEL_BODY_TOP_PADDING;
+    let line_height = bitmap_text_height(BITMAP_TEXT_PIXEL) + PANEL_BODY_LINE_GAP;
+    let max_y = rect.y + rect.height - PANEL_TITLE_TOP_PADDING;
+    for line in &surface.body_lines {
+        if y + bitmap_text_height(BITMAP_TEXT_PIXEL) > max_y {
+            break;
+        }
+        let text = normalize_bitmap_text(line);
+        push_bitmap_text(
+            vertices,
+            &text,
+            rect.x + PANEL_TITLE_LEFT_PADDING,
+            y,
+            BITMAP_TEXT_PIXEL,
+            PANEL_BODY_COLOR,
+            size,
+            max_width,
+        );
+        y += line_height;
+    }
 }
 
 fn normalize_bitmap_text(text: &str) -> String {
