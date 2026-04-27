@@ -64,6 +64,10 @@ jobs:
         shell: bash
         run: python3 scripts/check_panic_budget.py
 
+      - name: Enforce swallowed-error usage ratchet
+        shell: bash
+        run: python3 scripts/check_swallowed_error_budget.py
+
   mobile-simulator:
     name: Mobile Simulator (Linux)
     runs-on: ubuntu-latest

@@ -13,6 +13,8 @@ cargo fmt --all -- --check
 cargo check -q
 scripts/check_warning_budget.sh
 scripts/check_code_size_budget.py
+scripts/check_panic_budget.py
+scripts/check_swallowed_error_budget.py
 ```
 
 When you touch core orchestration, provider, server, or TUI code, run the stricter set too:
@@ -71,6 +73,13 @@ Do **not** update the baseline to permit new warnings.
 - Prefer fixing lint findings over suppressing them.
 - Broad module-level suppressions are strongly discouraged.
 - If a suppression is truly necessary, make it narrow and document why.
+
+### Error handling policy
+
+- Production panic-prone usage must stay at zero via `scripts/check_panic_budget.py`.
+- Suspicious swallowed-error patterns are ratcheted via `scripts/check_swallowed_error_budget.py`.
+- Do not add new `let _ = ...`, `.ok()`, or `.unwrap_or_default()` in production code unless the error is intentionally best-effort and there is no clearer helper available.
+- Prefer propagating errors with context, or logging failures with enough context to debug the affected session/provider/path.
 
 ### Refactor rules
 
