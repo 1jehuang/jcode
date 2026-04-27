@@ -73,6 +73,20 @@ inspection:
 The goal is for an agent to test autonomously in every way a human would, while
 also having richer semantic APIs than a human has.
 
+## Rust-owned gateway protocol helpers
+
+`jcode-mobile-core::protocol` owns the gateway-facing mobile protocol shapes and
+transport helpers that the future iOS shell can call through FFI:
+
+- `MobileRequest` and `MobileServerEvent` for typed request/event JSON
+- `MobileGatewayConfig` and `MobileGatewayEndpoints` for HTTP/WebSocket URL derivation
+- `MobilePairingConfig` to build pair requests without Swift-owned request logic
+- `serialize_mobile_request` to produce gateway JSON envelopes with stable IDs
+- `decode_mobile_server_event_lossy` to preserve unknown future gateway events
+
+This keeps pairing, health, WebSocket URL construction, request serialization,
+and event decoding in Rust while Swift remains a thin platform shell.
+
 ## Default transport
 
 The simulator listens on a **Unix socket** by default.

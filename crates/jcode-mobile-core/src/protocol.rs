@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const DEFAULT_GATEWAY_PORT: u16 = 7643;
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -78,6 +80,162 @@ pub enum MobileRequest {
         request_id: String,
         input: String,
     },
+}
+
+impl MobileRequest {
+    pub fn id(&self) -> u64 {
+        match self {
+            Self::Subscribe { id, .. }
+            | Self::Message { id, .. }
+            | Self::Cancel { id }
+            | Self::Ping { id }
+            | Self::GetHistory { id }
+            | Self::State { id }
+            | Self::Clear { id }
+            | Self::ResumeSession { id, .. }
+            | Self::CycleModel { id, .. }
+            | Self::SetModel { id, .. }
+            | Self::Compact { id }
+            | Self::SoftInterrupt { id, .. }
+            | Self::CancelSoftInterrupts { id }
+            | Self::BackgroundTool { id }
+            | Self::Split { id }
+            | Self::StdinResponse { id, .. } => *id,
+        }
+    }
+
+    pub fn to_gateway_json(&self) -> anyhow::Result<String> {
+        Ok(serde_json::to_string(self)?)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileGatewayConfig {
+    pub host: String,
+    pub port: u16,
+    pub use_tls: bool,
+}
+
+impl MobileGatewayConfig {
+    pub fn new(host: impl Into<String>, port: u16, use_tls: bool) -> anyhow::Result<Self> {
+        let host = normalize_gateway_host(&host.into())?;
+        Ok(Self {
+            host,
+            port,
+            use_tls,
+        })
+    }
+
+    pub fn endpoints(&self) -> MobileGatewayEndpoints {
+        let http_scheme = if self.use_tls { "https" } else { "http" };
+        let ws_scheme = if self.use_tls { "wss" } else { "ws" };
+        let authority = format!("{}:{}", self.host, self.port);
+        MobileGatewayEndpoints {
+            base_http_url: format!("{http_scheme}://{authority}"),
+            health_url: format!("{http_scheme}://{authority}/health"),
+            pair_url: format!("{http_scheme}://{authority}/pair"),
+            websocket_url: format!("{ws_scheme}://{authority}/ws"),
+        }
+    }
+}
+
+impl Default for MobileGatewayConfig {
+    fn default() -> Self {
+        Self {
+            host: "localhost".to_string(),
+            port: DEFAULT_GATEWAY_PORT,
+            use_tls: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileGatewayEndpoints {
+    pub base_http_url: String,
+    pub health_url: String,
+    pub pair_url: String,
+    pub websocket_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobilePairingConfig {
+    pub code: String,
+    pub device_id: String,
+    pub device_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apns_token: Option<String>,
+}
+
+impl From<MobilePairingConfig> for PairRequest {
+    fn from(value: MobilePairingConfig) -> Self {
+        Self {
+            code: value.code,
+            device_id: value.device_id,
+            device_name: value.device_name,
+            apns_token: value.apns_token,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SerializedMobileRequest {
+    pub id: u64,
+    pub json: String,
+}
+
+pub fn serialize_mobile_request(
+    request: &MobileRequest,
+) -> anyhow::Result<SerializedMobileRequest> {
+    Ok(SerializedMobileRequest {
+        id: request.id(),
+        json: request.to_gateway_json()?,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DecodedMobileServerEvent {
+    Known(MobileServerEvent),
+    Unknown(RawMobileServerEvent),
+}
+
+pub fn decode_mobile_server_event_lossy(value: Value) -> anyhow::Result<DecodedMobileServerEvent> {
+    match serde_json::from_value::<MobileServerEvent>(value.clone()) {
+        Ok(event) => Ok(DecodedMobileServerEvent::Known(event)),
+        Err(_) => {
+            let event_type = value
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            Ok(DecodedMobileServerEvent::Unknown(RawMobileServerEvent {
+                event_type,
+                raw: value,
+            }))
+        }
+    }
+}
+
+fn normalize_gateway_host(input: &str) -> anyhow::Result<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("gateway host cannot be empty");
+    }
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .or_else(|| trimmed.strip_prefix("wss://"))
+        .or_else(|| trimmed.strip_prefix("ws://"))
+        .unwrap_or(trimmed);
+    let host = without_scheme
+        .split('/')
+        .next()
+        .unwrap_or(without_scheme)
+        .trim_end_matches('/');
+    if host.is_empty() {
+        anyhow::bail!("gateway host cannot be empty");
+    }
+    Ok(host.to_string())
 }
 
 /// Events received by the mobile app from the jcode gateway.
@@ -400,5 +558,75 @@ mod tests {
             value,
             json!({"code":"123456","device_id":"ios-test","device_name":"simulator"})
         );
+    }
+
+    #[test]
+    fn gateway_config_derives_http_and_websocket_endpoints() {
+        let config = MobileGatewayConfig::new("https://devbox.tailnet.ts.net/", 7643, true);
+        assert!(config.is_ok(), "gateway config should normalize host");
+        let Ok(config) = config else {
+            return;
+        };
+        assert_eq!(config.host, "devbox.tailnet.ts.net");
+        let endpoints = config.endpoints();
+        assert_eq!(
+            endpoints.base_http_url,
+            "https://devbox.tailnet.ts.net:7643"
+        );
+        assert_eq!(
+            endpoints.health_url,
+            "https://devbox.tailnet.ts.net:7643/health"
+        );
+        assert_eq!(
+            endpoints.pair_url,
+            "https://devbox.tailnet.ts.net:7643/pair"
+        );
+        assert_eq!(
+            endpoints.websocket_url,
+            "wss://devbox.tailnet.ts.net:7643/ws"
+        );
+    }
+
+    #[test]
+    fn serialized_request_preserves_id_and_json_shape() {
+        let request = MobileRequest::Ping { id: 42 };
+        let serialized = serialize_mobile_request(&request);
+        assert!(serialized.is_ok(), "request serializes");
+        let Ok(serialized) = serialized else {
+            return;
+        };
+        assert_eq!(serialized.id, 42);
+        assert_eq!(serialized.json, r#"{"type":"ping","id":42}"#);
+    }
+
+    #[test]
+    fn pairing_config_builds_pair_request() {
+        let request = PairRequest::from(MobilePairingConfig {
+            code: "654321".to_string(),
+            device_id: "device-1".to_string(),
+            device_name: "Linux simulator".to_string(),
+            apns_token: Some("token".to_string()),
+        });
+
+        assert_eq!(request.code, "654321");
+        assert_eq!(request.device_id, "device-1");
+        assert_eq!(request.apns_token.as_deref(), Some("token"));
+    }
+
+    #[test]
+    fn lossy_event_decoder_preserves_unknown_events() {
+        let decoded = decode_mobile_server_event_lossy(json!({
+            "type": "future_event",
+            "payload": 123
+        }));
+        assert!(decoded.is_ok(), "unknown events are preserved");
+        let Ok(decoded) = decoded else {
+            return;
+        };
+        let DecodedMobileServerEvent::Unknown(raw) = decoded else {
+            panic!("expected unknown event");
+        };
+        assert_eq!(raw.event_type, "future_event");
+        assert_eq!(raw.raw["payload"], 123);
     }
 }
