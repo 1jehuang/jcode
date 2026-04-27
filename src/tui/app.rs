@@ -73,6 +73,7 @@ mod tui_lifecycle;
 mod tui_lifecycle_runtime;
 mod tui_state;
 mod turn;
+mod turn_memory;
 
 pub(crate) use self::state_ui_storage::compact_display_messages_for_storage;
 

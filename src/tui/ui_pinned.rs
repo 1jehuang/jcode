@@ -1,4 +1,7 @@
 use super::*;
+mod ui_pinned_table;
+use ui_pinned_table::is_rendered_table_line;
+
 #[path = "ui_pinned_layout.rs"]
 mod layout_support;
 #[path = "ui_pinned_utils.rs"]
@@ -1942,15 +1945,6 @@ fn wrap_side_panel_markdown_lines(lines: Vec<Line<'static>>, width: usize) -> Ve
             }
         })
         .collect()
-}
-
-fn is_rendered_table_line(line: &Line<'_>) -> bool {
-    let text: String = line
-        .spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect();
-    text.contains(" │ ") || text.contains("─┼─")
 }
 
 #[cfg(test)]
