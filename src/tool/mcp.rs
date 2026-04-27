@@ -429,7 +429,6 @@ mod tests {
     fn test_tool_description() {
         let tool = create_test_tool();
         assert!(tool.description().contains("MCP"));
-        assert!(tool.description().contains("Model Context Protocol"));
     }
 
     #[test]

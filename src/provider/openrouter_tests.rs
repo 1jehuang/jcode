@@ -35,23 +35,22 @@ impl Drop for EnvVarGuard {
     }
 }
 
+/// Resolve the directory where a test fixture should drop an env-style
+/// credentials file so production code reading via
+/// `crate::storage::app_config_dir()` will see it.
+///
+/// Production code respects `$JCODE_HOME` and falls back to
+/// `dirs::config_dir()` otherwise. On Windows, `dirs::config_dir()` uses
+/// `SHGetKnownFolderPath` and does **not** read the `APPDATA` env var,
+/// so simply setting `APPDATA` in a test does not redirect the lookup.
+/// Tests therefore must set `JCODE_HOME` and we write under
+/// `$JCODE_HOME/config/jcode/`.
 fn test_config_dir(temp: &TempDir) -> std::path::PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        temp.path().join("Library").join("Application Support")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        temp.path().join("AppData").join("Roaming")
-    }
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    {
-        temp.path().to_path_buf()
-    }
+    temp.path().join("config").join("jcode")
 }
 
 fn write_test_api_key(temp: &TempDir, env_file: &str, env_key: &str, value: &str) {
-    let config_dir = test_config_dir(temp).join("jcode");
+    let config_dir = test_config_dir(temp);
     std::fs::create_dir_all(&config_dir).expect("create test config dir");
     std::fs::write(config_dir.join(env_file), format!("{env_key}={value}\n"))
         .expect("write test api key");
@@ -98,6 +97,10 @@ fn autodetects_single_saved_openai_compatible_profile() {
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    // JCODE_HOME is the redirection that production app_config_dir() honors
+    // first; on Windows, dirs::config_dir() ignores APPDATA so JCODE_HOME is
+    // the only env-based way to redirect the lookup.
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _openrouter_base = EnvVarGuard::remove("JCODE_OPENROUTER_API_BASE");
     let _openrouter_key = EnvVarGuard::remove("JCODE_OPENROUTER_API_KEY_NAME");
     let _openrouter_file = EnvVarGuard::remove("JCODE_OPENROUTER_ENV_FILE");
@@ -128,6 +131,10 @@ fn autodetects_single_saved_local_openai_compatible_profile() {
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    // JCODE_HOME is the redirection that production app_config_dir() honors
+    // first; on Windows, dirs::config_dir() ignores APPDATA so JCODE_HOME is
+    // the only env-based way to redirect the lookup.
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _openrouter_base = EnvVarGuard::remove("JCODE_OPENROUTER_API_BASE");
     let _openrouter_key = EnvVarGuard::remove("JCODE_OPENROUTER_API_KEY_NAME");
     let _openrouter_file = EnvVarGuard::remove("JCODE_OPENROUTER_ENV_FILE");
@@ -139,7 +146,7 @@ fn autodetects_single_saved_local_openai_compatible_profile() {
     let lmstudio = crate::provider_catalog::resolve_openai_compatible_profile(
         crate::provider_catalog::LMSTUDIO_PROFILE,
     );
-    let config_dir = test_config_dir(&temp).join("jcode");
+    let config_dir = test_config_dir(&temp);
     std::fs::create_dir_all(&config_dir).expect("create test config dir");
     std::fs::write(
         config_dir.join(&lmstudio.env_file),
@@ -164,6 +171,10 @@ fn does_not_guess_when_multiple_saved_openai_compatible_profiles_exist() {
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    // JCODE_HOME is the redirection that production app_config_dir() honors
+    // first; on Windows, dirs::config_dir() ignores APPDATA so JCODE_HOME is
+    // the only env-based way to redirect the lookup.
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _openrouter_base = EnvVarGuard::remove("JCODE_OPENROUTER_API_BASE");
     let _openrouter_key = EnvVarGuard::remove("JCODE_OPENROUTER_API_KEY_NAME");
     let _openrouter_file = EnvVarGuard::remove("JCODE_OPENROUTER_ENV_FILE");
@@ -204,6 +215,10 @@ fn autodetected_profile_seeds_default_model_and_cache_namespace() {
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    // JCODE_HOME is the redirection that production app_config_dir() honors
+    // first; on Windows, dirs::config_dir() ignores APPDATA so JCODE_HOME is
+    // the only env-based way to redirect the lookup.
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _openrouter_base = EnvVarGuard::remove("JCODE_OPENROUTER_API_BASE");
     let _openrouter_key = EnvVarGuard::remove("JCODE_OPENROUTER_API_KEY_NAME");
     let _openrouter_file = EnvVarGuard::remove("JCODE_OPENROUTER_ENV_FILE");
