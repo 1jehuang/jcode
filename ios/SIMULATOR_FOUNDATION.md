@@ -188,6 +188,21 @@ cargo run -p jcode-mobile-sim -- assert-live-replay crates/jcode-mobile-core/tes
 The checked-in golden trace `crates/jcode-mobile-core/tests/golden/pairing_ready_chat_send.json`
 locks the current pairing-to-chat-send behavior for regression tests.
 
+### Export and assert deterministic screenshots
+
+The screenshot pipeline exports deterministic SVG-based snapshots with viewport
+dimensions, theme, stable hash, SVG markup, and semantic layout metadata. This
+keeps screenshot regression tests Linux-native and dependency-free.
+
+```bash
+cargo run -p jcode-mobile-sim -- screenshot --output /tmp/mobile-screenshot.json
+cargo run -p jcode-mobile-sim -- screenshot --format svg --output /tmp/mobile-screenshot.svg
+cargo run -p jcode-mobile-sim -- assert-screenshot /tmp/mobile-screenshot.json
+```
+
+`assert-screenshot` compares stable hashes and reports a structured diff with
+lengths and first differing byte offset when snapshots diverge.
+
 ### Set fields
 
 ```bash
@@ -298,7 +313,7 @@ This is an initial foundation only.
 Not included yet:
 
 - visible desktop renderer
-- screenshot export
+- raster screenshot export in addition to deterministic SVG snapshots
 - richer replay DSL beyond deterministic JSON action bundles
 - live render inspector
 - iOS host integration

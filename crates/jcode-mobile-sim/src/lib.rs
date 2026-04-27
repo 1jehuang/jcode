@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use jcode_mobile_core::{
-    DispatchReport, ScenarioName, SimulatorAction, SimulatorStore, UiNodeAction, hit_test,
-    hit_test_actionable,
+    DispatchReport, ScenarioName, ScreenshotSnapshot, SimulatorAction, SimulatorStore,
+    UiNodeAction, diff_screenshots, hit_test, hit_test_actionable, screenshot_snapshot,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -186,6 +186,37 @@ async fn handle_request(
                 serde_json::to_value(store.semantic_tree()).unwrap_or(Value::Null),
                 false,
             ))
+        }
+        "screenshot" => {
+            let store = store.lock().await;
+            let snapshot = screenshot_snapshot(&store.semantic_tree());
+            Ok((serde_json::to_value(snapshot).unwrap_or(Value::Null), false))
+        }
+        "assert_screenshot" => {
+            let expected = request
+                .params
+                .get("snapshot")
+                .cloned()
+                .ok_or_else(|| anyhow!("missing snapshot field"));
+            match expected.and_then(|value| {
+                serde_json::from_value::<ScreenshotSnapshot>(value).map_err(Into::into)
+            }) {
+                Ok(expected) => {
+                    let store = store.lock().await;
+                    let actual = screenshot_snapshot(&store.semantic_tree());
+                    let diff = diff_screenshots(&expected, &actual);
+                    if diff.matches {
+                        Ok((json!({"matched": true, "hash": actual.hash}), false))
+                    } else {
+                        Err(anyhow!(
+                            "screenshot mismatch: {}",
+                            serde_json::to_string(&diff)
+                                .unwrap_or_else(|_| "<diff encode failed>".to_string())
+                        ))
+                    }
+                }
+                Err(err) => Err(err),
+            }
         }
         "find_node" => {
             let node_id = required_str(&request.params, "node_id");
@@ -686,6 +717,34 @@ mod tests {
         .await?;
         let tree_json = serde_json::to_string(&tree.result)?;
         assert!(tree_json.contains("chat.send"));
+
+        let screenshot = send_request(
+            &socket,
+            AutomationRequest {
+                id: "screenshot".to_string(),
+                method: "screenshot".to_string(),
+                params: Value::Null,
+            },
+        )
+        .await?;
+        assert!(screenshot.ok);
+        assert!(
+            screenshot.result["svg"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("chat.send")
+        );
+
+        let assert_screenshot = send_request(
+            &socket,
+            AutomationRequest {
+                id: "assert-screenshot".to_string(),
+                method: "assert_screenshot".to_string(),
+                params: json!({"snapshot": screenshot.result}),
+            },
+        )
+        .await?;
+        assert!(assert_screenshot.ok);
 
         let assert_screen = send_request(
             &socket,

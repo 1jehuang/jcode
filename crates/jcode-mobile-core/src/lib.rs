@@ -442,6 +442,170 @@ pub struct UiTree {
     pub root: UiNode,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenshotSnapshot {
+    pub format: String,
+    pub width: i32,
+    pub height: i32,
+    pub theme: String,
+    pub hash: String,
+    pub svg: String,
+    pub layout: UiTree,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenshotDiff {
+    pub matches: bool,
+    pub expected_hash: String,
+    pub actual_hash: String,
+    pub expected_len: usize,
+    pub actual_len: usize,
+    pub first_difference: Option<usize>,
+}
+
+pub fn screenshot_snapshot(tree: &UiTree) -> ScreenshotSnapshot {
+    let svg = render_svg(tree);
+    let hash = stable_hash_hex(svg.as_bytes());
+    ScreenshotSnapshot {
+        format: "svg".to_string(),
+        width: DEFAULT_VIEWPORT_WIDTH,
+        height: DEFAULT_VIEWPORT_HEIGHT,
+        theme: "jcode-mobile-sim-light".to_string(),
+        hash,
+        svg,
+        layout: tree.clone(),
+    }
+}
+
+pub fn diff_screenshots(
+    expected: &ScreenshotSnapshot,
+    actual: &ScreenshotSnapshot,
+) -> ScreenshotDiff {
+    let first_difference = expected
+        .svg
+        .as_bytes()
+        .iter()
+        .zip(actual.svg.as_bytes().iter())
+        .position(|(a, b)| a != b)
+        .or_else(|| {
+            if expected.svg.len() == actual.svg.len() {
+                None
+            } else {
+                Some(expected.svg.len().min(actual.svg.len()))
+            }
+        });
+
+    ScreenshotDiff {
+        matches: expected.hash == actual.hash && first_difference.is_none(),
+        expected_hash: expected.hash.clone(),
+        actual_hash: actual.hash.clone(),
+        expected_len: expected.svg.len(),
+        actual_len: actual.svg.len(),
+        first_difference,
+    }
+}
+
+fn render_svg(tree: &UiTree) -> String {
+    let mut svg = String::new();
+    svg.push_str(&format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}" font-family="Inter, ui-sans-serif, system-ui" font-size="14">"#,
+        DEFAULT_VIEWPORT_WIDTH, DEFAULT_VIEWPORT_HEIGHT, DEFAULT_VIEWPORT_WIDTH, DEFAULT_VIEWPORT_HEIGHT
+    ));
+    svg.push_str(r##"<rect x="0" y="0" width="390" height="844" fill="#f8fafc"/>"##);
+    render_svg_node(&mut svg, &tree.root, 0);
+    svg.push_str("</svg>\n");
+    svg
+}
+
+fn render_svg_node(svg: &mut String, node: &UiNode, depth: usize) {
+    if !node.visible {
+        return;
+    }
+
+    if let Some(bounds) = node.bounds {
+        let (fill, stroke) = match node.role {
+            UiNodeRole::Screen => ("none", "none"),
+            UiNodeRole::TextInput | UiNodeRole::Composer => ("#ffffff", "#94a3b8"),
+            UiNodeRole::Button => {
+                if node.enabled {
+                    ("#2563eb", "#1d4ed8")
+                } else {
+                    ("#cbd5e1", "#94a3b8")
+                }
+            }
+            UiNodeRole::Banner => ("#e0f2fe", "#38bdf8"),
+            UiNodeRole::MessageList => ("#eef2ff", "#c7d2fe"),
+            UiNodeRole::Message => ("#ffffff", "#cbd5e1"),
+        };
+        if stroke != "none" {
+            svg.push_str(&format!(
+                r#"<rect data-node="{}" data-role="{:?}" x="{}" y="{}" width="{}" height="{}" rx="10" fill="{}" stroke="{}"/>"#,
+                xml_escape(&node.id),
+                node.role,
+                bounds.x,
+                bounds.y,
+                bounds.width,
+                bounds.height,
+                fill,
+                stroke
+            ));
+        }
+
+        if node.role != UiNodeRole::Screen {
+            let text = node
+                .value
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .unwrap_or(&node.label);
+            let text = truncate_for_svg(text, 54usize.saturating_sub(depth * 4));
+            let fill = if node.role == UiNodeRole::Button && node.enabled {
+                "#ffffff"
+            } else {
+                "#0f172a"
+            };
+            svg.push_str(&format!(
+                r#"<text data-node-label="{}" x="{}" y="{}" fill="{}">{}</text>"#,
+                xml_escape(&node.id),
+                bounds.x + 12,
+                bounds.y + 28,
+                fill,
+                xml_escape(&text)
+            ));
+        }
+    }
+
+    for child in &node.children {
+        render_svg_node(svg, child, depth + 1);
+    }
+}
+
+fn truncate_for_svg(input: &str, max_chars: usize) -> String {
+    if input.chars().count() <= max_chars {
+        return input.to_string();
+    }
+    let mut output: String = input.chars().take(max_chars.saturating_sub(1)).collect();
+    output.push('…');
+    output
+}
+
+fn xml_escape(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn stable_hash_hex(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
 pub fn hit_test(tree: &UiTree, x: i32, y: i32) -> Option<&UiNode> {
     hit_test_node(&tree.root, x, y)
 }
@@ -1472,5 +1636,33 @@ mod tests {
             hit_test_actionable(&tree, 330, 788, UiNodeAction::Tap).map(|node| node.id.as_str()),
             Some("chat.send")
         );
+    }
+
+    #[test]
+    fn screenshot_snapshot_is_deterministic_svg_with_layout() {
+        let store = SimulatorStore::new(SimulatorState::for_scenario(ScenarioName::ConnectedChat));
+        let tree = store.semantic_tree();
+        let first = screenshot_snapshot(&tree);
+        let second = screenshot_snapshot(&tree);
+
+        assert_eq!(first, second);
+        assert_eq!(first.width, DEFAULT_VIEWPORT_WIDTH);
+        assert_eq!(first.height, DEFAULT_VIEWPORT_HEIGHT);
+        assert!(first.hash.starts_with("fnv1a64:"));
+        assert!(first.svg.contains("data-node=\"chat.send\""));
+        assert!(first.layout.root.bounds.is_some());
+    }
+
+    #[test]
+    fn screenshot_diff_reports_mismatch() {
+        let store = SimulatorStore::new(SimulatorState::for_scenario(ScenarioName::ConnectedChat));
+        let mut expected = screenshot_snapshot(&store.semantic_tree());
+        let actual = expected.clone();
+        expected.svg.push_str("<!-- changed -->");
+        expected.hash = "fnv1a64:changed".to_string();
+
+        let diff = diff_screenshots(&expected, &actual);
+        assert!(!diff.matches);
+        assert!(diff.first_difference.is_some());
     }
 }

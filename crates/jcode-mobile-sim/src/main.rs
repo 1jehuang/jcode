@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use jcode_mobile_core::{ReplayTrace, ScenarioName, SimulatorAction};
+use jcode_mobile_core::{ReplayTrace, ScenarioName, ScreenshotSnapshot, SimulatorAction};
 use jcode_mobile_sim::{
     AutomationRequest, default_socket_path, request_status, run_server, send_request,
 };
@@ -40,6 +40,19 @@ enum Command {
     Tree {
         #[arg(long)]
         socket: Option<PathBuf>,
+    },
+    Screenshot {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long, default_value = "json")]
+        format: String,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    AssertScreenshot {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        path: PathBuf,
     },
     FindNode {
         #[arg(long)]
@@ -183,6 +196,25 @@ async fn main() -> Result<()> {
         }
         Command::Tree { socket } => {
             print_result(send_simple(&resolve_socket(socket), "tree", Value::Null).await?)
+        }
+        Command::Screenshot {
+            socket,
+            format,
+            output,
+        } => {
+            let snapshot = send_simple(&resolve_socket(socket), "screenshot", Value::Null).await?;
+            write_screenshot(snapshot, &format, output)
+        }
+        Command::AssertScreenshot { socket, path } => {
+            let snapshot = read_screenshot_snapshot(&path)?;
+            print_result(
+                send_simple(
+                    &resolve_socket(socket),
+                    "assert_screenshot",
+                    json!({ "snapshot": snapshot }),
+                )
+                .await?,
+            )
         }
         Command::FindNode { socket, node_id } => print_result(
             send_simple(
@@ -412,6 +444,38 @@ fn write_or_print_json(value: Value, output: Option<PathBuf>) -> Result<()> {
         println!("{json}");
     }
     Ok(())
+}
+
+fn write_screenshot(value: Value, format: &str, output: Option<PathBuf>) -> Result<()> {
+    match format {
+        "json" => write_or_print_json(value, output),
+        "svg" => {
+            let svg = value
+                .get("svg")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("screenshot response missing svg field"))?;
+            if let Some(output) = output {
+                if let Some(parent) = output.parent() {
+                    std::fs::create_dir_all(parent).with_context(|| {
+                        format!("create screenshot output directory {}", parent.display())
+                    })?;
+                }
+                std::fs::write(&output, svg)
+                    .with_context(|| format!("write screenshot SVG {}", output.display()))?;
+            } else {
+                print!("{svg}");
+            }
+            Ok(())
+        }
+        other => bail!("unsupported screenshot format: {other}"),
+    }
+}
+
+fn read_screenshot_snapshot(path: &Path) -> Result<ScreenshotSnapshot> {
+    let json = std::fs::read_to_string(path)
+        .with_context(|| format!("read screenshot snapshot {}", path.display()))?;
+    serde_json::from_str(&json)
+        .with_context(|| format!("parse screenshot snapshot {}", path.display()))
 }
 
 fn read_replay_trace(path: &Path) -> Result<ReplayTrace> {
