@@ -39,6 +39,7 @@ fn build_input_shell_command(command: &str) -> Command {
     {
         let mut cmd = Command::new("cmd.exe");
         cmd.arg("/C").arg(command);
+        crate::platform::suppress_child_console_async(&mut cmd);
         cmd
     }
 

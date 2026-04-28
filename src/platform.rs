@@ -372,6 +372,41 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<std::p
     cmd.spawn()
 }
 
+/// Suppress allocation of a fresh console window for a child process on Windows.
+///
+/// When the jcode server runs detached (`DETACHED_PROCESS`, no inherited
+/// console) and spawns a console-subsystem program (`cmd.exe`, `git`,
+/// `cargo`, `python`, ...), Windows allocates a brand-new console window for
+/// the child unless we set `CREATE_NO_WINDOW` (`0x08000000`). That manifests
+/// as PowerShell/cmd windows flashing up on every Bash tool call, every
+/// background git/cargo probe, etc.
+///
+/// Use this on every `std::process::Command` spawned from server-side code
+/// where the child's stdio is already piped (so a console window would be
+/// pure noise). For `tokio::process::Command`, see
+/// [`suppress_child_console_async`].
+///
+/// On non-Windows platforms this is a no-op.
+#[cfg_attr(not(windows), allow(unused_variables))]
+pub fn suppress_child_console(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
+/// Tokio variant of [`suppress_child_console`].
+#[cfg_attr(not(windows), allow(unused_variables))]
+pub fn suppress_child_console_async(cmd: &mut tokio::process::Command) {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 #[cfg(windows)]
 fn spawn_replacement_process(
     cmd: &mut std::process::Command,

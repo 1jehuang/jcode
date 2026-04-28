@@ -802,11 +802,11 @@ impl Tool for ScheduleTool {
             .working_dir
             .as_ref()
             .and_then(|wd| {
-                std::process::Command::new("git")
-                    .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                    .current_dir(wd)
-                    .output()
-                    .ok()
+                let mut cmd = std::process::Command::new("git");
+                cmd.args(["rev-parse", "--abbrev-ref", "HEAD"])
+                    .current_dir(wd);
+                crate::platform::suppress_child_console(&mut cmd);
+                cmd.output().ok()
             })
             .and_then(|out| {
                 if out.status.success() {

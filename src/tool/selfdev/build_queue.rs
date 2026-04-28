@@ -61,6 +61,7 @@ impl SelfDevTool {
             .kill_on_drop(true)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        crate::platform::suppress_child_console_async(&mut cmd);
 
         let mut child = cmd
             .spawn()
