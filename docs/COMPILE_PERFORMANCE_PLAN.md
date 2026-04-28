@@ -155,6 +155,16 @@ Use it when capturing comparable before/after numbers for refactors.
   `--skip-cold --touch src/tool/browser.rs --runs 1`:
   - warm touched-file `cargo check`: **13.693s**
   - warm touched-file `selfdev-jcode` build: **18.874s**
+- 2026-04-28: diagnosed the repeated self-dev `jcode` lib build `SIGTERM` on this 16 GiB,
+  no-swap workstation. `journalctl -u earlyoom` showed earlyoom sending `SIGTERM` to the root
+  `rustc` at about **1.09 GiB RSS** when available memory crossed the 10% threshold. A direct
+  no-`sccache` build reproduced the same signal, so `sccache` was only reporting the termination.
+  `scripts/dev_cargo.sh` now enables adaptive low-memory overrides for `--profile selfdev` when
+  Linux + earlyoom + no swap + <24 GiB RAM are detected: `CARGO_INCREMENTAL=0`,
+  `CARGO_PROFILE_SELFDEV_INCREMENTAL=false`, and `CARGO_PROFILE_SELFDEV_CODEGEN_UNITS=16`.
+  Use `JCODE_SELFDEV_LOW_MEMORY=off` to disable, or `JCODE_SELFDEV_LOW_MEMORY=on` to force.
+  Validation: the same root build completed under those settings in **2m34s** after the interrupted
+  partial build reused artifacts.
 
 Warm-only touched-file checkpoints captured so far on this machine:
 
