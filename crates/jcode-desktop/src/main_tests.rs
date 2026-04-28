@@ -331,6 +331,7 @@ fn single_session_model_cycle_updates_status_and_transcript() {
     app.apply_session_event(session_launch::DesktopSessionEvent::ModelChanged {
         model: "claude-opus-4-5".to_string(),
         provider_name: Some("Claude".to_string()),
+        error: None,
     });
 
     assert_eq!(
@@ -342,6 +343,78 @@ fn single_session_model_cycle_updates_status_and_transcript() {
             .join("\n")
             .contains("model switched to Claude · claude-opus-4-5")
     );
+}
+
+#[test]
+fn single_session_model_picker_loads_filters_and_selects_model() {
+    let mut app = SingleSessionApp::new(None);
+
+    assert_eq!(
+        app.handle_key(KeyInput::OpenModelPicker),
+        KeyOutcome::LoadModelCatalog
+    );
+    assert!(app.model_picker.open);
+    assert!(app.model_picker.loading);
+    assert!(app.body_lines().join("\n").contains("loading models"));
+
+    app.apply_session_event(session_launch::DesktopSessionEvent::ModelCatalog {
+        current_model: Some("claude-sonnet-4-5".to_string()),
+        provider_name: Some("Claude".to_string()),
+        models: vec![
+            session_launch::DesktopModelChoice {
+                model: "claude-sonnet-4-5".to_string(),
+                provider: Some("claude".to_string()),
+                detail: Some("active account".to_string()),
+                available: true,
+            },
+            session_launch::DesktopModelChoice {
+                model: "claude-opus-4-5".to_string(),
+                provider: Some("claude".to_string()),
+                detail: Some("premium".to_string()),
+                available: true,
+            },
+        ],
+    });
+
+    let picker = app.body_lines().join("\n");
+    assert!(picker.contains("desktop model/account picker"));
+    assert!(picker.contains("current: Claude · claude-sonnet-4-5"));
+    assert!(picker.contains("✓ claude-sonnet-4-5"));
+    assert!(picker.contains("provider claude"));
+
+    assert_eq!(
+        app.handle_key(KeyInput::Character("opus".to_string())),
+        KeyOutcome::Redraw
+    );
+    let filtered = app.body_lines().join("\n");
+    assert!(filtered.contains("filter: opus"));
+    assert!(filtered.contains("claude-opus-4-5"));
+
+    assert_eq!(
+        app.handle_key(KeyInput::SubmitDraft),
+        KeyOutcome::SetModel("claude-opus-4-5".to_string())
+    );
+}
+
+#[test]
+fn single_session_model_picker_updates_current_model_after_switch() {
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::OpenModelPicker);
+
+    app.apply_session_event(session_launch::DesktopSessionEvent::ModelChanged {
+        model: "gpt-5.4".to_string(),
+        provider_name: Some("OpenAI".to_string()),
+        error: None,
+    });
+
+    assert_eq!(app.model_picker.current_model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(app.model_picker.provider_name.as_deref(), Some("OpenAI"));
+    assert!(
+        app.body_lines()
+            .join("\n")
+            .contains("current: OpenAI · gpt-5.4")
+    );
+    assert!(app.composer_status_line().contains("model OpenAI/gpt-5.4"));
 }
 
 #[test]

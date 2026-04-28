@@ -82,6 +82,8 @@ pub enum KeyInput {
     ScrollBodyPages(i32),
     JumpPrompt(i32),
     CopyLatestResponse,
+    OpenModelPicker,
+    ModelPickerMove(i32),
     CycleModel(i8),
     AttachClipboardImage,
     PasteText,
@@ -112,6 +114,8 @@ pub enum KeyOutcome {
     },
     CancelGeneration,
     CopyLatestResponse(String),
+    LoadModelCatalog,
+    SetModel(String),
     CycleModel(i8),
     AttachClipboardImage,
     PasteText,
@@ -440,6 +444,8 @@ impl Workspace {
             KeyInput::CancelGeneration
             | KeyInput::ScrollBodyPages(_)
             | KeyInput::CycleModel(_)
+            | KeyInput::OpenModelPicker
+            | KeyInput::ModelPickerMove(_)
             | KeyInput::AttachClipboardImage
             | KeyInput::PasteText
             | KeyInput::QueueDraft => {
@@ -551,6 +557,8 @@ impl Workspace {
             | KeyInput::ScrollBodyPages(_)
             | KeyInput::JumpPrompt(_)
             | KeyInput::CopyLatestResponse
+            | KeyInput::OpenModelPicker
+            | KeyInput::ModelPickerMove(_)
             | KeyInput::CycleModel(_)
             | KeyInput::AttachClipboardImage => KeyOutcome::None,
             KeyInput::PasteText => KeyOutcome::PasteText,

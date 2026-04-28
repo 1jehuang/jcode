@@ -359,6 +359,34 @@ async fn run() -> Result<()> {
                         KeyOutcome::CycleModel(direction) => {
                             if let Err(error) = session_launch::spawn_cycle_model(
                                 direction,
+                                app.single_session_live_id(),
+                                session_event_tx.clone(),
+                            ) {
+                                apply_single_session_error(&mut app, error);
+                            } else {
+                                app.apply_session_event(
+                                    session_launch::DesktopSessionEvent::Status(
+                                        "switching model".to_string(),
+                                    ),
+                                );
+                            }
+                            window.set_title(&app.status_title());
+                            window.request_redraw();
+                        }
+                        KeyOutcome::LoadModelCatalog => {
+                            if let Err(error) = session_launch::spawn_load_model_catalog(
+                                app.single_session_live_id(),
+                                session_event_tx.clone(),
+                            ) {
+                                apply_single_session_error(&mut app, error);
+                            }
+                            window.set_title(&app.status_title());
+                            window.request_redraw();
+                        }
+                        KeyOutcome::SetModel(model) => {
+                            if let Err(error) = session_launch::spawn_set_model(
+                                model,
+                                app.single_session_live_id(),
                                 session_event_tx.clone(),
                             ) {
                                 apply_single_session_error(&mut app, error);
@@ -577,7 +605,21 @@ fn run_headless_chat_smoke(message: String) -> Result<()> {
             session_launch::DesktopSessionEvent::ModelChanged {
                 model,
                 provider_name,
+                error,
             } => {
+                if let Some(error) = error {
+                    last_status = Some(format!("model switch failed: {error}"));
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "event": "model_changed",
+                            "model": model,
+                            "provider_name": provider_name,
+                            "error": error,
+                        })
+                    );
+                    continue;
+                }
                 let label = provider_name
                     .as_deref()
                     .map(|provider| format!("{provider} · {model}"))
@@ -590,6 +632,29 @@ fn run_headless_chat_smoke(message: String) -> Result<()> {
                         "model": model,
                         "provider_name": provider_name,
                     })
+                );
+            }
+            session_launch::DesktopSessionEvent::ModelCatalog {
+                current_model,
+                provider_name,
+                models,
+            } => {
+                last_status = Some(format!("models loaded ({})", models.len()));
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "event": "model_catalog",
+                        "current_model": current_model,
+                        "provider_name": provider_name,
+                        "models": models.len(),
+                    })
+                );
+            }
+            session_launch::DesktopSessionEvent::ModelCatalogError { error } => {
+                last_status = Some(format!("model picker error: {error}"));
+                println!(
+                    "{}",
+                    serde_json::json!({"event": "model_catalog_error", "error": error})
                 );
             }
             session_launch::DesktopSessionEvent::StdinRequest {
@@ -972,6 +1037,8 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         Key::Named(NamedKey::PageDown) => KeyInput::ScrollBodyPages(-1),
         Key::Named(NamedKey::ArrowUp) if modifiers.alt_key() => KeyInput::JumpPrompt(-1),
         Key::Named(NamedKey::ArrowDown) if modifiers.alt_key() => KeyInput::JumpPrompt(1),
+        Key::Named(NamedKey::ArrowUp) => KeyInput::ModelPickerMove(-1),
+        Key::Named(NamedKey::ArrowDown) => KeyInput::ModelPickerMove(1),
         Key::Named(NamedKey::ArrowLeft) => KeyInput::MoveCursorLeft,
         Key::Named(NamedKey::ArrowRight) => KeyInput::MoveCursorRight,
         Key::Named(NamedKey::Home) => KeyInput::MoveToLineStart,
@@ -1022,6 +1089,13 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         }
         Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("i") => {
             KeyInput::AttachClipboardImage
+        }
+        Key::Character(text)
+            if modifiers.control_key()
+                && modifiers.shift_key()
+                && text.eq_ignore_ascii_case("m") =>
+        {
+            KeyInput::OpenModelPicker
         }
         Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("m") => {
             KeyInput::CycleModel(1)

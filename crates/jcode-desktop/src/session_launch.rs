@@ -12,6 +12,14 @@ const SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
 const SERVER_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DesktopModelChoice {
+    pub model: String,
+    pub provider: Option<String>,
+    pub detail: Option<String>,
+    pub available: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DesktopSessionEvent {
     Status(String),
     SessionStarted {
@@ -30,6 +38,15 @@ pub enum DesktopSessionEvent {
     ModelChanged {
         model: String,
         provider_name: Option<String>,
+        error: Option<String>,
+    },
+    ModelCatalog {
+        current_model: Option<String>,
+        provider_name: Option<String>,
+        models: Vec<DesktopModelChoice>,
+    },
+    ModelCatalogError {
+        error: String,
     },
     StdinRequest {
         request_id: String,
@@ -150,12 +167,22 @@ pub fn spawn_message_to_session(
 }
 
 #[cfg(unix)]
-pub fn spawn_cycle_model(direction: i8, event_tx: DesktopSessionEventSender) -> Result<()> {
+pub fn spawn_cycle_model(
+    direction: i8,
+    target_session_id: Option<String>,
+    event_tx: DesktopSessionEventSender,
+) -> Result<()> {
     std::thread::Builder::new()
         .name("jcode-desktop-cycle-model".to_string())
         .spawn(move || {
-            if let Err(error) = cycle_model(direction, Some(event_tx.clone())) {
-                let _ = event_tx.send(DesktopSessionEvent::Error(format!("{error:#}")));
+            if let Err(error) = cycle_model(
+                direction,
+                target_session_id.as_deref(),
+                Some(event_tx.clone()),
+            ) {
+                let _ = event_tx.send(DesktopSessionEvent::ModelCatalogError {
+                    error: format!("{error:#}"),
+                });
             }
         })
         .context("failed to spawn desktop model switch worker")?;
@@ -163,17 +190,94 @@ pub fn spawn_cycle_model(direction: i8, event_tx: DesktopSessionEventSender) -> 
 }
 
 #[cfg(not(unix))]
-pub fn spawn_cycle_model(_direction: i8, event_tx: DesktopSessionEventSender) -> Result<()> {
+pub fn spawn_cycle_model(
+    _direction: i8,
+    _target_session_id: Option<String>,
+    event_tx: DesktopSessionEventSender,
+) -> Result<()> {
     event_tx
-        .send(DesktopSessionEvent::Error(
-            "desktop model switching is not implemented on this platform yet".to_string(),
-        ))
+        .send(DesktopSessionEvent::ModelCatalogError {
+            error: "desktop model switching is not implemented on this platform yet".to_string(),
+        })
         .ok();
     Ok(())
 }
 
 #[cfg(unix)]
-fn cycle_model(direction: i8, event_tx: Option<DesktopSessionEventSender>) -> Result<()> {
+pub fn spawn_load_model_catalog(
+    target_session_id: Option<String>,
+    event_tx: DesktopSessionEventSender,
+) -> Result<()> {
+    std::thread::Builder::new()
+        .name("jcode-desktop-load-model-catalog".to_string())
+        .spawn(move || {
+            if let Err(error) =
+                load_model_catalog(target_session_id.as_deref(), Some(event_tx.clone()))
+            {
+                let _ = event_tx.send(DesktopSessionEvent::ModelCatalogError {
+                    error: format!("{error:#}"),
+                });
+            }
+        })
+        .context("failed to spawn desktop model catalog worker")?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn spawn_load_model_catalog(
+    _target_session_id: Option<String>,
+    event_tx: DesktopSessionEventSender,
+) -> Result<()> {
+    event_tx
+        .send(DesktopSessionEvent::ModelCatalogError {
+            error: "desktop model catalog loading is not implemented on this platform yet"
+                .to_string(),
+        })
+        .ok();
+    Ok(())
+}
+
+#[cfg(unix)]
+pub fn spawn_set_model(
+    model: String,
+    target_session_id: Option<String>,
+    event_tx: DesktopSessionEventSender,
+) -> Result<()> {
+    std::thread::Builder::new()
+        .name("jcode-desktop-set-model".to_string())
+        .spawn(move || {
+            if let Err(error) =
+                set_model(&model, target_session_id.as_deref(), Some(event_tx.clone()))
+            {
+                let _ = event_tx.send(DesktopSessionEvent::ModelCatalogError {
+                    error: format!("{error:#}"),
+                });
+            }
+        })
+        .context("failed to spawn desktop set model worker")?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn spawn_set_model(
+    _model: String,
+    _target_session_id: Option<String>,
+    event_tx: DesktopSessionEventSender,
+) -> Result<()> {
+    event_tx
+        .send(DesktopSessionEvent::ModelCatalogError {
+            error: "desktop model switching is not implemented on this platform yet".to_string(),
+        })
+        .ok();
+    Ok(())
+}
+
+#[cfg(unix)]
+fn cycle_model(
+    direction: i8,
+    target_session_id: Option<&str>,
+    event_tx: Option<DesktopSessionEventSender>,
+) -> Result<()> {
     send_desktop_status(&event_tx, "switching model");
     ensure_server_running()?;
     let stream = connect_server_with_retry(SERVER_START_TIMEOUT)?;
@@ -181,13 +285,95 @@ fn cycle_model(direction: i8, event_tx: Option<DesktopSessionEventSender>) -> Re
         .try_clone()
         .context("failed to clone server socket writer")?;
     let mut reader = BufReader::new(stream);
-    let request_id = 1_u64;
+    let mut next_request_id = 1_u64;
+    subscribe_and_establish_session(
+        &mut reader,
+        &mut writer,
+        &mut next_request_id,
+        target_session_id,
+        event_tx.as_ref(),
+    )?;
+    let request_id = next_request_id;
     write_json_line(
         &mut writer,
         json!({
             "type": "cycle_model",
             "id": request_id,
             "direction": direction,
+        }),
+    )?;
+    read_model_changed(
+        &mut reader,
+        SERVER_START_TIMEOUT,
+        event_tx.as_ref(),
+        request_id,
+    )
+}
+
+#[cfg(unix)]
+fn load_model_catalog(
+    target_session_id: Option<&str>,
+    event_tx: Option<DesktopSessionEventSender>,
+) -> Result<()> {
+    send_desktop_status(&event_tx, "loading models");
+    ensure_server_running()?;
+    let stream = connect_server_with_retry(SERVER_START_TIMEOUT)?;
+    let mut writer = stream
+        .try_clone()
+        .context("failed to clone server socket writer")?;
+    let mut reader = BufReader::new(stream);
+    let mut next_request_id = 1_u64;
+    subscribe_and_establish_session(
+        &mut reader,
+        &mut writer,
+        &mut next_request_id,
+        target_session_id,
+        event_tx.as_ref(),
+    )?;
+    let request_id = next_request_id;
+    write_json_line(
+        &mut writer,
+        json!({
+            "type": "get_history",
+            "id": request_id,
+        }),
+    )?;
+    read_model_catalog(
+        &mut reader,
+        SERVER_START_TIMEOUT,
+        event_tx.as_ref(),
+        request_id,
+    )
+}
+
+#[cfg(unix)]
+fn set_model(
+    model: &str,
+    target_session_id: Option<&str>,
+    event_tx: Option<DesktopSessionEventSender>,
+) -> Result<()> {
+    send_desktop_status(&event_tx, "switching model");
+    ensure_server_running()?;
+    let stream = connect_server_with_retry(SERVER_START_TIMEOUT)?;
+    let mut writer = stream
+        .try_clone()
+        .context("failed to clone server socket writer")?;
+    let mut reader = BufReader::new(stream);
+    let mut next_request_id = 1_u64;
+    subscribe_and_establish_session(
+        &mut reader,
+        &mut writer,
+        &mut next_request_id,
+        target_session_id,
+        event_tx.as_ref(),
+    )?;
+    let request_id = next_request_id;
+    write_json_line(
+        &mut writer,
+        json!({
+            "type": "set_model",
+            "id": request_id,
+            "model": model,
         }),
     )?;
     read_model_changed(
@@ -392,6 +578,26 @@ fn establish_session_id(
 }
 
 #[cfg(unix)]
+fn subscribe_and_establish_session(
+    reader: &mut BufReader<UnixStream>,
+    writer: &mut UnixStream,
+    next_request_id: &mut u64,
+    target_session_id: Option<&str>,
+    event_tx: Option<&DesktopSessionEventSender>,
+) -> Result<String> {
+    let subscribe_request_id = *next_request_id;
+    subscribe_to_server(writer, subscribe_request_id, target_session_id)?;
+    *next_request_id += 1;
+    establish_session_id(
+        reader,
+        writer,
+        next_request_id,
+        subscribe_request_id,
+        event_tx,
+    )
+}
+
+#[cfg(unix)]
 fn read_session_id_from_events(
     reader: &mut BufReader<UnixStream>,
     timeout: Duration,
@@ -526,9 +732,6 @@ fn read_model_changed(
                 if value.get("type").and_then(Value::as_str) == Some("model_changed")
                     && value.get("id").and_then(Value::as_u64) == Some(request_id)
                 {
-                    if let Some(error) = value.get("error").and_then(Value::as_str) {
-                        anyhow::bail!("failed to switch model: {error}");
-                    }
                     if let Some(event) = desktop_event_from_server_value(&value) {
                         send_desktop_event_ref(event_tx, event);
                     }
@@ -559,6 +762,62 @@ fn read_model_changed(
     }
 
     anyhow::bail!("timed out waiting for jcode server model switch")
+}
+
+#[cfg(unix)]
+fn read_model_catalog(
+    reader: &mut BufReader<UnixStream>,
+    timeout: Duration,
+    event_tx: Option<&DesktopSessionEventSender>,
+    request_id: u64,
+) -> Result<()> {
+    reader
+        .get_ref()
+        .set_read_timeout(Some(SERVER_CONNECT_RETRY_DELAY))
+        .context("failed to configure server socket timeout")?;
+    let started = Instant::now();
+    let mut line = String::new();
+    while started.elapsed() < timeout {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => anyhow::bail!("jcode server disconnected before loading model catalog"),
+            Ok(_) => {
+                let value: Value = serde_json::from_str(line.trim())
+                    .context("failed to parse jcode server event")?;
+                if value.get("type").and_then(Value::as_str) == Some("history")
+                    && value.get("id").and_then(Value::as_u64) == Some(request_id)
+                {
+                    if let Some(event) = model_catalog_event_from_server_value(&value) {
+                        send_desktop_event_ref(event_tx, event);
+                        return Ok(());
+                    }
+                    anyhow::bail!("jcode server returned malformed model catalog");
+                }
+                if let Some(event) = desktop_event_from_server_value(&value) {
+                    if !matches!(event, DesktopSessionEvent::Done) {
+                        send_desktop_event_ref(event_tx, event);
+                    }
+                }
+                if value.get("type").and_then(Value::as_str) == Some("error")
+                    && value.get("id").and_then(Value::as_u64) == Some(request_id)
+                {
+                    let message = value
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown server error");
+                    anyhow::bail!("jcode server rejected model catalog request: {message}");
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => return Err(error).context("failed to read jcode server event"),
+        }
+    }
+
+    anyhow::bail!("timed out waiting for jcode server model catalog")
 }
 
 #[cfg(unix)]
@@ -721,7 +980,17 @@ fn desktop_event_from_server_value(value: &Value) -> Option<DesktopSessionEvent>
                     .get("provider_name")
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned),
+                error: value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
             }
+        }),
+        "history" => model_catalog_event_from_server_value(value),
+        "available_models_updated" => Some(DesktopSessionEvent::ModelCatalog {
+            current_model: None,
+            provider_name: None,
+            models: model_choices_from_server_value(value),
         }),
         "stdin_request" => Some(DesktopSessionEvent::StdinRequest {
             request_id: value
@@ -760,6 +1029,66 @@ fn desktop_event_from_server_value(value: &Value) -> Option<DesktopSessionEvent>
         )),
         _ => None,
     }
+}
+
+fn model_catalog_event_from_server_value(value: &Value) -> Option<DesktopSessionEvent> {
+    Some(DesktopSessionEvent::ModelCatalog {
+        current_model: value
+            .get("provider_model")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        provider_name: value
+            .get("provider_name")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        models: model_choices_from_server_value(value),
+    })
+}
+
+fn model_choices_from_server_value(value: &Value) -> Vec<DesktopModelChoice> {
+    let mut choices = Vec::new();
+    if let Some(routes) = value
+        .get("available_model_routes")
+        .and_then(Value::as_array)
+    {
+        for route in routes {
+            let Some(model) = route.get("model").and_then(Value::as_str) else {
+                continue;
+            };
+            choices.push(DesktopModelChoice {
+                model: model.to_string(),
+                provider: route
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .filter(|provider| !provider.is_empty())
+                    .map(ToOwned::to_owned),
+                detail: route
+                    .get("detail")
+                    .and_then(Value::as_str)
+                    .filter(|detail| !detail.is_empty())
+                    .map(ToOwned::to_owned),
+                available: route
+                    .get("available")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+            });
+        }
+    }
+
+    if choices.is_empty()
+        && let Some(models) = value.get("available_models").and_then(Value::as_array)
+    {
+        for model in models.iter().filter_map(Value::as_str) {
+            choices.push(DesktopModelChoice {
+                model: model.to_string(),
+                provider: None,
+                detail: None,
+                available: true,
+            });
+        }
+    }
+
+    choices
 }
 
 fn compact_tool_output(output: &str) -> String {
@@ -997,7 +1326,37 @@ mod tests {
             })),
             Some(DesktopSessionEvent::ModelChanged {
                 model: "claude-opus-4-5".to_string(),
-                provider_name: Some("Claude".to_string())
+                provider_name: Some("Claude".to_string()),
+                error: None
+            })
+        );
+        assert_eq!(
+            desktop_event_from_server_value(&json!({
+                "type": "history",
+                "id": 7,
+                "session_id": "session_test",
+                "messages": [],
+                "provider_name": "Claude",
+                "provider_model": "claude-sonnet-4-5",
+                "available_model_routes": [
+                    {
+                        "model": "claude-sonnet-4-5",
+                        "provider": "claude",
+                        "api_method": "responses",
+                        "available": true,
+                        "detail": "active account"
+                    }
+                ]
+            })),
+            Some(DesktopSessionEvent::ModelCatalog {
+                current_model: Some("claude-sonnet-4-5".to_string()),
+                provider_name: Some("Claude".to_string()),
+                models: vec![DesktopModelChoice {
+                    model: "claude-sonnet-4-5".to_string(),
+                    provider: Some("claude".to_string()),
+                    detail: Some("active account".to_string()),
+                    available: true,
+                }]
             })
         );
         assert_eq!(

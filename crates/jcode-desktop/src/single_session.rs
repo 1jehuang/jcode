@@ -1,5 +1,5 @@
 use crate::{
-    session_launch::{DesktopSessionEvent, DesktopSessionHandle},
+    session_launch::{DesktopModelChoice, DesktopSessionEvent, DesktopSessionHandle},
     workspace,
 };
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
@@ -65,11 +65,183 @@ pub(crate) struct SingleSessionApp {
     pub(crate) body_scroll_lines: usize,
     pub(crate) show_help: bool,
     pub(crate) pending_images: Vec<(String, String)>,
+    pub(crate) model_picker: ModelPickerState,
     queued_drafts: Vec<(String, Vec<(String, String)>)>,
     selection_anchor_line: Option<usize>,
     selection_focus_line: Option<usize>,
     input_undo_stack: Vec<(String, usize)>,
     session_handle: Option<DesktopSessionHandle>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ModelPickerState {
+    pub(crate) open: bool,
+    pub(crate) loading: bool,
+    pub(crate) filter: String,
+    pub(crate) selected: usize,
+    pub(crate) current_model: Option<String>,
+    pub(crate) provider_name: Option<String>,
+    pub(crate) choices: Vec<DesktopModelChoice>,
+    pub(crate) error: Option<String>,
+}
+
+impl Default for ModelPickerState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            loading: false,
+            filter: String::new(),
+            selected: 0,
+            current_model: None,
+            provider_name: None,
+            choices: Vec::new(),
+            error: None,
+        }
+    }
+}
+
+impl ModelPickerState {
+    fn open_loading(&mut self) {
+        self.open = true;
+        self.loading = true;
+        self.error = None;
+        self.selected = self.current_choice_index().unwrap_or(0);
+    }
+
+    fn close(&mut self) {
+        self.open = false;
+        self.loading = false;
+        self.error = None;
+    }
+
+    fn apply_catalog(
+        &mut self,
+        current_model: Option<String>,
+        provider_name: Option<String>,
+        choices: Vec<DesktopModelChoice>,
+    ) {
+        if current_model.is_some() {
+            self.current_model = current_model;
+        }
+        if provider_name.is_some() {
+            self.provider_name = provider_name;
+        }
+        if !choices.is_empty() {
+            self.choices = dedupe_model_choices(choices);
+        }
+        self.loading = false;
+        self.error = None;
+        self.ensure_current_choice_present();
+        self.selected = self.current_visible_position().unwrap_or(0);
+        self.clamp_selection();
+    }
+
+    fn apply_error(&mut self, error: String) {
+        self.open = true;
+        self.loading = false;
+        self.error = Some(error);
+    }
+
+    fn apply_model_change(&mut self, model: String, provider_name: Option<String>) {
+        self.current_model = Some(model);
+        if provider_name.is_some() {
+            self.provider_name = provider_name;
+        }
+        self.ensure_current_choice_present();
+        self.selected = self.current_visible_position().unwrap_or(self.selected);
+        self.clamp_selection();
+    }
+
+    fn selected_model(&self) -> Option<String> {
+        let visible = self.filtered_indices();
+        visible
+            .get(self.selected)
+            .and_then(|index| self.choices.get(*index))
+            .map(|choice| choice.model.clone())
+    }
+
+    fn move_selection(&mut self, delta: i32) {
+        let visible_len = self.filtered_indices().len();
+        if visible_len == 0 {
+            self.selected = 0;
+            return;
+        }
+        if delta < 0 {
+            self.selected = self.selected.saturating_sub(delta.unsigned_abs() as usize);
+        } else {
+            self.selected = (self.selected + delta as usize).min(visible_len - 1);
+        }
+    }
+
+    fn push_filter_text(&mut self, text: &str) {
+        self.filter.push_str(text);
+        self.selected = 0;
+    }
+
+    fn pop_filter_char(&mut self) {
+        self.filter.pop();
+        self.selected = 0;
+    }
+
+    fn filtered_indices(&self) -> Vec<usize> {
+        let query = self.filter.trim().to_lowercase();
+        self.choices
+            .iter()
+            .enumerate()
+            .filter_map(|(index, choice)| {
+                if query.is_empty() || model_choice_search_text(choice).contains(&query) {
+                    Some(index)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn current_choice_index(&self) -> Option<usize> {
+        let current = self.current_model.as_deref()?;
+        self.choices
+            .iter()
+            .position(|choice| choice.model == current)
+    }
+
+    fn current_visible_position(&self) -> Option<usize> {
+        let current = self.current_choice_index()?;
+        self.filtered_indices()
+            .iter()
+            .position(|index| *index == current)
+    }
+
+    fn clamp_selection(&mut self) {
+        let visible_len = self.filtered_indices().len();
+        if visible_len == 0 {
+            self.selected = 0;
+        } else if self.selected >= visible_len {
+            self.selected = visible_len - 1;
+        }
+    }
+
+    fn ensure_current_choice_present(&mut self) {
+        let Some(current_model) = self.current_model.clone() else {
+            return;
+        };
+        if self
+            .choices
+            .iter()
+            .any(|choice| choice.model == current_model)
+        {
+            return;
+        }
+        self.choices.insert(
+            0,
+            DesktopModelChoice {
+                model: current_model,
+                provider: self.provider_name.clone(),
+                detail: Some("current model".to_string()),
+                available: true,
+            },
+        );
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -149,6 +321,7 @@ impl SingleSessionApp {
             body_scroll_lines: 0,
             show_help: false,
             pending_images: Vec::new(),
+            model_picker: ModelPickerState::default(),
             queued_drafts: Vec::new(),
             selection_anchor_line: None,
             selection_focus_line: None,
@@ -179,6 +352,7 @@ impl SingleSessionApp {
         self.body_scroll_lines = 0;
         self.show_help = false;
         self.pending_images.clear();
+        self.model_picker = ModelPickerState::default();
         self.queued_drafts.clear();
         self.clear_selection();
         self.input_undo_stack.clear();
@@ -188,7 +362,7 @@ impl SingleSessionApp {
     pub(crate) fn status_title(&self) -> String {
         let title = self.title();
         format!(
-            "Jcode Desktop · single session · {title} · Enter send · Shift+Enter newline · Ctrl+Enter queue · Ctrl+; spawn · Ctrl+R refresh · Esc quit · --workspace for Niri layout"
+            "Jcode Desktop · single session · {title} · Enter send · Shift+Enter newline · Ctrl+Enter queue · Ctrl+Shift+M models · Ctrl+; spawn · Ctrl+R refresh · Esc quit · --workspace for Niri layout"
         )
     }
 
@@ -242,12 +416,30 @@ impl SingleSessionApp {
             1 => " · 1 queued".to_string(),
             count => format!(" · {count} queued"),
         };
-        format!("{status}{images}{queued} · {mode}")
+        let model = self
+            .model_picker
+            .current_model
+            .as_ref()
+            .map(|model| {
+                self.model_picker
+                    .provider_name
+                    .as_deref()
+                    .filter(|provider| !provider.is_empty())
+                    .map(|provider| format!(" · model {provider}/{model}"))
+                    .unwrap_or_else(|| format!(" · model {model}"))
+            })
+            .unwrap_or_default();
+        format!("{status}{images}{queued}{model} · {mode}")
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyInput) -> KeyOutcome {
+        if self.model_picker.open {
+            return self.handle_model_picker_key(key);
+        }
+
         match key {
             KeyInput::SpawnPanel => KeyOutcome::SpawnSession,
+            KeyInput::OpenModelPicker => self.open_model_picker(),
             KeyInput::HotkeyHelp => {
                 self.show_help = !self.show_help;
                 self.scroll_body_to_bottom();
@@ -273,6 +465,7 @@ impl SingleSessionApp {
                 .latest_assistant_response()
                 .map(KeyOutcome::CopyLatestResponse)
                 .unwrap_or(KeyOutcome::None),
+            KeyInput::ModelPickerMove(_) => KeyOutcome::None,
             KeyInput::CycleModel(direction) => KeyOutcome::CycleModel(direction),
             KeyInput::AttachClipboardImage => KeyOutcome::AttachClipboardImage,
             KeyInput::PasteText => KeyOutcome::PasteText,
@@ -348,7 +541,56 @@ impl SingleSessionApp {
         }
     }
 
+    fn open_model_picker(&mut self) -> KeyOutcome {
+        self.show_help = false;
+        self.model_picker.open_loading();
+        self.status = Some("loading models".to_string());
+        self.scroll_body_to_bottom();
+        KeyOutcome::LoadModelCatalog
+    }
+
+    fn handle_model_picker_key(&mut self, key: KeyInput) -> KeyOutcome {
+        match key {
+            KeyInput::Escape | KeyInput::OpenModelPicker => {
+                self.model_picker.close();
+                KeyOutcome::Redraw
+            }
+            KeyInput::RefreshSessions => {
+                self.model_picker.open_loading();
+                self.status = Some("loading models".to_string());
+                KeyOutcome::LoadModelCatalog
+            }
+            KeyInput::ModelPickerMove(delta) => {
+                self.model_picker.move_selection(delta);
+                KeyOutcome::Redraw
+            }
+            KeyInput::CycleModel(direction) => KeyOutcome::CycleModel(direction),
+            KeyInput::SubmitDraft => self
+                .model_picker
+                .selected_model()
+                .map(KeyOutcome::SetModel)
+                .unwrap_or(KeyOutcome::None),
+            KeyInput::Backspace => {
+                self.model_picker.pop_filter_char();
+                KeyOutcome::Redraw
+            }
+            KeyInput::Character(text) => {
+                self.model_picker.push_filter_text(&text);
+                KeyOutcome::Redraw
+            }
+            KeyInput::HotkeyHelp => {
+                self.model_picker.close();
+                self.show_help = true;
+                KeyOutcome::Redraw
+            }
+            _ => KeyOutcome::None,
+        }
+    }
+
     pub(crate) fn body_lines(&self) -> Vec<String> {
+        if self.model_picker.open {
+            return model_picker_lines(&self.model_picker);
+        }
         if self.show_help {
             return single_session_help_lines();
         }
@@ -426,16 +668,40 @@ impl SingleSessionApp {
             DesktopSessionEvent::ModelChanged {
                 model,
                 provider_name,
+                error,
             } => {
+                if let Some(error) = error {
+                    self.status = Some("model switch failed".to_string());
+                    self.model_picker.apply_error(error.clone());
+                    self.messages.push(SingleSessionMessage::meta(format!(
+                        "model switch failed: {error}"
+                    )));
+                    return;
+                }
                 let label = provider_name
                     .as_deref()
                     .filter(|provider| !provider.is_empty())
                     .map(|provider| format!("{provider} · {model}"))
                     .unwrap_or_else(|| model.clone());
+                self.model_picker
+                    .apply_model_change(model.clone(), provider_name.clone());
                 self.status = Some(format!("model: {label}"));
                 self.messages.push(SingleSessionMessage::meta(format!(
                     "model switched to {label}"
                 )));
+            }
+            DesktopSessionEvent::ModelCatalog {
+                current_model,
+                provider_name,
+                models,
+            } => {
+                self.model_picker
+                    .apply_catalog(current_model, provider_name, models);
+                self.status = Some("models loaded".to_string());
+            }
+            DesktopSessionEvent::ModelCatalogError { error } => {
+                self.model_picker.apply_error(error.clone());
+                self.status = Some("model picker error".to_string());
             }
             DesktopSessionEvent::StdinRequest {
                 request_id,
@@ -826,6 +1092,127 @@ impl SingleSessionApp {
     }
 }
 
+fn model_picker_lines(picker: &ModelPickerState) -> Vec<String> {
+    let mut lines = vec![
+        "desktop model/account picker".to_string(),
+        format!(
+            "current: {}",
+            model_picker_current_label(
+                picker.provider_name.as_deref(),
+                picker.current_model.as_deref(),
+            )
+        ),
+        "↑/↓ select · type filter · Backspace edit filter · Enter switch · Ctrl+R reload · Esc close"
+            .to_string(),
+        format!(
+            "filter: {}",
+            if picker.filter.is_empty() {
+                "<none>"
+            } else {
+                picker.filter.as_str()
+            }
+        ),
+        String::new(),
+    ];
+
+    if picker.loading {
+        lines.push("loading models from shared server...".to_string());
+    }
+
+    if let Some(error) = &picker.error {
+        lines.push(format!("error: {error}"));
+    }
+
+    let visible = picker.filtered_indices();
+    if visible.is_empty() && !picker.loading {
+        lines.push("no matching models".to_string());
+        lines.push("try clearing the filter or pressing Ctrl+R to reload the catalog".to_string());
+        return lines;
+    }
+
+    let current = picker.current_model.as_deref();
+    let limit = 28;
+    for (position, index) in visible.iter().take(limit).enumerate() {
+        let Some(choice) = picker.choices.get(*index) else {
+            continue;
+        };
+        let selector = if position == picker.selected {
+            "›"
+        } else {
+            " "
+        };
+        let current_marker = if Some(choice.model.as_str()) == current {
+            "✓"
+        } else {
+            " "
+        };
+        lines.push(format!(
+            "{selector} {current_marker} {}",
+            model_choice_display_line(choice)
+        ));
+    }
+    if visible.len() > limit {
+        lines.push(format!("… {} more models", visible.len() - limit));
+    }
+
+    lines
+}
+
+fn model_picker_current_label(provider_name: Option<&str>, current_model: Option<&str>) -> String {
+    match (provider_name, current_model) {
+        (Some(provider), Some(model)) if !provider.is_empty() => format!("{provider} · {model}"),
+        (_, Some(model)) => model.to_string(),
+        (Some(provider), None) if !provider.is_empty() => provider.to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
+fn model_choice_display_line(choice: &DesktopModelChoice) -> String {
+    let provider = choice
+        .provider
+        .as_deref()
+        .filter(|provider| !provider.is_empty())
+        .map(|provider| format!(" · provider {provider}"))
+        .unwrap_or_default();
+    let availability = if choice.available {
+        ""
+    } else {
+        " · unavailable"
+    };
+    let detail = choice
+        .detail
+        .as_deref()
+        .filter(|detail| !detail.is_empty())
+        .map(|detail| format!(" · {detail}"))
+        .unwrap_or_default();
+    format!("{}{provider}{availability}{detail}", choice.model)
+}
+
+fn model_choice_search_text(choice: &DesktopModelChoice) -> String {
+    format!(
+        "{} {} {}",
+        choice.model,
+        choice.provider.as_deref().unwrap_or_default(),
+        choice.detail.as_deref().unwrap_or_default()
+    )
+    .to_lowercase()
+}
+
+fn dedupe_model_choices(choices: Vec<DesktopModelChoice>) -> Vec<DesktopModelChoice> {
+    let mut deduped: Vec<DesktopModelChoice> = Vec::new();
+    for choice in choices {
+        if deduped.iter().any(|existing| {
+            existing.model == choice.model
+                && existing.provider == choice.provider
+                && existing.detail == choice.detail
+        }) {
+            continue;
+        }
+        deduped.push(choice);
+    }
+    deduped
+}
+
 pub(crate) fn single_session_help_lines() -> Vec<String> {
     vec![
         "desktop shortcuts".to_string(),
@@ -838,6 +1225,7 @@ pub(crate) fn single_session_help_lines() -> Vec<String> {
         "  Ctrl+Shift+C copy latest assistant response".to_string(),
         "  Ctrl+V      paste clipboard text".to_string(),
         "  Ctrl+I      attach clipboard image to next prompt".to_string(),
+        "  Ctrl+Shift+M open model/account picker".to_string(),
         "  Ctrl+M/N    switch to next/previous model".to_string(),
         String::new(),
         "navigation".to_string(),
