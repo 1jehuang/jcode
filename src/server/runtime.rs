@@ -91,9 +91,6 @@ impl ServerRuntime {
     pub(super) fn spawn_main_accept_loop(&self, listener: Listener) -> tokio::task::JoinHandle<()> {
         let runtime = self.clone();
         tokio::spawn(async move {
-            #[cfg(windows)]
-            let mut listener = listener;
-
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
@@ -115,9 +112,6 @@ impl ServerRuntime {
     ) -> tokio::task::JoinHandle<()> {
         let runtime = self.clone();
         tokio::spawn(async move {
-            #[cfg(windows)]
-            let mut listener = listener;
-
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {

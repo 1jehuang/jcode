@@ -950,6 +950,9 @@ impl BackgroundTaskManager {
             }
             #[cfg(windows)]
             {
+                // Windows has no SIGTERM/SIGKILL split, so the grace period is
+                // observed before the single termination call.
+                tokio::time::sleep(graceful_timeout).await;
                 let _ = crate::platform::signal_detached_process_group(pid, 0);
             }
 

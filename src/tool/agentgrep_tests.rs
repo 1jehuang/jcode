@@ -23,6 +23,7 @@ fn test_exposure(message_index: usize, total_messages: usize) -> ExposureDescrip
     }
 }
 
+#[cfg(unix)]
 fn grep_input(query: &str, max_regions: Option<usize>) -> AgentGrepInput {
     AgentGrepInput {
         mode: "grep".to_string(),
@@ -74,6 +75,9 @@ fn render_compacts_huge_grep_match_lines() {
     );
 }
 
+// agentgrep crate behavior under Windows path semantics needs a separate
+// pass; until then these integration-style tests run on Unix only.
+#[cfg(unix)]
 #[test]
 fn grep_max_regions_limits_rendered_match_excerpts() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -98,6 +102,7 @@ fn grep_max_regions_limits_rendered_match_excerpts() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn grep_caps_non_code_file_match_excerpts_by_default() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -124,6 +129,7 @@ fn grep_caps_non_code_file_match_excerpts_by_default() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn build_grep_args_includes_scope_flags() {
     let ctx = test_ctx(Path::new("/tmp/root"));
@@ -157,6 +163,7 @@ fn build_grep_args_includes_scope_flags() {
     assert_eq!(args.glob.as_deref(), Some("src/**/*.rs"));
 }
 
+#[cfg(unix)]
 #[test]
 fn build_grep_args_drops_match_all_glob() {
     let ctx = test_ctx(Path::new("/tmp/root"));
@@ -220,6 +227,7 @@ fn build_grep_args_scopes_file_path_to_parent_and_exact_glob() {
     assert_eq!(args.glob.as_deref(), Some("app.rs"));
 }
 
+#[cfg(unix)]
 #[test]
 fn build_find_args_allows_glob_only_search() {
     let ctx = test_ctx(Path::new("/tmp/root"));
@@ -279,6 +287,7 @@ fn build_find_args_still_rejects_unscoped_empty_query() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn build_smart_args_uses_terms() {
     let ctx = test_ctx(Path::new("/workspace"));
@@ -440,6 +449,7 @@ fn input_defaults_missing_mode_to_grep() {
     assert_eq!(params.query.as_deref(), Some("auth_status"));
 }
 
+#[cfg(unix)]
 #[test]
 fn build_outline_args_accepts_file_field() {
     let ctx = test_ctx(Path::new("/workspace"));
@@ -467,6 +477,7 @@ fn build_outline_args_accepts_file_field() {
     assert_eq!(args.path.as_deref(), Some("/workspace/repo"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn execute_runs_linked_grep() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -491,6 +502,7 @@ async fn execute_runs_linked_grep() {
     assert!(output.output.contains("@ 1 pub fn auth_status() {}"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn execute_runs_linked_grep_when_mode_is_omitted() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -508,6 +520,7 @@ async fn execute_runs_linked_grep_when_mode_is_omitted() {
     assert!(output.output.contains("app.rs"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn execute_runs_linked_grep_when_path_points_to_file() {
     let temp = tempfile::tempdir().expect("tempdir");

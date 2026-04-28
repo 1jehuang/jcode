@@ -28,6 +28,7 @@ struct EnvGuard {
     prev_socket: Option<OsString>,
 }
 
+#[cfg(unix)]
 struct ScopedEnvVar {
     key: &'static str,
     prev: Option<OsString>,
@@ -93,6 +94,7 @@ impl Drop for EnvGuard {
     }
 }
 
+#[cfg(unix)]
 impl ScopedEnvVar {
     fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let prev = std::env::var_os(key);
@@ -101,6 +103,7 @@ impl ScopedEnvVar {
     }
 }
 
+#[cfg(unix)]
 impl Drop for ScopedEnvVar {
     fn drop(&mut self) {
         if let Some(value) = &self.prev {

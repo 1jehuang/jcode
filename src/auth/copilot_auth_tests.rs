@@ -514,3 +514,52 @@ fn normalize_github_host_key_rejects_non_github_hosts() {
     assert_eq!(normalize_github_host_key("gitlab.com"), None);
     assert_eq!(normalize_github_host_key(""), None);
 }
+
+#[test]
+fn copilot_exchange_404_explains_missing_subscription() {
+    let body = r#"{"message":"Not Found","documentation_url":"https://docs.github.com/rest","status":"404"}"#;
+    let msg = format_copilot_exchange_failure(reqwest::StatusCode::NOT_FOUND, body);
+    assert!(
+        msg.contains("does not have an active Copilot subscription"),
+        "expected subscription guidance, got: {msg}"
+    );
+    // The failover machinery scans for these substrings; keep them stable.
+    assert!(
+        msg.contains("Copilot token exchange failed"),
+        "expected canonical failure prefix, got: {msg}"
+    );
+    assert!(
+        msg.contains("404"),
+        "expected standalone 404 marker for failover routing, got: {msg}"
+    );
+}
+
+#[test]
+fn copilot_exchange_404_without_not_found_body_falls_back_to_generic() {
+    let msg = format_copilot_exchange_failure(reqwest::StatusCode::NOT_FOUND, "weird body");
+    assert!(
+        !msg.contains("does not have an active Copilot subscription"),
+        "should not assert subscription cause without GitHub's not-found body: {msg}"
+    );
+    assert!(msg.contains("404"), "{msg}");
+    assert!(msg.contains("weird body"), "{msg}");
+}
+
+#[test]
+fn copilot_exchange_other_status_uses_generic_format() {
+    let body = r#"{"error":"something else"}"#;
+    let msg = format_copilot_exchange_failure(reqwest::StatusCode::FORBIDDEN, body);
+    assert!(msg.contains("403"), "{msg}");
+    assert!(msg.contains("something else"), "{msg}");
+    assert!(
+        !msg.contains("does not have an active Copilot subscription"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn copilot_exchange_empty_body_is_handled() {
+    let msg = format_copilot_exchange_failure(reqwest::StatusCode::BAD_GATEWAY, "");
+    assert!(msg.contains("502"), "{msg}");
+    assert!(msg.contains("(empty body)"), "{msg}");
+}

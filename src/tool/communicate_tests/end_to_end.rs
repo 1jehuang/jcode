@@ -186,6 +186,10 @@ async fn communicate_status_returns_busy_snapshot_for_running_member() {
     server_task.abort();
 }
 
+// Spawning a subagent over the comm channel is flaky on Windows (the
+// release-binary handshake path uses Unix-only signal semantics). Gate
+// until the cross-platform handoff is sorted.
+#[cfg(unix)]
 #[tokio::test]
 async fn communicate_spawn_reports_completion_back_to_spawner() {
     let _env_lock = crate::storage::lock_test_env();

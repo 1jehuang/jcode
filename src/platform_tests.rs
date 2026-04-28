@@ -101,3 +101,92 @@ fn spawn_replacement_process_returns_without_waiting_for_child_exit() {
     child.kill().ok();
     let _ = child.wait();
 }
+
+#[cfg(windows)]
+#[test]
+fn replace_executable_atomic_writes_new_contents_when_target_is_idle() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let src = temp.path().join("src.exe");
+    let dst = temp.path().join("dst.exe");
+
+    std::fs::write(&src, b"new contents").expect("write src");
+    std::fs::write(&dst, b"old contents").expect("write dst");
+
+    super::replace_executable_atomic(&src, &dst).expect("replace");
+
+    let contents = std::fs::read(&dst).expect("read dst");
+    assert_eq!(contents, b"new contents");
+}
+
+#[cfg(windows)]
+#[test]
+fn replace_executable_atomic_succeeds_when_target_is_locked_for_execution() {
+    // Simulate a "running .exe": Windows opens the loaded image with
+    // FILE_SHARE_READ | FILE_SHARE_DELETE — that combination rejects
+    // unlink but permits rename (which is what our implementation
+    // relies on).
+    use std::os::windows::fs::OpenOptionsExt;
+    // See windows-sys Win32::Storage::FileSystem. Hardcoded so the
+    // test does not require pulling in that feature.
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let src = temp.path().join("src.exe");
+    let dst = temp.path().join("dst.exe");
+
+    std::fs::write(&src, b"new contents").expect("write src");
+    std::fs::write(&dst, b"old contents").expect("write dst");
+
+    let _locked = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .open(&dst)
+        .expect("lock dst");
+
+    super::replace_executable_atomic(&src, &dst).expect("replace");
+
+    let contents = std::fs::read(&dst).expect("read dst");
+    assert_eq!(contents, b"new contents");
+
+    let aside_count = std::fs::read_dir(temp.path())
+        .expect("read tempdir")
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| n.starts_with(".dst.exe.") && n.ends_with(".old"))
+                .unwrap_or(false)
+        })
+        .count();
+    assert_eq!(aside_count, 1, "expected exactly one .old sidecar");
+
+    // Cleanup helper should remove the sidecar (drop the lock first so it can).
+    drop(_locked);
+    super::clean_stale_executable_replacements(temp.path());
+    let aside_after = std::fs::read_dir(temp.path())
+        .expect("read tempdir after cleanup")
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| n.ends_with(".old"))
+                .unwrap_or(false)
+        })
+        .count();
+    assert_eq!(aside_after, 0, "cleanup should remove .old sidecars");
+}
+
+#[cfg(unix)]
+#[test]
+fn replace_executable_atomic_replaces_target_on_unix() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let src = temp.path().join("src.bin");
+    let dst = temp.path().join("dst.bin");
+
+    std::fs::write(&src, b"new").expect("write src");
+    std::fs::write(&dst, b"old").expect("write dst");
+
+    super::replace_executable_atomic(&src, &dst).expect("replace");
+    assert_eq!(std::fs::read(&dst).expect("read dst"), b"new");
+}

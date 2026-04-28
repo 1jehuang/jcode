@@ -1,7 +1,7 @@
 # Jcode Desktop Architecture Direction
 
-Status: Proposed
-Updated: 2026-04-25
+Status: Design direction, active prototype in progress
+Updated: 2026-04-28
 
 This document captures the initial direction for a desktop application for Jcode under these constraints:
 
@@ -22,11 +22,13 @@ See also:
 - [`CLIENT_CORE_PRESENTATION_SPLIT_PLAN.md`](./CLIENT_CORE_PRESENTATION_SPLIT_PLAN.md)
 - [`MULTI_SESSION_CLIENT_ARCHITECTURE.md`](./MULTI_SESSION_CLIENT_ARCHITECTURE.md)
 - [`SERVER_ARCHITECTURE.md`](./SERVER_ARCHITECTURE.md)
+- [`DESKTOP_SINGLE_SESSION_DESIGN.md`](./DESKTOP_SINGLE_SESSION_DESIGN.md)
+- [`OPENAI_APPS_MCP_ASSISTANT_REVIEW.md`](./OPENAI_APPS_MCP_ASSISTANT_REVIEW.md)
 - [`MEMORY_BUDGET.md`](./MEMORY_BUDGET.md)
 
 ## Executive summary
 
-Build Jcode Desktop as a small Rust desktop client with a custom GPU-rendered UI. The app should connect to a local Jcode server/daemon that owns sessions, tools, agent execution, persistence, and permissions.
+Build Jcode Desktop as a small Rust desktop client with a custom GPU-rendered UI. The app connects to a local Jcode server/daemon that owns sessions, tools, agent execution, persistence, and permissions. As of 2026-04-28, the single-session desktop path is an active prototype with server-backed chat, assistant markdown rendering, model/session overlays, image attachments, tool cards, selection/copy, and stdin-response handling.
 
 The frontend should be optimized as a render/input surface:
 

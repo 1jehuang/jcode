@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant, sleep};
 
 pub(crate) struct ActiveDictation {
+    #[cfg(unix)]
     pid: u32,
     #[cfg(not(unix))]
     child: Arc<Mutex<Option<Child>>>,
@@ -14,10 +15,15 @@ pub(crate) struct ActiveDictation {
 
 impl ActiveDictation {
     fn new(pid: u32, _child: Arc<Mutex<Option<Child>>>) -> Self {
-        Self {
-            pid,
-            #[cfg(not(unix))]
-            child: _child,
+        #[cfg(unix)]
+        {
+            let _ = _child;
+            Self { pid }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pid;
+            Self { child: _child }
         }
     }
 
@@ -272,6 +278,7 @@ async fn wait_for_dictation_exit(
                 }
                 #[cfg(not(unix))]
                 {
+                    let _ = pid;
                     let mut guard = child.lock().await;
                     if let Some(process) = guard.as_mut() {
                         let _ = process.start_kill();

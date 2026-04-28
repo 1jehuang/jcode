@@ -28,9 +28,11 @@ use crate::storage;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -347,15 +349,23 @@ pub fn install_binary_at_version(source: &std::path::Path, version: &str) -> Res
 
     let dest = dest_dir.join(binary_name());
 
-    // Remove existing file first to avoid ETXTBSY when replacing a running binary.
-    if dest.exists() {
-        std::fs::remove_file(&dest)?;
+    // On Unix, removing an open ELF is fine (kernel keeps the inode alive).
+    // On Windows, deleting a running .exe is rejected — so route through
+    // replace_executable_atomic which renames the running binary aside first.
+    #[cfg(unix)]
+    {
+        if dest.exists() {
+            std::fs::remove_file(&dest)?;
+        }
+        // Prefer hard link (instant, zero I/O) over copy (71MB+ binary).
+        // Falls back to copy if hard link fails (e.g. cross-filesystem).
+        if std::fs::hard_link(source, &dest).is_err() {
+            std::fs::copy(source, &dest)?;
+        }
     }
-
-    // Prefer hard link (instant, zero I/O) over copy (71MB+ binary).
-    // Falls back to copy if hard link fails (e.g. cross-filesystem).
-    if std::fs::hard_link(source, &dest).is_err() {
-        std::fs::copy(source, &dest)?;
+    #[cfg(windows)]
+    {
+        crate::platform::replace_executable_atomic(source, &dest)?;
     }
     crate::platform::set_permissions_executable(&dest)?;
 
@@ -447,10 +457,11 @@ fn validate_binary_version_matches_source_report(
 }
 
 fn dirty_status_paths(repo_dir: &Path) -> Result<Vec<(PathBuf, bool)>> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
-        .current_dir(repo_dir)
-        .output()?;
+    let mut cmd = Command::new("git");
+    cmd.args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        .current_dir(repo_dir);
+    crate::platform::suppress_child_console(&mut cmd);
+    let output = cmd.output()?;
     if !output.status.success() {
         anyhow::bail!(
             "git status failed while validating dirty build freshness with status {:?}",

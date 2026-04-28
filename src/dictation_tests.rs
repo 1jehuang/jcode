@@ -1,15 +1,20 @@
+#[cfg(target_os = "linux")]
+use super::focused_jcode_session;
 use super::{
-    ClientCandidate, extract_session_short_name_from_window_title, focused_jcode_session,
-    last_focused_session, normalize_session_short_name, parse_ppid, read_resumed_session_id,
+    ClientCandidate, extract_session_short_name_from_window_title, last_focused_session,
+    normalize_session_short_name, parse_ppid, read_resumed_session_id,
     remember_last_focused_session, run_command, select_candidate,
 };
+#[cfg(target_os = "linux")]
 use std::ffi::OsString;
 
+#[cfg(target_os = "linux")]
 struct EnvVarGuard {
     key: &'static str,
     previous: Option<OsString>,
 }
 
+#[cfg(target_os = "linux")]
 impl EnvVarGuard {
     fn set<K: AsRef<std::ffi::OsStr>>(key: &'static str, value: K) -> Self {
         let previous = std::env::var_os(key);
@@ -18,6 +23,7 @@ impl EnvVarGuard {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         if let Some(previous) = &self.previous {

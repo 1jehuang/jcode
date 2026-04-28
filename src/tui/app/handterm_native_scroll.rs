@@ -1,7 +1,10 @@
 use super::App;
+#[cfg(unix)]
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::UnboundedReceiver;
+#[cfg(unix)]
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 #[cfg(unix)]
 use std::io::{Read, Write};
@@ -16,6 +19,7 @@ use std::thread;
 #[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(unix)]
 const ENV_SOCKET: &str = "HANDTERM_NATIVE_SCROLL_SOCKET";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +29,7 @@ pub(super) enum PaneKind {
     SidePanel,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct PaneState {
     pub kind: PaneKind,
@@ -37,11 +42,13 @@ pub(super) struct PaneState {
     pub viewport_length: usize,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 struct PaneSnapshot {
     panes: Vec<PaneState>,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AppToHost {
@@ -58,6 +65,7 @@ pub(super) struct HandtermNativeScrollClient {
     #[cfg(unix)]
     updates_tx: Sender<AppToHost>,
     commands_rx: UnboundedReceiver<HostToApp>,
+    #[cfg(unix)]
     last_sent: Option<PaneSnapshot>,
 }
 
@@ -91,7 +99,6 @@ impl HandtermNativeScrollClient {
         #[cfg(not(unix))]
         {
             let _ = app;
-            return;
         }
 
         #[cfg(unix)]
@@ -113,6 +120,7 @@ impl HandtermNativeScrollClient {
 }
 
 impl App {
+    #[cfg(unix)]
     fn current_native_scroll_snapshot(&self) -> PaneSnapshot {
         let mut panes = Vec::new();
         if let Some(layout) = crate::tui::ui::last_layout_snapshot() {

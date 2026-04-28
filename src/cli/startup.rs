@@ -27,6 +27,9 @@ pub async fn run() -> Result<()> {
     storage::harden_user_config_permissions();
     startup_profile::mark("perm_harden");
 
+    #[cfg(windows)]
+    clean_stale_executable_replacements();
+
     perf::init_background();
     startup_profile::mark("perf_init");
 
@@ -43,6 +46,24 @@ pub async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// On Windows, `replace_executable_atomic` renames running `.exe` files aside
+/// rather than deleting them (Windows refuses the latter). The next launch
+/// sweeps the leftover `.old` sidecars.
+#[cfg(windows)]
+fn clean_stale_executable_replacements() {
+    let Ok(builds_root) = build::builds_dir() else {
+        return;
+    };
+    for channel in ["stable", "current", "canary", "shared-server"] {
+        crate::platform::clean_stale_executable_replacements(&builds_root.join(channel));
+    }
+    if let Ok(versions) = std::fs::read_dir(builds_root.join("versions")) {
+        for entry in versions.flatten() {
+            crate::platform::clean_stale_executable_replacements(&entry.path());
+        }
+    }
 }
 
 fn parse_and_prepare_args() -> Result<Args> {

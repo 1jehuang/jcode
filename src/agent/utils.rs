@@ -29,11 +29,10 @@ pub(super) fn git_state_for_dir(dir: &Path) -> Option<GitState> {
 }
 
 fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .ok()?;
+    let mut cmd = Command::new("git");
+    cmd.args(args).current_dir(dir);
+    crate::platform::suppress_child_console(&mut cmd);
+    let output = cmd.output().ok()?;
     if !output.status.success() {
         return None;
     }

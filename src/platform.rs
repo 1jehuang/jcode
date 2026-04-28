@@ -1,5 +1,6 @@
 use std::path::Path;
 
+#[cfg(any(unix, test))]
 fn desired_nofile_soft_limit(current: u64, hard: u64, minimum: u64) -> Option<u64> {
     let desired = current.max(minimum).min(hard);
     (desired > current).then_some(desired)
@@ -249,7 +250,8 @@ pub fn try_reap_child_process(pid: u32) -> std::io::Result<Option<i32>> {
 /// Atomically swap a symlink by creating a temp symlink and renaming.
 ///
 /// On Unix: creates temp symlink, then renames over target (atomic).
-/// On Windows: removes target, copies source (not atomic, but best effort).
+/// On Windows: replaces the target file via [`replace_executable_atomic`],
+/// which renames a running `.exe` aside before writing the new one.
 pub fn atomic_symlink_swap(src: &Path, dst: &Path, temp: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -259,11 +261,84 @@ pub fn atomic_symlink_swap(src: &Path, dst: &Path, temp: &Path) -> std::io::Resu
     }
     #[cfg(windows)]
     {
-        let _ = std::fs::remove_file(temp);
-        let _ = std::fs::remove_file(dst);
-        std::fs::copy(src, dst).map(|_| ())?;
+        let _ = temp;
+        replace_executable_atomic(src, dst)?;
     }
     Ok(())
+}
+
+/// Replace a possibly-running executable at `dst` with the contents of `src`.
+///
+/// On Unix this is just `remove + copy` — `unlink` succeeds on a running ELF
+/// because the kernel keeps the inode alive for any executing process.
+///
+/// On Windows the OS refuses to delete or overwrite a running `.exe`, so the
+/// target is first renamed to a sibling `.<pid>-<nanos>.old` file (which
+/// Windows allows even while the file is in use). The fresh image is then
+/// copied into place. Stale `.old` sidecars accumulate in the directory until
+/// [`clean_stale_executable_replacements`] is called on the parent directory,
+/// usually at startup.
+pub fn replace_executable_atomic(src: &Path, dst: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let _ = std::fs::remove_file(dst);
+        std::fs::copy(src, dst).map(|_| ())
+    }
+    #[cfg(windows)]
+    {
+        if dst.exists() {
+            let stem = dst.file_name().and_then(|n| n.to_str()).unwrap_or("jcode");
+            let parent = dst
+                .parent()
+                .ok_or_else(|| std::io::Error::other("destination has no parent directory"))?;
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let aside = parent.join(format!(".{}.{}-{}.old", stem, std::process::id(), nanos));
+            // Renaming a running .exe is permitted; deleting is not. If we
+            // raced with another updater the aside path may already exist —
+            // append a counter and retry once.
+            match std::fs::rename(dst, &aside) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let aside2 =
+                        parent.join(format!(".{}.{}-{}-1.old", stem, std::process::id(), nanos));
+                    std::fs::rename(dst, &aside2)?;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        std::fs::copy(src, dst).map(|_| ())
+    }
+}
+
+/// Best-effort cleanup of `.old` sidecars left behind by
+/// [`replace_executable_atomic`].
+///
+/// Failure to delete an individual sidecar is ignored — a previously-running
+/// process may still hold a handle on it. The next caller (or the next
+/// reboot) will clean it up.
+pub fn clean_stale_executable_replacements(directory: &Path) {
+    #[cfg(unix)]
+    {
+        let _ = directory;
+    }
+    #[cfg(windows)]
+    {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name.starts_with('.') && name.ends_with(".old") {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
 }
 
 /// Spawn a process detached from the current client session.
@@ -297,20 +372,77 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<std::p
     cmd.spawn()
 }
 
+/// Suppress allocation of a fresh console window for a child process on Windows.
+///
+/// When the jcode server runs detached (`DETACHED_PROCESS`, no inherited
+/// console) and spawns a console-subsystem program (`cmd.exe`, `git`,
+/// `cargo`, `python`, ...), Windows allocates a brand-new console window for
+/// the child unless we set `CREATE_NO_WINDOW` (`0x08000000`). That manifests
+/// as PowerShell/cmd windows flashing up on every Bash tool call, every
+/// background git/cargo probe, etc.
+///
+/// Use this on every `std::process::Command` spawned from server-side code
+/// where the child's stdio is already piped (so a console window would be
+/// pure noise). For `tokio::process::Command`, see
+/// [`suppress_child_console_async`].
+///
+/// On non-Windows platforms this is a no-op.
+#[cfg_attr(not(windows), allow(unused_variables))]
+pub fn suppress_child_console(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
+/// Tokio variant of [`suppress_child_console`].
+#[cfg_attr(not(windows), allow(unused_variables))]
+pub fn suppress_child_console_async(cmd: &mut tokio::process::Command) {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 #[cfg(windows)]
 fn spawn_replacement_process(
     cmd: &mut std::process::Command,
 ) -> std::io::Result<std::process::Child> {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
+
+    // CREATE_NEW_PROCESS_GROUP gives the child its own group so Ctrl+C in
+    // the parent terminal does not propagate to the new process during the
+    // brief overlap window before the parent exits. Stdio is inherited by
+    // default — that's intentional, since most replace_process callers
+    // (hot_exec, tui_launch) hand the running terminal to the new
+    // process. Pure-daemon callers should set their own stdio redirects
+    // on `cmd` before invoking replace_process.
+    cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
     cmd.spawn()
 }
 
 /// Replace the current process with a new command (exec on Unix).
 ///
-/// On Unix, this calls exec() which never returns on success.
-/// On Windows, this spawns the process and exits.
+/// On Unix this calls `exec()` which never returns on success — the new
+/// program reuses this PID, inherits open file descriptors, and any
+/// destructors in the current binary are skipped.
 ///
-/// Returns an error only if the operation fails. On success (Unix exec),
-/// this function never returns.
+/// On Windows there is no `exec`. We spawn the replacement (inheriting
+/// stdio so an interactive caller hands its terminal off cleanly) and
+/// then exit the parent. The new process gets a fresh PID. This is a
+/// race window — the parent briefly coexists with the child and any
+/// kernel resource bound by the parent (sockets, named pipes, file
+/// locks) is not handed off the way `exec` would. Callers that need
+/// sockets to migrate must arrange for the parent to drop them before
+/// `replace_process` is invoked, and for the child to retry-bind on
+/// startup.
+///
+/// Returns an error only if the operation fails. On success this
+/// function never returns.
 pub fn replace_process(cmd: &mut std::process::Command) -> std::io::Error {
     #[cfg(unix)]
     {
@@ -326,8 +458,16 @@ pub fn replace_process(cmd: &mut std::process::Command) -> std::io::Error {
     #[cfg(windows)]
     {
         match spawn_replacement_process(cmd) {
-            Ok(_child) => std::process::exit(0),
-            Err(e) => e,
+            Ok(_child) => {
+                // Drop the Child handle implicitly via process::exit. Windows
+                // has no zombie state — the child continues running once the
+                // parent terminates.
+                std::process::exit(0)
+            }
+            Err(err) => {
+                crate::logging::error(&format!("replace_process spawn failed on Windows: {err}"));
+                err
+            }
         }
     }
 }

@@ -50,6 +50,17 @@ impl MultiProvider {
     pub(super) fn new_with_auth_status(auth_status: auth::AuthStatus) -> Self {
         let provider_init_start = std::time::Instant::now();
         let has_claude_creds = auth::claude::load_credentials().is_ok();
+        // ANTHROPIC_API_KEY alone is enough to drive AnthropicProvider — it
+        // doesn't depend on Claude OAuth credentials. Detect it explicitly so
+        // users with only the API key set still get a working `claude`/`anthropic`
+        // provider routed through ActiveProvider::Claude. Previously we gated
+        // the provider on `has_claude_creds` only, so a fresh box with just
+        // ANTHROPIC_API_KEY exported would have `claude=false, anthropic=false`
+        // in availability and the `default_provider = "claude"` config preference
+        // would silently fall through to whatever was auto-detected.
+        let has_anthropic_api_key = std::env::var("ANTHROPIC_API_KEY")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
         let has_openai_creds = auth::codex::load_credentials().is_ok();
         let has_copilot_api = auth_status.copilot_has_api_token;
         let has_antigravity_creds = auth::antigravity::load_tokens().is_ok();
@@ -75,7 +86,7 @@ impl MultiProvider {
             None
         };
 
-        let anthropic = if has_claude_creds && !use_claude_cli {
+        let anthropic = if (has_claude_creds || has_anthropic_api_key) && !use_claude_cli {
             Some(Arc::new(anthropic::AnthropicProvider::new()))
         } else {
             None

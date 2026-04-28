@@ -754,6 +754,10 @@ async fn firefox_run_bridge_command(
     {
         command.env("BROWSER_SESSION", session_name);
     }
+    #[cfg(windows)]
+    {
+        let _ = ctx;
+    }
 
     let output = command
         .output()

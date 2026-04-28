@@ -33,9 +33,14 @@ fn path_to_pipe_name(path: &Path) -> String {
 
 /// Listener wraps a Windows named pipe server, providing an accept loop
 /// that matches the UnixListener interface.
+///
+/// `current_server` is held behind a `tokio::sync::Mutex` so that `accept`
+/// can take `&self`, matching `tokio::net::UnixListener::accept` on Unix.
+/// Accept loops are sequential by construction (one in-flight accept per
+/// listener), so the mutex is uncontended in practice.
 pub struct Listener {
     pipe_name: String,
-    current_server: NamedPipeServer,
+    current_server: Mutex<NamedPipeServer>,
 }
 
 impl Listener {
@@ -47,7 +52,7 @@ impl Listener {
         {
             Ok(server) => Ok(Self {
                 pipe_name,
-                current_server: server,
+                current_server: Mutex::new(server),
             }),
             Err(e)
                 if e.raw_os_error()
@@ -61,20 +66,19 @@ impl Listener {
                 let server = ServerOptions::new().create(&pipe_name)?;
                 Ok(Self {
                     pipe_name,
-                    current_server: server,
+                    current_server: Mutex::new(server),
                 })
             }
             Err(e) => Err(e),
         }
     }
 
-    pub async fn accept(&mut self) -> io::Result<(Stream, PipeAddr)> {
-        self.current_server.connect().await?;
+    pub async fn accept(&self) -> io::Result<(Stream, PipeAddr)> {
+        let mut current = self.current_server.lock().await;
+        current.connect().await?;
 
-        let connected = std::mem::replace(
-            &mut self.current_server,
-            ServerOptions::new().create(&self.pipe_name)?,
-        );
+        let next = ServerOptions::new().create(&self.pipe_name)?;
+        let connected = std::mem::replace(&mut *current, next);
 
         Ok((Stream::Server(connected), PipeAddr))
     }
@@ -132,7 +136,7 @@ impl Stream {
         static PAIR_COUNTER: AtomicU64 = AtomicU64::new(0);
         let counter = PAIR_COUNTER.fetch_add(1, Ordering::Relaxed);
         let pipe_name = format!(r"\\.\pipe\jcode-pair-{}-{}", std::process::id(), counter);
-        let mut server = ServerOptions::new()
+        let server = ServerOptions::new()
             .first_pipe_instance(true)
             .create(&pipe_name)?;
         let client = ClientOptions::new().open(&pipe_name)?;

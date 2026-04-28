@@ -241,6 +241,24 @@ fn test_should_failover_on_token_exchange_failed() {
 }
 
 #[test]
+fn test_should_failover_on_copilot_404_no_subscription_message() {
+    // Mirrors auth::copilot::format_copilot_exchange_failure for 404.
+    // The failover machinery scans for "token exchange failed" and the
+    // "404" status marker — both must keep matching after we made the
+    // user-facing message more diagnostic.
+    let msg = "Copilot token exchange failed (HTTP 404 Not Found): the GitHub account this token \
+               belongs to does not have an active Copilot subscription. GitHub returns 404 instead \
+               of 403 here to hide the endpoint from non-Copilot users. \
+               Subscribe at https://github.com/settings/copilot, switch accounts via \
+               `gh auth login` (or set GH_TOKEN/COPILOT_GITHUB_TOKEN), or pick another provider.";
+    let err = anyhow::anyhow!("{}", msg);
+    assert_eq!(
+        MultiProvider::classify_failover_error(&err),
+        FailoverDecision::RetryAndMarkUnavailable
+    );
+}
+
+#[test]
 fn test_should_failover_on_access_denied() {
     let err = anyhow::anyhow!("Access denied: account suspended");
     assert!(MultiProvider::classify_failover_error(&err).should_failover());

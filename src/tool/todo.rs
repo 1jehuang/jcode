@@ -113,13 +113,17 @@ mod tests {
     }
 
     #[test]
-    fn schema_only_advertises_todos() {
+    fn schema_only_advertises_todos_and_intent() {
         let schema = TodoTool::new().parameters_schema();
         let props = schema
             .get("properties")
             .and_then(|v| v.as_object())
             .expect("todo schema should have properties");
-        assert_eq!(props.len(), 1);
-        assert!(props.contains_key("todos"));
+        // The schema exposes the universal `intent` property plus the
+        // tool-specific `todos` array — and nothing else (e.g. no `action`
+        // discriminator). Update both halves of this assertion together.
+        assert!(props.contains_key("todos"), "{props:?}");
+        assert!(props.contains_key("intent"), "{props:?}");
+        assert_eq!(props.len(), 2, "{props:?}");
     }
 }

@@ -381,6 +381,10 @@ Example MCP config:
 
 On first run, jcode also tries to import MCP servers from `~/.claude/mcp.json` and `~/.codex/config.toml` if `~/.jcode/mcp.json` does not exist yet.
 
+The built-in `mcp` tool can manage servers at runtime with `list`, `connect`, `disconnect`, and `reload`. Discovered server tools are registered as `mcp__<server>__<tool>`. In server/daemon mode, MCP servers with `shared: true` reuse a shared process pool across sessions; set `shared: false` for stateful per-session servers.
+
+For the current MCP and OpenAI Apps SDK status review, see [OpenAI Apps SDK, MCP, Apps UI, and Assistant Review](docs/OPENAI_APPS_MCP_ASSISTANT_REVIEW.md).
+
 For headless or SSH sessions, OAuth-style providers support `jcode login --provider <provider> --no-browser` (alias: `--headless`) so jcode prints the auth URL/QR and falls back to manual code or callback paste instead of trying to launch a local browser.
 
 For more scriptable remote flows, `claude`, `openai`, `gemini`, and `antigravity` also support a two-step pattern:
@@ -554,6 +558,7 @@ Notes:
 
 ## Further Reading
 
+- [OpenAI Apps SDK, MCP, Apps UI, and Assistant Review](docs/OPENAI_APPS_MCP_ASSISTANT_REVIEW.md)
 - [Ambient Mode / OpenClaw](docs/AMBIENT_MODE.md)
 - [Browser Provider Protocol](docs/BROWSER_PROVIDER_PROTOCOL.md)
 - [Memory Architecture](docs/MEMORY_ARCHITECTURE.md)

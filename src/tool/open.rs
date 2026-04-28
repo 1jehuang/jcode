@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+#[cfg(unix)]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -401,7 +402,7 @@ async fn reveal_target(path: &Path, kind: LocalTargetKind) -> Result<(String, bo
             cmd.arg(format!("/select,{}", path.display()));
         }
         spawn_with_grace(cmd, "explorer").await?;
-        return Ok(("explorer".to_string(), true));
+        Ok(("explorer".to_string(), true))
     }
 }
 

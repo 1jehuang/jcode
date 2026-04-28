@@ -443,7 +443,10 @@ fn load_token_from_gh_cli() -> Option<String> {
         return None;
     }
 
-    let output = Command::new("gh").args(["auth", "token"]).output().ok()?;
+    let mut cmd = Command::new("gh");
+    cmd.args(["auth", "token"]);
+    crate::platform::suppress_child_console(&mut cmd);
+    let output = cmd.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -549,7 +552,7 @@ pub async fn exchange_github_token(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = crate::util::http_error_body(resp, "HTTP error").await;
-        anyhow::bail!("Copilot token exchange failed (HTTP {}): {}", status, body);
+        anyhow::bail!(format_copilot_exchange_failure(status, &body));
     }
 
     let token_resp: CopilotTokenResponse = resp
@@ -561,6 +564,41 @@ pub async fn exchange_github_token(
         token: token_resp.token,
         expires_at: token_resp.expires_at,
     })
+}
+
+/// Build the user-facing error string for a non-success Copilot token exchange.
+///
+/// GitHub deliberately returns 404 (not 403) on `copilot_internal/v2/token` and
+/// `user/copilot_billing` when the account has no active Copilot subscription —
+/// the raw `{"message":"Not Found"}` body is opaque, so we surface the actual
+/// likely cause and remediation. Other statuses fall through to a generic
+/// message that still includes the standalone status code so the failover
+/// machinery (which scans for "401"/"403"/"token exchange failed") keeps
+/// behaving correctly.
+fn format_copilot_exchange_failure(status: reqwest::StatusCode, body: &str) -> String {
+    let trimmed = body.trim();
+    let body_for_display = if trimmed.is_empty() {
+        "(empty body)".to_string()
+    } else {
+        trimmed.to_string()
+    };
+
+    if status == reqwest::StatusCode::NOT_FOUND && trimmed.contains("\"message\":\"Not Found\"") {
+        return format!(
+            "Copilot token exchange failed (HTTP 404 Not Found): the GitHub account this token \
+             belongs to does not have an active Copilot subscription. GitHub returns 404 instead \
+             of 403 here to hide the endpoint from non-Copilot users. \
+             Subscribe at https://github.com/settings/copilot, switch accounts via \
+             `gh auth login` (or set GH_TOKEN/COPILOT_GITHUB_TOKEN), or pick another provider \
+             with `jcode --provider claude` / `--provider openai`. Raw response: {}",
+            body_for_display
+        );
+    }
+
+    format!(
+        "Copilot token exchange failed (HTTP {}): {}",
+        status, body_for_display
+    )
 }
 
 /// Initiate GitHub OAuth device flow for Copilot authentication.

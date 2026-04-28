@@ -42,6 +42,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/help", "Show help and keyboard shortcuts"),
     RegisteredCommand::public("/?", "Alias for /help"),
     RegisteredCommand::public("/commands", "Alias for /help"),
+    RegisteredCommand::public(
+        "/help-cmds",
+        "Cheat sheet: features, config, multi-window setup",
+    ),
     RegisteredCommand::public("/model", "List or switch models"),
     RegisteredCommand::public("/models", "Alias for /model"),
     RegisteredCommand::public("/refresh-model-list", "Refresh provider model catalogs"),

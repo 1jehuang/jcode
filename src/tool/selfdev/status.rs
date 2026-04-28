@@ -9,11 +9,10 @@ pub fn selfdev_status_output() -> Result<ToolOutput> {
     status.push_str(&format!("**Running:** jcode {}\n", env!("JCODE_VERSION")));
 
     if let Some(repo_dir) = build::get_repo_dir() {
-        let output = std::process::Command::new("git")
-            .args(["status", "--porcelain"])
-            .current_dir(&repo_dir)
-            .output()
-            .ok();
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["status", "--porcelain"]).current_dir(&repo_dir);
+        crate::platform::suppress_child_console(&mut cmd);
+        let output = cmd.output().ok();
 
         if let Some(output) = output {
             let changes: Vec<&str> = std::str::from_utf8(&output.stdout)

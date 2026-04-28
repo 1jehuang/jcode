@@ -33,10 +33,10 @@ fn hash_path_scope(path: &Path) -> String {
 }
 
 fn git_output_bytes(repo_dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(repo_dir)
-        .output()?;
+    let mut cmd = Command::new("git");
+    cmd.args(args).current_dir(repo_dir);
+    crate::platform::suppress_child_console(&mut cmd);
+    let output = cmd.output()?;
     if !output.status.success() {
         anyhow::bail!(
             "git {} failed with status {:?}",
@@ -155,10 +155,11 @@ pub fn repo_build_version(repo_dir: &Path) -> Result<String> {
 
 /// Get the current git hash
 pub fn current_git_hash(repo_dir: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(repo_dir)
-        .output()?;
+    let mut cmd = Command::new("git");
+    cmd.args(["rev-parse", "--short", "HEAD"])
+        .current_dir(repo_dir);
+    crate::platform::suppress_child_console(&mut cmd);
+    let output = cmd.output()?;
 
     if !output.status.success() {
         anyhow::bail!("Failed to get git hash");
@@ -169,10 +170,10 @@ pub fn current_git_hash(repo_dir: &Path) -> Result<String> {
 
 /// Get the full git hash
 pub fn current_git_hash_full(repo_dir: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(repo_dir)
-        .output()?;
+    let mut cmd = Command::new("git");
+    cmd.args(["rev-parse", "HEAD"]).current_dir(repo_dir);
+    crate::platform::suppress_child_console(&mut cmd);
+    let output = cmd.output()?;
 
     if !output.status.success() {
         anyhow::bail!("Failed to get git hash");
@@ -183,30 +184,31 @@ pub fn current_git_hash_full(repo_dir: &Path) -> Result<String> {
 
 /// Get the git diff for uncommitted changes
 pub fn current_git_diff(repo_dir: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .args(["diff", "HEAD"])
-        .current_dir(repo_dir)
-        .output()?;
+    let mut cmd = Command::new("git");
+    cmd.args(["diff", "HEAD"]).current_dir(repo_dir);
+    crate::platform::suppress_child_console(&mut cmd);
+    let output = cmd.output()?;
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 /// Check if working tree is dirty
 pub fn is_working_tree_dirty(repo_dir: &Path) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(repo_dir)
-        .output()?;
+    let mut cmd = Command::new("git");
+    cmd.args(["status", "--porcelain"]).current_dir(repo_dir);
+    crate::platform::suppress_child_console(&mut cmd);
+    let output = cmd.output()?;
 
     Ok(!output.stdout.is_empty())
 }
 
 /// Get commit message for a hash
 pub fn get_commit_message(repo_dir: &Path, hash: &str) -> Result<String> {
-    let output = Command::new("git")
-        .args(["log", "-1", "--format=%s", hash])
-        .current_dir(repo_dir)
-        .output()?;
+    let mut cmd = Command::new("git");
+    cmd.args(["log", "-1", "--format=%s", hash])
+        .current_dir(repo_dir);
+    crate::platform::suppress_child_console(&mut cmd);
+    let output = cmd.output()?;
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
