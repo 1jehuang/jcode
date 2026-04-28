@@ -1,7 +1,8 @@
 {
   "threshold_loc": 1200,
   "tracked_files": {
-    "tests/e2e/test_support/mod.rs": 1309
+    "crates/jcode-desktop/src/main_tests.rs": 1501,
+    "tests/e2e/test_support/mod.rs": 1310
   },
   "version": 1
 }

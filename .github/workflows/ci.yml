@@ -397,7 +397,7 @@ jobs:
           sudo apt-get install -y -qq clang lld llvm ninja-build
 
       - name: Install cargo-xwin
-        run: cargo install --locked cargo-xwin
+        run: cargo install --git https://github.com/rust-cross/cargo-xwin cargo-xwin
 
       - name: Check Windows x64 target
         run: cargo xwin check --locked --target x86_64-pc-windows-msvc

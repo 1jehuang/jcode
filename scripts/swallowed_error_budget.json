@@ -1,9 +1,9 @@
 {
-  "total": 1966,
+  "total": 1995,
   "totals_by_pattern": {
-    "dot_ok": 648,
-    "let_underscore": 870,
-    "unwrap_or_default": 448
+    "dot_ok": 654,
+    "let_underscore": 877,
+    "unwrap_or_default": 464
   },
   "tracked_files": {
     "crates/jcode-desktop/src/desktop_prefs.rs": {
@@ -25,6 +25,16 @@
       "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 1
+    },
+    "crates/jcode-desktop/src/session_launch.rs": {
+      "dot_ok": 3,
+      "let_underscore": 7,
+      "unwrap_or_default": 0
+    },
+    "crates/jcode-desktop/src/single_session.rs": {
+      "dot_ok": 0,
+      "let_underscore": 0,
+      "unwrap_or_default": 13
     },
     "crates/jcode-desktop/src/workspace.rs": {
       "dot_ok": 0,
@@ -532,7 +542,7 @@
       "unwrap_or_default": 5
     },
     "src/provider/openai_provider_impl.rs": {
-      "dot_ok": 2,
+      "dot_ok": 1,
       "let_underscore": 2,
       "unwrap_or_default": 0
     },
@@ -547,9 +557,9 @@
       "unwrap_or_default": 2
     },
     "src/provider/openrouter.rs": {
-      "dot_ok": 15,
+      "dot_ok": 18,
       "let_underscore": 0,
-      "unwrap_or_default": 3
+      "unwrap_or_default": 4
     },
     "src/provider/openrouter_provider_impl.rs": {
       "dot_ok": 0,
@@ -1184,7 +1194,7 @@
     "src/tui/app/remote/server_events.rs": {
       "dot_ok": 4,
       "let_underscore": 1,
-      "unwrap_or_default": 1
+      "unwrap_or_default": 2
     },
     "src/tui/app/remote/session_persistence.rs": {
       "dot_ok": 0,
@@ -1208,6 +1218,11 @@
     },
     "src/tui/app/state_ui_input_helpers.rs": {
       "dot_ok": 3,
+      "let_underscore": 0,
+      "unwrap_or_default": 1
+    },
+    "src/tui/app/state_ui_messages.rs": {
+      "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
