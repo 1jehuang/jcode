@@ -140,6 +140,19 @@ fn focus_title_best_effort(title: &str) {
 #[cfg(any(not(unix), target_os = "macos"))]
 fn focus_title_best_effort(_title: &str) {}
 
+#[cfg(target_os = "macos")]
+fn macos_ghostty_app_installed() -> bool {
+    if std::path::Path::new("/Applications/Ghostty.app").is_dir() {
+        return true;
+    }
+    if let Some(home) = dirs::home_dir()
+        && home.join("Applications/Ghostty.app").is_dir()
+    {
+        return true;
+    }
+    false
+}
+
 fn push_unique_terminal(candidates: &mut Vec<String>, term: impl Into<String>) {
     let term = term.into();
     if term.trim().is_empty() {
@@ -174,10 +187,16 @@ fn detected_resume_terminal() -> Option<&'static str> {
 
     #[cfg(target_os = "macos")]
     {
+        if std::env::var("GHOSTTY_RESOURCES_DIR").is_ok()
+            || std::env::var("GHOSTTY_BIN_DIR").is_ok()
+        {
+            return Some("ghostty");
+        }
         let term_program = std::env::var("TERM_PROGRAM")
             .ok()
             .map(|value| value.to_ascii_lowercase());
         return match term_program.as_deref() {
+            Some("ghostty") => Some("ghostty"),
             Some("kitty") => Some("kitty"),
             Some("wezterm") => Some("wezterm"),
             Some("alacritty") => Some("alacritty"),
@@ -205,6 +224,9 @@ fn resume_terminal_candidates_unix() -> Vec<String> {
 
     #[cfg(target_os = "macos")]
     {
+        if macos_ghostty_app_installed() {
+            push_unique_terminal(&mut candidates, "ghostty");
+        }
         for term in ["kitty", "wezterm", "alacritty", "iterm2", "terminal"] {
             push_unique_terminal(&mut candidates, term);
         }
@@ -671,6 +693,22 @@ pub fn spawn_resume_in_new_terminal(
                 ]);
                 cmd.args(["--standalone", "--backend", "gpu", "--exec", &command]);
             }
+            "ghostty" => {
+                cmd = Command::new("open");
+                let command = shell_command(&[
+                    exe.to_string_lossy().into_owned(),
+                    "--fresh-spawn".to_string(),
+                    "--resume".to_string(),
+                    session_id.to_string(),
+                ]);
+                cmd.current_dir(cwd)
+                    .env("JCODE_FRESH_SPAWN", "1")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .args(["-na", "Ghostty", "--args", "-e", "/bin/bash", "-lc"])
+                    .arg(command);
+            }
             "kitty" => {
                 let title = resumed_window_title(session_id);
                 cmd.args(["--title", &title, "-e"])
@@ -795,6 +833,23 @@ pub fn spawn_selfdev_in_new_terminal(
                     "self-dev".to_string(),
                 ]);
                 cmd.args(["--standalone", "--backend", "gpu", "--exec", &command]);
+            }
+            "ghostty" => {
+                cmd = Command::new("open");
+                let command = shell_command(&[
+                    exe.to_string_lossy().into_owned(),
+                    "--fresh-spawn".to_string(),
+                    "--resume".to_string(),
+                    session_id.to_string(),
+                    "self-dev".to_string(),
+                ]);
+                cmd.current_dir(cwd)
+                    .env("JCODE_FRESH_SPAWN", "1")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .args(["-na", "Ghostty", "--args", "-e", "/bin/bash", "-lc"])
+                    .arg(command);
             }
             "kitty" => {
                 cmd.args(["--title", selfdev_title.as_str(), "-e"])
@@ -1244,6 +1299,21 @@ pub fn list_sessions() -> Result<()> {
                             .collect::<Vec<_>>(),
                     );
                     cmd.args(["--standalone", "--backend", "gpu", "--exec", &command]);
+                }
+                #[cfg(target_os = "macos")]
+                "ghostty" => {
+                    let command = shell_command(
+                        &std::iter::once(program.to_string_lossy().into_owned())
+                            .chain(args.iter().cloned())
+                            .collect::<Vec<_>>(),
+                    );
+                    cmd = Command::new("open");
+                    cmd.current_dir(cwd)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .args(["-na", "Ghostty", "--args", "-e", "/bin/bash", "-lc"])
+                        .arg(command);
                 }
                 "kitty" => {
                     cmd.args(["--title", &title, "-e"])
