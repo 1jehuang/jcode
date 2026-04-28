@@ -777,7 +777,12 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
 }
 
 async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteConnection) {
-    const STALL_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+    // Reasoning models (GPT-5.5 with high effort, Claude with extended thinking,
+    // Gemini deep mode) can stay silent on the wire for several minutes during
+    // a single internal step. The previous 120s was too aggressive and caused
+    // legitimate turns to be cancelled mid-thought. WS-level health (idle
+    // ping/pong) is handled separately in `provider::openai::persistent_ws_*`.
+    const STALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
     let is_running_tool = matches!(app.status, ProcessingStatus::RunningTool(_));
     if app.is_processing && !is_running_tool {
         let stalled = app
