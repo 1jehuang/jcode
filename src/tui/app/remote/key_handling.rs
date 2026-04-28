@@ -192,6 +192,12 @@ async fn handle_remote_key_internal(
                 if direction > 0 { "max" } else { "min" }
             ));
         } else {
+            app.remote_reasoning_effort = Some(next_effort.to_string());
+            app.invalidate_model_picker_cache();
+            app.set_status_notice(format!(
+                "Effort: {} (will apply to next request)",
+                app_mod::effort_display_label(next_effort)
+            ));
             remote.set_reasoning_effort(next_effort).await?;
         }
         return Ok(());
@@ -835,6 +841,15 @@ async fn handle_remote_key_internal(
                     if level.is_empty() {
                         app.push_display_message(DisplayMessage::error("Usage: /effort <level>"));
                         return Ok(());
+                    }
+                    const EFFORTS: [&str; 5] = ["none", "low", "medium", "high", "xhigh"];
+                    if EFFORTS.contains(&level) {
+                        app.remote_reasoning_effort = Some(level.to_string());
+                        app.invalidate_model_picker_cache();
+                        app.set_status_notice(format!(
+                            "Effort: {} (will apply to next request)",
+                            app_mod::effort_display_label(level)
+                        ));
                     }
                     remote.set_reasoning_effort(level).await?;
                     return Ok(());

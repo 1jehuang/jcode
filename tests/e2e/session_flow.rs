@@ -3,7 +3,7 @@ use crate::test_support::*;
 #[tokio::test]
 async fn resume_session_restores_persisted_compaction_for_provider_context() -> Result<()> {
     let _env = setup_test_env()?;
-    let runtime_dir = std::env::temp_dir().join(format!(
+    let runtime_dir = short_runtime_dir(format!(
         "jcode-compaction-resume-test-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -169,7 +169,7 @@ async fn test_agent_clear_preserves_debug_flag() -> Result<()> {
 #[tokio::test]
 async fn test_debug_create_session_marks_debug() -> Result<()> {
     let _env = setup_test_env()?;
-    let runtime_dir = std::env::temp_dir().join(format!(
+    let runtime_dir = short_runtime_dir(format!(
         "jcode-debug-test-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -200,7 +200,7 @@ async fn test_debug_create_session_marks_debug() -> Result<()> {
 #[tokio::test]
 async fn test_debug_create_selfdev_session_marks_canary() -> Result<()> {
     let _env = setup_test_env()?;
-    let runtime_dir = std::env::temp_dir().join(format!(
+    let runtime_dir = short_runtime_dir(format!(
         "jcode-debug-selfdev-test-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -236,7 +236,7 @@ async fn test_debug_create_selfdev_session_marks_canary() -> Result<()> {
 #[tokio::test]
 async fn test_clear_preserves_debug_for_resumed_debug_session() -> Result<()> {
     let _env = setup_test_env()?;
-    let runtime_dir = std::env::temp_dir().join(format!(
+    let runtime_dir = short_runtime_dir(format!(
         "jcode-clear-debug-test-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

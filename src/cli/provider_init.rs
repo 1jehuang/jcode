@@ -969,10 +969,21 @@ async fn init_provider_with_options(
     show_init_messages: bool,
     allow_login_bootstrap: bool,
 ) -> Result<Arc<dyn provider::Provider>> {
-    if let Some(profile) = profile_for_choice(choice) {
-        apply_openai_compatible_profile_env(Some(profile));
-    } else {
-        apply_openai_compatible_profile_env(None);
+    if let Ok(profile_name) = std::env::var("JCODE_PROVIDER_PROFILE_NAME")
+        && !profile_name.trim().is_empty()
+    {
+        crate::provider_catalog::apply_named_provider_profile_env(profile_name.trim())?;
+        crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
+    }
+
+    if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_none()
+        && std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none()
+    {
+        if let Some(profile) = profile_for_choice(choice) {
+            apply_openai_compatible_profile_env(Some(profile));
+        } else {
+            apply_openai_compatible_profile_env(None);
+        }
     }
 
     let init_notice = |message: &str| {
@@ -1085,17 +1096,44 @@ async fn init_provider_with_options(
             disable_subscription_runtime_mode();
             let profile = profile_for_choice(choice)
                 .ok_or_else(|| anyhow::anyhow!("missing provider profile for choice"))?;
-            apply_openai_compatible_profile_env(Some(profile));
-            let resolved = resolve_openai_compatible_profile(profile);
-            if resolved.requires_api_key {
-                ensure_external_api_key_auth_allowed_for_explicit_choice(&resolved.api_key_env)?;
+            if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_none()
+                && std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none()
+            {
+                apply_openai_compatible_profile_env(Some(profile));
             }
+            let display_name = if let Ok(named) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE") {
+                named
+            } else {
+                let resolved = resolve_openai_compatible_profile(profile);
+                if resolved.requires_api_key {
+                    ensure_external_api_key_auth_allowed_for_explicit_choice(
+                        &resolved.api_key_env,
+                    )?;
+                }
+                resolved.display_name
+            };
             init_notice(&format!(
                 "Using {} via OpenAI-compatible API (provider locked)",
-                resolved.display_name
+                display_name
             ));
             lock_model_provider("openrouter");
-            Arc::new(provider::MultiProvider::new_fast())
+            if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_some()
+                || std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_some()
+            {
+                let profile_name = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")?;
+                let cfg = crate::config::config();
+                let profile = cfg.providers.get(&profile_name).ok_or_else(|| {
+                    anyhow::anyhow!("Unknown provider profile '{}'", profile_name)
+                })?;
+                Arc::new(
+                    provider::openrouter::OpenRouterProvider::new_named_openai_compatible(
+                        &profile_name,
+                        profile,
+                    )?,
+                )
+            } else {
+                Arc::new(provider::MultiProvider::new_fast())
+            }
         }
         ProviderChoice::Antigravity => {
             disable_subscription_runtime_mode();
@@ -1269,7 +1307,9 @@ async fn init_provider_with_options(
         }
     };
 
-    if model.is_none()
+    if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_none()
+        && std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none()
+        && model.is_none()
         && let Some(profile) = profile_for_choice(choice)
         && let Some(default_model) = resolved_profile_default_model(profile)
         && provider.set_model(&default_model).is_ok()

@@ -97,11 +97,7 @@ impl MultiProvider {
         forced_provider: Option<ActiveProvider>,
     ) -> Vec<ActiveProvider> {
         if let Some(forced) = forced_provider {
-            if active == forced {
-                vec![forced]
-            } else {
-                vec![active, forced]
-            }
+            vec![forced]
         } else {
             Self::fallback_sequence(active)
         }

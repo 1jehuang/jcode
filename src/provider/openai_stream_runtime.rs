@@ -117,7 +117,7 @@ pub(super) async fn stream_response(
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok());
 
-        let body = response.text().await.unwrap_or_default();
+        let body = crate::util::http_error_body(response, "HTTP error").await;
 
         if let Some(reason) = classify_unavailable_model_error(status, &body)
             && let Some(model_name) = request.get("model").and_then(|m| m.as_str())

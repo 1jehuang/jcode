@@ -103,7 +103,7 @@ async fn test_stream_error() -> Result<()> {
 #[tokio::test]
 async fn test_socket_model_cycle_supported_models() -> Result<()> {
     let _env = setup_test_env()?;
-    let runtime_dir = std::env::temp_dir().join(format!(
+    let runtime_dir = short_runtime_dir(format!(
         "jcode-test-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -152,7 +152,7 @@ async fn test_socket_model_cycle_supported_models() -> Result<()> {
 #[tokio::test]
 async fn test_resume_restores_model_and_tool_history() -> Result<()> {
     let _env = setup_test_env()?;
-    let runtime_dir = std::env::temp_dir().join(format!(
+    let runtime_dir = short_runtime_dir(format!(
         "jcode-resume-test-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -250,7 +250,7 @@ async fn test_resume_restores_model_and_tool_history() -> Result<()> {
 #[tokio::test]
 async fn test_resume_session_with_local_history_uses_metadata_only_history() -> Result<()> {
     let _env = setup_test_env()?;
-    let runtime_dir = std::env::temp_dir().join(format!(
+    let runtime_dir = short_runtime_dir(format!(
         "jcode-target-subscribe-test-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -333,9 +333,17 @@ async fn test_resume_session_with_local_history_uses_metadata_only_history() -> 
                 ..
             } if id == resume_id => {
                 assert_eq!(session_id, session.id);
+                assert_eq!(
+                    messages.len(),
+                    2,
+                    "resume history should include persisted local messages"
+                );
+                assert_eq!(messages[0].role, "user");
+                assert!(messages[0].content.contains("Existing local history"));
+                assert_eq!(messages[1].role, "assistant");
                 assert!(
-                    messages.is_empty(),
-                    "expected metadata-only history payload"
+                    messages[1].content.contains("Existing assistant response"),
+                    "resume history should include persisted assistant response"
                 );
                 assert_eq!(provider_model, Some("model-a".to_string()));
                 history_checked = true;
@@ -394,7 +402,7 @@ async fn test_resume_session_with_local_history_uses_metadata_only_history() -> 
 #[tokio::test]
 async fn test_resume_session_reports_reload_interruption_for_peer_sessions() -> Result<()> {
     let _env = setup_test_env()?;
-    let runtime_dir = std::env::temp_dir().join(format!(
+    let runtime_dir = short_runtime_dir(format!(
         "jcode-reload-interruption-test-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -469,7 +477,7 @@ async fn test_resume_session_reports_reload_interruption_for_peer_sessions() -> 
 #[tokio::test]
 async fn test_subscribe_selfdev_hint_marks_canary() -> Result<()> {
     let _env = setup_test_env()?;
-    let runtime_dir = std::env::temp_dir().join(format!(
+    let runtime_dir = short_runtime_dir(format!(
         "jcode-test-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -517,7 +525,7 @@ async fn test_subscribe_selfdev_hint_marks_canary() -> Result<()> {
 #[tokio::test]
 async fn test_subscribe_working_dir_without_selfdev_hint_stays_normal() -> Result<()> {
     let _env = setup_test_env()?;
-    let runtime_dir = std::env::temp_dir().join(format!(
+    let runtime_dir = short_runtime_dir(format!(
         "jcode-test-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -580,7 +588,7 @@ async fn test_subscribe_working_dir_without_selfdev_hint_stays_normal() -> Resul
 #[tokio::test]
 async fn test_model_switch_resets_provider_session() -> Result<()> {
     let _env = setup_test_env()?;
-    let runtime_dir = std::env::temp_dir().join(format!(
+    let runtime_dir = short_runtime_dir(format!(
         "jcode-test-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -667,7 +675,7 @@ async fn test_model_switch_resets_provider_session() -> Result<()> {
 #[tokio::test]
 async fn test_model_switch_is_per_session() -> Result<()> {
     let _env = setup_test_env()?;
-    let runtime_dir = std::env::temp_dir().join(format!(
+    let runtime_dir = short_runtime_dir(format!(
         "jcode-test-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

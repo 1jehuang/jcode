@@ -22,8 +22,8 @@ impl App {
             "model" => {
                 "`/model`\nOpen model picker.\n\n`/model <name>`\nSwitch model.\n\n`/model <name>@<provider>`\nPin OpenRouter routing (`@auto` clears pin)."
             }
-            "refresh-model-list" | "refresh-models" | "refresh models" | "refresh model list" => {
-                "`/refresh-model-list`\nForce-refresh provider model catalogs, update `/model`, and persist the refreshed cache.\n\nAliases: `/refresh-models`, `/refresh models`, `/refresh model list`."
+            "refresh-model-list" => {
+                "`/refresh-model-list`\nForce-refresh provider model catalogs, update `/model`, and persist the refreshed cache."
             }
             "agents" => {
                 "`/agents`\nOpen the agent-model config picker.\n\n`/agents <swarm|review|judge|memory|ambient>`\nJump straight to that agent role's saved model override."

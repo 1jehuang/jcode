@@ -16,7 +16,7 @@ use std::path::Path;
 #[cfg(unix)]
 use std::process::Command as StdCommand;
 use std::process::Stdio;
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
@@ -34,42 +34,45 @@ const BACKGROUND_PROGRESS_GUIDANCE: &str = "For long-running background commands
 const BASH_TOOL_DESCRIPTION: &str = "Run a bash command. For long-running background commands, prefer scripts that emit progress/checkpoint lines. Print `JCODE_PROGRESS {json}` or `JCODE_CHECKPOINT {json}` lines for reliable reporting, or at least output parseable progress like `42%`, `3/10 tests`, `3 of 10 steps`, `1.5/3.0 GiB`, or `Running ...`.";
 const WINDOWS_SHELL_TOOL_DESCRIPTION: &str = "Run a shell command. For long-running background commands, prefer scripts that emit progress/checkpoint lines. Print `JCODE_PROGRESS {json}` or `JCODE_CHECKPOINT {json}` lines for reliable reporting, or at least output parseable progress like `42%`, `3/10 tests`, `3 of 10 steps`, `1.5/3.0 GiB`, or `Running ...`.";
 
-fn progress_ratio_regex() -> &'static regex::Regex {
-    static REGEX: OnceLock<regex::Regex> = OnceLock::new();
-    REGEX.get_or_init(|| {
+fn progress_ratio_regex() -> Result<&'static regex::Regex> {
+    static REGEX: LazyLock<Result<regex::Regex, regex::Error>> = LazyLock::new(|| {
         regex::Regex::new(
             r"(?i)\b(?P<current>\d{1,6})\s*/\s*(?P<total>\d{1,6})\b(?:\s*(?P<unit>tests?|steps?|files?|items?|cases?|tasks?|targets?|chunks?|batches?|examples?|crates?|modules?|packages?|workers?))?",
         )
-        .expect("valid progress ratio regex")
-    })
+    });
+    REGEX
+        .as_ref()
+        .map_err(|err| anyhow::anyhow!("invalid progress ratio regex: {err}"))
 }
 
-fn progress_of_regex() -> &'static regex::Regex {
-    static REGEX: OnceLock<regex::Regex> = OnceLock::new();
-    REGEX.get_or_init(|| {
+fn progress_of_regex() -> Result<&'static regex::Regex> {
+    static REGEX: LazyLock<Result<regex::Regex, regex::Error>> = LazyLock::new(|| {
         regex::Regex::new(
             r"(?i)\b(?P<current>\d{1,6})\s+of\s+(?P<total>\d{1,6})\b(?:\s+(?P<unit>tests?|steps?|files?|items?|cases?|tasks?|targets?|chunks?|batches?|examples?|crates?|modules?|packages?|workers?))?",
         )
-        .expect("valid progress of regex")
-    })
+    });
+    REGEX
+        .as_ref()
+        .map_err(|err| anyhow::anyhow!("invalid progress-of regex: {err}"))
 }
 
-fn progress_byte_ratio_regex() -> &'static regex::Regex {
-    static REGEX: OnceLock<regex::Regex> = OnceLock::new();
-    REGEX.get_or_init(|| {
+fn progress_byte_ratio_regex() -> Result<&'static regex::Regex> {
+    static REGEX: LazyLock<Result<regex::Regex, regex::Error>> = LazyLock::new(|| {
         regex::Regex::new(
             r"(?i)\b(?P<current>\d+(?:\.\d+)?)\s*/\s*(?P<total>\d+(?:\.\d+)?)\s*(?P<unit>bytes?|[kmgt]i?b)\b",
         )
-        .expect("valid progress byte ratio regex")
-    })
+    });
+    REGEX
+        .as_ref()
+        .map_err(|err| anyhow::anyhow!("invalid progress byte-ratio regex: {err}"))
 }
 
-fn progress_percent_regex() -> &'static regex::Regex {
-    static REGEX: OnceLock<regex::Regex> = OnceLock::new();
-    REGEX.get_or_init(|| {
-        regex::Regex::new(r"(?i)\b(?P<percent>100|[1-9]?\d)\s*%")
-            .expect("valid progress percent regex")
-    })
+fn progress_percent_regex() -> Result<&'static regex::Regex> {
+    static REGEX: LazyLock<Result<regex::Regex, regex::Error>> =
+        LazyLock::new(|| regex::Regex::new(r"(?i)\b(?P<percent>100|[1-9]?\d)\s*%"));
+    REGEX
+        .as_ref()
+        .map_err(|err| anyhow::anyhow!("invalid progress percent regex: {err}"))
 }
 
 #[derive(Deserialize)]
@@ -244,22 +247,28 @@ fn progress_from_counts(
     )
 }
 
-fn parse_heuristic_progress(line: &str) -> Option<BackgroundTaskProgress> {
+fn parse_heuristic_progress(line: &str) -> Result<Option<BackgroundTaskProgress>> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
-        return None;
+        return Ok(None);
     }
 
-    if let Some(captures) = progress_byte_ratio_regex().captures(trimmed) {
-        let current = captures.name("current")?.as_str().parse::<f64>().ok()?;
-        let total = captures.name("total")?.as_str().parse::<f64>().ok()?;
-        if total > 0.0 && current <= total {
-            let matched = captures.get(0)?.as_str();
-            return Some(
+    if let Some(captures) = progress_byte_ratio_regex()?.captures(trimmed) {
+        let current = captures
+            .name("current")
+            .and_then(|m| m.as_str().parse::<f64>().ok());
+        let total = captures
+            .name("total")
+            .and_then(|m| m.as_str().parse::<f64>().ok());
+        if let (Some(current), Some(total), Some(matched)) = (current, total, captures.get(0))
+            && total > 0.0
+            && current <= total
+        {
+            return Ok(Some(
                 BackgroundTaskProgress {
                     kind: BackgroundTaskProgressKind::Determinate,
                     percent: Some(((current / total) * 100.0) as f32),
-                    message: progress_message_from_line(trimmed, matched),
+                    message: progress_message_from_line(trimmed, matched.as_str()),
                     current: None,
                     total: None,
                     unit: captures
@@ -270,48 +279,63 @@ fn parse_heuristic_progress(line: &str) -> Option<BackgroundTaskProgress> {
                     source: BackgroundTaskProgressSource::ParsedOutput,
                 }
                 .normalize(),
-            );
+            ));
         }
     }
 
-    if let Some(captures) = progress_ratio_regex().captures(trimmed) {
-        let current = captures.name("current")?.as_str().parse::<u64>().ok()?;
-        let total = captures.name("total")?.as_str().parse::<u64>().ok()?;
-        let matched = captures.get(0)?.as_str();
-        return progress_from_counts(
-            trimmed,
-            matched,
-            current,
-            total,
-            captures
-                .name("unit")
-                .map(|unit| unit.as_str().to_ascii_lowercase()),
-        );
+    if let Some(captures) = progress_ratio_regex()?.captures(trimmed) {
+        let current = captures
+            .name("current")
+            .and_then(|m| m.as_str().parse::<u64>().ok());
+        let total = captures
+            .name("total")
+            .and_then(|m| m.as_str().parse::<u64>().ok());
+        if let (Some(current), Some(total), Some(matched)) = (current, total, captures.get(0)) {
+            return Ok(progress_from_counts(
+                trimmed,
+                matched.as_str(),
+                current,
+                total,
+                captures
+                    .name("unit")
+                    .map(|unit| unit.as_str().to_ascii_lowercase()),
+            ));
+        }
     }
 
-    if let Some(captures) = progress_of_regex().captures(trimmed) {
-        let current = captures.name("current")?.as_str().parse::<u64>().ok()?;
-        let total = captures.name("total")?.as_str().parse::<u64>().ok()?;
-        let matched = captures.get(0)?.as_str();
-        return progress_from_counts(
-            trimmed,
-            matched,
-            current,
-            total,
-            captures
-                .name("unit")
-                .map(|unit| unit.as_str().to_ascii_lowercase()),
-        );
+    if let Some(captures) = progress_of_regex()?.captures(trimmed) {
+        let current = captures
+            .name("current")
+            .and_then(|m| m.as_str().parse::<u64>().ok());
+        let total = captures
+            .name("total")
+            .and_then(|m| m.as_str().parse::<u64>().ok());
+        if let (Some(current), Some(total), Some(matched)) = (current, total, captures.get(0)) {
+            return Ok(progress_from_counts(
+                trimmed,
+                matched.as_str(),
+                current,
+                total,
+                captures
+                    .name("unit")
+                    .map(|unit| unit.as_str().to_ascii_lowercase()),
+            ));
+        }
     }
 
-    if let Some(captures) = progress_percent_regex().captures(trimmed) {
-        let percent = captures.name("percent")?.as_str().parse::<f32>().ok()?;
-        let matched = captures.get(0)?.as_str();
-        return Some(
+    if let Some(captures) = progress_percent_regex()?.captures(trimmed)
+        && let (Some(percent), Some(matched)) = (
+            captures
+                .name("percent")
+                .and_then(|m| m.as_str().parse::<f32>().ok()),
+            captures.get(0),
+        )
+    {
+        return Ok(Some(
             BackgroundTaskProgress {
                 kind: BackgroundTaskProgressKind::Determinate,
                 percent: Some(percent),
-                message: progress_message_from_line(trimmed, matched),
+                message: progress_message_from_line(trimmed, matched.as_str()),
                 current: None,
                 total: None,
                 unit: None,
@@ -320,7 +344,7 @@ fn parse_heuristic_progress(line: &str) -> Option<BackgroundTaskProgress> {
                 source: BackgroundTaskProgressSource::ParsedOutput,
             }
             .normalize(),
-        );
+        ));
     }
 
     const PHASE_PREFIXES: &[&str] = &[
@@ -337,7 +361,7 @@ fn parse_heuristic_progress(line: &str) -> Option<BackgroundTaskProgress> {
         .iter()
         .any(|prefix| trimmed.starts_with(prefix))
     {
-        return Some(
+        return Ok(Some(
             BackgroundTaskProgress {
                 kind: BackgroundTaskProgressKind::Indeterminate,
                 percent: None,
@@ -350,10 +374,10 @@ fn parse_heuristic_progress(line: &str) -> Option<BackgroundTaskProgress> {
                 source: BackgroundTaskProgressSource::ParsedOutput,
             }
             .normalize(),
-        );
+        ));
     }
 
-    None
+    Ok(None)
 }
 
 async fn handle_background_output_line(
@@ -383,13 +407,21 @@ async fn handle_background_output_line(
         return;
     }
 
-    if let Some(progress) = parse_heuristic_progress(raw_line) {
-        if let Some(task_id) = task_id_from_output_path(output_path) {
-            let _ = crate::background::global()
-                .update_progress(task_id, progress)
-                .await;
+    match parse_heuristic_progress(raw_line) {
+        Ok(Some(progress)) => {
+            if let Some(task_id) = task_id_from_output_path(output_path) {
+                let _ = crate::background::global()
+                    .update_progress(task_id, progress)
+                    .await;
+            }
+            return;
         }
-        return;
+        Ok(None) => {}
+        Err(err) => {
+            let warning = format!("[jcode warning] failed to parse background progress: {err}\n");
+            file.write_all(warning.as_bytes()).await.ok();
+            file.flush().await.ok();
+        }
     }
 
     let rendered = if stderr {

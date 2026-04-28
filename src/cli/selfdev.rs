@@ -154,7 +154,7 @@ pub async fn run_self_dev(should_build: bool, resume_session: Option<String>) ->
 
     if !server_running {
         super::dispatch::maybe_prompt_server_bootstrap_login(&ProviderChoice::Auto).await?;
-        super::dispatch::spawn_server(&ProviderChoice::Auto, None).await?;
+        super::dispatch::spawn_server(&ProviderChoice::Auto, None, None).await?;
     }
 
     if std::env::var("JCODE_RESUMING").is_err() && server_running {

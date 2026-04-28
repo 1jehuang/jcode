@@ -91,13 +91,22 @@ pub(crate) fn push_panel_contents(
 }
 
 pub(crate) fn focused_panel_draft(workspace: &Workspace, surface_id: u64) -> Option<String> {
-    if workspace.mode == InputMode::Insert
-        && workspace.is_focused(surface_id)
-        && !workspace.draft.trim().is_empty()
-    {
-        Some(workspace.draft.trim().to_string())
-    } else {
+    if workspace.mode != InputMode::Insert || !workspace.is_focused(surface_id) {
+        return None;
+    }
+
+    let draft = workspace.draft.trim();
+    let images = match workspace.pending_images.len() {
+        0 => String::new(),
+        1 => " · 1 image".to_string(),
+        count => format!(" · {count} images"),
+    };
+    if draft.is_empty() && images.is_empty() {
         None
+    } else if draft.is_empty() {
+        Some(images.trim_start_matches(" · ").to_string())
+    } else {
+        Some(format!("{draft}{images}"))
     }
 }
 
@@ -712,15 +721,36 @@ pub(crate) fn status_preview_lane(
 pub(crate) fn push_surface(
     vertices: &mut Vec<Vertex>,
     rect: Rect,
-    _color_index: usize,
+    color_index: usize,
     focused: bool,
     focus_pulse: f32,
     size: PhysicalSize<u32>,
 ) {
+    let accent = panel_accent_color(color_index, focused);
+    push_rounded_rect(
+        vertices,
+        rect,
+        PANEL_RADIUS,
+        with_alpha(accent, if focused { 0.105 } else { 0.055 }),
+        size,
+    );
+    push_rounded_rect(
+        vertices,
+        Rect {
+            x: rect.x,
+            y: rect.y,
+            width: 5.0_f32.min(rect.width),
+            height: rect.height,
+        },
+        PANEL_RADIUS,
+        with_alpha(accent, if focused { 0.78 } else { 0.46 }),
+        size,
+    );
+
     let border = if focused {
-        FOCUS_RING_COLOR
+        accent
     } else {
-        UNFOCUSED_BORDER_COLOR
+        with_alpha(accent, 0.62)
     };
 
     let stroke_width = if focused {
@@ -740,6 +770,26 @@ pub(crate) fn push_surface(
             size,
         );
     }
+}
+
+pub(crate) fn panel_accent_color(color_index: usize, focused: bool) -> [f32; 4] {
+    const ACCENTS: [[f32; 4]; 8] = [
+        [0.550, 0.780, 1.000, 1.0],
+        [0.820, 0.660, 1.000, 1.0],
+        [0.560, 0.900, 0.640, 1.0],
+        [1.000, 0.760, 0.420, 1.0],
+        [0.520, 0.880, 0.940, 1.0],
+        [1.000, 0.620, 0.720, 1.0],
+        [0.760, 0.780, 0.880, 1.0],
+        [0.920, 0.850, 0.500, 1.0],
+    ];
+    let mut color = ACCENTS[color_index % ACCENTS.len()];
+    if !focused {
+        color[0] *= 0.72;
+        color[1] *= 0.72;
+        color[2] *= 0.72;
+    }
+    color
 }
 
 pub(crate) fn with_alpha(mut color: [f32; 4], alpha: f32) -> [f32; 4] {

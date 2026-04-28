@@ -66,6 +66,30 @@ pub enum KeyInput {
     Escape,
     Enter,
     Backspace,
+    DeletePreviousWord,
+    DeleteNextWord,
+    DeleteNextChar,
+    MoveCursorWordLeft,
+    MoveCursorWordRight,
+    MoveCursorLeft,
+    MoveCursorRight,
+    MoveToLineStart,
+    MoveToLineEnd,
+    DeleteToLineStart,
+    DeleteToLineEnd,
+    UndoInput,
+    CancelGeneration,
+    ScrollBodyPages(i32),
+    JumpPrompt(i32),
+    CopyLatestResponse,
+    OpenModelPicker,
+    OpenSessionSwitcher,
+    ModelPickerMove(i32),
+    CycleModel(i8),
+    AttachClipboardImage,
+    ClearAttachedImages,
+    PasteText,
+    QueueDraft,
     SubmitDraft,
     SpawnPanel,
     HotkeyHelp,
@@ -88,6 +112,23 @@ pub enum KeyOutcome {
         session_id: String,
         title: String,
         message: String,
+        images: Vec<(String, String)>,
+    },
+    CancelGeneration,
+    CopyLatestResponse(String),
+    LoadModelCatalog,
+    LoadSessionSwitcher,
+    SetModel(String),
+    CycleModel(i8),
+    SendStdinResponse {
+        request_id: String,
+        input: String,
+    },
+    AttachClipboardImage,
+    PasteText,
+    StartFreshSession {
+        message: String,
+        images: Vec<(String, String)>,
     },
     Exit,
 }
@@ -176,6 +217,7 @@ pub struct Workspace {
     pub zoomed: bool,
     pub detail_scroll: usize,
     pub draft: String,
+    pub pending_images: Vec<(String, String)>,
     panel_size: PanelSizePreset,
     next_id: u64,
 }
@@ -200,6 +242,7 @@ impl Workspace {
             zoomed: false,
             detail_scroll: 0,
             draft: String::new(),
+            pending_images: Vec::new(),
             panel_size: PanelSizePreset::Quarter,
             next_id: 8,
         }
@@ -228,6 +271,7 @@ impl Workspace {
             zoomed: false,
             detail_scroll: 0,
             draft: String::new(),
+            pending_images: Vec::new(),
             panel_size: PanelSizePreset::Quarter,
             next_id,
         }
@@ -253,6 +297,7 @@ impl Workspace {
             zoomed: false,
             detail_scroll: 0,
             draft: String::new(),
+            pending_images: Vec::new(),
             panel_size: PanelSizePreset::Quarter,
             next_id: 2,
         }
@@ -289,8 +334,13 @@ impl Workspace {
                 "Jcode Desktop · {mode}{zoom} · workspace {workspace} · panel {panel_size} · {focused} · h/l columns · j/k workspaces · Ctrl+1-4 panel size · Ctrl+R refresh · Ctrl+; new · Ctrl+? help · z zoom · i insert · Esc quit"
             ),
             InputMode::Insert => {
+                let images = match self.pending_images.len() {
+                    0 => String::new(),
+                    1 => " · 1 image".to_string(),
+                    count => format!(" · {count} images"),
+                };
                 format!(
-                    "Jcode Desktop · {mode}{zoom} · workspace {workspace} · {focused} · Ctrl+Enter send · Enter newline · Esc NAV"
+                    "Jcode Desktop · {mode}{zoom} · workspace {workspace} · {focused}{images} · Enter send · Shift+Enter newline · Ctrl+I image · Esc NAV"
                 )
             }
         }
@@ -314,6 +364,8 @@ impl Workspace {
         replacement.mode = previous_mode;
         replacement.panel_size = previous_panel_size;
         replacement.detail_scroll = self.detail_scroll;
+        replacement.draft = self.draft.clone();
+        replacement.pending_images = self.pending_images.clone();
         if let Some(previous_session_id) = previous_session_id
             && let Some(surface) = replacement
                 .surfaces
@@ -378,6 +430,30 @@ impl Workspace {
         self.focused_id == surface_id
     }
 
+    pub fn paste_text(&mut self, text: &str) -> bool {
+        if self.mode != InputMode::Insert || text.is_empty() {
+            return false;
+        }
+        self.draft.push_str(text);
+        true
+    }
+
+    pub fn attach_image(&mut self, media_type: String, base64_data: String) -> bool {
+        if self.mode != InputMode::Insert {
+            return false;
+        }
+        self.pending_images.push((media_type, base64_data));
+        true
+    }
+
+    pub fn clear_attached_images(&mut self) -> bool {
+        if self.pending_images.is_empty() {
+            return false;
+        }
+        self.pending_images.clear();
+        true
+    }
+
     fn handle_navigation_key(&mut self, key: KeyInput) -> KeyOutcome {
         match key {
             KeyInput::SpawnPanel => {
@@ -392,7 +468,25 @@ impl Workspace {
                 self.panel_size = size;
                 return KeyOutcome::Redraw;
             }
-            KeyInput::SubmitDraft => return KeyOutcome::None,
+            KeyInput::SubmitDraft => {
+                if let Some((session_id, title)) = self.focused_session_target() {
+                    return KeyOutcome::OpenSession { session_id, title };
+                }
+                self.mode = InputMode::Insert;
+                return KeyOutcome::Redraw;
+            }
+            KeyInput::CancelGeneration
+            | KeyInput::ScrollBodyPages(_)
+            | KeyInput::CycleModel(_)
+            | KeyInput::OpenModelPicker
+            | KeyInput::OpenSessionSwitcher
+            | KeyInput::ModelPickerMove(_)
+            | KeyInput::AttachClipboardImage
+            | KeyInput::ClearAttachedImages
+            | KeyInput::PasteText
+            | KeyInput::QueueDraft => {
+                return KeyOutcome::None;
+            }
             _ => {}
         }
 
@@ -464,7 +558,7 @@ impl Workspace {
                 self.panel_size = size;
                 KeyOutcome::Redraw
             }
-            KeyInput::SubmitDraft => self.submit_draft(),
+            KeyInput::SubmitDraft | KeyInput::QueueDraft => self.submit_draft(),
             KeyInput::Escape => {
                 self.mode = InputMode::Navigation;
                 KeyOutcome::Redraw
@@ -477,6 +571,41 @@ impl Workspace {
                 self.draft.pop();
                 KeyOutcome::Redraw
             }
+            KeyInput::DeletePreviousWord => {
+                delete_previous_word(&mut self.draft);
+                KeyOutcome::Redraw
+            }
+            KeyInput::DeleteToLineStart => {
+                self.draft.clear();
+                KeyOutcome::Redraw
+            }
+            KeyInput::AttachClipboardImage => KeyOutcome::AttachClipboardImage,
+            KeyInput::ClearAttachedImages => {
+                if self.clear_attached_images() {
+                    KeyOutcome::Redraw
+                } else {
+                    KeyOutcome::None
+                }
+            }
+            KeyInput::DeleteNextChar
+            | KeyInput::DeleteNextWord
+            | KeyInput::MoveCursorLeft
+            | KeyInput::MoveCursorRight
+            | KeyInput::MoveCursorWordLeft
+            | KeyInput::MoveCursorWordRight
+            | KeyInput::MoveToLineStart
+            | KeyInput::MoveToLineEnd
+            | KeyInput::DeleteToLineEnd
+            | KeyInput::UndoInput
+            | KeyInput::CancelGeneration
+            | KeyInput::ScrollBodyPages(_)
+            | KeyInput::JumpPrompt(_)
+            | KeyInput::CopyLatestResponse
+            | KeyInput::OpenModelPicker
+            | KeyInput::OpenSessionSwitcher
+            | KeyInput::ModelPickerMove(_)
+            | KeyInput::CycleModel(_) => KeyOutcome::None,
+            KeyInput::PasteText => KeyOutcome::PasteText,
             KeyInput::Character(text) => {
                 self.draft.push_str(&text);
                 KeyOutcome::Redraw
@@ -487,19 +616,21 @@ impl Workspace {
 
     fn submit_draft(&mut self) -> KeyOutcome {
         let message = self.draft.trim().to_string();
-        if message.is_empty() {
+        if message.is_empty() && self.pending_images.is_empty() {
             return KeyOutcome::None;
         }
         let Some((session_id, title)) = self.focused_session_target() else {
             return KeyOutcome::None;
         };
 
+        let images = std::mem::take(&mut self.pending_images);
         self.draft.clear();
         self.mode = InputMode::Navigation;
         KeyOutcome::SendDraft {
             session_id,
             title,
             message,
+            images,
         }
     }
 
@@ -731,6 +862,9 @@ impl Workspace {
                 "esc nav mode".to_string(),
                 "ctrl r refresh sessions".to_string(),
                 "ctrl semicolon new panel".to_string(),
+                "ctrl v paste text or image".to_string(),
+                "ctrl i attach clipboard image".to_string(),
+                "ctrl shift i clear images".to_string(),
                 "ctrl slash help".to_string(),
             ],
         }
@@ -806,6 +940,15 @@ impl Workspace {
 
     fn max_detail_scroll(&self) -> usize {
         self.focused_detail_line_count().saturating_sub(1)
+    }
+}
+
+fn delete_previous_word(text: &mut String) {
+    while text.ends_with(char::is_whitespace) {
+        text.pop();
+    }
+    while text.chars().last().is_some_and(|ch| !ch.is_whitespace()) {
+        text.pop();
     }
 }
 

@@ -126,6 +126,192 @@ fn test_set_model_accepts_bare_openai_openrouter_pin_when_openrouter_available()
 }
 
 #[test]
+fn test_forced_openrouter_treats_claude_like_model_as_provider_local() {
+    with_clean_provider_test_env(|| {
+        with_env_var("OPENROUTER_API_KEY", "test-openrouter-key", || {
+            with_env_var("JCODE_OPENROUTER_PROVIDER_FEATURES", "0", || {
+                with_env_var("JCODE_OPENROUTER_API_BASE", "https://compat.example.test/v1", || {
+                    let openrouter = Arc::new(
+                        openrouter::OpenRouterProvider::new()
+                            .expect("custom compatible provider should initialize"),
+                    );
+                    let provider = MultiProvider {
+                        claude: RwLock::new(None),
+                        anthropic: RwLock::new(None),
+                        openai: RwLock::new(None),
+                        copilot_api: RwLock::new(None),
+                        antigravity: RwLock::new(None),
+                        gemini: RwLock::new(None),
+                        cursor: RwLock::new(None),
+                        openrouter: RwLock::new(Some(openrouter)),
+                        active: RwLock::new(ActiveProvider::OpenRouter),
+                        use_claude_cli: false,
+                        startup_notices: RwLock::new(Vec::new()),
+                        forced_provider: Some(ActiveProvider::OpenRouter),
+                    };
+
+                    provider
+                        .set_model("claude-opus4.6-thinking")
+                        .expect("forced OpenAI-compatible provider should accept opaque model IDs");
+
+                    assert_eq!(provider.active_provider(), ActiveProvider::OpenRouter);
+                    assert_eq!(provider.model(), "claude-opus4.6-thinking");
+                })
+            })
+        })
+    });
+}
+
+#[test]
+fn test_forced_openrouter_preserves_custom_at_sign_model_ids() {
+    with_clean_provider_test_env(|| {
+        with_env_var("OPENROUTER_API_KEY", "test-openrouter-key", || {
+            with_env_var("JCODE_OPENROUTER_PROVIDER_FEATURES", "0", || {
+                with_env_var("JCODE_OPENROUTER_API_BASE", "https://compat.example.test/v1", || {
+                    let openrouter = Arc::new(
+                        openrouter::OpenRouterProvider::new()
+                            .expect("custom compatible provider should initialize"),
+                    );
+                    let provider = MultiProvider {
+                        claude: RwLock::new(None),
+                        anthropic: RwLock::new(None),
+                        openai: RwLock::new(None),
+                        copilot_api: RwLock::new(None),
+                        antigravity: RwLock::new(None),
+                        gemini: RwLock::new(None),
+                        cursor: RwLock::new(None),
+                        openrouter: RwLock::new(Some(openrouter)),
+                        active: RwLock::new(ActiveProvider::OpenRouter),
+                        use_claude_cli: false,
+                        startup_notices: RwLock::new(Vec::new()),
+                        forced_provider: Some(ActiveProvider::OpenRouter),
+                    };
+
+                    provider
+                        .set_model("gpt-5.4@OpenAI")
+                        .expect("custom compatible provider should preserve @ in model IDs");
+
+                    assert_eq!(provider.active_provider(), ActiveProvider::OpenRouter);
+                    assert_eq!(provider.model(), "gpt-5.4@OpenAI");
+                })
+            })
+        })
+    });
+}
+
+#[test]
+fn test_custom_compatible_model_routes_do_not_request_openrouter_rewrite() {
+    with_clean_provider_test_env(|| {
+        with_env_var("OPENROUTER_API_KEY", "test-openrouter-key", || {
+            with_env_var("JCODE_OPENROUTER_PROVIDER_FEATURES", "0", || {
+                with_env_var("JCODE_OPENROUTER_API_BASE", "https://compat.example.test/v1", || {
+                    let openrouter = Arc::new(
+                        openrouter::OpenRouterProvider::new()
+                            .expect("custom compatible provider should initialize"),
+                    );
+                    let provider = MultiProvider {
+                        claude: RwLock::new(None),
+                        anthropic: RwLock::new(None),
+                        openai: RwLock::new(None),
+                        copilot_api: RwLock::new(None),
+                        antigravity: RwLock::new(None),
+                        gemini: RwLock::new(None),
+                        cursor: RwLock::new(None),
+                        openrouter: RwLock::new(Some(openrouter)),
+                        active: RwLock::new(ActiveProvider::OpenRouter),
+                        use_claude_cli: false,
+                        startup_notices: RwLock::new(Vec::new()),
+                        forced_provider: Some(ActiveProvider::OpenRouter),
+                    };
+
+                    provider
+                        .set_model("claude-opus4.6-thinking")
+                        .expect("forced OpenAI-compatible provider should accept opaque model IDs");
+
+                    let routes = provider.model_routes();
+                    assert!(routes.iter().any(|route| {
+                        route.model == "claude-opus4.6-thinking"
+                            && route.provider == "OpenAI-compatible"
+                            && route.api_method == "openai-compatible"
+                    }));
+                    assert!(!routes.iter().any(|route| {
+                        route.model == "claude-opus4.6-thinking"
+                            && route.provider == "auto"
+                            && route.api_method == "openrouter"
+                    }));
+                })
+            })
+        })
+    });
+}
+
+#[test]
+fn test_forced_copilot_treats_claude_like_model_as_provider_local() {
+    with_clean_provider_test_env(|| {
+        let copilot = Arc::new(copilot::CopilotApiProvider::new_with_token(
+            "test-token".to_string(),
+        ));
+        let provider = MultiProvider {
+            claude: RwLock::new(None),
+            anthropic: RwLock::new(None),
+            openai: RwLock::new(None),
+            copilot_api: RwLock::new(Some(copilot)),
+            antigravity: RwLock::new(None),
+            gemini: RwLock::new(None),
+            cursor: RwLock::new(None),
+            openrouter: RwLock::new(None),
+            active: RwLock::new(ActiveProvider::Copilot),
+            use_claude_cli: false,
+            startup_notices: RwLock::new(Vec::new()),
+            forced_provider: Some(ActiveProvider::Copilot),
+        };
+
+        provider
+            .set_model("claude-opus-4.6")
+            .expect("forced Copilot should accept Copilot's dotted Claude model ID");
+
+        assert_eq!(provider.active_provider(), ActiveProvider::Copilot);
+        assert_eq!(provider.model(), "claude-opus-4.6");
+    });
+}
+
+#[test]
+fn test_provider_specific_model_prefix_cannot_bypass_provider_lock() {
+    with_clean_provider_test_env(|| {
+        with_env_var("OPENROUTER_API_KEY", "test-openrouter-key", || {
+            let openrouter = Arc::new(
+                openrouter::OpenRouterProvider::new().expect("openrouter provider should initialize"),
+            );
+            let provider = MultiProvider {
+                claude: RwLock::new(None),
+                anthropic: RwLock::new(None),
+                openai: RwLock::new(None),
+                copilot_api: RwLock::new(None),
+                antigravity: RwLock::new(None),
+                gemini: RwLock::new(None),
+                cursor: RwLock::new(Some(Arc::new(cursor::CursorCliProvider::new()))),
+                openrouter: RwLock::new(Some(openrouter)),
+                active: RwLock::new(ActiveProvider::OpenRouter),
+                use_claude_cli: false,
+                startup_notices: RwLock::new(Vec::new()),
+                forced_provider: Some(ActiveProvider::OpenRouter),
+            };
+
+            let err = provider
+                .set_model("cursor:gpt-5")
+                .expect_err("explicit cursor prefix should not bypass an OpenRouter lock");
+
+            assert!(
+                err.to_string().contains("--provider is locked"),
+                "expected provider lock error, got: {}",
+                err
+            );
+            assert_eq!(provider.active_provider(), ActiveProvider::OpenRouter);
+        })
+    });
+}
+
+#[test]
 fn test_provider_for_model_unknown() {
     assert_eq!(provider_for_model("unknown-model"), None);
 }

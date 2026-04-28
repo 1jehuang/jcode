@@ -34,6 +34,17 @@ pub(crate) use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 static JCODE_HOME_LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
 
+pub(crate) fn short_runtime_dir(name: String) -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        std::path::PathBuf::from("/tmp").join(name)
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::temp_dir().join(name)
+    }
+}
+
 fn lock_jcode_home() -> std::sync::MutexGuard<'static, ()> {
     let mutex = JCODE_HOME_LOCK.get_or_init(|| Mutex::new(()));
     // Recover from poisoned state if a previous test panicked
@@ -168,6 +179,7 @@ pub(crate) async fn wait_for_debug_socket_ready(path: &std::path::Path) -> Resul
             anyhow::bail!("debug socket never became responsive");
         }
 
+        #[cfg(unix)]
         if !path.exists() {
             tokio::time::sleep(Duration::from_millis(25)).await;
             continue;
@@ -187,7 +199,7 @@ pub(crate) async fn wait_for_server_ready(
     socket_path: &std::path::Path,
     debug_socket_path: &std::path::Path,
 ) -> Result<()> {
-    wait_for_socket(socket_path).await?;
+    let _client = wait_for_server_client(socket_path).await?;
     wait_for_debug_socket_ready(debug_socket_path).await
 }
 
@@ -489,7 +501,7 @@ pub(crate) struct TransportScenarioResult {
 }
 
 pub(crate) async fn run_unix_transport_scenario() -> Result<TransportScenarioResult> {
-    let runtime_dir = std::env::temp_dir().join(format!(
+    let runtime_dir = short_runtime_dir(format!(
         "jcode-ws-e2e-unix-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -587,7 +599,7 @@ pub(crate) async fn run_unix_transport_scenario() -> Result<TransportScenarioRes
 }
 
 pub(crate) async fn run_websocket_transport_scenario() -> Result<TransportScenarioResult> {
-    let runtime_dir = std::env::temp_dir().join(format!(
+    let runtime_dir = short_runtime_dir(format!(
         "jcode-ws-e2e-websocket-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -859,10 +871,14 @@ impl PtyChild {
 }
 
 #[cfg(unix)]
+#[allow(
+    clippy::unnecessary_mut_passed,
+    reason = "libc::openpty takes a mutable winsize pointer on Apple targets"
+)]
 pub(crate) fn spawn_pty_child(mut cmd: Command) -> Result<PtyChild> {
     let mut master_fd = -1;
     let mut slave_fd = -1;
-    let winsize = libc::winsize {
+    let mut winsize = libc::winsize {
         ws_row: 40,
         ws_col: 120,
         ws_xpixel: 0,
@@ -875,7 +891,7 @@ pub(crate) fn spawn_pty_child(mut cmd: Command) -> Result<PtyChild> {
             &mut slave_fd,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &winsize,
+            &mut winsize,
         )
     };
     if rc != 0 {

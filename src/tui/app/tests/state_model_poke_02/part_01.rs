@@ -401,10 +401,10 @@ fn test_refresh_model_list_command_suggestions() {
             .iter()
             .any(|(cmd, _)| cmd == "/refresh-model-list")
     );
-    assert!(suggestions.iter().any(|(cmd, _)| cmd == "/refresh-models"));
+    assert!(!suggestions.iter().any(|(cmd, _)| cmd == "/refresh-models"));
 
     let spaced = app.get_suggestions_for("/refresh ");
-    assert!(spaced.iter().any(|(cmd, _)| cmd == "/refresh model list"));
+    assert!(spaced.is_empty());
 }
 
 #[test]

@@ -171,7 +171,7 @@ async fn burst_attach_resumed_client_with_options(
 async fn run_burst_resume_attach_stress(burst_size: usize) -> Result<()> {
     let _env = setup_test_env()?;
 
-    let runtime_dir = std::env::temp_dir().join(format!(
+    let runtime_dir = short_runtime_dir(format!(
         "jcode-burst-spawn-test-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -361,7 +361,7 @@ async fn burst_retry_takeover_without_local_history_keeps_existing_live_clients_
 -> Result<()> {
     let _env = setup_test_env()?;
 
-    let runtime_dir = std::env::temp_dir().join(format!(
+    let runtime_dir = short_runtime_dir(format!(
         "jcode-burst-spawn-live-clients-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -476,7 +476,7 @@ async fn burst_spawn_resume_attach_keeps_unique_live_mappings_and_reports_metric
 async fn burst_attach_detach_reattach_restores_live_clients_cleanly() -> Result<()> {
     let _env = setup_test_env()?;
 
-    let runtime_dir = std::env::temp_dir().join(format!(
+    let runtime_dir = short_runtime_dir(format!(
         "jcode-burst-spawn-reattach-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

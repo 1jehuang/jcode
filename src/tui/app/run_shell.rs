@@ -68,6 +68,8 @@ impl App {
                             self.apply_handterm_native_scroll(command);
                             self.request_full_redraw();
                             needs_redraw = true;
+                        } else {
+                            handterm_native_scroll = None;
                         }
                     }
                     // Handle background task completion notifications
@@ -211,6 +213,8 @@ impl App {
                             self.apply_handterm_native_scroll(command);
                             self.request_full_redraw();
                             needs_redraw = true;
+                        } else {
+                            handterm_native_scroll = None;
                         }
                     }
                     bus_event = bus_receiver_remote.recv() => {

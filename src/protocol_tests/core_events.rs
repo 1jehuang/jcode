@@ -13,6 +13,26 @@ fn test_request_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn test_compacted_history_request_roundtrip() -> Result<()> {
+    let req = Request::GetCompactedHistory {
+        id: 7,
+        visible_messages: 64,
+    };
+    let json = serde_json::to_string(&req)?;
+    assert!(json.contains("\"type\":\"get_compacted_history\""));
+    let decoded = parse_request_json(&json)?;
+    assert_eq!(decoded.id(), 7);
+    let Request::GetCompactedHistory {
+        visible_messages, ..
+    } = decoded
+    else {
+        return Err(anyhow!("wrong request type"));
+    };
+    assert_eq!(visible_messages, 64);
+    Ok(())
+}
+
+#[test]
 fn test_event_roundtrip() -> Result<()> {
     let event = ServerEvent::TextDelta {
         text: "hello".to_string(),
@@ -211,6 +231,47 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
     assert_eq!(side_panel.pages.len(), 1);
     assert_eq!(side_panel.pages[0].title, "Notes");
     assert_eq!(side_panel.pages[0].content, "# Notes");
+    Ok(())
+}
+
+#[test]
+fn test_compacted_history_event_roundtrip() -> Result<()> {
+    let event = ServerEvent::CompactedHistory {
+        id: 77,
+        session_id: "ses_compact_123".to_string(),
+        messages: vec![HistoryMessage {
+            role: "assistant".to_string(),
+            content: "older response".to_string(),
+            tool_calls: None,
+            tool_data: None,
+        }],
+        images: Vec::new(),
+        compacted_total: 128,
+        compacted_visible: 64,
+        compacted_remaining: 64,
+    };
+    let json = encode_event(&event);
+    assert!(json.contains("\"type\":\"compacted_history\""));
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::CompactedHistory {
+        id,
+        session_id,
+        messages,
+        compacted_total,
+        compacted_visible,
+        compacted_remaining,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("expected CompactedHistory event"));
+    };
+    assert_eq!(id, 77);
+    assert_eq!(session_id, "ses_compact_123");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].content, "older response");
+    assert_eq!(compacted_total, 128);
+    assert_eq!(compacted_visible, 64);
+    assert_eq!(compacted_remaining, 64);
     Ok(())
 }
 

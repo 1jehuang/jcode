@@ -49,9 +49,6 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/model", "List or switch models"),
     RegisteredCommand::public("/models", "Alias for /model"),
     RegisteredCommand::public("/refresh-model-list", "Refresh provider model catalogs"),
-    RegisteredCommand::public("/refresh-models", "Alias for /refresh-model-list"),
-    RegisteredCommand::public("/refresh models", "Alias for /refresh-model-list"),
-    RegisteredCommand::public("/refresh model list", "Alias for /refresh-model-list"),
     RegisteredCommand::public("/agents", "Configure models for agent roles"),
     RegisteredCommand::public("/subagent", "Launch a subagent manually"),
     RegisteredCommand::public("/observe", "Show the latest tool context in the side panel"),
@@ -896,6 +893,16 @@ impl App {
 
     /// Get command suggestions based on current input
     pub fn command_suggestions(&self) -> Vec<(String, &'static str)> {
+        if self
+            .inline_interactive_state
+            .as_ref()
+            .is_some_and(|picker| picker.preview && picker.kind == crate::tui::PickerKind::Model)
+        {
+            let input = self.input.trim_start();
+            if input.starts_with("/model") || input.starts_with("/models") {
+                return Vec::new();
+            }
+        }
         self.get_suggestions_for(&self.input)
     }
 

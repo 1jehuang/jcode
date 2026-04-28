@@ -213,6 +213,166 @@ fn matrix_openrouter_like_sources_accept_valid_overrides() {
 }
 
 #[test]
+fn named_provider_config_accepts_openai_compatible_spelling() {
+    let cfg: crate::config::Config = toml::from_str(
+        r#"
+        [providers.my-gateway]
+        type = "openai-compatible"
+        base_url = "https://llm.example.com/v1"
+        auth = "bearer"
+        api_key_env = "MY_GATEWAY_API_KEY"
+        default_model = "opaque/model@id"
+
+        [[providers.my-gateway.models]]
+        id = "opaque/model@id"
+        input = ["text"]
+        "#,
+    )
+    .expect("config should parse");
+
+    let profile = cfg.providers.get("my-gateway").expect("profile");
+    assert_eq!(
+        profile.provider_type,
+        crate::config::NamedProviderType::OpenAiCompatible
+    );
+    assert_eq!(profile.base_url, "https://llm.example.com/v1");
+    assert_eq!(profile.default_model.as_deref(), Some("opaque/model@id"));
+    assert_eq!(profile.models[0].id, "opaque/model@id");
+}
+
+#[test]
+fn named_provider_profile_maps_to_openai_compatible_runtime_env() {
+    let _lock = crate::storage::lock_test_env();
+    let _guard = EnvGuard::save(&[
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_OPENROUTER_MODEL",
+        "JCODE_OPENROUTER_STATIC_MODELS",
+        "JCODE_OPENROUTER_AUTH_HEADER",
+        "JCODE_OPENROUTER_AUTH_HEADER_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "MY_GATEWAY_API_KEY",
+    ]);
+
+    let cfg: crate::config::Config = toml::from_str(
+        r#"
+        [providers.my-gateway]
+        type = "openai-compatible"
+        base_url = "https://llm.example.com/v1/"
+        auth = "header"
+        auth_header = "x-api-key"
+        api_key_env = "MY_GATEWAY_API_KEY"
+        default_model = "opaque/model@id"
+        model_catalog = false
+
+        [[providers.my-gateway.models]]
+        id = "opaque/model@id"
+
+        [[providers.my-gateway.models]]
+        id = "another-local-id"
+        "#,
+    )
+    .expect("config should parse");
+
+    apply_named_provider_profile_env_from_config("my-gateway", &cfg).expect("apply profile");
+
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_BASE").ok().as_deref(),
+        Some("https://llm.example.com/v1")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
+            .ok()
+            .as_deref(),
+        Some("MY_GATEWAY_API_KEY")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_PROVIDER_FEATURES")
+            .ok()
+            .as_deref(),
+        Some("0")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_MODEL_CATALOG")
+            .ok()
+            .as_deref(),
+        Some("0")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_MODEL").ok().as_deref(),
+        Some("opaque/model@id")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_STATIC_MODELS")
+            .ok()
+            .as_deref(),
+        Some("opaque/model@id\nanother-local-id")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_AUTH_HEADER")
+            .ok()
+            .as_deref(),
+        Some("api-key")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_AUTH_HEADER_NAME")
+            .ok()
+            .as_deref(),
+        Some("x-api-key")
+    );
+    assert_eq!(
+        std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+            .ok()
+            .as_deref(),
+        Some("my-gateway")
+    );
+}
+
+#[test]
+fn named_provider_inline_api_key_is_private_runtime_fallback() {
+    let _lock = crate::storage::lock_test_env();
+    let _guard = EnvGuard::save(&[
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_MY_GATEWAY_API_KEY",
+    ]);
+
+    let cfg: crate::config::Config = toml::from_str(
+        r#"
+        [providers.my-gateway]
+        type = "openai-compatible"
+        base_url = "https://llm.example.com/v1"
+        api_key = "inline-secret"
+        "#,
+    )
+    .expect("config should parse");
+
+    apply_named_provider_profile_env_from_config("my-gateway", &cfg).expect("apply profile");
+
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
+            .ok()
+            .as_deref(),
+        Some("JCODE_PROVIDER_MY_GATEWAY_API_KEY")
+    );
+    assert_eq!(
+        std::env::var("JCODE_PROVIDER_MY_GATEWAY_API_KEY")
+            .ok()
+            .as_deref(),
+        Some("inline-secret")
+    );
+}
+
+#[test]
 fn matrix_openrouter_like_sources_reject_invalid_overrides() {
     let _lock = crate::storage::lock_test_env();
     let _guard = EnvGuard::save(&[

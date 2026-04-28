@@ -21,6 +21,18 @@ use provider_init::ProviderChoice;
 pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     resolve_resume_arg(&mut args)?;
 
+    if let Some(profile_name) = args
+        .provider_profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        provider_catalog::apply_named_provider_profile_env(profile_name)?;
+        crate::env::set_var("JCODE_PROVIDER_PROFILE_NAME", profile_name);
+        crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
+        args.provider = ProviderChoice::OpenaiCompatible;
+    }
+
     match args.command {
         Some(Command::Serve) => {
             let serve_start = Instant::now();
@@ -417,7 +429,12 @@ async fn run_default_command(args: Args) -> Result<()> {
 
     if !server_running {
         maybe_prompt_server_bootstrap_login(&args.provider).await?;
-        spawn_server(&args.provider, args.model.as_deref()).await?;
+        spawn_server(
+            &args.provider,
+            args.model.as_deref(),
+            args.provider_profile.as_deref(),
+        )
+        .await?;
     }
 
     startup_profile::mark("pre_tui_client");
@@ -632,6 +649,7 @@ pub(crate) async fn maybe_prompt_server_bootstrap_login(
 pub(crate) async fn spawn_server(
     provider_choice: &ProviderChoice,
     model: Option<&str>,
+    provider_profile: Option<&str>,
 ) -> Result<()> {
     let socket_path = server::socket_path();
     if server_is_running_at(&socket_path).await {
@@ -670,6 +688,9 @@ pub(crate) async fn spawn_server(
         cmd.env("JCODE_DEBUG_CONTROL", "1");
     }
     cmd.arg("--provider").arg(provider_choice.as_arg_value());
+    if let Some(provider_profile) = provider_profile {
+        cmd.arg("--provider-profile").arg(provider_profile);
+    }
     if let Some(model) = model {
         cmd.arg("--model").arg(model);
     }

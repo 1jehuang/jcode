@@ -70,7 +70,7 @@ impl Tool for SkillTool {
             "load" => self.load_skill(params.name).await,
             "list" => self.list_skills().await,
             "reload" => self.reload_skill(params.name).await,
-            "reload_all" => self.reload_all_skills().await,
+            "reload_all" => self.reload_all_skills(ctx.working_dir.as_deref()).await,
             "read" => self.read_skill(params.name).await,
             _ => Ok(ToolOutput::new(format!(
                 "Unknown action: {}. Use 'load', 'list', 'reload', 'reload_all', or 'read'.",
@@ -186,10 +186,10 @@ impl SkillTool {
         }
     }
 
-    async fn reload_all_skills(&self) -> Result<ToolOutput> {
+    async fn reload_all_skills(&self, working_dir: Option<&std::path::Path>) -> Result<ToolOutput> {
         let mut registry = self.registry.write().await;
 
-        match registry.reload_all() {
+        match registry.reload_all_for_working_dir(working_dir) {
             Ok(count) => {
                 let skills = registry.list();
                 let mut output = format!("Reloaded {} skills\n\n", count);

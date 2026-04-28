@@ -151,6 +151,14 @@ pub enum Request {
     #[serde(rename = "get_history")]
     GetHistory { id: u64 },
 
+    /// Get a bounded view of compacted historical messages for lazy transcript expansion.
+    #[serde(rename = "get_compacted_history")]
+    GetCompactedHistory {
+        id: u64,
+        /// Number of leading compacted messages the client wants rendered before the live tail.
+        visible_messages: usize,
+    },
+
     /// Trigger server hot reload (build new version, restart)
     #[serde(rename = "reload")]
     Reload { id: u64 },
@@ -881,6 +889,19 @@ pub enum ServerEvent {
         side_panel: SidePanelSnapshot,
     },
 
+    /// Expanded compacted-history window (response to GetCompactedHistory).
+    #[serde(rename = "compacted_history")]
+    CompactedHistory {
+        id: u64,
+        session_id: String,
+        messages: Vec<HistoryMessage>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<crate::session::RenderedImage>,
+        compacted_total: usize,
+        compacted_visible: usize,
+        compacted_remaining: usize,
+    },
+
     /// Side panel state changed for the active session
     #[serde(rename = "side_panel_state")]
     SidePanelState { snapshot: SidePanelSnapshot },
@@ -1271,6 +1292,7 @@ impl Request {
             Request::ClientDebugResponse { id, .. } => *id,
             Request::Subscribe { id, .. } => *id,
             Request::GetHistory { id } => *id,
+            Request::GetCompactedHistory { id, .. } => *id,
             Request::Reload { id } => *id,
             Request::ResumeSession { id, .. } => *id,
             Request::NotifySession { id, .. } => *id,

@@ -59,6 +59,14 @@ fn test_debug_memory_profile_reports_messages_and_provider_cache() {
         ],
     );
 
+    session.compaction = Some(StoredCompactionState {
+        summary_text: "summary".to_string(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 7,
+        original_turn_count: 9,
+        compacted_count: 7,
+    });
+
     let _ = session.provider_messages();
     let profile = session.debug_memory_profile();
 
@@ -68,6 +76,10 @@ fn test_debug_memory_profile_reports_messages_and_provider_cache() {
     assert_eq!(profile["messages"]["memory"]["tool_result_blocks"], 1);
     assert!(profile["messages"]["json_bytes"].as_u64().unwrap_or(0) > 0);
     assert_eq!(profile["provider_messages_cache"]["count"], 2);
+    assert_eq!(profile["compaction"]["present"], true);
+    assert_eq!(profile["compaction"]["covers_up_to_turn"], 7);
+    assert_eq!(profile["compaction"]["original_turn_count"], 9);
+    assert_eq!(profile["compaction"]["compacted_count"], 7);
     assert!(
         profile["provider_messages_cache"]["json_bytes"]
             .as_u64()
@@ -668,6 +680,110 @@ fn test_render_messages_honors_background_task_display_role_override() {
     assert_eq!(rendered.len(), 1);
     assert_eq!(rendered[0].role, "background_task");
     assert!(rendered[0].content.contains("**Background task**"));
+}
+
+#[test]
+fn test_render_messages_hides_compacted_leading_history() {
+    let mut session = Session::create_with_id(
+        "session_render_compacted_history_test".to_string(),
+        None,
+        Some("render compacted history test".to_string()),
+    );
+
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "old prompt".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::Text {
+            text: "old response".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "current prompt".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.compaction = Some(StoredCompactionState {
+        summary_text: "old prompt and response".to_string(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 2,
+        original_turn_count: 2,
+        compacted_count: 2,
+    });
+
+    let rendered = render_messages(&session);
+    assert_eq!(rendered.len(), 2);
+    assert_eq!(rendered[0].role, "system");
+    assert!(rendered[0].content.contains("2 historical messages hidden"));
+    assert_eq!(rendered[1].role, "user");
+    assert_eq!(rendered[1].content, "current prompt");
+}
+
+#[test]
+fn test_render_messages_can_expand_compacted_history_window() {
+    let mut session = Session::create_with_id(
+        "session_render_compacted_history_expand_test".to_string(),
+        None,
+        Some("render compacted history expand test".to_string()),
+    );
+
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "old prompt".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::Text {
+            text: "old response".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "current prompt".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.compaction = Some(StoredCompactionState {
+        summary_text: "old prompt and response".to_string(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 2,
+        original_turn_count: 2,
+        compacted_count: 2,
+    });
+
+    let (rendered, _images, info) = render_messages_and_images_with_compacted_history(&session, 1);
+    assert_eq!(info.unwrap().total_messages, 2);
+    assert_eq!(info.unwrap().visible_messages, 1);
+    assert_eq!(info.unwrap().remaining_messages, 1);
+    assert_eq!(rendered.len(), 3);
+    assert!(rendered[0].content.contains("Showing 1 of 2"));
+    assert_eq!(rendered[1].role, "assistant");
+    assert_eq!(rendered[1].content, "old response");
+    assert_eq!(rendered[2].content, "current prompt");
+
+    let (rendered_all, _images, info_all) =
+        render_messages_and_images_with_compacted_history(&session, usize::MAX);
+    let info_all = info_all.expect("compacted info");
+    assert_eq!(info_all.visible_messages, 2);
+    assert_eq!(info_all.remaining_messages, 0);
+    assert_eq!(rendered_all.len(), 4);
+    assert!(rendered_all[0].content.contains("showing all 2"));
+    assert_eq!(rendered_all[1].content, "old prompt");
+    assert_eq!(rendered_all[2].content, "old response");
+    assert_eq!(rendered_all[3].content, "current prompt");
 }
 
 #[test]

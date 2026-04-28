@@ -259,6 +259,9 @@ fn replacing_session_cards_preserves_focus_when_possible() {
         Workspace::from_session_cards(vec![session_card("a", "alpha"), session_card("b", "bravo")]);
     workspace.focused_id = 2;
     workspace.handle_key(KeyInput::SetPanelSize(PanelSizePreset::Half));
+    workspace.handle_key(KeyInput::Character("i".to_string()));
+    workspace.handle_key(KeyInput::Character("draft".to_string()));
+    workspace.attach_image("image/png".to_string(), "abc123".to_string());
 
     workspace.replace_session_cards(vec![session_card("b", "bravo refreshed")]);
 
@@ -269,6 +272,8 @@ fn replacing_session_cards_preserves_focus_when_possible() {
         Some("bravo refreshed")
     );
     assert_eq!(workspace.preferred_panel_screen_fraction(), 0.50);
+    assert_eq!(workspace.draft, "draft");
+    assert_eq!(workspace.pending_images.len(), 1);
 }
 
 #[test]
@@ -314,11 +319,104 @@ fn ctrl_enter_submits_insert_draft_to_focused_session() {
         KeyOutcome::SendDraft {
             session_id: "a".to_string(),
             title: "alpha".to_string(),
-            message: "hello".to_string()
+            message: "hello".to_string(),
+            images: Vec::new()
         }
     );
     assert_eq!(workspace.mode, InputMode::Navigation);
     assert!(workspace.draft.is_empty());
+}
+
+#[test]
+fn submit_draft_opens_focused_session_in_navigation_mode() {
+    let mut workspace = Workspace::from_session_cards(vec![session_card("a", "alpha")]);
+
+    assert_eq!(
+        workspace.handle_key(KeyInput::SubmitDraft),
+        KeyOutcome::OpenSession {
+            session_id: "a".to_string(),
+            title: "alpha".to_string()
+        }
+    );
+}
+
+#[test]
+fn paste_text_appends_to_workspace_insert_draft() {
+    let mut workspace = Workspace::from_session_cards(vec![session_card("a", "alpha")]);
+    workspace.handle_key(KeyInput::Character("i".to_string()));
+
+    assert_eq!(
+        workspace.handle_key(KeyInput::PasteText),
+        KeyOutcome::PasteText
+    );
+    assert!(workspace.paste_text("hello  paste"));
+    assert_eq!(workspace.draft, "hello  paste");
+}
+
+#[test]
+fn attach_image_adds_to_workspace_insert_draft() {
+    let mut workspace = Workspace::from_session_cards(vec![session_card("a", "alpha")]);
+    assert!(!workspace.attach_image("image/png".to_string(), "ignored".to_string()));
+
+    workspace.handle_key(KeyInput::Character("i".to_string()));
+    assert_eq!(
+        workspace.handle_key(KeyInput::AttachClipboardImage),
+        KeyOutcome::AttachClipboardImage
+    );
+    assert!(workspace.attach_image("image/png".to_string(), "abc123".to_string()));
+    assert_eq!(workspace.pending_images.len(), 1);
+    assert!(workspace.status_title().contains("1 image"));
+}
+
+#[test]
+fn clear_attached_images_shortcut_clears_workspace_images() {
+    let mut workspace = Workspace::from_session_cards(vec![session_card("a", "alpha")]);
+    workspace.handle_key(KeyInput::Character("i".to_string()));
+    workspace.attach_image("image/png".to_string(), "abc123".to_string());
+
+    assert_eq!(
+        workspace.handle_key(KeyInput::ClearAttachedImages),
+        KeyOutcome::Redraw
+    );
+    assert!(workspace.pending_images.is_empty());
+    assert_eq!(
+        workspace.handle_key(KeyInput::ClearAttachedImages),
+        KeyOutcome::None
+    );
+}
+
+#[test]
+fn workspace_image_draft_submits_images_and_clears_pending_images() {
+    let mut workspace = Workspace::from_session_cards(vec![session_card("a", "alpha")]);
+    workspace.handle_key(KeyInput::Character("i".to_string()));
+    workspace.attach_image("image/png".to_string(), "abc123".to_string());
+
+    assert_eq!(
+        workspace.handle_key(KeyInput::SubmitDraft),
+        KeyOutcome::SendDraft {
+            session_id: "a".to_string(),
+            title: "alpha".to_string(),
+            message: String::new(),
+            images: vec![("image/png".to_string(), "abc123".to_string())]
+        }
+    );
+    assert_eq!(workspace.mode, InputMode::Navigation);
+    assert!(workspace.pending_images.is_empty());
+}
+
+#[test]
+fn workspace_placeholder_preserves_image_draft_when_submit_has_no_target() {
+    let mut workspace = Workspace::fake();
+    workspace.handle_key(KeyInput::Character("i".to_string()));
+    workspace.handle_key(KeyInput::Character("hello".to_string()));
+    workspace.attach_image("image/png".to_string(), "abc123".to_string());
+
+    assert_eq!(
+        workspace.handle_key(KeyInput::SubmitDraft),
+        KeyOutcome::None
+    );
+    assert_eq!(workspace.draft, "hello");
+    assert_eq!(workspace.pending_images.len(), 1);
 }
 
 #[test]

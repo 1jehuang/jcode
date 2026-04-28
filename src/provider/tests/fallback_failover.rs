@@ -150,7 +150,7 @@ fn test_set_model_supports_explicit_cursor_prefix() {
 fn test_forced_provider_disables_cross_provider_fallback_sequence() {
     assert_eq!(
         MultiProvider::fallback_sequence_for(ActiveProvider::Claude, Some(ActiveProvider::OpenAI)),
-        vec![ActiveProvider::Claude, ActiveProvider::OpenAI]
+        vec![ActiveProvider::OpenAI]
     );
     assert_eq!(
         MultiProvider::fallback_sequence_for(ActiveProvider::OpenAI, Some(ActiveProvider::OpenAI)),
@@ -186,9 +186,10 @@ fn test_set_model_rejects_cross_provider_without_creds() {
 
     let err = provider
         .set_model("claude-sonnet-4-6")
-        .expect_err("model routing should reject when target provider has no creds");
+        .expect_err("forced provider should reject when the forced provider has no creds");
     assert!(
-        err.to_string().contains("credentials are not configured"),
+        err.to_string()
+            .contains("OpenAI credentials not available"),
         "expected credentials error, got: {}",
         err
     );

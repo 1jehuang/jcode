@@ -26,7 +26,11 @@ impl Provider for OpenAIProvider {
             };
             (instructions, is_chatgpt)
         };
-        let reasoning_effort = self.reasoning_effort.read().await.clone();
+        let reasoning_effort = self
+            .reasoning_effort
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
         let service_tier = self
             .service_tier
             .read()
@@ -386,21 +390,22 @@ impl Provider for OpenAIProvider {
 
     fn reasoning_effort(&self) -> Option<String> {
         self.reasoning_effort
-            .try_read()
-            .ok()
-            .and_then(|g| g.clone())
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
     }
 
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
         let normalized = Self::normalize_reasoning_effort(effort);
-        match self.reasoning_effort.try_write() {
+        match self.reasoning_effort.write() {
             Ok(mut guard) => {
                 *guard = normalized;
                 Ok(())
             }
-            Err(_) => Err(anyhow::anyhow!(
-                "Failed to acquire lock for reasoning effort"
-            )),
+            Err(poisoned) => {
+                *poisoned.into_inner() = normalized;
+                Ok(())
+            }
         }
     }
 
@@ -548,7 +553,7 @@ impl Provider for OpenAIProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = crate::util::http_error_body(response, "HTTP error").await;
             anyhow::bail!("OpenAI compact error {}: {}", status, body);
         }
 
@@ -593,7 +598,7 @@ impl Provider for OpenAIProvider {
             prompt_cache_key: self.prompt_cache_key.clone(),
             prompt_cache_retention: self.prompt_cache_retention.clone(),
             max_output_tokens: self.max_output_tokens,
-            reasoning_effort: Arc::new(RwLock::new(self.reasoning_effort())),
+            reasoning_effort: Arc::new(StdRwLock::new(self.reasoning_effort())),
             service_tier: Arc::new(StdRwLock::new(self.service_tier())),
             native_compaction_mode: self.native_compaction_mode,
             native_compaction_threshold_tokens: self.native_compaction_threshold_tokens,

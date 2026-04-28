@@ -445,6 +445,18 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Request a wider compacted-history window for the active session.
+    pub async fn get_compacted_history(&mut self, visible_messages: usize) -> Result<u64> {
+        let id = self.next_request_id;
+        let request = Request::GetCompactedHistory {
+            id,
+            visible_messages,
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await?;
+        Ok(id)
+    }
+
     /// Cycle the active model on the server
     pub async fn cycle_model(&mut self, direction: i8) -> Result<()> {
         let request = Request::CycleModel {

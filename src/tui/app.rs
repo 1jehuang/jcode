@@ -112,6 +112,45 @@ struct PendingSessionPickerLoad {
     >,
 }
 
+struct PendingModelPickerLoad {
+    request_id: u64,
+    signature: ModelPickerCacheSignature,
+    picker_started: Instant,
+    receiver: mpsc::Receiver<anyhow::Result<ModelPickerRoutesResult>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelPickerCacheSignature {
+    is_remote: bool,
+    provider_name: String,
+    current_model: String,
+    config_default_model: Option<String>,
+    reasoning_effort: Option<String>,
+    available_efforts: Vec<String>,
+    simplified_model_picker: bool,
+    catalog_revision: u64,
+    remote_provider_name: Option<String>,
+    remote_available_len: usize,
+    remote_available_first: Option<String>,
+    remote_available_last: Option<String>,
+    remote_routes_len: usize,
+    remote_routes_first: Option<String>,
+    remote_routes_last: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ModelPickerCache {
+    signature: ModelPickerCacheSignature,
+    entries: Vec<super::PickerEntry>,
+    route_count: usize,
+    model_count: usize,
+}
+
+struct ModelPickerRoutesResult {
+    routes: Vec<crate::provider::ModelRoute>,
+    routes_ms: u128,
+}
+
 #[derive(Debug, Clone)]
 struct PreparedTransferSession {
     session_id: String,
@@ -338,6 +377,14 @@ pub(super) enum MouseScrollTarget {
     ChangelogOverlay,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(super) struct CompactedHistoryLazyState {
+    pub total_messages: usize,
+    pub visible_messages: usize,
+    pub remaining_messages: usize,
+    pub pending_request_visible: Option<usize>,
+}
+
 /// State for an in-progress OAuth/API-key login flow triggered by `/login`.
 /// TUI Application state
 pub struct App {
@@ -351,6 +398,7 @@ pub struct App {
     display_messages_version: u64,
     display_user_message_count: usize,
     display_edit_tool_message_count: usize,
+    compacted_history_lazy: CompactedHistoryLazyState,
     input: String,
     cursor_pos: usize,
     scroll_offset: usize,
@@ -431,6 +479,10 @@ pub struct App {
     visible_turn_started: Option<Instant>,
     // When the last API response completed (for cache TTL tracking)
     last_api_completed: Option<Instant>,
+    // Provider/model that produced the last completed API response. A warm cache is only
+    // meaningful for the same provider and model; switching either should make cache state cold.
+    last_api_completed_provider: Option<String>,
+    last_api_completed_model: Option<String>,
     // Input tokens from the last completed turn (for cache TTL display)
     last_turn_input_tokens: Option<u64>,
     // Pending turn to process (allows UI to redraw before processing starts)
@@ -643,6 +695,11 @@ pub struct App {
     inline_view_state: Option<super::InlineViewState>,
     // Interactive model/provider picker
     inline_interactive_state: Option<super::InlineInteractiveState>,
+    // Cached model picker entries. Building these can require hydrating large provider catalogs.
+    model_picker_cache: Option<ModelPickerCache>,
+    model_picker_catalog_revision: u64,
+    pending_model_picker_load: Option<PendingModelPickerLoad>,
+    model_picker_load_request_id: u64,
     // Pending model switch from picker (for remote mode async processing)
     pending_model_switch: Option<String>,
     // Pending account switch from inline picker (for remote mode async processing)

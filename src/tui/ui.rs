@@ -45,7 +45,7 @@ use super::visual_debug::{
     self, FrameCaptureBuilder, ImageRegionCapture, InfoWidgetCapture, MarginsCapture,
     MessageCapture, RenderTimingCapture,
 };
-use super::{DisplayMessage, ProcessingStatus, TuiState, is_unexpected_cache_miss};
+use super::{DisplayMessage, ProcessingStatus, TuiState};
 use crate::message::ToolCall;
 use ratatui::{prelude::*, widgets::Paragraph};
 use serde::Serialize;

@@ -34,6 +34,7 @@ use async_trait::async_trait;
 #[cfg(test)]
 use failover::FailoverDecision;
 use futures::Stream;
+use std::borrow::Cow;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
@@ -462,7 +463,20 @@ impl MultiProvider {
         self.spawn_anthropic_catalog_refresh_if_needed();
         self.spawn_openai_catalog_refresh_if_needed();
 
-        let active = self.active_provider();
+        let detected_active = self.active_provider();
+        let active = if let Some(forced) = self.forced_provider {
+            if detected_active != forced {
+                crate::logging::warn(&format!(
+                    "Provider lock corrected active provider from {} to {} before request",
+                    Self::provider_label(detected_active),
+                    Self::provider_label(forced),
+                ));
+                self.set_active_provider(forced);
+            }
+            forced
+        } else {
+            detected_active
+        };
         let sequence = Self::fallback_sequence_for(active, self.forced_provider);
         let mut notes: Vec<String> = Vec::new();
         let mut failover_reason: Option<String> = None;
@@ -612,6 +626,144 @@ impl MultiProvider {
 
         Err(self.no_provider_available_error(&notes))
     }
+
+    fn provider_from_model_key(key: &str) -> Option<ActiveProvider> {
+        match key {
+            "claude" => Some(ActiveProvider::Claude),
+            "openai" => Some(ActiveProvider::OpenAI),
+            "copilot" => Some(ActiveProvider::Copilot),
+            "antigravity" => Some(ActiveProvider::Antigravity),
+            "gemini" => Some(ActiveProvider::Gemini),
+            "cursor" => Some(ActiveProvider::Cursor),
+            "openrouter" => Some(ActiveProvider::OpenRouter),
+            _ => None,
+        }
+    }
+
+    fn explicit_model_provider_prefix(model: &str) -> Option<(ActiveProvider, &'static str, &str)> {
+        if let Some(rest) = model.strip_prefix("copilot:") {
+            Some((ActiveProvider::Copilot, "copilot:", rest))
+        } else if let Some(rest) = model.strip_prefix("antigravity:") {
+            Some((ActiveProvider::Antigravity, "antigravity:", rest))
+        } else if let Some(rest) = model.strip_prefix("cursor:") {
+            Some((ActiveProvider::Cursor, "cursor:", rest))
+        } else {
+            None
+        }
+    }
+
+    fn ensure_provider_lock_allows_model_target(
+        &self,
+        target: ActiveProvider,
+        requested_model: &str,
+    ) -> Result<()> {
+        let Some(forced) = self.forced_provider else {
+            return Ok(());
+        };
+        if forced == target {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "Model '{}' targets {} but --provider is locked to {}. Remove the provider-specific model prefix or use `--provider {}`.",
+            requested_model,
+            Self::provider_label(target),
+            Self::provider_label(forced),
+            Self::provider_key(target),
+        );
+    }
+
+    fn model_name_for_provider<'a>(provider: ActiveProvider, model: &'a str) -> Cow<'a, str> {
+        if matches!(provider, ActiveProvider::Claude)
+            && let Some(canonical) = normalize_copilot_model_name(model)
+        {
+            return Cow::Borrowed(canonical);
+        }
+        Cow::Borrowed(model)
+    }
+
+    fn set_model_on_provider(&self, provider: ActiveProvider, model: &str) -> Result<()> {
+        let model = model.trim();
+        if model.is_empty() {
+            anyhow::bail!("Model cannot be empty");
+        }
+
+        match provider {
+            ActiveProvider::Claude => {
+                let model = Self::model_name_for_provider(provider, model);
+                if let Some(anthropic) = self.anthropic_provider() {
+                    anthropic.set_model(&model)?;
+                } else if let Some(claude) = self.claude_provider() {
+                    claude.set_model(&model)?;
+                } else {
+                    anyhow::bail!(
+                        "Claude credentials not available. Run `jcode login --provider claude` first."
+                    );
+                }
+                self.set_active_provider(ActiveProvider::Claude);
+                Ok(())
+            }
+            ActiveProvider::OpenAI => {
+                let Some(openai) = self.openai_provider() else {
+                    anyhow::bail!(
+                        "OpenAI credentials not available. Run `jcode login --provider openai` first."
+                    );
+                };
+                openai.set_model(model)?;
+                self.set_active_provider(ActiveProvider::OpenAI);
+                Ok(())
+            }
+            ActiveProvider::Copilot => {
+                let Some(copilot) = self.copilot_provider() else {
+                    anyhow::bail!(
+                        "GitHub Copilot credentials not available. Run `jcode login --provider copilot` first."
+                    );
+                };
+                copilot.set_model(model)?;
+                self.set_active_provider(ActiveProvider::Copilot);
+                Ok(())
+            }
+            ActiveProvider::Antigravity => {
+                let Some(antigravity) = self.antigravity_provider() else {
+                    anyhow::bail!(
+                        "Antigravity credentials not available. Run `jcode login --provider antigravity` first."
+                    );
+                };
+                antigravity.set_model(model)?;
+                self.set_active_provider(ActiveProvider::Antigravity);
+                Ok(())
+            }
+            ActiveProvider::Gemini => {
+                let Some(gemini) = self.gemini_provider() else {
+                    anyhow::bail!(
+                        "Gemini credentials not available. Run `jcode login --provider gemini` first."
+                    );
+                };
+                gemini.set_model(model)?;
+                self.set_active_provider(ActiveProvider::Gemini);
+                Ok(())
+            }
+            ActiveProvider::Cursor => {
+                let Some(cursor) = self.cursor_provider() else {
+                    anyhow::bail!(
+                        "Cursor credentials not available. Run `jcode login --provider cursor` first."
+                    );
+                };
+                cursor.set_model(model)?;
+                self.set_active_provider(ActiveProvider::Cursor);
+                Ok(())
+            }
+            ActiveProvider::OpenRouter => {
+                let Some(openrouter) = self.openrouter_provider() else {
+                    anyhow::bail!(
+                        "OpenRouter/OpenAI-compatible credentials not available. Set the configured API key or run `jcode login --provider openrouter` first."
+                    );
+                };
+                openrouter.set_model(model)?;
+                self.set_active_provider(ActiveProvider::OpenRouter);
+                Ok(())
+            }
+        }
+    }
 }
 
 impl Default for MultiProvider {
@@ -714,390 +866,57 @@ impl Provider for MultiProvider {
         self.spawn_anthropic_catalog_refresh_if_needed();
         self.spawn_openai_catalog_refresh_if_needed();
 
-        // Handle explicit "copilot:" prefix from model picker
-        if let Some(copilot_model) = model.strip_prefix("copilot:") {
-            if let Some(forced) = self.forced_provider
-                && forced != ActiveProvider::Copilot
-            {
-                let copilot_guard = self
-                    .copilot_api
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if copilot_guard.is_none() {
-                    anyhow::bail!(
-                        "Model '{}' requires GitHub Copilot but Copilot credentials are not configured. Run `jcode login --provider copilot` first.",
-                        copilot_model
-                    );
-                }
-                drop(copilot_guard);
-                crate::logging::info(&format!(
-                    "Switching from {} to GitHub Copilot for model '{}'",
-                    Self::provider_label(forced),
-                    copilot_model,
-                ));
-            }
-            let copilot_guard = self
-                .copilot_api
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if copilot_guard.is_some() {
-                *self
-                    .active
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = ActiveProvider::Copilot;
-                if let Some(ref copilot) = *copilot_guard {
-                    copilot.set_model(copilot_model)?;
-                }
-                return Ok(());
-            }
-            drop(copilot_guard);
-            if self.forced_provider == Some(ActiveProvider::Copilot) {
-                return Err(anyhow::anyhow!(
-                    "GitHub Copilot is locked by --provider but is not configured. Run `jcode login --provider copilot`."
-                ));
-            }
-            // Copilot not available - fall through with the bare model name
-            // so we can try routing it to another provider (e.g. claude-opus-4.6
-            // can be served by Anthropic as claude-opus-4-6).
-            crate::logging::info(&format!(
-                "Copilot not available for '{}', trying other providers",
-                copilot_model
-            ));
-            return self.set_model(copilot_model);
+        let requested_model = model.trim();
+        if requested_model.is_empty() {
+            anyhow::bail!("Model cannot be empty");
         }
 
-        if let Some(antigravity_model) = model.strip_prefix("antigravity:") {
-            if let Some(forced) = self.forced_provider
-                && forced != ActiveProvider::Antigravity
-            {
-                let antigravity_guard = self
-                    .antigravity
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if antigravity_guard.is_none() {
-                    anyhow::bail!(
-                        "Model '{}' requires Antigravity but Antigravity credentials are not configured. Run `jcode login --provider antigravity` first.",
-                        antigravity_model
-                    );
-                }
-                drop(antigravity_guard);
-                crate::logging::info(&format!(
-                    "Switching from {} to Antigravity for model '{}'",
-                    Self::provider_label(forced),
-                    antigravity_model,
-                ));
-            }
-            let antigravity_guard = self
-                .antigravity
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if antigravity_guard.is_some() {
-                *self
-                    .active
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = ActiveProvider::Antigravity;
-                if let Some(ref antigravity) = *antigravity_guard {
-                    antigravity.set_model(antigravity_model)?;
-                }
-                return Ok(());
-            }
-            drop(antigravity_guard);
-            if self.forced_provider == Some(ActiveProvider::Antigravity) {
-                return Err(anyhow::anyhow!(
-                    "Antigravity is locked by --provider but is not configured. Run `jcode login --provider antigravity`."
-                ));
-            }
-            crate::logging::info(&format!(
-                "Antigravity not available for '{}', trying other providers",
-                antigravity_model
-            ));
-            return self.set_model(antigravity_model);
+        // Provider-prefixed model names are explicit routing directives. They
+        // must never silently fall through to another provider when the target
+        // is unavailable or when --provider locks a different backend.
+        if let Some((target, _prefix, target_model)) =
+            Self::explicit_model_provider_prefix(requested_model)
+        {
+            self.ensure_provider_lock_allows_model_target(target, requested_model)?;
+            return self.set_model_on_provider(target, target_model);
         }
 
-        // Handle explicit "cursor:" prefix from model picker/default config
-        if let Some(cursor_model) = model.strip_prefix("cursor:") {
-            if let Some(forced) = self.forced_provider
-                && forced != ActiveProvider::Cursor
-            {
-                let cursor_guard = self
-                    .cursor
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if cursor_guard.is_none() {
-                    anyhow::bail!(
-                        "Model '{}' requires Cursor but Cursor credentials are not configured. Run `jcode login --provider cursor` first.",
-                        cursor_model
-                    );
-                }
-                drop(cursor_guard);
-                crate::logging::info(&format!(
-                    "Switching from {} to Cursor for model '{}'",
-                    Self::provider_label(forced),
-                    cursor_model,
-                ));
-            }
-            let cursor_guard = self
-                .cursor
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if cursor_guard.is_some() {
-                *self
-                    .active
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = ActiveProvider::Cursor;
-                if let Some(ref cursor) = *cursor_guard {
-                    cursor.set_model(cursor_model)?;
-                }
-                return Ok(());
-            }
-            drop(cursor_guard);
-            if self.forced_provider == Some(ActiveProvider::Cursor) {
-                return Err(anyhow::anyhow!(
-                    "Cursor is locked by --provider but is not configured. Run `jcode login --provider cursor`."
-                ));
-            }
-            crate::logging::info(&format!(
-                "Cursor not available for '{}', trying other providers",
-                cursor_model
-            ));
-            return self.set_model(cursor_model);
+        // A CLI --provider lock means the model string is provider-local. Do
+        // not apply global Claude/OpenAI/OpenRouter heuristics here: custom
+        // OpenAI-compatible endpoints often use model IDs that look like other
+        // providers' IDs, and GitHub Copilot uses Claude-looking dotted names.
+        if let Some(forced) = self.forced_provider {
+            return self.set_model_on_provider(forced, requested_model);
         }
 
         // Normalize Copilot-style model names (dots -> hyphens) to canonical form.
-        // e.g. "claude-opus-4.6" -> "claude-opus-4-6" so Anthropic/OpenAI accept it.
-        let model = if let Some(canonical) = normalize_copilot_model_name(model) {
+        // e.g. "claude-opus-4.6" -> "claude-opus-4-6" so Anthropic accepts it.
+        let model = if let Some(canonical) = normalize_copilot_model_name(requested_model) {
             canonical
         } else {
-            model
+            requested_model
         };
 
         if let Some((base_model, provider_pin)) = model.rsplit_once('@')
             && !provider_pin.trim().is_empty()
             && let Some(openrouter_model) = openrouter_catalog_model_id(base_model)
         {
-            let openrouter = self
-                .openrouter
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone();
-            if openrouter.is_none() {
-                return Err(anyhow::anyhow!(
-                    "OpenRouter credentials not available. Set OPENROUTER_API_KEY environment variable."
-                ));
-            }
-            *self
-                .active
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = ActiveProvider::OpenRouter;
-            if let Some(openrouter) = openrouter {
-                return openrouter.set_model(&format!("{}@{}", openrouter_model, provider_pin));
-            }
+            return self.set_model_on_provider(
+                ActiveProvider::OpenRouter,
+                &format!("{}@{}", openrouter_model, provider_pin),
+            );
         }
 
-        // Detect which provider this model belongs to
+        // Detect which provider this model belongs to when no explicit
+        // --provider lock was requested.
         let target_provider = provider_for_model(model);
-        if let Some(forced) = self.forced_provider
-            && let Some(target) = target_provider
+        if let Some(target_provider) = target_provider
+            && let Some(target) = Self::provider_from_model_key(target_provider)
         {
-            let target_active = match target {
-                "claude" => ActiveProvider::Claude,
-                "openai" => ActiveProvider::OpenAI,
-                "antigravity" => ActiveProvider::Antigravity,
-                "gemini" => ActiveProvider::Gemini,
-                "cursor" => ActiveProvider::Cursor,
-                "openrouter" => ActiveProvider::OpenRouter,
-                _ => forced,
-            };
-            if target_active != forced {
-                let has_target_creds = match target_active {
-                    ActiveProvider::Claude => self.has_claude_runtime(),
-                    ActiveProvider::OpenAI => self.openai_provider().is_some(),
-                    ActiveProvider::Antigravity => self.antigravity_provider().is_some(),
-                    ActiveProvider::Gemini => self.gemini_provider().is_some(),
-                    ActiveProvider::Cursor => self.cursor_provider().is_some(),
-                    ActiveProvider::OpenRouter => self.openrouter_provider().is_some(),
-                    ActiveProvider::Copilot => self.copilot_provider().is_some(),
-                };
-                if !has_target_creds {
-                    anyhow::bail!(
-                        "Model '{}' belongs to {} but {} credentials are not configured. Run `jcode login --provider {}` first.",
-                        model,
-                        Self::provider_label(target_active),
-                        Self::provider_label(target_active),
-                        Self::provider_key(target_active),
-                    );
-                }
-                crate::logging::info(&format!(
-                    "Switching from {} to {} for model '{}'",
-                    Self::provider_label(forced),
-                    Self::provider_label(target_active),
-                    model,
-                ));
-            }
-        }
-
-        if target_provider == Some("claude") {
-            if !self.has_claude_runtime() {
-                return Err(anyhow::anyhow!(
-                    "Claude credentials not available. Run `claude` to log in first."
-                ));
-            }
-            // Switch active provider to Claude
-            *self
-                .active
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = ActiveProvider::Claude;
-            // Set on whichever is available
-            if let Some(anthropic) = self.anthropic_provider() {
-                anthropic.set_model(model)
-            } else if let Some(claude) = self.claude_provider() {
-                claude.set_model(model)
-            } else {
-                Ok(())
-            }
-        } else if target_provider == Some("openai") {
-            if self.openai_provider().is_none() {
-                return Err(anyhow::anyhow!(
-                    "OpenAI credentials not available. Run `jcode login --provider openai` first."
-                ));
-            }
-            // Switch active provider to OpenAI
-            *self
-                .active
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = ActiveProvider::OpenAI;
-            if let Some(openai) = self.openai_provider() {
-                openai.set_model(model)
-            } else {
-                Ok(())
-            }
-        } else if target_provider == Some("gemini") {
-            let gemini = self.gemini_provider();
-            if gemini.is_none() {
-                return Err(anyhow::anyhow!(
-                    "Gemini credentials not available. Run `jcode login --provider gemini` first."
-                ));
-            }
-            *self
-                .active
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = ActiveProvider::Gemini;
-            if let Some(gemini) = gemini {
-                gemini.set_model(model)
-            } else {
-                Ok(())
-            }
-        } else if target_provider == Some("antigravity") {
-            let antigravity = self.antigravity_provider();
-            if antigravity.is_none() {
-                return Err(anyhow::anyhow!(
-                    "Antigravity credentials not available. Run `jcode login --provider antigravity` first."
-                ));
-            }
-            *self
-                .active
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = ActiveProvider::Antigravity;
-            if let Some(antigravity) = antigravity {
-                antigravity.set_model(model)
-            } else {
-                Ok(())
-            }
-        } else if target_provider == Some("cursor") {
-            let cursor_guard = self
-                .cursor
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if cursor_guard.is_none() {
-                return Err(anyhow::anyhow!(
-                    "Cursor credentials not available. Run `jcode login --provider cursor` first."
-                ));
-            }
-            *self
-                .active
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = ActiveProvider::Cursor;
-            if let Some(ref cursor) = *cursor_guard {
-                cursor.set_model(model)
-            } else {
-                Ok(())
-            }
-        } else if target_provider == Some("openrouter") {
-            let openrouter = self
-                .openrouter
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone();
-            if openrouter.is_none() {
-                return Err(anyhow::anyhow!(
-                    "OpenRouter credentials not available. Set OPENROUTER_API_KEY environment variable."
-                ));
-            }
-            // Switch active provider to OpenRouter
-            *self
-                .active
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = ActiveProvider::OpenRouter;
-            if let Some(openrouter) = openrouter {
-                openrouter.set_model(model)
-            } else {
-                Ok(())
-            }
+            self.set_model_on_provider(target, model)
         } else {
-            // Unknown model - try current provider
-            match self.active_provider() {
-                ActiveProvider::Claude => {
-                    if let Some(anthropic) = self.anthropic_provider() {
-                        anthropic.set_model(model)
-                    } else if let Some(claude) = self.claude_provider() {
-                        claude.set_model(model)
-                    } else {
-                        Err(anyhow::anyhow!("Unknown model: {}", model))
-                    }
-                }
-                ActiveProvider::OpenAI => {
-                    if let Some(openai) = self.openai_provider() {
-                        openai.set_model(model)
-                    } else {
-                        Err(anyhow::anyhow!("Unknown model: {}", model))
-                    }
-                }
-                ActiveProvider::Copilot => {
-                    if let Some(copilot) = self.copilot_provider() {
-                        copilot.set_model(model)
-                    } else {
-                        Err(anyhow::anyhow!("Unknown model: {}", model))
-                    }
-                }
-                ActiveProvider::Antigravity => {
-                    if let Some(antigravity) = self.antigravity_provider() {
-                        antigravity.set_model(model)
-                    } else {
-                        Err(anyhow::anyhow!("Unknown model: {}", model))
-                    }
-                }
-                ActiveProvider::Gemini => {
-                    if let Some(gemini) = self.gemini_provider() {
-                        gemini.set_model(model)
-                    } else {
-                        Err(anyhow::anyhow!("Unknown model: {}", model))
-                    }
-                }
-                ActiveProvider::Cursor => {
-                    if let Some(cursor) = self.cursor_provider() {
-                        cursor.set_model(model)
-                    } else {
-                        Err(anyhow::anyhow!("Unknown model: {}", model))
-                    }
-                }
-                ActiveProvider::OpenRouter => {
-                    if let Some(openrouter) = self.openrouter_provider() {
-                        openrouter.set_model(model)
-                    } else {
-                        Err(anyhow::anyhow!("Unknown model: {}", model))
-                    }
-                }
-            }
+            // Unknown model - try current provider.
+            self.set_model_on_provider(self.active_provider(), model)
         }
     }
 
@@ -1333,6 +1152,8 @@ impl Provider for MultiProvider {
         let has_openrouter = self.openrouter_provider().is_some();
         if let Some(openrouter) = self.openrouter_provider() {
             let current_openrouter_model = openrouter.model();
+            let supports_openrouter_provider_features =
+                openrouter.supports_provider_routing_features();
             let mut scheduled_endpoint_refreshes = 0usize;
             for model in openrouter.available_models_display() {
                 openrouter_models += 1;
@@ -1362,11 +1183,22 @@ impl Provider for MultiProvider {
                     .as_ref()
                     .and_then(|(eps, _)| eps.first().map(|ep| format!("→ {}", ep.provider_name)))
                     .unwrap_or_default();
-                routes.push(build_openrouter_auto_route(
-                    &model,
-                    has_openrouter,
-                    auto_detail,
-                ));
+                if supports_openrouter_provider_features {
+                    routes.push(build_openrouter_auto_route(
+                        &model,
+                        has_openrouter,
+                        auto_detail,
+                    ));
+                } else {
+                    routes.push(ModelRoute {
+                        model: model.clone(),
+                        provider: "OpenAI-compatible".to_string(),
+                        api_method: "openai-compatible".to_string(),
+                        available: has_openrouter,
+                        detail: "custom endpoint".to_string(),
+                        cheapness: None,
+                    });
+                }
                 // Add per-provider routes from endpoints cache
                 if let Some((ref endpoints, _)) = cached {
                     openrouter_endpoint_cache_hits += 1;

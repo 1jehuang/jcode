@@ -162,6 +162,149 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
 }
 
 #[test]
+fn test_compacted_history_marker_scroll_queues_lazy_load() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.replace_display_messages(vec![DisplayMessage::system(
+        "Earlier conversation compacted — 128 historical messages hidden from the UI. Scroll to the top to load older history.",
+    )]);
+
+    let state = app.compacted_history_lazy_state();
+    assert_eq!(state.total_messages, 128);
+    assert_eq!(state.visible_messages, 0);
+    assert_eq!(state.remaining_messages, 128);
+
+    app.auto_scroll_paused = true;
+    app.scroll_offset = 5;
+    app.scroll_up(5);
+
+    assert_eq!(app.scroll_offset, 0);
+    assert_eq!(app.take_pending_compacted_history_load(), Some(64));
+}
+
+#[test]
+fn test_local_compacted_history_marker_scroll_expands_from_session() {
+    let mut app = create_test_app();
+    app.session.add_message(
+        crate::message::Role::User,
+        vec![crate::message::ContentBlock::Text {
+            text: "old prompt".to_string(),
+            cache_control: None,
+        }],
+    );
+    app.session.add_message(
+        crate::message::Role::Assistant,
+        vec![crate::message::ContentBlock::Text {
+            text: "old response".to_string(),
+            cache_control: None,
+        }],
+    );
+    app.session.add_message(
+        crate::message::Role::User,
+        vec![crate::message::ContentBlock::Text {
+            text: "current prompt".to_string(),
+            cache_control: None,
+        }],
+    );
+    app.session.compaction = Some(crate::session::StoredCompactionState {
+        summary_text: "old prompt and response".to_string(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 2,
+        original_turn_count: 2,
+        compacted_count: 2,
+    });
+
+    let rendered = crate::session::render_messages(&app.session)
+        .into_iter()
+        .map(|msg| DisplayMessage {
+            role: msg.role,
+            content: msg.content,
+            tool_calls: msg.tool_calls,
+            duration_secs: None,
+            title: None,
+            tool_data: msg.tool_data,
+        })
+        .collect();
+    app.replace_display_messages(rendered);
+    assert_eq!(app.compacted_history_lazy_state().remaining_messages, 2);
+
+    app.auto_scroll_paused = true;
+    app.scroll_offset = 0;
+    app.scroll_up(1);
+
+    assert_eq!(app.take_pending_compacted_history_load(), None);
+    assert_eq!(app.compacted_history_lazy_state().visible_messages, 2);
+    assert_eq!(app.compacted_history_lazy_state().remaining_messages, 0);
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|message| message.content == "old prompt")
+    );
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|message| message.content == "old response")
+    );
+}
+
+#[test]
+fn test_compacted_history_event_applies_expanded_window() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_remote = true;
+    app.remote_session_id = Some("session_lazy_history".to_string());
+    app.push_display_message(DisplayMessage::assistant("existing tail"));
+    app.scroll_offset = 12;
+    app.auto_scroll_paused = false;
+
+    let needs_redraw = app.handle_server_event(
+        crate::protocol::ServerEvent::CompactedHistory {
+            id: 8,
+            session_id: "session_lazy_history".to_string(),
+            messages: vec![
+                crate::protocol::HistoryMessage {
+                    role: "system".to_string(),
+                    content: "Earlier conversation compacted — 64 older historical messages hidden. Showing 64 of 128 compacted messages. Scroll to the top to load more.".to_string(),
+                    tool_calls: None,
+                    tool_data: None,
+                },
+                crate::protocol::HistoryMessage {
+                    role: "assistant".to_string(),
+                    content: "older response".to_string(),
+                    tool_calls: None,
+                    tool_data: None,
+                },
+                crate::protocol::HistoryMessage {
+                    role: "user".to_string(),
+                    content: "current prompt".to_string(),
+                    tool_calls: None,
+                    tool_data: None,
+                },
+            ],
+            images: vec![],
+            compacted_total: 128,
+            compacted_visible: 64,
+            compacted_remaining: 64,
+        },
+        &mut remote,
+    );
+
+    assert!(needs_redraw);
+    assert_eq!(app.display_messages().len(), 3);
+    assert_eq!(app.display_messages()[1].content, "older response");
+    assert_eq!(app.display_messages()[2].content, "current prompt");
+    assert!(app.auto_scroll_paused);
+    assert_eq!(app.scroll_offset, 0);
+    let state = app.compacted_history_lazy_state();
+    assert_eq!(state.total_messages, 128);
+    assert_eq!(state.visible_messages, 64);
+    assert_eq!(state.remaining_messages, 64);
+}
+
+#[test]
 fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

@@ -621,7 +621,25 @@ impl Provider for OpenRouterProvider {
     fn set_model(&self, model: &str) -> Result<()> {
         // OpenRouter accepts any model ID - validation happens at API call time
         // This allows using any model without needing to pre-fetch the list
-        let (model_id, provider) = parse_model_spec(model);
+        let trimmed = model.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("OpenRouter/OpenAI-compatible model cannot be empty");
+        }
+
+        let (model_id, provider) = if self.supports_provider_features {
+            let (model_id, provider) = parse_model_spec(trimmed);
+            let model_id = if provider.is_some() {
+                crate::provider::openrouter_catalog_model_id(&model_id).unwrap_or(model_id)
+            } else {
+                model_id
+            };
+            (model_id, provider)
+        } else {
+            // Generic OpenAI-compatible backends often use arbitrary model IDs.
+            // Only real OpenRouter supports the model@provider pin syntax, so
+            // preserve the caller's model string exactly for custom endpoints.
+            (trimmed.to_string(), None)
+        };
         if let Ok(mut current) = self.model.try_write() {
             *current = model_id.clone();
         } else {
@@ -650,12 +668,24 @@ impl Provider for OpenRouterProvider {
     }
 
     fn available_models_display(&self) -> Vec<String> {
-        if !self.supports_model_catalog {
-            let model = self.model();
-            if model.trim().is_empty() {
-                return Vec::new();
+        let with_current_model = |mut models: Vec<String>| {
+            let current = self.model();
+            if !current.trim().is_empty() && !models.iter().any(|model| model == &current) {
+                models.insert(0, current);
             }
-            return vec![model];
+            models
+        };
+
+        if !self.supports_model_catalog {
+            if !self.static_models.is_empty() {
+                return with_current_model(self.static_models.clone());
+            }
+            let model = self.model();
+            return if model.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![model]
+            };
         }
 
         if let Ok(cache) = self.models_cache.try_read()
@@ -668,7 +698,7 @@ impl Provider for OpenRouterProvider {
             {
                 self.maybe_schedule_model_catalog_refresh(cache_age, "display memory cache");
             }
-            return cache.models.iter().map(|m| m.id.clone()).collect();
+            return with_current_model(cache.models.iter().map(|m| m.id.clone()).collect());
         }
 
         if let Some(cache_entry) = load_disk_cache_entry() {
@@ -681,7 +711,7 @@ impl Provider for OpenRouterProvider {
                 cache.cached_at = Some(cache_entry.cached_at);
             }
             self.maybe_schedule_model_catalog_refresh(cache_age, "display disk cache");
-            return cache_entry.models.into_iter().map(|m| m.id).collect();
+            return with_current_model(cache_entry.models.into_iter().map(|m| m.id).collect());
         }
 
         let model = self.model();
@@ -790,6 +820,7 @@ impl Provider for OpenRouterProvider {
             auth: self.auth.clone(),
             supports_provider_features: self.supports_provider_features,
             supports_model_catalog: self.supports_model_catalog,
+            static_models: self.static_models.clone(),
             send_openrouter_headers: self.send_openrouter_headers,
             models_cache: Arc::clone(&self.models_cache),
             model_catalog_refresh: Arc::clone(&self.model_catalog_refresh),

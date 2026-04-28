@@ -329,8 +329,12 @@ async fn recover_reloading_server(
         detail
     ));
 
-    match crate::cli::dispatch::spawn_server(&crate::cli::provider_init::ProviderChoice::Auto, None)
-        .await
+    match crate::cli::dispatch::spawn_server(
+        &crate::cli::provider_init::ProviderChoice::Auto,
+        None,
+        None,
+    )
+    .await
     {
         Ok(()) => {
             state.initial_server_start = true;

@@ -69,6 +69,18 @@ pub fn approx_tool_output_token_severity(tokens: usize) -> ApproxTokenSeverity {
     }
 }
 
+/// Read an HTTP error body without hiding failures behind an empty string.
+///
+/// This is useful after a non-success status when the response is about to be
+/// converted into an error. If reading the body itself fails, the returned text
+/// preserves that failure so callers can include it in their error message.
+pub async fn http_error_body(response: reqwest::Response, context: &str) -> String {
+    match response.text().await {
+        Ok(body) => body,
+        Err(err) => format!("<failed to read {context} response body: {err}>"),
+    }
+}
+
 /// Format an anyhow error including its full cause chain.
 ///
 /// This preserves actionable upstream details such as HTTP status/body instead of

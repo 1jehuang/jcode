@@ -1355,7 +1355,7 @@ async fn stream_response(
 
     if !response.status().is_success() {
         let status = response.status();
-        let error_text = response.text().await.unwrap_or_default();
+        let error_text = crate::util::http_error_body(response, "HTTP error").await;
         anyhow::bail!("Anthropic API error ({}): {}", status, error_text);
     }
 

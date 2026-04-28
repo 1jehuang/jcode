@@ -16,6 +16,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+#[path = "tui_bench/side_panel.rs"]
+mod tui_bench_side_panel;
+use tui_bench_side_panel::{
+    make_bench_file, make_bench_side_panel, make_side_panel_refresh_content,
+};
+
 fn is_edit_tool_name(name: &str) -> bool {
     matches!(
         name,
@@ -352,7 +358,7 @@ impl BenchState {
         mode: BenchMode,
         side_panel_source: SidePanelSource,
         side_panel_mermaids: usize,
-    ) -> Self {
+    ) -> Result<Self> {
         let mut messages = Vec::with_capacity(turns * 2);
         let mut bench_file_paths = Vec::new();
         let side_panel = if matches!(mode, BenchMode::SidePanel | BenchMode::MermaidUi) {
@@ -361,7 +367,7 @@ impl BenchState {
                 side_panel_source,
                 side_panel_mermaids,
                 &mut bench_file_paths,
-            )
+            )?
         } else {
             SidePanelSnapshot::default()
         };
@@ -382,7 +388,7 @@ impl BenchState {
             messages.push(DisplayMessage::assistant(assistant));
 
             if matches!(mode, BenchMode::FileDiff) {
-                let file_path = make_bench_file(idx, assistant_len.max(240));
+                let file_path = make_bench_file(idx, assistant_len.max(240))?;
                 let file_path_str = file_path.to_string_lossy().to_string();
                 bench_file_paths.push(file_path.clone());
                 let tool = ToolCall {
@@ -410,7 +416,7 @@ impl BenchState {
             ProcessingStatus::Idle
         };
 
-        Self {
+        Ok(Self {
             messages,
             messages_version: 1,
             streaming_text: String::new(),
@@ -444,7 +450,7 @@ impl BenchState {
                 .flatten(),
             linked_refresh_generation: 0,
             session_source: None,
-        }
+        })
     }
 
     fn from_session(
@@ -523,21 +529,27 @@ impl BenchState {
         })
     }
 
-    fn simulate_linked_refresh(&mut self) {
+    fn simulate_linked_refresh(&mut self) -> Result<()> {
         let Some(path) = self.linked_refresh_path.as_ref() else {
-            return;
+            return Ok(());
         };
         let Some(page) = self.side_panel.focused_page() else {
-            return;
+            return Ok(());
         };
         if page.source != SidePanelPageSource::LinkedFile {
-            return;
+            return Ok(());
         }
 
         self.linked_refresh_generation += 1;
         let content = make_side_panel_refresh_content(self.linked_refresh_generation);
-        fs::write(path, &content).expect("rewrite linked side-panel bench file");
+        fs::write(path, &content).with_context(|| {
+            format!(
+                "failed to rewrite linked side-panel bench file {}",
+                path.display()
+            )
+        })?;
         let _ = jcode::side_panel::refresh_linked_page_content(&mut self.side_panel, None);
+        Ok(())
     }
 
     fn prewarm_side_panel(&self, width: u16, height: u16) -> bool {
@@ -558,104 +570,6 @@ impl Drop for BenchState {
             let _ = fs::remove_file(path);
         }
     }
-}
-
-fn make_bench_file(idx: usize, approx_len: usize) -> PathBuf {
-    let base_dir = std::env::temp_dir().join("jcode_tui_bench");
-    let _ = fs::create_dir_all(&base_dir);
-    let file_path = base_dir.join(format!("file_diff_{idx}.rs"));
-
-    let mut content = String::from("fn bench_file() {\n");
-    let repeated = make_text(approx_len);
-    for line_idx in 0..120 {
-        if line_idx == idx % 120 {
-            content.push_str(&format!(
-                "    let line_{line_idx} = \"target line {idx}\";\n"
-            ));
-        } else {
-            content.push_str(&format!("    let line_{line_idx} = \"{}\";\n", repeated));
-        }
-    }
-    content.push_str("}\n");
-
-    fs::write(&file_path, content).expect("write bench file");
-    file_path
-}
-
-fn make_bench_side_panel(
-    approx_len: usize,
-    source: SidePanelSource,
-    mermaid_count: usize,
-    bench_file_paths: &mut Vec<PathBuf>,
-) -> SidePanelSnapshot {
-    let content = make_side_panel_content(approx_len, mermaid_count.max(1));
-    let source_kind = match source {
-        SidePanelSource::Managed => SidePanelPageSource::Managed,
-        SidePanelSource::LinkedFile => SidePanelPageSource::LinkedFile,
-    };
-
-    let file_path = match source {
-        SidePanelSource::Managed => std::env::temp_dir()
-            .join("jcode_tui_bench")
-            .join("side_panel_managed.md"),
-        SidePanelSource::LinkedFile => std::env::temp_dir()
-            .join("jcode_tui_bench")
-            .join("side_panel_linked.md"),
-    };
-    let _ = fs::create_dir_all(
-        file_path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new(".")),
-    );
-    fs::write(&file_path, &content).expect("write side panel bench file");
-    bench_file_paths.push(file_path.clone());
-
-    SidePanelSnapshot {
-        focused_page_id: Some("bench_side_panel".to_string()),
-        pages: vec![SidePanelPage {
-            id: "bench_side_panel".to_string(),
-            title: format!(
-                "Bench Side Panel ({})",
-                match source {
-                    SidePanelSource::Managed => "managed",
-                    SidePanelSource::LinkedFile => "linked-file",
-                }
-            ),
-            file_path: file_path.display().to_string(),
-            format: SidePanelPageFormat::Markdown,
-            source: source_kind,
-            content,
-            updated_at_ms: 1,
-        }],
-    }
-}
-
-fn make_side_panel_content(approx_len: usize, mermaid_count: usize) -> String {
-    let mut out = String::new();
-    out.push_str("# Side Panel Benchmark\n\n");
-    for idx in 0..mermaid_count {
-        out.push_str(&format!("## Section {}\n\n", idx + 1));
-        out.push_str(&make_text(approx_len));
-        out.push_str("\n\n");
-        out.push_str("```mermaid\nflowchart TD\n");
-        out.push_str(&format!(
-            "    A{idx}[Start {idx}] --> B{idx}[Load content]\n    B{idx} --> C{idx}{{Scroll?}}\n    C{idx} -- Yes --> D{idx}[Render viewport]\n    C{idx} -- No --> E{idx}[Reuse cache]\n    D{idx} --> F{idx}[Done]\n    E{idx} --> F{idx}[Done]\n"
-        ));
-        out.push_str("```\n\n");
-        out.push_str("- scroll interaction\n- markdown wrapping\n- image viewport rendering\n\n");
-    }
-    out.push_str("## Final Notes\n\n");
-    for idx in 0..24 {
-        out.push_str(&format!("- Bench line {:02}: {}\n", idx + 1, make_text(64)));
-    }
-    out
-}
-
-fn make_side_panel_refresh_content(generation: usize) -> String {
-    format!(
-        "# Linked Refresh Benchmark\n\nGeneration: {generation}\n\n{}\n\n```mermaid\nflowchart TD\n    A[Refresh {generation}] --> B[Read file]\n    B --> C[Update snapshot]\n    C --> D[Reuse width cache]\n```\n",
-        make_text(360)
-    )
 }
 
 fn session_to_display_messages(session: &Session, max_messages: usize) -> Vec<DisplayMessage> {
@@ -1289,7 +1203,7 @@ fn main() -> Result<()> {
             args.mode,
             args.side_panel_source,
             args.side_panel_mermaids,
-        )
+        )?
     };
     let stream_text = make_text(args.assistant_len.max(args.stream_chunk));
 
@@ -1376,7 +1290,7 @@ fn main() -> Result<()> {
             && frame > 0
             && frame % args.linked_refresh_every == 0
         {
-            state.simulate_linked_refresh();
+            state.simulate_linked_refresh()?;
         }
         if matches!(args.mode, BenchMode::Streaming) {
             let chunk_len = ((frame + 1) * args.stream_chunk).min(stream_text.len());

@@ -43,19 +43,19 @@ pub mod linux {
                 if is_read && is_stdin {
                     return StdinState::Reading;
                 }
-                return StdinState::NotReading;
             }
         }
 
-        // Fallback: /proc/PID/wchan (no special permissions needed)
-        // In strict mode (child processes), skip this fallback since wchan
-        // can't distinguish which fd is being read - a process blocking on
-        // a stdout/stderr pipe would false-positive if fd 0 is also a pipe.
-        if !strict && let Ok(wchan) = std::fs::read_to_string(format!("/proc/{}/wchan", pid)) {
+        // Fallback: /proc/PID/wchan (no special permissions needed).
+        // This is less exact than /proc/PID/syscall, so pair it with an fd 0
+        // pipe/pty check. For child processes, check_process_tree also verifies
+        // the child shares the parent's stdin pipe before calling strict mode.
+        if let Ok(wchan) = std::fs::read_to_string(format!("/proc/{}/wchan", pid)) {
             let wchan = wchan.trim();
             if (wchan == "n_tty_read"
                 || wchan == "wait_woken"
                 || wchan == "pipe_read"
+                || wchan == "pipe_wait_readable"
                 || wchan == "unix_stream_read_generic")
                 && stdin_is_pipe_or_pty(pid)
             {

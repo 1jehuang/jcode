@@ -185,7 +185,7 @@ pub async fn refresh_tokens(tokens: &AntigravityTokens) -> Result<AntigravityTok
             .context("Failed to refresh Antigravity OAuth token")?;
 
         if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = crate::util::http_error_body(resp, "HTTP error").await;
             anyhow::bail!("Antigravity token refresh failed: {}", body.trim());
         }
 
@@ -384,7 +384,7 @@ async fn exchange_authorization_code(
         .context("Failed to exchange Antigravity authorization code")?;
 
     if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
+        let body = crate::util::http_error_body(resp, "HTTP error").await;
         anyhow::bail!("Antigravity token exchange failed: {}", body.trim());
     }
 
@@ -422,7 +422,7 @@ pub async fn fetch_email(access_token: &str) -> Result<String> {
         .context("Failed to fetch Antigravity Google profile")?;
 
     if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
+        let body = crate::util::http_error_body(resp, "HTTP error").await;
         anyhow::bail!(
             "Failed to fetch Antigravity Google profile: {}",
             body.trim()
@@ -468,7 +468,7 @@ pub async fn fetch_project_id(access_token: &str) -> Result<String> {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
+            let text = crate::util::http_error_body(resp, "HTTP error").await;
             errors.push(format!("{base_url}: HTTP {status} {}", text.trim()));
             continue;
         }

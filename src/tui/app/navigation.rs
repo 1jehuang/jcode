@@ -935,7 +935,7 @@ impl App {
                 return false;
             }
         }
-        true
+        false
     }
 
     pub(super) fn scroll_up(&mut self, amount: usize) {
@@ -952,6 +952,7 @@ impl App {
             self.scroll_offset = self.scroll_offset.saturating_sub(amount);
         }
         self.auto_scroll_paused = true;
+        self.maybe_queue_compacted_history_load();
     }
 
     pub(super) fn pause_chat_auto_scroll(&mut self) {

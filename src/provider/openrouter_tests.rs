@@ -302,6 +302,7 @@ fn make_provider() -> OpenRouterProvider {
         },
         supports_provider_features: true,
         supports_model_catalog: true,
+        static_models: Vec::new(),
         send_openrouter_headers: true,
         models_cache: Arc::new(RwLock::new(ModelsCache::default())),
         model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
@@ -310,6 +311,55 @@ fn make_provider() -> OpenRouterProvider {
         provider_pin: Arc::new(Mutex::new(None)),
         endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
     }
+}
+
+fn make_custom_compatible_provider() -> OpenRouterProvider {
+    OpenRouterProvider {
+        client: crate::provider::shared_http_client(),
+        model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
+        api_base: "https://compat.example.test/v1".to_string(),
+        auth: ProviderAuth::AuthorizationBearer {
+            token: "test".to_string(),
+            label: "OPENAI_COMPAT_API_KEY".to_string(),
+        },
+        supports_provider_features: false,
+        supports_model_catalog: true,
+        static_models: Vec::new(),
+        send_openrouter_headers: false,
+        models_cache: Arc::new(RwLock::new(ModelsCache::default())),
+        model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
+        endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
+        provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
+        provider_pin: Arc::new(Mutex::new(None)),
+        endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
+    }
+}
+
+#[test]
+fn custom_compatible_provider_preserves_claude_like_model_ids() {
+    let provider = make_custom_compatible_provider();
+
+    provider.set_model("claude-opus4.6-thinking").unwrap();
+
+    assert_eq!(provider.model(), "claude-opus4.6-thinking");
+}
+
+#[test]
+fn custom_compatible_provider_preserves_at_sign_model_ids() {
+    let provider = make_custom_compatible_provider();
+
+    provider.set_model("gpt-5.4@OpenAI").unwrap();
+
+    assert_eq!(provider.model(), "gpt-5.4@OpenAI");
+}
+
+#[test]
+fn openrouter_provider_normalizes_bare_pinned_model_ids() {
+    let provider = make_provider();
+
+    provider.set_model("gpt-5.4@OpenAI").unwrap();
+
+    assert_eq!(provider.model(), "openai/gpt-5.4");
 }
 
 #[test]

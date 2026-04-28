@@ -1,3 +1,11 @@
+#![allow(
+    unknown_lints,
+    clippy::collapsible_match,
+    clippy::manual_checked_ops,
+    clippy::unnecessary_sort_by,
+    clippy::useless_conversion
+)]
+
 pub mod agent;
 pub mod ambient;
 pub mod ambient_runner;

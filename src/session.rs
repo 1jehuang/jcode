@@ -19,8 +19,9 @@ pub use crash::{
     find_session_by_name_or_id, recover_crashed_sessions,
 };
 pub use render::{
-    RenderedImage, RenderedImageSource, RenderedMessage, has_rendered_images, render_images,
-    render_messages, render_messages_and_images, summarize_tool_calls,
+    RenderedCompactedHistoryInfo, RenderedImage, RenderedImageSource, RenderedMessage,
+    has_rendered_images, render_images, render_messages, render_messages_and_images,
+    render_messages_and_images_with_compacted_history, summarize_tool_calls,
 };
 
 /// Session exit status - why the session ended
@@ -811,6 +812,21 @@ impl Session {
             },
             "compaction": {
                 "present": self.compaction.is_some(),
+                "covers_up_to_turn": self
+                    .compaction
+                    .as_ref()
+                    .map(|c| c.covers_up_to_turn)
+                    .unwrap_or(0),
+                "original_turn_count": self
+                    .compaction
+                    .as_ref()
+                    .map(|c| c.original_turn_count)
+                    .unwrap_or(0),
+                "compacted_count": self
+                    .compaction
+                    .as_ref()
+                    .map(|c| c.compacted_count)
+                    .unwrap_or(0),
                 "json_bytes": compaction_json_bytes,
                 "summary_text_bytes": compaction_summary_bytes,
                 "encrypted_content_bytes": compaction_encrypted_bytes,

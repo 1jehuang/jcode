@@ -345,6 +345,7 @@ fn render_model_picker_text(app: &mut App, width: u16, height: u16) -> String {
         app.bump_display_messages_version();
     }
     app.open_model_picker();
+    wait_for_model_picker_load(app);
     let backend = ratatui::backend::TestBackend::new(width, height);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
     render_and_snap(app, &mut terminal)

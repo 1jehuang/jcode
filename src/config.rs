@@ -4,6 +4,7 @@
 //! Environment variables override config file settings.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -119,6 +120,15 @@ pub struct Config {
     /// Provider configuration
     pub provider: ProviderConfig,
 
+    /// Named provider profiles, keyed by profile name.
+    ///
+    /// Example:
+    /// [providers.my-gateway]
+    /// type = "openai-compatible"
+    /// base_url = "https://llm.example.com/v1"
+    /// api_key_env = "MY_GATEWAY_API_KEY"
+    pub providers: BTreeMap<String, NamedProviderConfig>,
+
     /// Agent-specific model defaults
     pub agents: AgentsConfig,
 
@@ -139,6 +149,77 @@ pub struct Config {
 
     /// Auto-judge configuration
     pub autojudge: AutoJudgeConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum NamedProviderType {
+    #[serde(alias = "openai-compatible", alias = "openai_compatible")]
+    #[default]
+    OpenAiCompatible,
+    OpenRouter,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NamedProviderAuth {
+    #[default]
+    Bearer,
+    Header,
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct NamedProviderModelConfig {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct NamedProviderConfig {
+    #[serde(rename = "type")]
+    pub provider_type: NamedProviderType,
+    pub base_url: String,
+    pub api: Option<String>,
+    pub auth: NamedProviderAuth,
+    pub auth_header: Option<String>,
+    pub api_key_env: Option<String>,
+    pub api_key: Option<String>,
+    pub env_file: Option<String>,
+    pub default_model: Option<String>,
+    pub requires_api_key: Option<bool>,
+    #[serde(default)]
+    pub provider_routing: bool,
+    #[serde(default)]
+    pub model_catalog: bool,
+    #[serde(default)]
+    pub allow_provider_pinning: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<NamedProviderModelConfig>,
+}
+
+impl Default for NamedProviderConfig {
+    fn default() -> Self {
+        Self {
+            provider_type: NamedProviderType::OpenAiCompatible,
+            base_url: String::new(),
+            api: None,
+            auth: NamedProviderAuth::Bearer,
+            auth_header: None,
+            api_key_env: None,
+            api_key: None,
+            env_file: None,
+            default_model: None,
+            requires_api_key: None,
+            provider_routing: false,
+            model_catalog: false,
+            allow_provider_pinning: false,
+            models: Vec::new(),
+        }
+    }
 }
 
 /// Remembered trust decisions for external auth sources managed by other tools.
@@ -596,7 +677,7 @@ impl Default for ProviderConfig {
         Self {
             default_model: None,
             default_provider: None,
-            openai_reasoning_effort: Some("high".to_string()),
+            openai_reasoning_effort: Some("low".to_string()),
             openai_transport: None,
             openai_service_tier: None,
             openai_native_compaction_mode: "auto".to_string(),

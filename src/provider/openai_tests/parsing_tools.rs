@@ -522,15 +522,13 @@ fn test_handle_openai_output_item_recovers_bright_pearl_fixture() {
 
     for event in events {
         match event {
-            StreamEvent::TextDelta(text) => {
-                if text.contains("Status: I detected pre-existing local edits") {
-                    saw_prefix = true;
-                }
+            StreamEvent::TextDelta(text)
+                if text.contains("Status: I detected pre-existing local edits") =>
+            {
+                saw_prefix = true;
             }
-            StreamEvent::ToolUseStart { name, .. } => {
-                if name == "batch" {
-                    saw_tool = true;
-                }
+            StreamEvent::ToolUseStart { name, .. } if name == "batch" => {
+                saw_tool = true;
             }
             StreamEvent::ToolInputDelta(delta) => {
                 let args: Value = serde_json::from_str(&delta).expect("valid tool args");

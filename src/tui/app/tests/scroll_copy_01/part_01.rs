@@ -360,6 +360,38 @@ fn test_streaming_repaint_does_not_leave_bracket_artifact() {
 }
 
 #[test]
+fn test_chat_mouse_scroll_requests_immediate_redraw_during_streaming() {
+    let _lock = scroll_render_test_lock();
+
+    let (mut app, mut terminal) = create_scroll_test_app(50, 12, 0, 36);
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+
+    let before = render_and_snap(&app, &mut terminal);
+    assert!(
+        crate::tui::ui::last_max_scroll() > 2,
+        "expected scrollable chat content"
+    );
+
+    let scroll_only = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(app.auto_scroll_paused, "scroll state should update immediately");
+    assert_ne!(app.scroll_offset, 0, "scroll offset should change immediately");
+    assert!(
+        !scroll_only,
+        "chat mouse wheel scrolls should request immediate redraw while streaming"
+    );
+
+    let after = render_and_snap(&app, &mut terminal);
+    assert_ne!(after, before, "immediate redraw should make scroll visible");
+}
+
+#[test]
 fn test_queued_file_activity_repaint_does_not_leave_trailing_digit_artifact() {
     let _lock = scroll_render_test_lock();
 

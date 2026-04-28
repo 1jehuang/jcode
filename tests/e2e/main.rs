@@ -13,3 +13,5 @@ mod provider_behavior;
 mod safety;
 mod session_flow;
 mod transport;
+#[cfg(windows)]
+mod windows_lifecycle;

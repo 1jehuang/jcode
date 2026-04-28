@@ -11,6 +11,13 @@ pub struct RenderedMessage {
     pub tool_data: Option<ToolCall>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenderedCompactedHistoryInfo {
+    pub total_messages: usize,
+    pub visible_messages: usize,
+    pub remaining_messages: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RenderedImageSource {
@@ -127,11 +134,61 @@ pub fn render_messages(session: &Session) -> Vec<RenderedMessage> {
 }
 
 pub fn render_messages_and_images(session: &Session) -> (Vec<RenderedMessage>, Vec<RenderedImage>) {
+    let (messages, images, _) = render_messages_and_images_with_compacted_history(session, 0);
+    (messages, images)
+}
+
+pub fn render_messages_and_images_with_compacted_history(
+    session: &Session,
+    compacted_history_visible: usize,
+) -> (
+    Vec<RenderedMessage>,
+    Vec<RenderedImage>,
+    Option<RenderedCompactedHistoryInfo>,
+) {
     let mut rendered: Vec<RenderedMessage> = Vec::new();
     let mut images: Vec<RenderedImage> = Vec::new();
     let mut tool_map: HashMap<String, ToolCall> = HashMap::new();
+    let compacted_count = session
+        .compaction
+        .as_ref()
+        .map(|state| state.compacted_count.min(session.messages.len()))
+        .unwrap_or(0);
+    let visible_compacted = compacted_history_visible.min(compacted_count);
+    let render_start_idx = compacted_count.saturating_sub(visible_compacted);
+    let remaining_compacted = render_start_idx;
+    let compacted_info = (compacted_count > 0).then_some(RenderedCompactedHistoryInfo {
+        total_messages: compacted_count,
+        visible_messages: visible_compacted,
+        remaining_messages: remaining_compacted,
+    });
 
-    for msg in &session.messages {
+    if compacted_count > 0 {
+        let content = if remaining_compacted == 0 {
+            format!(
+                "Earlier conversation compacted — showing all {} compacted historical messages. Redraw may be slower while this view is open.",
+                compacted_count
+            )
+        } else if visible_compacted == 0 {
+            format!(
+                "Earlier conversation compacted — {} historical messages hidden from the UI. Scroll to the top to load older history.",
+                compacted_count
+            )
+        } else {
+            format!(
+                "Earlier conversation compacted — {} older historical messages hidden. Showing {} of {} compacted messages. Scroll to the top to load more.",
+                remaining_compacted, visible_compacted, compacted_count
+            )
+        };
+        rendered.push(RenderedMessage {
+            role: "system".to_string(),
+            content,
+            tool_calls: Vec::new(),
+            tool_data: None,
+        });
+    }
+
+    for msg in session.messages.iter().skip(render_start_idx) {
         let role = match msg.display_role {
             Some(StoredDisplayRole::System) => "system",
             Some(StoredDisplayRole::BackgroundTask) => "background_task",
@@ -227,5 +284,5 @@ pub fn render_messages_and_images(session: &Session) -> (Vec<RenderedMessage>, V
         }
     }
 
-    (rendered, images)
+    (rendered, images, compacted_info)
 }

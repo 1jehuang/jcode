@@ -274,7 +274,7 @@ impl GeminiProvider {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = crate::util::http_error_body(resp, "HTTP error").await;
             anyhow::bail!(
                 "Gemini request {} failed (HTTP {}): {}",
                 method,
@@ -330,7 +330,7 @@ impl GeminiProvider {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = crate::util::http_error_body(resp, "HTTP error").await;
             anyhow::bail!(
                 "Gemini operation lookup failed (HTTP {}): {}",
                 status,

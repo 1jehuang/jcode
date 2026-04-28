@@ -51,11 +51,28 @@ set +e
 mapfile -d '' tracked_files < <(git ls-files -z)
 scan_status=1
 if [[ "${#tracked_files[@]}" -gt 0 ]]; then
-  rg -n --color=never -e "$secret_regex" \
-    --glob '!Cargo.lock' --glob '!*.snap' --glob '!*.png' --glob '!*.jpg' --glob '!*.jpeg' \
-    --glob '!*.gif' --glob '!*.svg' --glob '!*.pdf' --glob '!*.woff' --glob '!*.woff2' --glob '!*.ttf' \
-    "${tracked_files[@]}" > /tmp/jcode-secret-scan.txt
-  scan_status=$?
+  if command -v rg >/dev/null 2>&1; then
+    rg -n --color=never -e "$secret_regex" \
+      --glob '!Cargo.lock' --glob '!*.snap' --glob '!*.png' --glob '!*.jpg' --glob '!*.jpeg' \
+      --glob '!*.gif' --glob '!*.svg' --glob '!*.pdf' --glob '!*.woff' --glob '!*.woff2' --glob '!*.ttf' \
+      "${tracked_files[@]}" > /tmp/jcode-secret-scan.txt
+    scan_status=$?
+  else
+    scan_files=()
+    for tracked_file in "${tracked_files[@]}"; do
+      case "$tracked_file" in
+        Cargo.lock|*.snap|*.png|*.jpg|*.jpeg|*.gif|*.svg|*.pdf|*.woff|*.woff2|*.ttf)
+          ;;
+        *)
+          scan_files+=("$tracked_file")
+          ;;
+      esac
+    done
+    if [[ "${#scan_files[@]}" -gt 0 ]]; then
+      grep -I -n -E "$secret_regex" "${scan_files[@]}" > /tmp/jcode-secret-scan.txt
+      scan_status=$?
+    fi
+  fi
 fi
 set -e
 

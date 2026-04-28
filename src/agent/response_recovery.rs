@@ -192,7 +192,7 @@ impl Agent {
             ));
             if let Some(msg_id) = assistant_message_id {
                 self.session.remove_tool_use_blocks(msg_id);
-                let _ = self.session.save();
+                self.persist_session_best_effort("truncated tool-call repair");
             }
         }
     }

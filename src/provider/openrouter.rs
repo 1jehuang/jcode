@@ -236,6 +236,21 @@ fn configured_auth_header_mode() -> AuthHeaderMode {
     }
 }
 
+fn configured_auth_header_name() -> HeaderName {
+    let raw = std::env::var("JCODE_OPENROUTER_AUTH_HEADER_NAME")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "api-key".to_string());
+    HeaderName::from_bytes(raw.as_bytes()).unwrap_or_else(|_| {
+        crate::logging::warn(&format!(
+            "Ignoring invalid JCODE_OPENROUTER_AUTH_HEADER_NAME '{}'; using api-key",
+            raw
+        ));
+        HeaderName::from_static("api-key")
+    })
+}
+
 fn configured_dynamic_bearer_provider() -> Option<String> {
     std::env::var("JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER")
         .ok()
@@ -378,7 +393,7 @@ async fn fetch_models_from_api(
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = crate::util::http_error_body(response, "HTTP error").await;
         anyhow::bail!("Model catalog API error ({}): {}", status, body);
     }
 
@@ -437,6 +452,7 @@ pub struct OpenRouterProvider {
     auth: ProviderAuth,
     supports_provider_features: bool,
     supports_model_catalog: bool,
+    static_models: Vec<String>,
     send_openrouter_headers: bool,
     models_cache: Arc<RwLock<ModelsCache>>,
     model_catalog_refresh: Arc<Mutex<ModelCatalogRefreshState>>,
@@ -451,6 +467,88 @@ pub struct OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
+    pub(crate) fn supports_provider_routing_features(&self) -> bool {
+        self.supports_provider_features
+    }
+
+    pub fn new_named_openai_compatible(
+        profile_name: &str,
+        profile: &crate::config::NamedProviderConfig,
+    ) -> Result<Self> {
+        let api_base = normalize_api_base(&profile.base_url).ok_or_else(|| {
+            anyhow::anyhow!("Provider profile '{}' has invalid base_url", profile_name)
+        })?;
+        let key_label = profile
+            .api_key_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("inline api_key")
+            .to_string();
+        let key = profile
+            .api_key_env
+            .as_deref()
+            .and_then(|name| std::env::var(name).ok())
+            .or_else(|| profile.api_key.clone());
+        let auth = match profile.auth {
+            crate::config::NamedProviderAuth::None => ProviderAuth::None {
+                label: "local endpoint (no auth)".to_string(),
+            },
+            crate::config::NamedProviderAuth::Bearer => ProviderAuth::AuthorizationBearer {
+                token: key
+                    .ok_or_else(|| anyhow::anyhow!("{} not found in environment", key_label))?,
+                label: key_label,
+            },
+            crate::config::NamedProviderAuth::Header => ProviderAuth::HeaderValue {
+                header_name: HeaderName::from_bytes(
+                    profile
+                        .auth_header
+                        .as_deref()
+                        .unwrap_or("api-key")
+                        .as_bytes(),
+                )?,
+                value: key
+                    .ok_or_else(|| anyhow::anyhow!("{} not found in environment", key_label))?,
+                label: key_label,
+            },
+        };
+        let model = profile
+            .default_model
+            .clone()
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+        let static_models = profile
+            .models
+            .iter()
+            .map(|m| m.id.trim())
+            .filter(|id| !id.is_empty())
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        Ok(Self {
+            client: crate::provider::shared_http_client(),
+            model: Arc::new(RwLock::new(model)),
+            api_base,
+            auth,
+            supports_provider_features: matches!(
+                profile.provider_type,
+                crate::config::NamedProviderType::OpenRouter
+            ) || profile.provider_routing
+                || profile.allow_provider_pinning,
+            supports_model_catalog: profile.model_catalog
+                || matches!(
+                    profile.provider_type,
+                    crate::config::NamedProviderType::OpenRouter
+                ),
+            static_models,
+            send_openrouter_headers: false,
+            models_cache: Arc::new(RwLock::new(ModelsCache::default())),
+            model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
+            provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
+            provider_pin: Arc::new(Mutex::new(None)),
+            endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
+            endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
+        })
+    }
+
     /// Return true if this model is a Kimi K2/K2.5 variant (Moonshot).
     fn is_kimi_model(model: &str) -> bool {
         jcode_provider_openrouter::is_kimi_model(model)
@@ -482,6 +580,16 @@ impl OpenRouterProvider {
         let supports_model_catalog = model_catalog_enabled();
         let send_openrouter_headers = supports_provider_features;
         let auth = Self::resolve_auth()?;
+        let static_models = std::env::var("JCODE_OPENROUTER_STATIC_MODELS")
+            .ok()
+            .map(|raw| {
+                raw.lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
 
         if std::env::var_os("JCODE_OPENROUTER_CACHE_NAMESPACE").is_none()
             && let Some(profile) = autodetected_profile.as_ref()
@@ -514,6 +622,7 @@ impl OpenRouterProvider {
             auth,
             supports_provider_features,
             supports_model_catalog,
+            static_models,
             send_openrouter_headers,
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
@@ -673,6 +782,7 @@ impl OpenRouterProvider {
                 auth,
                 supports_provider_features: true,
                 supports_model_catalog: true,
+                static_models: Vec::new(),
                 send_openrouter_headers: true,
                 models_cache: Arc::new(RwLock::new(ModelsCache::default())),
                 model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
@@ -1100,7 +1210,7 @@ impl OpenRouterProvider {
                         label: key_name,
                     },
                     AuthHeaderMode::ApiKey => ProviderAuth::HeaderValue {
-                        header_name: HeaderName::from_static("api-key"),
+                        header_name: configured_auth_header_name(),
                         value: api_key,
                         label: key_name,
                     },
@@ -1126,7 +1236,7 @@ impl OpenRouterProvider {
                 label: key_name,
             },
             AuthHeaderMode::ApiKey => ProviderAuth::HeaderValue {
-                header_name: HeaderName::from_static("api-key"),
+                header_name: configured_auth_header_name(),
                 value: api_key,
                 label: key_name,
             },
@@ -1235,7 +1345,7 @@ impl OpenRouterProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = crate::util::http_error_body(response, "HTTP error").await;
             anyhow::bail!("Endpoints API error ({}): {}", status, body);
         }
 
@@ -1290,7 +1400,7 @@ impl OpenRouterProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = crate::util::http_error_body(response, "HTTP error").await;
             anyhow::bail!("Endpoints API error ({}): {}", status, body);
         }
 

@@ -3,7 +3,7 @@ use super::server_has_newer_binary;
 use crate::agent::Agent;
 use crate::bus::Bus;
 use crate::message::{ContentBlock, Role};
-use crate::protocol::{ServerEvent, SessionActivitySnapshot, encode_event};
+use crate::protocol::{HistoryMessage, ServerEvent, SessionActivitySnapshot, encode_event};
 use crate::provider::Provider;
 use crate::session::{Session, SessionStatus};
 use crate::transport::WriteHalf;
@@ -142,6 +142,84 @@ pub(super) async fn handle_get_history(
         history_start.elapsed().as_millis(),
     ));
     Ok(())
+}
+
+pub(super) async fn handle_get_compacted_history(
+    id: u64,
+    session_id: &str,
+    agent: &Arc<Mutex<Agent>>,
+    writer: &Arc<Mutex<WriteHalf>>,
+    visible_messages: usize,
+) -> Result<()> {
+    let started = Instant::now();
+    let (messages, images, compacted_info, source) = match agent.try_lock() {
+        Ok(agent_guard) => {
+            let (messages, images, info) = agent_guard
+                .get_history_and_rendered_images_with_compacted_history(visible_messages);
+            (messages, images, info, "live")
+        }
+        Err(_) => {
+            let session = crate::session::Session::load_for_remote_startup(session_id)
+                .or_else(|_| crate::session::Session::load_startup_stub(session_id))?;
+            let (rendered_messages, images, info) =
+                crate::session::render_messages_and_images_with_compacted_history(
+                    &session,
+                    visible_messages,
+                );
+            (
+                rendered_messages
+                    .into_iter()
+                    .map(rendered_to_history_message)
+                    .collect(),
+                images,
+                info,
+                "persisted",
+            )
+        }
+    };
+
+    let compacted_info = compacted_info.unwrap_or(crate::session::RenderedCompactedHistoryInfo {
+        total_messages: 0,
+        visible_messages: 0,
+        remaining_messages: 0,
+    });
+    crate::logging::info(&format!(
+        "[TIMING] get_compacted_history: session={}, source={}, requested={}, visible={}, remaining={}, messages={}, total={}ms",
+        session_id,
+        source,
+        visible_messages,
+        compacted_info.visible_messages,
+        compacted_info.remaining_messages,
+        messages.len(),
+        started.elapsed().as_millis(),
+    ));
+
+    write_event(
+        writer,
+        &ServerEvent::CompactedHistory {
+            id,
+            session_id: session_id.to_string(),
+            messages,
+            images,
+            compacted_total: compacted_info.total_messages,
+            compacted_visible: compacted_info.visible_messages,
+            compacted_remaining: compacted_info.remaining_messages,
+        },
+    )
+    .await
+}
+
+fn rendered_to_history_message(msg: crate::session::RenderedMessage) -> HistoryMessage {
+    HistoryMessage {
+        role: msg.role,
+        content: msg.content,
+        tool_calls: if msg.tool_calls.is_empty() {
+            None
+        } else {
+            Some(msg.tool_calls)
+        },
+        tool_data: msg.tool_data,
+    }
 }
 
 fn history_reload_recovery_snapshot(

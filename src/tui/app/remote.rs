@@ -64,6 +64,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     let mut needs_redraw = crate::tui::periodic_redraw_required(app);
     app.maybe_capture_runtime_memory_heartbeat();
     app.progress_mouse_scroll_animation();
+    needs_redraw |= dispatch_compacted_history_load(app, remote).await;
     if let Some(chunk) = app.stream_buffer.flush() {
         app.append_streaming_text(&chunk);
         needs_redraw = true;
@@ -71,6 +72,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
 
     needs_redraw |= app.refresh_todos_view_if_needed();
     needs_redraw |= app.refresh_side_panel_linked_content_if_due();
+    needs_redraw |= app.poll_model_picker_load();
     needs_redraw |= app.poll_session_picker_load();
 
     let _ = check_debug_command(app, remote).await;
@@ -302,6 +304,7 @@ pub(super) async fn handle_terminal_event(
                 }
             }
             needs_redraw = true;
+            needs_redraw |= dispatch_compacted_history_load(app, remote).await;
         }
         Some(Ok(Event::Paste(text))) => {
             app.note_client_interaction();
@@ -312,6 +315,7 @@ pub(super) async fn handle_terminal_event(
             app.note_client_interaction();
             handle_mouse_event(app, mouse);
             needs_redraw = true;
+            needs_redraw |= dispatch_compacted_history_load(app, remote).await;
         }
         Some(Ok(Event::Resize(_, _))) => {
             needs_redraw = app.should_redraw_after_resize();
@@ -319,6 +323,20 @@ pub(super) async fn handle_terminal_event(
         _ => {}
     }
     Ok(needs_redraw)
+}
+
+async fn dispatch_compacted_history_load(app: &mut App, remote: &mut RemoteConnection) -> bool {
+    let Some(visible_messages) = app.take_pending_compacted_history_load() else {
+        return false;
+    };
+    match remote.get_compacted_history(visible_messages).await {
+        Ok(_) => true,
+        Err(error) => {
+            app.restore_pending_compacted_history_load(visible_messages);
+            app.set_status_notice(format!("Failed to request older history: {}", error));
+            true
+        }
+    }
 }
 
 #[cfg(test)]

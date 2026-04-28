@@ -77,6 +77,11 @@ pub(crate) struct Args {
     #[arg(short, long, global = true)]
     pub(crate) model: Option<String>,
 
+    /// Named provider profile from [providers.<name>] in config.toml.
+    /// Implies --provider openai-compatible for OpenAI-compatible profiles.
+    #[arg(long, global = true)]
+    pub(crate) provider_profile: Option<String>,
+
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
 }

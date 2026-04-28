@@ -1,5 +1,35 @@
-use super::{AmbientConfig, Config, DiffDisplayMode, DisplayConfig};
+use super::{AmbientConfig, Config, DiffDisplayMode, DisplayConfig, ProviderConfig};
 use std::path::Path;
+
+#[test]
+fn test_openai_reasoning_effort_defaults_to_low() {
+    assert_eq!(
+        ProviderConfig::default().openai_reasoning_effort.as_deref(),
+        Some("low")
+    );
+}
+
+#[test]
+fn test_generated_default_config_uses_low_openai_reasoning_effort() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+
+    let path = Config::create_default_config_file().expect("create default config file");
+    let content = std::fs::read_to_string(path).expect("read default config file");
+
+    assert!(
+        content.contains("openai_reasoning_effort = \"low\""),
+        "generated default config should use low OpenAI reasoning effort"
+    );
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
 
 #[test]
 fn test_ambient_visible_defaults_to_true() {

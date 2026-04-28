@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(not(test))]
 use std::sync::OnceLock;
+use tokio::sync::RwLock;
 
 /// A skill definition from SKILL.md
 #[derive(Debug, Clone)]
@@ -33,6 +34,24 @@ pub struct SkillRegistry {
 }
 
 impl SkillRegistry {
+    /// Process-wide shared mutable registry used by both `skill_manage` and
+    /// direct slash invocation paths. Keeping a single registry prevents slash
+    /// commands from seeing a stale startup-only skill snapshot after reloads.
+    pub fn shared_registry() -> Arc<RwLock<Self>> {
+        #[cfg(test)]
+        {
+            Arc::new(RwLock::new(Self::load().unwrap_or_default()))
+        }
+
+        #[cfg(not(test))]
+        {
+            static SHARED: OnceLock<Arc<RwLock<SkillRegistry>>> = OnceLock::new();
+            SHARED
+                .get_or_init(|| Arc::new(RwLock::new(SkillRegistry::load().unwrap_or_default())))
+                .clone()
+        }
+    }
+
     /// Load a process-wide shared immutable snapshot of skills for startup paths
     /// that only need read access.
     pub fn shared_snapshot() -> Arc<Self> {
@@ -43,10 +62,11 @@ impl SkillRegistry {
 
         #[cfg(not(test))]
         {
-            static SHARED: OnceLock<Arc<SkillRegistry>> = OnceLock::new();
-            SHARED
-                .get_or_init(|| Arc::new(SkillRegistry::load().unwrap_or_default()))
-                .clone()
+            if let Ok(skills) = Self::shared_registry().try_read() {
+                Arc::new(skills.clone())
+            } else {
+                Arc::new(SkillRegistry::load().unwrap_or_default())
+            }
         }
     }
 
@@ -180,6 +200,12 @@ impl SkillRegistry {
 
     /// Load skills from all standard locations
     pub fn load() -> Result<Self> {
+        Self::load_for_working_dir(None)
+    }
+
+    /// Load skills from all standard locations, with project-local locations
+    /// resolved against an optional active session working directory.
+    pub fn load_for_working_dir(working_dir: Option<&Path>) -> Result<Self> {
         // First-run import from Claude Code / Codex CLI
         Self::import_from_external();
 
@@ -193,19 +219,30 @@ impl SkillRegistry {
             }
         }
 
+        registry.load_project_local_dirs(working_dir)?;
+
+        Ok(registry)
+    }
+
+    fn project_local_dir(working_dir: Option<&Path>, name: &str) -> PathBuf {
+        let path = Path::new(name).join("skills");
+        working_dir.map(|dir| dir.join(&path)).unwrap_or(path)
+    }
+
+    fn load_project_local_dirs(&mut self, working_dir: Option<&Path>) -> Result<()> {
         // Load from ./.jcode/skills/ (project-local jcode skills)
-        let local_jcode = Path::new(".jcode").join("skills");
+        let local_jcode = Self::project_local_dir(working_dir, ".jcode");
         if local_jcode.exists() {
-            registry.load_from_dir(&local_jcode)?;
+            self.load_from_dir(&local_jcode)?;
         }
 
         // Fallback: ./.claude/skills/ (project-local Claude skills for compatibility)
-        let local_claude = Path::new(".claude").join("skills");
+        let local_claude = Self::project_local_dir(working_dir, ".claude");
         if local_claude.exists() {
-            registry.load_from_dir(&local_claude)?;
+            self.load_from_dir(&local_claude)?;
         }
 
-        Ok(registry)
+        Ok(())
     }
 
     /// Load skills from a directory
@@ -311,6 +348,12 @@ impl SkillRegistry {
 
     /// Reload all skills from all locations
     pub fn reload_all(&mut self) -> Result<usize> {
+        self.reload_all_for_working_dir(None)
+    }
+
+    /// Reload all skills, resolving project-local locations against an optional
+    /// active session working directory.
+    pub fn reload_all_for_working_dir(&mut self, working_dir: Option<&Path>) -> Result<usize> {
         self.skills.clear();
 
         let mut count = 0;
@@ -324,13 +367,13 @@ impl SkillRegistry {
         }
 
         // Load from ./.jcode/skills/ (project-local jcode skills)
-        let local_jcode = Path::new(".jcode").join("skills");
+        let local_jcode = Self::project_local_dir(working_dir, ".jcode");
         if local_jcode.exists() {
             count += self.load_from_dir_count(&local_jcode)?;
         }
 
         // Fallback: ./.claude/skills/ (project-local Claude skills for compatibility)
-        let local_claude = Path::new(".claude").join("skills");
+        let local_claude = Self::project_local_dir(working_dir, ".claude");
         if local_claude.exists() {
             count += self.load_from_dir_count(&local_claude)?;
         }
@@ -455,6 +498,16 @@ mod tests {
         }
     }
 
+    fn write_test_skill(root: &Path, scope: &str, name: &str) {
+        let dir = root.join(scope).join("skills").join(name);
+        std::fs::create_dir_all(&dir).expect("create skill dir");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Test skill {name}\n---\n\nUse {name}.\n"),
+        )
+        .expect("write skill");
+    }
+
     #[test]
     fn skill_as_memory_entry_formats_invocation_and_prompt() {
         let skill = test_skill(
@@ -473,5 +526,33 @@ mod tests {
         assert!(entry.content.contains("/firefox-browser"));
         assert!(entry.content.contains("# Skill: firefox-browser"));
         assert_eq!(entry.source.as_deref(), Some("skill_registry"));
+    }
+
+    #[test]
+    fn load_for_working_dir_reads_project_local_jcode_skills() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_test_skill(temp.path(), ".jcode", "wd-only");
+
+        let registry = SkillRegistry::load_for_working_dir(Some(temp.path())).expect("load skills");
+
+        let skill = registry
+            .get("wd-only")
+            .expect("working-dir local skill should load");
+        assert_eq!(skill.description, "Test skill wd-only");
+        assert!(skill.path.starts_with(temp.path()));
+    }
+
+    #[test]
+    fn reload_all_for_working_dir_replaces_stale_snapshot_with_session_local_skills() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_test_skill(temp.path(), ".jcode", "session-skill");
+
+        let mut registry = SkillRegistry::default();
+        let count = registry
+            .reload_all_for_working_dir(Some(temp.path()))
+            .expect("reload skills");
+
+        assert!(count >= 1);
+        assert!(registry.get("session-skill").is_some());
     }
 }

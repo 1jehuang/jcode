@@ -62,6 +62,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     }
     needs_redraw |= app.refresh_todos_view_if_needed();
     needs_redraw |= app.refresh_side_panel_linked_content_if_due();
+    needs_redraw |= app.poll_model_picker_load();
     needs_redraw |= app.poll_session_picker_load();
     needs_redraw |= app.poll_compaction_completion();
     needs_redraw |= super::commands::poll_local_transfer_prepare(app);
@@ -133,6 +134,10 @@ pub(super) fn handle_bus_event(
         }
         Ok(BusEvent::LoginCompleted(login)) => {
             app.handle_login_completed(login);
+            true
+        }
+        Ok(BusEvent::ModelsUpdated) => {
+            app.invalidate_model_picker_cache();
             true
         }
         Ok(BusEvent::UpdateStatus(status)) => {

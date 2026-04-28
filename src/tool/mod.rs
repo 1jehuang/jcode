@@ -44,8 +44,6 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(not(test))]
-use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
 const TOOL_INTENT_DESCRIPTION: &str = concat!(
@@ -217,18 +215,7 @@ impl Clone for Registry {
 
 impl Registry {
     fn shared_skills_registry() -> Arc<RwLock<SkillRegistry>> {
-        #[cfg(test)]
-        {
-            Arc::new(RwLock::new(SkillRegistry::load().unwrap_or_default()))
-        }
-
-        #[cfg(not(test))]
-        {
-            static SHARED: OnceLock<Arc<RwLock<SkillRegistry>>> = OnceLock::new();
-            SHARED
-                .get_or_init(|| Arc::new(RwLock::new(SkillRegistry::load().unwrap_or_default())))
-                .clone()
-        }
+        SkillRegistry::shared_registry()
     }
 
     fn insert_tool<T>(tools: &mut HashMap<String, Arc<dyn Tool>>, name: &str, tool: T)

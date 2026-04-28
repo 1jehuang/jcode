@@ -1028,6 +1028,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
                 app.provider_session_id = None;
                 app.session.provider_session_id = None;
                 app.upstream_provider = None;
+                app.invalidate_model_picker_cache();
                 let active_model = app.provider.model();
                 app.update_context_limit_for_model(&active_model);
                 app.session.model = Some(active_model.clone());
@@ -1294,10 +1295,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
 }
 
 pub(super) fn is_refresh_model_list_command(trimmed: &str) -> bool {
-    matches!(
-        trimmed,
-        "/refresh-model-list" | "/refresh-models" | "/refresh models" | "/refresh model list"
-    )
+    trimmed == "/refresh-model-list"
 }
 
 pub(super) fn format_model_refresh_summary(

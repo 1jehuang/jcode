@@ -210,24 +210,29 @@ fn test_model_picker_preserves_recommendation_priority_order() {
         .expect("gpt-5.3-codex should be present");
 
     assert!(
-        gpt55 < gpt54,
-        "gpt-5.5 should rank ahead of gpt-5.4, got {:?}",
+        gpt55 < claude_opus,
+        "gpt-5.5 should rank ahead of claude-opus-4-7, got {:?}",
         model_names
     );
     assert!(
-        gpt54 < gpt54_pro,
-        "gpt-5.4 should rank ahead of gpt-5.4-pro, got {:?}",
+        claude_opus < gpt54,
+        "claude-opus-4-7 should rank ahead of unrecommended gpt-5.4, got {:?}",
         model_names
     );
     assert!(
-        gpt54_pro < claude_opus,
-        "gpt-5.4-pro should rank ahead of claude-opus-4-7, got {:?}",
+        claude_opus < gpt54_pro,
+        "claude-opus-4-7 should rank ahead of unrecommended gpt-5.4-pro, got {:?}",
         model_names
     );
+    assert!(picker.entries[gpt55].recommended, "gpt-5.5 should be recommended");
     assert!(
-        claude_opus < spark,
-        "claude-opus-4-7 should rank ahead of non-recommended gpt-5.3-codex-spark, got {:?}",
-        model_names
+        picker.entries[claude_opus].recommended,
+        "claude-opus-4-7 should be recommended"
+    );
+    assert!(!picker.entries[gpt54].recommended, "gpt-5.4 should not be recommended");
+    assert!(
+        !picker.entries[gpt54_pro].recommended,
+        "gpt-5.4-pro should not be recommended"
     );
     assert!(
         !picker.entries[spark].recommended,

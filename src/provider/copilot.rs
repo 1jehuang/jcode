@@ -730,7 +730,7 @@ impl CopilotApiProvider {
             }
 
             if !status.is_success() {
-                let body_text = resp.text().await.unwrap_or_default();
+                let body_text = crate::util::http_error_body(resp, "HTTP error").await;
                 let error_str =
                     format!("Copilot API error (HTTP {}): {}", status, body_text).to_lowercase();
                 if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {

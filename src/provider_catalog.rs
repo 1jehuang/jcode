@@ -84,6 +84,10 @@ pub fn resolve_openai_compatible_profile(
 }
 
 pub fn apply_openai_compatible_profile_env(profile: Option<OpenAiCompatibleProfile>) {
+    if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_some() {
+        return;
+    }
+
     let vars = [
         "JCODE_OPENROUTER_API_BASE",
         "JCODE_OPENROUTER_API_KEY_NAME",
@@ -92,10 +96,16 @@ pub fn apply_openai_compatible_profile_env(profile: Option<OpenAiCompatibleProfi
         "JCODE_OPENROUTER_PROVIDER_FEATURES",
         "JCODE_OPENROUTER_ALLOW_NO_AUTH",
         "JCODE_OPENROUTER_MODEL_CATALOG",
+        "JCODE_OPENROUTER_MODEL",
+        "JCODE_OPENROUTER_STATIC_MODELS",
         "JCODE_OPENROUTER_AUTH_HEADER",
+        "JCODE_OPENROUTER_AUTH_HEADER_NAME",
         "JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER",
         "JCODE_OPENROUTER_PROVIDER",
         "JCODE_OPENROUTER_NO_FALLBACK",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
     ];
 
     for var in vars {
@@ -115,6 +125,175 @@ pub fn apply_openai_compatible_profile_env(profile: Option<OpenAiCompatibleProfi
             crate::env::set_var("JCODE_OPENROUTER_ALLOW_NO_AUTH", "1");
         }
     }
+}
+
+fn inline_key_env_name(profile_name: &str) -> String {
+    let suffix = profile_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("JCODE_PROVIDER_{}_API_KEY", suffix)
+}
+
+pub fn apply_named_provider_profile_env(profile_name: &str) -> anyhow::Result<String> {
+    let config = crate::config::config();
+    apply_named_provider_profile_env_from_config(profile_name, config)
+}
+
+pub fn apply_named_provider_profile_env_from_config(
+    profile_name: &str,
+    config: &crate::config::Config,
+) -> anyhow::Result<String> {
+    let Some(profile) = config.providers.get(profile_name) else {
+        anyhow::bail!(
+            "Unknown provider profile '{}'. Add [providers.{}] to config.toml.",
+            profile_name,
+            profile_name
+        );
+    };
+
+    let api_base = normalize_api_base(&profile.base_url).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Provider profile '{}' has invalid base_url '{}'. Use https://... or http://localhost.",
+            profile_name,
+            profile.base_url
+        )
+    })?;
+
+    crate::env::remove_var("JCODE_PROVIDER_PROFILE_ACTIVE");
+    crate::env::remove_var("JCODE_PROVIDER_PROFILE_NAME");
+    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
+    apply_openai_compatible_profile_env(None);
+    crate::env::set_var("JCODE_OPENROUTER_API_BASE", &api_base);
+    crate::env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", profile_name);
+    crate::env::set_var("JCODE_NAMED_PROVIDER_PROFILE", profile_name);
+
+    let provider_features = matches!(
+        profile.provider_type,
+        crate::config::NamedProviderType::OpenRouter
+    ) || profile.provider_routing
+        || profile.allow_provider_pinning;
+    crate::env::set_var(
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        if provider_features { "1" } else { "0" },
+    );
+    crate::env::set_var(
+        "JCODE_OPENROUTER_MODEL_CATALOG",
+        if profile.model_catalog
+            || matches!(
+                profile.provider_type,
+                crate::config::NamedProviderType::OpenRouter
+            )
+        {
+            "1"
+        } else {
+            "0"
+        },
+    );
+
+    if let Some(model) = profile
+        .default_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        crate::env::set_var("JCODE_OPENROUTER_MODEL", model);
+    }
+
+    let static_models = profile
+        .models
+        .iter()
+        .map(|model| model.id.trim())
+        .filter(|id| !id.is_empty())
+        .collect::<Vec<_>>();
+    if !static_models.is_empty() {
+        crate::env::set_var("JCODE_OPENROUTER_STATIC_MODELS", static_models.join("\n"));
+    }
+
+    match profile.auth {
+        crate::config::NamedProviderAuth::None => {
+            crate::env::set_var("JCODE_OPENROUTER_ALLOW_NO_AUTH", "1");
+        }
+        crate::config::NamedProviderAuth::Bearer | crate::config::NamedProviderAuth::Header => {
+            let key_env = profile
+                .api_key_env
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(ToString::to_string)
+                .or_else(|| {
+                    profile.api_key.as_deref().map(str::trim).filter(|v| !v.is_empty()).map(|key| {
+                        let env_name = inline_key_env_name(profile_name);
+                        crate::env::set_var(&env_name, key);
+                        crate::logging::warn(&format!(
+                            "Provider profile '{}' stores an inline API key in config.toml. Prefer api_key_env to avoid accidental leaks.",
+                            profile_name
+                        ));
+                        env_name
+                    })
+                });
+
+            if let Some(key_env) = key_env {
+                if !is_safe_env_key_name(&key_env) {
+                    anyhow::bail!(
+                        "Provider profile '{}' has invalid api_key_env '{}'.",
+                        profile_name,
+                        key_env
+                    );
+                }
+                crate::env::set_var("JCODE_OPENROUTER_API_KEY_NAME", &key_env);
+            }
+
+            if let Some(env_file) = profile
+                .env_file
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                if !is_safe_env_file_name(env_file) {
+                    anyhow::bail!(
+                        "Provider profile '{}' has invalid env_file '{}'.",
+                        profile_name,
+                        env_file
+                    );
+                }
+                crate::env::set_var("JCODE_OPENROUTER_ENV_FILE", env_file);
+            }
+
+            let requires_key = profile
+                .requires_api_key
+                .unwrap_or(!api_base_uses_localhost(&api_base));
+            if !requires_key {
+                crate::env::set_var("JCODE_OPENROUTER_ALLOW_NO_AUTH", "1");
+            }
+
+            match profile.auth {
+                crate::config::NamedProviderAuth::Bearer => {
+                    crate::env::set_var("JCODE_OPENROUTER_AUTH_HEADER", "bearer");
+                }
+                crate::config::NamedProviderAuth::Header => {
+                    crate::env::set_var("JCODE_OPENROUTER_AUTH_HEADER", "api-key");
+                    if let Some(header) = profile
+                        .auth_header
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                    {
+                        crate::env::set_var("JCODE_OPENROUTER_AUTH_HEADER_NAME", header);
+                    }
+                }
+                crate::config::NamedProviderAuth::None => {}
+            }
+        }
+    }
+
+    Ok(profile_name.to_string())
 }
 
 pub fn openrouter_like_api_key_sources() -> Vec<(String, String)> {
