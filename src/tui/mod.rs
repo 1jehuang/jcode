@@ -389,11 +389,143 @@ pub fn cache_ttl_for_provider(provider: &str) -> Option<u64> {
         "anthropic" | "claude" => Some(300),
         "openai" => Some(300),
         "openrouter" => Some(300),
+        "jcode subscription" => Some(300),
+        "gemini" => Some(300),
         "copilot" => None,
         "cursor" => None,
         "antigravity" => None,
         _ => None,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KvCacheProblemKind {
+    /// The provider explicitly reported new cache creation on a turn where we expected
+    /// an already-warm cache to be read instead.
+    UnexpectedCacheCreation,
+    /// The provider explicitly reported zero cached input tokens on a turn where this
+    /// provider family should report cached tokens for a warm, cacheable conversation.
+    ExpectedCacheReadMissing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KvCacheProblem {
+    pub kind: KvCacheProblemKind,
+    pub affected_tokens: Option<u64>,
+}
+
+impl KvCacheProblem {
+    pub(crate) fn log_reason(self) -> &'static str {
+        match self.kind {
+            KvCacheProblemKind::UnexpectedCacheCreation => "unexpected_cache_creation",
+            KvCacheProblemKind::ExpectedCacheReadMissing => "expected_cache_read_missing",
+        }
+    }
+}
+
+fn normalized_provider_matches(provider: &str, needle: &str) -> bool {
+    provider
+        .trim()
+        .to_ascii_lowercase()
+        .contains(&needle.to_ascii_lowercase())
+}
+
+fn provider_stack_contains(provider: &str, upstream_provider: Option<&str>, needle: &str) -> bool {
+    normalized_provider_matches(provider, needle)
+        || upstream_provider
+            .map(|upstream| normalized_provider_matches(upstream, needle))
+            .unwrap_or(false)
+}
+
+fn supports_reliable_zero_cache_read_warning(
+    provider: &str,
+    upstream_provider: Option<&str>,
+) -> bool {
+    if provider_stack_contains(provider, upstream_provider, "openai")
+        || provider_stack_contains(provider, upstream_provider, "anthropic")
+        || provider_stack_contains(provider, upstream_provider, "claude")
+        || provider_stack_contains(provider, upstream_provider, "gemini")
+        || provider_stack_contains(provider, upstream_provider, "google")
+    {
+        return true;
+    }
+
+    // OpenRouter/Jcode-subscription routes can only be treated as reliable for zero-read
+    // warnings once the upstream provider identifies a known cache-reporting family.
+    // A bare OpenRouter route with cached_tokens=0 is not enough: some upstreams simply
+    // do not implement prompt caching, and warning on those would make the UI untrustworthy.
+    false
+}
+
+fn min_cacheable_input_tokens(provider: &str, upstream_provider: Option<&str>) -> u64 {
+    if provider_stack_contains(provider, upstream_provider, "gemini")
+        || provider_stack_contains(provider, upstream_provider, "google")
+    {
+        // Be conservative for Gemini-style implicit caching. Several Gemini models have
+        // higher minimums than OpenAI/Anthropic; a higher UI threshold avoids warning on
+        // prompts that might legitimately be below the provider's cacheable size.
+        4_096
+    } else {
+        1_024
+    }
+}
+
+fn cache_expected_warm(cache_ttl: Option<&CacheTtlInfo>) -> bool {
+    cache_ttl.map(|info| !info.is_cold).unwrap_or(false)
+}
+
+/// Detect a KV/prompt-cache problem that is reliable enough to surface in the UI.
+///
+/// This intentionally does **not** warn merely because a cache-hit metric is absent. A warning
+/// requires all of the following:
+/// - a multi-turn conversation where cache reuse should be possible;
+/// - a prior completed turn still within the provider's expected cache TTL;
+/// - explicit provider telemetry showing either a cache rewrite without a read, or an explicit
+///   zero cache-read count from a known cache-reporting provider family;
+/// - enough input tokens to be cacheable for read-only providers.
+pub(crate) fn detect_kv_cache_problem(
+    provider: &str,
+    upstream_provider: Option<&str>,
+    user_turn_count: usize,
+    input_tokens: u64,
+    cache_read: Option<u64>,
+    cache_creation: Option<u64>,
+    cache_ttl: Option<&CacheTtlInfo>,
+) -> Option<KvCacheProblem> {
+    if user_turn_count <= 2 || !cache_expected_warm(cache_ttl) {
+        return None;
+    }
+
+    let cache_read_tokens = cache_read.unwrap_or(0);
+    let cache_creation_tokens = cache_creation.unwrap_or(0);
+
+    // Strongest signal: the provider explicitly says it created cache but read none.
+    if cache_creation_tokens > 0 && cache_read_tokens == 0 {
+        return Some(KvCacheProblem {
+            kind: KvCacheProblemKind::UnexpectedCacheCreation,
+            affected_tokens: Some(cache_creation_tokens),
+        });
+    }
+
+    // Read-only telemetry providers (OpenAI/Gemini and known OpenRouter upstreams) do not expose
+    // cache creation tokens. For those, an explicit zero read on a warm, cacheable conversation is
+    // the reliable signal. Absence of the metric is ignored.
+    if cache_read != Some(0) {
+        return None;
+    }
+
+    if !supports_reliable_zero_cache_read_warning(provider, upstream_provider) {
+        return None;
+    }
+
+    if input_tokens < min_cacheable_input_tokens(provider, upstream_provider) {
+        return None;
+    }
+
+    Some(KvCacheProblem {
+        kind: KvCacheProblemKind::ExpectedCacheReadMissing,
+        affected_tokens: Some(input_tokens),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1000,18 +1132,6 @@ pub(crate) fn periodic_redraw_required(state: &dyn TuiState) -> bool {
         .unwrap_or(false)
 }
 
-/// Returns true when cache behavior is unexpected for a multi-turn conversation.
-///
-/// Anthropic conversation caching is usually warmed on turn 2 (cache creation without reads),
-/// so misses are only unexpected from turn 3 onward.
-pub(crate) fn is_unexpected_cache_miss(
-    user_turn_count: usize,
-    cache_read: Option<u64>,
-    cache_creation: Option<u64>,
-) -> bool {
-    user_turn_count > 2 && cache_creation.unwrap_or(0) > 0 && cache_read.unwrap_or(0) == 0
-}
-
 pub(crate) fn subscribe_metadata() -> (Option<String>, Option<bool>) {
     let working_dir = std::env::current_dir().ok();
     let working_dir_str = working_dir.as_ref().map(|p| p.display().to_string());
@@ -1125,31 +1245,167 @@ pub fn prewarm_focused_side_panel(
 #[cfg(test)]
 mod tests {
     use super::{
-        connection_type_icon, is_unexpected_cache_miss, keyboard_enhancement_flags,
-        scheduled_notification_text,
+        CacheTtlInfo, KvCacheProblemKind, connection_type_icon, detect_kv_cache_problem,
+        keyboard_enhancement_flags, scheduled_notification_text,
     };
     use crate::ambient::AmbientStatus;
     use crate::tui::info_widget::AmbientWidgetData;
     use crossterm::event::KeyboardEnhancementFlags;
 
-    #[test]
-    fn cache_creation_only_on_turn_two_is_expected() {
-        assert!(!is_unexpected_cache_miss(2, Some(0), Some(12_000)));
+    fn warm_cache_ttl() -> CacheTtlInfo {
+        CacheTtlInfo {
+            remaining_secs: 240,
+            ttl_secs: 300,
+            is_cold: false,
+            cached_tokens: Some(12_000),
+        }
+    }
+
+    fn cold_cache_ttl() -> CacheTtlInfo {
+        CacheTtlInfo {
+            remaining_secs: 0,
+            ttl_secs: 300,
+            is_cold: true,
+            cached_tokens: Some(12_000),
+        }
     }
 
     #[test]
-    fn cache_creation_only_on_later_turns_is_unexpected() {
-        assert!(is_unexpected_cache_miss(3, Some(0), Some(12_000)));
+    fn anthropic_cache_creation_on_turn_two_is_warmup_not_problem() {
+        let ttl = warm_cache_ttl();
+        assert_eq!(
+            detect_kv_cache_problem(
+                "anthropic",
+                None,
+                2,
+                12_000,
+                Some(0),
+                Some(12_000),
+                Some(&ttl)
+            ),
+            None
+        );
     }
 
     #[test]
-    fn cache_reads_disable_miss_warning() {
-        assert!(!is_unexpected_cache_miss(3, Some(8_000), Some(12_000)));
+    fn anthropic_cache_creation_without_read_on_warm_later_turn_is_problem() {
+        let ttl = warm_cache_ttl();
+        let problem = detect_kv_cache_problem(
+            "anthropic",
+            None,
+            3,
+            12_000,
+            Some(0),
+            Some(12_000),
+            Some(&ttl),
+        )
+        .expect("expected explicit cache creation without read to warn");
+        assert_eq!(problem.kind, KvCacheProblemKind::UnexpectedCacheCreation);
+        assert_eq!(problem.affected_tokens, Some(12_000));
     }
 
     #[test]
-    fn no_cache_creation_is_not_a_miss() {
-        assert!(!is_unexpected_cache_miss(3, Some(0), Some(0)));
+    fn cache_read_suppresses_cache_creation_warning() {
+        let ttl = warm_cache_ttl();
+        assert_eq!(
+            detect_kv_cache_problem(
+                "anthropic",
+                None,
+                3,
+                12_000,
+                Some(8_000),
+                Some(4_000),
+                Some(&ttl)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn cold_cache_suppresses_cache_warning() {
+        let ttl = cold_cache_ttl();
+        assert_eq!(
+            detect_kv_cache_problem(
+                "anthropic",
+                None,
+                3,
+                12_000,
+                Some(0),
+                Some(12_000),
+                Some(&ttl)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn openai_explicit_zero_cache_read_on_warm_cacheable_turn_is_problem() {
+        let ttl = warm_cache_ttl();
+        let problem = detect_kv_cache_problem("openai", None, 3, 8_000, Some(0), None, Some(&ttl))
+            .expect("expected explicit zero cached tokens to warn");
+        assert_eq!(problem.kind, KvCacheProblemKind::ExpectedCacheReadMissing);
+        assert_eq!(problem.affected_tokens, Some(8_000));
+    }
+
+    #[test]
+    fn missing_cache_read_metric_is_not_a_warning() {
+        let ttl = warm_cache_ttl();
+        assert_eq!(
+            detect_kv_cache_problem("openai", None, 3, 8_000, None, None, Some(&ttl)),
+            None
+        );
+    }
+
+    #[test]
+    fn read_only_warning_requires_cacheable_input_size() {
+        let ttl = warm_cache_ttl();
+        assert_eq!(
+            detect_kv_cache_problem("openai", None, 3, 800, Some(0), None, Some(&ttl)),
+            None
+        );
+    }
+
+    #[test]
+    fn openrouter_zero_cache_read_requires_known_cache_capable_upstream() {
+        let ttl = warm_cache_ttl();
+        assert_eq!(
+            detect_kv_cache_problem("openrouter", None, 3, 8_000, Some(0), None, Some(&ttl)),
+            None
+        );
+
+        let problem = detect_kv_cache_problem(
+            "openrouter",
+            Some("OpenAI"),
+            3,
+            8_000,
+            Some(0),
+            None,
+            Some(&ttl),
+        )
+        .expect("known OpenAI upstream should make explicit zero read actionable");
+        assert_eq!(problem.kind, KvCacheProblemKind::ExpectedCacheReadMissing);
+    }
+
+    #[test]
+    fn unsupported_provider_zero_cache_read_does_not_warn_even_if_metric_present() {
+        let ttl = warm_cache_ttl();
+        assert_eq!(
+            detect_kv_cache_problem("copilot", None, 3, 8_000, Some(0), None, Some(&ttl)),
+            None
+        );
+    }
+
+    #[test]
+    fn gemini_zero_cache_read_uses_conservative_minimum() {
+        let ttl = warm_cache_ttl();
+        assert_eq!(
+            detect_kv_cache_problem("gemini", None, 3, 3_000, Some(0), None, Some(&ttl)),
+            None
+        );
+
+        let problem = detect_kv_cache_problem("gemini", None, 3, 5_000, Some(0), None, Some(&ttl))
+            .expect("large Gemini prompt with explicit zero cached content should warn");
+        assert_eq!(problem.kind, KvCacheProblemKind::ExpectedCacheReadMissing);
     }
 
     #[test]

@@ -1206,6 +1206,12 @@ impl crate::tui::TuiState for App {
     fn cache_ttl_status(&self) -> Option<crate::tui::CacheTtlInfo> {
         let last_completed = self.last_api_completed?;
         let provider = self.provider_name();
+        let model = self.provider_model();
+        let last_provider = self.last_api_completed_provider.as_deref()?;
+        let last_model = self.last_api_completed_model.as_deref()?;
+        if last_provider != provider || last_model != model {
+            return None;
+        }
         let ttl_secs = crate::tui::cache_ttl_for_provider(provider)?;
         let elapsed = last_completed.elapsed().as_secs();
         let remaining = ttl_secs.saturating_sub(elapsed);

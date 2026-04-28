@@ -3,11 +3,12 @@ use super::tools_ui::{get_tool_summary, summarize_batch_running_tools_compact};
 use super::visual_debug::{self, FrameCaptureBuilder};
 use super::{
     ProcessingStatus, TuiState, accent_color, ai_color, animated_tool_color, asap_color, dim_color,
-    is_unexpected_cache_miss, pending_color, queued_color, rainbow_prompt_color, user_color,
+    pending_color, queued_color, rainbow_prompt_color, user_color,
 };
 use crate::message::ConnectionPhase;
 use crate::tui::app;
 use crate::tui::color_support::rgb;
+use crate::tui::detect_kv_cache_problem;
 use crate::tui::info_widget::occasional_status_tip;
 use crate::tui::layout_utils;
 use ratatui::{prelude::*, widgets::Paragraph};
@@ -399,8 +400,19 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
     let stale_secs = app.time_since_activity().map(|d| d.as_secs_f32());
     let (cache_read, cache_creation) = app.streaming_cache_tokens();
     let user_turn_count = app.display_user_message_count();
-    let unexpected_cache_miss =
-        is_unexpected_cache_miss(user_turn_count, cache_read, cache_creation);
+    let (streaming_input_tokens, _) = app.streaming_tokens();
+    let provider_name = app.provider_name();
+    let upstream_provider = app.upstream_provider();
+    let cache_ttl = app.cache_ttl_status();
+    let kv_cache_problem = detect_kv_cache_problem(
+        &provider_name,
+        upstream_provider.as_deref(),
+        user_turn_count,
+        streaming_input_tokens,
+        cache_read,
+        cache_creation,
+        cache_ttl.as_ref(),
+    );
 
     let queued_suffix = if pending_count > 0 {
         format!(" · +{} queued", pending_count)
@@ -523,12 +535,14 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                     );
                 }
                 append_transport_context(&mut status_text, app);
-                if unexpected_cache_miss {
-                    let miss_tokens = cache_creation.unwrap_or(0);
+                if let Some(problem) = kv_cache_problem {
+                    let miss_tokens = problem.affected_tokens.unwrap_or(0);
                     let miss_str = if miss_tokens >= 1000 {
                         format!("{}k", miss_tokens / 1000)
-                    } else {
+                    } else if miss_tokens > 0 {
                         format!("{}", miss_tokens)
+                    } else {
+                        "kv".to_string()
                     };
                     status_text = format!("⚠ {} cache miss · {}", miss_str, status_text);
                 }
@@ -536,7 +550,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                     Span::styled(spinner, Style::default().fg(ai_color())),
                     Span::styled(
                         format!(" {}", status_text),
-                        Style::default().fg(if unexpected_cache_miss {
+                        Style::default().fg(if kv_cache_problem.is_some() {
                             rgb(255, 193, 7)
                         } else {
                             dim_color()
@@ -637,12 +651,14 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                     Style::default().fg(dim_color()),
                 ));
 
-                if unexpected_cache_miss {
-                    let miss_tokens = cache_creation.unwrap_or(0);
+                if let Some(problem) = kv_cache_problem {
+                    let miss_tokens = problem.affected_tokens.unwrap_or(0);
                     let miss_str = if miss_tokens >= 1000 {
                         format!("{}k", miss_tokens / 1000)
-                    } else {
+                    } else if miss_tokens > 0 {
                         format!("{}", miss_tokens)
+                    } else {
+                        "kv".to_string()
                     };
                     spans.push(Span::styled(
                         format!(" · ⚠ {} cache miss", miss_str),

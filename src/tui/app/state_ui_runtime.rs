@@ -1,5 +1,5 @@
 use super::*;
-use crate::tui::{is_unexpected_cache_miss, ui};
+use crate::tui::{TuiState, detect_kv_cache_problem, ui};
 
 impl App {
     pub(super) fn current_skills_snapshot(&self) -> std::sync::Arc<crate::skill::SkillRegistry> {
@@ -89,6 +89,8 @@ impl App {
         self.log_cache_miss_if_unexpected();
 
         self.last_api_completed = Some(Instant::now());
+        self.last_api_completed_provider = Some(self.provider.name().to_string());
+        self.last_api_completed_model = Some(self.provider.model());
         self.last_turn_input_tokens = {
             let input = self.streaming_input_tokens;
             if input > 0 { Some(input) } else { None }
@@ -114,17 +116,22 @@ impl App {
             .filter(|m| m.role == "user")
             .count();
 
-        // Unexpected cache miss: on turn 3+, we should no longer be in cache warm-up
-        let is_unexpected = is_unexpected_cache_miss(
+        let provider = self.provider.name().to_string();
+        let upstream_provider = self.upstream_provider();
+        let cache_ttl = self.cache_ttl_status();
+        let cache_problem = detect_kv_cache_problem(
+            &provider,
+            upstream_provider,
             user_turn_count,
+            self.streaming_input_tokens,
             self.streaming_cache_read_tokens,
             self.streaming_cache_creation_tokens,
+            cache_ttl.as_ref(),
         );
 
-        if is_unexpected {
+        if let Some(problem) = cache_problem {
             // Collect context for debugging
             let session_id = self.session_id().to_string();
-            let provider = self.provider.name().to_string();
             let model = self.provider.model();
             let input_tokens = self.streaming_input_tokens;
             let output_tokens = self.streaming_output_tokens;
@@ -148,18 +155,21 @@ impl App {
             }
 
             crate::logging::warn(&format!(
-                "CACHE_MISS: unexpected cache miss on turn {} | \
+                "CACHE_MISS: {} on turn {} | \
                  cache_creation={} cache_read={} | \
-                 input={} output={} | \
-                 session={} provider={} model={} | \
+                 input={} output={} affected={:?} | \
+                 session={} provider={} upstream={:?} model={} | \
                  msgs: user={} assistant={} tool={} other={}",
+                problem.log_reason(),
                 user_turn_count,
                 cache_creation_dbg,
                 cache_read_dbg,
                 input_tokens,
                 output_tokens,
+                problem.affected_tokens,
                 session_id,
                 provider,
+                upstream_provider,
                 model,
                 user_msgs,
                 assistant_msgs,
