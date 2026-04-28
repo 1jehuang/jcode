@@ -163,7 +163,7 @@ jobs:
         shell: bash
         run: |
           python3 .github/scripts/run_with_timeout.py 900 \
-            cargo test --target ${{ matrix.target }} --lib --bins
+            cargo test --target ${{ matrix.target }} --lib --bins -- --test-threads=1
 
       - name: Run provider matrix tests
         shell: bash
