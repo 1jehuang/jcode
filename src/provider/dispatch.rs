@@ -79,6 +79,9 @@ impl MultiProvider {
                 }
             }
             ActiveProvider::OpenAI => {
+                if self.openai_provider().is_none() {
+                    self.try_hot_init_openai_from_disk();
+                }
                 if let Some(openai) = self.openai_provider() {
                     openai
                         .complete(messages, tools, system, resume_session_id)
@@ -206,6 +209,9 @@ impl MultiProvider {
                 }
             }
             ActiveProvider::OpenAI => {
+                if self.openai_provider().is_none() {
+                    self.try_hot_init_openai_from_disk();
+                }
                 if let Some(openai) = self.openai_provider() {
                     openai
                         .complete_split(

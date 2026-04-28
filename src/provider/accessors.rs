@@ -60,4 +60,27 @@ impl MultiProvider {
     pub(super) fn has_claude_runtime(&self) -> bool {
         self.anthropic_provider().is_some() || self.claude_provider().is_some()
     }
+
+    /// Lazy hot-init: if `self.openai` is currently `None` but valid OpenAI
+    /// credentials exist on disk (or via `OPENAI_API_KEY`), attach a fresh
+    /// `OpenAIProvider`. Used by credential-check paths in `set_model` and
+    /// `complete*` so the dispatcher recovers when credentials become valid
+    /// after startup without an in-process `LoginCompleted` event reaching
+    /// this server (e.g. the user ran `jcode login --provider openai` from a
+    /// separate shell).
+    pub(super) fn try_hot_init_openai_from_disk(&self) {
+        if self.openai_provider().is_some() {
+            return;
+        }
+        crate::auth::AuthStatus::invalidate_cache();
+        let Ok(credentials) = crate::auth::codex::load_credentials() else {
+            return;
+        };
+        crate::logging::info("Hot-initialized OpenAI provider lazily on demand");
+        *self
+            .openai
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(Arc::new(openai::OpenAIProvider::new(credentials)));
+    }
 }
