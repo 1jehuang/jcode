@@ -436,8 +436,14 @@ async fn handle_background_output_line(
 fn build_shell_command(cmd_str: &str) -> TokioCommand {
     #[cfg(windows)]
     {
+        // CREATE_NO_WINDOW (0x08000000): cmd.exe is a console-subsystem program;
+        // when the server runs detached (no inherited console), Windows would
+        // otherwise allocate a fresh console window for every Bash tool call,
+        // which flashes up as a stray PowerShell/cmd window. Suppressing the
+        // window has no effect on stdio (we pipe stdout/stderr above).
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
         let mut cmd = TokioCommand::new("cmd.exe");
-        cmd.arg("/C").arg(cmd_str);
+        cmd.arg("/C").arg(cmd_str).creation_flags(CREATE_NO_WINDOW);
         cmd
     }
     #[cfg(not(windows))]
