@@ -68,10 +68,23 @@ pub(crate) struct SingleSessionApp {
     pub(crate) model_picker: ModelPickerState,
     pub(crate) stdin_response: Option<StdinResponseState>,
     queued_drafts: Vec<(String, Vec<(String, String)>)>,
-    selection_anchor_line: Option<usize>,
-    selection_focus_line: Option<usize>,
+    selection_anchor: Option<SelectionPoint>,
+    selection_focus: Option<SelectionPoint>,
     input_undo_stack: Vec<(String, usize)>,
     session_handle: Option<DesktopSessionHandle>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SelectionPoint {
+    pub(crate) line: usize,
+    pub(crate) column: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SelectionLineSegment {
+    pub(crate) line: usize,
+    pub(crate) start_column: usize,
+    pub(crate) end_column: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -334,8 +347,8 @@ impl SingleSessionApp {
             model_picker: ModelPickerState::default(),
             stdin_response: None,
             queued_drafts: Vec::new(),
-            selection_anchor_line: None,
-            selection_focus_line: None,
+            selection_anchor: None,
+            selection_focus: None,
             input_undo_stack: Vec::new(),
             session_handle: None,
         }
@@ -1016,35 +1029,89 @@ impl SingleSessionApp {
         Some((message, images))
     }
 
-    pub(crate) fn begin_selection(&mut self, line: usize) {
-        self.selection_anchor_line = Some(line);
-        self.selection_focus_line = Some(line);
+    pub(crate) fn begin_selection(&mut self, point: SelectionPoint) {
+        self.selection_anchor = Some(point);
+        self.selection_focus = Some(point);
     }
 
-    pub(crate) fn update_selection(&mut self, line: usize) {
-        if self.selection_anchor_line.is_some() {
-            self.selection_focus_line = Some(line);
+    pub(crate) fn update_selection(&mut self, point: SelectionPoint) {
+        if self.selection_anchor.is_some() {
+            self.selection_focus = Some(point);
         }
     }
 
     pub(crate) fn clear_selection(&mut self) {
-        self.selection_anchor_line = None;
-        self.selection_focus_line = None;
+        self.selection_anchor = None;
+        self.selection_focus = None;
     }
 
-    pub(crate) fn selection_range(&self) -> Option<std::ops::RangeInclusive<usize>> {
-        let anchor = self.selection_anchor_line?;
-        let focus = self.selection_focus_line?;
-        Some(anchor.min(focus)..=anchor.max(focus))
+    pub(crate) fn selection_points(&self) -> Option<(SelectionPoint, SelectionPoint)> {
+        let anchor = self.selection_anchor?;
+        let focus = self.selection_focus?;
+        if selection_point_cmp(anchor, focus).is_gt() {
+            Some((focus, anchor))
+        } else {
+            Some((anchor, focus))
+        }
+    }
+
+    pub(crate) fn selection_segments(&self, lines: &[String]) -> Vec<SelectionLineSegment> {
+        let Some((start, end)) = self.selection_points() else {
+            return Vec::new();
+        };
+        if start == end || start.line >= lines.len() {
+            return Vec::new();
+        }
+
+        let end_line = end.line.min(lines.len().saturating_sub(1));
+        let mut segments = Vec::new();
+        for line_index in start.line..=end_line {
+            let line_len = lines[line_index].chars().count();
+            let start_column = if line_index == start.line {
+                start.column.min(line_len)
+            } else {
+                0
+            };
+            let end_column = if line_index == end_line {
+                end.column.min(line_len)
+            } else {
+                line_len
+            };
+            if start_column != end_column || (start.line != end.line && line_len == 0) {
+                segments.push(SelectionLineSegment {
+                    line: line_index,
+                    start_column,
+                    end_column,
+                });
+            }
+        }
+        segments
     }
 
     pub(crate) fn selected_text_from_lines(&self, lines: &[String]) -> Option<String> {
-        let selected = self
-            .selection_range()?
-            .filter_map(|index| lines.get(index))
-            .cloned()
-            .collect::<Vec<_>>();
-        (!selected.is_empty()).then(|| selected.join("\n"))
+        let (start, end) = self.selection_points()?;
+        if start == end || start.line >= lines.len() {
+            return None;
+        }
+        let end_line = end.line.min(lines.len().saturating_sub(1));
+        let mut selected = Vec::new();
+        for line_index in start.line..=end_line {
+            let line = &lines[line_index];
+            let line_len = line.chars().count();
+            let start_column = if line_index == start.line {
+                start.column.min(line_len)
+            } else {
+                0
+            };
+            let end_column = if line_index == end_line {
+                end.column.min(line_len)
+            } else {
+                line_len
+            };
+            selected.push(slice_by_char_columns(line, start_column, end_column));
+        }
+        let text = selected.join("\n");
+        (!text.is_empty()).then_some(text)
     }
 
     fn record_user_submit(&mut self, message: &str) {
@@ -1222,6 +1289,26 @@ fn stdin_response_lines(state: &StdinResponseState) -> Vec<String> {
         "Enter send · Ctrl+Enter send · Shift+Enter newline · Ctrl+V paste · Ctrl+U clear · Ctrl+C cancel"
             .to_string(),
     ]
+}
+
+fn selection_point_cmp(left: SelectionPoint, right: SelectionPoint) -> std::cmp::Ordering {
+    left.line
+        .cmp(&right.line)
+        .then_with(|| left.column.cmp(&right.column))
+}
+
+fn slice_by_char_columns(line: &str, start_column: usize, end_column: usize) -> String {
+    let start = byte_index_at_char_column(line, start_column);
+    let end = byte_index_at_char_column(line, end_column.max(start_column));
+    line.get(start..end).unwrap_or_default().to_string()
+}
+
+fn byte_index_at_char_column(line: &str, column: usize) -> usize {
+    line.char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(line.len()))
+        .nth(column)
+        .unwrap_or(line.len())
 }
 
 fn model_picker_lines(picker: &ModelPickerState) -> Vec<String> {

@@ -513,19 +513,48 @@ fn single_session_paste_text_preserves_spaces() {
 }
 
 #[test]
-fn single_session_line_selection_extracts_visible_text() {
+fn single_session_character_selection_extracts_visible_text() {
     let mut app = SingleSessionApp::new(None);
     app.messages.push(SingleSessionMessage::user("first"));
     app.messages
         .push(SingleSessionMessage::assistant("second\nthird"));
     let lines = app.body_lines();
 
-    app.begin_selection(1);
-    app.update_selection(2);
+    app.begin_selection(SelectionPoint { line: 2, column: 1 });
+    app.update_selection(SelectionPoint { line: 3, column: 2 });
 
     assert_eq!(
         app.selected_text_from_lines(&lines),
-        Some(lines[1..=2].join("\n"))
+        Some(format!("{}\n{}", &lines[2][1..], &lines[3][..2]))
+    );
+    assert_eq!(
+        app.selection_segments(&lines),
+        vec![
+            SelectionLineSegment {
+                line: 2,
+                start_column: 1,
+                end_column: lines[2].chars().count()
+            },
+            SelectionLineSegment {
+                line: 3,
+                start_column: 0,
+                end_column: 2
+            }
+        ]
+    );
+}
+
+#[test]
+fn single_session_character_selection_handles_reverse_unicode_selection() {
+    let mut app = SingleSessionApp::new(None);
+    let lines = vec!["hello 🦀 world".to_string()];
+
+    app.begin_selection(SelectionPoint { line: 0, column: 9 });
+    app.update_selection(SelectionPoint { line: 0, column: 6 });
+
+    assert_eq!(
+        app.selected_text_from_lines(&lines),
+        Some("🦀 w".to_string())
     );
 }
 
@@ -537,6 +566,37 @@ fn single_session_body_line_at_y_maps_transcript_region() {
         Some(0)
     );
     assert_eq!(single_session_body_line_at_y(size, 1.0), None);
+}
+
+#[test]
+fn single_session_body_point_at_position_maps_x_to_character_column() {
+    let size = PhysicalSize::new(800, 600);
+    let lines = vec!["abcdef".to_string()];
+    let y = PANEL_BODY_TOP_PADDING + 1.0;
+    let char_width = single_session_body_char_width();
+
+    assert_eq!(
+        single_session_body_point_at_position(size, PANEL_TITLE_LEFT_PADDING - 4.0, y, &lines),
+        Some(SelectionPoint { line: 0, column: 0 })
+    );
+    assert_eq!(
+        single_session_body_point_at_position(
+            size,
+            PANEL_TITLE_LEFT_PADDING + char_width * 2.4,
+            y,
+            &lines
+        ),
+        Some(SelectionPoint { line: 0, column: 2 })
+    );
+    assert_eq!(
+        single_session_body_point_at_position(
+            size,
+            PANEL_TITLE_LEFT_PADDING + char_width * 99.0,
+            y,
+            &lines
+        ),
+        Some(SelectionPoint { line: 0, column: 6 })
+    );
 }
 
 #[test]

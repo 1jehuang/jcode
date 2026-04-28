@@ -16,7 +16,8 @@ use glyphon::{
 };
 use render_helpers::*;
 use single_session::{
-    SINGLE_SESSION_FONT_FAMILY, SingleSessionApp, single_session_surface, single_session_typography,
+    SINGLE_SESSION_FONT_FAMILY, SelectionPoint, SingleSessionApp, single_session_surface,
+    single_session_typography,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{CompositeAlphaMode, PresentMode, SurfaceError, TextureUsages};
@@ -206,6 +207,7 @@ async fn run() -> Result<()> {
                     cursor_position = position;
                     if selecting_body
                         && app.update_single_session_selection_at(
+                            cursor_position.x as f32,
                             cursor_position.y as f32,
                             window.inner_size(),
                         )
@@ -220,6 +222,7 @@ async fn run() -> Result<()> {
                 } => match state {
                     ElementState::Pressed => {
                         selecting_body = app.begin_single_session_selection_at(
+                            cursor_position.x as f32,
                             cursor_position.y as f32,
                             window.inner_size(),
                         );
@@ -229,6 +232,11 @@ async fn run() -> Result<()> {
                     }
                     ElementState::Released => {
                         if selecting_body {
+                            app.update_single_session_selection_at(
+                                cursor_position.x as f32,
+                                cursor_position.y as f32,
+                                window.inner_size(),
+                            );
                             selecting_body = false;
                             let selected = app.selected_single_session_text(window.inner_size());
                             if let Some(text) = selected {
@@ -971,28 +979,32 @@ impl DesktopApp {
         }
     }
 
-    fn begin_single_session_selection_at(&mut self, y: f32, size: PhysicalSize<u32>) -> bool {
-        let Some(line) = single_session_body_line_at_y(size, y) else {
-            return false;
-        };
+    fn begin_single_session_selection_at(
+        &mut self,
+        x: f32,
+        y: f32,
+        size: PhysicalSize<u32>,
+    ) -> bool {
         if let Self::SingleSession(app) = self {
             let lines = single_session_visible_body(app, size);
-            if line < lines.len() {
-                app.begin_selection(line);
+            if let Some(point) = single_session_body_point_at_position(size, x, y, &lines) {
+                app.begin_selection(point);
                 return true;
             }
         }
         false
     }
 
-    fn update_single_session_selection_at(&mut self, y: f32, size: PhysicalSize<u32>) -> bool {
-        let Some(line) = single_session_body_line_at_y(size, y) else {
-            return false;
-        };
+    fn update_single_session_selection_at(
+        &mut self,
+        x: f32,
+        y: f32,
+        size: PhysicalSize<u32>,
+    ) -> bool {
         if let Self::SingleSession(app) = self {
             let lines = single_session_visible_body(app, size);
-            if line < lines.len() {
-                app.update_selection(line);
+            if let Some(point) = single_session_body_point_at_position(size, x, y, &lines) {
+                app.update_selection(point);
                 return true;
             }
         }
@@ -1581,23 +1593,21 @@ fn push_single_session_selection(
     app: &SingleSessionApp,
     size: PhysicalSize<u32>,
 ) {
-    let Some(range) = app.selection_range() else {
-        return;
-    };
     let typography = single_session_typography();
     let line_height = typography.body_size * typography.body_line_height;
-    let content_width = (size.width as f32 - PANEL_TITLE_LEFT_PADDING * 2.0).max(1.0);
-    let visible_lines = single_session_visible_body(app, size).len();
-    for line in range {
-        if line >= visible_lines {
-            continue;
-        }
+    let char_width = single_session_body_char_width();
+    let visible_lines = single_session_visible_body(app, size);
+    for segment in app.selection_segments(&visible_lines) {
+        let selected_columns = segment
+            .end_column
+            .saturating_sub(segment.start_column)
+            .max(1);
         push_rect(
             vertices,
             Rect {
-                x: PANEL_TITLE_LEFT_PADDING - 4.0,
-                y: PANEL_BODY_TOP_PADDING + line as f32 * line_height,
-                width: content_width + 8.0,
+                x: PANEL_TITLE_LEFT_PADDING - 2.0 + segment.start_column as f32 * char_width,
+                y: PANEL_BODY_TOP_PADDING + segment.line as f32 * line_height,
+                width: selected_columns as f32 * char_width + 4.0,
                 height: line_height,
             },
             SELECTION_HIGHLIGHT_COLOR,
@@ -1812,6 +1822,34 @@ fn single_session_body_line_at_y(size: PhysicalSize<u32>, y: f32) -> Option<usiz
         return None;
     }
     Some(((y - PANEL_BODY_TOP_PADDING) / line_height).floor() as usize)
+}
+
+fn single_session_body_point_at_position(
+    size: PhysicalSize<u32>,
+    x: f32,
+    y: f32,
+    lines: &[String],
+) -> Option<SelectionPoint> {
+    let line = single_session_body_line_at_y(size, y)?;
+    let text = lines.get(line)?;
+    Some(SelectionPoint {
+        line,
+        column: single_session_body_column_at_x(x, text),
+    })
+}
+
+fn single_session_body_column_at_x(x: f32, line: &str) -> usize {
+    let char_count = line.chars().count();
+    if x <= PANEL_TITLE_LEFT_PADDING {
+        return 0;
+    }
+    let raw = ((x - PANEL_TITLE_LEFT_PADDING) / single_session_body_char_width()).round();
+    raw.max(0.0).min(char_count as f32) as usize
+}
+
+fn single_session_body_char_width() -> f32 {
+    let typography = single_session_typography();
+    typography.body_size * 0.58
 }
 
 fn single_session_text_buffer(
