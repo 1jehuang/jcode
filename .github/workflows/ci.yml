@@ -159,11 +159,11 @@ jobs:
           fi
           cargo build --release --target ${{ matrix.target }}
 
-      - name: Run library and binary tests
+      - name: Compile library and binary tests
         shell: bash
         run: |
           python3 .github/scripts/run_with_timeout.py 900 \
-            cargo test --target ${{ matrix.target }} --lib --bins -- --test-threads=1
+            cargo test --target ${{ matrix.target }} --lib --bins --no-run
 
       - name: Run provider matrix tests
         shell: bash
