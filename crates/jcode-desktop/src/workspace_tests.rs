@@ -369,6 +369,23 @@ fn attach_image_adds_to_workspace_insert_draft() {
 }
 
 #[test]
+fn clear_attached_images_shortcut_clears_workspace_images() {
+    let mut workspace = Workspace::from_session_cards(vec![session_card("a", "alpha")]);
+    workspace.handle_key(KeyInput::Character("i".to_string()));
+    workspace.attach_image("image/png".to_string(), "abc123".to_string());
+
+    assert_eq!(
+        workspace.handle_key(KeyInput::ClearAttachedImages),
+        KeyOutcome::Redraw
+    );
+    assert!(workspace.pending_images.is_empty());
+    assert_eq!(
+        workspace.handle_key(KeyInput::ClearAttachedImages),
+        KeyOutcome::None
+    );
+}
+
+#[test]
 fn workspace_image_draft_submits_images_and_clears_pending_images() {
     let mut workspace = Workspace::from_session_cards(vec![session_card("a", "alpha")]);
     workspace.handle_key(KeyInput::Character("i".to_string()));

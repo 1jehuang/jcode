@@ -443,9 +443,8 @@ async fn run() -> Result<()> {
                             window.request_redraw();
                         }
                         KeyOutcome::PasteText => {
-                            match clipboard_text() {
-                                Ok(text) => app.paste_text(&text),
-                                Err(error) => apply_single_session_error(&mut app, error),
+                            if let Err(error) = paste_clipboard_into_app(&mut app) {
+                                apply_single_session_error(&mut app, error);
                             }
                             window.set_title(&app.status_title());
                             window.request_redraw();
@@ -969,6 +968,13 @@ impl DesktopApp {
         }
     }
 
+    fn accepts_clipboard_image_paste(&self) -> bool {
+        match self {
+            Self::SingleSession(app) => app.accepts_clipboard_image_paste(),
+            Self::Workspace(workspace) => workspace.mode == InputMode::Insert,
+        }
+    }
+
     fn paste_text(&mut self, text: &str) {
         match self {
             Self::SingleSession(app) => app.paste_text(text),
@@ -1139,6 +1145,13 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("v") => {
             KeyInput::PasteText
         }
+        Key::Character(text)
+            if modifiers.control_key()
+                && modifiers.shift_key()
+                && text.eq_ignore_ascii_case("i") =>
+        {
+            KeyInput::ClearAttachedImages
+        }
         Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("i") => {
             KeyInput::AttachClipboardImage
         }
@@ -1203,6 +1216,27 @@ fn copy_text_to_clipboard(text: &str, app: &mut DesktopApp) {
         Err(error) => app.apply_session_event(session_launch::DesktopSessionEvent::Error(format!(
             "failed to copy latest response: {error}"
         ))),
+    }
+}
+
+fn paste_clipboard_into_app(app: &mut DesktopApp) -> Result<()> {
+    match clipboard_text() {
+        Ok(text) => {
+            app.paste_text(&text);
+            Ok(())
+        }
+        Err(text_error) if app.accepts_clipboard_image_paste() => {
+            match clipboard_image_png_base64() {
+                Ok((media_type, base64_data)) => {
+                    app.attach_clipboard_image(media_type, base64_data);
+                    Ok(())
+                }
+                Err(image_error) => Err(anyhow::anyhow!(
+                    "clipboard contains neither pasteable text nor image: text: {text_error}; image: {image_error}"
+                )),
+            }
+        }
+        Err(error) => Err(error),
     }
 }
 

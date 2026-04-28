@@ -485,6 +485,38 @@ fn single_session_attached_image_is_sent_with_next_prompt() {
 }
 
 #[test]
+fn single_session_clear_attached_images_shortcut_clears_pending_images() {
+    let mut app = SingleSessionApp::new(None);
+    app.attach_image("image/png".to_string(), "abc123".to_string());
+
+    assert_eq!(
+        app.handle_key(KeyInput::ClearAttachedImages),
+        KeyOutcome::Redraw
+    );
+    assert!(app.pending_images.is_empty());
+    assert_eq!(app.status.as_deref(), Some("cleared image attachments"));
+    assert_eq!(
+        app.handle_key(KeyInput::ClearAttachedImages),
+        KeyOutcome::None
+    );
+}
+
+#[test]
+fn clipboard_image_paste_is_disabled_while_answering_stdin() {
+    let mut app = SingleSessionApp::new(None);
+    assert!(app.accepts_clipboard_image_paste());
+
+    app.apply_session_event(session_launch::DesktopSessionEvent::StdinRequest {
+        request_id: "stdin-1".to_string(),
+        prompt: "Password:".to_string(),
+        is_password: true,
+        tool_call_id: "tool-1".to_string(),
+    });
+
+    assert!(!app.accepts_clipboard_image_paste());
+}
+
+#[test]
 fn single_session_ctrl_enter_queues_while_processing_then_dequeues() {
     let mut app = SingleSessionApp::new(None);
     app.is_processing = true;

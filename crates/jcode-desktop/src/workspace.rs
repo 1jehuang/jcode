@@ -86,6 +86,7 @@ pub enum KeyInput {
     ModelPickerMove(i32),
     CycleModel(i8),
     AttachClipboardImage,
+    ClearAttachedImages,
     PasteText,
     QueueDraft,
     SubmitDraft,
@@ -443,6 +444,14 @@ impl Workspace {
         true
     }
 
+    pub fn clear_attached_images(&mut self) -> bool {
+        if self.pending_images.is_empty() {
+            return false;
+        }
+        self.pending_images.clear();
+        true
+    }
+
     fn handle_navigation_key(&mut self, key: KeyInput) -> KeyOutcome {
         match key {
             KeyInput::SpawnPanel => {
@@ -470,6 +479,7 @@ impl Workspace {
             | KeyInput::OpenModelPicker
             | KeyInput::ModelPickerMove(_)
             | KeyInput::AttachClipboardImage
+            | KeyInput::ClearAttachedImages
             | KeyInput::PasteText
             | KeyInput::QueueDraft => {
                 return KeyOutcome::None;
@@ -567,6 +577,13 @@ impl Workspace {
                 KeyOutcome::Redraw
             }
             KeyInput::AttachClipboardImage => KeyOutcome::AttachClipboardImage,
+            KeyInput::ClearAttachedImages => {
+                if self.clear_attached_images() {
+                    KeyOutcome::Redraw
+                } else {
+                    KeyOutcome::None
+                }
+            }
             KeyInput::DeleteNextChar
             | KeyInput::DeleteNextWord
             | KeyInput::MoveCursorLeft
@@ -841,6 +858,9 @@ impl Workspace {
                 "esc nav mode".to_string(),
                 "ctrl r refresh sessions".to_string(),
                 "ctrl semicolon new panel".to_string(),
+                "ctrl v paste text or image".to_string(),
+                "ctrl i attach clipboard image".to_string(),
+                "ctrl shift i clear images".to_string(),
                 "ctrl slash help".to_string(),
             ],
         }

@@ -508,6 +508,13 @@ impl SingleSessionApp {
             KeyInput::ModelPickerMove(_) => KeyOutcome::None,
             KeyInput::CycleModel(direction) => KeyOutcome::CycleModel(direction),
             KeyInput::AttachClipboardImage => KeyOutcome::AttachClipboardImage,
+            KeyInput::ClearAttachedImages => {
+                if self.clear_attached_images() {
+                    KeyOutcome::Redraw
+                } else {
+                    KeyOutcome::None
+                }
+            }
             KeyInput::PasteText => KeyOutcome::PasteText,
             KeyInput::QueueDraft if self.is_processing => self.queue_draft(),
             KeyInput::QueueDraft => self.submit_draft(),
@@ -980,6 +987,19 @@ impl SingleSessionApp {
         self.status = Some(format!("attached {} image(s)", self.pending_images.len()));
     }
 
+    pub(crate) fn clear_attached_images(&mut self) -> bool {
+        if self.pending_images.is_empty() {
+            return false;
+        }
+        self.pending_images.clear();
+        self.status = Some("cleared image attachments".to_string());
+        true
+    }
+
+    pub(crate) fn accepts_clipboard_image_paste(&self) -> bool {
+        self.stdin_response.is_none() && !self.model_picker.open
+    }
+
     pub(crate) fn paste_text(&mut self, text: &str) {
         if !text.is_empty() {
             if let Some(stdin_response) = &mut self.stdin_response {
@@ -1443,7 +1463,9 @@ pub(crate) fn single_session_help_lines() -> Vec<String> {
         "  Ctrl+C      interrupt running generation".to_string(),
         "  Ctrl+Shift+C copy latest assistant response".to_string(),
         "  Ctrl+V      paste clipboard text".to_string(),
+        "  Ctrl+V      paste clipboard image when no text is present".to_string(),
         "  Ctrl+I      attach clipboard image to next prompt".to_string(),
+        "  Ctrl+Shift+I clear pending image attachments".to_string(),
         "  Ctrl+Shift+M open model/account picker".to_string(),
         "  Ctrl+M/N    switch to next/previous model".to_string(),
         String::new(),
