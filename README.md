@@ -649,6 +649,54 @@ brew tap 1jehuang/jcode
 brew install jcode
 ```
 
+### Verifying release artifacts
+
+Each release ships SHA256 manifests alongside the binaries:
+
+- `SHA256SUMS` — Linux + macOS tarballs
+- `SHA256SUMS-windows` — Windows tarballs and `.exe` artifacts
+
+Verify before installing:
+
+```bash
+VERSION=v0.11.1
+ARTIFACT=jcode-linux-x86_64.tar.gz   # or jcode-macos-aarch64.tar.gz
+
+curl -LO "https://github.com/1jehuang/jcode/releases/download/${VERSION}/${ARTIFACT}"
+curl -LO "https://github.com/1jehuang/jcode/releases/download/${VERSION}/SHA256SUMS"
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+Expected output:
+
+```
+jcode-linux-x86_64.tar.gz: OK
+```
+
+A non-zero exit or `FAILED` line means the download was corrupted or
+tampered with — do not extract or install it.
+
+On macOS, `sha256sum` is not in the default toolchain; use `shasum -a 256 -c`
+instead, or install `coreutils` (`brew install coreutils` then `gsha256sum`).
+
+On Windows (PowerShell):
+
+```powershell
+$VERSION = "v0.11.1"
+$ARTIFACT = "jcode-windows-x86_64.tar.gz"
+
+Invoke-WebRequest "https://github.com/1jehuang/jcode/releases/download/$VERSION/$ARTIFACT" -OutFile $ARTIFACT
+Invoke-WebRequest "https://github.com/1jehuang/jcode/releases/download/$VERSION/SHA256SUMS-windows" -OutFile SHA256SUMS-windows
+
+$expected = (Select-String -Path SHA256SUMS-windows -Pattern "  $ARTIFACT$").Line.Split(' ')[0]
+$actual   = (Get-FileHash $ARTIFACT -Algorithm SHA256).Hash.ToLower()
+
+if ($expected -eq $actual) { "OK: $ARTIFACT" } else { throw "MISMATCH: $ARTIFACT" }
+```
+
+Sigstore / cosign signatures and installer-side automatic verification are
+tracked separately in [#63](https://github.com/1jehuang/jcode/issues/63).
+
 ### From Source (all platforms)
 
 ```bash

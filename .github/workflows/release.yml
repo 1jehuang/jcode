@@ -228,6 +228,22 @@ jobs:
           path: artifacts
           pattern: jcode-*
 
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          # Collect every release tarball into a flat manifest. Filenames in
+          # SHA256SUMS are bare (no path prefix) so users can verify with
+          # `sha256sum --check SHA256SUMS` alongside the downloaded artifact.
+          (
+            cd artifacts
+            find . -type f -name '*.tar.gz' -print0 | sort -z | while IFS= read -r -d '' f; do
+              sha=$(sha256sum "$f" | cut -d' ' -f1)
+              printf '%s  %s\n' "$sha" "$(basename "$f")"
+            done
+          ) > artifacts/SHA256SUMS
+          echo "Generated SHA256SUMS:"
+          cat artifacts/SHA256SUMS
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -235,6 +251,7 @@ jobs:
           files: |
             artifacts/jcode-linux-x86_64/*.tar.gz
             artifacts/jcode-macos-aarch64/*.tar.gz
+            artifacts/SHA256SUMS
 
       - name: Update Homebrew formula
         env:
@@ -398,9 +415,26 @@ jobs:
           path: artifacts
           pattern: jcode-windows-*
 
+      - name: Generate SHA256SUMS-windows
+        run: |
+          set -euo pipefail
+          # Mirror the Linux/macOS manifest format. Filenames are bare so
+          # `sha256sum --check SHA256SUMS-windows` works after a flat
+          # download, regardless of the artifacts/<name>/ subdir layout.
+          (
+            cd artifacts
+            find . -type f \( -name '*.tar.gz' -o -name '*.exe' \) -print0 | sort -z | while IFS= read -r -d '' f; do
+              sha=$(sha256sum "$f" | cut -d' ' -f1)
+              printf '%s  %s\n' "$sha" "$(basename "$f")"
+            done
+          ) > artifacts/SHA256SUMS-windows
+          echo "Generated SHA256SUMS-windows:"
+          cat artifacts/SHA256SUMS-windows
+
       - name: Attach Windows artifacts to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/jcode-windows-*/**/*.tar.gz
             artifacts/jcode-windows-*/**/*.exe
+            artifacts/SHA256SUMS-windows
