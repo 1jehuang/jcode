@@ -1,6 +1,10 @@
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::{AutomationRequest, request_status, run_server, send_request};
+    use anyhow::{Result, anyhow};
+    use jcode_mobile_core::ScenarioName;
+    use serde_json::{Value, json};
+    use std::path::Path;
     use tempfile::TempDir;
 
     #[cfg(unix)]

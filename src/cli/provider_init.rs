@@ -969,11 +969,11 @@ async fn init_provider_with_options(
     show_init_messages: bool,
     allow_login_bootstrap: bool,
 ) -> Result<Arc<dyn provider::Provider>> {
-    if let Ok(profile_name) = std::env::var("JCODE_PROVIDER_PROFILE_NAME") {
-        if !profile_name.trim().is_empty() {
-            crate::provider_catalog::apply_named_provider_profile_env(profile_name.trim())?;
-            crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
-        }
+    if let Ok(profile_name) = std::env::var("JCODE_PROVIDER_PROFILE_NAME")
+        && !profile_name.trim().is_empty()
+    {
+        crate::provider_catalog::apply_named_provider_profile_env(profile_name.trim())?;
+        crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
     }
 
     if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_none()
