@@ -254,6 +254,27 @@ jobs:
       - name: Run targeted Windows validation tests
         shell: pwsh
         run: |
+          function Invoke-CargoWithTimeout {
+            param(
+              [Parameter(Mandatory=$true)] [string]$Name,
+              [Parameter(Mandatory=$true)] [string[]]$CargoArgs,
+              [int]$TimeoutSeconds = 300
+            )
+            Write-Host "::group::$Name"
+            Write-Host "cargo $($CargoArgs -join ' ')"
+            $process = Start-Process -FilePath 'cargo' -ArgumentList $CargoArgs -NoNewWindow -PassThru
+            if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+              Write-Host "::endgroup::"
+              throw "$Name timed out after $TimeoutSeconds seconds"
+            }
+            $exitCode = $process.ExitCode
+            Write-Host "::endgroup::"
+            if ($exitCode -ne 0) {
+              throw "$Name failed with exit code $exitCode"
+            }
+          }
+
           $tests = @(
             'command_candidates_adds_extension_on_windows',
             'command_exists_for_known_binary',
@@ -269,25 +290,46 @@ jobs:
           )
 
           foreach ($testName in $tests) {
-            & cargo test --locked --target x86_64-pc-windows-msvc --lib $testName -- --nocapture
-            if ($LASTEXITCODE -ne 0) {
-              throw "Windows targeted test failed: $testName"
-            }
+            Invoke-CargoWithTimeout `
+              -Name "Windows targeted test: $testName" `
+              -TimeoutSeconds 300 `
+              -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '--lib', $testName, '--', '--nocapture')
           }
 
       - name: Run Windows e2e smoke tests
         shell: pwsh
         run: |
+          function Invoke-CargoWithTimeout {
+            param(
+              [Parameter(Mandatory=$true)] [string]$Name,
+              [Parameter(Mandatory=$true)] [string[]]$CargoArgs,
+              [int]$TimeoutSeconds = 420
+            )
+            Write-Host "::group::$Name"
+            Write-Host "cargo $($CargoArgs -join ' ')"
+            $process = Start-Process -FilePath 'cargo' -ArgumentList $CargoArgs -NoNewWindow -PassThru
+            if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+              Write-Host "::endgroup::"
+              throw "$Name timed out after $TimeoutSeconds seconds"
+            }
+            $exitCode = $process.ExitCode
+            Write-Host "::endgroup::"
+            if ($exitCode -ne 0) {
+              throw "$Name failed with exit code $exitCode"
+            }
+          }
+
           $tests = @(
             'provider_behavior::test_socket_model_cycle_supported_models',
             'provider_behavior::test_model_switch_resets_provider_session'
           )
 
           foreach ($testName in $tests) {
-            & cargo test --locked --target x86_64-pc-windows-msvc --test e2e $testName -- --exact --nocapture
-            if ($LASTEXITCODE -ne 0) {
-              throw "Windows e2e smoke test failed: $testName"
-            }
+            Invoke-CargoWithTimeout `
+              -Name "Windows e2e smoke test: $testName" `
+              -TimeoutSeconds 420 `
+              -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '--test', 'e2e', $testName, '--', '--exact', '--nocapture')
           }
 
       - name: Run Windows lifecycle e2e tests
@@ -295,10 +337,37 @@ jobs:
         env:
           JCODE_E2E_ARTIFACT_DIR: ${{ runner.temp }}/jcode-windows-e2e-logs
         run: |
+          function Invoke-CargoWithTimeout {
+            param(
+              [Parameter(Mandatory=$true)] [string]$Name,
+              [Parameter(Mandatory=$true)] [string[]]$CargoArgs,
+              [int]$TimeoutSeconds = 420
+            )
+            Write-Host "::group::$Name"
+            Write-Host "cargo $($CargoArgs -join ' ')"
+            $process = Start-Process -FilePath 'cargo' -ArgumentList $CargoArgs -NoNewWindow -PassThru
+            if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+              Write-Host "::endgroup::"
+              throw "$Name timed out after $TimeoutSeconds seconds"
+            }
+            $exitCode = $process.ExitCode
+            Write-Host "::endgroup::"
+            if ($exitCode -ne 0) {
+              throw "$Name failed with exit code $exitCode"
+            }
+          }
+
           New-Item -ItemType Directory -Force -Path $env:JCODE_E2E_ARTIFACT_DIR | Out-Null
-          & cargo test --locked --target x86_64-pc-windows-msvc --test e2e windows_lifecycle:: -- --nocapture
-          if ($LASTEXITCODE -ne 0) {
-            throw 'Windows lifecycle e2e tests failed'
+          $tests = @(
+            'windows_lifecycle::windows_binary_server_accepts_clients_and_debug_cli',
+            'windows_lifecycle::windows_binary_server_rebinds_named_pipe_after_exit'
+          )
+          foreach ($testName in $tests) {
+            Invoke-CargoWithTimeout `
+              -Name "Windows lifecycle e2e test: $testName" `
+              -TimeoutSeconds 420 `
+              -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '--test', 'e2e', $testName, '--', '--exact', '--nocapture')
           }
 
       - name: Upload Windows e2e diagnostics
