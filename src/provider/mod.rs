@@ -703,6 +703,9 @@ impl MultiProvider {
                 Ok(())
             }
             ActiveProvider::OpenAI => {
+                if self.openai_provider().is_none() {
+                    self.try_hot_init_openai_from_disk();
+                }
                 let Some(openai) = self.openai_provider() else {
                     anyhow::bail!(
                         "OpenAI credentials not available. Run `jcode login --provider openai` first."
