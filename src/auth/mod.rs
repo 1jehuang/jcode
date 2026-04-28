@@ -31,7 +31,6 @@ pub use status_types::{
 
 use crate::provider_catalog::LoginProviderAuthStateKey;
 use crate::provider_catalog::LoginProviderDescriptor;
-use crate::provider_catalog::openrouter_like_api_key_sources;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, RwLock};
@@ -488,10 +487,8 @@ impl AuthStatus {
         status.anthropic = anthropic;
 
         // Check OpenRouter/OpenAI-compatible API keys (env var or config file)
-        let openrouter_like_keys = openrouter_like_api_key_sources();
-        let openrouter_available = openrouter_like_keys
-            .iter()
-            .any(|(env_key, file_name)| api_key_available(env_key, file_name));
+        let openrouter_available =
+            crate::provider::openrouter::OpenRouterProvider::has_credentials();
 
         if openrouter_available {
             status.openrouter = AuthState::Available;
@@ -632,10 +629,8 @@ impl AuthStatus {
         timings.push(("anthropic", step_start.elapsed().as_millis()));
 
         let step_start = Instant::now();
-        let openrouter_like_keys = openrouter_like_api_key_sources();
-        let openrouter_available = openrouter_like_keys
-            .iter()
-            .any(|(env_key, file_name)| api_key_available(env_key, file_name));
+        let openrouter_available =
+            crate::provider::openrouter::OpenRouterProvider::has_credentials();
         if openrouter_available {
             status.openrouter = AuthState::Available;
         }
