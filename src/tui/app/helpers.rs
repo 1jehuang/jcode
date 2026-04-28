@@ -4,7 +4,10 @@ use crate::todo::TodoItem;
 use crate::tui::info_widget::{AmbientWidgetData, GitInfo, MemoryInfo};
 use crate::tui::session_picker::ResumeTarget;
 use crossterm::event::{KeyCode, KeyModifiers};
+use std::ffi::OsStr;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -240,25 +243,137 @@ pub(super) fn format_tokens(tokens: u64) -> String {
     }
 }
 
-/// Copy text to clipboard, trying wl-copy first (Wayland), then arboard as fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClipboardCommand {
+    program: &'static str,
+    args: &'static [&'static str],
+}
+
+/// Copy text to the clipboard, preferring native tools and falling back to OSC 52.
 pub(super) fn copy_to_clipboard(text: &str) -> bool {
-    if let Ok(mut child) = std::process::Command::new("wl-copy")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        use std::io::Write;
-        if let Some(stdin) = child.stdin.as_mut()
-            && stdin.write_all(text.as_bytes()).is_ok()
-        {
-            drop(child.stdin.take());
-            return child.wait().map(|s| s.success()).unwrap_or(false);
+    if !should_prefer_osc52() {
+        for command in native_clipboard_commands() {
+            if run_clipboard_command(command, text.as_bytes()) {
+                return true;
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        if copy_with_arboard(text) {
+            return true;
         }
     }
+
+    write_osc52_clipboard(text.as_bytes())
+}
+
+fn run_clipboard_command(command: ClipboardCommand, bytes: &[u8]) -> bool {
+    let mut child = match Command::new(command.program)
+        .args(command.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return false;
+    };
+
+    if stdin.write_all(bytes).is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return false;
+    }
+    drop(stdin);
+
+    child.wait().map(|status| status.success()).unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn native_clipboard_commands() -> Vec<ClipboardCommand> {
+    vec![ClipboardCommand {
+        program: "pbcopy",
+        args: &[],
+    }]
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn native_clipboard_commands() -> Vec<ClipboardCommand> {
+    native_clipboard_commands_for_env(
+        std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+        std::env::var_os("DISPLAY").as_deref(),
+    )
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn native_clipboard_commands_for_env(
+    wayland_display: Option<&OsStr>,
+    display: Option<&OsStr>,
+) -> Vec<ClipboardCommand> {
+    let mut commands = Vec::new();
+
+    if wayland_display.is_some() {
+        commands.push(ClipboardCommand {
+            program: "wl-copy",
+            args: &["--type", "text/plain;charset=utf-8"],
+        });
+    }
+
+    if display.is_some() {
+        commands.push(ClipboardCommand {
+            program: "xclip",
+            args: &["-selection", "clipboard", "-in"],
+        });
+        commands.push(ClipboardCommand {
+            program: "xsel",
+            args: &["--clipboard", "--input"],
+        });
+    }
+
+    commands
+}
+
+#[cfg(not(any(unix, target_os = "macos")))]
+fn native_clipboard_commands() -> Vec<ClipboardCommand> {
+    Vec::new()
+}
+
+#[cfg(target_os = "windows")]
+fn copy_with_arboard(text: &str) -> bool {
     arboard::Clipboard::new()
         .and_then(|mut cb| cb.set_text(text.to_string()))
         .is_ok()
+}
+
+fn write_osc52_clipboard(bytes: &[u8]) -> bool {
+    write_osc52_clipboard_to(bytes, io::stdout()).is_ok()
+}
+
+fn should_prefer_osc52() -> bool {
+    should_prefer_osc52_for_env(
+        std::env::var_os("SSH_CONNECTION").as_deref(),
+        std::env::var_os("SSH_TTY").as_deref(),
+    )
+}
+
+fn should_prefer_osc52_for_env(ssh_connection: Option<&OsStr>, ssh_tty: Option<&OsStr>) -> bool {
+    ssh_connection.is_some() || ssh_tty.is_some()
+}
+
+fn write_osc52_clipboard_to(bytes: &[u8], mut writer: impl Write) -> io::Result<()> {
+    use base64::Engine;
+
+    let mut sequence = String::from("\x1b]52;c;");
+    sequence.push_str(&base64::engine::general_purpose::STANDARD.encode(bytes));
+    sequence.push('\x07');
+    writer.write_all(sequence.as_bytes())?;
+    writer.flush()
 }
 
 pub(super) fn effort_display_label(effort: &str) -> &str {
