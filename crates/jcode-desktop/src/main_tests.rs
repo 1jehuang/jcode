@@ -441,6 +441,17 @@ fn vertices_have_color(vertices: &[Vertex], color: [f32; 4]) -> bool {
     vertices.iter().any(|vertex| vertex.color == color)
 }
 
+fn test_session_card(id: &str, title: &str, status: &str) -> workspace::SessionCard {
+    workspace::SessionCard {
+        session_id: id.to_string(),
+        title: title.to_string(),
+        subtitle: format!("{status} · test-model"),
+        detail: format!("2 msgs · {title}-workspace"),
+        preview_lines: vec![format!("user {title} prompt")],
+        detail_lines: vec![format!("assistant {title} response")],
+    }
+}
+
 fn style_for_text(lines: &[SingleSessionStyledLine], text: &str) -> Option<SingleSessionLineStyle> {
     lines
         .iter()
@@ -484,6 +495,7 @@ fn single_session_hotkey_help_toggles_discoverable_shortcuts() {
     assert!(help.contains("desktop shortcuts"));
     assert!(help.contains("Ctrl+Enter  queue while running, send when idle"));
     assert!(help.contains("Ctrl+Shift+C copy latest assistant response"));
+    assert!(help.contains("Ctrl+P/O    open recent session switcher"));
     assert!(help.contains("Alt+Up/Down jump between user prompts"));
     assert!(!help.contains("desktop queue follow-up pending"));
     assert!(!help.contains("1  question"));
@@ -567,6 +579,80 @@ fn single_session_model_picker_loads_filters_and_selects_model() {
         app.handle_key(KeyInput::SubmitDraft),
         KeyOutcome::SetModel("claude-opus-4-5".to_string())
     );
+}
+
+#[test]
+fn single_session_session_switcher_loads_filters_and_resumes_session() {
+    let mut app = SingleSessionApp::new(None);
+    app.messages
+        .push(SingleSessionMessage::user("stale live transcript"));
+    app.handle_key(KeyInput::Character("pending draft".to_string()));
+
+    assert_eq!(
+        app.handle_key(KeyInput::OpenSessionSwitcher),
+        KeyOutcome::LoadSessionSwitcher
+    );
+    assert!(app.session_switcher.open);
+    assert!(app.session_switcher.loading);
+    assert!(
+        app.body_lines()
+            .join("\n")
+            .contains("loading recent sessions")
+    );
+
+    app.apply_session_switcher_cards(vec![
+        test_session_card("session_alpha", "alpha", "alpha status"),
+        test_session_card("session_beta", "beta", "beta status"),
+    ]);
+    let switcher = app.body_lines().join("\n");
+    assert!(switcher.contains("desktop session switcher"));
+    assert!(switcher.contains("alpha"));
+    assert!(switcher.contains("beta"));
+
+    assert_eq!(
+        app.handle_key(KeyInput::Character("beta".to_string())),
+        KeyOutcome::Redraw
+    );
+    assert!(app.body_lines().join("\n").contains("filter: beta"));
+
+    assert_eq!(app.handle_key(KeyInput::SubmitDraft), KeyOutcome::Redraw);
+    assert!(!app.session_switcher.open);
+    assert_eq!(
+        app.session
+            .as_ref()
+            .map(|session| session.session_id.as_str()),
+        Some("session_beta")
+    );
+    assert_eq!(app.live_session_id.as_deref(), Some("session_beta"));
+    assert_eq!(app.draft, "pending draft");
+    assert_eq!(app.status.as_deref(), Some("resumed beta"));
+
+    let resumed = app.body_lines().join("\n");
+    assert!(resumed.contains("beta status"));
+    assert!(!resumed.contains("stale live transcript"));
+}
+
+#[test]
+fn single_session_session_switcher_marks_current_session_and_reloads() {
+    let alpha = test_session_card("session_alpha", "alpha", "active");
+    let beta = test_session_card("session_beta", "beta", "idle");
+    let mut app = SingleSessionApp::new(Some(alpha.clone()));
+
+    assert_eq!(
+        app.handle_key(KeyInput::OpenSessionSwitcher),
+        KeyOutcome::LoadSessionSwitcher
+    );
+    app.apply_session_switcher_cards(vec![beta, alpha]);
+
+    assert_eq!(app.session_switcher.selected, 1);
+    assert!(app.body_lines().join("\n").contains("› ✓ alpha"));
+
+    assert_eq!(
+        app.handle_key(KeyInput::RefreshSessions),
+        KeyOutcome::LoadSessionSwitcher
+    );
+    assert!(app.session_switcher.loading);
+    assert_eq!(app.status.as_deref(), Some("loading recent sessions"));
 }
 
 #[test]

@@ -66,6 +66,7 @@ pub(crate) struct SingleSessionApp {
     pub(crate) show_help: bool,
     pub(crate) pending_images: Vec<(String, String)>,
     pub(crate) model_picker: ModelPickerState,
+    pub(crate) session_switcher: SessionSwitcherState,
     pub(crate) stdin_response: Option<StdinResponseState>,
     queued_drafts: Vec<(String, Vec<(String, String)>)>,
     selection_anchor: Option<SelectionPoint>,
@@ -298,6 +299,108 @@ impl ModelPickerState {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+pub(crate) struct SessionSwitcherState {
+    pub(crate) open: bool,
+    pub(crate) loading: bool,
+    pub(crate) filter: String,
+    pub(crate) selected: usize,
+    pub(crate) sessions: Vec<workspace::SessionCard>,
+}
+
+impl SessionSwitcherState {
+    fn open_loading(&mut self, current_session_id: Option<&str>) {
+        self.open = true;
+        self.loading = true;
+        self.selected = self
+            .current_visible_position(current_session_id)
+            .unwrap_or(self.selected);
+        self.clamp_selection();
+    }
+
+    fn close(&mut self) {
+        self.open = false;
+        self.loading = false;
+    }
+
+    fn apply_sessions(
+        &mut self,
+        sessions: Vec<workspace::SessionCard>,
+        current_session_id: Option<&str>,
+    ) {
+        self.sessions = sessions;
+        self.loading = false;
+        self.selected = self
+            .current_visible_position(current_session_id)
+            .unwrap_or(0);
+        self.clamp_selection();
+    }
+
+    fn selected_session(&self) -> Option<workspace::SessionCard> {
+        let visible = self.filtered_indices();
+        visible
+            .get(self.selected)
+            .and_then(|index| self.sessions.get(*index))
+            .cloned()
+    }
+
+    fn move_selection(&mut self, delta: i32) {
+        let visible_len = self.filtered_indices().len();
+        if visible_len == 0 {
+            self.selected = 0;
+            return;
+        }
+        if delta < 0 {
+            self.selected = self.selected.saturating_sub(delta.unsigned_abs() as usize);
+        } else {
+            self.selected = (self.selected + delta as usize).min(visible_len - 1);
+        }
+    }
+
+    fn push_filter_text(&mut self, text: &str) {
+        self.filter.push_str(text);
+        self.selected = 0;
+    }
+
+    fn pop_filter_char(&mut self) {
+        self.filter.pop();
+        self.selected = 0;
+    }
+
+    fn filtered_indices(&self) -> Vec<usize> {
+        let query = self.filter.trim().to_lowercase();
+        self.sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, session)| {
+                if query.is_empty() || session_card_search_text(session).contains(&query) {
+                    Some(index)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn current_visible_position(&self, current_session_id: Option<&str>) -> Option<usize> {
+        let current_session_id = current_session_id?;
+        self.filtered_indices().iter().position(|index| {
+            self.sessions
+                .get(*index)
+                .is_some_and(|session| session.session_id == current_session_id)
+        })
+    }
+
+    fn clamp_selection(&mut self) {
+        let visible_len = self.filtered_indices().len();
+        if visible_len == 0 {
+            self.selected = 0;
+        } else if self.selected >= visible_len {
+            self.selected = visible_len - 1;
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SingleSessionMessage {
     role: SingleSessionRole,
@@ -376,6 +479,7 @@ impl SingleSessionApp {
             show_help: false,
             pending_images: Vec::new(),
             model_picker: ModelPickerState::default(),
+            session_switcher: SessionSwitcherState::default(),
             stdin_response: None,
             queued_drafts: Vec::new(),
             selection_anchor: None,
@@ -408,6 +512,7 @@ impl SingleSessionApp {
         self.show_help = false;
         self.pending_images.clear();
         self.model_picker = ModelPickerState::default();
+        self.session_switcher = SessionSwitcherState::default();
         self.stdin_response = None;
         self.queued_drafts.clear();
         self.clear_selection();
@@ -418,7 +523,7 @@ impl SingleSessionApp {
     pub(crate) fn status_title(&self) -> String {
         let title = self.title();
         format!(
-            "Jcode Desktop · single session · {title} · Enter send · Shift+Enter newline · Ctrl+Enter queue · Ctrl+Shift+M models · Ctrl+; spawn · Ctrl+R refresh · Esc quit · --workspace for Niri layout"
+            "Jcode Desktop · single session · {title} · Enter send · Shift+Enter newline · Ctrl+Enter queue · Ctrl+P sessions · Ctrl+Shift+M models · Ctrl+; spawn · Esc quit · --workspace for Niri layout"
         )
     }
 
@@ -434,6 +539,14 @@ impl SingleSessionApp {
 
     pub(crate) fn has_background_work(&self) -> bool {
         self.is_processing
+    }
+
+    fn current_session_id(&self) -> Option<&str> {
+        self.live_session_id.as_deref().or_else(|| {
+            self.session
+                .as_ref()
+                .map(|session| session.session_id.as_str())
+        })
     }
 
     pub(crate) fn user_turn_count(&self) -> usize {
@@ -509,12 +622,17 @@ impl SingleSessionApp {
             return self.handle_stdin_response_key(key);
         }
 
+        if self.session_switcher.open {
+            return self.handle_session_switcher_key(key);
+        }
+
         if self.model_picker.open {
             return self.handle_model_picker_key(key);
         }
 
         match key {
             KeyInput::SpawnPanel => KeyOutcome::SpawnSession,
+            KeyInput::OpenSessionSwitcher => self.open_session_switcher(),
             KeyInput::OpenModelPicker => self.open_model_picker(),
             KeyInput::HotkeyHelp => {
                 self.show_help = !self.show_help;
@@ -626,10 +744,22 @@ impl SingleSessionApp {
 
     fn open_model_picker(&mut self) -> KeyOutcome {
         self.show_help = false;
+        self.session_switcher.close();
         self.model_picker.open_loading();
         self.status = Some("loading models".to_string());
         self.scroll_body_to_bottom();
         KeyOutcome::LoadModelCatalog
+    }
+
+    fn open_session_switcher(&mut self) -> KeyOutcome {
+        self.show_help = false;
+        self.model_picker.close();
+        let current_session_id = self.current_session_id().map(str::to_string);
+        self.session_switcher
+            .open_loading(current_session_id.as_deref());
+        self.status = Some("loading recent sessions".to_string());
+        self.scroll_body_to_bottom();
+        KeyOutcome::LoadSessionSwitcher
     }
 
     fn handle_model_picker_key(&mut self, key: KeyInput) -> KeyOutcome {
@@ -637,6 +767,10 @@ impl SingleSessionApp {
             KeyInput::Escape | KeyInput::OpenModelPicker => {
                 self.model_picker.close();
                 KeyOutcome::Redraw
+            }
+            KeyInput::OpenSessionSwitcher => {
+                self.model_picker.close();
+                self.open_session_switcher()
             }
             KeyInput::RefreshSessions => {
                 self.model_picker.open_loading();
@@ -668,6 +802,91 @@ impl SingleSessionApp {
             }
             _ => KeyOutcome::None,
         }
+    }
+
+    fn handle_session_switcher_key(&mut self, key: KeyInput) -> KeyOutcome {
+        match key {
+            KeyInput::Escape | KeyInput::OpenSessionSwitcher => {
+                self.session_switcher.close();
+                KeyOutcome::Redraw
+            }
+            KeyInput::RefreshSessions => {
+                let current_session_id = self.current_session_id().map(str::to_string);
+                self.session_switcher
+                    .open_loading(current_session_id.as_deref());
+                self.status = Some("loading recent sessions".to_string());
+                KeyOutcome::LoadSessionSwitcher
+            }
+            KeyInput::ModelPickerMove(delta) => {
+                self.session_switcher.move_selection(delta);
+                KeyOutcome::Redraw
+            }
+            KeyInput::SubmitDraft => self.resume_selected_switcher_session(),
+            KeyInput::Backspace => {
+                self.session_switcher.pop_filter_char();
+                KeyOutcome::Redraw
+            }
+            KeyInput::Character(text) => {
+                self.session_switcher.push_filter_text(&text);
+                KeyOutcome::Redraw
+            }
+            KeyInput::HotkeyHelp => {
+                self.session_switcher.close();
+                self.show_help = true;
+                KeyOutcome::Redraw
+            }
+            KeyInput::OpenModelPicker => {
+                self.session_switcher.close();
+                self.open_model_picker()
+            }
+            KeyInput::SpawnPanel => {
+                self.session_switcher.close();
+                KeyOutcome::SpawnSession
+            }
+            _ => KeyOutcome::None,
+        }
+    }
+
+    pub(crate) fn apply_session_switcher_cards(&mut self, cards: Vec<workspace::SessionCard>) {
+        let current_session_id = self.current_session_id().map(str::to_string);
+        self.session_switcher
+            .apply_sessions(cards, current_session_id.as_deref());
+        if self.session_switcher.open {
+            self.status = Some(format!(
+                "{} recent session(s)",
+                self.session_switcher.sessions.len()
+            ));
+        }
+    }
+
+    fn resume_selected_switcher_session(&mut self) -> KeyOutcome {
+        if self.is_processing {
+            self.status = Some(
+                "finish or Ctrl+C interrupt the running generation before switching sessions"
+                    .to_string(),
+            );
+            return KeyOutcome::Redraw;
+        }
+
+        let Some(session) = self.session_switcher.selected_session() else {
+            return KeyOutcome::None;
+        };
+        let title = session.title.clone();
+        self.session = Some(session);
+        self.live_session_id = self
+            .session
+            .as_ref()
+            .map(|session| session.session_id.clone());
+        self.detail_scroll = 0;
+        self.messages.clear();
+        self.streaming_response.clear();
+        self.error = None;
+        self.stdin_response = None;
+        self.body_scroll_lines = 0;
+        self.show_help = false;
+        self.session_switcher.close();
+        self.status = Some(format!("resumed {title}"));
+        KeyOutcome::Redraw
     }
 
     fn handle_stdin_response_key(&mut self, key: KeyInput) -> KeyOutcome {
@@ -727,6 +946,12 @@ impl SingleSessionApp {
         if let Some(stdin_response) = &self.stdin_response {
             return stdin_response_styled_lines(stdin_response);
         }
+        if self.session_switcher.open {
+            return session_switcher_styled_lines(
+                &self.session_switcher,
+                self.current_session_id(),
+            );
+        }
         if self.model_picker.open {
             return model_picker_styled_lines(&self.model_picker);
         }
@@ -761,7 +986,9 @@ impl SingleSessionApp {
             return lines;
         }
 
-        if let Some(status) = &self.status {
+        if let Some(status) = &self.status
+            && self.session.is_none()
+        {
             return vec![styled_line(status.clone(), SingleSessionLineStyle::Status)];
         }
 
@@ -1043,7 +1270,7 @@ impl SingleSessionApp {
     }
 
     pub(crate) fn accepts_clipboard_image_paste(&self) -> bool {
-        self.stdin_response.is_none() && !self.model_picker.open
+        self.stdin_response.is_none() && !self.model_picker.open && !self.session_switcher.open
     }
 
     pub(crate) fn paste_text(&mut self, text: &str) {
@@ -1402,6 +1629,122 @@ fn byte_index_at_char_column(line: &str, column: usize) -> usize {
         .unwrap_or(line.len())
 }
 
+fn session_switcher_styled_lines(
+    switcher: &SessionSwitcherState,
+    current_session_id: Option<&str>,
+) -> Vec<SingleSessionStyledLine> {
+    let mut lines = vec![
+        styled_line(
+            "desktop session switcher",
+            SingleSessionLineStyle::OverlayTitle,
+        ),
+        styled_line(
+            "↑/↓ select · type filter · Backspace edit filter · Enter resume · Ctrl+R reload · Ctrl+P/Esc close",
+            SingleSessionLineStyle::Overlay,
+        ),
+        styled_line(
+            format!(
+                "filter: {}",
+                if switcher.filter.is_empty() {
+                    "<none>"
+                } else {
+                    switcher.filter.as_str()
+                }
+            ),
+            SingleSessionLineStyle::Meta,
+        ),
+        blank_styled_line(),
+    ];
+
+    if switcher.loading {
+        lines.push(styled_line(
+            "loading recent sessions from ~/.jcode/sessions...",
+            SingleSessionLineStyle::Status,
+        ));
+    }
+
+    let visible = switcher.filtered_indices();
+    if visible.is_empty() && !switcher.loading {
+        let message = if switcher.sessions.is_empty() {
+            "no recent sessions found"
+        } else {
+            "no matching sessions"
+        };
+        lines.push(styled_line(message, SingleSessionLineStyle::Status));
+        lines.push(styled_line(
+            "try clearing the filter, pressing Ctrl+R, or starting a fresh session with Ctrl+;",
+            SingleSessionLineStyle::Overlay,
+        ));
+        return lines;
+    }
+
+    let limit = 28;
+    for (position, index) in visible.iter().take(limit).enumerate() {
+        let Some(session) = switcher.sessions.get(*index) else {
+            continue;
+        };
+        let selector = if position == switcher.selected {
+            "›"
+        } else {
+            " "
+        };
+        let current_marker = if Some(session.session_id.as_str()) == current_session_id {
+            "✓"
+        } else {
+            " "
+        };
+        lines.push(styled_line(
+            format!(
+                "{selector} {current_marker} {}",
+                session_card_display_line(session)
+            ),
+            if position == switcher.selected {
+                SingleSessionLineStyle::OverlaySelection
+            } else {
+                SingleSessionLineStyle::Overlay
+            },
+        ));
+    }
+    if visible.len() > limit {
+        lines.push(styled_line(
+            format!("… {} more sessions", visible.len() - limit),
+            SingleSessionLineStyle::Overlay,
+        ));
+    }
+
+    lines
+}
+
+fn session_card_display_line(session: &workspace::SessionCard) -> String {
+    let subtitle = if session.subtitle.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", session.subtitle)
+    };
+    let detail = if session.detail.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", session.detail)
+    };
+    format!("{}{}{}", session.title, subtitle, detail)
+}
+
+fn session_card_search_text(session: &workspace::SessionCard) -> String {
+    let mut text = format!(
+        "{} {} {} {}",
+        session.session_id, session.title, session.subtitle, session.detail
+    );
+    for line in session
+        .preview_lines
+        .iter()
+        .chain(session.detail_lines.iter())
+    {
+        text.push(' ');
+        text.push_str(line);
+    }
+    text.to_lowercase()
+}
+
 fn model_picker_styled_lines(picker: &ModelPickerState) -> Vec<SingleSessionStyledLine> {
     let mut lines = vec![
         styled_line(
@@ -1572,6 +1915,7 @@ fn single_session_help_styled_lines() -> Vec<SingleSessionStyledLine> {
         "  Ctrl+Shift+I clear pending image attachments",
         "  Ctrl+Shift+M open model/account picker",
         "  Ctrl+M/N    switch to next/previous model",
+        "  Ctrl+P/O    open recent session switcher",
         "",
         "navigation",
         "  PageUp/PageDown scroll transcript",
@@ -1588,7 +1932,7 @@ fn single_session_help_styled_lines() -> Vec<SingleSessionStyledLine> {
         "",
         "window",
         "  Ctrl+;      reset/spawn fresh desktop session",
-        "  Ctrl+R      refresh session metadata",
+        "  Ctrl+R      reload sessions/models while a picker is open",
         "  Ctrl+?      toggle this help",
         "  Esc         close help or quit",
     ]

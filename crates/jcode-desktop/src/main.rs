@@ -422,6 +422,11 @@ async fn run() -> Result<()> {
                             window.set_title(&app.status_title());
                             window.request_redraw();
                         }
+                        KeyOutcome::LoadSessionSwitcher => {
+                            app.apply_single_session_switcher_cards(load_session_cards_for_desktop());
+                            window.set_title(&app.status_title());
+                            window.request_redraw();
+                        }
                         KeyOutcome::SetModel(model) => {
                             if let Err(error) = session_launch::spawn_set_model(
                                 model,
@@ -968,6 +973,12 @@ impl DesktopApp {
         }
     }
 
+    fn apply_single_session_switcher_cards(&mut self, cards: Vec<workspace::SessionCard>) {
+        if let Self::SingleSession(app) = self {
+            app.apply_session_switcher_cards(cards);
+        }
+    }
+
     fn cancel_single_session_generation(&mut self) {
         if let Self::SingleSession(app) = self {
             app.cancel_generation();
@@ -1153,6 +1164,12 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         Key::Character(text) if modifiers.control_key() && text == ";" => KeyInput::SpawnPanel,
         Key::Character(text) if modifiers.control_key() && (text == "?" || text == "/") => {
             KeyInput::HotkeyHelp
+        }
+        Key::Character(text)
+            if modifiers.control_key()
+                && (text.eq_ignore_ascii_case("p") || text.eq_ignore_ascii_case("o")) =>
+        {
+            KeyInput::OpenSessionSwitcher
         }
         Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("r") => {
             KeyInput::RefreshSessions
