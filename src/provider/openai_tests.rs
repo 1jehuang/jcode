@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_match)]
+
 use super::*;
 use crate::auth::codex::CodexCredentials;
 use crate::message::{ContentBlock, Role};
