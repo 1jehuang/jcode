@@ -107,6 +107,25 @@ jobs:
             }
           }
 
+      - name: Run Windows lifecycle e2e tests
+        shell: pwsh
+        env:
+          JCODE_E2E_ARTIFACT_DIR: ${{ runner.temp }}/jcode-windows-e2e-logs
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:JCODE_E2E_ARTIFACT_DIR | Out-Null
+          & cargo test --locked --target x86_64-pc-windows-msvc --test e2e windows_lifecycle:: -- --nocapture
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Windows lifecycle e2e tests failed'
+          }
+
+      - name: Upload Windows e2e diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-smoke-e2e-diagnostics-x64
+          path: ${{ runner.temp }}/jcode-windows-e2e-logs
+          if-no-files-found: ignore
+
       - name: Verify built binary launches
         shell: pwsh
         run: |

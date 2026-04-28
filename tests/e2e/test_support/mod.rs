@@ -164,6 +164,7 @@ pub(crate) async fn wait_for_debug_socket_ready(path: &std::path::Path) -> Resul
             anyhow::bail!("debug socket never became responsive");
         }
 
+        #[cfg(unix)]
         if !path.exists() {
             tokio::time::sleep(Duration::from_millis(25)).await;
             continue;
@@ -183,7 +184,7 @@ pub(crate) async fn wait_for_server_ready(
     socket_path: &std::path::Path,
     debug_socket_path: &std::path::Path,
 ) -> Result<()> {
-    wait_for_socket(socket_path).await?;
+    let _client = wait_for_server_client(socket_path).await?;
     wait_for_debug_socket_ready(debug_socket_path).await
 }
 
