@@ -234,12 +234,13 @@ fn cursor_vscdb_paths() -> Vec<PathBuf> {
 
 /// Read a key from a vscdb file using the sqlite3 CLI.
 fn read_vscdb_key(db_path: &PathBuf, key: &str) -> Result<String> {
-    let output = std::process::Command::new("sqlite3")
-        .arg(db_path)
-        .arg(format!(
-            "SELECT value FROM ItemTable WHERE key = '{}';",
-            key
-        ))
+    let mut cmd = std::process::Command::new("sqlite3");
+    cmd.arg(db_path).arg(format!(
+        "SELECT value FROM ItemTable WHERE key = '{}';",
+        key
+    ));
+    crate::platform::suppress_child_console(&mut cmd);
+    let output = cmd
         .output()
         .context("Failed to run sqlite3 (is it installed?)")?;
 

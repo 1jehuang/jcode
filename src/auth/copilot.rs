@@ -443,7 +443,10 @@ fn load_token_from_gh_cli() -> Option<String> {
         return None;
     }
 
-    let output = Command::new("gh").args(["auth", "token"]).output().ok()?;
+    let mut cmd = Command::new("gh");
+    cmd.args(["auth", "token"]);
+    crate::platform::suppress_child_console(&mut cmd);
+    let output = cmd.output().ok()?;
     if !output.status.success() {
         return None;
     }

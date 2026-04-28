@@ -457,10 +457,11 @@ fn validate_binary_version_matches_source_report(
 }
 
 fn dirty_status_paths(repo_dir: &Path) -> Result<Vec<(PathBuf, bool)>> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
-        .current_dir(repo_dir)
-        .output()?;
+    let mut cmd = Command::new("git");
+    cmd.args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        .current_dir(repo_dir);
+    crate::platform::suppress_child_console(&mut cmd);
+    let output = cmd.output()?;
     if !output.status.success() {
         anyhow::bail!(
             "git status failed while validating dirty build freshness with status {:?}",

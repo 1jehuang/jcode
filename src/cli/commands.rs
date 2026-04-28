@@ -520,10 +520,10 @@ pub fn parse_tailscale_dns_name(status_json: &[u8]) -> Option<String> {
 }
 
 pub fn detect_tailscale_dns_name() -> Option<String> {
-    let output = std::process::Command::new("tailscale")
-        .args(["status", "--json"])
-        .output()
-        .ok()?;
+    let mut cmd = std::process::Command::new("tailscale");
+    cmd.args(["status", "--json"]);
+    crate::platform::suppress_child_console(&mut cmd);
+    let output = cmd.output().ok()?;
 
     if !output.status.success() {
         return None;

@@ -406,12 +406,15 @@ fn build_env_context() -> Option<String> {
 /// Get git branch and status summary
 fn get_git_info() -> Option<String> {
     // Check if we're in a git repo
-    let in_repo = Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output()
-        .ok()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let in_repo = {
+        let mut cmd = Command::new("git");
+        cmd.args(["rev-parse", "--is-inside-work-tree"]);
+        crate::platform::suppress_child_console(&mut cmd);
+        cmd.output()
+            .ok()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
 
     if !in_repo {
         return None;
@@ -420,9 +423,10 @@ fn get_git_info() -> Option<String> {
     let mut info = vec!["Git:".to_string()];
 
     // Current branch
-    if let Ok(output) = Command::new("git")
-        .args(["branch", "--show-current"])
-        .output()
+    let mut branch_cmd = Command::new("git");
+    branch_cmd.args(["branch", "--show-current"]);
+    crate::platform::suppress_child_console(&mut branch_cmd);
+    if let Ok(output) = branch_cmd.output()
         && output.status.success()
     {
         let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -432,7 +436,10 @@ fn get_git_info() -> Option<String> {
     }
 
     // Short status (modified files count)
-    if let Ok(output) = Command::new("git").args(["status", "--porcelain"]).output()
+    let mut status_cmd = Command::new("git");
+    status_cmd.args(["status", "--porcelain"]);
+    crate::platform::suppress_child_console(&mut status_cmd);
+    if let Ok(output) = status_cmd.output()
         && output.status.success()
     {
         let status = String::from_utf8_lossy(&output.stdout);
