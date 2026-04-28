@@ -1,129 +1,121 @@
-# Plan: Dynamic Skills and MCP Support
+# MCP and Dynamic Skills Status
 
-## Goals
-1. Hot-reload skills without restart
-2. MCP (Model Context Protocol) server support
-3. Dynamic tool registration at runtime
-4. Agent can add/configure MCP servers itself
+Status: Implemented baseline, active refinement
+Updated: 2026-04-28
 
-## Current State
-- Skills: Loaded from `~/.claude/skills/` and `./.claude/skills/` at startup
-- Tools: Hardcoded in `Registry::new()`
-- No MCP support
+This page used to be the implementation plan for MCP and dynamic skills. It is now a status page for the current implementation.
 
----
+## Current state
 
-## Implementation Plan
+jcode has first-class MCP client support and a dynamic tool registry:
 
-### Phase 1: Hot-reload Skills
+- Skills can be loaded, listed, read, reloaded individually, or reloaded as a group through the `skill_manage` tool.
+- The tool registry supports runtime registration and prefix unregistering, which is used by MCP reload/connect flows.
+- MCP servers are configured separately from `config.toml`.
+- MCP servers are connected in the background so startup is not blocked.
+- MCP tools are registered as normal jcode tools with names like `mcp__<server>__<tool>`.
+- The built-in `mcp` management tool supports `list`, `connect`, `disconnect`, and `reload`.
+- In daemon/server mode, MCP servers marked `shared: true` use a shared server pool so multiple sessions do not spawn duplicate stateless server processes.
+- Servers marked `shared: false` are spawned per session for stateful tools such as browser automation.
 
-**Changes to `src/skill.rs`:**
-- Add `reload(&mut self)` method to `SkillRegistry`
-- Skills can be reloaded without restarting
+## Config files
 
-**New tool `reload_skills`:**
-- Agent can trigger `reload_skills` to pick up new skills
+Primary config files:
 
-### Phase 2: Dynamic Tool Registry
+- `~/.jcode/mcp.json` for global MCP servers
+- `.jcode/mcp.json` for project-local MCP servers
 
-**Changes to `src/tool/mod.rs`:**
-```rust
-impl Registry {
-    /// Register a new tool at runtime
-    pub async fn register(&self, tool: Arc<dyn Tool>);
+Compatibility/import sources:
 
-    /// Unregister a tool by name
-    pub async fn unregister(&self, name: &str);
+- `.claude/mcp.json` is still read for project compatibility.
+- On first run, if `~/.jcode/mcp.json` does not exist, jcode tries to import servers from `~/.claude/mcp.json` and `~/.codex/config.toml`.
+- Codex `[mcp_servers.*]` tables are converted to jcode MCP server entries.
 
-    /// List all registered tools
-    pub async fn list(&self) -> Vec<String>;
-}
-```
+Example:
 
-### Phase 3: MCP Client
-
-**New module `src/mcp/mod.rs`:**
-- MCP protocol types (JSON-RPC 2.0)
-- MCP client for stdio-based servers
-- MCP tool wrapper (converts MCP tools to our Tool trait)
-
-**Config file `~/.claude/mcp.json`:**
 ```json
 {
   "servers": {
     "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@anthropic/mcp-server-filesystem", "/path"],
-      "env": {}
+      "command": "/path/to/mcp-server",
+      "args": ["--root", "/workspace"],
+      "env": {},
+      "shared": true
     },
-    "github": {
+    "playwright": {
       "command": "npx",
-      "args": ["-y", "@anthropic/mcp-server-github"],
-      "env": {"GITHUB_TOKEN": "..."}
+      "args": ["-y", "@playwright/mcp"],
+      "env": {},
+      "shared": false
     }
   }
 }
 ```
 
-**MCP Manager:**
-- Load config on startup
-- Connect to configured servers
-- Convert MCP tools to jcode Tool trait
-- Handle server lifecycle (start, stop, restart)
+`shared` defaults to `true`.
 
-### Phase 4: Agent Self-Configuration
+## Runtime management tool
 
-**New tools:**
-- `mcp_list` - List connected MCP servers
-- `mcp_connect` - Start a new MCP server
-- `mcp_disconnect` - Stop an MCP server
-- `mcp_reload` - Reload all MCP servers
+The management tool is named `mcp`.
 
-**Flow:**
-1. Agent calls `mcp_connect {"name": "playwright", "command": "npx", "args": ["-y", "@anthropic/mcp-server-playwright"]}`
-2. jcode spawns the process, does MCP handshake
-3. Tools from server are added to registry
-4. Agent can immediately use the new tools
-
----
-
-## MCP Protocol Summary
-
-MCP uses JSON-RPC 2.0 over stdio:
-
-**Initialize:**
 ```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"jcode","version":"0.1.0"}}}
+{"action": "list"}
 ```
 
-**List tools:**
 ```json
-{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+{
+  "action": "connect",
+  "server": "filesystem",
+  "command": "/path/to/mcp-server",
+  "args": ["--root", "/workspace"],
+  "env": {}
+}
 ```
 
-**Call tool:**
 ```json
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/tmp/test.txt"}}}
+{"action": "disconnect", "server": "filesystem"}
 ```
 
----
+```json
+{"action": "reload"}
+```
 
-## Files to Create/Modify
+`reload` re-reads MCP config, unregisters existing `mcp__` tools, reconnects configured servers, and registers the newly discovered server tools.
 
-1. `src/mcp/mod.rs` - MCP module
-2. `src/mcp/protocol.rs` - JSON-RPC types
-3. `src/mcp/client.rs` - MCP client
-4. `src/mcp/manager.rs` - Multi-server manager
-5. `src/mcp/tool.rs` - MCP tool wrapper
-6. `src/tool/mod.rs` - Add dynamic registration
-7. `src/tool/mcp_tools.rs` - mcp_connect, mcp_list, etc.
-8. `src/skill.rs` - Add reload()
-9. `src/tool/reload_skills.rs` - reload_skills tool
+## Protocol support
 
-## Order of Implementation
-1. Dynamic tool registry (prerequisite)
-2. Skill hot-reload (quick win)
-3. MCP protocol types
-4. MCP client (single server)
-5. MCP manager (multi-server)
-6. MCP tools for agent self-config
+jcode acts as an MCP client over JSON-RPC 2.0 stdio:
+
+1. Spawn the configured server command.
+2. Send `initialize` with jcode client info.
+3. Send `notifications/initialized`.
+4. Call `tools/list`.
+5. Wrap each MCP tool in jcode's `Tool` trait.
+6. Execute tools through `tools/call`.
+
+Current focus is tools. Resource and prompt protocol types exist, but the user-facing implementation is centered on tool discovery and tool calls.
+
+## UI/server visibility
+
+- The TUI receives `McpStatus` events and shows connecting/connected server state.
+- Remote/client sessions receive configured MCP tool registration through the server.
+- The debug socket exposes MCP inspection commands for testing.
+- MCP connection failures are logged and surfaced through the management tool instead of silently disappearing.
+
+## Important implementation files
+
+- `src/mcp/protocol.rs` - JSON-RPC, MCP protocol, config loading/import
+- `src/mcp/client.rs` - stdio MCP client
+- `src/mcp/manager.rs` - per-session manager and shared-pool delegation
+- `src/mcp/pool.rs` - shared MCP server process pool
+- `src/mcp/tool.rs` - wrapper for discovered MCP server tools
+- `src/tool/mcp.rs` - built-in MCP management tool
+- `src/tool/mod.rs` - dynamic registry and MCP tool registration
+- `src/server.rs` - server-side session registry wiring
+
+## Open items
+
+- Add richer docs for writing and testing custom MCP servers.
+- Decide whether resource/prompt support should become user-facing or remain protocol scaffolding.
+- Continue hardening reload/disconnect behavior around long-running or stateful MCP servers.
+- Keep OpenAI Apps SDK compatibility separate from jcode's current MCP client unless a real Apps SDK server/descriptor layer is added.
