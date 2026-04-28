@@ -13,6 +13,19 @@ struct SpawnedWindowsServer {
 }
 
 impl SpawnedWindowsServer {
+    fn jcode_binary() -> std::path::PathBuf {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let release_binary = manifest_dir
+            .join("target")
+            .join("x86_64-pc-windows-msvc")
+            .join("release")
+            .join("jcode.exe");
+        if release_binary.exists() {
+            return release_binary;
+        }
+        std::path::PathBuf::from(env!("CARGO_BIN_EXE_jcode"))
+    }
+
     fn spawn(prefix: &str) -> Result<Self> {
         let temp_root = tempfile::Builder::new().prefix(prefix).tempdir()?;
         let home_dir = temp_root.path().join("home");
@@ -29,7 +42,7 @@ impl SpawnedWindowsServer {
 
         let stdout_file = std::fs::File::create(&stdout_path)?;
         let stderr_file = std::fs::File::create(&stderr_path)?;
-        let mut command = Command::new(env!("CARGO_BIN_EXE_jcode"));
+        let mut command = Command::new(Self::jcode_binary());
         command
             .arg("--no-update")
             .arg("--socket")
@@ -43,6 +56,7 @@ impl SpawnedWindowsServer {
             .env("JCODE_HOME", &home_dir)
             .env("JCODE_RUNTIME_DIR", &runtime_dir)
             .env("JCODE_INSTALL_DIR", &install_dir)
+            .env("JCODE_NO_TELEMETRY", "1")
             .env("JCODE_OPENAI_COMPAT_API_BASE", "http://127.0.0.1:9/v1")
             .env("JCODE_OPENAI_COMPAT_DEFAULT_MODEL", "windows-e2e-model")
             .env("JCODE_OPENAI_COMPAT_LOCAL_ENABLED", "1")
@@ -76,6 +90,7 @@ impl SpawnedWindowsServer {
             .env("JCODE_HOME", &self.home_dir)
             .env("JCODE_RUNTIME_DIR", &self.runtime_dir)
             .env("JCODE_INSTALL_DIR", &self.install_dir)
+            .env("JCODE_NO_TELEMETRY", "1")
             .env("JCODE_OPENAI_COMPAT_API_BASE", "http://127.0.0.1:9/v1")
             .env("JCODE_OPENAI_COMPAT_DEFAULT_MODEL", "windows-e2e-model")
             .env("JCODE_OPENAI_COMPAT_LOCAL_ENABLED", "1")
@@ -84,7 +99,7 @@ impl SpawnedWindowsServer {
     }
 
     fn jcode_command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_jcode"));
+        let mut command = Command::new(Self::jcode_binary());
         self.apply_env(&mut command);
         command
     }
@@ -97,7 +112,7 @@ impl SpawnedWindowsServer {
         let stderr_path = self._temp_root.path().join(format!("{label}-stderr.log"));
         let stdout_file = std::fs::File::create(&stdout_path)?;
         let stderr_file = std::fs::File::create(&stderr_path)?;
-        let mut command = Command::new(env!("CARGO_BIN_EXE_jcode"));
+        let mut command = Command::new(Self::jcode_binary());
         self.apply_env(&mut command)
             .arg("--no-update")
             .arg("--socket")
