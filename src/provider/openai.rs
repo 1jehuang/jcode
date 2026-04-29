@@ -29,7 +29,7 @@ const CHATGPT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const RESPONSES_PATH: &str = "responses";
 const DEFAULT_MODEL: &str = "gpt-5.5";
 const ORIGINATOR: &str = "codex_cli_rs";
-const CHATGPT_INSTRUCTIONS: &str = include_str!("../prompts/openai_chatgpt.md");
+const CHATGPT_INSTRUCTIONS: &str = include_str!("../prompt/system.md");
 const SELFDEV_SECTION_HEADER: &str = "# Self-Development Mode";
 
 /// Maximum number of retries for transient errors

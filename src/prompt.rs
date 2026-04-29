@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Command;
 
 /// Default system prompt for jcode (embedded at compile time)
-pub const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompt/system.txt");
+pub const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompt/system.md");
 const SELFDEV_HINT_PROMPT: &str = include_str!("prompt/selfdev_hint.txt");
 const SELFDEV_MODE_PROMPT: &str = include_str!("prompt/selfdev_mode.txt");
 
@@ -256,10 +256,6 @@ pub fn build_system_prompt_full(
         parts.push(skills_section);
     }
 
-    parts.push(
-        "# Persistent Goals\n\nThe user may have persistent long-term goals that live outside the current conversation. Use the `goal` tool to list, resume, inspect, create, or update goals when relevant. Do not assume the current session is about a goal unless the user asks for it or the context strongly suggests it. Goal details are not preloaded into context; retrieve them on demand. The user can also inspect goals manually with `/goals`.".to_string(),
-    );
-
     // Add active skill prompt
     if let Some(skill) = skill_prompt {
         parts.push(format!("# Active Skill\n\n{}", skill));
@@ -328,10 +324,6 @@ pub fn build_system_prompt_split(
         info.skills_chars = skills_section.len();
         static_parts.push(skills_section);
     }
-
-    static_parts.push(
-        "# Persistent Goals\n\nThe user may have persistent long-term goals that live outside the current conversation. Use the `goal` tool to list, resume, inspect, create, or update goals when relevant. Do not assume the current session is about a goal unless the user asks for it or the context strongly suggests it. Goal details are not preloaded into context; retrieve them on demand. The user can also inspect goals manually with `/goals`.".to_string(),
-    );
 
     // === DYNAMIC CONTENT (not cached) ===
 

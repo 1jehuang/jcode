@@ -8,11 +8,11 @@ fn test_default_system_prompt_no_claude_code_identity() {
 
     assert!(
         !prompt.contains("claude code"),
-        "DEFAULT_SYSTEM_PROMPT should NOT identify as 'Claude Code'. Found in system.txt"
+        "DEFAULT_SYSTEM_PROMPT should NOT identify as 'Claude Code'. Found in system.md"
     );
     assert!(
         !prompt.contains("claude-code"),
-        "DEFAULT_SYSTEM_PROMPT should NOT contain 'claude-code'. Found in system.txt"
+        "DEFAULT_SYSTEM_PROMPT should NOT contain 'claude-code'. Found in system.md"
     );
 }
 
@@ -24,7 +24,7 @@ fn test_skill_prompt_integration() {
     let prompt = build_system_prompt(Some(skill_prompt), &[]);
 
     // The prompt should contain our default system prompt
-    assert!(prompt.contains("You are the Jcode agent"));
+    assert!(prompt.contains("You are the Jcode Agent"));
 
     // The prompt should contain the skill prompt
     assert!(prompt.contains(skill_prompt));
