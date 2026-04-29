@@ -11,7 +11,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-const TELEMETRY_ENDPOINT: &str = "https://jcode-telemetry.jeremyhuang55555.workers.dev/v1/event";
+// Telemetry endpoint is now resolved at runtime — see telemetry_endpoint().
+// Default in this fork is no endpoint, which disables telemetry. Set
+// JCODE_TELEMETRY_ENDPOINT or write `endpoint = "..."` to
+// `${JCODE_HOME:-~/.jcode}/telemetry.toml` to enable.
 const ASYNC_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const BLOCKING_INSTALL_TIMEOUT: Duration = Duration::from_millis(1200);
 const BLOCKING_LIFECYCLE_TIMEOUT: Duration = Duration::from_millis(800);
@@ -668,7 +671,46 @@ pub fn is_enabled() -> bool {
     {
         return false;
     }
-    true
+    // Opt-in by default in this fork: a telemetry endpoint must be configured
+    // (env var or config file) before any event is sent.
+    telemetry_endpoint().is_some()
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct TelemetryConfig {
+    endpoint: Option<String>,
+}
+
+/// Resolve the telemetry endpoint at runtime.
+///
+/// Resolution order:
+/// 1. `JCODE_TELEMETRY_ENDPOINT` environment variable (highest precedence).
+/// 2. `endpoint = "..."` in `${JCODE_HOME:-~/.jcode}/telemetry.toml`.
+/// 3. `None` — telemetry is disabled.
+///
+/// Empty / whitespace-only values are treated as `None` so that explicitly
+/// setting `JCODE_TELEMETRY_ENDPOINT=""` reliably disables telemetry without
+/// needing the separate `JCODE_NO_TELEMETRY` knob.
+fn telemetry_endpoint() -> Option<String> {
+    if let Ok(value) = std::env::var("JCODE_TELEMETRY_ENDPOINT") {
+        let trimmed = value.trim();
+        return if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+    }
+    let dir = storage::jcode_dir().ok()?;
+    let path = dir.join("telemetry.toml");
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let config: TelemetryConfig = toml::from_str(&contents).unwrap_or_default();
+    let endpoint = config.endpoint?;
+    let trimmed = endpoint.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn telemetry_envelope() -> (u32, String, bool, bool, bool) {
@@ -1169,6 +1211,10 @@ fn mcp_server_name(name: &str, input: &Value) -> Option<String> {
 }
 
 fn post_payload(payload: serde_json::Value, timeout: Duration) -> bool {
+    let endpoint = match telemetry_endpoint() {
+        Some(value) => value,
+        None => return false,
+    };
     let client = match reqwest::blocking::Client::builder()
         .timeout(timeout)
         .build()
@@ -1176,7 +1222,7 @@ fn post_payload(payload: serde_json::Value, timeout: Duration) -> bool {
         Ok(client) => client,
         Err(_) => return false,
     };
-    match client.post(TELEMETRY_ENDPOINT).json(&payload).send() {
+    match client.post(&endpoint).json(&payload).send() {
         Ok(response) => response.error_for_status().is_ok(),
         Err(_) => false,
     }
@@ -2031,11 +2077,11 @@ pub enum ErrorCategory {
 
 fn show_first_run_notice() {
     eprintln!("\x1b[90m");
-    eprintln!("  jcode collects anonymous usage statistics (install count, version, OS,");
-    eprintln!("  session activity, tool counts, and crash/exit reasons). No code, filenames,");
-    eprintln!("  prompts, or personal data is sent.");
-    eprintln!("  To opt out: export JCODE_NO_TELEMETRY=1");
-    eprintln!("  Details: https://github.com/1jehuang/jcode/blob/master/TELEMETRY.md");
+    eprintln!("  Telemetry is OFF by default in this build.");
+    eprintln!("  To enable, set JCODE_TELEMETRY_ENDPOINT or write");
+    eprintln!("    endpoint = \"https://your-collector/v1/event\"");
+    eprintln!("  to ${{JCODE_HOME:-~/.jcode}}/telemetry.toml.");
+    eprintln!("  Schema and field reference: TELEMETRY.md");
     eprintln!("\x1b[0m");
 }
 

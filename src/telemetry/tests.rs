@@ -27,6 +27,52 @@ fn test_do_not_track() {
 }
 
 #[test]
+fn test_default_no_endpoint_disables() {
+    let _guard = lock_test_env();
+    crate::env::remove_var("JCODE_NO_TELEMETRY");
+    crate::env::remove_var("DO_NOT_TRACK");
+    crate::env::remove_var("JCODE_TELEMETRY_ENDPOINT");
+    assert!(!is_enabled());
+}
+
+#[test]
+fn test_endpoint_via_env_var_enables() {
+    let _guard = lock_test_env();
+    crate::env::remove_var("JCODE_NO_TELEMETRY");
+    crate::env::remove_var("DO_NOT_TRACK");
+    crate::env::set_var(
+        "JCODE_TELEMETRY_ENDPOINT",
+        "https://collector.example.com/v1/event",
+    );
+    assert!(is_enabled());
+    crate::env::remove_var("JCODE_TELEMETRY_ENDPOINT");
+}
+
+#[test]
+fn test_endpoint_empty_string_disables() {
+    let _guard = lock_test_env();
+    crate::env::remove_var("JCODE_NO_TELEMETRY");
+    crate::env::remove_var("DO_NOT_TRACK");
+    crate::env::set_var("JCODE_TELEMETRY_ENDPOINT", "   ");
+    assert!(!is_enabled());
+    crate::env::remove_var("JCODE_TELEMETRY_ENDPOINT");
+}
+
+#[test]
+fn test_no_telemetry_flag_overrides_endpoint() {
+    let _guard = lock_test_env();
+    crate::env::remove_var("DO_NOT_TRACK");
+    crate::env::set_var(
+        "JCODE_TELEMETRY_ENDPOINT",
+        "https://collector.example.com/v1/event",
+    );
+    crate::env::set_var("JCODE_NO_TELEMETRY", "1");
+    assert!(!is_enabled());
+    crate::env::remove_var("JCODE_NO_TELEMETRY");
+    crate::env::remove_var("JCODE_TELEMETRY_ENDPOINT");
+}
+
+#[test]
 fn test_error_counters() {
     let _guard = lock_telemetry_test_state();
     reset_counters();
@@ -225,7 +271,9 @@ fn test_session_end_event_serialization() {
 
 #[test]
 fn test_record_token_usage_aggregates_session_and_turn() {
+    let _env_guard = lock_test_env();
     let _guard = lock_telemetry_test_state();
+    crate::env::set_var("JCODE_TELEMETRY_ENDPOINT", "https://test.example/v1/event");
     reset_counters();
     if let Ok(mut session) = SESSION_STATE.lock() {
         *session = None;
@@ -254,11 +302,14 @@ fn test_record_token_usage_aggregates_session_and_turn() {
         *session = None;
     }
     reset_counters();
+    crate::env::remove_var("JCODE_TELEMETRY_ENDPOINT");
 }
 
 #[test]
 fn test_record_connection_type_buckets_transport() {
+    let _env_guard = lock_test_env();
     let _guard = lock_telemetry_test_state();
+    crate::env::set_var("JCODE_TELEMETRY_ENDPOINT", "https://test.example/v1/event");
     reset_counters();
     if let Ok(mut session) = SESSION_STATE.lock() {
         *session = None;
