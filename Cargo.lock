@@ -2551,6 +2551,7 @@ dependencies = [
  "jcode-embedding",
  "jcode-notify-email",
  "jcode-pdf",
+ "jcode-plan",
  "jcode-provider-core",
  "jcode-provider-gemini",
  "jcode-provider-metadata",
@@ -2682,6 +2683,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "pdf-extract",
+]
+
+[[package]]
+name = "jcode-plan"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
