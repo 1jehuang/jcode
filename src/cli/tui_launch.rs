@@ -162,6 +162,9 @@ fn detected_resume_terminal() -> Option<&'static str> {
     {
         return Some("handterm");
     }
+    if std::env::var("TMUX").is_ok() {
+        return Some("tmux");
+    }
     if std::env::var("KITTY_PID").is_ok() {
         return Some("kitty");
     }
@@ -205,7 +208,14 @@ fn resume_terminal_candidates_unix() -> Vec<String> {
 
     #[cfg(target_os = "macos")]
     {
-        for term in ["kitty", "wezterm", "alacritty", "iterm2", "terminal"] {
+        for term in [
+            "tmux",
+            "kitty",
+            "wezterm",
+            "alacritty",
+            "iterm2",
+            "terminal",
+        ] {
             push_unique_terminal(&mut candidates, term);
         }
     }
@@ -214,6 +224,7 @@ fn resume_terminal_candidates_unix() -> Vec<String> {
     {
         for term in [
             "handterm",
+            "tmux",
             "kitty",
             "wezterm",
             "alacritty",
@@ -671,6 +682,18 @@ pub fn spawn_resume_in_new_terminal(
                 ]);
                 cmd.args(["--standalone", "--backend", "gpu", "--exec", &command]);
             }
+            "tmux" => {
+                let command = shell_command(&[
+                    exe.to_string_lossy().into_owned(),
+                    "--fresh-spawn".to_string(),
+                    "--resume".to_string(),
+                    session_id.to_string(),
+                ]);
+                cmd.args(["split-window", "-d", "-c"])
+                    .arg(cwd)
+                    .arg(&command)
+                    .args([";", "select-layout", "tiled"]);
+            }
             "kitty" => {
                 let title = resumed_window_title(session_id);
                 cmd.args(["--title", &title, "-e"])
@@ -795,6 +818,19 @@ pub fn spawn_selfdev_in_new_terminal(
                     "self-dev".to_string(),
                 ]);
                 cmd.args(["--standalone", "--backend", "gpu", "--exec", &command]);
+            }
+            "tmux" => {
+                let command = shell_command(&[
+                    exe.to_string_lossy().into_owned(),
+                    "--fresh-spawn".to_string(),
+                    "--resume".to_string(),
+                    session_id.to_string(),
+                    "self-dev".to_string(),
+                ]);
+                cmd.args(["split-window", "-d", "-c"])
+                    .arg(cwd)
+                    .arg(&command)
+                    .args([";", "select-layout", "tiled"]);
             }
             "kitty" => {
                 cmd.args(["--title", selfdev_title.as_str(), "-e"])
@@ -1244,6 +1280,17 @@ pub fn list_sessions() -> Result<()> {
                             .collect::<Vec<_>>(),
                     );
                     cmd.args(["--standalone", "--backend", "gpu", "--exec", &command]);
+                }
+                "tmux" => {
+                    let command = shell_command(
+                        &std::iter::once(program.to_string_lossy().into_owned())
+                            .chain(args.iter().cloned())
+                            .collect::<Vec<_>>(),
+                    );
+                    cmd.args(["split-window", "-d", "-c"])
+                        .arg(cwd)
+                        .arg(&command)
+                        .args([";", "select-layout", "tiled"]);
                 }
                 "kitty" => {
                     cmd.args(["--title", &title, "-e"])

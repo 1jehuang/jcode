@@ -63,6 +63,18 @@ fn write_fake_handterm(temp: &tempfile::TempDir, output_path: &Path) {
 }
 
 #[cfg(unix)]
+fn write_fake_tmux(temp: &tempfile::TempDir, output_path: &Path) {
+    let script_path = temp.path().join("tmux");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\n' \"$PWD\" > {}\nprintf '%s\n' \"$@\" >> {}\n",
+        output_path.display(),
+        output_path.display()
+    );
+    fs::write(&script_path, script).expect("write fake tmux script");
+    set_permissions_executable(&script_path).expect("make fake tmux executable");
+}
+
+#[cfg(unix)]
 fn wait_for_lines(path: &Path, min_lines: usize) -> Vec<String> {
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
@@ -103,7 +115,10 @@ fn spawn_resume_in_new_terminal_uses_handterm_exec_mode() {
     assert!(launched);
 
     let lines = wait_for_lines(&output_path, 5);
-    assert_eq!(lines[0], cwd.to_string_lossy());
+    assert_eq!(
+        Path::new(&lines[0]).canonicalize().expect("canonical pwd"),
+        cwd.canonicalize().expect("canonical cwd")
+    );
     assert_eq!(lines[1], "--standalone");
     assert_eq!(lines[2], "--backend");
     assert_eq!(lines[3], "gpu");
@@ -111,6 +126,46 @@ fn spawn_resume_in_new_terminal_uses_handterm_exec_mode() {
     assert!(lines[5].contains("--resume"));
     assert!(lines[5].contains("ses_test_123"));
     assert!(lines[5].contains(exe.to_string_lossy().as_ref()));
+}
+
+#[cfg(unix)]
+#[test]
+fn spawn_resume_in_new_terminal_uses_tmux_split_pane_grid() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let output_path = temp.path().join("tmux-launch.txt");
+    write_fake_tmux(&temp, &output_path);
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let _path_guard = EnvVarGuard::set_value("PATH", &path);
+    let _term_guard = EnvVarGuard::set_value("JCODE_TERMINAL", "tmux");
+
+    let exe = temp.path().join("jcode bin");
+    let cwd = temp.path().join("cwd");
+    fs::create_dir_all(&cwd).expect("create cwd");
+
+    let launched =
+        spawn_resume_in_new_terminal(&exe, "ses_tmux_123", &cwd).expect("spawn should work");
+    assert!(launched);
+
+    let lines = wait_for_lines(&output_path, 9);
+    assert_eq!(
+        Path::new(&lines[0]).canonicalize().expect("canonical pwd"),
+        cwd.canonicalize().expect("canonical cwd")
+    );
+    assert_eq!(lines[1], "split-window");
+    assert_eq!(lines[2], "-d");
+    assert_eq!(lines[3], "-c");
+    assert_eq!(lines[4], cwd.to_string_lossy());
+    assert!(lines[5].contains("'--fresh-spawn'"));
+    assert!(lines[5].contains("'--resume'"));
+    assert!(lines[5].contains("'ses_tmux_123'"));
+    assert!(lines[5].contains("jcode bin"));
+    assert_eq!(lines[6], ";");
+    assert_eq!(lines[7], "select-layout");
+    assert_eq!(lines[8], "tiled");
 }
 
 #[cfg(unix)]

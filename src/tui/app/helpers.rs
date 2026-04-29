@@ -470,6 +470,17 @@ fn spawn_command_in_new_terminal(
                 );
                 cmd.args(["--standalone", "--backend", "gpu", "--exec", &command]);
             }
+            "tmux" => {
+                let command = shell_command(
+                    &std::iter::once(program.to_string_lossy().into_owned())
+                        .chain(args.iter().cloned())
+                        .collect::<Vec<_>>(),
+                );
+                cmd.args(["split-window", "-d", "-c"])
+                    .arg(cwd)
+                    .arg(&command)
+                    .args([";", "select-layout", "tiled"]);
+            }
             "kitty" => {
                 cmd.args(["--title", title, "-e"]).arg(program).args(args);
             }
@@ -604,6 +615,9 @@ fn detected_resume_terminal() -> Option<&'static str> {
         {
             return Some("handterm");
         }
+        if std::env::var("TMUX").is_ok() {
+            return Some("tmux");
+        }
         if std::env::var("KITTY_PID").is_ok() {
             return Some("kitty");
         }
@@ -661,7 +675,14 @@ fn resume_terminal_candidates_unix() -> Vec<String> {
 
     #[cfg(target_os = "macos")]
     {
-        for term in ["kitty", "wezterm", "alacritty", "iterm2", "terminal"] {
+        for term in [
+            "tmux",
+            "kitty",
+            "wezterm",
+            "alacritty",
+            "iterm2",
+            "terminal",
+        ] {
             push_unique_terminal(&mut candidates, term);
         }
     }
@@ -670,6 +691,7 @@ fn resume_terminal_candidates_unix() -> Vec<String> {
     {
         for term in [
             "handterm",
+            "tmux",
             "kitty",
             "wezterm",
             "alacritty",
