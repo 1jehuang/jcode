@@ -1,5 +1,6 @@
 mod animation;
 mod desktop_prefs;
+mod power_inhibit;
 mod render_helpers;
 mod session_data;
 mod session_launch;
@@ -216,10 +217,13 @@ async fn run() -> Result<()> {
     let mut cursor_position = winit::dpi::PhysicalPosition::new(0.0, 0.0);
     let mut selecting_body = false;
     let mut hot_reloader = DesktopHotReloader::new();
+    let mut power_inhibitor = power_inhibit::PowerInhibitor::new();
     let (session_event_tx, session_event_rx) = mpsc::channel();
 
     event_loop.run(move |event, target| {
-        if app.has_background_work() {
+        let has_background_work = app.has_background_work();
+        power_inhibitor.set_active(has_background_work);
+        if has_background_work {
             target.set_control_flow(ControlFlow::WaitUntil(
                 Instant::now() + BACKGROUND_POLL_INTERVAL,
             ));
