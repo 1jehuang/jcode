@@ -103,6 +103,12 @@ pub fn take_pending_resume_session() -> Option<String> {
     with_state(|state| state.pending_resume_session.take())
 }
 
+pub fn queue_resume_session(session_id: String) {
+    with_state(|state| {
+        state.pending_resume_session = Some(session_id);
+    });
+}
+
 pub fn handle_split_response(new_session_id: &str) -> bool {
     with_state(|state| {
         if !state.enabled || state.pending_split_target.is_none() {

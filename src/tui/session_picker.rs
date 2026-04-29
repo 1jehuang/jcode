@@ -152,6 +152,8 @@ const MAX_SESSION_SCAN_LIMIT: usize = 10_000;
 #[derive(Clone, Debug)]
 pub enum PickerResult {
     Selected(Vec<ResumeTarget>),
+    SelectedInCurrentTerminal(Vec<ResumeTarget>),
+    SelectedInNewTerminal(Vec<ResumeTarget>),
     RestoreAllCrashed,
 }
 
@@ -726,7 +728,9 @@ impl SessionPicker {
                     } else {
                         let targets = self.selection_or_current_targets();
                         if !targets.is_empty() {
-                            return Ok(OverlayAction::Selected(PickerResult::Selected(targets)));
+                            return Ok(OverlayAction::Selected(
+                                self.selection_result_for_enter(targets, modifiers),
+                            ));
                         }
                     }
                 }
@@ -764,7 +768,9 @@ impl SessionPicker {
             KeyCode::Enter => {
                 let targets = self.selection_or_current_targets();
                 if !targets.is_empty() {
-                    return Ok(OverlayAction::Selected(PickerResult::Selected(targets)));
+                    return Ok(OverlayAction::Selected(
+                        self.selection_result_for_enter(targets, modifiers),
+                    ));
                 }
             }
             KeyCode::Char('R') | KeyCode::Char('B') | KeyCode::Char('b') => {
@@ -793,6 +799,27 @@ impl SessionPicker {
             return Ok(OverlayAction::Continue);
         }
         Ok(OverlayAction::Continue)
+    }
+
+    fn selection_result_for_enter(
+        &self,
+        targets: Vec<ResumeTarget>,
+        modifiers: KeyModifiers,
+    ) -> PickerResult {
+        let configured = crate::config::config().keybindings.session_picker_enter;
+        let action = if modifiers.contains(KeyModifiers::CONTROL) {
+            configured.alternate()
+        } else {
+            configured
+        };
+        match action {
+            crate::config::SessionPickerResumeAction::NewTerminal => {
+                PickerResult::SelectedInNewTerminal(targets)
+            }
+            crate::config::SessionPickerResumeAction::CurrentTerminal => {
+                PickerResult::SelectedInCurrentTerminal(targets)
+            }
+        }
     }
 
     fn render_preview(&mut self, frame: &mut Frame, area: Rect) {
@@ -1346,7 +1373,9 @@ impl SessionPicker {
                                         if targets.is_empty() {
                                             break Ok(None);
                                         }
-                                        break Ok(Some(PickerResult::Selected(targets)));
+                                        break Ok(Some(
+                                            self.selection_result_for_enter(targets, key.modifiers),
+                                        ));
                                     }
                                 }
                                 KeyCode::Backspace => {
@@ -1389,7 +1418,9 @@ impl SessionPicker {
                                 if targets.is_empty() {
                                     break Ok(None);
                                 }
-                                break Ok(Some(PickerResult::Selected(targets)));
+                                break Ok(Some(
+                                    self.selection_result_for_enter(targets, key.modifiers),
+                                ));
                             }
                             KeyCode::Char('R') | KeyCode::Char('B') | KeyCode::Char('b') => {
                                 if self.crashed_sessions.is_some() {

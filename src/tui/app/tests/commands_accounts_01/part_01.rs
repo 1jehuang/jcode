@@ -49,6 +49,60 @@ fn session_picker_resume_action_keeps_overlay_open() {
 }
 
 #[test]
+fn session_picker_ctrl_enter_queues_current_terminal_resume_and_closes_overlay() {
+    let mut app = create_test_app();
+    app.session_picker_mode = SessionPickerMode::Resume;
+    app.session_picker_overlay = Some(RefCell::new(
+        crate::tui::session_picker::SessionPicker::new(vec![
+            crate::tui::session_picker::SessionInfo {
+                id: "session_here_123".to_string(),
+                parent_id: None,
+                short_name: "here".to_string(),
+                icon: "h".to_string(),
+                title: "Here".to_string(),
+                message_count: 1,
+                user_message_count: 1,
+                assistant_message_count: 0,
+                created_at: chrono::Utc::now(),
+                last_message_time: chrono::Utc::now(),
+                last_active_at: None,
+                working_dir: None,
+                model: None,
+                provider_key: None,
+                is_canary: false,
+                is_debug: false,
+                saved: false,
+                save_label: None,
+                status: crate::session::SessionStatus::Closed,
+                needs_catchup: false,
+                estimated_tokens: 0,
+                messages_preview: Vec::new(),
+                search_index: "here".to_string(),
+                server_name: None,
+                server_icon: None,
+                source: crate::tui::session_picker::SessionSource::Jcode,
+                resume_target: crate::tui::session_picker::ResumeTarget::JcodeSession {
+                    session_id: "session_here_123".to_string(),
+                },
+                external_path: None,
+            },
+        ]),
+    ));
+
+    app.handle_session_picker_key(
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyModifiers::CONTROL,
+    )
+    .expect("session picker ctrl-enter should succeed");
+
+    assert!(app.session_picker_overlay.is_none());
+    assert_eq!(
+        crate::tui::workspace_client::take_pending_resume_session().as_deref(),
+        Some("session_here_123")
+    );
+}
+
+#[test]
 fn test_resize_redraw_is_debounced() {
     let mut app = create_test_app();
 

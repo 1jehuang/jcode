@@ -305,6 +305,26 @@ pub struct KeybindingsConfig {
     pub workspace_up: String,
     /// Workspace navigation right key (default: "alt+l")
     pub workspace_right: String,
+    /// Session picker Enter action: "new-terminal" (default) or "current-terminal".
+    /// Ctrl+Enter performs the alternate action.
+    pub session_picker_enter: SessionPickerResumeAction,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionPickerResumeAction {
+    #[default]
+    NewTerminal,
+    CurrentTerminal,
+}
+
+impl SessionPickerResumeAction {
+    pub fn alternate(self) -> Self {
+        match self {
+            Self::NewTerminal => Self::CurrentTerminal,
+            Self::CurrentTerminal => Self::NewTerminal,
+        }
+    }
 }
 
 impl Default for KeybindingsConfig {
@@ -328,6 +348,7 @@ impl Default for KeybindingsConfig {
             workspace_down: "alt+j".to_string(),
             workspace_up: "alt+k".to_string(),
             workspace_right: "alt+l".to_string(),
+            session_picker_enter: SessionPickerResumeAction::NewTerminal,
         }
     }
 }

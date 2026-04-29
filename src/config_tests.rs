@@ -1,4 +1,7 @@
-use super::{AmbientConfig, Config, DiffDisplayMode, DisplayConfig, ProviderConfig};
+use super::{
+    AmbientConfig, Config, DiffDisplayMode, DisplayConfig, ProviderConfig,
+    SessionPickerResumeAction,
+};
 use std::path::Path;
 
 #[test]
@@ -61,6 +64,34 @@ fn test_native_scrollbars_default_to_enabled() {
     let display = DisplayConfig::default();
     assert!(display.native_scrollbars.chat);
     assert!(display.native_scrollbars.side_panel);
+}
+
+#[test]
+fn test_session_picker_resume_action_defaults_to_new_terminal() {
+    assert_eq!(
+        Config::default().keybindings.session_picker_enter,
+        SessionPickerResumeAction::NewTerminal
+    );
+    assert_eq!(
+        SessionPickerResumeAction::NewTerminal.alternate(),
+        SessionPickerResumeAction::CurrentTerminal
+    );
+}
+
+#[test]
+fn test_session_picker_resume_action_deserializes_kebab_case() {
+    let cfg: Config = toml::from_str(
+        r#"
+        [keybindings]
+        session_picker_enter = "current-terminal"
+        "#,
+    )
+    .expect("config should deserialize");
+
+    assert_eq!(
+        cfg.keybindings.session_picker_enter,
+        SessionPickerResumeAction::CurrentTerminal
+    );
 }
 
 #[test]

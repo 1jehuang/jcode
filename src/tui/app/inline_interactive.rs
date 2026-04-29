@@ -1278,6 +1278,68 @@ impl App {
         }
     }
 
+    pub(super) fn handle_session_picker_current_terminal_selection(
+        &mut self,
+        targets: &[ResumeTarget],
+    ) {
+        let Some(target) = targets.first() else {
+            return;
+        };
+
+        let name = match target {
+            ResumeTarget::JcodeSession { session_id } => {
+                crate::id::extract_session_name(session_id)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| session_id.to_string())
+            }
+            ResumeTarget::ClaudeCodeSession { session_id, .. } => {
+                format!("Claude Code {}", &session_id[..session_id.len().min(8)])
+            }
+            ResumeTarget::CodexSession { session_id, .. } => {
+                format!("Codex {}", &session_id[..session_id.len().min(8)])
+            }
+            ResumeTarget::PiSession { session_path } => std::path::Path::new(session_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Pi session")
+                .to_string(),
+            ResumeTarget::OpenCodeSession { session_id, .. } => {
+                format!("OpenCode {}", &session_id[..session_id.len().min(8)])
+            }
+        };
+
+        let resolved_target = match crate::import::resolve_resume_target_to_jcode(target) {
+            Ok(target) => target,
+            Err(err) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Failed to import {}: {}",
+                    name, err
+                )));
+                return;
+            }
+        };
+
+        let ResumeTarget::JcodeSession { session_id } = resolved_target else {
+            self.push_display_message(DisplayMessage::error(format!(
+                "Cannot resume {} in the current terminal.",
+                name
+            )));
+            return;
+        };
+
+        if targets.len() > 1 {
+            self.push_display_message(DisplayMessage::system(format!(
+                "Selected {} sessions; resuming **{}** in this terminal.",
+                targets.len(),
+                name
+            )));
+        }
+        crate::tui::workspace_client::queue_resume_session(session_id);
+        self.session_picker_overlay = None;
+        self.session_picker_mode = SessionPickerMode::Resume;
+        self.set_status_notice(format!("Switching → {}", name));
+    }
+
     pub(super) fn handle_batch_crash_restore(&mut self) {
         let recovered = match crate::session::recover_crashed_sessions() {
             Ok(ids) => ids,
@@ -1372,11 +1434,15 @@ impl App {
                 self.session_picker_overlay = None;
                 self.session_picker_mode = SessionPickerMode::Resume;
             }
-            OverlayAction::Selected(PickerResult::Selected(ids)) => {
+            OverlayAction::Selected(PickerResult::Selected(ids))
+            | OverlayAction::Selected(PickerResult::SelectedInNewTerminal(ids)) => {
                 self.handle_session_picker_selection(&ids);
                 if let Some(picker_cell) = self.session_picker_overlay.as_ref() {
                     picker_cell.borrow_mut().clear_selected_sessions();
                 }
+            }
+            OverlayAction::Selected(PickerResult::SelectedInCurrentTerminal(ids)) => {
+                self.handle_session_picker_current_terminal_selection(&ids);
             }
             OverlayAction::Selected(PickerResult::RestoreAllCrashed) => {
                 self.handle_batch_crash_restore();
