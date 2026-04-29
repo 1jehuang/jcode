@@ -72,6 +72,7 @@ pub mod storage;
 pub mod subscription_catalog;
 pub mod telegram;
 pub mod telemetry;
+pub mod terminal_launch;
 pub mod todo;
 pub mod tool;
 pub mod transport;

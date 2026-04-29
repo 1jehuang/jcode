@@ -93,30 +93,6 @@ pub(crate) fn resumed_window_title(session_id: &str) -> String {
     }
 }
 
-fn applescript_escape(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-#[cfg(unix)]
-fn sh_escape(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "'\"'\"'"))
-}
-
-fn shell_command(args: &[String]) -> String {
-    #[cfg(unix)]
-    {
-        args.iter()
-            .map(|arg| sh_escape(arg))
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-
-    #[cfg(not(unix))]
-    {
-        args.join(" ")
-    }
-}
-
 #[cfg(all(unix, not(target_os = "macos")))]
 fn focus_title_best_effort(title: &str) {
     use std::process::{Command, Stdio};
@@ -139,124 +115,6 @@ fn focus_title_best_effort(title: &str) {
 
 #[cfg(any(not(unix), target_os = "macos"))]
 fn focus_title_best_effort(_title: &str) {}
-
-fn push_unique_terminal(candidates: &mut Vec<String>, term: impl Into<String>) {
-    let term = term.into();
-    if term.trim().is_empty() {
-        return;
-    }
-    if !candidates.iter().any(|candidate| candidate == &term) {
-        candidates.push(term);
-    }
-}
-
-#[cfg(unix)]
-fn detected_resume_terminal() -> Option<&'static str> {
-    if std::env::var("HANDTERM_SESSION").is_ok() || std::env::var("HANDTERM_PID").is_ok() {
-        return Some("handterm");
-    }
-    if std::env::var("TERM_PROGRAM")
-        .ok()
-        .map(|value| value.eq_ignore_ascii_case("handterm"))
-        .unwrap_or(false)
-    {
-        return Some("handterm");
-    }
-    if std::env::var("KITTY_PID").is_ok() {
-        return Some("kitty");
-    }
-    if std::env::var("WEZTERM_EXECUTABLE").is_ok() || std::env::var("WEZTERM_PANE").is_ok() {
-        return Some("wezterm");
-    }
-    if std::env::var("ALACRITTY_WINDOW_ID").is_ok() {
-        return Some("alacritty");
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let term_program = std::env::var("TERM_PROGRAM")
-            .ok()
-            .map(|value| value.to_ascii_lowercase());
-        return match term_program.as_deref() {
-            Some("kitty") => Some("kitty"),
-            Some("wezterm") => Some("wezterm"),
-            Some("alacritty") => Some("alacritty"),
-            Some("iterm.app") | Some("iterm2") => Some("iterm2"),
-            Some("apple_terminal") | Some("terminal") => Some("terminal"),
-            _ => None,
-        };
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
-    }
-}
-
-#[cfg(unix)]
-fn resume_terminal_candidates_unix() -> Vec<String> {
-    let mut candidates = Vec::new();
-    if let Ok(term) = std::env::var("JCODE_TERMINAL") {
-        push_unique_terminal(&mut candidates, term);
-    }
-    if let Some(term) = detected_resume_terminal() {
-        push_unique_terminal(&mut candidates, term);
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        for term in ["kitty", "wezterm", "alacritty", "iterm2", "terminal"] {
-            push_unique_terminal(&mut candidates, term);
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        for term in [
-            "handterm",
-            "kitty",
-            "wezterm",
-            "alacritty",
-            "gnome-terminal",
-            "konsole",
-            "xterm",
-            "foot",
-        ] {
-            push_unique_terminal(&mut candidates, term);
-        }
-    }
-
-    candidates
-}
-
-#[cfg(not(unix))]
-fn detected_resume_terminal() -> Option<&'static str> {
-    if std::env::var("WT_SESSION").is_ok() {
-        return Some("wt");
-    }
-    if std::env::var("WEZTERM_EXECUTABLE").is_ok() || std::env::var("WEZTERM_PANE").is_ok() {
-        return Some("wezterm");
-    }
-    if std::env::var("ALACRITTY_WINDOW_ID").is_ok() {
-        return Some("alacritty");
-    }
-    None
-}
-
-#[cfg(not(unix))]
-fn resume_terminal_candidates_windows() -> Vec<String> {
-    let mut candidates = Vec::new();
-    if let Ok(term) = std::env::var("JCODE_TERMINAL") {
-        push_unique_terminal(&mut candidates, term);
-    }
-    if let Some(term) = detected_resume_terminal() {
-        push_unique_terminal(&mut candidates, term);
-    }
-    for term in ["wezterm", "wt", "alacritty"] {
-        push_unique_terminal(&mut candidates, term);
-    }
-    candidates
-}
 
 pub async fn run_client() -> Result<()> {
     let mut client = server::Client::connect().await?;
@@ -651,115 +509,18 @@ pub fn spawn_resume_in_new_terminal(
     session_id: &str,
     cwd: &std::path::Path,
 ) -> Result<bool> {
-    use std::process::{Command, Stdio};
-
-    for term in resume_terminal_candidates_unix() {
-        let mut cmd = Command::new(&term);
-        cmd.current_dir(cwd)
-            .env("JCODE_FRESH_SPAWN", "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-
-        match term.as_str() {
-            "handterm" => {
-                let command = shell_command(&[
-                    exe.to_string_lossy().into_owned(),
-                    "--fresh-spawn".to_string(),
-                    "--resume".to_string(),
-                    session_id.to_string(),
-                ]);
-                cmd.args(["--standalone", "--backend", "gpu", "--exec", &command]);
-            }
-            "kitty" => {
-                let title = resumed_window_title(session_id);
-                cmd.args(["--title", &title, "-e"])
-                    .arg(exe)
-                    .arg("--fresh-spawn")
-                    .arg("--resume")
-                    .arg(session_id);
-            }
-            "wezterm" => {
-                cmd.args([
-                    "start",
-                    "--always-new-process",
-                    "--",
-                    exe.to_string_lossy().as_ref(),
-                    "--fresh-spawn",
-                    "--resume",
-                    session_id,
-                ]);
-            }
-            "alacritty" => {
-                cmd.args(["-e"])
-                    .arg(exe)
-                    .arg("--fresh-spawn")
-                    .arg("--resume")
-                    .arg(session_id);
-            }
-            "gnome-terminal" => {
-                cmd.args([
-                    "--",
-                    exe.to_string_lossy().as_ref(),
-                    "--fresh-spawn",
-                    "--resume",
-                    session_id,
-                ]);
-            }
-            "konsole" => {
-                cmd.args(["-e"])
-                    .arg(exe)
-                    .arg("--fresh-spawn")
-                    .arg("--resume")
-                    .arg(session_id);
-            }
-            "xterm" => {
-                cmd.args(["-e"])
-                    .arg(exe)
-                    .arg("--fresh-spawn")
-                    .arg("--resume")
-                    .arg(session_id);
-            }
-            "foot" => {
-                cmd.args(["-e"])
-                    .arg(exe)
-                    .arg("--fresh-spawn")
-                    .arg("--resume")
-                    .arg(session_id);
-            }
-            "iterm2" => {
-                cmd = Command::new("osascript");
-                cmd.args([
-                    "-e",
-                    &format!(
-                        r#"tell application "iTerm2"
-                            create window with default profile command "{} --resume {}"
-                        end tell"#,
-                        exe.to_string_lossy(),
-                        session_id
-                    ),
-                ]);
-            }
-            "terminal" => {
-                cmd = Command::new("open");
-                cmd.args([
-                    "-a",
-                    "Terminal",
-                    exe.to_str().unwrap_or("jcode"),
-                    "--args",
-                    "--resume",
-                    session_id,
-                ]);
-            }
-            _ => continue,
-        }
-
-        if crate::platform::spawn_detached(&mut cmd).is_ok() {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
+    let title = resumed_window_title(session_id);
+    let command = crate::terminal_launch::TerminalCommand::new(
+        exe,
+        vec![
+            "--fresh-spawn".to_string(),
+            "--resume".to_string(),
+            session_id.to_string(),
+        ],
+    )
+    .title(title)
+    .fresh_spawn();
+    crate::terminal_launch::spawn_command_in_new_terminal(&command, cwd)
 }
 
 #[cfg(unix)]
@@ -768,144 +529,23 @@ pub fn spawn_selfdev_in_new_terminal(
     session_id: &str,
     cwd: &std::path::Path,
 ) -> Result<bool> {
-    use std::process::{Command, Stdio};
-
     let selfdev_title = format!("{} [self-dev]", resumed_window_title(session_id));
-
-    for term in resume_terminal_candidates_unix() {
-        let mut cmd = Command::new(&term);
-        cmd.current_dir(cwd)
-            .env("JCODE_FRESH_SPAWN", "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-
-        let focus_title = match term.as_str() {
-            "kitty" | "alacritty" | "gnome-terminal" | "xterm" => Some(selfdev_title.as_str()),
-            _ => None,
-        };
-
-        match term.as_str() {
-            "handterm" => {
-                let command = shell_command(&[
-                    exe.to_string_lossy().into_owned(),
-                    "--fresh-spawn".to_string(),
-                    "--resume".to_string(),
-                    session_id.to_string(),
-                    "self-dev".to_string(),
-                ]);
-                cmd.args(["--standalone", "--backend", "gpu", "--exec", &command]);
-            }
-            "kitty" => {
-                cmd.args(["--title", selfdev_title.as_str(), "-e"])
-                    .arg(exe)
-                    .arg("--fresh-spawn")
-                    .arg("--resume")
-                    .arg(session_id)
-                    .arg("self-dev");
-            }
-            "wezterm" => {
-                cmd.args([
-                    "start",
-                    "--always-new-process",
-                    "--",
-                    exe.to_string_lossy().as_ref(),
-                    "--fresh-spawn",
-                    "--resume",
-                    session_id,
-                    "self-dev",
-                ]);
-            }
-            "alacritty" => {
-                cmd.args(["--title", selfdev_title.as_str(), "-e"])
-                    .arg(exe)
-                    .arg("--fresh-spawn")
-                    .arg("--resume")
-                    .arg(session_id)
-                    .arg("self-dev");
-            }
-            "gnome-terminal" => {
-                cmd.arg("--title").arg(selfdev_title.as_str());
-                cmd.args([
-                    "--",
-                    exe.to_string_lossy().as_ref(),
-                    "--fresh-spawn",
-                    "--resume",
-                    session_id,
-                    "self-dev",
-                ]);
-            }
-            "konsole" => {
-                cmd.args(["-e"])
-                    .arg(exe)
-                    .arg("--fresh-spawn")
-                    .arg("--resume")
-                    .arg(session_id)
-                    .arg("self-dev");
-            }
-            "xterm" => {
-                cmd.args(["-T", selfdev_title.as_str(), "-e"])
-                    .arg(exe)
-                    .arg("--resume")
-                    .arg(session_id)
-                    .arg("self-dev");
-            }
-            "foot" => {
-                cmd.args(["-e"])
-                    .arg(exe)
-                    .arg("--fresh-spawn")
-                    .arg("--resume")
-                    .arg(session_id)
-                    .arg("self-dev");
-            }
-            "iterm2" => {
-                cmd = Command::new("osascript");
-                let command = format!(
-                    "\"{}\" --resume {} self-dev",
-                    applescript_escape(exe.to_string_lossy().as_ref()),
-                    session_id
-                );
-                cmd.args([
-                    "-e",
-                    &format!(
-                        r#"tell application "iTerm2"
-                            create window with default profile command "{}"
-                            activate
-                        end tell"#,
-                        command
-                    ),
-                ]);
-            }
-            "terminal" => {
-                cmd = Command::new("osascript");
-                let command = format!(
-                    "\"{}\" --resume {} self-dev",
-                    applescript_escape(exe.to_string_lossy().as_ref()),
-                    session_id
-                );
-                cmd.args([
-                    "-e",
-                    &format!(
-                        r#"tell application "Terminal"
-                            activate
-                            do script "{}"
-                        end tell"#,
-                        command
-                    ),
-                ]);
-            }
-            _ => continue,
-        }
-
-        if crate::platform::spawn_detached(&mut cmd).is_ok() {
-            if let Some(title) = focus_title {
-                focus_title_best_effort(title);
-            }
-            return Ok(true);
-        }
+    let command = crate::terminal_launch::TerminalCommand::new(
+        exe,
+        vec![
+            "--fresh-spawn".to_string(),
+            "--resume".to_string(),
+            session_id.to_string(),
+            "self-dev".to_string(),
+        ],
+    )
+    .title(selfdev_title.clone())
+    .fresh_spawn();
+    let spawned = crate::terminal_launch::spawn_command_in_new_terminal(&command, cwd)?;
+    if spawned {
+        focus_title_best_effort(&selfdev_title);
     }
-
-    Ok(false)
+    Ok(spawned)
 }
 
 #[cfg(not(unix))]
@@ -1196,8 +836,6 @@ pub fn list_sessions() -> Result<()> {
         exe: &std::path::Path,
         cwd: &std::path::Path,
     ) -> Result<bool> {
-        use std::process::{Command, Stdio};
-
         let (program, args) = build_resume_target_command(exe, target);
         let title = match target {
             crate::tui::session_picker::ResumeTarget::JcodeSession { session_id } => {
@@ -1222,94 +860,15 @@ pub fn list_sessions() -> Result<()> {
                 format!("◌ OpenCode {}", &session_id[..session_id.len().min(8)])
             }
         };
-
-        #[cfg(unix)]
-        let resume_terminal_candidates = resume_terminal_candidates_unix();
-        #[cfg(not(unix))]
-        let resume_terminal_candidates = resume_terminal_candidates_windows();
-
-        for term in resume_terminal_candidates {
-            let mut cmd = Command::new(term.as_str());
-            cmd.current_dir(cwd)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-
-            match term.as_str() {
-                #[cfg(unix)]
-                "handterm" => {
-                    let command = shell_command(
-                        &std::iter::once(program.to_string_lossy().into_owned())
-                            .chain(args.iter().cloned())
-                            .collect::<Vec<_>>(),
-                    );
-                    cmd.args(["--standalone", "--backend", "gpu", "--exec", &command]);
-                }
-                "kitty" => {
-                    cmd.args(["--title", &title, "-e"])
-                        .arg(&program)
-                        .args(&args);
-                }
-                "wezterm" => {
-                    cmd.args([
-                        "start",
-                        "--always-new-process",
-                        "--",
-                        program.to_string_lossy().as_ref(),
-                    ]);
-                    cmd.args(&args);
-                }
-                "alacritty" => {
-                    cmd.args(["--title", &title, "-e"])
-                        .arg(&program)
-                        .args(&args);
-                }
-                "gnome-terminal" => {
-                    cmd.arg("--title").arg(&title);
-                    cmd.arg("--").arg(&program).args(&args);
-                }
-                "konsole" | "xterm" | "foot" => {
-                    cmd.args(["-e"]).arg(&program).args(&args);
-                }
-                "iterm2" => {
-                    cmd = Command::new("osascript");
-                    cmd.args([
-                        "-e",
-                        &format!(
-                            r#"tell application "iTerm2"
-                                create window with default profile command "{}"
-                            end tell"#,
-                            shell_command(
-                                &std::iter::once(program.to_string_lossy().into_owned())
-                                    .chain(args.iter().cloned())
-                                    .collect::<Vec<_>>()
-                            )
-                        ),
-                    ]);
-                }
-                "terminal" => {
-                    cmd = Command::new("open");
-                    cmd.args([
-                        "-a",
-                        "Terminal",
-                        program.to_str().unwrap_or("jcode"),
-                        "--args",
-                    ]);
-                    cmd.args(&args);
-                }
-                _ => continue,
-            }
-
-            if crate::platform::spawn_detached(&mut cmd).is_ok() {
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
+        let command = crate::terminal_launch::TerminalCommand::new(program, args).title(title);
+        crate::terminal_launch::spawn_command_in_new_terminal(&command, cwd)
     }
 
     match tui::session_picker::pick_session()? {
-        Some(tui::session_picker::PickerResult::Selected(targets)) => {
+        Some(
+            tui::session_picker::PickerResult::Selected(targets)
+            | tui::session_picker::PickerResult::SelectedInCurrentTerminal(targets),
+        ) => {
             let exe = std::env::current_exe()?;
             let cwd = std::env::current_dir()?;
 
@@ -1385,6 +944,58 @@ pub fn list_sessions() -> Result<()> {
 
                 Ok(())
             }
+        }
+        Some(tui::session_picker::PickerResult::SelectedInNewTerminal(targets)) => {
+            let exe = std::env::current_exe()?;
+            let cwd = std::env::current_dir()?;
+            let mut spawned = 0usize;
+            let mut warned_no_terminal = false;
+
+            for target in targets {
+                let resolved_target = match crate::import::resolve_resume_target_to_jcode(&target) {
+                    Ok(target) => target,
+                    Err(e) => {
+                        eprintln!("Failed to import selected session: {}", e);
+                        continue;
+                    }
+                };
+                let mut session_cwd = cwd.clone();
+                if let crate::tui::session_picker::ResumeTarget::JcodeSession { session_id } =
+                    &resolved_target
+                    && let Ok(sess) = session::Session::load(session_id)
+                    && let Some(dir) = sess.working_dir.as_deref()
+                    && std::path::Path::new(dir).is_dir()
+                {
+                    session_cwd = std::path::PathBuf::from(dir);
+                }
+
+                match spawn_target_in_new_terminal(&resolved_target, &exe, &session_cwd) {
+                    Ok(true) => spawned += 1,
+                    Ok(false) => {
+                        if !warned_no_terminal {
+                            eprintln!(
+                                "No supported terminal emulator found. Run these commands manually:"
+                            );
+                            warned_no_terminal = true;
+                        }
+                        let (program, args) = build_resume_target_command(&exe, &resolved_target);
+                        eprintln!("  {}", command_display(&program, &args));
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to spawn selected session: {}", e);
+                    }
+                }
+            }
+
+            if spawned == 0 && warned_no_terminal {
+                return Ok(());
+            }
+
+            if spawned == 0 {
+                anyhow::bail!("Failed to spawn any selected sessions");
+            }
+
+            Ok(())
         }
         Some(tui::session_picker::PickerResult::RestoreAllCrashed) => {
             let recovered = session::recover_crashed_sessions()?;

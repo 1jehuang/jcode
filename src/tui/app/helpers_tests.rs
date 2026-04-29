@@ -1,9 +1,9 @@
 use super::{
-    build_resume_command, detected_resume_terminal, extract_bracketed_system_message,
-    format_countdown_until, gather_ambient_info, partition_queued_messages, resume_invocation_args,
-    shell_command,
+    build_resume_command, extract_bracketed_system_message, format_countdown_until,
+    gather_ambient_info, partition_queued_messages, resume_invocation_args,
 };
 use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget};
+use crate::terminal_launch::{detected_resume_terminal, shell_command};
 use crate::tui::session_picker::ResumeTarget;
 use chrono::{Duration as ChronoDuration, Utc};
 
@@ -72,7 +72,7 @@ fn partition_queued_messages_moves_system_messages_into_reminders() {
 #[test]
 fn detected_resume_terminal_recognizes_handterm_term_program() {
     let _guard = EnvVarGuard::set_value("TERM_PROGRAM", "handterm");
-    assert_eq!(detected_resume_terminal(), Some("handterm"));
+    assert_eq!(detected_resume_terminal().as_deref(), Some("handterm"));
 }
 
 #[cfg(unix)]
