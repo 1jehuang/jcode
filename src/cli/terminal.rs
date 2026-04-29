@@ -107,6 +107,7 @@ fn init_tui_terminal() -> Result<ratatui::DefaultTerminal> {
 
 pub fn init_tui_runtime() -> Result<(ratatui::DefaultTerminal, TuiRuntimeState)> {
     let terminal = init_tui_terminal()?;
+    crate::tui::mermaid::install_jcode_mermaid_hooks();
     crate::tui::mermaid::init_picker();
 
     let perf_policy = crate::perf::tui_policy();

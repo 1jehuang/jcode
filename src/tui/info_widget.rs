@@ -484,18 +484,7 @@ pub struct GraphEdge {
     pub kind: String,
 }
 
-/// Info about a mermaid diagram for display in the info widget
-#[derive(Debug, Clone)]
-pub struct DiagramInfo {
-    /// Hash for mermaid cache lookup
-    pub hash: u64,
-    /// Original PNG width
-    pub width: u32,
-    /// Original PNG height
-    pub height: u32,
-    /// Optional label/title
-    pub label: Option<String>,
-}
+pub use jcode_tui_mermaid::DiagramInfo;
 
 /// Git repository status for the info widget
 #[derive(Debug, Clone)]

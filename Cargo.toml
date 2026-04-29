@@ -16,6 +16,7 @@ members = [
     "crates/jcode-provider-core",
     "crates/jcode-provider-openrouter",
     "crates/jcode-provider-gemini",
+    "crates/jcode-tui-mermaid",
     "crates/jcode-tui-workspace",
     "crates/jcode-mobile-core",
     "crates/jcode-mobile-sim",
@@ -96,6 +97,7 @@ jcode-provider-metadata = { path = "crates/jcode-provider-metadata" }
 jcode-provider-core = { path = "crates/jcode-provider-core" }
 jcode-provider-openrouter = { path = "crates/jcode-provider-openrouter" }
 jcode-provider-gemini = { path = "crates/jcode-provider-gemini" }
+jcode-tui-mermaid = { path = "crates/jcode-tui-mermaid" }
 jcode-tui-workspace = { path = "crates/jcode-tui-workspace" }
 
 # Streaming
@@ -106,10 +108,7 @@ bytes = "1"
 ratatui = "0.30"
 crossterm = { version = "0.28", features = ["event-stream"] }
 arboard = "3"              # Clipboard support
-ratatui-image = { version = "10.0.6", default-features = false, features = ["crossterm"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }  # Only PNG/JPEG (skip avif/rav1e, exr, gif, tiff, etc)
-resvg = "0.46"
-usvg = "0.46"
 
 # Markdown & syntax highlighting
 syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
@@ -123,9 +122,6 @@ jcode-pdf = { path = "crates/jcode-pdf", optional = true }
 flate2 = "1"
 tar = "0.4"
 tempfile = "3"
-
-# Mermaid diagram rendering (stable v0.2.0 tag)
-mermaid-rs-renderer = { git = "https://github.com/1jehuang/mermaid-rs-renderer.git", tag = "v0.2.1" }
 agentgrep = { git = "https://github.com/1jehuang/agentgrep.git", tag = "v0.1.2" }
 qr2term = "0.3.3"
 

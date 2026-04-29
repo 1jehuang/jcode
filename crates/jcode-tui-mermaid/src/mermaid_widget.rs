@@ -1,5 +1,4 @@
 use super::*;
-use crate::tui::panic_util::panic_payload_to_string;
 
 /// Border width for mermaid diagrams (left bar + space)
 pub(super) const BORDER_WIDTH: u16 = 2;
@@ -57,10 +56,10 @@ pub(super) fn render_stateful_image_safe(
     })) {
         Ok(()) => true,
         Err(payload) => {
-            crate::logging::warn(&format!(
+            crate::log_warn(&format!(
                 "Recovered image render panic for diagram {:016x}: {}",
                 hash,
-                panic_payload_to_string(payload.as_ref())
+                crate::panic_payload_to_string(payload.as_ref())
             ));
             clear_image_area(area, buf);
             false
@@ -279,7 +278,7 @@ pub fn render_image_widget(
     // Render failed - clear the area to avoid showing stale content
     let clr_area = area.intersection(buf_area);
     if clr_area.width > 0 && clr_area.height > 0 {
-        crate::tui::color_support::clear_buf(clr_area, buf);
+        jcode_tui_workspace::color_support::clear_buf(clr_area, buf);
     }
 
     0
@@ -493,7 +492,7 @@ fn render_image_widget_fit_inner(
 
     let clr_area = area.intersection(buf_area);
     if clr_area.width > 0 && clr_area.height > 0 {
-        crate::tui::color_support::clear_buf(clr_area, buf);
+        jcode_tui_workspace::color_support::clear_buf(clr_area, buf);
     }
 
     0

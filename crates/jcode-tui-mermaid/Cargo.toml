@@ -1,0 +1,20 @@
+[package]
+name = "jcode-tui-mermaid"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+crossterm = { version = "0.28", features = ["event-stream"] }
+dirs = "5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+jcode-tui-workspace = { path = "../jcode-tui-workspace" }
+mermaid-rs-renderer = { git = "https://github.com/1jehuang/mermaid-rs-renderer.git", tag = "v0.2.1" }
+ratatui = "0.30"
+ratatui-image = { version = "10.0.6", default-features = false, features = ["crossterm"] }
+resvg = "0.46"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+usvg = "0.46"

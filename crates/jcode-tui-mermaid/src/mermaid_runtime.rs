@@ -70,7 +70,7 @@ fn query_font_size() -> (u16, u16) {
             let fw = ws.width / ws.columns;
             let fh = ws.height / ws.rows;
             if fw > 0 && fh > 0 {
-                crate::logging::info(&format!(
+                crate::log_info(&format!(
                     "Detected terminal font size: {}x{} pixels/cell (window {}x{} px, {}x{} cells)",
                     fw, fh, ws.width, ws.height, ws.columns, ws.rows
                 ));
@@ -117,7 +117,7 @@ pub fn init_picker() {
         PickerInitMode::Probe => match Picker::from_query_stdio() {
             Ok(picker) => Some(picker),
             Err(err) => {
-                crate::logging::warn(&format!(
+                crate::log_warn(&format!(
                     "Mermaid picker probe failed ({}); using fast picker fallback",
                     err
                 ));

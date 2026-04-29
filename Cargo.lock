@@ -2555,19 +2555,17 @@ dependencies = [
  "jcode-provider-gemini",
  "jcode-provider-metadata",
  "jcode-provider-openrouter",
+ "jcode-tui-mermaid",
  "jcode-tui-workspace",
  "libc",
- "mermaid-rs-renderer",
  "open",
  "proctitle",
  "pulldown-cmark",
  "qr2term",
  "rand 0.9.3",
  "ratatui",
- "ratatui-image",
  "regex",
  "reqwest",
- "resvg",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2587,7 +2585,6 @@ dependencies = [
  "unicode-width 0.2.0",
  "url",
  "urlencoding",
- "usvg",
  "uuid",
  "walkdir",
  "windows-sys 0.59.0",
@@ -2720,6 +2717,25 @@ dependencies = [
  "dirs",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "jcode-tui-mermaid"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "crossterm 0.28.1",
+ "dirs",
+ "image",
+ "jcode-tui-workspace",
+ "mermaid-rs-renderer",
+ "ratatui",
+ "ratatui-image",
+ "resvg",
+ "serde",
+ "serde_json",
+ "usvg",
 ]
 
 [[package]]
