@@ -105,7 +105,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/login", "Login to a provider"),
     RegisteredCommand::public("/account", "Open the combined account picker"),
     RegisteredCommand::public("/accounts", "Alias for /account"),
-    RegisteredCommand::public("/cache", "Toggle cache TTL between 5min and 1h"),
+    RegisteredCommand::public("/cache", "Show cache stats or set cache TTL"),
     RegisteredCommand::public("/debug-visual", "Toggle visual debug overlay"),
     RegisteredCommand::public("/screenshot-mode", "Toggle screenshot capture mode"),
     RegisteredCommand::public("/screenshot", "Capture a screenshot debug state"),
@@ -688,6 +688,16 @@ impl App {
                     .iter()
                     .map(|mode| (format!("/compact mode {}", mode), *mode)),
             );
+            return self.rank_suggestions(input, suggestions);
+        }
+
+        if prefix.starts_with("/cache ") {
+            let suggestions = vec![
+                ("/cache stats".into(), "Show KV cache stats"),
+                ("/cache status".into(), "Alias for /cache stats"),
+                ("/cache 1h".into(), "Use 1 hour cache TTL"),
+                ("/cache 5m".into(), "Use 5 minute cache TTL"),
+            ];
             return self.rank_suggestions(input, suggestions);
         }
 

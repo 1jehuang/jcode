@@ -789,6 +789,88 @@ impl App {
     }
 }
 
+fn cache_ratio_pct(numerator: u64, denominator: u64) -> u8 {
+    if denominator == 0 {
+        0
+    } else {
+        ((numerator as f32 / denominator as f32) * 100.0)
+            .round()
+            .clamp(0.0, 100.0) as u8
+    }
+}
+
+fn format_cache_stats(app: &App) -> String {
+    let reported = app.total_cache_reported_input_tokens;
+    let read = app.total_cache_read_tokens;
+    let write = app.total_cache_creation_tokens;
+    let optimal = app.total_cache_optimal_input_tokens;
+    let read_pct = cache_ratio_pct(read, reported);
+    let write_pct = cache_ratio_pct(write, reported);
+    let optimal_pct = if optimal > 0 {
+        Some(cache_ratio_pct(read, optimal))
+    } else {
+        None
+    };
+    let ttl = if crate::provider::anthropic::is_cache_ttl_1h() {
+        "1 hour"
+    } else {
+        "5 minutes"
+    };
+
+    let mut lines = Vec::new();
+    lines.push("**KV cache stats**".to_string());
+    lines.push(String::new());
+    lines.push(format!("- TTL setting: **{}**", ttl));
+    if reported == 0 {
+        lines.push("- No provider cache telemetry recorded in this session yet.".to_string());
+    } else {
+        lines.push(format!("- Reported input: **{}** tokens", reported));
+        lines.push(format!("- Cache read: **{}** tokens ({}%)", read, read_pct));
+        lines.push(format!(
+            "- Cache write: **{}** tokens ({}%)",
+            write, write_pct
+        ));
+        if let Some(optimal_pct) = optimal_pct {
+            lines.push(format!(
+                "- Optimal baseline input: **{}** tokens; read vs optimal: **{}%**",
+                optimal, optimal_pct
+            ));
+        }
+    }
+
+    if let Some(baseline) = app.kv_cache_baseline.as_ref() {
+        lines.push(format!(
+            "- Current baseline: **{}** input tokens, age **{}s**, provider `{}` model `{}`{}",
+            baseline.input_tokens,
+            baseline.completed_at.elapsed().as_secs(),
+            baseline.provider,
+            baseline.model,
+            baseline
+                .upstream_provider
+                .as_ref()
+                .map(|upstream| format!(" upstream `{}`", upstream))
+                .unwrap_or_default()
+        ));
+    }
+
+    if app.kv_cache_miss_samples.is_empty() {
+        lines.push("- Recent misses: none attributed.".to_string());
+    } else {
+        lines.push("- Recent misses:".to_string());
+        for sample in app.kv_cache_miss_samples.iter().rev().take(5) {
+            lines.push(format!(
+                "  - turn {} call {}: **{}** missed tokens ({})",
+                sample.turn_number,
+                sample.call_index,
+                sample.missed_tokens,
+                sample.reason.label()
+            ));
+        }
+    }
+
+    lines.join("\n")
+}
+
 pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
     if trimmed == "/version" {
         let version = env!("JCODE_VERSION");
@@ -816,6 +898,10 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
     if trimmed == "/cache" || trimmed.starts_with("/cache ") {
         let arg = trimmed.strip_prefix("/cache").unwrap_or("").trim();
         match arg {
+            "stats" | "status" => {
+                app.push_display_message(DisplayMessage::system(format_cache_stats(app)));
+                app.set_status_notice("Cache stats");
+            }
             "1h" | "1hour" | "extended" => {
                 crate::provider::anthropic::set_cache_ttl_1h(true);
                 app.push_display_message(DisplayMessage::system(
@@ -841,7 +927,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             }
             _ => {
                 app.push_display_message(DisplayMessage::error(
-                    "Usage: `/cache` (toggle), `/cache 1h` (1 hour), `/cache 5m` (default)"
+                    "Usage: `/cache` (toggle), `/cache stats`, `/cache 1h` (1 hour), `/cache 5m` (default)"
                         .to_string(),
                 ));
             }
