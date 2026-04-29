@@ -262,10 +262,45 @@ fn schema_only_advertises_core_selfdev_fields() {
     assert!(props.contains_key("context"));
     assert!(props.contains_key("reason"));
     assert!(props.contains_key("target"));
+    assert!(props.contains_key("command"));
     assert!(props.contains_key("request_id"));
     assert!(props.contains_key("task_id"));
     assert!(!props.contains_key("notify"));
     assert!(!props.contains_key("wake"));
+}
+
+#[tokio::test]
+async fn test_action_queues_command_in_test_mode() {
+    let _storage_guard = crate::storage::lock_test_env();
+    let _lock = lock_env();
+    let temp_home = tempfile::TempDir::new().expect("temp home");
+    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+    let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let repo = create_repo_fixture();
+
+    let tool = SelfDevTool::new();
+    let ctx = create_test_context(
+        "session-selfdev-test-action",
+        Some(repo.path().to_path_buf()),
+    );
+    let output = tool
+        .execute(
+            json!({
+                "action": "test",
+                "command": "cargo test -p jcode selfdev_build_command",
+                "reason": "verify selfdev test queue"
+            }),
+            ctx,
+        )
+        .await
+        .expect("selfdev test should queue");
+
+    assert!(output.output.contains("Self-dev test queued"));
+    assert!(
+        output
+            .output
+            .contains("cargo test -p jcode selfdev_build_command")
+    );
 }
 
 #[tokio::test]

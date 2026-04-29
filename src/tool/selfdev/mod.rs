@@ -46,6 +46,9 @@ struct SelfDevInput {
     /// Build target for selfdev build: auto, tui, desktop, or all.
     #[serde(default)]
     target: Option<String>,
+    /// Shell command for selfdev test/check action.
+    #[serde(default)]
+    command: Option<String>,
     /// Whether to notify the requesting agent when the queued background build completes.
     #[serde(default)]
     notify: Option<bool>,
@@ -383,6 +386,7 @@ impl Tool for SelfDevTool {
                     "enum": [
                         "enter",
                         "build",
+                        "test",
                         "cancel-build",
                         "reload",
                         "status",
@@ -398,6 +402,10 @@ impl Tool for SelfDevTool {
                     "type": "string",
                     "enum": ["auto", "tui", "desktop", "all"],
                     "description": "Build target for action=build. auto chooses from changed paths; tui builds jcode; desktop builds jcode-desktop; all builds both."
+                },
+                "command": {
+                    "type": "string",
+                    "description": "Shell command for action=test. Runs under the selfdev worktree compile lock."
                 },
                 "request_id": { "type": "string" },
                 "task_id": { "type": "string" }
@@ -418,6 +426,16 @@ impl Tool for SelfDevTool {
                 self.do_build(
                     params.reason,
                     params.target,
+                    params.notify,
+                    params.wake,
+                    &ctx,
+                )
+                .await
+            }
+            "test" => {
+                self.do_test(
+                    params.command,
+                    params.reason,
                     params.notify,
                     params.wake,
                     &ctx,
@@ -458,7 +476,7 @@ impl Tool for SelfDevTool {
                 }
             }
             _ => Ok(ToolOutput::new(format!(
-                "Unknown action: {}. Use 'enter', 'build', 'cancel-build', 'reload', 'status', 'socket-info', or 'socket-help'.",
+                "Unknown action: {}. Use 'enter', 'build', 'test', 'cancel-build', 'reload', 'status', 'socket-info', or 'socket-help'.",
                 action
             ))),
         };

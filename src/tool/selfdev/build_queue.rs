@@ -144,6 +144,73 @@ impl SelfDevTool {
         Ok(TaskResult::completed(Some(0)))
     }
 
+    async fn run_test_request(
+        request_id: String,
+        repo_dir: PathBuf,
+        command: SelfDevBuildCommand,
+        reason: String,
+        output_path: PathBuf,
+    ) -> Result<TaskResult> {
+        let mut request = BuildRequest::load(&request_id)?
+            .ok_or_else(|| anyhow::anyhow!("Missing queued test request {}", request_id))?;
+        let mut queue_file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&output_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to open output file: {}", e))?;
+
+        let worktree_scope = request.worktree_scope.clone();
+        let _lock = Self::wait_for_turn(&request_id, &worktree_scope, &mut queue_file).await?;
+        request.state = BuildRequestState::Building;
+        request.started_at = Some(Utc::now().to_rfc3339());
+        request.last_progress = Some("testing".to_string());
+        request.save()?;
+        Self::append_output_line(&mut queue_file, format!("Test starting now: {}", reason)).await;
+        drop(queue_file);
+
+        let result = if Self::is_test_session() {
+            let mut file = tokio::fs::File::create(&output_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create output file: {}", e))?;
+            Self::append_output_line(
+                &mut file,
+                format!("[test mode] Simulated selfdev test: {}", command.display),
+            )
+            .await;
+            Self::append_output_line(&mut file, "--- Command finished with exit code: 0 ---").await;
+            TaskResult::completed(Some(0))
+        } else {
+            Self::stream_build_command(repo_dir, command, output_path.clone()).await?
+        };
+
+        let mut request = BuildRequest::load(&request_id)?
+            .ok_or_else(|| anyhow::anyhow!("Missing queued test request {}", request_id))?;
+        request.completed_at = Some(Utc::now().to_rfc3339());
+        request.state = match result
+            .status
+            .as_ref()
+            .unwrap_or(&BackgroundTaskStatus::Failed)
+        {
+            BackgroundTaskStatus::Completed => BuildRequestState::Completed,
+            BackgroundTaskStatus::Superseded => BuildRequestState::Superseded,
+            BackgroundTaskStatus::Failed => BuildRequestState::Failed,
+            BackgroundTaskStatus::Running => BuildRequestState::Building,
+        };
+        request.error = result.error.clone();
+        request.last_progress = match request.state {
+            BuildRequestState::Completed => Some("test completed".to_string()),
+            BuildRequestState::Superseded => Some("test superseded".to_string()),
+            BuildRequestState::Failed => Some("test failed".to_string()),
+            BuildRequestState::Building => Some("testing".to_string()),
+            BuildRequestState::Queued => Some("queued".to_string()),
+            BuildRequestState::Attached => Some("attached".to_string()),
+            BuildRequestState::Cancelled => Some("cancelled".to_string()),
+        };
+        request.save()?;
+        Ok(result)
+    }
+
     async fn follow_existing_build(
         request_id: String,
         original_request_id: String,
@@ -587,6 +654,145 @@ impl SelfDevTool {
                     .as_ref()
                     .map(|source| source.fingerprint.clone()),
             }))
+        })))
+    }
+
+    pub(super) async fn do_test(
+        &self,
+        command: Option<String>,
+        reason: Option<String>,
+        notify: Option<bool>,
+        wake: Option<bool>,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput> {
+        let command = command
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("`selfdev test` requires a non-empty shell `command`.")
+            })?;
+        let reason = reason
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| command.clone());
+        let repo_dir =
+            SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref()).ok_or_else(|| {
+                anyhow::anyhow!("Could not find the jcode repository directory for selfdev test")
+            })?;
+        let requested_source = SelfDevTool::requested_source_state(&repo_dir)?;
+        let shell_command = SelfDevBuildCommand {
+            program: "bash".to_string(),
+            args: vec!["-lc".to_string(), command.clone()],
+            display: command.clone(),
+        };
+        let dedupe_key = format!(
+            "test:{}:{}:{}",
+            requested_source.worktree_scope, requested_source.fingerprint, shell_command.display
+        );
+        let blocker = SelfDevTool::newest_active_request(&requested_source.worktree_scope)?;
+        let (session_short_name, session_title) = SelfDevTool::load_session_labels(&ctx.session_id);
+        let request_id = SelfDevTool::next_request_id();
+        let wake = wake.unwrap_or(true);
+        let notify = notify.unwrap_or(true) || wake;
+
+        let mut request = BuildRequest {
+            request_id: request_id.clone(),
+            background_task_id: None,
+            session_id: ctx.session_id.clone(),
+            session_short_name,
+            session_title,
+            reason: reason.clone(),
+            repo_dir: repo_dir.display().to_string(),
+            repo_scope: requested_source.repo_scope.clone(),
+            worktree_scope: requested_source.worktree_scope.clone(),
+            command: shell_command.display.clone(),
+            requested_at: Utc::now().to_rfc3339(),
+            started_at: None,
+            completed_at: None,
+            state: BuildRequestState::Queued,
+            version: Some(requested_source.version_label.clone()),
+            dedupe_key: Some(dedupe_key),
+            requested_source: Some(requested_source.clone()),
+            built_source: None,
+            published_version: None,
+            last_progress: Some("queued".to_string()),
+            validated: false,
+            error: None,
+            output_file: None,
+            status_file: None,
+            attached_to_request_id: None,
+        };
+        request.save()?;
+        let queue_position =
+            SelfDevTool::current_queue_position(&request_id, &requested_source.worktree_scope)?
+                .unwrap_or(1);
+
+        let request_id_for_task = request_id.clone();
+        let repo_dir_for_task = repo_dir.clone();
+        let command_for_task = shell_command.clone();
+        let reason_for_task = reason.clone();
+        let info = background::global()
+            .spawn_with_notify(
+                "selfdev-test",
+                Some("selfdev test".to_string()),
+                &ctx.session_id,
+                notify,
+                wake,
+                move |output_path| async move {
+                    SelfDevTool::run_test_request(
+                        request_id_for_task,
+                        repo_dir_for_task,
+                        command_for_task,
+                        reason_for_task,
+                        output_path,
+                    )
+                    .await
+                },
+            )
+            .await;
+
+        request.background_task_id = Some(info.task_id.clone());
+        request.output_file = Some(info.output_file.display().to_string());
+        request.status_file = Some(info.status_file.display().to_string());
+        request.save()?;
+        let delivery = if wake {
+            "The requesting agent will be woken when the test completes."
+        } else if notify {
+            "You will be notified when the test completes."
+        } else {
+            "Completion delivery is disabled for this test request."
+        };
+        let mut output = format!(
+            "Self-dev test queued in background.\n\n- Request ID: `{}`\n- Task ID: `{}`\n- Reason: {}\n- Command: `{}`\n- Queue position: {}\n- Output file: `{}`\n- Status file: `{}`\n\n{}",
+            request_id,
+            info.task_id,
+            reason,
+            shell_command.display,
+            queue_position,
+            info.output_file.display(),
+            info.status_file.display(),
+            delivery
+        );
+        if let Some(ref blocker) = blocker {
+            output.push_str(&format!(
+                "\n\nCurrently blocked by: {}\nReason: {}",
+                blocker.display_owner(),
+                blocker.reason
+            ));
+        }
+        output.push_str(&format!(
+            "\n\nUse `bg action=\"wait\" task_id=\"{}\"` to wait for completion/checkpoints, or `selfdev status` to inspect the queue.",
+            info.task_id
+        ));
+
+        Ok(ToolOutput::new(output).with_metadata(json!({
+            "background": true,
+            "request_id": request_id,
+            "task_id": info.task_id,
+            "output_file": info.output_file.to_string_lossy(),
+            "status_file": info.status_file.to_string_lossy(),
+            "queue_position": queue_position,
+            "command": shell_command.display,
         })))
     }
 
