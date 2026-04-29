@@ -26,6 +26,7 @@ members = [
     "crates/jcode-provider-gemini",
     "crates/jcode-tui-markdown",
     "crates/jcode-tui-mermaid",
+    "crates/jcode-tui-render",
     "crates/jcode-tui-workspace",
     "crates/jcode-mobile-core",
     "crates/jcode-mobile-sim",
@@ -108,6 +109,7 @@ jcode-provider-openrouter = { path = "crates/jcode-provider-openrouter" }
 jcode-provider-gemini = { path = "crates/jcode-provider-gemini" }
 jcode-tui-markdown = { path = "crates/jcode-tui-markdown" }
 jcode-tui-mermaid = { path = "crates/jcode-tui-mermaid" }
+jcode-tui-render = { path = "crates/jcode-tui-render" }
 jcode-tui-workspace = { path = "crates/jcode-tui-workspace" }
 
 # Streaming

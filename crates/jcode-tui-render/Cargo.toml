@@ -1,0 +1,9 @@
+[package]
+name = "jcode-tui-render"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ratatui = "0.30"
+unicode-width = "0.2"

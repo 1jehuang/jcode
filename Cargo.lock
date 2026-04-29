@@ -2565,6 +2565,7 @@ dependencies = [
  "jcode-side-panel-types",
  "jcode-tui-markdown",
  "jcode-tui-mermaid",
+ "jcode-tui-render",
  "jcode-tui-workspace",
  "libc",
  "open",
@@ -2827,6 +2828,14 @@ dependencies = [
  "serde",
  "serde_json",
  "usvg",
+]
+
+[[package]]
+name = "jcode-tui-render"
+version = "0.1.0"
+dependencies = [
+ "ratatui",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]
