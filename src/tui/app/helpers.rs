@@ -476,9 +476,10 @@ fn spawn_command_in_new_terminal(
                         .chain(args.iter().cloned())
                         .collect::<Vec<_>>(),
                 );
-                cmd.args(["new-window", "-c"])
+                cmd.args(["split-window", "-d", "-c"])
                     .arg(cwd)
-                    .args(["-n", title, &command]);
+                    .arg(&command)
+                    .args([";", "select-layout", "tiled"]);
             }
             "kitty" => {
                 cmd.args(["--title", title, "-e"]).arg(program).args(args);

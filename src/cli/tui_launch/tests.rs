@@ -130,7 +130,7 @@ fn spawn_resume_in_new_terminal_uses_handterm_exec_mode() {
 
 #[cfg(unix)]
 #[test]
-fn spawn_resume_in_new_terminal_uses_tmux_new_window() {
+fn spawn_resume_in_new_terminal_uses_tmux_split_pane_grid() {
     let temp = tempfile::tempdir().expect("temp dir");
     let output_path = temp.path().join("tmux-launch.txt");
     write_fake_tmux(&temp, &output_path);
@@ -150,20 +150,22 @@ fn spawn_resume_in_new_terminal_uses_tmux_new_window() {
         spawn_resume_in_new_terminal(&exe, "ses_tmux_123", &cwd).expect("spawn should work");
     assert!(launched);
 
-    let lines = wait_for_lines(&output_path, 7);
+    let lines = wait_for_lines(&output_path, 9);
     assert_eq!(
         Path::new(&lines[0]).canonicalize().expect("canonical pwd"),
         cwd.canonicalize().expect("canonical cwd")
     );
-    assert_eq!(lines[1], "new-window");
-    assert_eq!(lines[2], "-c");
-    assert_eq!(lines[3], cwd.to_string_lossy());
-    assert_eq!(lines[4], "-n");
-    assert_eq!(lines[5], resumed_window_title("ses_tmux_123"));
-    assert!(lines[6].contains("'--fresh-spawn'"));
-    assert!(lines[6].contains("'--resume'"));
-    assert!(lines[6].contains("'ses_tmux_123'"));
-    assert!(lines[6].contains("jcode bin"));
+    assert_eq!(lines[1], "split-window");
+    assert_eq!(lines[2], "-d");
+    assert_eq!(lines[3], "-c");
+    assert_eq!(lines[4], cwd.to_string_lossy());
+    assert!(lines[5].contains("'--fresh-spawn'"));
+    assert!(lines[5].contains("'--resume'"));
+    assert!(lines[5].contains("'ses_tmux_123'"));
+    assert!(lines[5].contains("jcode bin"));
+    assert_eq!(lines[6], ";");
+    assert_eq!(lines[7], "select-layout");
+    assert_eq!(lines[8], "tiled");
 }
 
 #[cfg(unix)]

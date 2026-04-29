@@ -683,16 +683,16 @@ pub fn spawn_resume_in_new_terminal(
                 cmd.args(["--standalone", "--backend", "gpu", "--exec", &command]);
             }
             "tmux" => {
-                let title = resumed_window_title(session_id);
                 let command = shell_command(&[
                     exe.to_string_lossy().into_owned(),
                     "--fresh-spawn".to_string(),
                     "--resume".to_string(),
                     session_id.to_string(),
                 ]);
-                cmd.args(["new-window", "-c"])
+                cmd.args(["split-window", "-d", "-c"])
                     .arg(cwd)
-                    .args(["-n", &title, &command]);
+                    .arg(&command)
+                    .args([";", "select-layout", "tiled"]);
             }
             "kitty" => {
                 let title = resumed_window_title(session_id);
@@ -827,11 +827,10 @@ pub fn spawn_selfdev_in_new_terminal(
                     session_id.to_string(),
                     "self-dev".to_string(),
                 ]);
-                cmd.args(["new-window", "-c"]).arg(cwd).args([
-                    "-n",
-                    selfdev_title.as_str(),
-                    &command,
-                ]);
+                cmd.args(["split-window", "-d", "-c"])
+                    .arg(cwd)
+                    .arg(&command)
+                    .args([";", "select-layout", "tiled"]);
             }
             "kitty" => {
                 cmd.args(["--title", selfdev_title.as_str(), "-e"])
@@ -1288,9 +1287,10 @@ pub fn list_sessions() -> Result<()> {
                             .chain(args.iter().cloned())
                             .collect::<Vec<_>>(),
                     );
-                    cmd.args(["new-window", "-c"])
+                    cmd.args(["split-window", "-d", "-c"])
                         .arg(cwd)
-                        .args(["-n", &title, &command]);
+                        .arg(&command)
+                        .args([";", "select-layout", "tiled"]);
                 }
                 "kitty" => {
                     cmd.args(["--title", &title, "-e"])
