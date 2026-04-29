@@ -567,6 +567,28 @@ fn test_save_and_restore_reload_state_preserves_queued_messages() {
 }
 
 #[test]
+fn test_new_for_remote_restored_queued_messages_triggers_dispatch_state() {
+    let mut app = create_test_app();
+    let session_id = format!("test-remote-queued-restore-{}", std::process::id());
+
+    app.queued_messages.push("queued one".to_string());
+    app.queued_messages.push("queued two".to_string());
+    app.hidden_queued_system_messages
+        .push("continue silently".to_string());
+    app.save_input_for_reload(&session_id);
+
+    let restored = App::new_for_remote(Some(session_id));
+    assert_eq!(restored.queued_messages(), &["queued one", "queued two"]);
+    assert_eq!(
+        restored.hidden_queued_system_messages,
+        vec!["continue silently"]
+    );
+    assert!(restored.pending_queued_dispatch);
+    assert!(restored.is_processing);
+    assert!(matches!(restored.status, ProcessingStatus::Sending));
+}
+
+#[test]
 fn test_save_and_restore_startup_submission_preserves_pending_images() {
     with_temp_jcode_home(|| {
         let session_id = "session_startup_prompt";
