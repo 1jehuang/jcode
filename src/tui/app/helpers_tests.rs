@@ -77,6 +77,28 @@ fn detected_resume_terminal_recognizes_handterm_term_program() {
 
 #[cfg(unix)]
 #[test]
+fn detected_resume_terminal_recognizes_tmux_session() {
+    let _guard = EnvVarGuard::set_value("TMUX", "/tmp/tmux-501/default,123,0");
+    assert_eq!(detected_resume_terminal(), Some("tmux"));
+}
+
+#[cfg(unix)]
+#[test]
+fn resume_terminal_candidates_include_tmux_once_when_requested() {
+    let _guard = EnvVarGuard::set_value("JCODE_TERMINAL", "tmux");
+    let candidates = super::resume_terminal_candidates_unix();
+    assert_eq!(candidates.first().map(String::as_str), Some("tmux"));
+    assert_eq!(
+        candidates
+            .iter()
+            .filter(|term| term.as_str() == "tmux")
+            .count(),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn shell_command_quotes_single_quotes_for_handterm_exec() {
     let command = shell_command(&[
         "/tmp/jcode binary".to_string(),
