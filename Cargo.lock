@@ -2556,6 +2556,7 @@ dependencies = [
  "jcode-provider-gemini",
  "jcode-provider-metadata",
  "jcode-provider-openrouter",
+ "jcode-side-panel-types",
  "jcode-tui-markdown",
  "jcode-tui-mermaid",
  "jcode-tui-workspace",
@@ -2724,6 +2725,13 @@ dependencies = [
  "dirs",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "jcode-side-panel-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

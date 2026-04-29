@@ -11,6 +11,7 @@ members = [
     "crates/jcode-embedding",
     "crates/jcode-pdf",
     "crates/jcode-plan",
+    "crates/jcode-side-panel-types",
     "crates/jcode-azure-auth",
     "crates/jcode-notify-email",
     "crates/jcode-provider-metadata",
@@ -119,6 +120,7 @@ unicode-width = "0.2"   # Unicode character display width
 # PDF parsing (behind feature flag)
 jcode-pdf = { path = "crates/jcode-pdf", optional = true }
 jcode-plan = { path = "crates/jcode-plan" }
+jcode-side-panel-types = { path = "crates/jcode-side-panel-types" }
 
 # Archive extraction (for auto-update)
 flate2 = "1"
