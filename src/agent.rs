@@ -125,6 +125,40 @@ pub struct Agent {
     stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::tool::StdinInputRequest>>,
 }
 
+/// Try to apply a session's persisted model selection to the provider, lazily
+/// hot-initialising any sub-providers from on-disk credentials if the first
+/// attempt fails because the provider believes credentials are unavailable.
+///
+/// This guards the session-restore path against a race where the running
+/// `MultiProvider` instance was constructed before the user finished an OAuth
+/// flow (e.g. across a `restart-snapshot` reload). Without this, restore would
+/// silently log an error and prompt the user to log in again even though
+/// `~/.jcode/auth.json` already holds valid credentials.
+pub(crate) fn set_session_model_with_lazy_auth_init(
+    provider: &dyn Provider,
+    model: &str,
+) -> anyhow::Result<()> {
+    match provider.set_model(model) {
+        Ok(()) => Ok(()),
+        Err(initial_err) => {
+            // Best-effort: ask the provider to re-scan on-disk credentials and
+            // retry once. `on_auth_changed` is idempotent and cheap (a few file
+            // reads), and is the same hook the login flow uses.
+            provider.on_auth_changed();
+            match provider.set_model(model) {
+                Ok(()) => {
+                    logging::info(&format!(
+                        "Recovered session model '{}' after lazy auth re-init",
+                        model
+                    ));
+                    Ok(())
+                }
+                Err(_) => Err(initial_err),
+            }
+        }
+    }
+}
+
 impl Agent {
     fn should_track_client_cache(&self) -> bool {
         match std::env::var("JCODE_TRACK_CLIENT_CACHE") {
@@ -212,7 +246,7 @@ impl Agent {
                 crate::session::derive_session_provider_key(agent.provider.name());
         }
         if let Some(model) = agent.session.model.clone() {
-            if let Err(e) = agent.provider.set_model(&model) {
+            if let Err(e) = set_session_model_with_lazy_auth_init(&*agent.provider, &model) {
                 logging::error(&format!(
                     "Failed to restore session model '{}': {}",
                     model, e
