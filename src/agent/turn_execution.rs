@@ -372,7 +372,7 @@ impl Agent {
 
         let model_start = Instant::now();
         if let Some(model) = self.session.model.clone() {
-            if let Err(e) = self.provider.set_model(&model) {
+            if let Err(e) = super::set_session_model_with_lazy_auth_init(&*self.provider, &model) {
                 logging::error(&format!(
                     "Failed to restore session model '{}': {}",
                     model, e

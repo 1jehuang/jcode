@@ -592,3 +592,200 @@ async fn env_snapshot_detail_is_minimal_for_empty_sessions_and_full_after_histor
 
     assert_eq!(agent.env_snapshot_detail(), EnvSnapshotDetail::Full);
 }
+
+/// Stub provider used to exercise `set_session_model_with_lazy_auth_init`.
+///
+/// The first call to `set_model` returns the same "credentials not available"
+/// error the real `MultiProvider` raises when an Anthropic sub-provider hasn't
+/// been hot-initialised yet. `on_auth_changed` flips an internal flag that
+/// makes subsequent `set_model` calls succeed, mirroring the behaviour of
+/// `MultiProvider::on_auth_changed` re-reading `auth.json` from disk.
+struct LazyAuthProvider {
+    credentials_loaded: std::sync::atomic::AtomicBool,
+    set_model_attempts: std::sync::atomic::AtomicUsize,
+    on_auth_changed_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl LazyAuthProvider {
+    fn new() -> Self {
+        Self {
+            credentials_loaded: std::sync::atomic::AtomicBool::new(false),
+            set_model_attempts: std::sync::atomic::AtomicUsize::new(0),
+            on_auth_changed_calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for LazyAuthProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let (_tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(1);
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "lazy-auth"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self::new())
+    }
+
+    fn set_model(&self, _model: &str) -> Result<()> {
+        self.set_model_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self
+            .credentials_loaded
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "Claude credentials not available. Run `jcode login --provider claude` first."
+            )
+        }
+    }
+
+    fn on_auth_changed(&self) {
+        self.on_auth_changed_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.credentials_loaded
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn set_session_model_with_lazy_auth_init_recovers_after_on_auth_changed() {
+    let provider = LazyAuthProvider::new();
+    let result = set_session_model_with_lazy_auth_init(&provider, "claude-opus-4-6");
+    assert!(
+        result.is_ok(),
+        "expected lazy hot-init retry to succeed, got {:?}",
+        result.err()
+    );
+    assert_eq!(
+        provider
+            .set_model_attempts
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "set_model should be retried exactly once after on_auth_changed",
+    );
+    assert_eq!(
+        provider
+            .on_auth_changed_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "on_auth_changed should be invoked exactly once",
+    );
+}
+
+struct AlwaysFailingProvider;
+
+#[async_trait]
+impl Provider for AlwaysFailingProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let (_tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(1);
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "always-failing"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+
+    fn set_model(&self, _model: &str) -> Result<()> {
+        anyhow::bail!("Claude credentials not available. Run `jcode login --provider claude` first.")
+    }
+}
+
+#[test]
+fn set_session_model_with_lazy_auth_init_returns_original_error_on_persistent_failure() {
+    let provider = AlwaysFailingProvider;
+    let result = set_session_model_with_lazy_auth_init(&provider, "claude-opus-4-6");
+    let err = result.expect_err("expected persistent failure to surface as Err");
+    assert!(
+        err.to_string().contains("credentials not available"),
+        "expected original error message to be preserved, got: {}",
+        err
+    );
+}
+
+struct FirstAttemptOkProvider {
+    set_model_attempts: std::sync::atomic::AtomicUsize,
+    on_auth_changed_calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl Provider for FirstAttemptOkProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let (_tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(1);
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "first-attempt-ok"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            set_model_attempts: std::sync::atomic::AtomicUsize::new(0),
+            on_auth_changed_calls: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    fn set_model(&self, _model: &str) -> Result<()> {
+        self.set_model_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn on_auth_changed(&self) {
+        self.on_auth_changed_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn set_session_model_with_lazy_auth_init_does_not_retry_when_first_call_succeeds() {
+    let provider = FirstAttemptOkProvider {
+        set_model_attempts: std::sync::atomic::AtomicUsize::new(0),
+        on_auth_changed_calls: std::sync::atomic::AtomicUsize::new(0),
+    };
+    set_session_model_with_lazy_auth_init(&provider, "claude-opus-4-6")
+        .expect("first attempt should succeed");
+    assert_eq!(
+        provider
+            .set_model_attempts
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "set_model should only be called once on success",
+    );
+    assert_eq!(
+        provider
+            .on_auth_changed_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "on_auth_changed must not be called on the success path",
+    );
+}
