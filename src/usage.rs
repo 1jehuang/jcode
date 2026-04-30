@@ -8,6 +8,7 @@ mod display;
 mod openai_helpers;
 mod provider_fetch;
 pub use accessors::*;
+pub use jcode_core::usage_types::{ProviderUsage, ProviderUsageProgress, UsageLimit};
 use provider_fetch::*;
 
 use anyhow::{Context, Result};
@@ -166,31 +167,6 @@ struct ExtraUsageResponse {
 }
 
 // ─── Combined usage for /usage command ───────────────────────────────────────
-
-#[derive(Debug, Clone, Default)]
-pub struct ProviderUsage {
-    pub provider_name: String,
-    pub limits: Vec<UsageLimit>,
-    pub extra_info: Vec<(String, String)>,
-    pub hard_limit_reached: bool,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct UsageLimit {
-    pub name: String,
-    pub usage_percent: f32,
-    pub resets_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ProviderUsageProgress {
-    pub results: Vec<ProviderUsage>,
-    pub completed: usize,
-    pub total: usize,
-    pub done: bool,
-    pub from_cache: bool,
-}
 
 /// Normalized OpenAI/Codex usage window info used by the TUI widget.
 #[derive(Debug, Clone, Default)]
