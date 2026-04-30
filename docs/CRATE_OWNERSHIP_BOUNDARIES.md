@@ -92,6 +92,18 @@ Known broad-filter hazards observed during modularization:
 
 Document precise filters next to each domain crate/module. Broad filters are still useful for periodic sweeps, but they should not block a DTO-only extraction when precise tests and compile checks pass.
 
+## Compile baseline observations
+
+Measured on 2026-04-30 with `scripts/dev_cargo.sh check --profile selfdev -p jcode --bin jcode` after the compile-speed boundary doc commit. This is a coarse mtime-touch benchmark, not a full statistical study, but it is enough to guide priorities.
+
+| Scenario | Observed time | Interpretation |
+| --- | ---: | --- |
+| No-op check after recent doc-only commit | ~65.8s | Environment/cache state can dominate a first check. Treat as warmup/noise baseline, not pure no-op steady state. |
+| Touch root behavior module `src/usage.rs` | ~6.25s | A root-only behavior edit can be relatively cheap when dependencies are already built. |
+| Touch `crates/jcode-core/src/usage_types.rs` | ~65.35s | Editing `jcode-core` invalidates broad downstream dependents. Avoid adding high-churn domain DTOs to `jcode-core`. |
+
+Implication: the compile-speed target is not simply "move things out of root". Moving stable, low-churn contracts out of root is good, but putting many high-churn domain DTOs into `jcode-core` can be counterproductive because `jcode-core` has high fan-out. Prefer focused leaf crates such as `jcode-usage-types`, `jcode-gateway-types`, and `jcode-ambient-types` for domain DTOs that are likely to change.
+
 ## Current `jcode-core` export audit
 
 | Module | Current contents | Preferred long-term home | Notes |
