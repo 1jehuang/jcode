@@ -621,6 +621,7 @@ pub(super) async fn handle_comm_stop(
 
     let mut sessions_guard = sessions.write().await;
     let removed_agent = sessions_guard.remove(&target_session);
+    let removed_live_agent = removed_agent.is_some();
     drop(sessions_guard);
     if let Some(agent_arc) = removed_agent {
         remove_session_interrupt_queue(soft_interrupt_queues, &target_session).await;
@@ -642,61 +643,55 @@ pub(super) async fn handle_comm_stop(
                 );
             }
         }
+    }
 
-        let (removed_swarm_id, removed_name) = {
-            let mut members = swarm_members.write().await;
-            if let Some(member) = members.remove(&target_session) {
-                (member.swarm_id, member.friendly_name)
-            } else {
-                (None, None)
-            }
-        };
-        if let Some(ref swarm_id) = removed_swarm_id {
-            record_swarm_event(
-                event_history,
-                event_counter,
-                swarm_event_tx,
-                target_session.clone(),
-                removed_name.clone(),
-                Some(swarm_id.clone()),
-                SwarmEventType::MemberChange {
-                    action: "left".to_string(),
-                },
-            )
-            .await;
-            remove_session_from_swarm(
-                &target_session,
-                swarm_id,
-                swarm_members,
-                swarms_by_id,
-                swarm_coordinators,
-                swarm_plans,
-            )
-            .await;
+    let (removed_swarm_id, removed_name) = {
+        let mut members = swarm_members.write().await;
+        if let Some(member) = members.remove(&target_session) {
+            (member.swarm_id, member.friendly_name)
+        } else {
+            (None, None)
         }
-        remove_session_channel_subscriptions(
-            &target_session,
-            channel_subscriptions,
-            channel_subscriptions_by_session,
-        )
-        .await;
-        finish_request(
-            swarm_mutation_runtime,
-            &mutation_state,
-            PersistedSwarmMutationResponse::Done,
-        )
-        .await;
-    } else {
-        finish_request(
-            swarm_mutation_runtime,
-            &mutation_state,
-            PersistedSwarmMutationResponse::Error {
-                message: format!("Unknown session '{target_session}'"),
-                retry_after_secs: None,
+    };
+    if let Some(ref swarm_id) = removed_swarm_id {
+        record_swarm_event(
+            event_history,
+            event_counter,
+            swarm_event_tx,
+            target_session.clone(),
+            removed_name.clone(),
+            Some(swarm_id.clone()),
+            SwarmEventType::MemberChange {
+                action: "left".to_string(),
             },
         )
         .await;
+        remove_session_from_swarm(
+            &target_session,
+            swarm_id,
+            swarm_members,
+            swarms_by_id,
+            swarm_coordinators,
+            swarm_plans,
+        )
+        .await;
     }
+    remove_session_channel_subscriptions(
+        &target_session,
+        channel_subscriptions,
+        channel_subscriptions_by_session,
+    )
+    .await;
+
+    let response = if removed_live_agent || removed_swarm_id.is_some() {
+        PersistedSwarmMutationResponse::Done
+    } else {
+        PersistedSwarmMutationResponse::Error {
+            message: format!("Unknown session '{target_session}'"),
+            retry_after_secs: None,
+        }
+    };
+    finish_request(swarm_mutation_runtime, &mutation_state, response).await;
 }
 
 fn swarm_stop_allowed_by_owner(
