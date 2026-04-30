@@ -12,6 +12,7 @@ mod active_pids;
 use active_pids::{active_pids_dir, register_active_pid, unregister_active_pid};
 pub use active_pids::{active_session_ids, find_active_session_id_by_pid};
 mod crash;
+mod journal;
 mod memory_profile;
 mod model;
 mod render;
@@ -21,6 +22,10 @@ pub use crash::{
     find_session_by_name_or_id, recover_crashed_sessions,
 };
 pub use jcode_session_types::{EnvSnapshot, GitState, SessionImproveMode, SessionStatus};
+use journal::{
+    PersistVectorMode, SessionJournalEntry, SessionJournalMeta, SessionPersistState,
+    metadata_requires_snapshot,
+};
 pub use memory_profile::SessionMemoryProfileSnapshot;
 use memory_profile::{
     ContentBlockMemoryStats, SessionMemoryProfileCache, summarize_blocks, summarize_message_content,
@@ -179,66 +184,6 @@ struct SessionStartupStub {
     saved: bool,
     #[serde(default)]
     save_label: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct SessionJournalMeta {
-    parent_id: Option<String>,
-    title: Option<String>,
-    updated_at: DateTime<Utc>,
-    compaction: Option<StoredCompactionState>,
-    provider_session_id: Option<String>,
-    provider_key: Option<String>,
-    model: Option<String>,
-    subagent_model: Option<String>,
-    improve_mode: Option<SessionImproveMode>,
-    autoreview_enabled: Option<bool>,
-    autojudge_enabled: Option<bool>,
-    is_canary: bool,
-    testing_build: Option<String>,
-    working_dir: Option<String>,
-    short_name: Option<String>,
-    status: SessionStatus,
-    last_pid: Option<u32>,
-    last_active_at: Option<DateTime<Utc>>,
-    is_debug: bool,
-    saved: bool,
-    save_label: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SessionJournalEntry {
-    meta: SessionJournalMeta,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    append_messages: Vec<StoredMessage>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    append_env_snapshots: Vec<EnvSnapshot>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    append_memory_injections: Vec<StoredMemoryInjection>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    append_replay_events: Vec<StoredReplayEvent>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum PersistVectorMode {
-    #[default]
-    Clean,
-    Append,
-    Full,
-}
-
-#[derive(Debug, Clone, Default)]
-struct SessionPersistState {
-    snapshot_exists: bool,
-    messages_len: usize,
-    env_snapshots_len: usize,
-    memory_injections_len: usize,
-    replay_events_len: usize,
-    messages_mode: PersistVectorMode,
-    env_snapshots_mode: PersistVectorMode,
-    memory_injections_mode: PersistVectorMode,
-    replay_events_mode: PersistVectorMode,
-    last_meta: Option<SessionJournalMeta>,
 }
 
 const MAX_SESSION_JOURNAL_BYTES: u64 = 512 * 1024;
@@ -642,24 +587,6 @@ impl Session {
         if self.persist_state.replay_events_mode != PersistVectorMode::Full {
             self.persist_state.replay_events_mode = PersistVectorMode::Append;
         }
-    }
-
-    fn metadata_requires_snapshot(prev: &SessionJournalMeta, current: &SessionJournalMeta) -> bool {
-        prev.parent_id != current.parent_id
-            || prev.title != current.title
-            || prev.provider_key != current.provider_key
-            || prev.subagent_model != current.subagent_model
-            || prev.improve_mode != current.improve_mode
-            || prev.autoreview_enabled != current.autoreview_enabled
-            || prev.autojudge_enabled != current.autojudge_enabled
-            || prev.is_canary != current.is_canary
-            || prev.testing_build != current.testing_build
-            || prev.working_dir != current.working_dir
-            || prev.short_name != current.short_name
-            || prev.status != current.status
-            || prev.is_debug != current.is_debug
-            || prev.saved != current.saved
-            || prev.save_label != current.save_label
     }
 
     fn apply_journal_meta(&mut self, meta: SessionJournalMeta) {
@@ -1121,7 +1048,7 @@ impl Session {
             .persist_state
             .last_meta
             .as_ref()
-            .is_some_and(|prev| Self::metadata_requires_snapshot(prev, &current_meta));
+            .is_some_and(|prev| metadata_requires_snapshot(prev, &current_meta));
         let vectors_need_snapshot = !self.persist_state.snapshot_exists
             || self.persist_state.messages_mode == PersistVectorMode::Full
             || self.persist_state.env_snapshots_mode == PersistVectorMode::Full
