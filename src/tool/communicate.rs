@@ -700,6 +700,13 @@ fn latest_assistant_report(messages: &[HistoryMessage]) -> Option<String> {
     })
 }
 
+fn resolve_optional_target_session(target: Option<String>, current_session: &str) -> String {
+    match target.as_deref() {
+        Some("current") | None => current_session.to_string(),
+        Some(_) => target.expect("target is Some when as_deref returned Some"),
+    }
+}
+
 fn format_awaited_members_with_reports(
     completed: bool,
     summary: &str,
@@ -1385,9 +1392,8 @@ impl Tool for CommunicateTool {
             }
 
             "status" => {
-                let target = params.target_session.ok_or_else(|| {
-                    anyhow::anyhow!("'target_session' is required for status action")
-                })?;
+                let target =
+                    resolve_optional_target_session(params.target_session, &ctx.session_id);
 
                 let request = Request::CommStatus {
                     id: REQUEST_ID,

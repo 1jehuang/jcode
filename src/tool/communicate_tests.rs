@@ -2,7 +2,7 @@ use super::{
     CommunicateInput, CommunicateTool, cleanup_candidate_session_ids,
     default_await_target_statuses, default_cleanup_target_statuses, format_awaited_members,
     format_awaited_members_with_reports, format_members, format_plan_status,
-    latest_assistant_report,
+    latest_assistant_report, resolve_optional_target_session,
 };
 use crate::message::{Message, StreamEvent, ToolDefinition};
 use crate::protocol::{
@@ -103,6 +103,22 @@ fn format_awaited_members_includes_completion_reports() {
     assert!(output.contains("Completion reports:"));
     assert!(output.contains("--- worker (ready) ---"));
     assert!(output.contains("Outcome: finished"));
+}
+
+#[test]
+fn resolve_optional_target_session_defaults_to_current() {
+    assert_eq!(
+        resolve_optional_target_session(None, "session_current"),
+        "session_current"
+    );
+    assert_eq!(
+        resolve_optional_target_session(Some("current".to_string()), "session_current"),
+        "session_current"
+    );
+    assert_eq!(
+        resolve_optional_target_session(Some("session_other".to_string()), "session_current"),
+        "session_other"
+    );
 }
 
 #[test]
