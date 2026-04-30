@@ -10,6 +10,7 @@ members = [
     "crates/jcode-agent-runtime",
     "crates/jcode-auth-types",
     "crates/jcode-embedding",
+    "crates/jcode-gateway-types",
     "crates/jcode-pdf",
     "crates/jcode-background-types",
     "crates/jcode-batch-types",
@@ -98,6 +99,7 @@ proctitle = "0.1"
 
 # Embeddings (local inference) - behind feature flag (163 crates, slow to compile)
 jcode-embedding = { path = "crates/jcode-embedding", optional = true }
+jcode-gateway-types = { path = "crates/jcode-gateway-types" }
 
 # OAuth
 base64 = "0.22"

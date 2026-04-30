@@ -25,7 +25,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::logging;
 use crate::storage;
-pub use jcode_core::gateway_types::{PairedDevice, PairingCode};
+pub use jcode_gateway_types::{PairedDevice, PairingCode};
 
 /// Default gateway port ("jc" on phone keypad = 52, but we use 7643)
 pub const DEFAULT_PORT: u16 = 7643;

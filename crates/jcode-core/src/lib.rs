@@ -1,7 +1,6 @@
 pub mod ambient_usage_types;
 pub mod catchup_types;
 pub mod env;
-pub mod gateway_types;
 pub mod goal_types;
 pub mod id;
 pub mod memory_types;

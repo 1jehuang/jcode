@@ -2554,6 +2554,7 @@ dependencies = [
  "jcode-config-types",
  "jcode-core",
  "jcode-embedding",
+ "jcode-gateway-types",
  "jcode-message-types",
  "jcode-notify-email",
  "jcode-pdf",
@@ -2687,6 +2688,13 @@ dependencies = [
  "tokenizers",
  "tract-hir",
  "tract-onnx",
+]
+
+[[package]]
+name = "jcode-gateway-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
