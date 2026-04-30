@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::path::PathBuf;
 use std::time::Instant;
 mod active_pids;
 use active_pids::{active_pids_dir, register_active_pid, unregister_active_pid};
@@ -15,6 +14,7 @@ pub use active_pids::{active_session_ids, find_active_session_id_by_pid};
 mod crash;
 mod memory_profile;
 mod render;
+mod storage_paths;
 pub use crash::{
     CrashedSessionsInfo, detect_crashed_sessions, find_recent_crashed_sessions,
     find_session_by_name_or_id, recover_crashed_sessions,
@@ -29,6 +29,11 @@ pub use render::{
     has_rendered_images, render_images, render_messages, render_messages_and_images,
     render_messages_and_images_with_compacted_history, summarize_tool_calls,
 };
+pub(crate) use storage_paths::session_journal_path_from_snapshot;
+#[cfg(test)]
+pub(crate) use storage_paths::session_path_in_dir;
+use storage_paths::{estimate_json_bytes, file_len_or_zero, persist_vector_mode_label};
+pub use storage_paths::{session_exists, session_journal_path, session_path};
 
 /// A memory injection event, stored for replay visualization
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1775,54 +1780,6 @@ struct RemoteStartupSessionSnapshot {
     saved: bool,
     #[serde(default)]
     save_label: Option<String>,
-}
-
-fn session_path_in_dir(base: &std::path::Path, session_id: &str) -> PathBuf {
-    base.join("sessions").join(format!("{}.json", session_id))
-}
-
-fn estimate_json_bytes<T: Serialize>(value: &T) -> usize {
-    serde_json::to_vec(value)
-        .map(|bytes| bytes.len())
-        .unwrap_or(0)
-}
-
-fn file_len_or_zero(path: &Path) -> u64 {
-    std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
-}
-
-fn persist_vector_mode_label(mode: PersistVectorMode) -> &'static str {
-    match mode {
-        PersistVectorMode::Clean => "clean",
-        PersistVectorMode::Append => "append",
-        PersistVectorMode::Full => "full",
-    }
-}
-
-pub(crate) fn session_journal_path_from_snapshot(path: &Path) -> PathBuf {
-    let mut name = path
-        .file_stem()
-        .map(|stem| stem.to_os_string())
-        .unwrap_or_default();
-    name.push(".journal.jsonl");
-    path.with_file_name(name)
-}
-
-pub fn session_path(session_id: &str) -> Result<PathBuf> {
-    let base = storage::jcode_dir()?;
-    Ok(session_path_in_dir(&base, session_id))
-}
-
-pub fn session_journal_path(session_id: &str) -> Result<PathBuf> {
-    Ok(session_journal_path_from_snapshot(&session_path(
-        session_id,
-    )?))
-}
-
-pub fn session_exists(session_id: &str) -> bool {
-    session_path(session_id)
-        .map(|path| path.exists())
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
