@@ -7,6 +7,47 @@ IS_WINDOWS=false
 info() { printf '\033[1;34m%s\033[0m\n' "$*"; }
 err()  { printf '\033[1;31merror: %s\033[0m\n' "$*" >&2; exit 1; }
 
+verify_checksum() {
+  local file="$1"
+  local sums_file="$2"
+  local basename
+  basename="$(basename "$file")"
+
+  if [ "${JCODE_INSTALL_SKIP_VERIFY:-0}" = "1" ]; then
+    info "Skipping checksum verification (JCODE_INSTALL_SKIP_VERIFY=1)"
+    return 0
+  fi
+
+  if [ ! -f "$sums_file" ]; then
+    info "No checksum file available — skipping verification"
+    info "  To verify manually: sha256sum '$basename' and compare with the release page"
+    return 0
+  fi
+
+  local expected
+  expected="$(grep -F "$basename" "$sums_file" | head -1 | awk '{print $1}')"
+  if [ -z "$expected" ]; then
+    info "Checksum entry for '$basename' not found in SHA256SUMS — skipping verification"
+    return 0
+  fi
+
+  local actual
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$file" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    actual="$(shasum -a 256 "$file" | awk '{print $1}')"
+  else
+    info "Neither sha256sum nor shasum found — skipping checksum verification"
+    return 0
+  fi
+
+  if [ "$actual" != "$expected" ]; then
+    err "Checksum mismatch for '$basename'!\n  Expected: $expected\n  Actual:   $actual\n  This could indicate a corrupted or tampered download."
+  fi
+
+  info "Checksum verified ✓"
+}
+
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
@@ -48,6 +89,7 @@ VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep
 
 URL_TGZ="https://github.com/$REPO/releases/download/$VERSION/$ARTIFACT.tar.gz"
 URL_BIN="https://github.com/$REPO/releases/download/$VERSION/$ARTIFACT"
+URL_SUMS="https://github.com/$REPO/releases/download/$VERSION/SHA256SUMS"
 
 if [ "$IS_WINDOWS" = true ]; then
   EXE=".exe"
@@ -85,6 +127,16 @@ if curl -fsSL "$URL_TGZ" -o "$tmpdir/jcode.download" 2>/dev/null; then
   download_mode="tar"
 elif curl -fsSL "$URL_BIN" -o "$tmpdir/jcode.download" 2>/dev/null; then
   download_mode="bin"
+fi
+
+# Download and verify checksums
+SUMS_FILE="$tmpdir/SHA256SUMS"
+curl -fsSL "$URL_SUMS" -o "$SUMS_FILE" 2>/dev/null || true
+
+if [ "$download_mode" = "tar" ]; then
+  verify_checksum "$tmpdir/jcode.download" "$SUMS_FILE"
+elif [ "$download_mode" = "bin" ]; then
+  verify_checksum "$tmpdir/jcode.download" "$SUMS_FILE"
 fi
 
 mkdir -p "$INSTALL_DIR" "$stable_dir" "$current_dir" "$version_dir"
