@@ -114,6 +114,10 @@ impl SystemProfile {
     pub fn is_wsl_windows_terminal(&self) -> bool {
         self.is_wsl && self.is_windows_terminal()
     }
+
+    pub fn is_vscode_terminal(&self) -> bool {
+        self.terminal == "vscode"
+    }
 }
 
 static PROFILE: OnceLock<SystemProfile> = OnceLock::new();
@@ -205,6 +209,14 @@ pub fn tui_policy_for(
         enable_keyboard_enhancement = false;
         simplified_model_picker = true;
         linked_side_panel_refresh_interval = std::time::Duration::from_millis(1000);
+    }
+
+    if profile.is_vscode_terminal() {
+        // VSCodium/VSCode terminal (xterm.js) translates keys via the OS keyboard layout
+        // before sending escape sequences. Enabling keyboard enhancement causes crossterm to
+        // reconstruct shifted characters using a hardcoded US layout, breaking international
+        // keyboard layouts (e.g. Finnish Shift+7 = '/' becomes '&').
+        enable_keyboard_enhancement = false;
     }
 
     match profile.tier {
