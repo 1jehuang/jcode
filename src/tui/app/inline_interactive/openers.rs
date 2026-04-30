@@ -67,7 +67,16 @@ impl App {
             .map(|provider| {
                 let auth_state = status.state_for_provider(provider);
                 let state_label = match auth_state {
-                    crate::auth::AuthState::Available => "configured",
+                    crate::auth::AuthState::Available => {
+                        if matches!(
+                            provider.target,
+                            crate::provider_catalog::LoginProviderTarget::AutoImport
+                        ) {
+                            "detected"
+                        } else {
+                            "configured"
+                        }
+                    }
                     crate::auth::AuthState::Expired => "attention",
                     crate::auth::AuthState::NotConfigured => "setup",
                 };

@@ -247,6 +247,59 @@ fn parse_external_auth_review_selection_supports_all_and_deduped_indices() {
 }
 
 #[test]
+fn parse_login_provider_selection_supports_skip_and_names() {
+    let providers = provider_catalog::cli_login_providers();
+
+    assert!(
+        parse_login_provider_selection_input("", &providers)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        parse_login_provider_selection_input("skip", &providers)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        parse_login_provider_selection_input("claude", &providers)
+            .unwrap()
+            .map(|provider| provider.id),
+        Some("claude")
+    );
+    let first_provider = providers[0].id;
+    assert_eq!(
+        parse_login_provider_selection_input("1", &providers)
+            .unwrap()
+            .map(|provider| provider.id),
+        Some(first_provider)
+    );
+    assert!(parse_login_provider_selection_input("not-a-provider", &providers).is_err());
+}
+
+#[test]
+fn login_provider_menu_shows_autodetected_auth_and_skip() {
+    let providers = vec![
+        provider_catalog::CLAUDE_LOGIN_PROVIDER,
+        provider_catalog::OPENAI_LOGIN_PROVIDER,
+    ];
+    let status = auth::AuthStatus {
+        anthropic: auth::ProviderAuth {
+            state: auth::AuthState::Available,
+            has_oauth: true,
+            has_api_key: false,
+        },
+        ..Default::default()
+    };
+
+    let menu = render_login_provider_selection_menu("Choose a provider:", &providers, &status);
+    assert!(menu.contains("Autodetected auth:"));
+    assert!(menu.contains("Anthropic/Claude: configured: OAuth"));
+    assert!(menu.contains("[configured"));
+    assert!(menu.contains("[not configured"));
+    assert!(menu.contains("Skip: press Enter"));
+}
+
+#[test]
 fn choice_for_login_provider_round_trips_core_targets() {
     assert_eq!(
         choice_for_login_provider(provider_catalog::JCODE_LOGIN_PROVIDER),

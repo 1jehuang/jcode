@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::auth;
 use crate::provider_catalog::{
     LoginProviderDescriptor, LoginProviderTarget, OPENAI_COMPAT_LOCAL_ENABLED_ENV,
-    OpenAiCompatibleProfile, resolve_login_selection, resolve_openai_compatible_profile,
+    OpenAiCompatibleProfile, resolve_openai_compatible_profile,
 };
 
 use super::provider_init::{ProviderChoice, login_provider_for_choice, save_named_api_key};
@@ -187,41 +187,12 @@ pub async fn run_login(
                 notify_running_server_auth_changed_best_effort().await;
                 return Ok(());
             }
-            eprintln!("Choose a provider to log in:");
-            for (index, provider) in providers.iter().enumerate() {
-                eprintln!(
-                    "  {}. {:<16} - {}",
-                    index + 1,
-                    provider.display_name,
-                    provider.menu_detail
-                );
-            }
-            eprintln!();
-            let recommended = providers
-                .iter()
-                .filter(|provider| provider.recommended)
-                .map(|provider| provider.display_name)
-                .collect::<Vec<_>>();
-            if !recommended.is_empty() {
-                eprintln!(
-                    "  Recommended if you have a subscription: {}.",
-                    recommended.join(", ")
-                );
-            }
-            eprint!("\nEnter 1-{}: ", providers.len());
-            io::stdout().flush()?;
-
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            if let Some(provider) = resolve_login_selection(input.trim(), &providers) {
-                run_login_provider(provider, account_label, options).await?;
-            } else {
-                let valid = providers
-                    .iter()
-                    .map(|provider| provider.id)
-                    .collect::<Vec<_>>()
-                    .join("|");
-                anyhow::bail!("Invalid choice. Use --provider {}", valid);
+            match super::provider_init::prompt_login_provider_selection_optional(
+                &providers,
+                "Choose a provider to log in:",
+            )? {
+                Some(provider) => run_login_provider(provider, account_label, options).await?,
+                None => eprintln!("Login skipped."),
             }
         }
         _ => unreachable!("handled above"),

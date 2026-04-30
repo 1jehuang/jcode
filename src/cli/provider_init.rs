@@ -283,34 +283,159 @@ pub fn prompt_login_provider_selection(
     providers: &[LoginProviderDescriptor],
     heading: &str,
 ) -> Result<LoginProviderDescriptor> {
-    eprintln!("{heading}");
-    for (index, provider) in providers.iter().enumerate() {
-        eprintln!(
-            "  {}. {:<16} - {}",
+    prompt_login_provider_selection_optional(providers, heading)?.ok_or_else(|| {
+        anyhow::anyhow!("Login skipped. Run `jcode login` when you're ready to authenticate.")
+    })
+}
+
+pub fn prompt_login_provider_selection_optional(
+    providers: &[LoginProviderDescriptor],
+    heading: &str,
+) -> Result<Option<LoginProviderDescriptor>> {
+    let status = auth::AuthStatus::check_fast();
+    eprint!(
+        "{}",
+        render_login_provider_selection_menu(heading, providers, &status)
+    );
+    eprint!(
+        "\nEnter 1-{}, provider name, or Enter=skip: ",
+        providers.len()
+    );
+    io::stderr().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    parse_login_provider_selection_input(&input, providers)
+}
+
+pub fn parse_login_provider_selection_input(
+    input: &str,
+    providers: &[LoginProviderDescriptor],
+) -> Result<Option<LoginProviderDescriptor>> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let normalized = trimmed.to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "s" | "skip" | "q" | "quit" | "cancel" | "none"
+    ) {
+        return Ok(None);
+    }
+
+    resolve_login_selection(trimmed, providers)
+        .map(Some)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Invalid choice '{}'. Enter 1-{}, a provider name, or 'skip'.",
+                trimmed,
+                providers.len()
+            )
+        })
+}
+
+pub fn render_login_provider_selection_menu(
+    heading: &str,
+    providers: &[LoginProviderDescriptor],
+    status: &auth::AuthStatus,
+) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "{heading}");
+    let _ = writeln!(out);
+
+    let detected = providers
+        .iter()
+        .copied()
+        .filter_map(|provider| {
+            let assessment = status.assessment_for_provider(provider);
+            (assessment.state != auth::AuthState::NotConfigured).then(|| {
+                format!(
+                    "  - {}: {}",
+                    provider.display_name,
+                    login_provider_detection_detail(provider, &assessment)
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if detected.is_empty() {
+        let _ = writeln!(out, "Autodetected auth: none found yet.");
+    } else {
+        let _ = writeln!(out, "Autodetected auth:");
+        for line in detected {
+            let _ = writeln!(out, "{line}");
+        }
+    }
+
+    let _ = writeln!(out);
+    for (index, provider) in providers.iter().copied().enumerate() {
+        let auth_state = status.state_for_provider(provider);
+        let _ = writeln!(
+            out,
+            "  {}. {:<22} [{:<15}] - {}",
             index + 1,
             provider.display_name,
+            login_provider_state_badge(provider, auth_state),
             provider.menu_detail
         );
     }
-    eprintln!();
+
     let recommended = providers
         .iter()
         .filter(|provider| provider.recommended)
         .map(|provider| provider.display_name)
         .collect::<Vec<_>>();
     if !recommended.is_empty() {
-        eprintln!(
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
             "  Recommended if you have a subscription: {}.",
             recommended.join(", ")
         );
     }
-    eprint!("\nEnter 1-{}: ", providers.len());
-    io::stdout().flush()?;
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    resolve_login_selection(input.trim(), providers)
-        .ok_or_else(|| anyhow::anyhow!("Invalid choice. Run 'jcode login' to try again."))
+    let _ = writeln!(out);
+    let _ = writeln!(out, "  Skip: press Enter, or type `skip`.");
+    out
+}
+
+fn login_provider_state_badge(
+    provider: LoginProviderDescriptor,
+    state: auth::AuthState,
+) -> &'static str {
+    match state {
+        auth::AuthState::Available => {
+            if matches!(provider.target, LoginProviderTarget::AutoImport) {
+                "detected"
+            } else {
+                "configured"
+            }
+        }
+        auth::AuthState::Expired => "needs attention",
+        auth::AuthState::NotConfigured => "not configured",
+    }
+}
+
+fn login_provider_detection_detail(
+    provider: LoginProviderDescriptor,
+    assessment: &auth::ProviderAuthAssessment,
+) -> String {
+    match assessment.state {
+        auth::AuthState::Available => {
+            let prefix = if matches!(provider.target, LoginProviderTarget::AutoImport) {
+                "detected"
+            } else {
+                "configured"
+            };
+            format!("{}: {}", prefix, assessment.method_detail)
+        }
+        auth::AuthState::Expired => format!("needs attention: {}", assessment.method_detail),
+        auth::AuthState::NotConfigured => "not configured".to_string(),
+    }
 }
 
 struct AutoProviderAvailability {
