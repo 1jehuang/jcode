@@ -102,7 +102,10 @@ jobs:
   build-windows:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    # Windows x64 release smoke tests compile the e2e harness after the release
+    # binary. GitHub-hosted Windows runners sometimes exceed 25 minutes, which
+    # cancels otherwise healthy releases before artifacts can be uploaded.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
