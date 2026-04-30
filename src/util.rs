@@ -40,7 +40,6 @@ pub fn format_error_chain(err: &anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Context;
 
     #[test]
     fn test_format_error_chain_includes_nested_causes() {

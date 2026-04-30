@@ -61,7 +61,6 @@ impl StreamBuffer {
     }
 
     /// Check if buffer is empty
-    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.buffer.is_empty()
     }
