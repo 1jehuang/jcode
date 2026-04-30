@@ -1,4 +1,5 @@
 pub mod env;
+pub mod goal_types;
 pub mod id;
 pub mod memory_types;
 pub mod panic_util;

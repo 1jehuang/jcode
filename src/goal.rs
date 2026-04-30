@@ -4,169 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum GoalScope {
-    Global,
-    #[default]
-    Project,
-}
-
-impl GoalScope {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "global" => Some(Self::Global),
-            "project" => Some(Self::Project),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Global => "global",
-            Self::Project => "project",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum GoalStatus {
-    Draft,
-    #[default]
-    Active,
-    Paused,
-    Blocked,
-    Completed,
-    Archived,
-    Abandoned,
-}
-
-impl GoalStatus {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "draft" => Some(Self::Draft),
-            "active" => Some(Self::Active),
-            "paused" => Some(Self::Paused),
-            "blocked" => Some(Self::Blocked),
-            "completed" => Some(Self::Completed),
-            "archived" => Some(Self::Archived),
-            "abandoned" => Some(Self::Abandoned),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Draft => "draft",
-            Self::Active => "active",
-            Self::Paused => "paused",
-            Self::Blocked => "blocked",
-            Self::Completed => "completed",
-            Self::Archived => "archived",
-            Self::Abandoned => "abandoned",
-        }
-    }
-
-    fn sort_rank(self) -> u8 {
-        match self {
-            Self::Active => 0,
-            Self::Blocked => 1,
-            Self::Draft => 2,
-            Self::Paused => 3,
-            Self::Completed => 4,
-            Self::Archived => 5,
-            Self::Abandoned => 6,
-        }
-    }
-
-    pub fn is_resumable(self) -> bool {
-        matches!(self, Self::Active | Self::Blocked | Self::Draft)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct GoalStep {
-    pub id: String,
-    pub content: String,
-    #[serde(default = "default_pending_status")]
-    pub status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct GoalMilestone {
-    pub id: String,
-    pub title: String,
-    #[serde(default = "default_pending_status")]
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub steps: Vec<GoalStep>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct GoalUpdate {
-    pub at: DateTime<Utc>,
-    pub summary: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Goal {
-    pub id: String,
-    pub title: String,
-    #[serde(default)]
-    pub scope: GoalScope,
-    #[serde(default)]
-    pub status: GoalStatus,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub why: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub success_criteria: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub milestones: Vec<GoalMilestone>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub next_steps: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub blockers: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_milestone_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub progress_percent: Option<u8>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub updates: Vec<GoalUpdate>,
-}
-
-impl Goal {
-    pub fn new(title: &str, scope: GoalScope) -> Self {
-        let now = Utc::now();
-        let trimmed = title.trim();
-        Self {
-            id: slugify(trimmed),
-            title: trimmed.to_string(),
-            scope,
-            status: GoalStatus::Active,
-            description: String::new(),
-            why: String::new(),
-            success_criteria: Vec::new(),
-            milestones: Vec::new(),
-            next_steps: Vec::new(),
-            blockers: Vec::new(),
-            current_milestone_id: None,
-            progress_percent: None,
-            created_at: now,
-            updated_at: now,
-            updates: Vec::new(),
-        }
-    }
-
-    pub fn current_milestone(&self) -> Option<&GoalMilestone> {
-        let current_id = self.current_milestone_id.as_deref()?;
-        self.milestones.iter().find(|m| m.id == current_id)
-    }
-}
+pub use jcode_core::goal_types::{
+    Goal, GoalMilestone, GoalScope, GoalStatus, GoalStep, GoalUpdate,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalDisplayMode {
@@ -234,17 +74,13 @@ pub struct GoalDisplayResult {
     pub snapshot: crate::side_panel::SidePanelSnapshot,
 }
 
-fn default_pending_status() -> String {
-    "pending".to_string()
-}
-
 pub fn create_goal(input: GoalCreateInput, working_dir: Option<&Path>) -> Result<Goal> {
     if input.title.trim().is_empty() {
         anyhow::bail!("goal title cannot be empty");
     }
     let mut goal = Goal::new(&input.title, input.scope);
     if let Some(id) = input.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        goal.id = sanitize_id(id);
+        goal.id = jcode_core::goal_types::sanitize_goal_id(id);
     }
     goal.id = next_available_goal_id(&goal.id, goal.scope, working_dir)?;
     goal.description = input.description.unwrap_or_default().trim().to_string();
@@ -328,7 +164,7 @@ pub fn load_goal(
     scope_hint: Option<GoalScope>,
     working_dir: Option<&Path>,
 ) -> Result<Option<Goal>> {
-    let id = sanitize_id(id);
+    let id = jcode_core::goal_types::sanitize_goal_id(id);
     let mut candidates = Vec::new();
     match scope_hint {
         Some(GoalScope::Global) => candidates.push(goal_file_in_dir(&global_goals_dir()?, &id)),
@@ -517,7 +353,7 @@ pub fn write_goal_page(
 }
 
 pub fn goal_page_id(id: &str) -> String {
-    format!("goal.{}", sanitize_id(id))
+    format!("goal.{}", jcode_core::goal_types::sanitize_goal_id(id))
 }
 
 pub fn header_badge(
@@ -686,7 +522,10 @@ fn goal_file(goal: &Goal, working_dir: Option<&Path>) -> Result<PathBuf> {
 }
 
 fn goal_file_in_dir(dir: &Path, id: &str) -> PathBuf {
-    dir.join(format!("{}.json", sanitize_id(id)))
+    dir.join(format!(
+        "{}.json",
+        jcode_core::goal_types::sanitize_goal_id(id)
+    ))
 }
 
 fn global_goals_dir() -> Result<PathBuf> {
@@ -753,38 +592,13 @@ fn next_available_goal_id(
     scope: GoalScope,
     working_dir: Option<&Path>,
 ) -> Result<String> {
-    let mut candidate = sanitize_id(base);
+    let mut candidate = jcode_core::goal_types::sanitize_goal_id(base);
     let mut idx = 2;
     while load_goal(&candidate, Some(scope), working_dir)?.is_some() {
-        candidate = format!("{}-{}", sanitize_id(base), idx);
+        candidate = format!("{}-{}", jcode_core::goal_types::sanitize_goal_id(base), idx);
         idx += 1;
     }
     Ok(candidate)
-}
-
-fn sanitize_id(id: &str) -> String {
-    let slug = slugify(id);
-    if slug.is_empty() {
-        "goal".to_string()
-    } else {
-        slug
-    }
-}
-
-fn slugify(input: &str) -> String {
-    let mut slug = String::new();
-    let mut prev_dash = false;
-    for ch in input.chars() {
-        let lower = ch.to_ascii_lowercase();
-        if lower.is_ascii_alphanumeric() {
-            slug.push(lower);
-            prev_dash = false;
-        } else if !prev_dash {
-            slug.push('-');
-            prev_dash = true;
-        }
-    }
-    slug.trim_matches('-').to_string()
 }
 
 fn trim_vec(values: Vec<String>) -> Vec<String> {
