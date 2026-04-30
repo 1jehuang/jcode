@@ -10,6 +10,7 @@ mod communicate;
 mod conversation_search;
 mod debug_socket;
 mod edit;
+mod exa_search;
 mod glob;
 mod gmail;
 mod goal;
@@ -302,6 +303,12 @@ impl Registry {
                 &mut timings,
                 "websearch",
                 websearch::WebSearchTool::new,
+            );
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "exa_search",
+                exa_search::ExaSearchTool::new,
             );
             Self::insert_tool_timed(
                 &mut m,
