@@ -196,6 +196,7 @@ async fn register_visible_spawned_member(
                 detail,
                 friendly_name: Some(friendly_name),
                 report_back_to_session_id: report_back_to_session_id.map(str::to_string),
+                latest_completion_report: None,
                 role: "agent".to_string(),
                 joined_at: now,
                 last_status_change: now,

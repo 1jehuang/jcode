@@ -212,6 +212,8 @@ pub struct SwarmMemberRecord {
     pub detail: Option<String>,
     pub friendly_name: Option<String>,
     pub report_back_to_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_completion_report: Option<String>,
     pub role: SwarmRole,
     pub is_headless: bool,
 }
@@ -447,6 +449,8 @@ pub struct SwarmMember {
     pub friendly_name: Option<String>,
     /// Session that should receive direct completion report-back for this member, if any.
     pub report_back_to_session_id: Option<String>,
+    /// Latest explicit completion report submitted by this member.
+    pub latest_completion_report: Option<String>,
     /// Role: "agent", "coordinator", "worktree_manager"
     pub role: String,
     /// When this member joined the swarm
@@ -469,6 +473,7 @@ impl SwarmMember {
             detail: self.detail.clone(),
             friendly_name: self.friendly_name.clone(),
             report_back_to_session_id: self.report_back_to_session_id.clone(),
+            latest_completion_report: self.latest_completion_report.clone(),
             role: SwarmRole::from(self.role.clone()),
             is_headless: self.is_headless,
         }
@@ -499,6 +504,7 @@ impl SwarmMember {
             detail: record.detail,
             friendly_name: record.friendly_name,
             report_back_to_session_id: record.report_back_to_session_id,
+            latest_completion_report: record.latest_completion_report,
             role: record.role.as_str().into_owned(),
             joined_at: Instant::now(),
             last_status_change: Instant::now(),

@@ -314,6 +314,7 @@ async fn ensure_client_swarm_member(
                     detail: None,
                     friendly_name: member_name.clone(),
                     report_back_to_session_id: None,
+                    latest_completion_report: None,
                     role: "agent".to_string(),
                     joined_at: now,
                     last_status_change: now,

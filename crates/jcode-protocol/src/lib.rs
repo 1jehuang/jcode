@@ -464,6 +464,24 @@ pub enum Request {
         target_session: String,
     },
 
+    /// Submit a structured swarm completion/progress report for this session
+    #[serde(rename = "comm_report")]
+    CommReport {
+        id: u64,
+        session_id: String,
+        /// Completion status to record for this member. Defaults to ready.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        /// Main report body.
+        message: String,
+        /// Optional validation/testing summary.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        validation: Option<String>,
+        /// Optional blockers/follow-up summary.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        follow_up: Option<String>,
+    },
+
     /// Read another agent's full conversation context
     #[serde(rename = "comm_read_context")]
     CommReadContext {
@@ -1051,6 +1069,14 @@ pub enum ServerEvent {
         snapshot: AgentStatusSnapshot,
     },
 
+    /// Response to comm_report request
+    #[serde(rename = "comm_report_response")]
+    CommReportResponse {
+        id: u64,
+        status: String,
+        message: String,
+    },
+
     /// Response to comm_plan_status request
     #[serde(rename = "comm_plan_status_response")]
     CommPlanStatusResponse { id: u64, summary: PlanGraphStatus },
@@ -1184,6 +1210,9 @@ pub struct AgentInfo {
     /// Session that owns report-back/cleanup responsibility for this member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_back_to_session_id: Option<String>,
+    /// Latest structured completion report submitted by this member, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_completion_report: Option<String>,
     /// Number of currently attached live client connections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_attachments: Option<usize>,
@@ -1283,6 +1312,9 @@ pub struct AwaitedMemberStatus {
     pub status: String,
     /// Whether this member reached the target status
     pub done: bool,
+    /// Latest structured completion report submitted by this member, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_report: Option<String>,
 }
 
 impl Request {
@@ -1344,6 +1376,7 @@ impl Request {
             Request::CommAssignRole { id, .. } => *id,
             Request::CommSummary { id, .. } => *id,
             Request::CommStatus { id, .. } => *id,
+            Request::CommReport { id, .. } => *id,
             Request::CommReadContext { id, .. } => *id,
             Request::CommResyncPlan { id, .. } => *id,
             Request::CommPlanStatus { id, .. } => *id,

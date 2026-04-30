@@ -40,14 +40,37 @@ pub(super) fn append_swarm_completion_report_instructions(message: &str) -> Stri
     out.push_str("<system-reminder>\n");
     out.push_str(SWARM_COMPLETION_REPORT_MARKER);
     out.push_str(
-        "\nAt the end of this turn, write a final assistant response that serves as your completion report. \
-The server will automatically deliver that final response to the coordinator/session that spawned or assigned you. \
-Include: outcome/status, what you changed or found, tests or validation performed, and blockers or follow-ups. \
+        "\nBefore finishing, call the swarm tool with action=\"report\" to submit your completion report. \
+Include a concise message, validation/tests performed, and blockers or follow-ups. \
+After the report tool succeeds, also write a brief final assistant response. \
 Do not finish with only tool output, a lifecycle status change, or no final response. \
 Do not send a separate DM for the final report unless you need interactive coordination before finishing.\n",
     );
     out.push_str("</system-reminder>");
     out
+}
+
+pub(super) fn format_structured_completion_report(
+    message: &str,
+    validation: Option<&str>,
+    follow_up: Option<&str>,
+) -> String {
+    let mut report = message.trim().to_string();
+    if let Some(validation) = validation.map(str::trim).filter(|value| !value.is_empty()) {
+        if !report.is_empty() {
+            report.push_str("\n\n");
+        }
+        report.push_str("Validation:\n");
+        report.push_str(validation);
+    }
+    if let Some(follow_up) = follow_up.map(str::trim).filter(|value| !value.is_empty()) {
+        if !report.is_empty() {
+            report.push_str("\n\n");
+        }
+        report.push_str("Follow-ups/blockers:\n");
+        report.push_str(follow_up);
+    }
+    report
 }
 
 fn normalize_completion_report(report: Option<String>) -> Option<String> {
@@ -808,7 +831,9 @@ pub(super) async fn update_member_status_with_report(
             let previous_status = member.status.clone();
             let status_changed = member.status != status;
             let detail_changed = member.detail != detail;
-            let member_changed = status_changed || detail_changed;
+            let report_changed =
+                completion_report.is_some() && member.latest_completion_report != completion_report;
+            let member_changed = status_changed || detail_changed || report_changed;
             if status_changed {
                 member.last_status_change = Instant::now();
             }
@@ -817,6 +842,9 @@ pub(super) async fn update_member_status_with_report(
             let report_back_to_session_id = member.report_back_to_session_id.clone();
             member.status = status.to_string();
             member.detail = detail;
+            if completion_report.is_some() {
+                member.latest_completion_report = completion_report.clone();
+            }
             (
                 member.swarm_id.clone(),
                 name,
@@ -1153,6 +1181,7 @@ mod tests {
                 detail: None,
                 friendly_name: Some(session_id.to_string()),
                 report_back_to_session_id: None,
+                latest_completion_report: None,
                 role: role.to_string(),
                 joined_at: Instant::now(),
                 last_status_change: Instant::now(),

@@ -737,8 +737,10 @@ fn format_awaited_members_with_reports(
     let mut report_members: Vec<_> = members
         .iter()
         .filter_map(|member| {
-            reports
-                .get(&member.session_id)
+            member
+                .completion_report
+                .as_ref()
+                .or_else(|| reports.get(&member.session_id))
                 .map(|report| (member, report))
         })
         .collect();
@@ -880,6 +882,12 @@ struct CommunicateInput {
     force: Option<bool>,
     #[serde(default)]
     retain_agents: Option<bool>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    validation: Option<String>,
+    #[serde(default)]
+    follow_up: Option<String>,
 }
 
 impl CommunicateInput {
@@ -908,7 +916,7 @@ impl Tool for CommunicateTool {
                     "type": "string",
                     "enum": ["share", "share_append", "read", "message", "broadcast", "dm", "channel", "list", "list_channels", "channel_members",
                              "propose_plan", "approve_plan", "reject_plan", "spawn", "stop", "assign_role",
-                             "status", "plan_status", "summary", "read_context", "resync_plan", "assign_task", "assign_next", "fill_slots", "run_plan", "cleanup",
+                             "status", "report", "plan_status", "summary", "read_context", "resync_plan", "assign_task", "assign_next", "fill_slots", "run_plan", "cleanup",
                              "start", "start_task", "wake", "resume", "retry", "reassign", "replace", "salvage",
                              "subscribe_channel", "unsubscribe_channel", "await_members"],
                     "description": "Action. For spawn, prefer including prompt with the initial task so the new agent starts useful work immediately."
@@ -920,7 +928,20 @@ impl Tool for CommunicateTool {
                     "type": "string"
                 },
                 "message": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Message body. For action=report, this is the completion report body."
+                },
+                "status": {
+                    "type": "string",
+                    "description": "For action=report: completion status to record, usually ready, blocked, failed, or completed. Defaults to ready."
+                },
+                "validation": {
+                    "type": "string",
+                    "description": "For action=report: tests or validation performed."
+                },
+                "follow_up": {
+                    "type": "string",
+                    "description": "For action=report: blockers or follow-up work."
                 },
                 "to_session": {
                     "type": "string",
@@ -1410,6 +1431,32 @@ impl Tool for CommunicateTool {
                         Ok(ToolOutput::new("No status snapshot returned."))
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to get status snapshot: {}", e)),
+                }
+            }
+
+            "report" => {
+                let message = params
+                    .message
+                    .ok_or_else(|| anyhow::anyhow!("'message' is required for report action"))?;
+                let request = Request::CommReport {
+                    id: REQUEST_ID,
+                    session_id: ctx.session_id.clone(),
+                    status: params.status,
+                    message,
+                    validation: params.validation,
+                    follow_up: params.follow_up,
+                };
+                match send_request(request).await {
+                    Ok(ServerEvent::CommReportResponse {
+                        status, message, ..
+                    }) => Ok(ToolOutput::new(format!(
+                        "Report recorded with status `{status}`. {message}"
+                    ))),
+                    Ok(response) => {
+                        ensure_success(&response)?;
+                        Ok(ToolOutput::new("Report recorded."))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("Failed to record report: {}", e)),
                 }
             }
 

@@ -147,6 +147,7 @@ pub(super) async fn create_headless_session(
                 detail: None,
                 friendly_name: Some(friendly_name.clone()),
                 report_back_to_session_id: report_back_to_session_id.clone(),
+                latest_completion_report: None,
                 role: "agent".to_string(),
                 joined_at: now,
                 last_status_change: now,

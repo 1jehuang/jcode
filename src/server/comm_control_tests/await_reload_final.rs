@@ -32,6 +32,7 @@ async fn await_members_returns_persisted_final_response_after_reload_retry() {
                         friendly_name: Some("peer-1".to_string()),
                         status: "completed".to_string(),
                         done: true,
+                        completion_report: None,
                     }],
                     summary: "All 1 members are done: peer-1".to_string(),
                     resolved_at_unix_ms: now_ms,

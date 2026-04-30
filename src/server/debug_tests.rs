@@ -122,6 +122,7 @@ mod transcript_routing_tests {
             detail: None,
             friendly_name: None,
             report_back_to_session_id: None,
+            latest_completion_report: None,
             role: "agent".to_string(),
             joined_at: now,
             last_status_change: now,

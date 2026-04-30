@@ -41,10 +41,16 @@ pub(super) async fn awaited_member_statuses(
     watch_ids
         .iter()
         .map(|session_id| {
-            let (name, status) = members
+            let (name, status, completion_report) = members
                 .get(session_id)
-                .map(|member| (member.friendly_name.clone(), member.status.clone()))
-                .unwrap_or((None, "unknown".to_string()));
+                .map(|member| {
+                    (
+                        member.friendly_name.clone(),
+                        member.status.clone(),
+                        member.latest_completion_report.clone(),
+                    )
+                })
+                .unwrap_or((None, "unknown".to_string(), None));
             let done = target_status.contains(&status)
                 || (status == "unknown"
                     && (target_status.contains(&"stopped".to_string())
@@ -54,6 +60,7 @@ pub(super) async fn awaited_member_statuses(
                 friendly_name: name,
                 status,
                 done,
+                completion_report,
             }
         })
         .collect()

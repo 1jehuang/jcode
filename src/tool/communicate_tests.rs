@@ -86,6 +86,7 @@ fn format_awaited_members_includes_completion_reports() {
         friendly_name: Some("worker".to_string()),
         status: "ready".to_string(),
         done: true,
+        completion_report: Some("Structured report wins.".to_string()),
     }];
     let reports = HashMap::from([(
         "session_worker".to_string(),
@@ -102,7 +103,8 @@ fn format_awaited_members_includes_completion_reports() {
 
     assert!(output.contains("Completion reports:"));
     assert!(output.contains("--- worker (ready) ---"));
-    assert!(output.contains("Outcome: finished"));
+    assert!(output.contains("Structured report wins."));
+    assert!(!output.contains("Outcome: finished"));
 }
 
 #[test]
@@ -167,6 +169,9 @@ fn schema_advertises_supported_swarm_fields() {
     assert!(props.contains_key("initial_message"));
     assert!(props.contains_key("force"));
     assert!(props.contains_key("retain_agents"));
+    assert!(props.contains_key("status"));
+    assert!(props.contains_key("validation"));
+    assert!(props.contains_key("follow_up"));
     assert_eq!(
         props["delivery"]["enum"],
         json!(["notify", "interrupt", "wake"])
@@ -180,6 +185,12 @@ fn schema_advertises_supported_swarm_fields() {
             .as_array()
             .expect("action enum")
             .contains(&json!("status"))
+    );
+    assert!(
+        schema["properties"]["action"]["enum"]
+            .as_array()
+            .expect("action enum")
+            .contains(&json!("report"))
     );
     assert!(
         schema["properties"]["action"]["enum"]

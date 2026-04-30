@@ -164,6 +164,63 @@ fn test_comm_await_members_defaults() -> Result<()> {
 }
 
 #[test]
+fn test_comm_report_roundtrip() -> Result<()> {
+    let req = Request::CommReport {
+        id: 57,
+        session_id: "sess_worker".to_string(),
+        status: Some("ready".to_string()),
+        message: "Implemented report action.".to_string(),
+        validation: Some("Focused tests passed.".to_string()),
+        follow_up: Some("None.".to_string()),
+    };
+    let json = serde_json::to_string(&req)?;
+    assert!(json.contains("\"type\":\"comm_report\""));
+    let decoded = parse_request_json(&json)?;
+    assert_eq!(decoded.id(), 57);
+    let Request::CommReport {
+        session_id,
+        status,
+        message,
+        validation,
+        follow_up,
+        ..
+    } = decoded
+    else {
+        return Err(anyhow!("expected CommReport"));
+    };
+    assert_eq!(session_id, "sess_worker");
+    assert_eq!(status.as_deref(), Some("ready"));
+    assert_eq!(message, "Implemented report action.");
+    assert_eq!(validation.as_deref(), Some("Focused tests passed."));
+    assert_eq!(follow_up.as_deref(), Some("None."));
+    Ok(())
+}
+
+#[test]
+fn test_comm_report_response_roundtrip() -> Result<()> {
+    let event = ServerEvent::CommReportResponse {
+        id: 57,
+        status: "ready".to_string(),
+        message: "Report recorded.".to_string(),
+    };
+    let json = encode_event(&event);
+    assert!(json.contains("\"type\":\"comm_report_response\""));
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::CommReportResponse {
+        id,
+        status,
+        message,
+    } = decoded
+    else {
+        return Err(anyhow!("expected CommReportResponse"));
+    };
+    assert_eq!(id, 57);
+    assert_eq!(status, "ready");
+    assert_eq!(message, "Report recorded.");
+    Ok(())
+}
+
+#[test]
 fn test_comm_await_members_response_roundtrip() -> Result<()> {
     let event = ServerEvent::CommAwaitMembersResponse {
         id: 55,
@@ -174,12 +231,14 @@ fn test_comm_await_members_response_roundtrip() -> Result<()> {
                 friendly_name: Some("fox".to_string()),
                 status: "completed".to_string(),
                 done: true,
+                completion_report: None,
             },
             AwaitedMemberStatus {
                 session_id: "sess_b".to_string(),
                 friendly_name: Some("wolf".to_string()),
                 status: "stopped".to_string(),
                 done: true,
+                completion_report: None,
             },
         ],
         summary: "All 2 members are done: fox, wolf".to_string(),

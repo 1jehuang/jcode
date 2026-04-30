@@ -35,8 +35,8 @@ use super::provider_control::{
 use super::{
     AwaitMembersRuntime, ClientConnectionInfo, ClientDebugState, FileAccess, SessionControlHandle,
     SessionInterruptQueues, SharedContext, SwarmEvent, SwarmMember, SwarmMutationRuntime,
-    VersionedPlan, register_session_interrupt_queue, truncate_detail, update_member_status,
-    update_member_status_with_report,
+    VersionedPlan, format_structured_completion_report, register_session_interrupt_queue,
+    truncate_detail, update_member_status, update_member_status_with_report,
 };
 use crate::agent::Agent;
 use crate::bus::{Bus, BusEvent};
@@ -107,6 +107,7 @@ fn is_lightweight_control_request(request: &Request) -> bool {
             | Request::CommAssignRole { .. }
             | Request::CommSummary { .. }
             | Request::CommStatus { .. }
+            | Request::CommReport { .. }
             | Request::CommPlanStatus { .. }
             | Request::CommReadContext { .. }
             | Request::CommResyncPlan { .. }
@@ -476,6 +477,40 @@ async fn handle_lightweight_control_request(
                 &client_event_tx,
             )
             .await;
+        }
+        Request::CommReport {
+            id,
+            session_id: req_session_id,
+            status,
+            message,
+            validation,
+            follow_up,
+        } => {
+            let status = status.unwrap_or_else(|| "ready".to_string());
+            let report = format_structured_completion_report(
+                &message,
+                validation.as_deref(),
+                follow_up.as_deref(),
+            );
+            let detail = Some(truncate_detail(&message, 160));
+            update_member_status_with_report(
+                &req_session_id,
+                &status,
+                detail,
+                Some(report.clone()),
+                swarm_members,
+                swarms_by_id,
+                Some(event_history),
+                Some(event_counter),
+                Some(swarm_event_tx),
+            )
+            .await;
+            let _ = client_event_tx.send(ServerEvent::CommReportResponse {
+                id,
+                status,
+                message: "Report recorded and delivered to the coordinator when applicable."
+                    .to_string(),
+            });
         }
         Request::CommPlanStatus {
             id,
@@ -2156,6 +2191,41 @@ pub(super) async fn handle_client(
                     &client_event_tx,
                 )
                 .await;
+            }
+
+            Request::CommReport {
+                id,
+                session_id: req_session_id,
+                status,
+                message,
+                validation,
+                follow_up,
+            } => {
+                let status = status.unwrap_or_else(|| "ready".to_string());
+                let report = format_structured_completion_report(
+                    &message,
+                    validation.as_deref(),
+                    follow_up.as_deref(),
+                );
+                let detail = Some(truncate_detail(&message, 160));
+                update_member_status_with_report(
+                    &req_session_id,
+                    &status,
+                    detail,
+                    Some(report),
+                    &swarm_members,
+                    &swarms_by_id,
+                    Some(&event_history),
+                    Some(&event_counter),
+                    Some(&swarm_event_tx),
+                )
+                .await;
+                let _ = client_event_tx.send(ServerEvent::CommReportResponse {
+                    id,
+                    status,
+                    message: "Report recorded and delivered to the coordinator when applicable."
+                        .to_string(),
+                });
             }
 
             Request::CommPlanStatus {
