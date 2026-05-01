@@ -221,9 +221,10 @@ final class AppModel: ObservableObject {
             try await credentialStore.save(credential)
             await loadSavedServers()
             selectedServer = credential
-            statusMessage = "Paired with \(response.serverName) (\(response.serverVersion))."
+            statusMessage = "Paired with \(response.serverName) (\(response.serverVersion)). Connecting..."
             pairCodeInput = ""
             errorMessage = nil
+            await connectSelected()
         } catch let error as PairingError {
             switch error {
             case .serverUnreachable:
