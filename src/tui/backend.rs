@@ -457,6 +457,20 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// Ask the server to truncate the active session to a 1-based message index.
+    pub async fn rewind(&mut self, message_index: usize) -> Result<u64> {
+        let id = self.next_request_id;
+        let request = Request::Rewind { id, message_index };
+        self.next_request_id += 1;
+
+        // The server responds by sending a fresh History payload for the same
+        // session. Allow that payload to replace the current display state even
+        // though this connection has already completed its initial bootstrap.
+        self.has_loaded_history = false;
+        self.send_request(request).await?;
+        Ok(id)
+    }
+
     /// Cycle the active model on the server
     pub async fn cycle_model(&mut self, direction: i8) -> Result<()> {
         let request = Request::CycleModel {

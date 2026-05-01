@@ -179,3 +179,27 @@ fn test_remote_poke_status_and_off_update_state() {
         }));
     });
 }
+
+#[test]
+fn test_remote_rewind_lists_display_history_when_session_transcript_is_empty() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_remote = true;
+    app.session.messages.clear();
+    app.push_display_message(DisplayMessage::user("hello"));
+    app.push_display_message(DisplayMessage::assistant("hi there"));
+
+    app.input = "/rewind".to_string();
+    app.cursor_pos = app.input.len();
+    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+        .expect("/rewind should be handled remotely");
+
+    let last = app.display_messages().last().expect("history message");
+    assert!(last.content.contains("**Conversation history:**"));
+    assert!(last.content.contains("`1` 👤 User - hello"));
+    assert!(last.content.contains("`2` 🤖 Assistant - hi there"));
+    assert!(!last.content.contains("No messages in conversation"));
+}

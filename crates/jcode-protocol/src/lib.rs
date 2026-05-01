@@ -104,6 +104,10 @@ pub enum Request {
     #[serde(rename = "clear")]
     Clear { id: u64 },
 
+    /// Rewind conversation history to the given 1-based message index.
+    #[serde(rename = "rewind")]
+    Rewind { id: u64, message_index: usize },
+
     /// Health check
     #[serde(rename = "ping")]
     Ping { id: u64 },
@@ -1330,6 +1334,7 @@ impl Request {
             Request::SoftInterrupt { id, .. } => *id,
             Request::CancelSoftInterrupts { id } => *id,
             Request::Clear { id } => *id,
+            Request::Rewind { id, .. } => *id,
             Request::Ping { id } => *id,
             Request::GetState { id } => *id,
             Request::DebugCommand { id, .. } => *id,

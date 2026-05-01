@@ -33,6 +33,23 @@ fn test_compacted_history_request_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn test_rewind_request_roundtrip() -> Result<()> {
+    let req = Request::Rewind {
+        id: 8,
+        message_index: 3,
+    };
+    let json = serde_json::to_string(&req)?;
+    assert!(json.contains("\"type\":\"rewind\""));
+    let decoded = parse_request_json(&json)?;
+    assert_eq!(decoded.id(), 8);
+    let Request::Rewind { message_index, .. } = decoded else {
+        return Err(anyhow!("wrong request type"));
+    };
+    assert_eq!(message_index, 3);
+    Ok(())
+}
+
+#[test]
 fn test_event_roundtrip() -> Result<()> {
     let event = ServerEvent::TextDelta {
         text: "hello".to_string(),

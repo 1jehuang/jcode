@@ -14,6 +14,7 @@ fn test_context_limit_error_detection() {
 #[test]
 fn test_rewind_truncates_provider_messages() {
     let mut app = create_test_app();
+    app.session.replace_messages(Vec::new());
 
     for idx in 1..=3 {
         let text = format!("msg-{}", idx);
@@ -40,6 +41,31 @@ fn test_rewind_truncates_provider_messages() {
     ));
     assert!(app.provider_session_id.is_none());
     assert!(app.session.provider_session_id.is_none());
+}
+
+#[test]
+fn test_rewind_lists_visible_messages_when_initial_session_context_is_hidden() {
+    let mut app = create_test_app();
+
+    for idx in 1..=2 {
+        app.session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!("msg-{}", idx),
+                cache_control: None,
+            }],
+        );
+    }
+
+    app.input = "/rewind".to_string();
+    app.submit_input();
+
+    let last = app.display_messages().last().expect("history message");
+    assert!(last.content.contains("**Conversation history:**"));
+    assert!(last.content.contains("`1` 👤 User - msg-1"));
+    assert!(last.content.contains("`2` 👤 User - msg-2"));
+    assert!(!last.content.contains("Session Context"));
+    assert!(!last.content.contains("No messages in conversation"));
 }
 
 #[test]

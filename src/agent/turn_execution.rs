@@ -153,6 +153,35 @@ impl Agent {
         self.persist_session_best_effort("provider session reset");
     }
 
+    /// Rewind the conversation to a 1-based visible conversation message index.
+    ///
+    /// Provider-side resumable sessions are reset so the next request sends the
+    /// truncated context from scratch instead of continuing from a stale upstream
+    /// conversation.
+    pub fn rewind_to_message(&mut self, message_index: usize) -> Result<usize, String> {
+        let message_count = self.session.visible_conversation_message_count();
+        let Some(stored_len) = self
+            .session
+            .stored_len_for_visible_conversation_message(message_index)
+        else {
+            return Err(format!(
+                "Invalid message number: {}. Valid range: 1-{}",
+                message_index, message_count
+            ));
+        };
+
+        let removed = message_count - message_index;
+        self.session.truncate_messages(stored_len);
+        self.session.updated_at = chrono::Utc::now();
+        self.provider_session_id = None;
+        self.session.provider_session_id = None;
+        self.cache_tracker.reset();
+        self.locked_tools = None;
+        self.reset_tool_output_tracking();
+        self.persist_session_best_effort("conversation rewind");
+        Ok(removed)
+    }
+
     /// Unlock the tool list so the next API request picks up any new tools.
     /// Called after MCP reload or when the user explicitly wants new tools.
     pub fn unlock_tools(&mut self) {

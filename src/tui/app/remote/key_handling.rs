@@ -72,6 +72,80 @@ async fn apply_remote_effort_direction(
     Ok(())
 }
 
+fn remote_rewindable_messages(app: &App) -> Vec<&DisplayMessage> {
+    app.display_messages()
+        .iter()
+        .filter(|message| matches!(message.role.as_str(), "user" | "assistant"))
+        .collect()
+}
+
+fn show_remote_rewind_history(app: &mut App) {
+    let rewindable = remote_rewindable_messages(app);
+    if rewindable.is_empty() {
+        app.push_display_message(DisplayMessage::system(
+            "No messages in conversation.".to_string(),
+        ));
+        return;
+    }
+
+    let mut history = String::from("**Conversation history:**\n\n");
+    for (i, msg) in rewindable.iter().enumerate() {
+        let role_str = match msg.role.as_str() {
+            "user" => "👤 User",
+            "assistant" => "🤖 Assistant",
+            _ => "💬 Message",
+        };
+        let preview = crate::util::truncate_str(&msg.content, 80);
+        history.push_str(&format!("  `{}` {} - {}\n", i + 1, role_str, preview));
+    }
+    history.push_str("\nUse `/rewind N` to rewind to message N (removes all messages after).");
+    app.push_display_message(DisplayMessage::system(history));
+}
+
+async fn handle_remote_rewind_command(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    trimmed: &str,
+) -> Result<bool> {
+    if trimmed == "/rewind" {
+        show_remote_rewind_history(app);
+        return Ok(true);
+    }
+
+    let Some(num_str) = trimmed.strip_prefix("/rewind ") else {
+        return Ok(false);
+    };
+
+    let message_count = remote_rewindable_messages(app).len();
+    if message_count == 0 {
+        app.push_display_message(DisplayMessage::system(
+            "No messages in conversation.".to_string(),
+        ));
+        return Ok(true);
+    }
+
+    match num_str.trim().parse::<usize>() {
+        Ok(n) if n > 0 && n <= message_count => {
+            remote.rewind(n).await?;
+            app.set_status_notice(format!("Rewinding to message {}...", n));
+        }
+        Ok(n) => {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Invalid message number: {}. Valid range: 1-{}",
+                n, message_count
+            )));
+        }
+        Err(_) => {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Usage: `/rewind N` where N is a message number (1-{})",
+                message_count
+            )));
+        }
+    }
+
+    Ok(true)
+}
+
 impl App {
     pub(super) async fn handle_account_picker_command_remote(
         &mut self,
@@ -626,6 +700,10 @@ async fn handle_remote_key_internal(
                 }
 
                 if app_mod::commands::handle_dictation_command(app, trimmed) {
+                    return Ok(());
+                }
+
+                if handle_remote_rewind_command(app, remote, trimmed).await? {
                     return Ok(());
                 }
 

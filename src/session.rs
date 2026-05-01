@@ -50,6 +50,21 @@ fn stored_messages_to_messages(messages: &[StoredMessage]) -> Vec<Message> {
     messages.iter().map(StoredMessage::to_message).collect()
 }
 
+fn is_internal_system_reminder_message(message: &StoredMessage) -> bool {
+    message
+        .content
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.trim_start()),
+            _ => None,
+        })
+        .is_some_and(|text| text.starts_with("<system-reminder>"))
+}
+
+fn is_visible_conversation_message(message: &StoredMessage) -> bool {
+    message.display_role.is_none() && !is_internal_system_reminder_message(message)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -1321,6 +1336,40 @@ impl Session {
             self.mark_memory_profile_dirty();
             self.mark_messages_full_dirty();
         }
+    }
+
+    pub fn visible_conversation_message_count(&self) -> usize {
+        self.messages
+            .iter()
+            .filter(|message| is_visible_conversation_message(message))
+            .count()
+    }
+
+    pub fn visible_conversation_messages(&self) -> Vec<&StoredMessage> {
+        self.messages
+            .iter()
+            .filter(|message| is_visible_conversation_message(message))
+            .collect()
+    }
+
+    pub fn stored_len_for_visible_conversation_message(
+        &self,
+        visible_index: usize,
+    ) -> Option<usize> {
+        if visible_index == 0 {
+            return None;
+        }
+
+        let mut count = 0usize;
+        for (stored_index, message) in self.messages.iter().enumerate() {
+            if is_visible_conversation_message(message) {
+                count += 1;
+                if count == visible_index {
+                    return Some(stored_index + 1);
+                }
+            }
+        }
+        None
     }
 
     /// Record a memory injection event for replay visualization
