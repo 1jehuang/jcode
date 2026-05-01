@@ -273,6 +273,25 @@ fn session_sort_key(stem: &str) -> u64 {
         .unwrap_or(0)
 }
 
+fn path_modified_sort_key(path: &Path) -> u128 {
+    path.metadata()
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
+}
+
+fn session_candidate_sort_key(
+    sessions_dir: &Path,
+    snapshot_path: &Path,
+    stem: &str,
+) -> (u128, u64, String) {
+    let journal_path = sessions_dir.join(format!("{stem}.journal.jsonl"));
+    let modified = path_modified_sort_key(snapshot_path).max(path_modified_sort_key(&journal_path));
+    (modified, session_sort_key(stem), stem.to_string())
+}
+
 fn classify_session_source(
     id: &str,
     provider_key: Option<&str>,
@@ -532,7 +551,7 @@ fn collect_recent_session_candidates(
     sessions_dir: &Path,
     candidate_limit: usize,
 ) -> Result<Vec<String>> {
-    let mut candidates: BinaryHeap<Reverse<(u64, String)>> = BinaryHeap::new();
+    let mut candidates: BinaryHeap<Reverse<(u128, u64, String)>> = BinaryHeap::new();
 
     for entry in std::fs::read_dir(sessions_dir)? {
         let entry = entry?;
@@ -547,7 +566,7 @@ fn collect_recent_session_candidates(
             continue;
         }
 
-        let key = (session_sort_key(stem), stem.to_string());
+        let key = session_candidate_sort_key(sessions_dir, &path, stem);
         if candidates.len() < candidate_limit {
             candidates.push(Reverse(key));
             continue;
@@ -563,9 +582,13 @@ fn collect_recent_session_candidates(
         }
     }
 
-    let mut out: Vec<(u64, String)> = candidates.into_iter().map(|entry| entry.0).collect();
-    out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-    Ok(out.into_iter().map(|(_, stem)| stem).collect())
+    let mut out: Vec<(u128, u64, String)> = candidates.into_iter().map(|entry| entry.0).collect();
+    out.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| b.2.cmp(&a.2))
+    });
+    Ok(out.into_iter().map(|(_, _, stem)| stem).collect())
 }
 
 pub(super) fn collect_recent_session_stems(
