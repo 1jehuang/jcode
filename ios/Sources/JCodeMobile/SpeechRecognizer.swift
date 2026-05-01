@@ -43,7 +43,9 @@ final class SpeechRecognizer: ObservableObject {
 
         let speechStatus = await withCheckedContinuation { (cont: CheckedContinuation<SFSpeechRecognizerAuthorizationStatus, Never>) in
             SFSpeechRecognizer.requestAuthorization { status in
-                cont.resume(returning: status)
+                Task { @MainActor in
+                    cont.resume(returning: status)
+                }
             }
         }
 
