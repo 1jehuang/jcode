@@ -658,6 +658,24 @@ pub(in crate::tui::app) fn handle_server_event(
                     app.set_status_notice("Reload complete — prompt preserved");
                 }
                 app.note_runtime_memory_event_force("history_loaded", "remote_history_applied");
+                if let Some(notice) = app.pending_remote_rewind_notice.take() {
+                    let content = if notice.undo {
+                        "✓ Undid rewind. Restored the messages removed by the last rewind."
+                            .to_string()
+                    } else {
+                        format!(
+                            "✓ Rewound to message {}. Removed {} message{}. Undo anytime with `/rewind undo`.",
+                            notice.message_index.unwrap_or_default(),
+                            notice.changed_messages,
+                            if notice.changed_messages == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
+                        )
+                    };
+                    app.push_display_message(DisplayMessage::system(content));
+                }
             } else {
                 crate::logging::info(
                     "Ignoring duplicate History event for active session after local state was restored",

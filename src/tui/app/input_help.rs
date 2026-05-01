@@ -17,7 +17,7 @@ impl App {
                 "`/fix`\nRun recovery actions when the model cannot continue.\nRepairs missing tool outputs, resets provider session state, and starts compaction when possible."
             }
             "rewind" => {
-                "`/rewind`\nShow numbered conversation history.\n\n`/rewind N`\nRewind to message N (drops everything after it and resets provider session)."
+                "`/rewind`\nShow numbered conversation history.\n\n`/rewind N`\nRewind to message N (drops everything after it and resets provider session).\n\n`/rewind undo`\nUndo the most recent rewind and restore the removed messages."
             }
             "clear" => {
                 "`/clear`\nClear current conversation, queue, and display; starts a fresh session."

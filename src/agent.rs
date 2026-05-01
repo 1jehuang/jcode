@@ -76,6 +76,14 @@ pub struct TokenUsage {
     pub cache_creation_input_tokens: Option<u64>,
 }
 
+#[derive(Debug, Clone)]
+struct RewindUndoSnapshot {
+    messages: Vec<StoredMessage>,
+    provider_session_id: Option<String>,
+    session_provider_session_id: Option<String>,
+    visible_message_count: usize,
+}
+
 pub struct Agent {
     provider: Arc<dyn Provider>,
     registry: Registry,
@@ -121,6 +129,8 @@ pub struct Agent {
     system_prompt_override: Option<String>,
     /// Whether memory features are enabled for this session
     memory_enabled: bool,
+    /// One-step undo snapshot captured before the most recent rewind.
+    rewind_undo_snapshot: Option<RewindUndoSnapshot>,
     /// Channel for tools to request stdin input from the user
     stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::tool::StdinInputRequest>>,
 }
@@ -167,6 +177,7 @@ impl Agent {
             locked_tools: None,
             system_prompt_override: None,
             memory_enabled: crate::config::config().features.memory,
+            rewind_undo_snapshot: None,
             stdin_request_tx: None,
         }
     }
@@ -324,6 +335,7 @@ impl Agent {
         self.cache_tracker.reset();
         self.last_usage = TokenUsage::default();
         self.locked_tools = None;
+        self.rewind_undo_snapshot = None;
     }
 
     fn sync_session_compaction_state_from_manager(

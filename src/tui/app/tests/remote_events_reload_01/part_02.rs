@@ -203,3 +203,66 @@ fn test_remote_rewind_lists_display_history_when_session_transcript_is_empty() {
     assert!(last.content.contains("`2` 🤖 Assistant - hi there"));
     assert!(!last.content.contains("No messages in conversation"));
 }
+
+#[test]
+fn test_remote_rewind_completion_shows_undo_hint_after_history_refresh() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_remote = true;
+    app.push_display_message(DisplayMessage::user("hello"));
+    app.push_display_message(DisplayMessage::assistant("hi there"));
+
+    app.input = "/rewind 1".to_string();
+    app.cursor_pos = app.input.len();
+    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+        .expect("/rewind N should be sent remotely");
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::History {
+            id: 1,
+            session_id: "session_rewind_remote".to_string(),
+            messages: vec![crate::protocol::HistoryMessage {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+                tool_calls: None,
+                tool_data: None,
+            }],
+            images: vec![],
+            provider_name: Some("mock".to_string()),
+            provider_model: Some("mock-model".to_string()),
+            subagent_model: None,
+            autoreview_enabled: None,
+            autojudge_enabled: None,
+            available_models: vec![],
+            available_model_routes: vec![],
+            mcp_servers: vec![],
+            skills: vec![],
+            total_tokens: None,
+            all_sessions: vec![],
+            client_count: None,
+            is_canary: None,
+            reload_recovery: None,
+            server_version: None,
+            server_name: None,
+            server_icon: None,
+            server_has_update: None,
+            was_interrupted: None,
+            connection_type: None,
+            status_detail: None,
+            upstream_provider: None,
+            reasoning_effort: None,
+            service_tier: None,
+            compaction_mode: crate::config::CompactionMode::Reactive,
+            activity: None,
+            side_panel: crate::side_panel::SidePanelSnapshot::default(),
+        },
+        &mut remote,
+    );
+
+    let last = app.display_messages().last().expect("rewind completion notice");
+    assert!(last.content.contains("✓ Rewound to message 1"));
+    assert!(last.content.contains("Undo anytime with `/rewind undo`"));
+}

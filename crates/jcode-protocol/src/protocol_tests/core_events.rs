@@ -50,6 +50,19 @@ fn test_rewind_request_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn test_rewind_undo_request_roundtrip() -> Result<()> {
+    let req = Request::RewindUndo { id: 9 };
+    let json = serde_json::to_string(&req)?;
+    assert!(json.contains("\"type\":\"rewind_undo\""));
+    let decoded = parse_request_json(&json)?;
+    assert_eq!(decoded.id(), 9);
+    let Request::RewindUndo { .. } = decoded else {
+        return Err(anyhow!("wrong request type"));
+    };
+    Ok(())
+}
+
+#[test]
 fn test_event_roundtrip() -> Result<()> {
     let event = ServerEvent::TextDelta {
         text: "hello".to_string(),

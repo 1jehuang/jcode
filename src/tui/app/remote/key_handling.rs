@@ -1,5 +1,6 @@
 use super::*;
 use crate::tui::app as app_mod;
+use crate::tui::app::PendingRemoteRewindNotice;
 use crate::tui::core;
 
 pub(in crate::tui::app) fn handle_remote_char_input(app: &mut App, c: char) {
@@ -99,6 +100,7 @@ fn show_remote_rewind_history(app: &mut App) {
         history.push_str(&format!("  `{}` {} - {}\n", i + 1, role_str, preview));
     }
     history.push_str("\nUse `/rewind N` to rewind to message N (removes all messages after).");
+    history.push_str(" After rewinding, use `/rewind undo` to restore the removed messages.");
     app.push_display_message(DisplayMessage::system(history));
 }
 
@@ -109,6 +111,17 @@ async fn handle_remote_rewind_command(
 ) -> Result<bool> {
     if trimmed == "/rewind" {
         show_remote_rewind_history(app);
+        return Ok(true);
+    }
+
+    if trimmed == "/rewind undo" {
+        remote.rewind_undo().await?;
+        app.pending_remote_rewind_notice = Some(PendingRemoteRewindNotice {
+            undo: true,
+            message_index: None,
+            changed_messages: 0,
+        });
+        app.set_status_notice("Undoing rewind...");
         return Ok(true);
     }
 
@@ -127,6 +140,11 @@ async fn handle_remote_rewind_command(
     match num_str.trim().parse::<usize>() {
         Ok(n) if n > 0 && n <= message_count => {
             remote.rewind(n).await?;
+            app.pending_remote_rewind_notice = Some(PendingRemoteRewindNotice {
+                undo: false,
+                message_index: Some(n),
+                changed_messages: message_count - n,
+            });
             app.set_status_notice(format!("Rewinding to message {}...", n));
         }
         Ok(n) => {

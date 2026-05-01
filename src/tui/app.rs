@@ -13,7 +13,7 @@ use crate::message::{
 };
 use crate::provider::Provider;
 use crate::runtime_memory_log::RuntimeMemoryLogController;
-use crate::session::Session;
+use crate::session::{Session, StoredMessage};
 use crate::skill::SkillRegistry;
 use crate::tool::selfdev::ReloadContext;
 use crate::tool::{Registry, ToolContext};
@@ -103,6 +103,21 @@ struct PendingSplitPrompt {
 
 struct PendingLocalTransfer {
     receiver: mpsc::Receiver<anyhow::Result<PreparedTransferSession>>,
+}
+
+#[derive(Debug, Clone)]
+struct LocalRewindUndoSnapshot {
+    messages: Vec<StoredMessage>,
+    provider_session_id: Option<String>,
+    session_provider_session_id: Option<String>,
+    visible_message_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PendingRemoteRewindNotice {
+    undo: bool,
+    message_index: Option<usize>,
+    changed_messages: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -579,6 +594,8 @@ pub struct App {
     streaming_tool_calls: Vec<ToolCall>,
     // Provider-specific session ID for conversation resume
     provider_session_id: Option<String>,
+    // One-step undo snapshot captured before the most recent local rewind.
+    rewind_undo_snapshot: Option<LocalRewindUndoSnapshot>,
     // Cancel flag for interrupting generation
     cancel_requested: bool,
     // Quit confirmation: tracks when first Ctrl+C was pressed
@@ -662,6 +679,8 @@ pub struct App {
     current_message_id: Option<u64>,
     // Whether running in remote mode
     is_remote: bool,
+    // Remote rewind/undo request waiting for the server's replacement History payload.
+    pending_remote_rewind_notice: Option<PendingRemoteRewindNotice>,
     // Server was just spawned - allow initial connection retries in run_remote
     server_spawning: bool,
     // Whether running in replay mode (readonly playback of a saved session)
