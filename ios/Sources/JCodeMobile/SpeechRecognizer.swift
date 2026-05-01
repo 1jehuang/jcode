@@ -41,13 +41,7 @@ final class SpeechRecognizer: ObservableObject {
         state = .requesting
         transcript = ""
 
-        let speechStatus = await withCheckedContinuation { (cont: CheckedContinuation<SFSpeechRecognizerAuthorizationStatus, Never>) in
-            SFSpeechRecognizer.requestAuthorization { status in
-                Task { @MainActor in
-                    cont.resume(returning: status)
-                }
-            }
-        }
+        let speechStatus = await SpeechPermission.requestAuthorization()
 
         guard speechStatus == .authorized else {
             state = .error("Speech recognition not authorized")
@@ -92,6 +86,16 @@ final class SpeechRecognizer: ObservableObject {
         guard state == .recording || state == .requesting else { return }
         audioCapture.stop(cancelRecognition: true)
         state = .idle
+    }
+}
+
+private enum SpeechPermission {
+    static func requestAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
+        await withCheckedContinuation { (cont: CheckedContinuation<SFSpeechRecognizerAuthorizationStatus, Never>) in
+            SFSpeechRecognizer.requestAuthorization { status in
+                cont.resume(returning: status)
+            }
+        }
     }
 }
 
