@@ -128,57 +128,88 @@ struct QRCameraView: UIViewControllerRepresentable {
 
 private final class CaptureSessionWrapper: @unchecked Sendable {
     let session = AVCaptureSession()
+    let queue = DispatchQueue(label: "com.jcode.mobile.qr.capture-session")
+    private var configured = false
 
-    func start() { session.startRunning() }
-    func stop() { session.stopRunning() }
+    func configure(delegate: AVCaptureMetadataOutputObjectsDelegate) {
+        queue.async { [weak self, weak delegate] in
+            guard let self, let delegate, !self.configured else { return }
+            self.session.beginConfiguration()
+            defer { self.session.commitConfiguration() }
+
+            guard let device = AVCaptureDevice.default(for: .video),
+                  let input = try? AVCaptureDeviceInput(device: device),
+                  self.session.canAddInput(input) else {
+                return
+            }
+            self.session.addInput(input)
+
+            let output = AVCaptureMetadataOutput()
+            guard self.session.canAddOutput(output) else { return }
+            self.session.addOutput(output)
+            output.setMetadataObjectsDelegate(delegate, queue: self.queue)
+            if output.availableMetadataObjectTypes.contains(.qr) {
+                output.metadataObjectTypes = [.qr]
+            }
+            self.configured = true
+        }
+    }
+
+    func start() {
+        queue.async { [weak self] in
+            guard let self, !self.session.isRunning else { return }
+            self.session.startRunning()
+        }
+    }
+
+    func stop() {
+        queue.async { [weak self] in
+            guard let self, self.session.isRunning else { return }
+            self.session.stopRunning()
+        }
+    }
 }
 
 final class QRScannerController: UIViewController {
     var onCodeScanned: ((String) -> Void)?
     private let wrapper = CaptureSessionWrapper()
     private let delegateHandler = MetadataDelegate()
+    private var previewLayer: AVCaptureVideoPreviewLayer?
 
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        guard let device = AVCaptureDevice.default(for: .video),
-              let input = try? AVCaptureDeviceInput(device: device) else {
-            return
-        }
-
-        let session = wrapper.session
-        session.addInput(input)
-
-        let output = AVCaptureMetadataOutput()
-        session.addOutput(output)
-
         delegateHandler.onDetected = { [weak self] value in
-            self?.handleDetection(value)
+            DispatchQueue.main.async {
+                self?.handleDetection(value)
+            }
         }
-        output.setMetadataObjectsDelegate(delegateHandler, queue: .main)
-        output.metadataObjectTypes = [.qr]
+        wrapper.configure(delegate: delegateHandler)
 
-        let previewLayer = AVCaptureVideoPreviewLayer(session: session)
+        let previewLayer = AVCaptureVideoPreviewLayer(session: wrapper.session)
         previewLayer.frame = view.layer.bounds
         previewLayer.videoGravity = .resizeAspectFill
         view.layer.addSublayer(previewLayer)
+        self.previewLayer = previewLayer
+    }
 
-        Task.detached { [wrapper] in
-            wrapper.start()
-        }
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        previewLayer?.frame = view.layer.bounds
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        wrapper.start()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        Task.detached { [wrapper] in
-            wrapper.stop()
-        }
+        wrapper.stop()
     }
 
     private func handleDetection(_ value: String) {
-        Task.detached { [wrapper] in
-            wrapper.stop()
-        }
+        wrapper.stop()
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         onCodeScanned?(value)
     }
