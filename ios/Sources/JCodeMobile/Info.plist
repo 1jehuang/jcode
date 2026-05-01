@@ -52,17 +52,35 @@
     <string>jcode uses the microphone for voice dictation to compose messages hands-free.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>jcode uses speech recognition to transcribe your voice into text messages.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>jcode connects to the Jcode gateway running on your Mac over your local network or Tailscale.</string>
     <key>ITSAppUsesNonExemptEncryption</key>
     <false/>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsArbitraryLoads</key>
         <true/>
+        <key>NSAllowsArbitraryLoadsInWebContent</key>
+        <true/>
         <key>NSAllowsLocalNetworking</key>
         <true/>
         <key>NSExceptionDomains</key>
         <dict>
+            <key>localhost</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+                <key>NSIncludesSubdomains</key>
+                <true/>
+            </dict>
             <key>local</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+                <key>NSIncludesSubdomains</key>
+                <true/>
+            </dict>
+            <key>ts.net</key>
             <dict>
                 <key>NSExceptionAllowsInsecureHTTPLoads</key>
                 <true/>
