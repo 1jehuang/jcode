@@ -16,12 +16,15 @@ final class SpeechRecognizer: ObservableObject {
 
     private var recognizer: SFSpeechRecognizer?
     private let audioCapture = SpeechAudioCapture()
+    private var silenceTask: Task<Void, Never>?
+    private let silenceFinalizeDelay: TimeInterval = 1.15
 
     init() {
         recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     }
 
     deinit {
+        silenceTask?.cancel()
         audioCapture.stop(cancelRecognition: true)
     }
 
@@ -40,6 +43,7 @@ final class SpeechRecognizer: ObservableObject {
 
         state = .requesting
         transcript = ""
+        silenceTask?.cancel()
 
         let speechStatus = await SpeechPermission.requestAuthorization()
 
@@ -63,7 +67,9 @@ final class SpeechRecognizer: ObservableObject {
             },
             onTranscript: { [weak self] text in
                 Task { @MainActor in
-                    self?.transcript = text
+                    guard let self else { return }
+                    self.transcript = text
+                    self.scheduleSilenceFinalize()
                 }
             },
             onFinished: { [weak self] in
@@ -84,8 +90,28 @@ final class SpeechRecognizer: ObservableObject {
 
     func stopRecording() {
         guard state == .recording || state == .requesting else { return }
+        silenceTask?.cancel()
         audioCapture.stop(cancelRecognition: true)
         state = .idle
+    }
+
+    private func finishCurrentUtterance() {
+        guard state == .recording || state == .requesting else { return }
+        silenceTask?.cancel()
+        audioCapture.stop(cancelRecognition: false)
+        state = .idle
+    }
+
+    private func scheduleSilenceFinalize() {
+        guard state == .recording else { return }
+        silenceTask?.cancel()
+        silenceTask = Task { [weak self, silenceFinalizeDelay] in
+            try? await Task.sleep(for: .seconds(silenceFinalizeDelay))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self?.finishCurrentUtterance()
+            }
+        }
     }
 }
 
