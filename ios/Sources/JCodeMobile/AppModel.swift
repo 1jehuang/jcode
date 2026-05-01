@@ -115,6 +115,23 @@ final class AppModel: ObservableObject {
         return generated
     }()
 
+    private func activeSessionDefaultsKey(for credential: ServerCredential? = nil) -> String? {
+        guard let credential = credential ?? selectedServer else { return nil }
+        return "jcode.selected.session.\(credential.host).\(credential.port)"
+    }
+
+    private func rememberedSessionId(for credential: ServerCredential? = nil) -> String? {
+        guard let key = activeSessionDefaultsKey(for: credential) else { return nil }
+        let value = UserDefaults.standard.string(forKey: key)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? nil : value
+    }
+
+    private func rememberSessionId(_ sessionId: String, for credential: ServerCredential? = nil) {
+        let trimmed = sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let key = activeSessionDefaultsKey(for: credential) else { return }
+        UserDefaults.standard.set(trimmed, forKey: key)
+    }
+
     func loadSavedServers() async {
         let all = await credentialStore.all()
         let creds = all.sorted {
@@ -289,15 +306,20 @@ final class AppModel: ObservableObject {
         shouldAutoReconnect = true
         reconnecting = false
 
-        messages = []
+        let sessionToResume = activeSessionId.isEmpty ? rememberedSessionId(for: credential) : activeSessionId
+
+        // Keep the existing transcript visible while reconnecting. iOS can suspend the
+        // socket when the app backgrounds; clearing here makes it look like the phone
+        // forgot the conversation before the server has a chance to replay history.
         inFlightTools.removeAll()
         lastToolId = nil
         lastAssistantMessageId = nil
         lastAssistantIndex = nil
         toolMessageIndex.removeAll()
         toolSubIndex.removeAll()
-        activeSessionId = ""
-        sessions = []
+        if let sessionToResume {
+            activeSessionId = sessionToResume
+        }
         serverName = credential.serverName
         serverVersion = credential.serverVersion
         modelName = ""
@@ -308,7 +330,7 @@ final class AppModel: ObservableObject {
         await newClient.setDelegate(delegate)
 
         do {
-            try await newClient.connect()
+            try await newClient.connect(resumeSessionId: sessionToResume)
             client = newClient
             connectionState = .connected
             reconnecting = false
@@ -469,6 +491,7 @@ final class AppModel: ObservableObject {
         do {
             try await client.switchSession(sessionId)
             activeSessionId = sessionId
+            rememberSessionId(sessionId)
             statusMessage = "Switched to \(sessionId)"
             // History will be refreshed by server event.
         } catch {
@@ -478,6 +501,7 @@ final class AppModel: ObservableObject {
 
     private func applyConnectedServerInfo(_ info: ServerInfo) {
         activeSessionId = info.sessionId
+        rememberSessionId(info.sessionId)
         sessions = info.allSessions
         serverName = info.serverName ?? "jcode"
         serverVersion = info.serverVersion ?? ""

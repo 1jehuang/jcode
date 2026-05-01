@@ -130,7 +130,7 @@ public actor JCodeClient {
         self._delegate = delegate
     }
 
-    public func connect(workingDir: String? = nil) async throws {
+    public func connect(workingDir: String? = nil, resumeSessionId: String? = nil) async throws {
         let stream = await connection.events()
         eventTask = Task { [weak self] in
             for await event in stream {
@@ -139,6 +139,9 @@ public actor JCodeClient {
             }
         }
         try await connection.connect(workingDir: workingDir)
+        if let resumeSessionId, !resumeSessionId.isEmpty {
+            try await connection.resumeSession(resumeSessionId)
+        }
         let _ = try await connection.requestHistory()
     }
 
