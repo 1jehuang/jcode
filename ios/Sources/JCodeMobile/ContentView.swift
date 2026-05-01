@@ -349,11 +349,12 @@ struct FloatingActions: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
         .padding(.trailing, JC.Spacing.md)
         .onChange(of: speech.transcript) { _, newValue in
-            guard speech.isRecording, !newValue.isEmpty else { return }
+            let dictated = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !dictated.isEmpty else { return }
             if prefixBeforeDictation.isEmpty {
-                draftMessage = newValue
+                draftMessage = dictated
             } else {
-                draftMessage = prefixBeforeDictation + " " + newValue
+                draftMessage = prefixBeforeDictation + " " + dictated
             }
         }
     }
