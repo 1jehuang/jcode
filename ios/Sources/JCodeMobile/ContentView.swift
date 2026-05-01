@@ -725,7 +725,10 @@ struct ChatInputBar: View {
         let hasText = !model.draftMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasAttachments = !allAttachments.isEmpty
 
-        guard model.connectionState == .connected else { return false }
+        guard model.selectedServer != nil else { return false }
+        if model.connectionState != .connected {
+            return hasText && !hasAttachments && !model.isProcessing
+        }
         if model.isProcessing {
             return hasText && !hasAttachments
         }

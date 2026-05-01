@@ -343,8 +343,17 @@ final class AppModel: ObservableObject {
     func sendDraft(images: [(String, String)] = []) async -> Bool {
         clearTransientMessages()
 
+        if connectionState != .connected {
+            guard selectedServer != nil else {
+                errorMessage = "Not connected."
+                return false
+            }
+            statusMessage = "Reconnecting before send..."
+            await connectSelected()
+        }
+
         guard connectionState == .connected else {
-            errorMessage = "Not connected."
+            errorMessage = "Not connected. Tap Connect in Settings or check the Mac gateway."
             return false
         }
 
