@@ -40,6 +40,13 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func imagesEqual(_ lhs: [(String, String)], _ rhs: [(String, String)]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        return zip(lhs, rhs).allSatisfy { left, right in
+            left.0 == right.0 && left.1 == right.1
+        }
+    }
+
     @Published var connectionState: ConnectionState = .disconnected
     @Published var isProcessing: Bool = false
     @Published var availableModels: [String] = []
@@ -389,7 +396,7 @@ final class AppModel: ObservableObject {
                 }
                 lastAssistantMessageId = messages.last(where: { $0.role == .assistant })?.id
             }
-            if let idx = messages.lastIndex(where: { $0.role == .user && $0.text == trimmed && $0.images == images }) {
+            if let idx = messages.lastIndex(where: { $0.role == .user && $0.text == trimmed && imagesEqual($0.images, images) }) {
                 messages.remove(at: idx)
             }
             errorMessage = isInterleaving
