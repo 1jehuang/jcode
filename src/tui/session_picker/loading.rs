@@ -1,7 +1,7 @@
 use crate::id::{extract_session_name, session_icon};
 use crate::message::Role;
 use crate::registry::{self, ServerInfo};
-use crate::session::{self, CrashedSessionsInfo, Session, SessionStatus};
+use crate::session::{self, CrashedSessionsInfo, Session, SessionStatus, StoredDisplayRole};
 use crate::storage;
 use anyhow::Result;
 use serde::Deserialize;
@@ -520,6 +520,63 @@ fn parse_timestamp_value(
         .map(|dt| dt.with_timezone(&chrono::Utc))
 }
 
+fn value_first_text(value: &serde_json::Value) -> Option<&str> {
+    match value {
+        serde_json::Value::String(text) => Some(text.as_str()),
+        serde_json::Value::Array(items) => items.iter().find_map(value_first_text),
+        serde_json::Value::Object(map) => map.get("text").and_then(|text| text.as_str()),
+        _ => None,
+    }
+}
+
+fn message_value_is_internal_system_reminder(message: &serde_json::Value) -> bool {
+    message
+        .get("content")
+        .and_then(value_first_text)
+        .is_some_and(|text| text.trim_start().starts_with("<system-reminder>"))
+}
+
+fn content_value_starts_with_system_reminder(content: &serde_json::Value) -> bool {
+    value_first_text(content).is_some_and(|text| text.trim_start().starts_with("<system-reminder>"))
+}
+
+fn message_value_is_visible_conversation(message: &serde_json::Value) -> bool {
+    let has_display_role = message
+        .get("display_role")
+        .is_some_and(|value| !value.is_null());
+    !has_display_role && !message_value_is_internal_system_reminder(message)
+}
+
+fn snapshot_has_visible_conversation(path: &Path) -> Option<bool> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&content).ok()?;
+    let messages = value.get("messages")?.as_array()?;
+    Some(messages.iter().any(message_value_is_visible_conversation))
+}
+
+fn journal_has_visible_conversation(path: &Path) -> Option<bool> {
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let mut saw_parseable_line = false;
+    for line in reader.lines().map_while(|line| line.ok()) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        saw_parseable_line = true;
+        let Some(messages) = value.get("append_messages").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        if messages.iter().any(message_value_is_visible_conversation) {
+            return Some(true);
+        }
+    }
+    saw_parseable_line.then_some(false)
+}
+
 fn is_empty_session_file(path: &Path) -> bool {
     let Ok(file) = std::fs::File::open(path) else {
         return true;
@@ -536,11 +593,20 @@ fn is_empty_session_file(path: &Path) -> bool {
 
 fn session_has_history(sessions_dir: &Path, stem: &str) -> bool {
     let snapshot_path = sessions_dir.join(format!("{stem}.json"));
+    let journal_path = sessions_dir.join(format!("{stem}.journal.jsonl"));
+
+    if journal_has_visible_conversation(&journal_path) == Some(true) {
+        return true;
+    }
+
+    if let Some(has_visible) = snapshot_has_visible_conversation(&snapshot_path) {
+        return has_visible;
+    }
+
     if !is_empty_session_file(&snapshot_path) {
         return true;
     }
 
-    let journal_path = sessions_dir.join(format!("{stem}.journal.jsonl"));
     journal_path
         .metadata()
         .map(|meta| meta.len() > 0)
@@ -656,7 +722,15 @@ struct SessionSummary {
 struct SessionMessageSummary {
     role: Role,
     #[serde(default)]
+    content: serde_json::Value,
+    #[serde(default)]
+    display_role: Option<StoredDisplayRole>,
+    #[serde(default)]
     token_usage: Option<SessionTokenUsageSummary>,
+}
+
+fn summary_message_is_visible_conversation(message: &SessionMessageSummary) -> bool {
+    message.display_role.is_none() && !content_value_starts_with_system_reminder(&message.content)
 }
 
 #[derive(Deserialize)]
@@ -863,7 +937,20 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
             let mut assistant_message_count = 0;
             let mut estimated_tokens: usize = 0;
 
-            for msg in &session.messages {
+            let visible_message_count = session
+                .messages
+                .iter()
+                .filter(|msg| summary_message_is_visible_conversation(msg))
+                .count();
+            if visible_message_count == 0 {
+                continue;
+            }
+
+            for msg in session
+                .messages
+                .iter()
+                .filter(|msg| summary_message_is_visible_conversation(msg))
+            {
                 match msg.role {
                     Role::User => user_message_count += 1,
                     Role::Assistant => assistant_message_count += 1,
@@ -882,10 +969,6 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
                 session.model.as_deref(),
             );
 
-            if session.messages.is_empty() {
-                continue;
-            }
-
             let title = session.title.unwrap_or_else(|| "Untitled".to_string());
             let messages_preview: Vec<PreviewMessage> = Vec::new();
             let search_index = build_search_index_from_summary(
@@ -902,7 +985,7 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
                 short_name,
                 icon: icon.to_string(),
                 title,
-                message_count: session.messages.len(),
+                message_count: visible_message_count,
                 user_message_count,
                 assistant_message_count,
                 created_at: session.created_at,

@@ -127,6 +127,45 @@ fn test_collect_recent_session_stems_skips_empty_recent_sessions() {
 }
 
 #[test]
+fn test_collect_recent_session_stems_skips_system_context_only_sessions() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+
+    write_session_file_with_mtime(
+        dir.path().join("session_empty_context_9000.json"),
+        r##"{"messages":[{"role":"user","display_role":"system","content":[{"type":"text","text":"<system-reminder>\n# Session Context\n</system-reminder>"}]}]}"##,
+        9000,
+    );
+    write_session_file_with_mtime(
+        dir.path().join("session_real_1000.json"),
+        r#"{"messages":[{"role":"user","content":"real prompt"}]}"#,
+        1000,
+    );
+
+    let stems = collect_recent_session_stems(dir.path(), 1).expect("collect stems");
+    assert_eq!(stems, vec!["session_real_1000"]);
+}
+
+#[test]
+fn test_collect_recent_session_stems_keeps_system_context_with_visible_journal_turn() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let stem = "session_context_then_journal_9000";
+
+    write_session_file_with_mtime(
+        dir.path().join(format!("{stem}.json")),
+        r##"{"messages":[{"role":"user","display_role":"system","content":[{"type":"text","text":"<system-reminder>\n# Session Context\n</system-reminder>"}]}]}"##,
+        1000,
+    );
+    write_session_file_with_mtime(
+        dir.path().join(format!("{stem}.journal.jsonl")),
+        r#"{"meta":{"updated_at":"2026-05-01T00:00:00Z"},"append_messages":[{"role":"user","content":"real prompt from journal"}]}"#,
+        9000,
+    );
+
+    let stems = collect_recent_session_stems(dir.path(), 1).expect("collect stems");
+    assert_eq!(stems, vec![stem]);
+}
+
+#[test]
 fn test_collect_recent_session_stems_uses_timestamp_as_mtime_tiebreaker() {
     let dir = tempfile::TempDir::new().expect("tempdir");
 
