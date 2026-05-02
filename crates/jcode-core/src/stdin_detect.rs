@@ -22,6 +22,7 @@ pub fn is_waiting_for_stdin(pid: u32) -> StdinState {
 #[cfg(target_os = "linux")]
 pub mod linux {
     use super::*;
+    use std::collections::{HashMap, HashSet};
 
     pub fn check(pid: u32) -> StdinState {
         check_inner(pid, false)
@@ -93,32 +94,47 @@ pub mod linux {
             .ok()
             .map(|p| p.to_string_lossy().to_string());
 
-        // Check child processes
+        // Build a parent -> children graph from /proc so we can traverse nested wrappers.
+        let mut children_by_parent: HashMap<u32, Vec<u32>> = HashMap::new();
         if let Ok(entries) = std::fs::read_dir("/proc") {
             for entry in entries.flatten() {
                 if let Ok(name) = entry.file_name().into_string()
-                    && let Ok(child_pid) = name.parse::<u32>()
-                    && let Ok(status) =
-                        std::fs::read_to_string(format!("/proc/{}/status", child_pid))
+                    && let Ok(proc_pid) = name.parse::<u32>()
+                    && let Ok(status) = std::fs::read_to_string(format!("/proc/{}/status", proc_pid))
                 {
                     for line in status.lines() {
                         if let Some(ppid_str) = line.strip_prefix("PPid:\t")
-                            && ppid_str.trim().parse::<u32>().ok() == Some(pid)
+                            && let Ok(ppid) = ppid_str.trim().parse::<u32>()
                         {
-                            if let Some(ref parent_link) = parent_stdin_link {
-                                let child_link =
-                                    std::fs::read_link(format!("/proc/{}/fd/0", child_pid))
-                                        .ok()
-                                        .map(|p| p.to_string_lossy().to_string());
-                                if child_link.as_deref() != Some(parent_link) {
-                                    continue;
-                                }
-                            }
-                            let child_result = check_inner(child_pid, true);
-                            if child_result == StdinState::Reading {
-                                return StdinState::Reading;
-                            }
+                            children_by_parent.entry(ppid).or_default().push(proc_pid);
+                            break;
                         }
+                    }
+                }
+            }
+        }
+
+        // DFS through descendants so chains like bash -> sh -> cat are detected.
+        let mut stack = vec![pid];
+        let mut visited = HashSet::new();
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            if let Some(children) = children_by_parent.get(&current) {
+                for &child_pid in children {
+                    stack.push(child_pid);
+                    if let Some(ref parent_link) = parent_stdin_link {
+                        let child_link = std::fs::read_link(format!("/proc/{}/fd/0", child_pid))
+                            .ok()
+                            .map(|p| p.to_string_lossy().to_string());
+                        if child_link.as_deref() != Some(parent_link) {
+                            continue;
+                        }
+                    }
+                    let child_result = check_inner(child_pid, true);
+                    if child_result == StdinState::Reading {
+                        return StdinState::Reading;
                     }
                 }
             }

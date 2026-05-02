@@ -93,6 +93,33 @@ fn test_child_process_tree_detection() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn test_grandchild_process_tree_detection() {
+    // Two-layer wrapper: bash -> sh -> cat. Only the grandchild reads stdin.
+    let mut child = Command::new("bash")
+        .arg("-c")
+        .arg("sh -c 'cat'")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("failed to spawn nested shell");
+
+    let pid = child.id();
+    std::thread::sleep(std::time::Duration::from_millis(350));
+
+    let state = linux::check_process_tree(pid);
+
+    child.kill().ok();
+    child.wait().ok();
+
+    assert_eq!(
+        state,
+        StdinState::Reading,
+        "grandchild cat should be detected via recursive process tree walk"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn test_process_that_reads_then_exits() {
     use std::io::Write;
 
