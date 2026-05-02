@@ -64,6 +64,7 @@ fn function_call_outputs(items: &[serde_json::Value], call_id: &str) -> Vec<Stri
 fn build_test_response_request(
     model_id: &str,
     is_chatgpt_mode: bool,
+    allow_optional_params: bool,
     max_output_tokens: Option<u32>,
     reasoning_effort: Option<&str>,
     service_tier: Option<&str>,
@@ -77,6 +78,7 @@ fn build_test_response_request(
         &[],
         &[],
         is_chatgpt_mode,
+        allow_optional_params,
         max_output_tokens,
         reasoning_effort,
         service_tier,
@@ -268,6 +270,7 @@ fn test_build_response_request_for_gpt_5_4_1m_uses_base_model_without_extra_flag
     let request = build_test_response_request(
         "gpt-5.4",
         true,
+        true,
         Some(DEFAULT_MAX_OUTPUT_TOKENS),
         Some("xhigh"),
         Some("unused"),
@@ -299,6 +302,7 @@ fn test_build_response_request_omits_long_context_for_plain_gpt_5_4() {
     let request = build_test_response_request(
         "gpt-5.4",
         true,
+        true,
         Some(DEFAULT_MAX_OUTPUT_TOKENS),
         None,
         None,
@@ -315,6 +319,7 @@ fn test_build_response_request_defaults_extended_cache_retention_for_gpt_5_5() {
     let request = build_test_response_request(
         "gpt-5.5",
         false,
+        true,
         Some(DEFAULT_MAX_OUTPUT_TOKENS),
         None,
         None,
@@ -335,6 +340,7 @@ fn test_build_response_request_respects_configured_cache_retention() {
     let request = build_test_response_request(
         "gpt-5.5",
         false,
+        true,
         Some(DEFAULT_MAX_OUTPUT_TOKENS),
         None,
         None,

@@ -26,6 +26,7 @@ impl Provider for OpenAIProvider {
             };
             (instructions, is_chatgpt)
         };
+        let allow_optional_params = crate::auth::codex::configured_responses_base_url().is_none();
         let reasoning_effort = self
             .reasoning_effort
             .read()
@@ -44,6 +45,7 @@ impl Provider for OpenAIProvider {
             &input,
             &api_tools,
             is_chatgpt_mode,
+            allow_optional_params,
             self.max_output_tokens,
             reasoning_effort.as_deref(),
             service_tier.as_deref(),

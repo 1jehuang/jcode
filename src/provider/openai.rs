@@ -668,11 +668,14 @@ impl OpenAIProvider {
     }
 
     fn responses_url(credentials: &CodexCredentials) -> String {
-        let base = if Self::is_chatgpt_mode(credentials) {
-            CHATGPT_API_BASE
-        } else {
-            OPENAI_API_BASE
-        };
+        let configured_base = crate::auth::codex::configured_responses_base_url();
+        let base = configured_base.as_deref().unwrap_or_else(|| {
+            if Self::is_chatgpt_mode(credentials) {
+                CHATGPT_API_BASE
+            } else {
+                OPENAI_API_BASE
+            }
+        });
         format!("{}/{}", base.trim_end_matches('/'), RESPONSES_PATH)
     }
 
@@ -696,6 +699,7 @@ impl OpenAIProvider {
         input: &[Value],
         api_tools: &[Value],
         is_chatgpt_mode: bool,
+        allow_optional_params: bool,
         max_output_tokens: Option<u32>,
         reasoning_effort: Option<&str>,
         service_tier: Option<&str>,
@@ -713,42 +717,45 @@ impl OpenAIProvider {
             "instructions": instructions,
             "input": input,
             "tools": tools,
-            "tool_choice": "auto",
-            "parallel_tool_calls": false,
             "stream": true,
-            "store": false,
-            "include": ["reasoning.encrypted_content"],
         });
 
-        if !is_chatgpt_mode && let Some(max_output_tokens) = max_output_tokens {
-            request["max_output_tokens"] = serde_json::json!(max_output_tokens);
-        }
+        if allow_optional_params {
+            request["tool_choice"] = serde_json::json!("auto");
+            request["parallel_tool_calls"] = serde_json::json!(false);
+            request["store"] = serde_json::json!(false);
+            request["include"] = serde_json::json!(["reasoning.encrypted_content"]);
 
-        if let Some(effort) = reasoning_effort {
-            request["reasoning"] = serde_json::json!({ "effort": effort });
-        }
-
-        if let Some(service_tier) = service_tier {
-            request["service_tier"] = serde_json::json!(service_tier);
-        }
-
-        if let Some(compact_threshold) = native_compaction_threshold {
-            request["context_management"] = serde_json::json!([
-                {
-                    "type": "compaction",
-                    "compact_threshold": compact_threshold,
-                }
-            ]);
-        }
-
-        if !is_chatgpt_mode {
-            if let Some(key) = prompt_cache_key {
-                request["prompt_cache_key"] = serde_json::json!(key);
+            if !is_chatgpt_mode && let Some(max_output_tokens) = max_output_tokens {
+                request["max_output_tokens"] = serde_json::json!(max_output_tokens);
             }
-            if let Some(retention) =
-                Self::effective_prompt_cache_retention(model_id, prompt_cache_retention)
-            {
-                request["prompt_cache_retention"] = serde_json::json!(retention);
+
+            if let Some(effort) = reasoning_effort {
+                request["reasoning"] = serde_json::json!({ "effort": effort });
+            }
+
+            if let Some(service_tier) = service_tier {
+                request["service_tier"] = serde_json::json!(service_tier);
+            }
+
+            if let Some(compact_threshold) = native_compaction_threshold {
+                request["context_management"] = serde_json::json!([
+                    {
+                        "type": "compaction",
+                        "compact_threshold": compact_threshold,
+                    }
+                ]);
+            }
+
+            if !is_chatgpt_mode {
+                if let Some(key) = prompt_cache_key {
+                    request["prompt_cache_key"] = serde_json::json!(key);
+                }
+                if let Some(retention) =
+                    Self::effective_prompt_cache_retention(model_id, prompt_cache_retention)
+                {
+                    request["prompt_cache_retention"] = serde_json::json!(retention);
+                }
             }
         }
 

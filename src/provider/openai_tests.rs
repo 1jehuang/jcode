@@ -159,6 +159,72 @@ async fn live_openai_smoke(model: &str, sentinel: &str) -> Result<Option<String>
     Ok(Some(response))
 }
 
+#[test]
+fn responses_url_uses_active_codex_provider_base_url() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let codex_dir = temp.path().join("external/.codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        r#"
+model_provider = "InputAI"
+
+[model_providers.InputAI]
+base_url = "https://ai.input.im"
+wire_api = "responses"
+requires_openai_auth = true
+"#,
+    )
+    .unwrap();
+    let credentials = CodexCredentials {
+        access_token: "sk-test".to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    };
+
+    assert_eq!(
+        OpenAIProvider::responses_url(&credentials),
+        "https://ai.input.im/responses"
+    );
+}
+
+#[test]
+fn configured_base_url_request_omits_openai_direct_options() {
+    let request = OpenAIProvider::build_response_request(
+        "gpt-5.5",
+        "system".to_string(),
+        &[],
+        &[],
+        false,
+        false,
+        Some(1234),
+        Some("xhigh"),
+        Some("fast"),
+        Some("cache-key"),
+        Some("24h"),
+        Some(4096),
+    );
+
+    for key in [
+        "max_output_tokens",
+        "reasoning",
+        "service_tier",
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "context_management",
+        "include",
+        "tool_choice",
+        "parallel_tool_calls",
+        "store",
+    ] {
+        assert!(request.get(key).is_none(), "unexpected {key}: {request}");
+    }
+}
+
 include!("openai_tests/models_state.rs");
 include!("openai_tests/responses_input.rs");
 include!("openai_tests/transport_runtime.rs");
