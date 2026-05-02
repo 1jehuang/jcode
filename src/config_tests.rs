@@ -182,6 +182,41 @@ fn test_env_override_trusted_external_auth_splits_source_and_path_entries() {
 }
 
 #[test]
+fn test_env_override_cheap_mode_sets_low_cost_defaults() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_CHEAP_MODE");
+    crate::env::set_var("JCODE_CHEAP_MODE", "1");
+
+    let mut cfg = Config::default();
+    cfg.features.memory = true;
+    cfg.features.swarm = true;
+    cfg.provider.openai_reasoning_effort = Some("high".to_string());
+    cfg.provider.openai_service_tier = Some("priority".to_string());
+    cfg.provider.cross_provider_failover = super::CrossProviderFailoverMode::Countdown;
+    cfg.provider.same_provider_account_failover = true;
+    cfg.ambient.allow_api_keys = true;
+
+    cfg.apply_env_overrides();
+
+    assert!(!cfg.features.memory);
+    assert!(!cfg.features.swarm);
+    assert_eq!(cfg.provider.openai_reasoning_effort.as_deref(), Some("none"));
+    assert!(cfg.provider.openai_service_tier.is_none());
+    assert_eq!(
+        cfg.provider.cross_provider_failover,
+        super::CrossProviderFailoverMode::Manual
+    );
+    assert!(!cfg.provider.same_provider_account_failover);
+    assert!(!cfg.ambient.allow_api_keys);
+
+    if let Some(prev) = prev {
+        crate::env::set_var("JCODE_CHEAP_MODE", prev);
+    } else {
+        crate::env::remove_var("JCODE_CHEAP_MODE");
+    }
+}
+
+#[test]
 fn test_external_auth_source_allowed_for_path_matches_saved_entry() {
     let _guard = crate::storage::lock_test_env();
     let dir = tempfile::TempDir::new().expect("tempdir");

@@ -438,6 +438,27 @@ impl Config {
                 crate::env::set_var("JCODE_COPILOT_PREMIUM", env_val);
             }
         }
+
+        // Cheap mode (opt-in): lower-cost and lower-complexity defaults.
+        // This is intentionally conservative and does not force a specific model id.
+        if let Ok(v) = std::env::var("JCODE_CHEAP_MODE")
+            && let Some(true) = parse_env_bool(&v)
+        {
+            // Reduce agent-side context growth and coordination overhead.
+            self.features.memory = false;
+            self.features.swarm = false;
+
+            // Keep OpenAI reasoning overhead minimal in cheap mode.
+            self.provider.openai_reasoning_effort = Some("none".to_string());
+
+            // Avoid accidental premium tier usage and duplicate failover spends.
+            self.provider.openai_service_tier = None;
+            self.provider.cross_provider_failover = CrossProviderFailoverMode::Manual;
+            self.provider.same_provider_account_failover = false;
+
+            // Keep ambient API-key usage opt-in.
+            self.ambient.allow_api_keys = false;
+        }
     }
 }
 
