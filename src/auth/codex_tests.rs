@@ -64,6 +64,55 @@ fn auth_file_with_api_key_only() {
 }
 
 #[test]
+fn configured_responses_base_url_uses_active_codex_provider() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let codex_dir = temp.path().join("external/.codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        r#"
+model_provider = "InputAI"
+
+[model_providers.InputAI]
+base_url = "https://ai.input.im/"
+wire_api = "responses"
+requires_openai_auth = true
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        configured_responses_base_url().as_deref(),
+        Some("https://ai.input.im")
+    );
+}
+
+#[test]
+fn configured_responses_base_url_ignores_non_responses_provider() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let codex_dir = temp.path().join("external/.codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        r#"
+model_provider = "Other"
+
+[model_providers.Other]
+base_url = "https://example.invalid/v1"
+wire_api = "chat_completions"
+requires_openai_auth = true
+"#,
+    )
+    .unwrap();
+
+    assert!(configured_responses_base_url().is_none());
+}
+
+#[test]
 fn auth_file_minimal_tokens() {
     let json = r#"{
         "tokens": {

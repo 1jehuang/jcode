@@ -87,6 +87,9 @@ pub struct Session {
     /// Model identifier for this session (e.g., "gpt-5.2-codex")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// OpenAI reasoning effort selected for this session, when persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     /// Optional fixed model to use for subagents launched from this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_model: Option<String>,
@@ -171,6 +174,8 @@ struct SessionStartupStub {
     provider_key: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
     #[serde(default)]
     subagent_model: Option<String>,
     #[serde(default)]
@@ -263,6 +268,7 @@ impl Session {
         session.provider_session_id = stub.provider_session_id;
         session.provider_key = stub.provider_key;
         session.model = stub.model;
+        session.reasoning_effort = stub.reasoning_effort;
         session.subagent_model = stub.subagent_model;
         session.improve_mode = stub.improve_mode;
         session.autoreview_enabled = stub.autoreview_enabled;
@@ -727,6 +733,7 @@ impl Session {
             provider_session_id: None,
             provider_key: None,
             model: None,
+            reasoning_effort: None,
             subagent_model: None,
             improve_mode: None,
             autoreview_enabled: None,
@@ -773,6 +780,7 @@ impl Session {
             provider_session_id: None,
             provider_key: None,
             model: None,
+            reasoning_effort: None,
             subagent_model: None,
             improve_mode: None,
             autoreview_enabled: None,

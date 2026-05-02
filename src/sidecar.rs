@@ -133,11 +133,12 @@ impl Sidecar {
             .context("Failed to load OpenAI/Codex credentials for sidecar")?;
 
         let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
-        let base = if is_chatgpt_mode {
+        let configured_base = auth::codex::configured_responses_base_url();
+        let base = configured_base.as_deref().unwrap_or(if is_chatgpt_mode {
             CHATGPT_API_BASE
         } else {
             OPENAI_API_BASE
-        };
+        });
         let url = format!("{}/{}", base.trim_end_matches('/'), OPENAI_RESPONSES_PATH);
 
         let (primary_model, primary_reasoning) =

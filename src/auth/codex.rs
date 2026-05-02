@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::RwLock;
 
@@ -54,6 +55,20 @@ struct LegacyTokens {
     id_token: Option<String>,
     account_id: Option<String>,
     expires_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexCliConfig {
+    model_provider: Option<String>,
+    #[serde(default)]
+    model_providers: BTreeMap<String, CodexCliModelProvider>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexCliModelProvider {
+    base_url: Option<String>,
+    wire_api: Option<String>,
+    requires_openai_auth: Option<bool>,
 }
 
 static ACTIVE_ACCOUNT_OVERRIDE: RwLock<Option<String>> = RwLock::new(None);
@@ -116,6 +131,48 @@ fn jcode_auth_path() -> Result<PathBuf> {
 
 fn legacy_auth_path() -> Result<PathBuf> {
     crate::storage::user_home_path(".codex/auth.json")
+}
+
+fn legacy_config_path() -> Result<PathBuf> {
+    crate::storage::user_home_path(".codex/config.toml")
+}
+
+/// Return the active Codex CLI Responses API base URL when it is safe to reuse
+/// with the same OpenAI/Codex credentials jcode already trusts.
+///
+/// Codex supports model-provider routing in `~/.codex/config.toml`; if the
+/// selected provider explicitly uses the Responses wire API and OpenAI auth,
+/// jcode should send its OpenAI provider traffic to that base instead of the
+/// baked-in OpenAI/ChatGPT endpoints. This keeps jcode aligned with a local
+/// Codex setup such as an authenticated gateway.
+pub fn configured_responses_base_url() -> Option<String> {
+    let path = legacy_config_path().ok()?;
+    let content = std::fs::read_to_string(path).ok()?;
+    let config: CodexCliConfig = toml::from_str(&content).ok()?;
+    let provider_name = config.model_provider?.trim().to_string();
+    if provider_name.is_empty() {
+        return None;
+    }
+    let provider = config.model_providers.get(&provider_name)?;
+    let wire_api = provider.wire_api.as_deref()?.trim();
+    if !wire_api.eq_ignore_ascii_case("responses") {
+        return None;
+    }
+    if provider.requires_openai_auth != Some(true) {
+        return None;
+    }
+    normalize_responses_base_url(provider.base_url.as_deref()?)
+}
+
+fn normalize_responses_base_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 pub fn legacy_auth_file_path() -> Result<PathBuf> {

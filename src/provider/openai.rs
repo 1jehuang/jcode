@@ -668,11 +668,14 @@ impl OpenAIProvider {
     }
 
     fn responses_url(credentials: &CodexCredentials) -> String {
-        let base = if Self::is_chatgpt_mode(credentials) {
-            CHATGPT_API_BASE
-        } else {
-            OPENAI_API_BASE
-        };
+        let configured_base = crate::auth::codex::configured_responses_base_url();
+        let base = configured_base.as_deref().unwrap_or_else(|| {
+            if Self::is_chatgpt_mode(credentials) {
+                CHATGPT_API_BASE
+            } else {
+                OPENAI_API_BASE
+            }
+        });
         format!("{}/{}", base.trim_end_matches('/'), RESPONSES_PATH)
     }
 
