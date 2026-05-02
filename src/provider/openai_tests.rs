@@ -192,6 +192,39 @@ requires_openai_auth = true
     );
 }
 
+#[test]
+fn configured_base_url_request_omits_openai_direct_options() {
+    let request = OpenAIProvider::build_response_request(
+        "gpt-5.5",
+        "system".to_string(),
+        &[],
+        &[],
+        false,
+        false,
+        Some(1234),
+        Some("xhigh"),
+        Some("fast"),
+        Some("cache-key"),
+        Some("24h"),
+        Some(4096),
+    );
+
+    for key in [
+        "max_output_tokens",
+        "reasoning",
+        "service_tier",
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "context_management",
+        "include",
+        "tool_choice",
+        "parallel_tool_calls",
+        "store",
+    ] {
+        assert!(request.get(key).is_none(), "unexpected {key}: {request}");
+    }
+}
+
 include!("openai_tests/models_state.rs");
 include!("openai_tests/responses_input.rs");
 include!("openai_tests/transport_runtime.rs");
