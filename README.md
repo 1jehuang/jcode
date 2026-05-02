@@ -533,6 +533,8 @@ Build speed improvements: An incremental debug cargo build with cache enabled ta
 
 </div>
 
+> **New to jcode?** Read the [Safe First Run Guide](docs/SAFE_FIRST_RUN.md) before evaluating jcode with your primary credentials.
+
 ```bash
 # Launch the TUI
 jcode
@@ -609,6 +611,7 @@ Notes:
 
 ## Further Reading
 
+- [Safe First Run Guide](docs/SAFE_FIRST_RUN.md) - Evaluate jcode safely before granting access to primary credentials
 - [Ambient Mode / OpenClaw](docs/AMBIENT_MODE.md)
 - [Browser Provider Protocol](docs/BROWSER_PROVIDER_PROTOCOL.md)
 - [Memory Architecture](docs/MEMORY_ARCHITECTURE.md)
