@@ -336,6 +336,61 @@ fn apply_kimi_coding_agent_headers(
     }
 }
 
+fn is_reserved_header_name(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "host"
+            | "content-length"
+            | "transfer-encoding"
+            | "connection"
+            | "keep-alive"
+            | "te"
+            | "trailer"
+            | "upgrade"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+    )
+}
+
+pub(crate) fn parse_named_provider_extra_headers(
+    profile_name: &str,
+    profile: &crate::config::NamedProviderConfig,
+) -> Vec<(HeaderName, String)> {
+    let mut out = Vec::with_capacity(profile.headers.len());
+    for (raw_name, raw_value) in &profile.headers {
+        let trimmed_name = raw_name.trim();
+        if trimmed_name.is_empty() {
+            continue;
+        }
+        let header_name = match HeaderName::from_bytes(trimmed_name.as_bytes()) {
+            Ok(name) => name,
+            Err(_) => {
+                crate::logging::warn(&format!(
+                    "Provider profile '{}' has invalid custom header name '{}'; skipping",
+                    profile_name, trimmed_name
+                ));
+                continue;
+            }
+        };
+        if is_reserved_header_name(&header_name) {
+            crate::logging::warn(&format!(
+                "Provider profile '{}' tried to override reserved header '{}'; skipping",
+                profile_name, trimmed_name
+            ));
+            continue;
+        }
+        if raw_value.contains('\r') || raw_value.contains('\n') {
+            crate::logging::warn(&format!(
+                "Provider profile '{}' header '{}' contains CR/LF; skipping",
+                profile_name, trimmed_name
+            ));
+            continue;
+        }
+        out.push((header_name, raw_value.clone()));
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 enum ProviderAuth {
     AuthorizationBearer {
@@ -489,6 +544,7 @@ pub struct OpenRouterProvider {
     static_models: Vec<String>,
     static_context_limits: HashMap<String, usize>,
     send_openrouter_headers: bool,
+    extra_headers: Vec<(HeaderName, String)>,
     models_cache: Arc<RwLock<ModelsCache>>,
     model_catalog_refresh: Arc<Mutex<ModelCatalogRefreshState>>,
     /// Provider routing preferences
@@ -568,6 +624,7 @@ impl OpenRouterProvider {
                     .map(|limit| (id.to_ascii_lowercase(), limit))
             })
             .collect::<HashMap<_, _>>();
+        let extra_headers = parse_named_provider_extra_headers(profile_name, profile);
         Ok(Self {
             client: crate::provider::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
@@ -587,6 +644,7 @@ impl OpenRouterProvider {
             static_models,
             static_context_limits,
             send_openrouter_headers: false,
+            extra_headers,
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
@@ -697,6 +755,7 @@ impl OpenRouterProvider {
             static_models,
             static_context_limits,
             send_openrouter_headers,
+            extra_headers: Vec::new(),
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(provider_routing)),
@@ -859,6 +918,7 @@ impl OpenRouterProvider {
                 static_models: Vec::new(),
                 static_context_limits: HashMap::new(),
                 send_openrouter_headers: true,
+                extra_headers: Vec::new(),
                 models_cache: Arc::new(RwLock::new(ModelsCache::default())),
                 model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
                 provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),

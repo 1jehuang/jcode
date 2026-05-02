@@ -26,6 +26,16 @@ pub(crate) enum ProviderAuthArg {
     None,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum NamedProviderTypeArg {
+    /// OpenAI-compatible Chat Completions API (default)
+    #[value(name = "openai-compatible", alias = "openai_compatible")]
+    OpenAiCompatible,
+    /// Anthropic-compatible Messages API
+    #[value(name = "anthropic-compatible", alias = "anthropic_compatible")]
+    AnthropicCompatible,
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "jcode")]
 #[command(version = env!("JCODE_VERSION"))]
@@ -474,6 +484,14 @@ pub(crate) enum ProviderCommand {
         /// Header name when --auth api-key is used (default: api-key)
         #[arg(long)]
         auth_header: Option<String>,
+
+        /// Custom request header in the form KEY=VALUE. Repeatable.
+        #[arg(long = "header", value_name = "KEY=VALUE")]
+        custom_headers: Vec<String>,
+
+        /// Provider API style: openai-compatible (default) or anthropic-compatible
+        #[arg(long = "type", value_enum)]
+        provider_type: Option<NamedProviderTypeArg>,
 
         /// Private env file name under jcode's app config directory for stored API keys
         #[arg(long)]
