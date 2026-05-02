@@ -32,6 +32,7 @@ use winit::window::{Fullscreen, Window, WindowBuilder};
 use workspace::{InputMode, KeyInput, KeyOutcome, PanelSizePreset, Workspace};
 
 use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
@@ -504,6 +505,16 @@ async fn run() -> Result<()> {
                         }
                         KeyOutcome::None => {}
                     }
+                }
+                WindowEvent::DroppedFile(path) => {
+                    match dropped_image_base64(&path) {
+                        Ok((media_type, base64_data)) => {
+                            app.attach_dropped_image(media_type, base64_data);
+                        }
+                        Err(error) => apply_single_session_error(&mut app, error),
+                    }
+                    window.set_title(&app.status_title());
+                    window.request_redraw();
                 }
                 WindowEvent::RedrawRequested => match canvas
                     .render(&app, window.current_monitor().map(|monitor| monitor.size()))
@@ -1053,6 +1064,10 @@ impl DesktopApp {
         }
     }
 
+    fn attach_dropped_image(&mut self, media_type: String, base64_data: String) {
+        self.attach_clipboard_image(media_type, base64_data);
+    }
+
     fn accepts_clipboard_image_paste(&self) -> bool {
         match self {
             Self::SingleSession(app) => app.accepts_clipboard_image_paste(),
@@ -1350,6 +1365,31 @@ fn clipboard_image_png_base64() -> Result<(String, String)> {
         "image/png".to_string(),
         base64::engine::general_purpose::STANDARD.encode(cursor.into_inner()),
     ))
+}
+
+fn dropped_image_base64(path: &Path) -> Result<(String, String)> {
+    let media_type = image_media_type_for_path(path)
+        .with_context(|| format!("unsupported dropped file type: {}", path.display()))?;
+    let bytes = fs::read(path)
+        .with_context(|| format!("failed to read dropped image: {}", path.display()))?;
+    if bytes.is_empty() {
+        anyhow::bail!("dropped image is empty: {}", path.display());
+    }
+    Ok((
+        media_type.to_string(),
+        base64::engine::general_purpose::STANDARD.encode(bytes),
+    ))
+}
+
+fn image_media_type_for_path(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
 }
 
 fn clipboard_text() -> Result<String> {
