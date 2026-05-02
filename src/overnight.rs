@@ -175,7 +175,7 @@ fn create_coordinator_session(parent: &Session, mission: &Option<String>) -> Res
     child.replace_messages(parent.messages.clone());
     child.compaction = parent.compaction.clone();
     child.provider_key = parent.provider_key.clone();
-    child.reasoning_effort = parent.reasoning_effort.clone();
+    child.model = parent.model.clone();
     child.subagent_model = parent.subagent_model.clone();
     child.improve_mode = parent.improve_mode;
     child.autoreview_enabled = Some(false);

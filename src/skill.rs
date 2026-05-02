@@ -34,6 +34,19 @@ pub struct SkillRegistry {
 }
 
 impl SkillRegistry {
+    fn with_builtins() -> Self {
+        let mut registry = Self::default();
+        registry.load_builtin_omx_workflows();
+        registry
+    }
+
+    fn load_builtin_omx_workflows(&mut self) {
+        for spec in BUILTIN_OMX_SKILLS {
+            let skill = Skill::builtin(spec.name, spec.description, spec.content);
+            self.skills.insert(skill.name.clone(), skill);
+        }
+    }
+
     /// Process-wide shared mutable registry used by both `skill_manage` and
     /// direct slash invocation paths. Keeping a single registry prevents slash
     /// commands from seeing a stale startup-only skill snapshot after reloads.
@@ -209,7 +222,7 @@ impl SkillRegistry {
         // First-run import from Claude Code / Codex CLI
         Self::import_from_external();
 
-        let mut registry = Self::default();
+        let mut registry = Self::with_builtins();
 
         // Load from ~/.jcode/skills/ (jcode's own global skills)
         if let Ok(jcode_dir) = crate::storage::jcode_dir() {
@@ -355,8 +368,9 @@ impl SkillRegistry {
     /// active session working directory.
     pub fn reload_all_for_working_dir(&mut self, working_dir: Option<&Path>) -> Result<usize> {
         self.skills.clear();
+        self.load_builtin_omx_workflows();
 
-        let mut count = 0;
+        let mut count = self.skills.len();
 
         // Load from ~/.jcode/skills/ (jcode's own global skills)
         if let Ok(jcode_dir) = crate::storage::jcode_dir() {
@@ -418,6 +432,17 @@ impl SkillRegistry {
 }
 
 impl Skill {
+    fn builtin(name: &str, description: &str, content: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            description: description.to_string(),
+            allowed_tools: None,
+            content: content.to_string(),
+            path: PathBuf::from(format!("<builtin>/omx/{name}/SKILL.md")),
+            search_text: build_skill_search_text(name, description, content),
+        }
+    }
+
     /// Get the full prompt content for this skill
     pub fn get_prompt(&self) -> String {
         format!(
@@ -462,6 +487,122 @@ impl Skill {
         }
     }
 }
+
+struct BuiltinSkillSpec {
+    name: &'static str,
+    description: &'static str,
+    content: &'static str,
+}
+
+const BUILTIN_OMX_SKILLS: &[BuiltinSkillSpec] = &[
+    BuiltinSkillSpec {
+        name: "autopilot",
+        description: "[OMX native] Autonomous delivery loop: ralplan -> ralph -> code-review",
+        content: r#"<Purpose>
+Autopilot is the strict autonomous delivery loop for non-trivial implementation work.
+Its primary contract is exactly: ralplan -> ralph -> code-review.
+</Purpose>
+
+<Use_When>
+- The user wants hands-off execution from a concrete idea, issue, or requirements artifact to reviewed code.
+- The request needs planning, implementation, verification, and review with automatic follow-up.
+</Use_When>
+
+<Execution_Policy>
+- Ground the request first. Create or reuse a context snapshot in `.jcode/context/` when the task is non-trivial.
+- Execute phases in order: planning consensus, implementation/verification, then code review.
+- If code review is not clean, return to planning with the findings as first-class input, then repeat.
+- Continue automatically through safe reversible phase transitions. Ask only for destructive, credentialed, production, or preference-dependent branches.
+- Persist visible progress with todo updates and, when useful, native state/memory/wiki artifacts.
+</Execution_Policy>
+
+<Final_Checklist>
+- Planning artifacts or acceptance criteria exist.
+- Implementation has fresh verification evidence.
+- Code review is clean or unresolved findings are reported with next steps.
+- The user receives a concise summary of plan, implementation, verification, and review evidence.
+</Final_Checklist>"#,
+    },
+    BuiltinSkillSpec {
+        name: "ralph",
+        description: "[OMX native] Persistent execution loop until verified completion",
+        content: r#"<Purpose>
+Ralph is a persistence loop that keeps working until the task is genuinely complete and verified.
+</Purpose>
+
+<Execution_Policy>
+- Do not reduce scope or declare partial work complete.
+- Define acceptance criteria, implement, verify with fresh evidence, fix failures, and repeat until done or blocked.
+- Run independent work in parallel and long-running commands in the background.
+- Require architect/code-review style verification before a high-confidence completion claim.
+- Use todo state for visible progress and preserve enough artifacts for resume.
+</Execution_Policy>
+
+<Final_Checklist>
+- All original requirements are met.
+- No pending/in-progress todos remain for the task.
+- Relevant tests/build/lint/typecheck or manual QA evidence is fresh.
+- Review/architect concerns are resolved or explicitly blocked.
+</Final_Checklist>"#,
+    },
+    BuiltinSkillSpec {
+        name: "ultrawork",
+        description: "[OMX native] Parallel execution discipline for high-throughput work",
+        content: r#"<Purpose>
+Ultrawork is the parallelism and execution-discipline layer for bounded high-throughput task completion.
+</Purpose>
+
+<Execution_Policy>
+- Ground context and define pass/fail acceptance criteria before editing.
+- Classify dependency shape: independent tasks can run in parallel, coupled tasks stay local or staged.
+- Fire independent tool calls, background commands, or agents simultaneously. Never serialize independent work.
+- Prefer direct local execution for shared-file or immediate-context work.
+- Close with lightweight evidence: affected checks pass, manual QA notes are recorded when needed, and no new errors are introduced.
+</Execution_Policy>"#,
+    },
+    BuiltinSkillSpec {
+        name: "ralplan",
+        description: "[OMX native] Consensus planning gate before execution",
+        content: r#"<Purpose>
+Ralplan produces an execution-ready plan and test specification before implementation begins.
+</Purpose>
+
+<Execution_Policy>
+- Clarify the outcome, constraints, unknowns, risks, and likely code touchpoints.
+- Inspect enough repository context to avoid hallucinated plans.
+- Produce concrete acceptance criteria, task decomposition, validation commands, and rollback/stop conditions.
+- Do not implement unless the user has requested execution or the active workflow explicitly continues into implementation.
+</Execution_Policy>"#,
+    },
+    BuiltinSkillSpec {
+        name: "ultraqa",
+        description: "[OMX native] Rigorous QA and regression validation workflow",
+        content: r#"<Purpose>
+UltraQA validates behavior with risk-proportional automated and manual checks.
+</Purpose>
+
+<Execution_Policy>
+- Identify the change surface, user-visible behavior, invariants, and likely regressions.
+- Prefer targeted tests first, then broader suites when risk warrants.
+- Read outputs and confirm they actually prove the claim.
+- Record commands, artifacts, failures, fixes, and remaining risk.
+</Execution_Policy>"#,
+    },
+    BuiltinSkillSpec {
+        name: "team",
+        description: "[OMX native] Coordinated multi-agent workflow for parallel tasks",
+        content: r#"<Purpose>
+Team coordinates multiple agents on a shared task list when work can be split into durable parallel lanes.
+</Purpose>
+
+<Execution_Policy>
+- Use native swarm/subagent coordination for in-session parallelism.
+- Create clear roles, task boundaries, acceptance criteria, and reporting expectations.
+- Keep shared context synchronized and wait for terminal worker status before final claims.
+- Do not use team mode for tightly coupled single-threaded work.
+</Execution_Policy>"#,
+    },
+];
 
 fn build_skill_search_text(name: &str, description: &str, content: &str) -> String {
     normalize_skill_search_text(&format!("{}\n{}\n{}", name, description, content))
@@ -539,6 +680,42 @@ mod tests {
             .get("wd-only")
             .expect("working-dir local skill should load");
         assert_eq!(skill.description, "Test skill wd-only");
+        assert!(skill.path.starts_with(temp.path()));
+    }
+
+    #[test]
+    fn load_for_working_dir_includes_builtin_omx_workflows() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let registry = SkillRegistry::load_for_working_dir(Some(temp.path())).expect("load skills");
+
+        let autopilot = registry
+            .get("autopilot")
+            .expect("builtin autopilot should load without external skill files");
+        assert!(autopilot.description.contains("OMX native"));
+        assert!(
+            autopilot
+                .content
+                .contains("ralplan -> ralph -> code-review")
+        );
+        assert_eq!(
+            autopilot.path,
+            PathBuf::from("<builtin>/omx/autopilot/SKILL.md")
+        );
+        assert!(registry.get("ralph").is_some());
+        assert!(registry.get("ultrawork").is_some());
+        assert!(registry.get("team").is_some());
+    }
+
+    #[test]
+    fn project_local_skill_overrides_builtin_workflow() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_test_skill(temp.path(), ".jcode", "autopilot");
+
+        let registry = SkillRegistry::load_for_working_dir(Some(temp.path())).expect("load skills");
+
+        let skill = registry.get("autopilot").expect("autopilot should load");
+        assert_eq!(skill.description, "Test skill autopilot");
         assert!(skill.path.starts_with(temp.path()));
     }
 
