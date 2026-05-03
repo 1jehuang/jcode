@@ -752,7 +752,7 @@ fn is_gemini_model_not_found_error(err: &anyhow::Error) -> bool {
         || lower.contains("requested entity was not found")
 }
 
-fn build_system_instruction(system: &str) -> Option<GeminiContent> {
+pub(crate) fn build_system_instruction(system: &str) -> Option<GeminiContent> {
     let trimmed = system.trim();
     if trimmed.is_empty() {
         None
@@ -767,7 +767,7 @@ fn build_system_instruction(system: &str) -> Option<GeminiContent> {
     }
 }
 
-fn build_contents(messages: &[Message]) -> Vec<GeminiContent> {
+pub(crate) fn build_contents(messages: &[Message]) -> Vec<GeminiContent> {
     messages
         .iter()
         .filter_map(|message| {
@@ -850,7 +850,7 @@ fn tool_name_from_tool_result(tool_use_id: &str, messages: &[Message]) -> String
     "tool".to_string()
 }
 
-fn build_tools(tools: &[ToolDefinition]) -> Option<Vec<GeminiTool>> {
+pub(crate) fn build_tools(tools: &[ToolDefinition]) -> Option<Vec<GeminiTool>> {
     if tools.is_empty() {
         return None;
     }

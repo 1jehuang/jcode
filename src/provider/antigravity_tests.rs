@@ -1,4 +1,6 @@
 use super::*;
+use crate::provider::Provider;
+use tokio_stream::StreamExt;
 
 #[test]
 fn parse_fetch_available_models_response_discovers_metadata_and_priority_order() {
@@ -137,4 +139,27 @@ fn catalog_detail_mentions_quota_and_reset() {
 #[test]
 fn catalog_stale_handles_invalid_timestamp() {
     assert!(catalog_is_stale("not-a-time"));
+}
+
+#[tokio::test]
+async fn complete_uses_native_https_transport_not_cli_subprocess() {
+    let provider = AntigravityCliProvider::new();
+    let mut stream = provider
+        .complete(&[], &[], "say hello", None)
+        .await
+        .expect("create stream");
+
+    let first_event = stream
+        .next()
+        .await
+        .expect("first event")
+        .expect("connection event");
+
+    match first_event {
+        StreamEvent::ConnectionType { connection } => {
+            assert_eq!(connection, "https");
+            assert_ne!(connection, "cli subprocess");
+        }
+        other => panic!("expected connection type, got {other:?}"),
+    }
 }

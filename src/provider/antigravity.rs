@@ -1,16 +1,19 @@
-use super::cli_common::{build_cli_prompt, run_cli_text_command};
 use super::{EventStream, Provider};
 use crate::auth::antigravity as antigravity_auth;
-use crate::message::{Message, ToolDefinition};
+use crate::message::{ConnectionPhase, Message, StreamEvent, ToolDefinition};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use jcode_provider_gemini::{
+    CodeAssistGenerateRequest, CodeAssistGenerateResponse, GeminiFunctionCallingConfig,
+    GeminiToolConfig, VertexGenerateContentRequest,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
-use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use uuid::Uuid;
 
 const DEFAULT_MODEL: &str = "default";
 const AVAILABLE_MODELS: &[&str] = &[
@@ -27,6 +30,8 @@ const AVAILABLE_MODELS: &[&str] = &[
 ];
 const FETCH_MODELS_API_URL: &str =
     "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
+const GENERATE_CONTENT_API_URL: &str =
+    "https://cloudcode-pa.googleapis.com/v1internal:generateContent";
 const VERSION_ENV: &str = "JCODE_ANTIGRAVITY_VERSION";
 const ANTIGRAVITY_VERSION: &str = "1.18.3";
 const X_GOOG_API_CLIENT: &str = "google-cloud-sdk vscode_cloudshelleditor/0.1";
@@ -348,23 +353,17 @@ fn catalog_is_stale(fetched_at_rfc3339: &str) -> bool {
 }
 
 pub struct AntigravityCliProvider {
-    cli_path: String,
     client: reqwest::Client,
     model: Arc<RwLock<String>>,
     fetched_catalog: Arc<RwLock<Vec<CatalogModel>>>,
-    prompt_flag: Option<String>,
-    model_flag: Option<String>,
 }
 
 impl Clone for AntigravityCliProvider {
     fn clone(&self) -> Self {
         Self {
-            cli_path: self.cli_path.clone(),
             client: self.client.clone(),
             model: self.model.clone(),
             fetched_catalog: self.fetched_catalog.clone(),
-            prompt_flag: self.prompt_flag.clone(),
-            model_flag: self.model_flag.clone(),
         }
     }
 }
@@ -415,24 +414,13 @@ impl AntigravityCliProvider {
     }
 
     pub fn new() -> Self {
-        let cli_path = std::env::var("JCODE_ANTIGRAVITY_CLI_PATH")
-            .unwrap_or_else(|_| "antigravity".to_string());
         let model =
             std::env::var("JCODE_ANTIGRAVITY_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
-        let prompt_flag = std::env::var("JCODE_ANTIGRAVITY_PROMPT_FLAG")
-            .ok()
-            .or_else(|| Some("-p".to_string()));
-        let model_flag = std::env::var("JCODE_ANTIGRAVITY_MODEL_FLAG")
-            .ok()
-            .or_else(|| Some("--model".to_string()));
 
         let provider = Self {
-            cli_path,
             client: crate::provider::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
             fetched_catalog: Arc::new(RwLock::new(Vec::new())),
-            prompt_flag,
-            model_flag,
         };
         provider.seed_cached_catalog();
         provider
@@ -528,6 +516,82 @@ impl AntigravityCliProvider {
         self.fetch_available_models_with_project(&tokens.access_token, None)
             .await
     }
+
+    async fn generate_content(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+    ) -> Result<CodeAssistGenerateResponse> {
+        let mut tokens = antigravity_auth::load_or_refresh_tokens().await?;
+        let project = match tokens
+            .project_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            Some(project_id) => project_id.to_string(),
+            None => {
+                let project_id = antigravity_auth::fetch_project_id(&tokens.access_token).await?;
+                tokens.project_id = Some(project_id.clone());
+                let _ = antigravity_auth::save_tokens(&tokens);
+                project_id
+            }
+        };
+        let request = CodeAssistGenerateRequest {
+            model: model.to_string(),
+            project,
+            user_prompt_id: Uuid::new_v4().to_string(),
+            request: VertexGenerateContentRequest {
+                contents: super::gemini::build_contents(messages),
+                system_instruction: super::gemini::build_system_instruction(system),
+                tools: super::gemini::build_tools(tools),
+                tool_config: if tools.is_empty() {
+                    None
+                } else {
+                    Some(GeminiToolConfig {
+                        function_calling_config: GeminiFunctionCallingConfig { mode: "AUTO" },
+                    })
+                },
+                session_id: resume_session_id
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_string),
+            },
+        };
+
+        let response = self
+            .client
+            .post(GENERATE_CONTENT_API_URL)
+            .bearer_auth(&tokens.access_token)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::USER_AGENT, antigravity_user_agent())
+            .header("x-goog-api-client", X_GOOG_API_CLIENT)
+            .header(
+                "x-goog-request-params",
+                format!("project={}", request.project),
+            )
+            .header("x-goog-client-metadata", client_metadata_header())
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to send Antigravity generateContent request")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = crate::util::http_error_body(response, "HTTP error").await;
+            anyhow::bail!(
+                "Antigravity generateContent failed (HTTP {}): {}",
+                status,
+                body.trim()
+            );
+        }
+
+        response
+            .json()
+            .await
+            .context("Failed to decode Antigravity generateContent response")
+    }
 }
 
 impl Default for AntigravityCliProvider {
@@ -545,43 +609,98 @@ impl Provider for AntigravityCliProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        let prompt = build_cli_prompt(system, messages);
         let model = self
             .model
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let cli_path = self.cli_path.clone();
-        let prompt_flag = self.prompt_flag.clone();
-        let model_flag = self.model_flag.clone();
-        let cwd = std::env::current_dir().ok();
+        let messages = messages.to_vec();
+        let tools = _tools.to_vec();
+        let system = system.to_string();
+        let resume_session_id = _resume_session_id.map(str::to_string);
+        let provider = self.clone();
         let (tx, rx) = mpsc::channel::<Result<crate::message::StreamEvent>>(100);
 
         tokio::spawn(async move {
-            if tx
-                .send(Ok(crate::message::StreamEvent::ConnectionType {
-                    connection: "cli subprocess".to_string(),
+            let _ = tx
+                .send(Ok(StreamEvent::ConnectionType {
+                    connection: "https".to_string(),
                 }))
+                .await;
+            let _ = tx
+                .send(Ok(StreamEvent::ConnectionPhase {
+                    phase: ConnectionPhase::Authenticating,
+                }))
+                .await;
+            let _ = tx
+                .send(Ok(StreamEvent::ConnectionPhase {
+                    phase: ConnectionPhase::WaitingForResponse,
+                }))
+                .await;
+            let response = match provider
+                .generate_content(
+                    &model,
+                    &messages,
+                    &tools,
+                    &system,
+                    resume_session_id.as_deref(),
+                )
                 .await
-                .is_err()
             {
+                Ok(response) => response,
+                Err(err) => {
+                    let _ = tx.send(Err(err)).await;
+                    return;
+                }
+            };
+            let _ = tx
+                .send(Ok(StreamEvent::ConnectionPhase {
+                    phase: ConnectionPhase::Streaming,
+                }))
+                .await;
+            if let Some(usage) = response
+                .response
+                .as_ref()
+                .and_then(|r| r.usage_metadata.as_ref())
+            {
+                let _ = tx
+                    .send(Ok(StreamEvent::TokenUsage {
+                        input_tokens: usage.prompt_token_count,
+                        output_tokens: usage.candidates_token_count,
+                        cache_read_input_tokens: usage.cached_content_token_count,
+                        cache_creation_input_tokens: None,
+                    }))
+                    .await;
+            }
+            let Some(candidate) = response
+                .response
+                .and_then(|r| r.candidates)
+                .and_then(|mut c| c.drain(..).next())
+            else {
+                let _ = tx
+                    .send(Err(anyhow::anyhow!(
+                        "Antigravity returned no candidates for generateContent"
+                    )))
+                    .await;
                 return;
-            }
-            let mut cmd = Command::new(&cli_path);
-            if let Some(flag) = model_flag.as_ref().filter(|f| !f.trim().is_empty()) {
-                cmd.arg(flag).arg(&model);
-            }
-            if let Some(flag) = prompt_flag.as_ref().filter(|f| !f.trim().is_empty()) {
-                cmd.arg(flag).arg(prompt);
-            } else {
-                cmd.arg(prompt);
-            }
-            if let Some(dir) = cwd {
-                cmd.current_dir(dir);
-            }
-
-            if let Err(e) = run_cli_text_command(cmd, tx.clone(), "Antigravity").await {
-                let _ = tx.send(Err(e)).await;
+            };
+            if let Some(content) = candidate.content {
+                for part in content.parts {
+                    if let Some(text) = part.text.filter(|text| !text.is_empty()) {
+                        let _ = tx.send(Ok(StreamEvent::TextDelta(text))).await;
+                    }
+                    if let Some(function_call) = part.function_call {
+                        let _ = tx
+                            .send(Ok(StreamEvent::NativeToolCall {
+                                request_id: function_call
+                                    .id
+                                    .unwrap_or_else(|| Uuid::new_v4().to_string()),
+                                tool_name: function_call.name,
+                                input: function_call.args,
+                            }))
+                            .await;
+                    }
+                }
             }
         });
 
@@ -637,7 +756,7 @@ impl Provider for AntigravityCliProvider {
                 .map(|model| super::ModelRoute {
                     model: model.id.clone(),
                     provider: "Antigravity".to_string(),
-                    api_method: "cli".to_string(),
+                    api_method: "https".to_string(),
                     available: model.available,
                     detail: catalog_model_detail(&model),
                     cheapness: None,
@@ -650,7 +769,7 @@ impl Provider for AntigravityCliProvider {
             .map(|model| super::ModelRoute {
                 model,
                 provider: "Antigravity".to_string(),
-                api_method: "cli".to_string(),
+                api_method: "https".to_string(),
                 available: true,
                 detail: "fallback catalog".to_string(),
                 cheapness: None,
@@ -705,12 +824,9 @@ impl Provider for AntigravityCliProvider {
 
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self {
-            cli_path: self.cli_path.clone(),
             client: self.client.clone(),
             model: Arc::new(RwLock::new(self.model())),
             fetched_catalog: self.fetched_catalog.clone(),
-            prompt_flag: self.prompt_flag.clone(),
-            model_flag: self.model_flag.clone(),
         })
     }
 }
