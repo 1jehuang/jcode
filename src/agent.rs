@@ -207,7 +207,12 @@ impl Agent {
         agent.session.ensure_initial_session_context_message();
         agent.seed_compaction_from_session();
         agent.log_env_snapshot("create");
-        crate::telemetry::begin_session(agent.provider.name(), &agent.provider.model());
+        crate::telemetry::begin_session_with_parent(
+            agent.provider.name(),
+            &agent.provider.model(),
+            agent.session.parent_id.clone(),
+            false,
+        );
         agent
     }
 
@@ -239,7 +244,12 @@ impl Agent {
         agent.sync_memory_dedup_state_from_session();
         agent.seed_compaction_from_session();
         agent.log_env_snapshot("attach");
-        crate::telemetry::begin_session(agent.provider.name(), &agent.provider.model());
+        crate::telemetry::begin_session_with_parent(
+            agent.provider.name(),
+            &agent.provider.model(),
+            agent.session.parent_id.clone(),
+            false,
+        );
         agent
     }
 

@@ -181,7 +181,12 @@ impl App {
         });
 
         crate::logging::info("App::new_minimal_with_session: skipping skill/prompt bootstrap");
-        crate::telemetry::begin_session(provider.name(), &provider.model());
+        crate::telemetry::begin_session_with_parent(
+            provider.name(),
+            &provider.model(),
+            session.parent_id.clone(),
+            false,
+        );
 
         let mut app = Self {
             provider,
@@ -534,7 +539,12 @@ impl App {
             t_prompt.as_secs_f64() * 1000.0,
         ));
 
-        crate::telemetry::begin_session(provider.name(), &provider.model());
+        crate::telemetry::begin_session_with_parent(
+            provider.name(),
+            &provider.model(),
+            session.parent_id.clone(),
+            false,
+        );
 
         let mut app = Self {
             provider,

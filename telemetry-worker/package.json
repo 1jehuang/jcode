@@ -12,6 +12,7 @@
     "migrate:workflow": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0005_workflow_turn_telemetry.sql",
     "migrate:tokens": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0006_token_usage.sql",
     "migrate:dashboard-indexes": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0007_dashboard_indexes.sql",
+    "migrate:agent-time": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0008_agent_time_and_churn.sql",
     "health": "npx wrangler d1 execute jcode-telemetry --remote --file=health.sql"
   },
   "devDependencies": {

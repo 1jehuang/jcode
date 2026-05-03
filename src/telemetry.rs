@@ -15,7 +15,7 @@ const TELEMETRY_ENDPOINT: &str = "https://jcode-telemetry.jeremyhuang55555.worke
 const ASYNC_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const BLOCKING_INSTALL_TIMEOUT: Duration = Duration::from_millis(1200);
 const BLOCKING_LIFECYCLE_TIMEOUT: Duration = Duration::from_millis(800);
-const TELEMETRY_SCHEMA_VERSION: u32 = 4;
+const TELEMETRY_SCHEMA_VERSION: u32 = 5;
 
 static SESSION_STATE: Mutex<Option<SessionTelemetry>> = Mutex::new(None);
 
@@ -201,6 +201,24 @@ struct SessionLifecycleEvent {
     unique_mcp_servers: u32,
     session_success: bool,
     abandoned_before_response: bool,
+    session_stop_reason: &'static str,
+    agent_role: &'static str,
+    parent_session_id: Option<String>,
+    agent_active_ms_total: u64,
+    agent_model_ms_total: u64,
+    agent_tool_ms_total: u64,
+    session_idle_ms_total: u64,
+    agent_blocked_ms_total: u64,
+    time_to_first_agent_action_ms: Option<u64>,
+    time_to_first_useful_action_ms: Option<u64>,
+    spawned_agent_count: u32,
+    background_task_count: u32,
+    background_task_completed_count: u32,
+    subagent_task_count: u32,
+    subagent_success_count: u32,
+    swarm_task_count: u32,
+    swarm_success_count: u32,
+    user_cancelled_count: u32,
     transport_https: u32,
     transport_persistent_ws_fresh: u32,
     transport_persistent_ws_reuse: u32,
@@ -411,6 +429,7 @@ struct SessionTelemetry {
     started_at_utc: DateTime<Utc>,
     provider_start: String,
     model_start: String,
+    parent_session_id: Option<String>,
     turns: u32,
     had_user_prompt: bool,
     had_assistant_response: bool,
@@ -452,6 +471,21 @@ struct SessionTelemetry {
     transport_cli_subprocess: u32,
     transport_native_http2: u32,
     transport_other: u32,
+    agent_active_ms_total: u64,
+    agent_model_ms_total: u64,
+    agent_tool_ms_total: u64,
+    session_idle_ms_total: u64,
+    agent_blocked_ms_total: u64,
+    time_to_first_agent_action_ms: Option<u64>,
+    time_to_first_useful_action_ms: Option<u64>,
+    spawned_agent_count: u32,
+    background_task_count: u32,
+    background_task_completed_count: u32,
+    subagent_task_count: u32,
+    subagent_success_count: u32,
+    swarm_task_count: u32,
+    swarm_success_count: u32,
+    user_cancelled_count: u32,
     tool_cat_read_search: u32,
     tool_cat_write: u32,
     tool_cat_shell: u32,
@@ -890,11 +924,11 @@ fn classify_tool_category(name: &str) -> ToolCategory {
         | "conversation_search"
         | "session_search" => ToolCategory::ReadSearch,
         "write" | "edit" | "multiedit" | "patch" | "apply_patch" => ToolCategory::Write,
-        "bash" | "bg" => ToolCategory::Shell,
+        "bash" | "bg" | "schedule" => ToolCategory::Shell,
         "webfetch" | "websearch" | "codesearch" | "open" => ToolCategory::Web,
         "memory" => ToolCategory::Memory,
         "subagent" => ToolCategory::Subagent,
-        "communicate" => ToolCategory::Swarm,
+        "swarm" | "communicate" => ToolCategory::Swarm,
         "gmail" => ToolCategory::Email,
         "side_panel" => ToolCategory::SidePanel,
         "goal" => ToolCategory::Goal,
@@ -946,6 +980,100 @@ fn update_turn_activity_timestamp(turn: &mut TurnTelemetry, now: Instant) {
     if now >= turn.last_activity_at {
         turn.last_activity_at = now;
     }
+}
+
+fn min_optional_ms(values: impl IntoIterator<Item = Option<u64>>) -> Option<u64> {
+    values.into_iter().flatten().min()
+}
+
+fn time_to_first_agent_action_ms(state: &SessionTelemetry) -> Option<u64> {
+    min_optional_ms([
+        state.first_assistant_response_ms,
+        state.first_tool_call_ms,
+        state.first_tool_success_ms,
+        state.first_file_edit_ms,
+        state.first_test_pass_ms,
+    ])
+}
+
+fn time_to_first_useful_action_ms(state: &SessionTelemetry) -> Option<u64> {
+    min_optional_ms([
+        state.first_tool_success_ms,
+        state.first_file_edit_ms,
+        state.first_test_pass_ms,
+    ])
+    .or(state.first_assistant_response_ms)
+}
+
+fn infer_agent_role(state: &SessionTelemetry) -> &'static str {
+    if state.feature_swarm_used || state.tool_cat_swarm > 0 {
+        "swarm"
+    } else if state.feature_subagent_used || state.tool_cat_subagent > 0 {
+        "subagent"
+    } else if state.feature_background_used || state.background_task_count > 0 {
+        "background"
+    } else {
+        "foreground"
+    }
+}
+
+fn infer_session_stop_reason(
+    event_name: &'static str,
+    reason: SessionEndReason,
+    state: &SessionTelemetry,
+    errors: &ErrorCounts,
+    duration_secs: u64,
+    session_success: bool,
+    abandoned_before_response: bool,
+    workflow_coding_used: bool,
+) -> &'static str {
+    if event_name == "session_crash"
+        || matches!(reason, SessionEndReason::Panic | SessionEndReason::Signal)
+    {
+        return "crash";
+    }
+    if errors.auth_failed > 0 {
+        return "auth_blocked";
+    }
+    if errors.rate_limited > 0 {
+        return "rate_limited";
+    }
+    if errors.provider_timeout > 0 {
+        return "provider_timeout";
+    }
+    if !state.had_user_prompt {
+        return "never_prompted";
+    }
+    if abandoned_before_response {
+        return "no_first_response";
+    }
+    if state.user_cancelled_count > 0 || matches!(reason, SessionEndReason::Disconnect) {
+        return "user_interrupted";
+    }
+    if matches!(state.first_assistant_response_ms, Some(ms) if ms > 60_000)
+        && time_to_first_useful_action_ms(state).is_none_or(|ms| ms > 60_000)
+    {
+        return "too_slow";
+    }
+    if state.executed_tool_failures >= 3 && state.executed_tool_successes == 0 {
+        return "tool_error_loop";
+    }
+    if errors.tool_error > 0 && state.executed_tool_successes == 0 {
+        return "tool_failures";
+    }
+    if workflow_coding_used && state.file_write_calls == 0 {
+        return "no_file_change";
+    }
+    if state.tests_run > 0 && state.tests_passed == 0 {
+        return "test_failure_unresolved";
+    }
+    if !session_success && duration_secs >= 300 && state.agent_active_ms_total >= 300_000 {
+        return "agent_got_stuck";
+    }
+    if !session_success {
+        return "no_useful_action";
+    }
+    "completed_successfully"
 }
 
 fn mark_command_family_usage(state: &mut SessionTelemetry, command: &str) {
@@ -1304,6 +1432,20 @@ fn finalize_current_turn(
         .checked_duration_since(turn.started_at)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0);
+    state.agent_active_ms_total = state
+        .agent_active_ms_total
+        .saturating_add(turn_active_duration_ms);
+    state.agent_tool_ms_total = state
+        .agent_tool_ms_total
+        .saturating_add(turn.tool_latency_total_ms);
+    state.agent_model_ms_total = state.agent_model_ms_total.saturating_add(
+        turn_active_duration_ms
+            .saturating_sub(turn.tool_latency_total_ms.min(turn_active_duration_ms)),
+    );
+    state.session_idle_ms_total = state
+        .session_idle_ms_total
+        .saturating_add(idle_after_turn_ms)
+        .saturating_add(turn.idle_before_turn_ms.unwrap_or(0));
     let turn_success = turn.assistant_responses > 0
         || turn.executed_tool_successes > 0
         || turn.tests_passed > 0
@@ -1630,14 +1772,28 @@ pub fn record_auth_success(provider: &str, method: &str) {
 }
 
 pub fn begin_session(provider: &str, model: &str) {
-    begin_session_with_mode(provider, model, false);
+    begin_session_with_parent(provider, model, None, false);
+}
+
+pub fn begin_session_with_parent(
+    provider: &str,
+    model: &str,
+    parent_session_id: Option<String>,
+    resumed_session: bool,
+) {
+    begin_session_with_mode(provider, model, parent_session_id, resumed_session);
 }
 
 pub fn begin_resumed_session(provider: &str, model: &str) {
-    begin_session_with_mode(provider, model, true);
+    begin_session_with_mode(provider, model, None, true);
 }
 
-fn begin_session_with_mode(provider: &str, model: &str, resumed_session: bool) {
+fn begin_session_with_mode(
+    provider: &str,
+    model: &str,
+    parent_session_id: Option<String>,
+    resumed_session: bool,
+) {
     if !is_enabled() {
         return;
     }
@@ -1655,6 +1811,7 @@ fn begin_session_with_mode(provider: &str, model: &str, resumed_session: bool) {
         started_at_utc,
         provider_start: sanitize_telemetry_label(provider),
         model_start: sanitize_telemetry_label(model),
+        parent_session_id,
         turns: 0,
         had_user_prompt: false,
         had_assistant_response: false,
@@ -1696,6 +1853,21 @@ fn begin_session_with_mode(provider: &str, model: &str, resumed_session: bool) {
         transport_cli_subprocess: 0,
         transport_native_http2: 0,
         transport_other: 0,
+        agent_active_ms_total: 0,
+        agent_model_ms_total: 0,
+        agent_tool_ms_total: 0,
+        session_idle_ms_total: 0,
+        agent_blocked_ms_total: 0,
+        time_to_first_agent_action_ms: None,
+        time_to_first_useful_action_ms: None,
+        spawned_agent_count: 0,
+        background_task_count: 0,
+        background_task_completed_count: 0,
+        subagent_task_count: 0,
+        subagent_success_count: 0,
+        swarm_task_count: 0,
+        swarm_success_count: 0,
+        user_cancelled_count: 0,
         tool_cat_read_search: 0,
         tool_cat_write: 0,
         tool_cat_shell: 0,
@@ -1959,6 +2131,19 @@ pub fn record_model_switch() {
     maybe_emit_session_start();
 }
 
+pub fn record_user_cancelled() {
+    if let Ok(mut guard) = SESSION_STATE.lock()
+        && let Some(ref mut state) = *guard
+    {
+        observe_session_concurrency(state);
+        state.user_cancelled_count = state.user_cancelled_count.saturating_add(1);
+        if let Some(turn) = state.current_turn.as_mut() {
+            update_turn_activity_timestamp(turn, Instant::now());
+        }
+    }
+    maybe_emit_session_start();
+}
+
 pub fn record_tool_execution(name: &str, input: &Value, succeeded: bool, latency_ms: u64) {
     if let Ok(mut guard) = SESSION_STATE.lock()
         && let Some(ref mut state) = *guard
@@ -1974,6 +2159,38 @@ pub fn record_tool_execution(name: &str, input: &Value, succeeded: bool, latency
             turn.tool_latency_max_ms = turn.tool_latency_max_ms.max(latency_ms);
             update_turn_activity_timestamp(turn, now);
         }
+        match classify_tool_category(name) {
+            ToolCategory::Subagent => {
+                state.subagent_task_count = state.subagent_task_count.saturating_add(1);
+                if succeeded {
+                    state.subagent_success_count = state.subagent_success_count.saturating_add(1);
+                }
+            }
+            ToolCategory::Swarm => {
+                state.swarm_task_count = state.swarm_task_count.saturating_add(1);
+                if succeeded {
+                    state.swarm_success_count = state.swarm_success_count.saturating_add(1);
+                }
+            }
+            ToolCategory::Shell
+                if matches!(name, "bg" | "schedule")
+                    || input
+                        .get("run_in_background")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false) =>
+            {
+                state.background_task_count = state.background_task_count.saturating_add(1);
+                if succeeded {
+                    state.background_task_completed_count =
+                        state.background_task_completed_count.saturating_add(1);
+                }
+            }
+            _ => {}
+        }
+        state.spawned_agent_count = state
+            .background_task_count
+            .saturating_add(state.subagent_task_count)
+            .saturating_add(state.swarm_task_count);
         mark_tool_feature_usage(state, name, input);
         if succeeded {
             state.executed_tool_successes += 1;

@@ -2,7 +2,7 @@
 
 jcode collects **anonymous, minimal usage statistics** to help understand how many people use jcode, what providers/models are popular, whether onboarding works, which feature families are used, how often sessions succeed, and whether performance/regressions are improving. This data helps prioritize development without collecting prompts or code.
 
-Recent telemetry additions also include: coarse onboarding steps, explicit thumbs-up / thumbs-down feedback, build-channel / dev-mode cleanup flags, session/workflow/tool-category summaries, coarse project language buckets, retention helpers like active days in the last 7 / 30 days, workflow cadence fields for session timing and multi-sessioning, and privacy-safe per-turn timing/outcome metrics.
+Recent telemetry additions also include: coarse onboarding steps, explicit thumbs-up / thumbs-down feedback, build-channel / dev-mode cleanup flags, session/workflow/tool-category summaries, coarse project language buckets, retention helpers like active days in the last 7 / 30 days, workflow cadence fields for session timing and multi-sessioning, privacy-safe per-turn timing/outcome metrics, and schema v5 agent-time / autonomy / pain-attribution metrics.
 
 ## What We Collect
 
@@ -119,6 +119,19 @@ Recent telemetry additions also include: coarse onboarding steps, explicit thumb
 | `unique_mcp_servers` | `2` | Count of distinct MCP servers touched in-session |
 | `session_success` | `true` | Coarse success proxy based on outcomes like responses, successful tools, tests, or edits |
 | `abandoned_before_response` | `false` | Whether the user engaged but got no successful outcome before ending |
+| `session_stop_reason` | `"tool_error_loop"` | Coarse inferred pain/churn bucket, such as crash, auth blocked, rate limited, no first response, too slow, tool failures, no useful action, or completed successfully |
+| `agent_role` | `"foreground"` / `"subagent"` | Coarse role classification for the session: foreground, background, subagent, or swarm |
+| `parent_session_id` | `"session_..."` | Optional parent session ID for attributing spawned/background/subagent work to the initiating session |
+| `agent_active_ms_total` | `7200000` | Sum of active agent time across finalized turns; two agents active for two hours count as four agent-hours in aggregate |
+| `agent_model_ms_total` / `agent_tool_ms_total` | `5400000` / `1800000` | Approximate active-time split between model/agent thinking and registry tool execution latency |
+| `session_idle_ms_total` | `300000` | Time around turns where the session was open but no agent activity was observed |
+| `time_to_first_agent_action_ms` | `900` | Time from session start to the first assistant response or tool action |
+| `time_to_first_useful_action_ms` | `1500` | Time from session start to the first successful tool/file/test outcome, falling back to first response |
+| `spawned_agent_count` | `3` | Count of background, subagent, and swarm task invocations attributed to the session |
+| `background_task_count` / `background_task_completed_count` | `1` / `1` | Background work started and successfully completed via background/scheduled tool paths |
+| `subagent_task_count` / `subagent_success_count` | `1` / `1` | Subagent task invocations and successful completions |
+| `swarm_task_count` / `swarm_success_count` | `1` / `0` | Swarm/agent-coordination task invocations and successful completions |
+| `user_cancelled_count` | `1` | Urgent interrupt count, used to detect sessions where the user stopped the agent mid-work |
 | `transport_https` | `2` | Number of provider requests sent over HTTPS/SSE |
 | `transport_persistent_ws_fresh` | `1` | Number of fresh persistent WebSocket requests |
 | `transport_persistent_ws_reuse` | `5` | Number of turns that reused an existing persistent WebSocket |
@@ -209,6 +222,10 @@ The UUID is randomly generated on first run and stored at `~/.jcode/telemetry_id
 9. If a request fails (offline, firewall, etc.), jcode silently continues - no retries, no queuing
 
 The telemetry endpoint is a Cloudflare Worker that stores events in a D1 database. The source code for the worker is in [`telemetry-worker/`](./telemetry-worker/).
+
+### Schema v5 deployment note
+
+Agent-time, autonomy, and pain-attribution fields require the D1 migration in `telemetry-worker/migrations/0008_agent_time_and_churn.sql`. Until that migration is applied, schema v5 clients can still send the new JSON payloads, but the worker will drop unknown columns through dynamic column filtering and dashboard agent-time panels will remain empty or show optional-panel errors. After migration, run/redeploy the telemetry worker and query the dashboard's **Agent time / autonomy** panel.
 
 ## How to Opt Out
 

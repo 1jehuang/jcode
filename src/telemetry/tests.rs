@@ -132,6 +132,24 @@ fn test_session_end_event_serialization() {
         unique_mcp_servers: 2,
         session_success: true,
         abandoned_before_response: false,
+        session_stop_reason: "completed_successfully",
+        agent_role: "foreground",
+        parent_session_id: None,
+        agent_active_ms_total: 180_000,
+        agent_model_ms_total: 120_000,
+        agent_tool_ms_total: 60_000,
+        session_idle_ms_total: 30_000,
+        agent_blocked_ms_total: 0,
+        time_to_first_agent_action_ms: Some(900),
+        time_to_first_useful_action_ms: Some(1500),
+        spawned_agent_count: 3,
+        background_task_count: 1,
+        background_task_completed_count: 1,
+        subagent_task_count: 1,
+        subagent_success_count: 1,
+        swarm_task_count: 1,
+        swarm_success_count: 0,
+        user_cancelled_count: 1,
         transport_https: 2,
         transport_persistent_ws_fresh: 1,
         transport_persistent_ws_reuse: 5,
@@ -221,6 +239,11 @@ fn test_session_end_event_serialization() {
     assert_eq!(json["cache_creation_input_tokens"], 12);
     assert_eq!(json["total_tokens"], 2703);
     assert_eq!(json["errors"]["provider_timeout"], 2);
+    assert_eq!(json["session_stop_reason"], "completed_successfully");
+    assert_eq!(json["agent_active_ms_total"], 180_000);
+    assert_eq!(json["time_to_first_useful_action_ms"], 1500);
+    assert_eq!(json["subagent_task_count"], 1);
+    assert_eq!(json["user_cancelled_count"], 1);
 }
 
 #[test]
@@ -230,7 +253,7 @@ fn test_record_token_usage_aggregates_session_and_turn() {
     if let Ok(mut session) = SESSION_STATE.lock() {
         *session = None;
     }
-    begin_session_with_mode("openai", "gpt-5.4", false);
+    begin_session_with_mode("openai", "gpt-5.4", None, false);
     record_turn();
     record_token_usage(100, 25, Some(200), Some(10));
     record_token_usage(50, 5, None, Some(2));
@@ -263,7 +286,7 @@ fn test_record_connection_type_buckets_transport() {
     if let Ok(mut session) = SESSION_STATE.lock() {
         *session = None;
     }
-    begin_session_with_mode("openai", "gpt-5.4", false);
+    begin_session_with_mode("openai", "gpt-5.4", None, false);
     record_connection_type("websocket/persistent-fresh");
     record_connection_type("websocket/persistent-reuse");
     record_connection_type("https/sse");
