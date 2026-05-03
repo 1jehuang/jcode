@@ -109,7 +109,7 @@ fn test_remote_error_with_retryable_pending_schedules_retry() {
 }
 
 #[test]
-fn test_remote_non_retryable_error_stops_auto_poke_without_retry() {
+fn test_remote_non_retryable_error_gets_short_auto_poke_retry() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -140,6 +140,73 @@ fn test_remote_non_retryable_error_stops_auto_poke_without_retry() {
         &mut remote,
     );
 
+    assert!(app.auto_poke_incomplete_todos);
+    let pending = app
+        .rate_limit_pending_message
+        .as_ref()
+        .expect("deterministic error should get a short retry budget");
+    assert_eq!(pending.retry_attempts, 1);
+    assert!(app.rate_limit_reset.is_some());
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|m| m.role == "system" && m.content.contains("attempt 1/2"))
+    );
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 13,
+            message: "OpenAI API error 400 Bad Request: {\"error\":{\"type\":\"invalid_request_error\",\"code\":\"string_above_max_length\"}}".to_string(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+
+    assert!(app.auto_poke_incomplete_todos);
+    let pending = app
+        .rate_limit_pending_message
+        .as_ref()
+        .expect("second deterministic error should still get final retry");
+    assert_eq!(pending.retry_attempts, 2);
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|m| m.role == "system" && m.content.contains("attempt 2/2"))
+    );
+}
+
+#[test]
+fn test_remote_non_retryable_error_stops_auto_poke_after_short_retry_budget() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.auto_poke_incomplete_todos = true;
+    app.queued_messages
+        .push("You have 1 incomplete todo. Continue working, or update the todo tool.".to_string());
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "You have 1 incomplete todo. Continue working, or update the todo tool."
+            .to_string(),
+        images: vec![],
+        is_system: true,
+        system_reminder: None,
+        auto_retry: true,
+        retry_attempts: 2,
+        retry_at: None,
+    });
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 14,
+            message: "OpenAI API error 400 Bad Request: {\"error\":{\"type\":\"invalid_request_error\",\"code\":\"string_above_max_length\"}}".to_string(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+
     assert!(!app.auto_poke_incomplete_todos);
     assert!(app.queued_messages().is_empty());
     assert!(app.rate_limit_pending_message.is_none());
@@ -148,11 +215,6 @@ fn test_remote_non_retryable_error_stops_auto_poke_without_retry() {
         app.display_messages()
             .iter()
             .any(|m| m.role == "system" && m.content.contains("Auto-poke stopped"))
-    );
-    assert!(
-        !app.display_messages()
-            .iter()
-            .any(|m| m.content.contains("Auto-retrying"))
     );
 }
 

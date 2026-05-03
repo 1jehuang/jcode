@@ -380,7 +380,16 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             remote.clear_pending();
             remote.reset_call_output_tokens_seen();
-            if crate::tui::app::commands::stop_auto_poke_for_non_retryable_error(app, &message) {
+            if app.auto_poke_incomplete_todos
+                && crate::tui::app::commands::is_non_retryable_auto_poke_error(&message)
+            {
+                if app.schedule_pending_remote_retry_with_limit(
+                    "⚠ Remote request failed with a likely non-retryable error.",
+                    2,
+                ) {
+                    return false;
+                }
+                crate::tui::app::commands::stop_auto_poke_for_non_retryable_error(app, &message);
                 return false;
             }
             if !is_failover_prompt && !app.schedule_pending_remote_retry("⚠ Remote request failed.")

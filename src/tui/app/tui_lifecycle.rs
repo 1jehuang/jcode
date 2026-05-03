@@ -77,6 +77,14 @@ impl App {
     }
 
     pub(super) fn schedule_pending_remote_retry(&mut self, reason: &str) -> bool {
+        self.schedule_pending_remote_retry_with_limit(reason, Self::AUTO_RETRY_MAX_ATTEMPTS)
+    }
+
+    pub(super) fn schedule_pending_remote_retry_with_limit(
+        &mut self,
+        reason: &str,
+        max_attempts: u8,
+    ) -> bool {
         let Some(pending) = self.rate_limit_pending_message.as_mut() else {
             return false;
         };
@@ -85,7 +93,7 @@ impl App {
         }
         let outcome = {
             let current_attempts = pending.retry_attempts;
-            if current_attempts >= Self::AUTO_RETRY_MAX_ATTEMPTS {
+            if current_attempts >= max_attempts {
                 Err(current_attempts)
             } else {
                 pending.retry_attempts += 1;
@@ -117,7 +125,7 @@ impl App {
                     backoff_secs,
                     if backoff_secs == 1 { "" } else { "s" },
                     retry_attempts,
-                    Self::AUTO_RETRY_MAX_ATTEMPTS
+                    max_attempts
                 )));
                 true
             }
