@@ -181,6 +181,11 @@ Use it when capturing comparable before/after numbers for refactors.
   stable, high-fanout support subsystem out of the root compile unit while preserving existing call sites
   (`crate::build::*`). Validation: `cargo check -p jcode-build-support`, `cargo test -p jcode-build-support`,
   and `cargo check -p jcode --lib` passed during the split.
+- 2026-05-03: moved the pure keybinding parser/matcher/types from `src/tui/keybind.rs` into
+  `jcode-tui-core::keybind`, leaving root TUI config-loading wrappers in place. This creates a reusable
+  cache boundary for a low-coupling TUI helper module while preserving the existing `crate::tui::keybind::*`
+  API. Validation: `cargo check -p jcode-tui-core`, `cargo test -p jcode-tui-core`, and
+  `cargo check -p jcode --lib` passed.
 
 Warm-only touched-file checkpoints captured so far on this machine:
 
@@ -224,6 +229,8 @@ Proposed destination layout:
   - embedding model integration and related heavy inference dependencies
 - `jcode-tui`
   - TUI rendering, widgets, state reduction, terminal UI support
+- `jcode-tui-core`
+  - low-level TUI helpers with minimal root coupling, including stream buffers and keybinding parsing
 - `jcode-selfdev`
   - customization records, migration logic, self-dev productization
 - `jcode-build-support`

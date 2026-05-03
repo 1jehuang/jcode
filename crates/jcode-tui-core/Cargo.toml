@@ -5,4 +5,5 @@ edition = "2024"
 publish = false
 
 [dependencies]
+crossterm = "0.28"
 serde = { version = "1", features = ["derive"] }
