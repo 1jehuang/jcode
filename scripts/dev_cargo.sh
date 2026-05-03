@@ -12,6 +12,7 @@ selected_linker_mode="not-configured"
 selected_linker_desc=""
 sccache_status="disabled"
 selfdev_low_memory_status="disabled"
+feature_profile_status="default"
 
 append_rustflags() {
   local new_flag="$1"
@@ -58,6 +59,97 @@ uses_selfdev_profile() {
     esac
   done
   return 1
+}
+
+has_explicit_feature_args() {
+  local expect_value="false"
+  for arg in "$@"; do
+    if [[ "$expect_value" == "true" ]]; then
+      expect_value="false"
+      continue
+    fi
+    case "$arg" in
+      --)
+        return 1
+        ;;
+      --features|--no-default-features)
+        return 0
+        ;;
+      --features=*|--no-default-features=*)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+feature_args_from_profile() {
+  local profile="$1"
+  case "$profile" in
+    ""|default)
+      return 0
+      ;;
+    minimal|none)
+      printf '%s\0' --no-default-features
+      ;;
+    pdf)
+      printf '%s\0' --no-default-features --features pdf
+      ;;
+    embeddings)
+      printf '%s\0' --no-default-features --features embeddings
+      ;;
+    full)
+      printf '%s\0' --features embeddings,pdf
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+validate_feature_profile() {
+  local profile="${JCODE_DEV_FEATURE_PROFILE:-default}"
+  case "$profile" in
+    ""|default|minimal|none|pdf|embeddings|full)
+      ;;
+    *)
+      printf 'error: unsupported JCODE_DEV_FEATURE_PROFILE=%s (expected default|minimal|pdf|embeddings|full)\n' "$profile" >&2
+      exit 1
+      ;;
+  esac
+}
+
+build_cargo_argv() {
+  local profile="${JCODE_DEV_FEATURE_PROFILE:-default}"
+  if [[ "$profile" == "default" || -z "$profile" ]]; then
+    feature_profile_status="default"
+    printf '%s\0' "$@"
+    return 0
+  fi
+
+  if has_explicit_feature_args "$@"; then
+    feature_profile_status="ignored-explicit-cargo-args"
+    printf '%s\0' "$@"
+    return 0
+  fi
+
+  local -a feature_args=()
+  while IFS= read -r -d '' arg; do
+    feature_args+=("$arg")
+  done < <(feature_args_from_profile "$profile")
+
+  feature_profile_status="$profile"
+  local inserted="false"
+  for arg in "$@"; do
+    if [[ "$arg" == "--" && "$inserted" == "false" ]]; then
+      printf '%s\0' "${feature_args[@]}"
+      inserted="true"
+    fi
+    printf '%s\0' "$arg"
+  done
+  if [[ "$inserted" == "false" ]]; then
+    printf '%s\0' "${feature_args[@]}"
+  fi
 }
 
 meminfo_kib() {
@@ -164,12 +256,16 @@ configure_linux_linker() {
 }
 
 print_setup() {
+  if [[ -n "${JCODE_DEV_FEATURE_PROFILE:-}" && "${JCODE_DEV_FEATURE_PROFILE}" != "default" ]]; then
+    feature_profile_status="${JCODE_DEV_FEATURE_PROFILE}"
+  fi
   cat <<EOF
 repo_root=$repo_root
 os=$(uname -s)
 arch=$(uname -m)
 sccache_status=$sccache_status
 selfdev_low_memory_status=$selfdev_low_memory_status
+feature_profile_status=$feature_profile_status
 rustc_wrapper=${RUSTC_WRAPPER:-<unset>}
 linker_mode=$selected_linker_mode
 linker_desc=${selected_linker_desc:-<none>}
@@ -178,6 +274,7 @@ rustflags=${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:-<unset>}
 EOF
 }
 
+validate_feature_profile
 maybe_configure_low_memory_selfdev "$@"
 maybe_enable_sccache
 
@@ -190,4 +287,9 @@ if [[ "${1:-}" == "--print-setup" ]]; then
   exit 0
 fi
 
-exec cargo "$@"
+cargo_argv=()
+while IFS= read -r -d '' arg; do
+  cargo_argv+=("$arg")
+done < <(build_cargo_argv "$@")
+
+exec cargo "${cargo_argv[@]}"

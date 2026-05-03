@@ -165,6 +165,12 @@ Use it when capturing comparable before/after numbers for refactors.
   Use `JCODE_SELFDEV_LOW_MEMORY=off` to disable, or `JCODE_SELFDEV_LOW_MEMORY=on` to force.
   Validation: the same root build completed under those settings in **2m34s** after the interrupted
   partial build reused artifacts.
+- 2026-05-03: added `JCODE_DEV_FEATURE_PROFILE` to `scripts/dev_cargo.sh` so compile-speed probes and
+  narrow inner-loop builds can consistently select feature sets without repeating Cargo flags. Profiles:
+  `default`, `minimal`/`none` (`--no-default-features`), `pdf` (`--no-default-features --features pdf`),
+  `embeddings` (`--no-default-features --features embeddings`), and `full` (`--features embeddings,pdf`).
+  The wrapper leaves explicit `--features` / `--no-default-features` cargo args untouched. Validation on
+  this machine: `JCODE_DEV_FEATURE_PROFILE=minimal scripts/dev_cargo.sh check -p jcode --lib --quiet` passed.
 
 Warm-only touched-file checkpoints captured so far on this machine:
 
@@ -404,11 +410,25 @@ scripts/dev_cargo.sh build --profile selfdev -p jcode --bin jcode --quiet
 scripts/dev_cargo.sh --print-setup
 ```
 
+For narrower feature-set probes, set `JCODE_DEV_FEATURE_PROFILE` instead of spelling out Cargo flags:
+
+```bash
+JCODE_DEV_FEATURE_PROFILE=minimal scripts/dev_cargo.sh check -p jcode --lib --quiet
+JCODE_DEV_FEATURE_PROFILE=pdf scripts/dev_cargo.sh build --profile selfdev -p jcode --bin jcode --quiet
+JCODE_DEV_FEATURE_PROFILE=full scripts/dev_cargo.sh check -p jcode --lib --quiet
+```
+
+This is especially useful because default `jcode` enables both `embeddings` and `pdf`; in the current
+dependency graph, the root tree is about **3740** lines with defaults, **1133** with PDF-only, and **1106**
+with no default features. Use these profiles for measurements and local probes, while keeping full/default
+builds in CI and release paths where feature coverage matters.
+
 The wrapper:
 
 - uses `sccache` automatically when available
 - prefers `lld` locally on Linux x86_64
 - uses the fast `selfdev` Cargo profile for self-dev build/reload workflows
+- can inject a named feature profile via `JCODE_DEV_FEATURE_PROFILE` unless explicit feature args are present
 - avoids hard-forcing a linker mode that may be broken on a given machine
 - can print the currently selected cache/linker setup with `--print-setup`
 
