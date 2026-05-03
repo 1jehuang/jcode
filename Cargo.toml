@@ -3,6 +3,7 @@ name = "jcode"
 version = "0.11.4"
 description = "Possibly the greatest coding agent ever built — blazing-fast TUI, multi-model, swarm coordination, 30+ tools"
 edition = "2024"
+autobins = false
 
 [workspace]
 members = [
@@ -59,6 +60,21 @@ path = "src/bin/test_api.rs"
 [[bin]]
 name = "jcode-harness"
 path = "src/bin/harness.rs"
+
+[[bin]]
+name = "session_memory_bench"
+path = "src/bin/session_memory_bench.rs"
+required-features = ["dev-bins"]
+
+[[bin]]
+name = "mermaid_side_panel_probe"
+path = "src/bin/mermaid_side_panel_probe.rs"
+required-features = ["dev-bins"]
+
+[[bin]]
+name = "tui_bench"
+path = "src/bin/tui_bench.rs"
+required-features = ["dev-bins"]
 
 [dependencies]
 # Memory allocator (reduces fragmentation for long-running server)
@@ -167,6 +183,7 @@ qr2term = "0.3.3"
 
 [features]
 default = ["embeddings", "pdf"]
+dev-bins = []
 jemalloc = [
     "dep:tikv-jemallocator",
     "dep:tikv-jemalloc-ctl",

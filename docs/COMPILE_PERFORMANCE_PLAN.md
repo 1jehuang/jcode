@@ -171,6 +171,11 @@ Use it when capturing comparable before/after numbers for refactors.
   `embeddings` (`--no-default-features --features embeddings`), and `full` (`--features embeddings,pdf`).
   The wrapper leaves explicit `--features` / `--no-default-features` cargo args untouched. Validation on
   this machine: `JCODE_DEV_FEATURE_PROFILE=minimal scripts/dev_cargo.sh check -p jcode --lib --quiet` passed.
+- 2026-05-03: disabled Cargo auto-discovery for root binary targets and moved developer-only helper
+  binaries (`tui_bench`, `session_memory_bench`, `mermaid_side_panel_probe`) behind the opt-in
+  `dev-bins` feature. This keeps broad normal checks focused on production/test targets while preserving
+  explicit probe coverage via `cargo check --all-targets -p jcode --features dev-bins`. Validation showed
+  `cargo check --all-targets -p jcode` skips those three bins, while adding `--features dev-bins` includes them.
 
 Warm-only touched-file checkpoints captured so far on this machine:
 
@@ -422,6 +427,16 @@ This is especially useful because default `jcode` enables both `embeddings` and 
 dependency graph, the root tree is about **3740** lines with defaults, **1133** with PDF-only, and **1106**
 with no default features. Use these profiles for measurements and local probes, while keeping full/default
 builds in CI and release paths where feature coverage matters.
+
+Developer-only root binaries are opt-in to keep `--all-targets` inner loops from compiling extra probe
+entrypoints by default:
+
+```bash
+cargo run --features dev-bins --bin tui_bench -- --help
+cargo run --features dev-bins --bin session_memory_bench -- --help
+cargo run --features dev-bins --bin mermaid_side_panel_probe -- --help
+cargo check --all-targets -p jcode --features dev-bins --quiet
+```
 
 The wrapper:
 
