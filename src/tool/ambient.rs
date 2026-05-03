@@ -122,7 +122,9 @@ impl EndAmbientCycleTool {
 #[derive(Deserialize)]
 struct EndCycleInput {
     summary: String,
+    #[serde(deserialize_with = "deserialize_u32_from_number_or_string")]
     memories_modified: u32,
+    #[serde(deserialize_with = "deserialize_u32_from_number_or_string")]
     compactions: u32,
     #[serde(default)]
     proactive_work: Option<String>,
@@ -132,12 +134,57 @@ struct EndCycleInput {
 
 #[derive(Deserialize)]
 struct NextScheduleInput {
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_u32_from_number_or_string"
+    )]
     wake_in_minutes: Option<u32>,
     #[serde(default)]
     context: Option<String>,
     #[serde(default)]
     priority: Option<String>,
+}
+
+fn deserialize_u32_from_number_or_string<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(deserializer)? {
+        Value::Number(number) => number
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| serde::de::Error::custom("expected u32-compatible integer")),
+        Value::String(value) => value
+            .parse::<u32>()
+            .map_err(|_| serde::de::Error::custom("expected u32-compatible integer string")),
+        other => Err(serde::de::Error::custom(format!(
+            "expected integer or integer string, got {other}"
+        ))),
+    }
+}
+
+fn deserialize_optional_u32_from_number_or_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<serde_json::Value>::deserialize(deserializer)?
+        .map(|value| deserialize_u32_value(value).map_err(serde::de::Error::custom))
+        .transpose()
+}
+
+fn deserialize_u32_value(value: Value) -> Result<u32, String> {
+    match value {
+        Value::Number(number) => number
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| "expected u32-compatible integer".to_string()),
+        Value::String(value) => value
+            .parse::<u32>()
+            .map_err(|_| "expected u32-compatible integer string".to_string()),
+        other => Err(format!("expected integer or integer string, got {other}")),
+    }
 }
 
 #[async_trait]
