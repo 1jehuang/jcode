@@ -142,7 +142,7 @@ pub const OPENCODE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://opencode.ai/zen/v1",
     api_key_env: "OPENCODE_API_KEY",
     env_file: "opencode.env",
-    setup_url: "https://opencode.ai/docs/providers#opencode-zen",
+    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("qwen/qwen3-coder-plus"),
     requires_api_key: true,
 };
@@ -153,8 +153,8 @@ pub const OPENCODE_GO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile
     api_base: "https://opencode.ai/zen/go/v1",
     api_key_env: "OPENCODE_GO_API_KEY",
     env_file: "opencode-go.env",
-    setup_url: "https://opencode.ai/docs/providers#opencode-go",
-    default_model: Some("THUDM/GLM-4.5"),
+    setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
+    default_model: Some("THUDM/GLM-4.9"),
     requires_api_key: true,
 };
 

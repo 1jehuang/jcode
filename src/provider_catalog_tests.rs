@@ -91,6 +91,15 @@ fn auth_issue_profile_metadata_matches_direct_provider_endpoints() {
     assert_eq!(DEEPSEEK_PROFILE.api_base, "https://api.deepseek.com");
     assert_eq!(DEEPSEEK_PROFILE.default_model, Some("deepseek-v4-flash"));
     assert_eq!(DEEPSEEK_PROFILE.setup_url, "https://api-docs.deepseek.com/");
+    assert_eq!(
+        OPENCODE_PROFILE.setup_url,
+        "https://github.com/1jehuang/jcode#openai-compatible-providers"
+    );
+    assert_eq!(
+        OPENCODE_GO_PROFILE.setup_url,
+        "https://github.com/1jehuang/jcode#openai-compatible-providers"
+    );
+    assert_eq!(OPENCODE_GO_PROFILE.default_model, Some("THUDM/GLM-4.9"));
     assert!(!OPENAI_COMPAT_PROFILE.setup_url.contains("opencode.ai"));
 }
 
