@@ -174,11 +174,16 @@ fn test_model_picker_opens_loading_state_before_async_routes_complete() {
         .expect("loading picker should open immediately");
     assert_eq!(picker.entries.len(), 1);
     assert_eq!(picker.entries[0].name, "counting-a");
-    assert!(picker.entries[0].options[0]
-        .detail
-        .contains("updating model list"));
+    assert!(
+        picker.entries[0].options[0]
+            .detail
+            .contains("updating model list")
+    );
     assert!(app.pending_model_picker_load.is_some());
-    assert_eq!(app.status_notice(), Some("Updating model list…".to_string()));
+    assert_eq!(
+        app.status_notice(),
+        Some("Updating model list…".to_string())
+    );
 
     wait_for_model_picker_load(&mut app);
     let picker = app
@@ -328,6 +333,14 @@ fn test_login_completed_surfaces_new_provider_models_in_local_model_picker() {
     assert!(copilot_entry.options.iter().any(|route| {
         route.provider == "Copilot" && route.api_method == "copilot" && route.available
     }));
+
+    assert!(
+        picker.entries[0]
+            .options
+            .iter()
+            .any(|route| route.provider == "Copilot" && route.detail.contains("recently added")),
+        "recently authenticated provider should be prioritized and marked in /model"
+    );
 }
 
 #[test]
@@ -348,7 +361,7 @@ fn test_local_model_picker_surfaces_antigravity_models_from_multiprovider() {
         .expect("antigravity model should be shown after login");
 
     assert!(antigravity_entry.options.iter().any(|route| {
-        route.provider == "Antigravity" && route.api_method == "cli" && route.available
+        route.provider == "Antigravity" && route.api_method == "https" && route.available
     }));
 }
 

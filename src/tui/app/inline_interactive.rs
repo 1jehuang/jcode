@@ -209,6 +209,16 @@ impl App {
 
     pub(super) fn open_model_picker(&mut self) {
         let picker_started = std::time::Instant::now();
+        const RECENT_AUTH_BOOST_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+        if self
+            .recent_authenticated_provider
+            .as_ref()
+            .map(|(_, at)| at.elapsed() > RECENT_AUTH_BOOST_TTL)
+            .unwrap_or(false)
+        {
+            self.recent_authenticated_provider = None;
+            self.invalidate_model_picker_cache();
+        }
 
         let current_model = if self.is_remote {
             self.remote_provider_model
@@ -506,6 +516,31 @@ impl App {
             (avail, method, cheapness, r.provider.clone())
         }
 
+        fn normalize_provider_label(value: &str) -> String {
+            value
+                .trim()
+                .to_ascii_lowercase()
+                .replace([' ', '_', '-'], "")
+        }
+
+        fn route_matches_recent_auth(route_provider: &str, login_provider: &str) -> bool {
+            let route = normalize_provider_label(route_provider);
+            let login = normalize_provider_label(login_provider);
+            if route == login || route.contains(&login) || login.contains(&route) {
+                return true;
+            }
+            matches!(
+                (login.as_str(), route.as_str()),
+                ("claude" | "anthropic", "anthropic" | "claude")
+                    | ("openai", "openai")
+                    | ("gemini" | "google", "gemini" | "google")
+                    | ("antigravity", "antigravity")
+                    | ("copilot" | "copilotcode", "copilot")
+                    | ("cursor", "cursor")
+                    | ("openrouter", "openrouter" | "auto")
+            )
+        }
+
         const RECOMMENDED_MODELS: &[&str] = &[
             "gpt-5.5",
             "claude-opus-4-7",
@@ -555,12 +590,38 @@ impl App {
         }
 
         let is_openai = !available_efforts.is_empty();
+        let recent_auth_provider = self
+            .recent_authenticated_provider
+            .as_ref()
+            .map(|(provider, _)| provider.as_str());
 
         let entries_started = std::time::Instant::now();
         let mut entries: Vec<PickerEntry> = Vec::new();
         for name in &model_order {
             let mut entry_routes = model_options.remove(name).unwrap_or_default();
             entry_routes.sort_by_key(route_sort_key);
+            let recently_authenticated = recent_auth_provider
+                .map(|provider| {
+                    entry_routes
+                        .iter()
+                        .any(|route| route_matches_recent_auth(&route.provider, provider))
+                })
+                .unwrap_or(false);
+            if recently_authenticated {
+                for route in &mut entry_routes {
+                    if recent_auth_provider
+                        .map(|provider| route_matches_recent_auth(&route.provider, provider))
+                        .unwrap_or(false)
+                        && !route.detail.contains("recently added")
+                    {
+                        route.detail = if route.detail.trim().is_empty() {
+                            "recently added".to_string()
+                        } else {
+                            format!("recently added · {}", route.detail)
+                        };
+                    }
+                }
+            }
 
             let is_openai_model = crate::provider::ALL_OPENAI_MODELS.contains(&name.as_str());
 
@@ -636,6 +697,24 @@ impl App {
         entries.sort_by(|a, b| {
             let a_current = if a.is_current { 0u8 } else { 1 };
             let b_current = if b.is_current { 0u8 } else { 1 };
+            let a_recent = if a
+                .options
+                .iter()
+                .any(|option| option.detail.contains("recently added"))
+            {
+                0u8
+            } else {
+                1
+            };
+            let b_recent = if b
+                .options
+                .iter()
+                .any(|option| option.detail.contains("recently added"))
+            {
+                0u8
+            } else {
+                1
+            };
             let a_rec = if a.recommended { 0u8 } else { 1 };
             let b_rec = if b.recommended { 0u8 } else { 1 };
             let a_rec_rank = if a.recommended {
@@ -662,6 +741,7 @@ impl App {
             let b_old = if b.old { 1u8 } else { 0 };
             a_current
                 .cmp(&b_current)
+                .then(a_recent.cmp(&b_recent))
                 .then(a_rec.cmp(&b_rec))
                 .then(a_rec_rank.cmp(&b_rec_rank))
                 .then(a_avail.cmp(&b_avail))

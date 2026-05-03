@@ -765,6 +765,7 @@ pub struct App {
     // Scroll offset for pinned diff pane
     diff_pane_scroll: usize,
     diff_pane_scroll_x: i32,
+    side_panel_image_zoom_percent: u8,
     diff_pane_focus: bool,
     diff_pane_auto_scroll: bool,
     side_panel: crate::side_panel::SidePanelSnapshot,
@@ -799,6 +800,8 @@ pub struct App {
     // Cached model picker entries. Building these can require hydrating large provider catalogs.
     model_picker_cache: Option<ModelPickerCache>,
     model_picker_catalog_revision: u64,
+    // Short-lived provider boost after login so newly authenticated models surface in /models.
+    recent_authenticated_provider: Option<(String, Instant)>,
     pending_model_picker_load: Option<PendingModelPickerLoad>,
     model_picker_load_request_id: u64,
     // Pending model switch from picker (for remote mode async processing)
