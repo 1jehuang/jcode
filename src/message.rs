@@ -1,8 +1,10 @@
 use crate::bus::{BackgroundTaskCompleted, BackgroundTaskProgressEvent, BackgroundTaskStatus};
+use base64::Engine as _;
 use chrono::Utc;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::OnceLock;
 
 pub use jcode_message_types::{InputShellResult, ToolCall};
@@ -569,6 +571,7 @@ impl ToolDefinition {
 }
 
 pub const GENERATED_IMAGE_TOOL_NAME: &str = "image_generation";
+pub const GENERATED_IMAGE_MAX_AUTO_VISION_BYTES: u64 = 20 * 1024 * 1024;
 
 pub fn generated_image_tool_input(
     path: &str,
@@ -599,6 +602,64 @@ pub fn generated_image_summary(
         summary.push_str(revised_prompt.trim());
     }
     summary
+}
+
+pub fn generated_image_visual_context_blocks(
+    path: &str,
+    metadata_path: Option<&str>,
+    output_format: &str,
+    revised_prompt: Option<&str>,
+) -> Option<Vec<ContentBlock>> {
+    let path_ref = Path::new(path);
+    let metadata = std::fs::metadata(path_ref).ok()?;
+    if !metadata.is_file() || metadata.len() > GENERATED_IMAGE_MAX_AUTO_VISION_BYTES {
+        return None;
+    }
+
+    let data = std::fs::read(path_ref).ok()?;
+    let media_type = generated_image_media_type(path_ref, output_format).to_string();
+    let data_b64 = base64::engine::general_purpose::STANDARD.encode(data);
+    let mut reminder = format!(
+        "<system-reminder>\nA provider-native image generation call created `{}`. Jcode attached the image pixels as visual context for future turns because the active provider supports image input and the file is under the safe {} MB limit.\nFormat: {}",
+        path,
+        GENERATED_IMAGE_MAX_AUTO_VISION_BYTES / 1024 / 1024,
+        output_format,
+    );
+    if let Some(metadata_path) = metadata_path.filter(|value| !value.trim().is_empty()) {
+        reminder.push_str(&format!("\nMetadata: {}", metadata_path));
+    }
+    if let Some(revised_prompt) = revised_prompt.filter(|value| !value.trim().is_empty()) {
+        reminder.push_str("\nRevised prompt:\n");
+        reminder.push_str(revised_prompt.trim());
+    }
+    reminder.push_str("\n</system-reminder>");
+
+    Some(vec![
+        ContentBlock::Text {
+            text: reminder,
+            cache_control: None,
+        },
+        ContentBlock::Image {
+            media_type,
+            data: data_b64,
+        },
+    ])
+}
+
+fn generated_image_media_type(path: &Path, output_format: &str) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or(output_format)
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        _ => "image/png",
+    }
 }
 
 /// Connection phase for status bar transparency

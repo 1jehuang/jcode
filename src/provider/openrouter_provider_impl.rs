@@ -618,6 +618,10 @@ impl Provider for OpenRouterProvider {
             .unwrap_or_else(|_| DEFAULT_MODEL.to_string())
     }
 
+    fn supports_image_input(&self) -> bool {
+        false
+    }
+
     fn set_model(&self, model: &str) -> Result<()> {
         // OpenRouter accepts any model ID - validation happens at API call time
         // This allows using any model without needing to pre-fetch the list

@@ -642,6 +642,10 @@ impl Provider for GeminiProvider {
             .clone()
     }
 
+    fn supports_image_input(&self) -> bool {
+        true
+    }
+
     fn set_model(&self, model: &str) -> Result<()> {
         let trimmed = model.trim();
         if trimmed.is_empty() {

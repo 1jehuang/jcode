@@ -326,6 +326,10 @@ impl Provider for OpenAIProvider {
             .unwrap_or_else(|_| DEFAULT_MODEL.to_string())
     }
 
+    fn supports_image_input(&self) -> bool {
+        true
+    }
+
     fn set_model(&self, model: &str) -> Result<()> {
         if !crate::provider::known_openai_model_ids()
             .iter()

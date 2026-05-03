@@ -119,6 +119,38 @@ fn side_panel_generated_image_marker_renders_as_image_placement() {
 }
 
 #[test]
+fn side_panel_markdown_image_path_renders_as_image_placement() {
+    with_serialized_mermaid_state(|| {
+        clear_side_panel_render_caches();
+        let dir = std::env::temp_dir().join(format!(
+            "jcode-side-panel-image-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp image dir");
+        let path = dir.join("generated.png");
+        ::image::RgbaImage::from_pixel(3, 2, ::image::Rgba([255, 0, 0, 255]))
+            .save(&path)
+            .expect("write temp png");
+
+        let page = sample_mermaid_page(format!(
+            "# Generated image\n\n![Generated image]({})\n\nDetails below",
+            path.display()
+        ));
+        let rendered =
+            render_side_panel_markdown_cached(&page, Rect::new(0, 0, 40, 20), true, false);
+
+        assert_eq!(rendered.image_placements.len(), 1);
+        let placement = &rendered.image_placements[0];
+        let (cached_path, width, height) = crate::tui::mermaid::get_cached_png(placement.hash)
+            .expect("registered markdown image path");
+        assert_eq!(cached_path, path);
+        assert_eq!((width, height), (3, 2));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
+#[test]
 fn side_panel_mermaid_prefers_viewport_when_downscaled_fit_wastes_space() {
     let layout =
         estimate_side_panel_image_layout_with_font(226, 504, 36, 30, 0, false, Some((8, 16)));

@@ -15,6 +15,43 @@ fn sanitize_tool_id_alphanumeric_passthrough() {
 }
 
 #[test]
+fn generated_image_visual_context_blocks_attach_safe_image() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let image_path = dir.path().join("generated.png");
+    ::image::RgbaImage::from_pixel(2, 1, ::image::Rgba([0, 255, 0, 255]))
+        .save(&image_path)
+        .expect("write png");
+
+    let blocks = generated_image_visual_context_blocks(
+        image_path.to_str().expect("utf8 path"),
+        Some("/tmp/generated.json"),
+        "png",
+        Some("a small green generated image"),
+    )
+    .expect("safe generated image should attach");
+
+    assert_eq!(blocks.len(), 2);
+    match &blocks[0] {
+        ContentBlock::Text { text, .. } => {
+            assert!(text.starts_with("<system-reminder>"));
+            assert!(text.contains("attached the image pixels as visual context"));
+            assert!(text.contains("a small green generated image"));
+        }
+        other => panic!("expected text reminder, got {other:?}"),
+    }
+    match &blocks[1] {
+        ContentBlock::Image { media_type, data } => {
+            assert_eq!(media_type, "image/png");
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .expect("valid base64 image");
+            assert!(!bytes.is_empty());
+        }
+        other => panic!("expected image block, got {other:?}"),
+    }
+}
+
+#[test]
 fn tool_call_intent_from_input_trims_optional_intent() {
     let input = serde_json::json!({
         "intent": "  Verify compact rendering  ",

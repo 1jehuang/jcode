@@ -1082,6 +1082,10 @@ impl Provider for AnthropicProvider {
         "anthropic"
     }
 
+    fn supports_image_input(&self) -> bool {
+        true
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self {
             client: self.client.clone(),

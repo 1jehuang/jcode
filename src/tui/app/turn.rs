@@ -191,6 +191,7 @@ impl App {
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut current_tool: Option<ToolCall> = None;
             let mut current_tool_input = String::new();
+            let mut generated_image_contexts: Vec<Vec<ContentBlock>> = Vec::new();
             let mut first_event = true;
             let mut saw_message_end = false;
             let mut call_output_tokens_seen: u64 = 0;
@@ -731,6 +732,21 @@ impl App {
                                                 err
                                             )),
                                         }
+                                        if provider.supports_image_input() {
+                                            if let Some(blocks) = crate::message::generated_image_visual_context_blocks(
+                                                &path,
+                                                metadata_path.as_deref(),
+                                                &output_format,
+                                                revised_prompt.as_deref(),
+                                            ) {
+                                                generated_image_contexts.push(blocks);
+                                            } else {
+                                                crate::logging::warn(&format!(
+                                                    "Generated image was not attached as visual context: {}",
+                                                    path
+                                                ));
+                                            }
+                                        }
                                         self.status = ProcessingStatus::Streaming;
                                         if eager_stream_redraw {
                                             self.redraw_now(terminal)?;
@@ -866,6 +882,22 @@ impl App {
 
             // If no tool calls, we're done
             if tool_calls.is_empty() {
+                if !generated_image_contexts.is_empty() {
+                    for blocks in generated_image_contexts.drain(..) {
+                        self.add_provider_message(Message {
+                            role: Role::User,
+                            content: blocks.clone(),
+                            timestamp: Some(chrono::Utc::now()),
+                            tool_duration_ms: None,
+                        });
+                        self.session.add_message(Role::User, blocks);
+                    }
+                    let _ = self.session.save();
+                    crate::logging::info(
+                        "Continuing turn so model can inspect generated image visual context",
+                    );
+                    continue;
+                }
                 break;
             }
 
@@ -1130,6 +1162,19 @@ impl App {
                     Some(tool_duration_ms),
                 );
                 self.observe_tool_result(&tc, &output, is_error, tool_title.as_deref());
+                let _ = self.session.save();
+            }
+
+            if !generated_image_contexts.is_empty() {
+                for blocks in generated_image_contexts.drain(..) {
+                    self.add_provider_message(Message {
+                        role: Role::User,
+                        content: blocks.clone(),
+                        timestamp: Some(chrono::Utc::now()),
+                        tool_duration_ms: None,
+                    });
+                    self.session.add_message(Role::User, blocks);
+                }
                 let _ = self.session.save();
             }
         }

@@ -1,5 +1,4 @@
 use anyhow::Result;
-use std::path::Path;
 
 pub fn generated_image_side_panel_page_id(id: &str) -> String {
     let safe: String = id
@@ -20,19 +19,7 @@ pub fn generated_image_side_panel_markdown(
     output_format: &str,
     revised_prompt: Option<&str>,
 ) -> String {
-    let path_ref = Path::new(path);
-    let placeholder = ::image::image_dimensions(path_ref)
-        .ok()
-        .map(|(width, height)| {
-            let hash = crate::tui::mermaid::register_external_image(path_ref, width, height);
-            crate::tui::mermaid::image_widget_placeholder_markdown(hash)
-        });
-
     let mut markdown = String::from("# Generated image\n\n");
-    if let Some(placeholder) = placeholder {
-        markdown.push_str(&placeholder);
-        markdown.push('\n');
-    }
     markdown.push_str(&format!("![Generated image]({path})\n\n"));
     markdown.push_str(&format!("- Image: `{path}`\n"));
     markdown.push_str(&format!("- Format: `{output_format}`\n"));

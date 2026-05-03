@@ -103,6 +103,11 @@ pub trait Provider: Send + Sync {
         "unknown".to_string()
     }
 
+    /// Whether this provider path can safely receive `ContentBlock::Image` inputs.
+    fn supports_image_input(&self) -> bool {
+        false
+    }
+
     /// Set the model to use (returns error if model not supported)
     fn set_model(&self, _model: &str) -> Result<()> {
         Err(anyhow::anyhow!(
@@ -1067,6 +1072,43 @@ impl Provider for MultiProvider {
                 .openrouter_provider()
                 .map(|o| o.model())
                 .unwrap_or_else(|| "anthropic/claude-sonnet-4".to_string()),
+        }
+    }
+
+    fn supports_image_input(&self) -> bool {
+        match self.active_provider() {
+            ActiveProvider::Claude => self
+                .anthropic_provider()
+                .map(|provider| provider.supports_image_input())
+                .or_else(|| {
+                    self.claude_provider()
+                        .map(|provider| provider.supports_image_input())
+                })
+                .unwrap_or(false),
+            ActiveProvider::OpenAI => self
+                .openai_provider()
+                .map(|provider| provider.supports_image_input())
+                .unwrap_or(false),
+            ActiveProvider::Copilot => self
+                .copilot_provider()
+                .map(|provider| provider.supports_image_input())
+                .unwrap_or(false),
+            ActiveProvider::Antigravity => self
+                .antigravity_provider()
+                .map(|provider| provider.supports_image_input())
+                .unwrap_or(false),
+            ActiveProvider::Gemini => self
+                .gemini_provider()
+                .map(|provider| provider.supports_image_input())
+                .unwrap_or(false),
+            ActiveProvider::Cursor => self
+                .cursor_provider()
+                .map(|provider| provider.supports_image_input())
+                .unwrap_or(false),
+            ActiveProvider::OpenRouter => self
+                .openrouter_provider()
+                .map(|provider| provider.supports_image_input())
+                .unwrap_or(false),
         }
     }
 

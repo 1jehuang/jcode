@@ -174,6 +174,7 @@ impl Agent {
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut current_tool: Option<ToolCall> = None;
             let mut current_tool_input = String::new();
+            let mut generated_image_contexts: Vec<Vec<ContentBlock>> = Vec::new();
             let mut usage_input: Option<u64> = None;
             let mut usage_output: Option<u64> = None;
             let mut usage_cache_read: Option<u64> = None;
@@ -346,6 +347,23 @@ impl Agent {
                             revised_prompt.as_deref(),
                         ) {
                             let _ = event_tx.send(ServerEvent::SidePanelState { snapshot });
+                        }
+                        if self.provider.supports_image_input() {
+                            if let Some(blocks) =
+                                crate::message::generated_image_visual_context_blocks(
+                                    &path,
+                                    metadata_path.as_deref(),
+                                    &output_format,
+                                    revised_prompt.as_deref(),
+                                )
+                            {
+                                generated_image_contexts.push(blocks);
+                            } else {
+                                crate::logging::warn(&format!(
+                                    "Generated image was not attached as visual context: {}",
+                                    path
+                                ));
+                            }
                         }
                         let _ = event_tx.send(ServerEvent::GeneratedImage {
                             id,
@@ -600,6 +618,17 @@ impl Agent {
                 assistant_message_id.as_ref(),
             );
 
+            if tool_calls.is_empty() && !generated_image_contexts.is_empty() {
+                for blocks in generated_image_contexts.drain(..) {
+                    self.add_message(Role::User, blocks);
+                }
+                self.session.save()?;
+                logging::info(
+                    "Continuing turn so model can inspect generated image visual context",
+                );
+                continue;
+            }
+
             // If no tool calls, check for soft interrupt or exit
             // NOTE: We only inject here (Point B) when there are no tools.
             // Injecting before tool_results would break the API requirement that
@@ -786,6 +815,13 @@ impl Agent {
             }
 
             if tool_results_dirty {
+                self.session.save()?;
+            }
+
+            if !generated_image_contexts.is_empty() {
+                for blocks in generated_image_contexts.drain(..) {
+                    self.add_message(Role::User, blocks);
+                }
                 self.session.save()?;
             }
 
