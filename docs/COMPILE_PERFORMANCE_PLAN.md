@@ -176,6 +176,11 @@ Use it when capturing comparable before/after numbers for refactors.
   `dev-bins` feature. This keeps broad normal checks focused on production/test targets while preserving
   explicit probe coverage via `cargo check --all-targets -p jcode --features dev-bins`. Validation showed
   `cargo check --all-targets -p jcode` skips those three bins, while adding `--features dev-bins` includes them.
+- 2026-05-03: moved the self-dev build/version/channel support implementation out of the root crate and
+  into `crates/jcode-build-support`, leaving `src/build.rs` as a re-export facade. This cuts another
+  stable, high-fanout support subsystem out of the root compile unit while preserving existing call sites
+  (`crate::build::*`). Validation: `cargo check -p jcode-build-support`, `cargo test -p jcode-build-support`,
+  and `cargo check -p jcode --lib` passed during the split.
 
 Warm-only touched-file checkpoints captured so far on this machine:
 
@@ -221,6 +226,8 @@ Proposed destination layout:
   - TUI rendering, widgets, state reduction, terminal UI support
 - `jcode-selfdev`
   - customization records, migration logic, self-dev productization
+- `jcode-build-support`
+  - self-dev build commands, source-state fingerprints, binary channel paths/manifests
 
 ### Phase 4 — First crate splits
 

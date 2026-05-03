@@ -2,9 +2,9 @@ use super::{
     SelfDevBuildCommand, SelfDevBuildTarget, canary_binary_path, current_binary_path,
     shared_server_binary_path, stable_binary_path,
 };
-use crate::storage;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use jcode_storage as storage;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
@@ -312,7 +312,7 @@ fn update_launcher_symlink(target: &Path) -> Result<PathBuf> {
             std::process::id()
         ));
 
-    crate::platform::atomic_symlink_swap(target, &launcher, &temp)?;
+    crate::platform_support::atomic_symlink_swap(target, &launcher, &temp)?;
     Ok(launcher)
 }
 
