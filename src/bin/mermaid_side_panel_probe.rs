@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use std::env;
 
 fn usage() -> &'static str {
-    "usage: cargo run --bin mermaid_side_panel_probe -- <mermaid-file> [--pane-width N] [--pane-height N] [--font-width N] [--font-height N] [--left]"
+    "usage: cargo run --features dev-bins --bin mermaid_side_panel_probe -- <mermaid-file> [--pane-width N] [--pane-height N] [--font-width N] [--font-height N] [--left]"
 }
 
 fn parse_u16_arg(args: &mut std::vec::IntoIter<String>, flag: &str) -> Result<u16> {

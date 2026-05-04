@@ -454,12 +454,17 @@ pub fn maybe_show_setup_hints() -> Option<StartupHints> {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         if !state.desktop_shortcut_created {
             let _ = create_desktop_shortcut(&mut state);
         }
     }
+
+    // On Windows, desktop shortcut creation shells out to PowerShell/COM and can
+    // take tens of seconds or hang in some Windows Terminal/WSL launch contexts.
+    // Do not run it on the critical startup path. Users can still run
+    // `jcode setup-launcher` explicitly.
 
     let startup_hints = startup_hints_for_launch(&state);
 

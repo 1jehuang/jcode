@@ -672,25 +672,18 @@ pub(crate) async fn maybe_prompt_server_bootstrap_login(
     provider_choice: &ProviderChoice,
 ) -> Result<()> {
     startup_profile::mark("cred_check_start");
-    let (has_claude, has_openai) = tokio::join!(
-        tokio::task::spawn_blocking(|| auth::claude::load_credentials().is_ok()),
-        tokio::task::spawn_blocking(|| auth::codex::load_credentials().is_ok()),
-    );
-    let has_claude = has_claude.unwrap_or(false);
-    let has_openai = has_openai.unwrap_or(false);
-    let has_openrouter = provider::openrouter::OpenRouterProvider::has_credentials();
-    let has_copilot = auth::copilot::has_copilot_credentials();
-    let has_api_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
+    let mut cred_state = detect_bootstrap_credentials().await;
     startup_profile::mark("cred_check_done");
 
-    if !has_claude
-        && !has_openai
-        && !has_openrouter
-        && !has_copilot
-        && !has_api_key
-        && !auth::AuthStatus::has_any_untrusted_external_auth()
+    if !cred_state.has_any
+        && auth::AuthStatus::has_any_untrusted_external_auth()
         && *provider_choice == ProviderChoice::Auto
     {
+        let _ = provider_init::maybe_run_external_auth_auto_import_flow().await?;
+        cred_state = detect_bootstrap_credentials().await;
+    }
+
+    if !cred_state.has_any && *provider_choice == ProviderChoice::Auto {
         let provider = provider_init::prompt_login_provider_selection(
             &provider_catalog::server_bootstrap_login_providers(),
             "No credentials found. Let's log in!\n\nChoose a provider:",
@@ -701,6 +694,26 @@ pub(crate) async fn maybe_prompt_server_bootstrap_login(
     }
 
     Ok(())
+}
+
+struct BootstrapCredentialState {
+    has_any: bool,
+}
+
+async fn detect_bootstrap_credentials() -> BootstrapCredentialState {
+    let (has_claude, has_openai) = tokio::join!(
+        tokio::task::spawn_blocking(|| auth::claude::load_credentials().is_ok()),
+        tokio::task::spawn_blocking(|| auth::codex::load_credentials().is_ok()),
+    );
+    let has_claude = has_claude.unwrap_or(false);
+    let has_openai = has_openai.unwrap_or(false);
+    let has_openrouter = provider::openrouter::OpenRouterProvider::has_credentials();
+    let has_copilot = auth::copilot::has_copilot_credentials();
+    let has_api_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
+
+    BootstrapCredentialState {
+        has_any: has_claude || has_openai || has_openrouter || has_copilot || has_api_key,
+    }
 }
 
 pub(crate) async fn spawn_server(
@@ -762,20 +775,46 @@ pub(crate) async fn spawn_server(
     }
     #[cfg(not(unix))]
     {
-        cmd.spawn()?;
+        use std::io::Read;
+
+        let mut child = cmd.spawn()?;
         let start = std::time::Instant::now();
-        while start.elapsed() < std::time::Duration::from_millis(500) {
+        let timeout = std::time::Duration::from_secs(5);
+        while start.elapsed() < timeout {
             if crate::transport::is_socket_path(&server::socket_path()) {
                 if crate::transport::Stream::connect(server::socket_path())
                     .await
                     .is_ok()
                 {
                     startup_profile::mark("server_ready");
-                    break;
+                    return Ok(());
                 }
             }
+
+            if let Some(status) = child.try_wait()? {
+                let mut stderr = String::new();
+                if let Some(mut pipe) = child.stderr.take() {
+                    let _ = pipe.read_to_string(&mut stderr);
+                }
+                let detail = stderr.trim();
+                if detail.is_empty() {
+                    anyhow::bail!("Server exited before becoming ready (status: {})", status);
+                }
+                anyhow::bail!(
+                    "Server exited before becoming ready (status: {}). {}",
+                    status,
+                    detail
+                );
+            }
+
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+
+        anyhow::bail!(
+            "Timed out waiting for server to become ready at {} after {}ms",
+            server::socket_path().display(),
+            timeout.as_millis()
+        );
     }
 
     Ok(())

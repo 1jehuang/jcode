@@ -2552,6 +2552,7 @@ dependencies = [
  "jcode-azure-auth",
  "jcode-background-types",
  "jcode-batch-types",
+ "jcode-build-support",
  "jcode-config-types",
  "jcode-core",
  "jcode-embedding",
@@ -2654,6 +2655,20 @@ version = "0.1.0"
 dependencies = [
  "jcode-message-types",
  "serde",
+]
+
+[[package]]
+name = "jcode-build-support"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "jcode-core",
+ "jcode-selfdev-types",
+ "jcode-storage",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -2889,6 +2904,7 @@ dependencies = [
 name = "jcode-tui-core"
 version = "0.1.0"
 dependencies = [
+ "crossterm 0.28.1",
  "serde",
 ]
 

@@ -547,12 +547,13 @@ fn maybe_enable_external_api_key_auth_for_auto(has_other_provider: bool) -> Resu
         let provider_name = provider_label_for_api_key_env(&env_key);
         let login_hint = provider_login_hint_for_api_key_env(&env_key);
         if !can_prompt_for_external_auth() {
-            anyhow::bail!(external_auth_blocked_message(
+            crate::logging::warn(&external_auth_blocked_message(
                 &provider_name,
                 source.display_name(),
                 &path,
                 &login_hint,
             ));
+            return Ok(false);
         }
         if prompt_to_trust_external_auth(&provider_name, source.display_name(), &path)? {
             auth::external::trust_external_auth_source(source)?;
@@ -576,6 +577,15 @@ fn maybe_prompt_for_generic_oauth_source(
     };
     let path = source.path()?;
     if !can_prompt_for_external_auth() {
+        if auto {
+            crate::logging::warn(&external_auth_blocked_message(
+                provider_name,
+                source.display_name(),
+                &path,
+                login_hint,
+            ));
+            return Ok(false);
+        }
         anyhow::bail!(external_auth_blocked_message(
             provider_name,
             source.display_name(),
@@ -659,12 +669,13 @@ fn maybe_enable_legacy_codex_auth_for_auto(has_other_provider: bool) -> Result<b
     let path = auth::codex::legacy_auth_file_path()?;
 
     if !can_prompt_for_external_auth() {
-        anyhow::bail!(external_auth_blocked_message(
+        crate::logging::warn(&external_auth_blocked_message(
             "OpenAI/Codex",
             "Codex",
             &path,
-            "jcode login --provider openai"
+            "jcode login --provider openai",
         ));
+        return Ok(false);
     }
 
     if prompt_to_trust_external_auth("OpenAI/Codex", "Codex", &path)? {
@@ -737,12 +748,13 @@ fn maybe_enable_claude_auth_for_auto(has_other_provider: bool) -> Result<bool> {
     }
     let path = source.path()?;
     if !can_prompt_for_external_auth() {
-        anyhow::bail!(external_auth_blocked_message(
+        crate::logging::warn(&external_auth_blocked_message(
             "Claude",
             source.display_name(),
             &path,
-            "jcode login --provider claude"
+            "jcode login --provider claude",
         ));
+        return Ok(false);
     }
     if prompt_to_trust_external_auth("Claude", source.display_name(), &path)? {
         auth::claude::trust_external_auth_source(source)?;
@@ -813,12 +825,13 @@ fn maybe_enable_gemini_auth_for_auto(has_other_provider: bool) -> Result<bool> {
     }
     let path = auth::gemini::gemini_cli_oauth_path()?;
     if !can_prompt_for_external_auth() {
-        anyhow::bail!(external_auth_blocked_message(
+        crate::logging::warn(&external_auth_blocked_message(
             "Gemini",
             "Gemini CLI",
             &path,
-            "jcode login --provider gemini"
+            "jcode login --provider gemini",
         ));
+        return Ok(false);
     }
     if prompt_to_trust_external_auth("Gemini", "Gemini CLI", &path)? {
         auth::gemini::trust_cli_auth_for_future_use()?;
@@ -882,12 +895,13 @@ fn maybe_enable_copilot_auth_for_auto(has_other_provider: bool) -> Result<bool> 
     }
     let path = source.path();
     if !can_prompt_for_external_auth() {
-        anyhow::bail!(external_auth_blocked_message(
+        crate::logging::warn(&external_auth_blocked_message(
             "GitHub Copilot",
             source.display_name(),
             &path,
-            "jcode login --provider copilot"
+            "jcode login --provider copilot",
         ));
+        return Ok(false);
     }
     if prompt_to_trust_external_auth("GitHub Copilot", source.display_name(), &path)? {
         auth::copilot::trust_external_auth_source(source)?;
@@ -933,12 +947,13 @@ fn maybe_enable_cursor_auth_for_auto(has_other_provider: bool) -> Result<bool> {
     }
     let path = source.path()?;
     if !can_prompt_for_external_auth() {
-        anyhow::bail!(external_auth_blocked_message(
+        crate::logging::warn(&external_auth_blocked_message(
             "Cursor",
             source.display_name(),
             &path,
-            "jcode login --provider cursor"
+            "jcode login --provider cursor",
         ));
+        return Ok(false);
     }
     if prompt_to_trust_external_auth("Cursor", source.display_name(), &path)? {
         auth::cursor::trust_external_auth_source(source)?;

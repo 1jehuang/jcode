@@ -1,15 +1,23 @@
 use super::*;
 
+fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    ENV_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
-    let _guard = crate::storage::lock_test_env();
+    let _guard = test_env_lock();
     let temp_home = tempfile::tempdir().expect("tempdir");
     let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp_home.path());
+    jcode_core::env::set_var("JCODE_HOME", temp_home.path());
     let result = f();
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        jcode_core::env::set_var("JCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        jcode_core::env::remove_var("JCODE_HOME");
     }
     result
 }
@@ -182,10 +190,10 @@ fn test_find_repo_in_ancestors_walks_upward() {
 
 #[test]
 fn test_client_update_candidate_prefers_dev_binary_for_selfdev() {
-    let _guard = crate::storage::lock_test_env();
+    let _guard = test_env_lock();
     let temp_home = tempfile::tempdir().expect("tempdir");
     let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp_home.path());
+    jcode_core::env::set_var("JCODE_HOME", temp_home.path());
 
     let version = "test-current";
     let version_binary =
@@ -201,9 +209,9 @@ fn test_client_update_candidate_prefers_dev_binary_for_selfdev() {
     );
 
     if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
+        jcode_core::env::set_var("JCODE_HOME", prev_home);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        jcode_core::env::remove_var("JCODE_HOME");
     }
 }
 

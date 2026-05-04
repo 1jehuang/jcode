@@ -3,6 +3,7 @@ name = "jcode"
 version = "0.11.4"
 description = "Possibly the greatest coding agent ever built — blazing-fast TUI, multi-model, swarm coordination, 30+ tools"
 edition = "2024"
+autobins = false
 
 [workspace]
 members = [
@@ -15,6 +16,7 @@ members = [
     "crates/jcode-pdf",
     "crates/jcode-background-types",
     "crates/jcode-batch-types",
+    "crates/jcode-build-support",
     "crates/jcode-config-types",
     "crates/jcode-core",
     "crates/jcode-memory-types",
@@ -59,6 +61,21 @@ path = "src/bin/test_api.rs"
 [[bin]]
 name = "jcode-harness"
 path = "src/bin/harness.rs"
+
+[[bin]]
+name = "session_memory_bench"
+path = "src/bin/session_memory_bench.rs"
+required-features = ["dev-bins"]
+
+[[bin]]
+name = "mermaid_side_panel_probe"
+path = "src/bin/mermaid_side_panel_probe.rs"
+required-features = ["dev-bins"]
+
+[[bin]]
+name = "tui_bench"
+path = "src/bin/tui_bench.rs"
+required-features = ["dev-bins"]
 
 [dependencies]
 # Memory allocator (reduces fragmentation for long-running server)
@@ -146,6 +163,7 @@ unicode-width = "0.2"   # Unicode character display width
 jcode-pdf = { path = "crates/jcode-pdf", optional = true }
 jcode-background-types = { path = "crates/jcode-background-types" }
 jcode-batch-types = { path = "crates/jcode-batch-types" }
+jcode-build-support = { path = "crates/jcode-build-support" }
 jcode-config-types = { path = "crates/jcode-config-types" }
 jcode-core = { path = "crates/jcode-core" }
 jcode-memory-types = { path = "crates/jcode-memory-types" }
@@ -167,6 +185,7 @@ qr2term = "0.3.3"
 
 [features]
 default = ["embeddings", "pdf"]
+dev-bins = []
 jemalloc = [
     "dep:tikv-jemallocator",
     "dep:tikv-jemalloc-ctl",

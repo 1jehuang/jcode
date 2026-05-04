@@ -165,6 +165,27 @@ Use it when capturing comparable before/after numbers for refactors.
   Use `JCODE_SELFDEV_LOW_MEMORY=off` to disable, or `JCODE_SELFDEV_LOW_MEMORY=on` to force.
   Validation: the same root build completed under those settings in **2m34s** after the interrupted
   partial build reused artifacts.
+- 2026-05-03: added `JCODE_DEV_FEATURE_PROFILE` to `scripts/dev_cargo.sh` so compile-speed probes and
+  narrow inner-loop builds can consistently select feature sets without repeating Cargo flags. Profiles:
+  `default`, `minimal`/`none` (`--no-default-features`), `pdf` (`--no-default-features --features pdf`),
+  `embeddings` (`--no-default-features --features embeddings`), and `full` (`--features embeddings,pdf`).
+  The wrapper leaves explicit `--features` / `--no-default-features` cargo args untouched. Validation on
+  this machine: `JCODE_DEV_FEATURE_PROFILE=minimal scripts/dev_cargo.sh check -p jcode --lib --quiet` passed.
+- 2026-05-03: disabled Cargo auto-discovery for root binary targets and moved developer-only helper
+  binaries (`tui_bench`, `session_memory_bench`, `mermaid_side_panel_probe`) behind the opt-in
+  `dev-bins` feature. This keeps broad normal checks focused on production/test targets while preserving
+  explicit probe coverage via `cargo check --all-targets -p jcode --features dev-bins`. Validation showed
+  `cargo check --all-targets -p jcode` skips those three bins, while adding `--features dev-bins` includes them.
+- 2026-05-03: moved the self-dev build/version/channel support implementation out of the root crate and
+  into `crates/jcode-build-support`, leaving `src/build.rs` as a re-export facade. This cuts another
+  stable, high-fanout support subsystem out of the root compile unit while preserving existing call sites
+  (`crate::build::*`). Validation: `cargo check -p jcode-build-support`, `cargo test -p jcode-build-support`,
+  and `cargo check -p jcode --lib` passed during the split.
+- 2026-05-03: moved the pure keybinding parser/matcher/types from `src/tui/keybind.rs` into
+  `jcode-tui-core::keybind`, leaving root TUI config-loading wrappers in place. This creates a reusable
+  cache boundary for a low-coupling TUI helper module while preserving the existing `crate::tui::keybind::*`
+  API. Validation: `cargo check -p jcode-tui-core`, `cargo test -p jcode-tui-core`, and
+  `cargo check -p jcode --lib` passed.
 
 Warm-only touched-file checkpoints captured so far on this machine:
 
@@ -208,8 +229,12 @@ Proposed destination layout:
   - embedding model integration and related heavy inference dependencies
 - `jcode-tui`
   - TUI rendering, widgets, state reduction, terminal UI support
+- `jcode-tui-core`
+  - low-level TUI helpers with minimal root coupling, including stream buffers and keybinding parsing
 - `jcode-selfdev`
   - customization records, migration logic, self-dev productization
+- `jcode-build-support`
+  - self-dev build commands, source-state fingerprints, binary channel paths/manifests
 
 ### Phase 4 — First crate splits
 
@@ -404,11 +429,35 @@ scripts/dev_cargo.sh build --profile selfdev -p jcode --bin jcode --quiet
 scripts/dev_cargo.sh --print-setup
 ```
 
+For narrower feature-set probes, set `JCODE_DEV_FEATURE_PROFILE` instead of spelling out Cargo flags:
+
+```bash
+JCODE_DEV_FEATURE_PROFILE=minimal scripts/dev_cargo.sh check -p jcode --lib --quiet
+JCODE_DEV_FEATURE_PROFILE=pdf scripts/dev_cargo.sh build --profile selfdev -p jcode --bin jcode --quiet
+JCODE_DEV_FEATURE_PROFILE=full scripts/dev_cargo.sh check -p jcode --lib --quiet
+```
+
+This is especially useful because default `jcode` enables both `embeddings` and `pdf`; in the current
+dependency graph, the root tree is about **3740** lines with defaults, **1133** with PDF-only, and **1106**
+with no default features. Use these profiles for measurements and local probes, while keeping full/default
+builds in CI and release paths where feature coverage matters.
+
+Developer-only root binaries are opt-in to keep `--all-targets` inner loops from compiling extra probe
+entrypoints by default:
+
+```bash
+cargo run --features dev-bins --bin tui_bench -- --help
+cargo run --features dev-bins --bin session_memory_bench -- --help
+cargo run --features dev-bins --bin mermaid_side_panel_probe -- --help
+cargo check --all-targets -p jcode --features dev-bins --quiet
+```
+
 The wrapper:
 
 - uses `sccache` automatically when available
 - prefers `lld` locally on Linux x86_64
 - uses the fast `selfdev` Cargo profile for self-dev build/reload workflows
+- can inject a named feature profile via `JCODE_DEV_FEATURE_PROFILE` unless explicit feature args are present
 - avoids hard-forcing a linker mode that may be broken on a given machine
 - can print the currently selected cache/linker setup with `--print-setup`
 

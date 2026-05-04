@@ -442,6 +442,91 @@ async fn init_provider_for_ollama_reapplies_local_compat_runtime_env_after_disab
     }
 }
 
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test env locks intentionally stay held across provider init to isolate process-global auth env"
+)]
+async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_blocking() {
+    let _guard = lock_env();
+    let _env_guard = crate::storage::lock_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let saved: Vec<(String, Option<String>)> = [
+        "JCODE_HOME",
+        "JCODE_NON_INTERACTIVE",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GITHUB_TOKEN",
+        "GEMINI_API_KEY",
+        "CURSOR_API_KEY",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_FORCE_PROVIDER",
+    ]
+    .iter()
+    .map(|k| (k.to_string(), std::env::var(k).ok()))
+    .collect();
+
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
+    for key in [
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GITHUB_TOKEN",
+        "GEMINI_API_KEY",
+        "CURSOR_API_KEY",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_FORCE_PROVIDER",
+    ] {
+        crate::env::remove_var(key);
+    }
+
+    let opencode_path = crate::auth::claude::ExternalClaudeAuthSource::OpenCode
+        .path()
+        .expect("opencode path");
+    std::fs::create_dir_all(opencode_path.parent().expect("opencode parent"))
+        .expect("create opencode dir");
+    std::fs::write(
+        &opencode_path,
+        serde_json::json!({
+            "anthropic": {
+                "access": "oc_acc",
+                "refresh": "oc_ref",
+                "expires": chrono::Utc::now().timestamp_millis() + 60_000
+            }
+        })
+        .to_string(),
+    )
+    .expect("write opencode auth");
+
+    let result = init_provider_for_validation(&ProviderChoice::Auto, None).await;
+    let err = match result {
+        Ok(provider) => panic!(
+            "auto init should still fail without trusted/direct credentials, got provider {}",
+            provider.name()
+        ),
+        Err(err) => err,
+    };
+    let message = err.to_string();
+    assert!(
+        message.contains("No credentials configured"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        !message.contains("will not read them without confirmation"),
+        "auto mode should skip untrusted external auth, not fail with the consent prompt error: {message}"
+    );
+
+    for (key, value) in saved {
+        if let Some(value) = value {
+            crate::env::set_var(&key, value);
+        } else {
+            crate::env::remove_var(&key);
+        }
+    }
+}
+
 #[test]
 fn pending_external_auth_review_candidates_include_shared_and_legacy_sources() {
     let _guard = lock_env();
