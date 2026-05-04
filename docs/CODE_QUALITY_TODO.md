@@ -432,8 +432,8 @@ Generated from `docs/CODE_QUALITY_AUDIT_2026-04-18.md`. This section enumerates 
 
 - [ ] Remove or justify suppressions in `src/agent/turn_loops.rs` (unused_variables)
 - [ ] Remove or justify suppressions in `src/auth/mod.rs` (unused_mut)
-- [ ] Remove or justify suppressions in `src/cli/dispatch.rs` (deprecated, unused_mut, unused_mut)
-- [ ] Remove or justify suppressions in `src/main.rs` (non_upper_case_globals, non_upper_case_globals)
+- [x] Remove or justify suppressions in `src/cli/dispatch.rs` (deprecated, unused_mut, unused_mut)
+- [x] Remove or justify suppressions in `src/main.rs` (non_upper_case_globals, non_upper_case_globals)
 - [ ] Remove or justify suppressions in `src/perf.rs` (non_snake_case)
 - [ ] Remove or justify suppressions in `src/server.rs` (unused_mut, unused_mut)
 - [ ] Remove or justify suppressions in `src/server/client_actions.rs` (clippy::too_many_arguments)

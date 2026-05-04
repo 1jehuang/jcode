@@ -104,7 +104,7 @@ fn spawn_resume_in_new_terminal_uses_handterm_exec_mode() {
 
     let lines = wait_for_lines(&output_path, 5);
     assert_eq!(lines[0], cwd.to_string_lossy());
-    assert_eq!(lines[1], "--standalone");
+    assert_eq!(lines[1], "--fresh-spawn");
     assert_eq!(lines[2], "--backend");
     assert_eq!(lines[3], "gpu");
     assert_eq!(lines[4], "--exec");
@@ -173,7 +173,7 @@ fn spawn_selfdev_in_new_terminal_uses_handterm_exec_mode() {
 
     let lines = wait_for_lines(&output_path, 5);
     assert_eq!(lines[0], cwd.to_string_lossy());
-    assert_eq!(lines[1], "--standalone");
+    assert_eq!(lines[1], "--fresh-spawn");
     assert_eq!(lines[2], "--backend");
     assert_eq!(lines[3], "gpu");
     assert_eq!(lines[4], "--exec");
