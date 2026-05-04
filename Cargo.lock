@@ -3862,6 +3862,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-workflow"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "jcode-background-types",
+ "jcode-plan",
+ "jcode-task-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "jni"
 version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

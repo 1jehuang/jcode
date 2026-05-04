@@ -47,6 +47,7 @@ members = [
     "crates/jcode-tool-core",
     "crates/jcode-tool-types",
     "crates/jcode-tui-account-picker",
+    "crates/jcode-workflow",
     "crates/jcode-tui-render",
     "crates/jcode-tui-session-picker",
     "crates/jcode-tui-style",

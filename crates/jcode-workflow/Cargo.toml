@@ -1,0 +1,15 @@
+[package]
+name = "jcode-workflow"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+jcode-background-types = { path = "../jcode-background-types" }
+jcode-plan = { path = "../jcode-plan" }
+jcode-task-types = { path = "../jcode-task-types" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
