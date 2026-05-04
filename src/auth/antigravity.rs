@@ -94,17 +94,8 @@ pub struct AntigravityTokens {
 
 impl AntigravityTokens {
     pub fn is_expired(&self) -> bool {
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        self.expires_at <= now_ms + 60_000
+        super::google_oauth::token_is_expired(self.expires_at)
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct GoogleTokenResponse {
-    access_token: String,
-    #[serde(default)]
-    refresh_token: Option<String>,
-    expires_in: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,7 +179,7 @@ pub async fn refresh_tokens(tokens: &AntigravityTokens) -> Result<AntigravityTok
             anyhow::bail!("Antigravity token refresh failed: {}", body.trim());
         }
 
-        let token_resp: GoogleTokenResponse = resp
+        let token_resp: super::google_oauth::TokenResponse = resp
             .json()
             .await
             .context("Failed to parse Antigravity refresh response")?;
@@ -198,7 +189,7 @@ pub async fn refresh_tokens(tokens: &AntigravityTokens) -> Result<AntigravityTok
             refresh_token: token_resp
                 .refresh_token
                 .unwrap_or_else(|| tokens.refresh_token.clone()),
-            expires_at: chrono::Utc::now().timestamp_millis() + (token_resp.expires_in * 1000),
+            expires_at: super::google_oauth::expires_at_from_now(token_resp.expires_in),
             email: tokens.email.clone(),
             project_id: tokens.project_id.clone(),
         };
@@ -387,7 +378,7 @@ async fn exchange_authorization_code(
         anyhow::bail!("Antigravity token exchange failed: {}", body.trim());
     }
 
-    let token_resp: GoogleTokenResponse = resp
+    let token_resp: super::google_oauth::TokenResponse = resp
         .json()
         .await
         .context("Failed to parse Antigravity token exchange response")?;
@@ -404,7 +395,7 @@ async fn exchange_authorization_code(
     Ok(AntigravityTokens {
         access_token: token_resp.access_token,
         refresh_token,
-        expires_at: chrono::Utc::now().timestamp_millis() + (token_resp.expires_in * 1000),
+        expires_at: super::google_oauth::expires_at_from_now(token_resp.expires_in),
         email,
         project_id,
     })
