@@ -12,14 +12,18 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 // prof:true            — enable profiling support in jemalloc-prof builds
 // prof_active:false    — keep sampling disabled until explicitly enabled at runtime
 #[cfg(all(feature = "jemalloc", not(feature = "jemalloc-prof")))]
-// jemalloc reads this exact exported symbol name at startup.
+// jemalloc locates its configuration by looking up the exported C symbol `malloc_conf`
+// at process startup. The symbol name is defined by the jemalloc ABI and must be exactly
+// `malloc_conf` (lower_snake_case). `#[allow(non_upper_case_globals)]` is therefore
+// load-bearing and cannot be removed.
 #[allow(non_upper_case_globals)]
 #[unsafe(no_mangle)]
 pub static malloc_conf: Option<&'static [u8; 50]> =
     Some(b"dirty_decay_ms:1000,muzzy_decay_ms:1000,narenas:4\0");
 
 #[cfg(feature = "jemalloc-prof")]
-// jemalloc reads this exact exported symbol name at startup.
+// Same as above: `malloc_conf` is an ABI-defined symbol name required by jemalloc.
+// `#[allow(non_upper_case_globals)]` is load-bearing and cannot be removed.
 #[allow(non_upper_case_globals)]
 #[unsafe(no_mangle)]
 pub static malloc_conf: Option<&'static [u8; 78]> =
