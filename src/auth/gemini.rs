@@ -58,17 +58,8 @@ pub struct GeminiTokens {
 
 impl GeminiTokens {
     pub fn is_expired(&self) -> bool {
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        self.expires_at <= now_ms + 60_000
+        super::google_oauth::token_is_expired(self.expires_at)
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct GoogleTokenResponse {
-    access_token: String,
-    #[serde(default)]
-    refresh_token: Option<String>,
-    expires_in: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,9 +174,9 @@ pub fn load_tokens() -> Result<GeminiTokens> {
                 .expiry_date
                 .or(imported.expires_at)
                 .or_else(|| {
-                    imported.expires_in.map(|expires_in| {
-                        chrono::Utc::now().timestamp_millis() + (expires_in * 1000)
-                    })
+                    imported
+                        .expires_in
+                        .map(super::google_oauth::expires_at_from_now)
                 })
                 .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() - 1);
             return Ok(GeminiTokens {
@@ -254,7 +245,7 @@ pub async fn refresh_tokens(tokens: &GeminiTokens) -> Result<GeminiTokens> {
             anyhow::bail!("Gemini token refresh failed: {}", body.trim());
         }
 
-        let token_resp: GoogleTokenResponse = resp
+        let token_resp: super::google_oauth::TokenResponse = resp
             .json()
             .await
             .context("Failed to parse Gemini refresh response")?;
@@ -263,7 +254,7 @@ pub async fn refresh_tokens(tokens: &GeminiTokens) -> Result<GeminiTokens> {
             refresh_token: token_resp
                 .refresh_token
                 .unwrap_or_else(|| tokens.refresh_token.clone()),
-            expires_at: chrono::Utc::now().timestamp_millis() + (token_resp.expires_in * 1000),
+            expires_at: super::google_oauth::expires_at_from_now(token_resp.expires_in),
             email: tokens.email.clone(),
         };
         save_tokens(&refreshed)?;
@@ -466,7 +457,7 @@ async fn exchange_authorization_code(
         anyhow::bail!("Gemini token exchange failed: {}", body.trim());
     }
 
-    let token_resp: GoogleTokenResponse = resp
+    let token_resp: super::google_oauth::TokenResponse = resp
         .json()
         .await
         .context("Failed to parse Gemini token exchange response")?;
@@ -481,7 +472,7 @@ async fn exchange_authorization_code(
     Ok(GeminiTokens {
         access_token: token_resp.access_token,
         refresh_token,
-        expires_at: chrono::Utc::now().timestamp_millis() + (token_resp.expires_in * 1000),
+        expires_at: super::google_oauth::expires_at_from_now(token_resp.expires_in),
         email,
     })
 }

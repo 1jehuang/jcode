@@ -59,8 +59,7 @@ pub struct GoogleTokens {
 
 impl GoogleTokens {
     pub fn is_expired(&self) -> bool {
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        self.expires_at <= now_ms + 60_000
+        super::google_oauth::token_is_expired(self.expires_at)
     }
 }
 
@@ -281,15 +280,8 @@ async fn exchange_code(
         anyhow::bail!("Google token exchange failed: {}", text);
     }
 
-    #[derive(Deserialize)]
-    struct TokenResponse {
-        access_token: String,
-        refresh_token: Option<String>,
-        expires_in: i64,
-    }
-
-    let token_resp: TokenResponse = resp.json().await?;
-    let expires_at = chrono::Utc::now().timestamp_millis() + (token_resp.expires_in * 1000);
+    let token_resp: super::google_oauth::TokenResponse = resp.json().await?;
+    let expires_at = super::google_oauth::expires_at_from_now(token_resp.expires_in);
 
     let refresh_token = token_resp.refresh_token.ok_or_else(|| {
         anyhow::anyhow!("No refresh token received. Try revoking access at https://myaccount.google.com/permissions and logging in again.")
@@ -330,14 +322,8 @@ pub async fn refresh_tokens(tokens: &GoogleTokens) -> Result<GoogleTokens> {
             anyhow::bail!("Google token refresh failed: {}", text);
         }
 
-        #[derive(Deserialize)]
-        struct RefreshResponse {
-            access_token: String,
-            expires_in: i64,
-        }
-
-        let refresh_resp: RefreshResponse = resp.json().await?;
-        let expires_at = chrono::Utc::now().timestamp_millis() + (refresh_resp.expires_in * 1000);
+        let refresh_resp: super::google_oauth::TokenResponse = resp.json().await?;
+        let expires_at = super::google_oauth::expires_at_from_now(refresh_resp.expires_in);
 
         let new_tokens = GoogleTokens {
             access_token: refresh_resp.access_token,
