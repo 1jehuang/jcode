@@ -376,6 +376,10 @@ fn fallback_context_limit_for_model(model: &str, provider_hint: Option<&str>) ->
         return Some(limit);
     }
 
+    if model.starts_with("deepseek") {
+        return Some(1_000_000);
+    }
+
     if model.starts_with("gemini-2.0-flash")
         || model.starts_with("gemini-2.5")
         || model.starts_with("gemini-3")
