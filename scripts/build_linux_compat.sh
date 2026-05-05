@@ -94,8 +94,15 @@ docker run --rm \
 	    cat > "/out/'"$artifact"'" <<WRAPPER
 #!/usr/bin/env sh
 set -eu
-case "\$0" in
-  */*) self_dir=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd) ;;
+self_path=\$0
+if command -v readlink >/dev/null 2>&1; then
+  resolved=\$(readlink -f -- "\$0" 2>/dev/null || true)
+  if [ -n "\$resolved" ]; then
+    self_path=\$resolved
+  fi
+fi
+case "\$self_path" in
+  */*) self_dir=\$(CDPATH= cd -- "\$(dirname -- "\$self_path")" && pwd) ;;
   *) self_dir=\$(pwd) ;;
 esac
 if [ -n "\${LD_LIBRARY_PATH:-}" ]; then
