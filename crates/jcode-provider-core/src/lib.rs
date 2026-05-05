@@ -1,4 +1,8 @@
+pub mod catalog_refresh;
 pub mod openai_schema;
+pub mod pricing;
+
+pub use catalog_refresh::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;

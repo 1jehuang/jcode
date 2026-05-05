@@ -335,6 +335,19 @@ Start with the highest-leverage cache boundaries:
 - Reason: this creates another provider-side cache boundary now without prematurely pulling `Message`, `ToolDefinition`,
   or the `Provider` trait into a shared crate.
 
+- 2026-05-05: moved provider catalog-refresh diffing into
+  `jcode-provider-core::catalog_refresh` and re-exported it from the root provider facade.
+- Boundary decision: move the pure `ModelRoute` summary/diff logic first because it has no root-crate
+  auth/runtime/config dependencies.
+- 2026-05-05: split the stable provider pricing tables/helpers into
+  `jcode-provider-core::pricing`, leaving `src/provider/pricing.rs` as a thin facade for root-only
+  auth/env/OpenRouter-cache lookups.
+- Reason: provider pricing is relatively stable table/math code, but it previously lived in the main crate
+  beside high-churn provider runtime code. This creates a reusable cache boundary without moving the
+  `Provider` trait or network implementations prematurely.
+- Validation: `cargo test -p jcode-provider-core --quiet`, `cargo test -p jcode pricing:: --quiet`,
+  `cargo check -p jcode --quiet`, and `cargo check -p jcode --features embeddings --quiet` pass.
+
 - 2026-03-30: moved the workspace-map subsystem into the new `crates/jcode-tui-workspace` crate.
 - Boundary decision: move **workspace map data/model + widget rendering** first, while keeping the surrounding
   `info_widget`, app state, and higher-level TUI composition in the main crate.

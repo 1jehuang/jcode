@@ -1,4 +1,4 @@
-use jcode_provider_core::ModelRoute;
+use crate::ModelRoute;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 

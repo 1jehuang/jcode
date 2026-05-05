@@ -2,7 +2,6 @@ mod accessors;
 mod account_failover;
 pub mod anthropic;
 pub mod antigravity;
-mod catalog_refresh;
 pub mod claude;
 pub mod cli_common;
 pub mod copilot;
@@ -39,13 +38,13 @@ use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
 // Re-export native tool result types for use by agent
-pub use catalog_refresh::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
 pub use claude::{NativeToolResult, NativeToolResultSender};
 pub(crate) use failover::{ProviderFailoverPrompt, parse_failover_prompt_message};
 pub use jcode_provider_core::{
-    CHEAPNESS_REFERENCE_INPUT_TOKENS, CHEAPNESS_REFERENCE_OUTPUT_TOKENS, ModelRoute,
-    NativeCompactionResult, RouteBillingKind, RouteCheapnessEstimate, RouteCostConfidence,
-    RouteCostSource, shared_http_client,
+    CHEAPNESS_REFERENCE_INPUT_TOKENS, CHEAPNESS_REFERENCE_OUTPUT_TOKENS,
+    ModelCatalogRefreshSummary, ModelRoute, NativeCompactionResult, RouteBillingKind,
+    RouteCheapnessEstimate, RouteCostConfidence, RouteCostSource, shared_http_client,
+    summarize_model_catalog_refresh,
 };
 pub use route_builders::{
     build_anthropic_oauth_route, build_copilot_route, build_openai_api_key_route,
