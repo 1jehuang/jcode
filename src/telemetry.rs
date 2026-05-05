@@ -4,10 +4,10 @@ mod state_support;
 use chrono::{DateTime, NaiveDate, Utc};
 pub use jcode_usage_types::{ErrorCategory, SessionEndReason};
 use jcode_usage_types::{
-    TelemetryToolCategory as ToolCategory, TelemetryWorkflowCounts,
-    classify_telemetry_tool_category as classify_tool_category,
+    TelemetryProjectProfile as ProjectProfile, TelemetryToolCategory as ToolCategory,
+    TelemetryWorkflowCounts, classify_telemetry_tool_category as classify_tool_category,
     looks_like_telemetry_test_run as looks_like_test_run,
-    mcp_telemetry_server_name as mcp_server_name, sanitize_telemetry_label,
+    mcp_telemetry_server_name as mcp_server_name, sanitize_feedback_text, sanitize_telemetry_label,
     telemetry_workflow_flags_from_counts,
 };
 use lifecycle::emit_lifecycle_event;
@@ -590,32 +590,6 @@ impl TurnTelemetry {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-struct ProjectProfile {
-    repo_present: bool,
-    lang_rust: bool,
-    lang_js_ts: bool,
-    lang_python: bool,
-    lang_go: bool,
-    lang_markdown: bool,
-}
-
-impl ProjectProfile {
-    fn mixed(&self) -> bool {
-        [
-            self.lang_rust,
-            self.lang_js_ts,
-            self.lang_python,
-            self.lang_go,
-            self.lang_markdown,
-        ]
-        .into_iter()
-        .filter(|value| *value)
-        .count()
-            > 1
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 enum DeliveryMode {
     Background,
@@ -750,17 +724,6 @@ pub fn record_feedback(text: &str) {
     }
 }
 
-fn sanitize_feedback_text(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
-        .collect::<String>()
-        .trim()
-        .chars()
-        .take(2000)
-        .collect()
-}
-
 fn update_active_days(id: &str) -> (u32, u32) {
     let Some(path) = active_days_path(id) else {
         return (0, 0);
@@ -831,19 +794,13 @@ fn detect_project_profile() -> ProjectProfile {
             continue;
         }
         scanned_files += 1;
-        match entry
-            .path()
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or_default()
-        {
-            "rs" => profile.lang_rust = true,
-            "js" | "jsx" | "ts" | "tsx" => profile.lang_js_ts = true,
-            "py" => profile.lang_python = true,
-            "go" => profile.lang_go = true,
-            "md" | "mdx" => profile.lang_markdown = true,
-            _ => {}
-        }
+        profile.note_extension(
+            entry
+                .path()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or_default(),
+        );
     }
     profile
 }

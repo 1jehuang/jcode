@@ -184,6 +184,54 @@ pub enum ErrorCategory {
     RateLimited,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TelemetryProjectProfile {
+    pub repo_present: bool,
+    pub lang_rust: bool,
+    pub lang_js_ts: bool,
+    pub lang_python: bool,
+    pub lang_go: bool,
+    pub lang_markdown: bool,
+}
+
+impl TelemetryProjectProfile {
+    pub fn mixed(&self) -> bool {
+        [
+            self.lang_rust,
+            self.lang_js_ts,
+            self.lang_python,
+            self.lang_go,
+            self.lang_markdown,
+        ]
+        .into_iter()
+        .filter(|value| *value)
+        .count()
+            > 1
+    }
+
+    pub fn note_extension(&mut self, extension: &str) {
+        match extension {
+            "rs" => self.lang_rust = true,
+            "js" | "jsx" | "ts" | "tsx" => self.lang_js_ts = true,
+            "py" => self.lang_python = true,
+            "go" => self.lang_go = true,
+            "md" | "mdx" => self.lang_markdown = true,
+            _ => {}
+        }
+    }
+}
+
+pub fn sanitize_feedback_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(2000)
+        .collect()
+}
+
 pub fn sanitize_telemetry_label(value: &str) -> String {
     let mut cleaned = String::with_capacity(value.len());
     let mut chars = value.chars().peekable();
@@ -301,6 +349,27 @@ mod telemetry_helper_tests {
             sanitize_telemetry_label("\u{1b}[1mclaude-opus-4-6\u{1b}[0m\n"),
             "claude-opus-4-6"
         );
+    }
+
+    #[test]
+    fn project_profile_tracks_languages_and_mixed_state() {
+        let mut profile = TelemetryProjectProfile::default();
+        profile.note_extension("rs");
+        assert!(!profile.mixed());
+        profile.note_extension("ts");
+        assert!(profile.mixed());
+        profile.note_extension("lock");
+        assert!(profile.lang_rust);
+        assert!(profile.lang_js_ts);
+    }
+
+    #[test]
+    fn sanitizes_feedback_text() {
+        let raw = format!("  ok\u{0000}\n{}  ", "x".repeat(2100));
+        let sanitized = sanitize_feedback_text(&raw);
+        assert!(sanitized.starts_with("ok\n"));
+        assert_eq!(sanitized.chars().count(), 2000);
+        assert!(!sanitized.contains('\u{0000}'));
     }
 
     #[test]
