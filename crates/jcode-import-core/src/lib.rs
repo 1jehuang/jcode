@@ -352,6 +352,58 @@ pub fn parse_rfc3339_json(value: Option<&serde_json::Value>) -> Option<DateTime<
         .map(|dt| dt.with_timezone(&Utc))
 }
 
+pub fn extract_external_text_from_json(value: &serde_json::Value, include_tools: bool) -> String {
+    fn visit(value: &serde_json::Value, include_tools: bool, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(text) => {
+                if !text.trim().is_empty() {
+                    out.push(text.trim().to_string());
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    visit(item, include_tools, out);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                let block_type = map.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+                if !include_tools
+                    && matches!(block_type, "tool_use" | "tool_result" | "function_call")
+                {
+                    return;
+                }
+                if let Some(text) = map.get("text").and_then(|v| v.as_str()) {
+                    if !text.trim().is_empty() {
+                        out.push(text.trim().to_string());
+                    }
+                } else if include_tools
+                    && let Some(content) = map.get("content").and_then(|v| v.as_str())
+                    && !content.trim().is_empty()
+                {
+                    out.push(content.trim().to_string());
+                }
+                for (key, nested) in map {
+                    if matches!(key.as_str(), "type" | "text" | "content") {
+                        continue;
+                    }
+                    visit(nested, include_tools, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    visit(value, include_tools, &mut out);
+    out.join("\n")
+}
+
+pub fn file_modified_datetime(path: &Path) -> Option<DateTime<Utc>> {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .map(DateTime::<Utc>::from)
+}
+
 pub fn extract_text_from_json_value(value: &serde_json::Value) -> String {
     fn visit(value: &serde_json::Value, out: &mut Vec<String>) {
         match value {
@@ -508,6 +560,19 @@ mod tests {
     #[test]
     fn collect_recent_files_returns_empty_for_zero_limit() {
         assert!(collect_recent_files_recursive(Path::new("."), "rs", 0).is_empty());
+    }
+
+    #[test]
+    fn extract_external_text_respects_include_tools() {
+        let value = serde_json::json!([
+            {"type": "text", "text": " hello "},
+            {"type": "tool_result", "content": " tool output "}
+        ]);
+        assert_eq!(extract_external_text_from_json(&value, false), "hello");
+        assert_eq!(
+            extract_external_text_from_json(&value, true),
+            "hello\ntool output"
+        );
     }
 
     #[test]

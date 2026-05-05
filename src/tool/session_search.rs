@@ -13,6 +13,10 @@ use crate::storage;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
+use jcode_import_core::{
+    collect_recent_files_recursive, extract_external_text_from_json, file_modified_datetime,
+    parse_rfc3339_json,
+};
 use jcode_session_types::{
     SessionSearchQueryProfile as QueryProfile,
     score_session_search_text_match as score_message_match,
@@ -1074,33 +1078,6 @@ fn build_external_context(
         .collect()
 }
 
-fn collect_recent_files_recursive(root: &Path, extension: &str, limit: usize) -> Vec<PathBuf> {
-    fn walk(dir: &Path, extension: &str, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(&path, extension, out);
-            } else if path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| ext.eq_ignore_ascii_case(extension))
-                .unwrap_or(false)
-            {
-                out.push(path);
-            }
-        }
-    }
-
-    let mut files = Vec::new();
-    walk(root, extension, &mut files);
-    files.sort_by(|a, b| modified_time_or_epoch(b).cmp(&modified_time_or_epoch(a)));
-    files.truncate(limit);
-    files
-}
-
 fn load_claude_external_messages(
     path: &Path,
     options: &SearchOptions,
@@ -1126,7 +1103,7 @@ fn load_claude_external_messages(
                 .and_then(|v| v.as_str())
                 .unwrap_or(entry_type)
                 .to_string();
-            let text = extract_external_text(
+            let text = extract_external_text_from_json(
                 message.get("content").unwrap_or(&Value::Null),
                 options.include_tools,
             );
@@ -1136,7 +1113,7 @@ fn load_claude_external_messages(
             Some(ExternalMessageRecord {
                 role,
                 text,
-                timestamp: parse_timestamp_value(value.get("timestamp")),
+                timestamp: parse_rfc3339_json(value.get("timestamp")),
                 id: value
                     .get("uuid")
                     .and_then(|v| v.as_str())
@@ -1165,10 +1142,10 @@ fn load_codex_external_session(
     if session_id.is_empty() {
         return Ok(None);
     }
-    let created_at = parse_timestamp_value(meta.get("timestamp"))
-        .or_else(|| parse_timestamp_value(header.get("timestamp")))
+    let created_at = parse_rfc3339_json(meta.get("timestamp"))
+        .or_else(|| parse_rfc3339_json(header.get("timestamp")))
         .unwrap_or_else(Utc::now);
-    let mut updated_at = modified_datetime(path).unwrap_or(created_at);
+    let mut updated_at = file_modified_datetime(path).unwrap_or(created_at);
     let working_dir = meta.get("cwd").and_then(|v| v.as_str()).map(str::to_string);
     let mut messages = Vec::new();
     for line in lines.map_while(|line| line.ok()) {
@@ -1201,11 +1178,11 @@ fn load_codex_external_session(
         if role != "user" && role != "assistant" {
             continue;
         }
-        let text = extract_external_text(content_value, options.include_tools);
+        let text = extract_external_text_from_json(content_value, options.include_tools);
         if text.trim().is_empty() {
             continue;
         }
-        let timestamp = parse_timestamp_value(value.get("timestamp"));
+        let timestamp = parse_rfc3339_json(value.get("timestamp"));
         if let Some(ts) = timestamp {
             updated_at = updated_at.max(ts);
         }
@@ -1254,8 +1231,8 @@ fn load_pi_external_session(
     if session_id.is_empty() {
         return Ok(None);
     }
-    let created_at = parse_timestamp_value(header.get("timestamp")).unwrap_or_else(Utc::now);
-    let mut updated_at = modified_datetime(path).unwrap_or(created_at);
+    let created_at = parse_rfc3339_json(header.get("timestamp")).unwrap_or_else(Utc::now);
+    let mut updated_at = file_modified_datetime(path).unwrap_or(created_at);
     let working_dir = header
         .get("cwd")
         .and_then(|v| v.as_str())
@@ -1267,7 +1244,7 @@ fn load_pi_external_session(
         let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
-        if let Some(ts) = parse_timestamp_value(value.get("timestamp")) {
+        if let Some(ts) = parse_rfc3339_json(value.get("timestamp")) {
             updated_at = updated_at.max(ts);
         }
         match value.get("type").and_then(|v| v.as_str()) {
@@ -1294,7 +1271,7 @@ fn load_pi_external_session(
                 if role != "user" && role != "assistant" {
                     continue;
                 }
-                let text = extract_external_text(
+                let text = extract_external_text_from_json(
                     message.get("content").unwrap_or(&Value::Null),
                     options.include_tools,
                 );
@@ -1304,7 +1281,7 @@ fn load_pi_external_session(
                 messages.push(ExternalMessageRecord {
                     role: role.to_string(),
                     text,
-                    timestamp: parse_timestamp_value(value.get("timestamp")),
+                    timestamp: parse_rfc3339_json(value.get("timestamp")),
                     id: value.get("id").and_then(|v| v.as_str()).map(str::to_string),
                 });
             }
@@ -1349,7 +1326,7 @@ fn load_opencode_external_session(
         .and_then(|time| time.get("updated"))
         .and_then(|v| v.as_i64())
         .and_then(DateTime::<Utc>::from_timestamp_millis)
-        .or_else(|| modified_datetime(path))
+        .or_else(|| file_modified_datetime(path))
         .unwrap_or(created_at);
     let working_dir = value
         .get("directory")
@@ -1402,7 +1379,7 @@ fn load_opencode_external_session(
             let text = msg_value
                 .get("summary")
                 .or_else(|| msg_value.get("content"))
-                .map(|value| extract_external_text(value, options.include_tools))
+                .map(|value| extract_external_text_from_json(value, options.include_tools))
                 .unwrap_or_default();
             if text.trim().is_empty() {
                 continue;
@@ -1434,65 +1411,6 @@ fn load_opencode_external_session(
         path: path.to_path_buf(),
         messages,
     }))
-}
-
-fn extract_external_text(value: &Value, include_tools: bool) -> String {
-    fn visit(value: &Value, include_tools: bool, out: &mut Vec<String>) {
-        match value {
-            Value::String(text) => {
-                if !text.trim().is_empty() {
-                    out.push(text.trim().to_string());
-                }
-            }
-            Value::Array(items) => {
-                for item in items {
-                    visit(item, include_tools, out);
-                }
-            }
-            Value::Object(map) => {
-                let block_type = map.get("type").and_then(|v| v.as_str()).unwrap_or_default();
-                if !include_tools
-                    && matches!(block_type, "tool_use" | "tool_result" | "function_call")
-                {
-                    return;
-                }
-                if let Some(text) = map.get("text").and_then(|v| v.as_str()) {
-                    if !text.trim().is_empty() {
-                        out.push(text.trim().to_string());
-                    }
-                } else if include_tools
-                    && let Some(content) = map.get("content").and_then(|v| v.as_str())
-                    && !content.trim().is_empty()
-                {
-                    out.push(content.trim().to_string());
-                }
-                for (key, nested) in map {
-                    if matches!(key.as_str(), "type" | "text" | "content") {
-                        continue;
-                    }
-                    visit(nested, include_tools, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut out = Vec::new();
-    visit(value, include_tools, &mut out);
-    out.join("\n")
-}
-
-fn parse_timestamp_value(value: Option<&Value>) -> Option<DateTime<Utc>> {
-    value
-        .and_then(|v| v.as_str())
-        .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
-        .map(|dt| dt.with_timezone(&Utc))
-}
-
-fn modified_datetime(path: &Path) -> Option<DateTime<Utc>> {
-    std::fs::metadata(path)
-        .and_then(|meta| meta.modified())
-        .ok()
-        .map(DateTime::<Utc>::from)
 }
 
 fn append_session_results(
