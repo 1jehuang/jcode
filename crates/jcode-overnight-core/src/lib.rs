@@ -782,6 +782,231 @@ pub fn format_minutes(minutes: u32) -> String {
     }
 }
 
+pub fn build_progress_card_from_parts(
+    manifest: &OvernightManifest,
+    events: &[OvernightEvent],
+    preflight: Option<&OvernightPreflight>,
+    task_cards: &[OvernightTaskCard],
+    now: DateTime<Utc>,
+) -> OvernightProgressCard {
+    let target_minutes = manifest
+        .target_wake_at
+        .signed_duration_since(manifest.started_at)
+        .num_minutes()
+        .max(1) as u32;
+    let elapsed_minutes = now
+        .signed_duration_since(manifest.started_at)
+        .num_minutes()
+        .max(0) as u32;
+    let progress_percent = ((elapsed_minutes as f32 / target_minutes as f32) * 100.0).min(100.0);
+    let latest_event = events
+        .iter()
+        .rev()
+        .find(|event| event.meaningful)
+        .or_else(|| events.last());
+    let latest_resource = events
+        .iter()
+        .rev()
+        .find(|event| event.kind == "resource_sample")
+        .and_then(|event| serde_json::from_value::<ResourceSnapshot>(event.details.clone()).ok())
+        .or_else(|| preflight.map(|preflight| preflight.resources.clone()));
+    let resources_summary = latest_resource
+        .as_ref()
+        .map(resource_summary)
+        .unwrap_or_else(|| "resources pending".to_string());
+    let usage = preflight.map(|preflight| &preflight.usage);
+    let usage_projection = usage
+        .and_then(|usage| {
+            usage
+                .projected_end_min_percent
+                .zip(usage.projected_end_max_percent)
+        })
+        .map(|(min, max)| format!("projected {:.0}% to {:.0}%", min, max))
+        .unwrap_or_else(|| "projection pending".to_string());
+    let task_summary = summarize_task_cards_slice(task_cards);
+    let active_task_title = task_cards
+        .iter()
+        .rev()
+        .find(|card| matches!(task_status_bucket(&card.status), "active" | "blocked"))
+        .map(task_card_title)
+        .or_else(|| task_summary.latest_title.clone());
+
+    OvernightProgressCard {
+        run_id: manifest.run_id.clone(),
+        status: manifest.status.label().to_string(),
+        phase: overnight_phase(manifest, now).to_string(),
+        coordinator_session_id: manifest.coordinator_session_id.clone(),
+        coordinator_session_name: manifest.coordinator_session_name.clone(),
+        elapsed_label: format_minutes(elapsed_minutes),
+        target_duration_label: format_minutes(target_minutes),
+        progress_percent,
+        target_wake_at: manifest.target_wake_at.to_rfc3339(),
+        time_relation: time_relation_to_target(manifest, now),
+        last_activity_label: relative_time(manifest.last_activity_at, now),
+        next_prompt_label: next_prompt_label(manifest, now),
+        usage_risk: usage
+            .map(|usage| usage.risk.clone())
+            .unwrap_or_else(|| "pending".to_string()),
+        usage_confidence: usage
+            .map(|usage| usage.confidence.clone())
+            .unwrap_or_else(|| "pending".to_string()),
+        usage_projection,
+        resources_summary,
+        latest_event_kind: latest_event.map(|event| event.kind.clone()),
+        latest_event_summary: latest_event.map(|event| event.summary.clone()),
+        task_summary,
+        active_task_title,
+        review_path: manifest.review_path.display().to_string(),
+        log_path: manifest.human_log_path.display().to_string(),
+        run_dir: manifest.run_dir.display().to_string(),
+        completed_at: manifest.completed_at.map(|at| at.to_rfc3339()),
+    }
+}
+
+pub fn format_status_markdown_from_summary(
+    manifest: &OvernightManifest,
+    task_summary: &OvernightTaskCardSummary,
+    now: DateTime<Utc>,
+) -> String {
+    let remaining = manifest
+        .target_wake_at
+        .signed_duration_since(now)
+        .num_minutes();
+    let remaining_line = if remaining >= 0 {
+        format!("Target wake time in {}.", format_minutes(remaining as u32))
+    } else {
+        format!(
+            "Target wake time passed {} ago.",
+            format_minutes((-remaining) as u32)
+        )
+    };
+    format!(
+        "🌙 **Overnight run `{}`**\n\nStatus: **{}**\nCoordinator: `{}` ({})\n{}\nTask cards: **{} complete**, **{} active**, **{} blocked**, **{} deferred** ({} total, {} validated)\nPost-wake soft grace until: `{}`\nLast meaningful activity: {}\nReview: `{}`\nLog: `{}`",
+        manifest.run_id,
+        manifest.status.label(),
+        manifest.coordinator_session_id,
+        manifest.coordinator_session_name,
+        remaining_line,
+        task_summary.counts.completed,
+        task_summary.counts.active,
+        task_summary.counts.blocked,
+        task_summary.counts.deferred,
+        task_summary.total,
+        task_summary.validated,
+        manifest.post_wake_grace_until.to_rfc3339(),
+        manifest.last_activity_at.to_rfc3339(),
+        manifest.review_path.display(),
+        manifest.human_log_path.display()
+    )
+}
+
+pub fn format_log_markdown_from_events(
+    manifest: &OvernightManifest,
+    events: &[OvernightEvent],
+    max_lines: usize,
+) -> String {
+    let start = events.len().saturating_sub(max_lines);
+    let mut out = format!("🌙 **Overnight log `{}`**\n\n", manifest.run_id);
+    for event in &events[start..] {
+        out.push_str(&format!(
+            "- `{}` **{}**: {}\n",
+            event.timestamp.format("%H:%M:%S"),
+            event.kind,
+            event.summary
+        ));
+    }
+    if events.is_empty() {
+        out.push_str("No events recorded yet.\n");
+    }
+    out.push_str(&format!(
+        "\nFull log: `{}`",
+        manifest.human_log_path.display()
+    ));
+    out
+}
+
+fn overnight_phase(manifest: &OvernightManifest, now: DateTime<Utc>) -> &'static str {
+    match manifest.status {
+        OvernightRunStatus::Completed => "completed",
+        OvernightRunStatus::Failed => "failed",
+        OvernightRunStatus::CancelRequested => "cancelling",
+        OvernightRunStatus::Running => {
+            if now < manifest.handoff_ready_at {
+                "running"
+            } else if now < manifest.target_wake_at {
+                "wind-down"
+            } else if manifest.morning_report_posted_at.is_none() {
+                "morning report"
+            } else if now < manifest.post_wake_grace_until {
+                "post-wake"
+            } else {
+                "finalizing"
+            }
+        }
+    }
+}
+
+fn time_relation_to_target(manifest: &OvernightManifest, now: DateTime<Utc>) -> String {
+    let minutes = manifest
+        .target_wake_at
+        .signed_duration_since(now)
+        .num_minutes();
+    if minutes >= 0 {
+        format!("target in {}", format_minutes(minutes as u32))
+    } else {
+        format!("target passed {} ago", format_minutes((-minutes) as u32))
+    }
+}
+
+fn relative_time(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let minutes = now.signed_duration_since(then).num_minutes();
+    if minutes >= 0 {
+        format!("{} ago", format_minutes(minutes as u32))
+    } else {
+        format!("in {}", format_minutes((-minutes) as u32))
+    }
+}
+
+fn next_prompt_label(manifest: &OvernightManifest, now: DateTime<Utc>) -> String {
+    if !matches!(manifest.status, OvernightRunStatus::Running) {
+        return "none".to_string();
+    }
+    if now < manifest.handoff_ready_at {
+        return format!(
+            "handoff mode in {} or after current turn",
+            format_minutes(
+                manifest
+                    .handoff_ready_at
+                    .signed_duration_since(now)
+                    .num_minutes()
+                    .max(0) as u32
+            )
+        );
+    }
+    if now < manifest.target_wake_at {
+        return format!(
+            "morning report in {} or after current turn",
+            format_minutes(
+                manifest
+                    .target_wake_at
+                    .signed_duration_since(now)
+                    .num_minutes()
+                    .max(0) as u32
+            )
+        );
+    }
+    if manifest.morning_report_posted_at.is_none() {
+        return "morning report after current turn".to_string();
+    }
+    if now < manifest.post_wake_grace_until {
+        return format!(
+            "final wrap by {} or after current turn",
+            manifest.post_wake_grace_until.format("%H:%M UTC")
+        );
+    }
+    "final wrap after current turn".to_string()
+}
+
 pub fn build_coordinator_prompt(
     manifest: &OvernightManifest,
     preflight: &OvernightPreflight,
@@ -991,6 +1216,41 @@ mod helper_tests {
         }
     }
 
+    fn test_manifest(now: DateTime<Utc>) -> OvernightManifest {
+        let run_dir = PathBuf::from("/tmp/overnight-run");
+        OvernightManifest {
+            version: OVERNIGHT_VERSION,
+            run_id: "run-1".to_string(),
+            parent_session_id: "parent".to_string(),
+            coordinator_session_id: "coord".to_string(),
+            coordinator_session_name: "coordinator".to_string(),
+            started_at: now - chrono::Duration::minutes(60),
+            target_wake_at: now + chrono::Duration::minutes(60),
+            handoff_ready_at: now - chrono::Duration::minutes(10),
+            post_wake_grace_until: now + chrono::Duration::hours(2),
+            morning_report_posted_at: None,
+            completed_at: None,
+            cancel_requested_at: None,
+            status: OvernightRunStatus::Running,
+            mission: Some("verify <things>".to_string()),
+            working_dir: Some("/tmp/project".to_string()),
+            provider_name: "provider".to_string(),
+            model: "model".to_string(),
+            max_agents_guidance: 1,
+            process_id: 123,
+            run_dir: run_dir.clone(),
+            events_path: run_dir.join("events.jsonl"),
+            human_log_path: run_dir.join("run.log"),
+            review_path: run_dir.join("review.html"),
+            review_notes_path: run_dir.join("notes.md"),
+            preflight_path: run_dir.join("preflight.json"),
+            task_cards_dir: run_dir.join("task-cards"),
+            issue_drafts_dir: run_dir.join("issues"),
+            validation_dir: run_dir.join("validation"),
+            last_activity_at: now - chrono::Duration::minutes(5),
+        }
+    }
+
     #[test]
     fn summarizes_task_card_statuses_and_validation() {
         let mut completed = task_card("1", "Done", "validated");
@@ -1057,6 +1317,90 @@ mod helper_tests {
         assert_eq!(format_minutes(45), "45m");
         assert_eq!(format_minutes(120), "2h");
         assert_eq!(format_minutes(125), "2h 5m");
+    }
+
+    #[test]
+    fn progress_card_builder_uses_supplied_runtime_parts() {
+        let now = Utc::now();
+        let manifest = test_manifest(now);
+        let events = vec![OvernightEvent {
+            timestamp: now,
+            run_id: manifest.run_id.clone(),
+            session_id: Some(manifest.coordinator_session_id.clone()),
+            kind: "task_completed".to_string(),
+            summary: "finished setup".to_string(),
+            details: serde_json::json!({}),
+            meaningful: true,
+        }];
+        let preflight = OvernightPreflight {
+            captured_at: now,
+            usage: UsageProjection {
+                captured_at: now,
+                risk: "medium".to_string(),
+                confidence: "high".to_string(),
+                projected_delta_min_percent: None,
+                projected_delta_max_percent: None,
+                projected_end_min_percent: Some(70.0),
+                projected_end_max_percent: Some(80.0),
+                providers: Vec::new(),
+                notes: Vec::new(),
+            },
+            resources: ResourceSnapshot {
+                captured_at: now,
+                memory_used_percent: Some(42.0),
+                load_one: Some(1.5),
+                cpu_count: Some(8),
+                ..Default::default()
+            },
+            git: GitSnapshot {
+                captured_at: now,
+                branch: Some("master".to_string()),
+                dirty_count: Some(0),
+                dirty_summary: Vec::new(),
+                error: None,
+            },
+        };
+        let cards = vec![task_card("1", "Active task", "in progress")];
+
+        let card =
+            build_progress_card_from_parts(&manifest, &events, Some(&preflight), &cards, now);
+        assert_eq!(card.phase, "wind-down");
+        assert_eq!(card.progress_percent, 50.0);
+        assert_eq!(card.usage_risk, "medium");
+        assert_eq!(card.usage_projection, "projected 70% to 80%");
+        assert_eq!(
+            card.resources_summary,
+            "RAM 42%, load 1.5/8, battery unknown"
+        );
+        assert_eq!(card.latest_event_kind.as_deref(), Some("task_completed"));
+        assert_eq!(card.active_task_title.as_deref(), Some("Active task"));
+    }
+
+    #[test]
+    fn status_and_log_markdown_builders_are_stable() {
+        let now = Utc::now();
+        let manifest = test_manifest(now);
+        let summary = summarize_task_cards_slice(&[
+            task_card("1", "Done", "complete"),
+            task_card("2", "Blocked", "blocked"),
+        ]);
+        let status = format_status_markdown_from_summary(&manifest, &summary, now);
+        assert!(status.contains("Overnight run `run-1`"));
+        assert!(status.contains("Target wake time in 1h."));
+        assert!(status.contains("**1 complete**, **0 active**, **1 blocked**"));
+
+        let events = vec![OvernightEvent {
+            timestamp: now,
+            run_id: manifest.run_id.clone(),
+            session_id: None,
+            kind: "note".to_string(),
+            summary: "hello".to_string(),
+            details: serde_json::json!({}),
+            meaningful: false,
+        }];
+        let log = format_log_markdown_from_events(&manifest, &events, 30);
+        assert!(log.contains("**note**: hello"));
+        assert!(log.contains("Full log: `/tmp/overnight-run/run.log`"));
     }
 
     #[test]
