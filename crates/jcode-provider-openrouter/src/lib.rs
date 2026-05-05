@@ -41,6 +41,7 @@ pub fn known_providers() -> Vec<String> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub id: String,
+    #[serde(default)]
     pub name: String,
     pub context_length: Option<u64>,
     #[serde(default)]

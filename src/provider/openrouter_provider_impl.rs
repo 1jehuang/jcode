@@ -727,6 +727,15 @@ impl Provider for OpenRouterProvider {
             return merge_static_models(cache_entry.models.into_iter().map(|m| m.id).collect());
         }
 
+        // No memory or disk catalog yet. This commonly happens immediately after
+        // adding a new OpenAI-compatible endpoint from `/login`: the provider is
+        // hot-initialized, but the picker may render before the post-auth
+        // prefetch has completed. Make the picker path self-healing by starting
+        // the first `/models` fetch here, then return the best immediate
+        // fallback. The background refresh publishes ModelsUpdated, which
+        // invalidates/reopens the picker with the newly discovered models.
+        self.maybe_schedule_model_catalog_refresh(u64::MAX, "display cache miss");
+
         if !self.static_models.is_empty() {
             return with_current_model(self.static_models.clone());
         }

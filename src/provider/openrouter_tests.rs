@@ -63,6 +63,52 @@ fn test_has_credentials() {
 }
 
 #[test]
+fn openai_compatible_models_endpoint_allows_minimal_model_objects() {
+    #[derive(serde::Deserialize)]
+    struct ModelsResponse {
+        data: Vec<ModelInfo>,
+    }
+
+    let parsed: ModelsResponse = serde_json::from_str(
+        r#"{
+            "object": "list",
+            "data": [
+                {"id": "glm-51-nvfp4", "object": "model", "created": null, "owned_by": null},
+                {"id": "gte-qwen2-7b", "object": "model"}
+            ]
+        }"#,
+    )
+    .expect("minimal OpenAI-compatible /models response should parse");
+
+    assert_eq!(parsed.data.len(), 2);
+    assert_eq!(parsed.data[0].id, "glm-51-nvfp4");
+    assert_eq!(parsed.data[0].name, "");
+}
+
+#[test]
+fn named_openai_compatible_provider_sets_catalog_cache_namespace() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let _key = EnvVarGuard::set("TEST_NAMED_COMPAT_KEY", "test-key");
+
+    let profile = crate::config::NamedProviderConfig {
+        base_url: "https://llm.example.com/v1".to_string(),
+        api_key_env: Some("TEST_NAMED_COMPAT_KEY".to_string()),
+        model_catalog: true,
+        default_model: Some("example-model".to_string()),
+        ..Default::default()
+    };
+
+    let _provider = OpenRouterProvider::new_named_openai_compatible("example-compat", &profile)
+        .expect("named profile should initialize");
+
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE").as_deref(),
+        Ok("example-compat")
+    );
+}
+
+#[test]
 fn test_configured_api_base_accepts_https() {
     let _lock = ENV_LOCK.lock().unwrap();
     let prev = std::env::var("JCODE_OPENROUTER_API_BASE").ok();

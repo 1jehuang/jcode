@@ -510,6 +510,12 @@ impl OpenRouterProvider {
         profile_name: &str,
         profile: &crate::config::NamedProviderConfig,
     ) -> Result<Self> {
+        // The OpenRouter/OpenAI-compatible catalog cache helpers are currently
+        // process-env scoped. Named provider profiles are constructed directly
+        // in several CLI/TUI paths, so make sure their cache namespace is active
+        // before any model-cache reads/writes happen. Without this, a custom
+        // endpoint can accidentally display the default OpenRouter catalog.
+        crate::env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", profile_name);
         let api_base = normalize_api_base(&profile.base_url).ok_or_else(|| {
             anyhow::anyhow!("Provider profile '{}' has invalid base_url", profile_name)
         })?;
