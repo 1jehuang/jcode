@@ -2,6 +2,14 @@ use crate::storage;
 mod lifecycle;
 mod state_support;
 use chrono::{DateTime, NaiveDate, Utc};
+pub use jcode_usage_types::{ErrorCategory, SessionEndReason};
+use jcode_usage_types::{
+    TelemetryToolCategory as ToolCategory, TelemetryWorkflowCounts,
+    classify_telemetry_tool_category as classify_tool_category,
+    looks_like_telemetry_test_run as looks_like_test_run,
+    mcp_telemetry_server_name as mcp_server_name, sanitize_telemetry_label,
+    telemetry_workflow_flags_from_counts,
+};
 use lifecycle::emit_lifecycle_event;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -582,48 +590,6 @@ impl TurnTelemetry {
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "workflow flags are derived from collected per-turn and per-session counters"
-)]
-fn workflow_flags_from_counts(
-    had_user_prompt: bool,
-    file_write_calls: u32,
-    tests_run: u32,
-    tests_passed: u32,
-    feature_web_used: bool,
-    feature_background_used: bool,
-    feature_subagent_used: bool,
-    feature_swarm_used: bool,
-    tool_cat_write: u32,
-    tool_cat_web: u32,
-    tool_cat_subagent: u32,
-    tool_cat_swarm: u32,
-) -> (bool, bool, bool, bool, bool, bool, bool) {
-    let workflow_coding_used = file_write_calls > 0 || tool_cat_write > 0;
-    let workflow_research_used = feature_web_used || tool_cat_web > 0;
-    let workflow_tests_used = tests_run > 0 || tests_passed > 0;
-    let workflow_background_used = feature_background_used;
-    let workflow_subagent_used = feature_subagent_used || tool_cat_subagent > 0;
-    let workflow_swarm_used = feature_swarm_used || tool_cat_swarm > 0;
-    let workflow_chat_only = had_user_prompt
-        && !workflow_coding_used
-        && !workflow_research_used
-        && !workflow_tests_used
-        && !workflow_background_used
-        && !workflow_subagent_used
-        && !workflow_swarm_used;
-    (
-        workflow_chat_only,
-        workflow_coding_used,
-        workflow_research_used,
-        workflow_tests_used,
-        workflow_background_used,
-        workflow_subagent_used,
-        workflow_swarm_used,
-    )
-}
-
 #[derive(Debug, Clone, Default)]
 struct ProjectProfile {
     repo_present: bool,
@@ -651,48 +617,9 @@ impl ProjectProfile {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum ToolCategory {
-    ReadSearch,
-    Write,
-    Shell,
-    Web,
-    Memory,
-    Subagent,
-    Swarm,
-    Email,
-    SidePanel,
-    Goal,
-    Mcp,
-    Other,
-}
-
-#[derive(Debug, Clone, Copy)]
 enum DeliveryMode {
     Background,
     Blocking(Duration),
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum SessionEndReason {
-    NormalExit,
-    Panic,
-    Signal,
-    Disconnect,
-    Reload,
-    Unknown,
-}
-
-impl SessionEndReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            SessionEndReason::NormalExit => "normal_exit",
-            SessionEndReason::Panic => "panic",
-            SessionEndReason::Signal => "signal",
-            SessionEndReason::Disconnect => "disconnect",
-            SessionEndReason::Reload => "reload",
-            SessionEndReason::Unknown => "unknown",
-        }
-    }
 }
 
 pub fn is_enabled() -> bool {
@@ -923,30 +850,6 @@ fn detect_project_profile() -> ProjectProfile {
 
 fn now_ms_since(started_at: Instant) -> u64 {
     started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
-}
-
-fn classify_tool_category(name: &str) -> ToolCategory {
-    match name {
-        "read"
-        | "glob"
-        | "grep"
-        | "agentgrep"
-        | "ls"
-        | "conversation_search"
-        | "session_search" => ToolCategory::ReadSearch,
-        "write" | "edit" | "multiedit" | "patch" | "apply_patch" => ToolCategory::Write,
-        "bash" | "bg" | "schedule" => ToolCategory::Shell,
-        "webfetch" | "websearch" | "codesearch" | "open" => ToolCategory::Web,
-        "memory" => ToolCategory::Memory,
-        "subagent" => ToolCategory::Subagent,
-        "swarm" | "communicate" => ToolCategory::Swarm,
-        "gmail" => ToolCategory::Email,
-        "side_panel" => ToolCategory::SidePanel,
-        "goal" => ToolCategory::Goal,
-        "mcp" => ToolCategory::Mcp,
-        other if other.starts_with("mcp__") => ToolCategory::Mcp,
-        _ => ToolCategory::Other,
-    }
 }
 
 fn increment_tool_category(state: &mut SessionTelemetry, category: ToolCategory) {
@@ -1265,48 +1168,6 @@ pub fn record_command_family(command: &str) {
     maybe_emit_session_start();
 }
 
-fn looks_like_test_run(name: &str, input: &Value) -> bool {
-    let mut haystacks = Vec::new();
-    haystacks.push(name.to_ascii_lowercase());
-
-    if let Some(command) = input.get("command").and_then(Value::as_str) {
-        haystacks.push(command.to_ascii_lowercase());
-    }
-    if let Some(description) = input.get("description").and_then(Value::as_str) {
-        haystacks.push(description.to_ascii_lowercase());
-    }
-    if let Some(task) = input.get("task").and_then(Value::as_str) {
-        haystacks.push(task.to_ascii_lowercase());
-    }
-
-    haystacks.into_iter().any(|value| {
-        value.contains("cargo test")
-            || value.contains("npm test")
-            || value.contains("pnpm test")
-            || value.contains("pytest")
-            || value.contains("jest")
-            || value.contains("vitest")
-            || value.contains("go test")
-            || value.contains("rspec")
-            || value.contains("bun test")
-            || value.contains(" test")
-    })
-}
-
-fn mcp_server_name(name: &str, input: &Value) -> Option<String> {
-    if let Some(rest) = name.strip_prefix("mcp__") {
-        return rest.split("__").next().map(|value| value.to_string());
-    }
-    if name == "mcp" {
-        return input
-            .get("server")
-            .and_then(Value::as_str)
-            .map(sanitize_telemetry_label)
-            .filter(|value| !value.is_empty());
-    }
-    None
-}
-
 fn post_payload(payload: serde_json::Value, timeout: Duration) -> bool {
     let client = match reqwest::blocking::Client::builder()
         .timeout(timeout)
@@ -1361,30 +1222,6 @@ fn current_error_counts() -> ErrorCounts {
         mcp_error: ERROR_MCP_ERROR.load(Ordering::Relaxed),
         rate_limited: ERROR_RATE_LIMITED.load(Ordering::Relaxed),
     }
-}
-
-fn sanitize_telemetry_label(value: &str) -> String {
-    let mut cleaned = String::with_capacity(value.len());
-    let mut chars = value.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' {
-            if matches!(chars.peek(), Some('[')) {
-                let _ = chars.next();
-                for next in chars.by_ref() {
-                    if ('@'..='~').contains(&next) {
-                        break;
-                    }
-                }
-                continue;
-            }
-            continue;
-        }
-        if ch.is_control() {
-            continue;
-        }
-        cleaned.push(ch);
-    }
-    cleaned.trim().to_string()
 }
 
 fn has_any_errors(errors: &ErrorCounts) -> bool {
@@ -1463,28 +1300,27 @@ fn finalize_current_turn(
         || turn.file_write_calls > 0;
     let turn_abandoned =
         !turn_success && turn.tool_failures == 0 && turn.executed_tool_failures == 0;
-    let (
-        workflow_chat_only,
-        workflow_coding_used,
-        workflow_research_used,
-        workflow_tests_used,
-        workflow_background_used,
-        workflow_subagent_used,
-        workflow_swarm_used,
-    ) = workflow_flags_from_counts(
-        true,
-        turn.file_write_calls,
-        turn.tests_run,
-        turn.tests_passed,
-        turn.feature_web_used,
-        turn.feature_background_used,
-        turn.feature_subagent_used,
-        turn.feature_swarm_used,
-        turn.tool_cat_write,
-        turn.tool_cat_web,
-        turn.tool_cat_subagent,
-        turn.tool_cat_swarm,
-    );
+    let workflow_flags = telemetry_workflow_flags_from_counts(TelemetryWorkflowCounts {
+        had_user_prompt: true,
+        file_write_calls: turn.file_write_calls,
+        tests_run: turn.tests_run,
+        tests_passed: turn.tests_passed,
+        feature_web_used: turn.feature_web_used,
+        feature_background_used: turn.feature_background_used,
+        feature_subagent_used: turn.feature_subagent_used,
+        feature_swarm_used: turn.feature_swarm_used,
+        tool_cat_write: turn.tool_cat_write,
+        tool_cat_web: turn.tool_cat_web,
+        tool_cat_subagent: turn.tool_cat_subagent,
+        tool_cat_swarm: turn.tool_cat_swarm,
+    });
+    let workflow_chat_only = workflow_flags.chat_only;
+    let workflow_coding_used = workflow_flags.coding_used;
+    let workflow_research_used = workflow_flags.research_used;
+    let workflow_tests_used = workflow_flags.tests_used;
+    let workflow_background_used = workflow_flags.background_used;
+    let workflow_subagent_used = workflow_flags.subagent_used;
+    let workflow_swarm_used = workflow_flags.swarm_used;
     let (schema_version, build_channel, git_checkout, ci, from_cargo) = telemetry_envelope();
     let event = TurnEndEvent {
         event_id: new_event_id(),
@@ -2246,15 +2082,6 @@ pub fn current_provider_model() -> Option<(String, String)> {
             .as_ref()
             .map(|state| (state.provider_start.clone(), state.model_start.clone()))
     })
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum ErrorCategory {
-    ProviderTimeout,
-    AuthFailed,
-    ToolError,
-    McpError,
-    RateLimited,
 }
 
 fn show_first_run_notice() {
