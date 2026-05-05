@@ -733,9 +733,14 @@ struct SessionMessageSummary {
     // `/resume` only needs role/display/token metadata for the initial list.
     // Deserializing full message content here makes large sessions expensive to
     // show, and preview/search content is loaded lazily through the transcript
-    // paths when needed.
-    #[serde(default, skip_deserializing)]
-    content: serde_json::Value,
+    // paths when needed. We still retain the one content-derived bit needed to
+    // exclude internal system-reminder messages from visible counts.
+    #[serde(
+        default,
+        rename = "content",
+        deserialize_with = "deserialize_content_starts_with_system_reminder"
+    )]
+    content_starts_with_system_reminder: bool,
     #[serde(default)]
     display_role: Option<StoredDisplayRole>,
     #[serde(default)]
@@ -743,7 +748,17 @@ struct SessionMessageSummary {
 }
 
 fn summary_message_is_visible_conversation(message: &SessionMessageSummary) -> bool {
-    message.display_role.is_none() && !content_value_starts_with_system_reminder(&message.content)
+    message.display_role.is_none() && !message.content_starts_with_system_reminder
+}
+
+fn deserialize_content_starts_with_system_reminder<'de, D>(
+    deserializer: D,
+) -> std::result::Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(content_value_starts_with_system_reminder(&value))
 }
 
 #[derive(Deserialize)]
