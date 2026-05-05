@@ -14,7 +14,7 @@ pub use notifications::{FeatureToggle, NotificationType};
 
 use jcode_batch_types::BatchProgress;
 use jcode_message_types::{InputShellResult, ToolCall};
-use jcode_plan::PlanItem;
+use jcode_plan::{PlanItem, VersionedPlan, next_runnable_item_ids, summarize_plan_graph};
 use jcode_side_panel_types::{SidePanelSnapshot, snapshot_is_empty};
 
 #[path = "protocol_memory.rs"]
@@ -1288,6 +1288,46 @@ pub struct PlanGraphStatus {
     pub next_ready_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub newly_ready_ids: Vec<String>,
+}
+
+impl PlanGraphStatus {
+    pub fn empty_for_swarm(swarm_id: impl Into<String>) -> Self {
+        Self {
+            swarm_id: Some(swarm_id.into()),
+            version: 0,
+            item_count: 0,
+            ready_ids: Vec::new(),
+            blocked_ids: Vec::new(),
+            active_ids: Vec::new(),
+            completed_ids: Vec::new(),
+            cycle_ids: Vec::new(),
+            unresolved_dependency_ids: Vec::new(),
+            next_ready_ids: Vec::new(),
+            newly_ready_ids: Vec::new(),
+        }
+    }
+
+    pub fn from_versioned_plan(
+        swarm_id: impl Into<String>,
+        plan: &VersionedPlan,
+        next_ready_limit: Option<usize>,
+        newly_ready_ids: Vec<String>,
+    ) -> Self {
+        let graph = summarize_plan_graph(&plan.items);
+        Self {
+            swarm_id: Some(swarm_id.into()),
+            version: plan.version,
+            item_count: plan.items.len(),
+            ready_ids: graph.ready_ids,
+            blocked_ids: graph.blocked_ids,
+            active_ids: graph.active_ids,
+            completed_ids: graph.completed_ids,
+            cycle_ids: graph.cycle_ids,
+            unresolved_dependency_ids: graph.unresolved_dependency_ids,
+            next_ready_ids: next_runnable_item_ids(&plan.items, next_ready_limit),
+            newly_ready_ids,
+        }
+    }
 }
 
 /// Swarm member status for lifecycle updates

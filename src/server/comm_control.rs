@@ -87,34 +87,9 @@ async fn plan_graph_status_for(
     let plans = swarm_plans.read().await;
     let plan = plans.get(swarm_id);
     if let Some(plan) = plan {
-        let graph = crate::plan::summarize_plan_graph(&plan.items);
-        PlanGraphStatus {
-            swarm_id: Some(swarm_id.to_string()),
-            version: plan.version,
-            item_count: plan.items.len(),
-            ready_ids: graph.ready_ids,
-            blocked_ids: graph.blocked_ids,
-            active_ids: graph.active_ids,
-            completed_ids: graph.completed_ids,
-            cycle_ids: graph.cycle_ids,
-            unresolved_dependency_ids: graph.unresolved_dependency_ids,
-            next_ready_ids: next_runnable_item_ids(&plan.items, Some(8)),
-            newly_ready_ids: Vec::new(),
-        }
+        PlanGraphStatus::from_versioned_plan(swarm_id, plan, Some(8), Vec::new())
     } else {
-        PlanGraphStatus {
-            swarm_id: Some(swarm_id.to_string()),
-            version: 0,
-            item_count: 0,
-            ready_ids: Vec::new(),
-            blocked_ids: Vec::new(),
-            active_ids: Vec::new(),
-            completed_ids: Vec::new(),
-            cycle_ids: Vec::new(),
-            unresolved_dependency_ids: Vec::new(),
-            next_ready_ids: Vec::new(),
-            newly_ready_ids: Vec::new(),
-        }
+        PlanGraphStatus::empty_for_swarm(swarm_id)
     }
 }
 

@@ -3,7 +3,6 @@ use super::{
     broadcast_swarm_plan, persist_swarm_state_for, record_swarm_event,
 };
 use crate::agent::Agent;
-use crate::plan::{next_runnable_item_ids, summarize_plan_graph};
 use crate::protocol::{
     AgentStatusSnapshot, NotificationType, PlanGraphStatus, ServerEvent, SessionActivitySnapshot,
 };
@@ -338,34 +337,9 @@ pub(super) async fn handle_comm_plan_status(
         let plans = swarm_plans.read().await;
         let plan = plans.get(&swarm_id);
         if let Some(plan) = plan {
-            let graph = summarize_plan_graph(&plan.items);
-            PlanGraphStatus {
-                swarm_id: Some(swarm_id.clone()),
-                version: plan.version,
-                item_count: plan.items.len(),
-                ready_ids: graph.ready_ids,
-                blocked_ids: graph.blocked_ids,
-                active_ids: graph.active_ids,
-                completed_ids: graph.completed_ids,
-                cycle_ids: graph.cycle_ids,
-                unresolved_dependency_ids: graph.unresolved_dependency_ids,
-                next_ready_ids: next_runnable_item_ids(&plan.items, Some(8)),
-                newly_ready_ids: Vec::new(),
-            }
+            PlanGraphStatus::from_versioned_plan(swarm_id.clone(), plan, Some(8), Vec::new())
         } else {
-            PlanGraphStatus {
-                swarm_id: Some(swarm_id.clone()),
-                version: 0,
-                item_count: 0,
-                ready_ids: Vec::new(),
-                blocked_ids: Vec::new(),
-                active_ids: Vec::new(),
-                completed_ids: Vec::new(),
-                cycle_ids: Vec::new(),
-                unresolved_dependency_ids: Vec::new(),
-                next_ready_ids: Vec::new(),
-                newly_ready_ids: Vec::new(),
-            }
+            PlanGraphStatus::empty_for_swarm(swarm_id.clone())
         }
     };
 

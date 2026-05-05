@@ -2,7 +2,7 @@ use super::state::{MAX_EVENT_HISTORY, fanout_session_event};
 use super::{FileAccess, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan};
 use super::{persist_swarm_state_for, remove_persisted_swarm_state_for};
 use crate::agent::Agent;
-use crate::plan::{PlanItem, newly_ready_item_ids, next_runnable_item_ids, summarize_plan_graph};
+use crate::plan::{PlanItem, newly_ready_item_ids};
 use crate::protocol::{NotificationType, ServerEvent};
 use crate::session::Session;
 use anyhow::Result;
@@ -492,7 +492,6 @@ pub(super) async fn broadcast_swarm_plan_with_previous(
         let Some(vp) = plans.get(swarm_id) else {
             return;
         };
-        let graph_summary = summarize_plan_graph(&vp.items);
         let newly_ready_ids = previous_items
             .map(|before| newly_ready_item_ids(before, &vp.items))
             .unwrap_or_default();
@@ -501,19 +500,12 @@ pub(super) async fn broadcast_swarm_plan_with_previous(
         (
             vp.version,
             vp.items.clone(),
-            crate::protocol::PlanGraphStatus {
-                swarm_id: Some(swarm_id.to_string()),
-                version: vp.version,
-                item_count: vp.items.len(),
-                ready_ids: graph_summary.ready_ids.clone(),
-                blocked_ids: graph_summary.blocked_ids,
-                active_ids: graph_summary.active_ids,
-                completed_ids: graph_summary.completed_ids,
-                cycle_ids: graph_summary.cycle_ids,
-                unresolved_dependency_ids: graph_summary.unresolved_dependency_ids,
-                next_ready_ids: next_runnable_item_ids(&vp.items, Some(3)),
+            crate::protocol::PlanGraphStatus::from_versioned_plan(
+                swarm_id,
+                vp,
+                Some(3),
                 newly_ready_ids,
-            },
+            ),
             p,
         )
     };
