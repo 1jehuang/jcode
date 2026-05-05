@@ -1402,6 +1402,37 @@ impl Request {
             Request::CommAwaitMembers { id, .. } => *id,
         }
     }
+
+    pub fn is_lightweight_control_request(&self) -> bool {
+        matches!(
+            self,
+            Request::Ping { .. }
+                | Request::CommShare { .. }
+                | Request::CommRead { .. }
+                | Request::CommMessage { .. }
+                | Request::CommList { .. }
+                | Request::CommListChannels { .. }
+                | Request::CommChannelMembers { .. }
+                | Request::CommProposePlan { .. }
+                | Request::CommApprovePlan { .. }
+                | Request::CommRejectPlan { .. }
+                | Request::CommSpawn { .. }
+                | Request::CommStop { .. }
+                | Request::CommAssignRole { .. }
+                | Request::CommSummary { .. }
+                | Request::CommStatus { .. }
+                | Request::CommReport { .. }
+                | Request::CommPlanStatus { .. }
+                | Request::CommReadContext { .. }
+                | Request::CommResyncPlan { .. }
+                | Request::CommAssignTask { .. }
+                | Request::CommAssignNext { .. }
+                | Request::CommTaskControl { .. }
+                | Request::CommSubscribeChannel { .. }
+                | Request::CommUnsubscribeChannel { .. }
+                | Request::CommAwaitMembers { .. }
+        )
+    }
 }
 
 fn default_model_direction() -> i8 {

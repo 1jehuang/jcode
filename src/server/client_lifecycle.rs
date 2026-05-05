@@ -89,37 +89,6 @@ fn server_reload_starting() -> bool {
     )
 }
 
-fn is_lightweight_control_request(request: &Request) -> bool {
-    matches!(
-        request,
-        Request::Ping { .. }
-            | Request::CommShare { .. }
-            | Request::CommRead { .. }
-            | Request::CommMessage { .. }
-            | Request::CommList { .. }
-            | Request::CommListChannels { .. }
-            | Request::CommChannelMembers { .. }
-            | Request::CommProposePlan { .. }
-            | Request::CommApprovePlan { .. }
-            | Request::CommRejectPlan { .. }
-            | Request::CommSpawn { .. }
-            | Request::CommStop { .. }
-            | Request::CommAssignRole { .. }
-            | Request::CommSummary { .. }
-            | Request::CommStatus { .. }
-            | Request::CommReport { .. }
-            | Request::CommPlanStatus { .. }
-            | Request::CommReadContext { .. }
-            | Request::CommResyncPlan { .. }
-            | Request::CommAssignTask { .. }
-            | Request::CommAssignNext { .. }
-            | Request::CommTaskControl { .. }
-            | Request::CommSubscribeChannel { .. }
-            | Request::CommUnsubscribeChannel { .. }
-            | Request::CommAwaitMembers { .. }
-    )
-}
-
 async fn write_direct_event(
     writer: &Arc<Mutex<crate::transport::WriteHalf>>,
     event: &ServerEvent,
@@ -804,7 +773,7 @@ pub(super) async fn handle_client(
 
         match decode_request(&line) {
             Ok(request) => {
-                if is_lightweight_control_request(&request) {
+                if request.is_lightweight_control_request() {
                     handle_lightweight_control_request(
                         request,
                         Arc::clone(&writer),

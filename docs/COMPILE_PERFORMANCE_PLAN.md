@@ -414,6 +414,12 @@ Start with the highest-leverage cache boundaries:
 - Validation: `cargo test -p jcode-message-types dynamic_context --quiet`,
   `cargo check -p jcode-message-types --quiet`, and `cargo check -p jcode --quiet` pass.
 
+- 2026-05-05: moved the server lightweight-control request classifier from
+  `src/server/client_lifecycle.rs` into `jcode-protocol::Request::is_lightweight_control_request`.
+  This is a small but directionally important server seam: protocol-shape policy belongs with the
+  protocol contract, while the large client lifecycle module keeps runtime dispatch.
+- Validation: `cargo check -p jcode-protocol --quiet` and `cargo check -p jcode --quiet` pass.
+
 - 2026-03-30: moved the workspace-map subsystem into the new `crates/jcode-tui-workspace` crate.
 - Boundary decision: move **workspace map data/model + widget rendering** first, while keeping the surrounding
   `info_widget`, app state, and higher-level TUI composition in the main crate.
