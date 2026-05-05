@@ -4,4 +4,7 @@ __pycache__/
 ios_simulator_screenshot.png
 /.wrangler/
 /tmp/
+/.DS_Store
+/.jcode/*
+!/.jcode/generated-images/
 /.jcode/generated-images/
