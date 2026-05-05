@@ -462,6 +462,114 @@ pub fn html_escape(input: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+pub fn render_task_cards_html(cards: &[OvernightTaskCard]) -> String {
+    if cards.is_empty() {
+        return "<p class=\"meta\">No structured task cards have been written yet. The coordinator should create `task-cards/*.json` as meaningful tasks are selected.</p>".to_string();
+    }
+
+    let mut out = String::from("<div class=\"task-grid\">\n");
+    for card in cards.iter().rev() {
+        out.push_str("<article class=\"task-card\">\n");
+        out.push_str(&format!(
+            "<h3>{}</h3>\n<div class=\"meta\"><span class=\"status-pill\">{}</span>{}</div>\n",
+            html_escape(&task_card_title(card)),
+            html_escape(if card.status.trim().is_empty() {
+                "unknown"
+            } else {
+                card.status.trim()
+            }),
+            html_escape(&task_card_meta(card))
+        ));
+        push_optional_task_paragraph(&mut out, "Why selected", card.why_selected.as_deref());
+        push_optional_task_paragraph(&mut out, "Verifiability", card.verifiability.as_deref());
+        push_optional_task_paragraph(&mut out, "Before", card.before.problem.as_deref());
+        push_list(&mut out, "Before evidence", &card.before.evidence);
+        push_optional_task_paragraph(&mut out, "After", card.after.change.as_deref());
+        push_list(&mut out, "Files changed", &card.after.files_changed);
+        push_list(&mut out, "After evidence", &card.after.evidence);
+        push_list(&mut out, "Validation commands", &card.validation.commands);
+        push_optional_task_paragraph(
+            &mut out,
+            "Validation result",
+            card.validation.result.as_deref(),
+        );
+        push_list(&mut out, "Validation evidence", &card.validation.evidence);
+        push_optional_task_paragraph(&mut out, "Outcome", card.outcome.as_deref());
+        push_list(&mut out, "Followups", &card.followups);
+        out.push_str("</article>\n");
+    }
+    out.push_str("</div>");
+    out
+}
+
+pub fn task_card_meta(card: &OvernightTaskCard) -> String {
+    let mut parts = Vec::new();
+    if let Some(priority) = card
+        .priority
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(format!("priority: {}", priority.trim()));
+    }
+    if let Some(source) = card
+        .source
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(format!("source: {}", source.trim()));
+    }
+    if let Some(risk) = card
+        .risk
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(format!("risk: {}", risk.trim()));
+    }
+    if let Some(updated_at) = card
+        .updated_at
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(format!("updated: {}", updated_at.trim()));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", parts.join(" · "))
+    }
+}
+
+pub fn push_optional_task_paragraph(out: &mut String, label: &str, value: Option<&str>) {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    out.push_str(&format!(
+        "<p><strong>{}</strong>: {}</p>\n",
+        html_escape(label),
+        html_escape(value)
+    ));
+}
+
+pub fn push_list(out: &mut String, label: &str, values: &[String]) {
+    let values: Vec<&str> = values
+        .iter()
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect();
+    if values.is_empty() {
+        return;
+    }
+    out.push_str(&format!(
+        "<p><strong>{}</strong></p>\n<ul>\n",
+        html_escape(label)
+    ));
+    for value in values {
+        out.push_str(&format!("<li>{}</li>\n", html_escape(value)));
+    }
+    out.push_str("</ul>\n");
+}
+
 pub fn resource_summary(snapshot: &ResourceSnapshot) -> String {
     let memory = snapshot
         .memory_used_percent
