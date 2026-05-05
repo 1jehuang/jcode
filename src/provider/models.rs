@@ -1,4 +1,3 @@
-use super::{ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS};
 use crate::auth;
 use crate::provider::cursor;
 
@@ -12,7 +11,11 @@ pub use catalog::{
     AnthropicModelCatalog, OpenAIModelCatalog, fetch_anthropic_model_catalog,
     fetch_anthropic_model_catalog_oauth, fetch_openai_context_limits, fetch_openai_model_catalog,
 };
-use jcode_provider_core::{ModelRoute, shared_http_client};
+use jcode_provider_core::{
+    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, ModelCapabilities, ModelRoute,
+    context_limit_for_model_with_provider_and_cache, core_provider_for_model_with_hint,
+    provider_key_from_hint, shared_http_client,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -67,9 +70,6 @@ pub(crate) fn ensure_model_allowed_for_subscription(model: &str) -> Result<()> {
     }
     Ok(())
 }
-
-/// Default context window size when model-specific data isn't known.
-pub const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
 
 /// Dynamic cache of model context window sizes, populated from API at startup.
 static CONTEXT_LIMIT_CACHE: std::sync::LazyLock<RwLock<HashMap<String, usize>>> =
@@ -260,130 +260,6 @@ fn current_provider_runtime_scope_key(provider: &str) -> String {
         }
         _ => provider_runtime_scope_key(provider, None),
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelCapabilities {
-    pub provider: Option<String>,
-    pub context_window: Option<usize>,
-}
-
-fn provider_key_from_hint(provider_hint: Option<&str>) -> Option<&'static str> {
-    let normalized = normalize_provider_id(provider_hint?);
-    match normalized.as_str() {
-        "anthropic" | "claude" => Some("claude"),
-        "openai" => Some("openai"),
-        "openrouter" => Some("openrouter"),
-        "copilot" | "github copilot" => Some("copilot"),
-        "antigravity" => Some("antigravity"),
-        "gemini" | "google gemini" => Some("gemini"),
-        "cursor" => Some("cursor"),
-        _ => None,
-    }
-}
-
-fn model_id_for_capability_lookup(model: &str, provider: Option<&str>) -> (String, bool) {
-    let normalized = model.trim().to_ascii_lowercase();
-    let (base, is_1m) = if let Some(base) = normalized.strip_suffix("[1m]") {
-        (base.to_string(), true)
-    } else {
-        (normalized, false)
-    };
-
-    let lookup = if matches!(provider, Some("openrouter")) || base.contains('/') {
-        base.rsplit('/').next().unwrap_or(&base).to_string()
-    } else {
-        base
-    };
-
-    (lookup, is_1m)
-}
-
-fn copilot_context_limit_for_model(model: &str) -> usize {
-    match model {
-        "claude-sonnet-4" | "claude-sonnet-4-6" | "claude-sonnet-4.6" => 128_000,
-        "claude-opus-4-6" | "claude-opus-4.6" | "claude-opus-4.6-fast" => 200_000,
-        "claude-opus-4.5" | "claude-opus-4-5" => 200_000,
-        "claude-sonnet-4.5" | "claude-sonnet-4-5" => 200_000,
-        "claude-haiku-4.5" | "claude-haiku-4-5" => 200_000,
-        "gpt-4o" | "gpt-4o-mini" => 128_000,
-        m if m.starts_with("gpt-4o") => 128_000,
-        m if m.starts_with("gpt-4.1") => 128_000,
-        m if m.starts_with("gpt-5") => 128_000,
-        "o3-mini" | "o4-mini" => 128_000,
-        m if m.starts_with("gemini-2.0-flash") => 1_000_000,
-        m if m.starts_with("gemini-2.5") => 1_000_000,
-        m if m.starts_with("gemini-3") => 1_000_000,
-        _ => 128_000,
-    }
-}
-
-fn fallback_context_limit_for_model(model: &str, provider_hint: Option<&str>) -> Option<usize> {
-    let provider = provider_key_from_hint(provider_hint).or_else(|| provider_for_model(model));
-    let (model, is_1m) = model_id_for_capability_lookup(model, provider);
-    let model = model.as_str();
-
-    if matches!(provider, Some("copilot")) {
-        return Some(copilot_context_limit_for_model(model));
-    }
-
-    // Spark variant has a smaller context window than the full codex model
-    if model.starts_with("gpt-5.3-codex-spark") {
-        return Some(128_000);
-    }
-
-    if model.starts_with("gpt-5.2-chat")
-        || model.starts_with("gpt-5.1-chat")
-        || model.starts_with("gpt-5-chat")
-    {
-        return Some(128_000);
-    }
-
-    // GPT-5.4-family models should default to the long-context window.
-    // The live Codex OAuth catalog can still override this via the dynamic cache above.
-    if model.starts_with("gpt-5.4") {
-        return Some(1_000_000);
-    }
-
-    // Most GPT-5.x codex/reasoning models: 272k per Codex backend API
-    if model.starts_with("gpt-5") {
-        return Some(272_000);
-    }
-
-    if model.starts_with("claude-opus-4-6") || model.starts_with("claude-opus-4.6") {
-        let eff_1m = is_1m
-            || crate::provider::anthropic::effectively_1m(&format!(
-                "claude-opus-4-6{}",
-                if is_1m { "[1m]" } else { "" }
-            ));
-        return Some(if eff_1m { 1_048_576 } else { 200_000 });
-    }
-
-    if model.starts_with("claude-sonnet-4-6") || model.starts_with("claude-sonnet-4.6") {
-        let eff_1m = is_1m
-            || crate::provider::anthropic::effectively_1m(&format!(
-                "claude-sonnet-4-6{}",
-                if is_1m { "[1m]" } else { "" }
-            ));
-        return Some(if eff_1m { 1_048_576 } else { 200_000 });
-    }
-
-    if model.starts_with("claude-opus-4-5") || model.starts_with("claude-opus-4.5") {
-        return Some(200_000);
-    }
-
-    if let Some(limit) = get_cached_context_limit(model) {
-        return Some(limit);
-    }
-
-    if model.starts_with("gemini-2.0-flash")
-        || model.starts_with("gemini-2.5")
-        || model.starts_with("gemini-3")
-    {
-        return Some(1_000_000);
-    }
-
-    None
 }
 
 fn openai_static_model_ids() -> Vec<String> {
@@ -1195,7 +1071,7 @@ pub fn context_limit_for_model_with_provider(
     model: &str,
     provider_hint: Option<&str>,
 ) -> Option<usize> {
-    fallback_context_limit_for_model(model, provider_hint)
+    context_limit_for_model_with_provider_and_cache(model, provider_hint, get_cached_context_limit)
 }
 
 pub fn resolve_model_capabilities(model: &str, provider_hint: Option<&str>) -> ModelCapabilities {
@@ -1205,24 +1081,6 @@ pub fn resolve_model_capabilities(model: &str, provider_hint: Option<&str>) -> M
         provider,
         context_window,
     }
-}
-
-/// Normalize a Copilot-style model name to the canonical form used by our
-/// provider model lists. Copilot uses dots in version numbers (e.g.
-/// `claude-opus-4.6`) while our canonical lists use hyphens (`claude-opus-4-6`).
-/// Returns None if no normalization is needed (model already canonical or unknown).
-pub(crate) fn normalize_copilot_model_name(model: &str) -> Option<&'static str> {
-    for canonical in ALL_CLAUDE_MODELS.iter().chain(ALL_OPENAI_MODELS.iter()) {
-        if *canonical == model {
-            return None;
-        }
-    }
-    let normalized = model.replace('.', "-");
-    ALL_CLAUDE_MODELS
-        .iter()
-        .chain(ALL_OPENAI_MODELS.iter())
-        .find(|canonical| **canonical == normalized)
-        .copied()
 }
 
 /// Detect which provider a model belongs to
@@ -1249,6 +1107,8 @@ pub fn provider_for_model_with_hint(
         Some("openai")
     } else if model.starts_with("gemini-") {
         Some("gemini")
+    } else if let Some(provider) = core_provider_for_model_with_hint(model, None) {
+        Some(provider)
     } else if crate::provider::antigravity::is_known_model(model) {
         Some("antigravity")
     } else if cursor::is_known_model(model) {

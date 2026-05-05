@@ -360,6 +360,12 @@ Start with the highest-leverage cache boundaries:
 - 2026-05-05: moved provider-native tool result DTOs/sender aliases into `jcode-provider-core`.
   The global `Provider` trait no longer has to expose types owned by the root Claude module.
 - Validation: `cargo check -p jcode-provider-core --quiet` and `cargo check -p jcode --quiet` pass.
+- 2026-05-05: moved stable provider model constants, static provider/model classification,
+  Copilot model-name normalization, and fallback context-window heuristics into
+  `jcode-provider-core::models`. Root `src/provider/models.rs` now layers dynamic account catalogs,
+  runtime availability, and cache hydration on top of those core helpers.
+- Validation: `cargo test -p jcode-provider-core models:: --quiet`,
+  `cargo check -p jcode-provider-core --quiet`, and `cargo check -p jcode --quiet` pass.
 
 - 2026-05-05: moved the stable provider-facing `ToolDefinition` contract from `src/message.rs` into
   `jcode-message-types` and re-exported it from the root message facade. This is a prerequisite for

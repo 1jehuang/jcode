@@ -40,10 +40,12 @@ use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
 pub use jcode_provider_core::{
-    CHEAPNESS_REFERENCE_INPUT_TOKENS, CHEAPNESS_REFERENCE_OUTPUT_TOKENS,
+    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHEAPNESS_REFERENCE_INPUT_TOKENS,
+    CHEAPNESS_REFERENCE_OUTPUT_TOKENS, DEFAULT_CONTEXT_LIMIT, ModelCapabilities,
     ModelCatalogRefreshSummary, ModelRoute, NativeCompactionResult, NativeToolResult,
     NativeToolResultSender, PremiumMode, RouteBillingKind, RouteCheapnessEstimate,
-    RouteCostConfidence, RouteCostSource, shared_http_client, summarize_model_catalog_refresh,
+    RouteCostConfidence, RouteCostSource, normalize_copilot_model_name, shared_http_client,
+    summarize_model_catalog_refresh,
 };
 pub(crate) use jcode_provider_core::{ProviderFailoverPrompt, parse_failover_prompt_message};
 pub use route_builders::{
@@ -375,48 +377,10 @@ pub fn set_model_with_auth_refresh(provider: &dyn Provider, model: &str) -> Resu
     }
 }
 
-/// Available models (shown in /model list)
-pub const ALL_CLAUDE_MODELS: &[&str] = &[
-    "claude-opus-4-6",
-    "claude-opus-4-6[1m]",
-    "claude-sonnet-4-6",
-    "claude-sonnet-4-6[1m]",
-    "claude-haiku-4-5",
-    "claude-opus-4-5",
-    "claude-sonnet-4-5",
-    "claude-sonnet-4-20250514",
-];
-
-pub const ALL_OPENAI_MODELS: &[&str] = &[
-    "gpt-5.5",
-    "gpt-5.4",
-    "gpt-5.4-pro",
-    "gpt-5.3-codex",
-    "gpt-5.3-codex-spark",
-    "gpt-5.2-chat-latest",
-    "gpt-5.2-codex",
-    "gpt-5.2-pro",
-    "gpt-5.1-codex-mini",
-    "gpt-5.1-codex-max",
-    "gpt-5.2",
-    "gpt-5.1-chat-latest",
-    "gpt-5.1",
-    "gpt-5.1-codex",
-    "gpt-5-chat-latest",
-    "gpt-5-codex",
-    "gpt-5-codex-mini",
-    "gpt-5-pro",
-    "gpt-5-mini",
-    "gpt-5-nano",
-    "gpt-5",
-];
-
 use self::dispatch::CompletionMode;
-use self::models::normalize_copilot_model_name;
 pub use self::models::{
     AccountModelAvailability, AccountModelAvailabilityState, AnthropicModelCatalog,
-    DEFAULT_CONTEXT_LIMIT, ModelCapabilities, OpenAIModelCatalog,
-    begin_anthropic_model_catalog_refresh, begin_openai_model_catalog_refresh,
+    OpenAIModelCatalog, begin_anthropic_model_catalog_refresh, begin_openai_model_catalog_refresh,
     cached_anthropic_model_ids, cached_openai_model_ids,
     clear_all_model_unavailability_for_account, clear_all_provider_unavailability_for_account,
     clear_model_unavailable_for_account, clear_provider_unavailable_for_account,

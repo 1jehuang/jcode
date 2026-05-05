@@ -1,5 +1,6 @@
 pub mod catalog_refresh;
 pub mod failover;
+pub mod models;
 pub mod openai_schema;
 pub mod pricing;
 pub mod selection;
@@ -8,6 +9,13 @@ pub use catalog_refresh::{ModelCatalogRefreshSummary, summarize_model_catalog_re
 pub use failover::{
     FailoverDecision, ProviderFailoverPrompt, classify_failover_error_message,
     parse_failover_prompt_message,
+};
+pub use models::{
+    ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, DEFAULT_CONTEXT_LIMIT, ModelCapabilities,
+    context_limit_for_model, context_limit_for_model_with_provider,
+    context_limit_for_model_with_provider_and_cache, normalize_copilot_model_name,
+    provider_for_model as core_provider_for_model,
+    provider_for_model_with_hint as core_provider_for_model_with_hint, provider_key_from_hint,
 };
 pub use selection::{
     ActiveProvider, ProviderAvailability, auto_default_provider, fallback_sequence,
