@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::PathBuf;
 
-use crate::cli::args::ProviderAuthArg;
+use crate::cli::args::{NamedProviderTypeArg, ProviderAuthArg};
 use crate::config::{
     Config, NamedProviderAuth, NamedProviderConfig, NamedProviderModelConfig, NamedProviderType,
 };
@@ -24,6 +25,8 @@ pub(crate) struct ProviderAddOptions {
     pub no_api_key: bool,
     pub auth: Option<ProviderAuthArg>,
     pub auth_header: Option<String>,
+    pub custom_headers: Vec<String>,
+    pub provider_type: Option<NamedProviderTypeArg>,
     pub env_file: Option<String>,
     pub set_default: bool,
     pub overwrite: bool,
@@ -153,8 +156,14 @@ pub(crate) fn configure_provider_profile(
     }
     let api_key_stored = api_key.is_some() && env_file.is_some();
 
+    let custom_headers = parse_custom_header_args(&options.custom_headers)?;
+    let provider_type = match options.provider_type {
+        Some(NamedProviderTypeArg::OpenAiCompatible) | None => NamedProviderType::OpenAiCompatible,
+        Some(NamedProviderTypeArg::AnthropicCompatible) => NamedProviderType::AnthropicCompatible,
+    };
+
     let profile = NamedProviderConfig {
-        provider_type: NamedProviderType::OpenAiCompatible,
+        provider_type: provider_type.clone(),
         base_url: api_base.clone(),
         api: None,
         auth: auth.clone(),
@@ -175,6 +184,7 @@ pub(crate) fn configure_provider_profile(
         provider_routing: options.provider_routing,
         model_catalog: options.model_catalog,
         allow_provider_pinning: options.provider_routing,
+        headers: custom_headers,
         models: vec![NamedProviderModelConfig {
             id: model.clone(),
             context_window: options.context_window,
@@ -409,7 +419,10 @@ fn append_profile_section(
     }
 
     content.push_str(&format!("[providers.{name}]\n"));
-    content.push_str("type = \"openai-compatible\"\n");
+    content.push_str(&format!(
+        "type = {}\n",
+        toml_quote(provider_type_label(&profile.provider_type))
+    ));
     content.push_str(&format!("base_url = {}\n", toml_quote(&profile.base_url)));
     content.push_str(&format!(
         "auth = {}\n",
@@ -435,6 +448,13 @@ fn append_profile_section(
     }
     if profile.model_catalog {
         content.push_str("model_catalog = true\n");
+    }
+
+    if !profile.headers.is_empty() {
+        content.push_str(&format!("\n[providers.{name}.headers]\n"));
+        for (key, value) in &profile.headers {
+            content.push_str(&format!("{} = {}\n", toml_quote(key), toml_quote(value)));
+        }
     }
 
     for model in &profile.models {
@@ -537,10 +557,13 @@ fn is_named_provider_header(line: &str, name: &str) -> bool {
     let single_quoted = format!("providers.'{name}'");
     inner == plain
         || inner == format!("{plain}.models")
+        || inner == format!("{plain}.headers")
         || inner == double_quoted
         || inner == format!("{double_quoted}.models")
+        || inner == format!("{double_quoted}.headers")
         || inner == single_quoted
         || inner == format!("{single_quoted}.models")
+        || inner == format!("{single_quoted}.headers")
 }
 
 fn is_toml_header(line: &str) -> bool {
@@ -574,6 +597,52 @@ fn auth_label(auth: &NamedProviderAuth) -> &'static str {
         NamedProviderAuth::Header => "header",
         NamedProviderAuth::None => "none",
     }
+}
+
+fn provider_type_label(kind: &NamedProviderType) -> &'static str {
+    match kind {
+        NamedProviderType::OpenAiCompatible => "openai-compatible",
+        NamedProviderType::AnthropicCompatible => "anthropic-compatible",
+        NamedProviderType::OpenRouter => "open-router",
+    }
+}
+
+fn parse_custom_header_args(raw: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for item in raw {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (key, value) = trimmed
+            .split_once('=')
+            .or_else(|| trimmed.split_once(':'))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Invalid --header '{}': expected KEY=VALUE",
+                    trimmed
+                )
+            })?;
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty() {
+            anyhow::bail!("--header '{}' has empty name", trimmed);
+        }
+        if !key
+            .bytes()
+            .all(|b| b == b'-' || b == b'_' || b.is_ascii_alphanumeric())
+        {
+            anyhow::bail!(
+                "--header name '{}' must be ASCII letters/digits/'-'/'_' only",
+                key
+            );
+        }
+        if value.contains('\r') || value.contains('\n') {
+            anyhow::bail!("--header '{}' value must not contain CR/LF", key);
+        }
+        out.insert(key.to_string(), value.to_string());
+    }
+    Ok(out)
 }
 
 fn toml_quote(value: &str) -> String {
@@ -641,6 +710,8 @@ mod tests {
             no_api_key: false,
             auth: None,
             auth_header: None,
+            custom_headers: Vec::new(),
+            provider_type: None,
             env_file: None,
             set_default: true,
             overwrite: false,
@@ -722,5 +793,67 @@ mod tests {
         let config = std::fs::read_to_string(temp.path().join("config.toml")).expect("config");
         assert!(config.contains("auth = \"none\""));
         assert!(config.contains("requires_api_key = false"));
+    }
+
+    #[test]
+    fn parse_custom_header_args_accepts_kv_and_rejects_invalid() {
+        let parsed = parse_custom_header_args(&[
+            "X-Org=acme".to_string(),
+            "anthropic-beta:beta1,beta2".to_string(),
+            "  ".to_string(),
+        ])
+        .expect("parse");
+        assert_eq!(parsed.get("X-Org").map(String::as_str), Some("acme"));
+        assert_eq!(
+            parsed.get("anthropic-beta").map(String::as_str),
+            Some("beta1,beta2")
+        );
+
+        let err = parse_custom_header_args(&["bad header".to_string()])
+            .expect_err("missing separator");
+        assert!(err.to_string().contains("KEY=VALUE"));
+
+        let err = parse_custom_header_args(&["bad space=value".to_string()])
+            .expect_err("invalid name");
+        assert!(err.to_string().contains("ASCII"));
+
+        let err = parse_custom_header_args(&["x-bad=line\nbreak".to_string()])
+            .expect_err("crlf");
+        assert!(err.to_string().contains("CR/LF"));
+    }
+
+    #[test]
+    fn provider_add_writes_anthropic_compatible_type_with_custom_headers() {
+        let _lock = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+        let _key = EnvVarGuard::remove("JCODE_PROVIDER_MY_API_API_KEY");
+
+        let mut options = base_options();
+        options.provider_type = Some(crate::cli::args::NamedProviderTypeArg::AnthropicCompatible);
+        options.custom_headers = vec![
+            "anthropic-beta=beta1".to_string(),
+            "X-Org=acme".to_string(),
+        ];
+        configure_provider_profile(options).expect("configure provider");
+
+        let config_path = temp.path().join("config.toml");
+        let config = std::fs::read_to_string(&config_path).expect("config");
+        assert!(config.contains("type = \"anthropic-compatible\""));
+        assert!(config.contains("[providers.my-api.headers]"));
+        assert!(config.contains("\"anthropic-beta\" = \"beta1\""));
+        assert!(config.contains("\"X-Org\" = \"acme\""));
+
+        let parsed: Config = toml::from_str(&config).expect("valid config");
+        let profile = parsed.providers.get("my-api").expect("profile");
+        assert_eq!(
+            profile.provider_type,
+            NamedProviderType::AnthropicCompatible
+        );
+        assert_eq!(profile.headers.len(), 2);
+        assert_eq!(
+            profile.headers.get("anthropic-beta").map(String::as_str),
+            Some("beta1")
+        );
     }
 }

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Compaction mode
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -266,6 +267,8 @@ pub enum NamedProviderType {
     #[serde(alias = "openai-compatible", alias = "openai_compatible")]
     #[default]
     OpenAiCompatible,
+    #[serde(alias = "anthropic-compatible", alias = "anthropic_compatible")]
+    AnthropicCompatible,
     OpenRouter,
 }
 
@@ -315,6 +318,8 @@ pub struct NamedProviderConfig {
     pub model_catalog: bool,
     #[serde(default)]
     pub allow_provider_pinning: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<NamedProviderModelConfig>,
 }
@@ -335,6 +340,7 @@ impl Default for NamedProviderConfig {
             provider_routing: false,
             model_catalog: false,
             allow_provider_pinning: false,
+            headers: BTreeMap::new(),
             models: Vec::new(),
         }
     }
