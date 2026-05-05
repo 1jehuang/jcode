@@ -395,7 +395,9 @@ fn current_mode_for(app: &App, predicate: impl Fn(ImproveMode) -> bool) -> Optio
 fn persist_improve_mode_local(app: &mut App, mode: Option<ImproveMode>) {
     app.improve_mode = mode;
     app.session.improve_mode = mode.map(session_improve_mode_for);
-    let _ = app.session.save();
+    if let Err(e) = app.session.save() {
+        crate::logging::warn(&format!("Failed to save session: {}", e));
+    }
 }
 
 fn start_synthetic_user_turn(app: &mut App, content: String) {
@@ -408,7 +410,9 @@ fn start_synthetic_user_turn(app: &mut App, content: String) {
             cache_control: None,
         }],
     );
-    let _ = app.session.save();
+    if let Err(e) = app.session.save() {
+        crate::logging::warn(&format!("Failed to save session: {}", e));
+    }
 
     app.is_processing = true;
     app.status = ProcessingStatus::Sending;

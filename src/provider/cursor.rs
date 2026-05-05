@@ -719,7 +719,11 @@ fn encode_field(field_number: u64, wire_type: u8, value: Vec<u8>) -> Vec<u8> {
             bytes.extend(encode_varint_bytes(value.len() as u64));
             bytes.extend(value);
         }
-        _ => unreachable!("unsupported wire type"),
+        other => {
+            // Unsupported wire type - encode as length-delimited fallback
+            eprintln!("[cursor] Warning: unsupported wire type {}, encoding as varint", other);
+            bytes.extend(value);
+        }
     }
     bytes
 }

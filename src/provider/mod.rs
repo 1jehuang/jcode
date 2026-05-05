@@ -1079,17 +1079,17 @@ impl Provider for MultiProvider {
                 } else if let Some(claude) = self.claude_provider() {
                     claude.model()
                 } else {
-                    "claude-opus-4-5-20251101".to_string()
+                    super::provider::anthropic::DEFAULT_MODEL.to_string()
                 }
             }
             ActiveProvider::OpenAI => self
                 .openai_provider()
                 .map(|o| o.model())
-                .unwrap_or_else(|| "gpt-5.5".to_string()),
+                .unwrap_or_else(|| super::provider::openai::DEFAULT_MODEL.to_string()),
             ActiveProvider::Copilot => self
                 .copilot_provider()
                 .map(|o| o.model())
-                .unwrap_or_else(|| "claude-sonnet-4".to_string()),
+                .unwrap_or_else(|| super::provider::copilot::DEFAULT_MODEL.to_string()),
             ActiveProvider::Antigravity => self
                 .antigravity_provider()
                 .map(|o| o.model())
@@ -1097,7 +1097,7 @@ impl Provider for MultiProvider {
             ActiveProvider::Gemini => self
                 .gemini_provider()
                 .map(|o| o.model())
-                .unwrap_or_else(|| "gemini-2.5-pro".to_string()),
+                .unwrap_or_else(|| super::provider::gemini::DEFAULT_MODEL.to_string()),
             ActiveProvider::Cursor => self
                 .cursor_provider()
                 .map(|o| o.model())

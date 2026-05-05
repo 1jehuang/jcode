@@ -542,7 +542,9 @@ impl App {
                 crate::telemetry::SessionEndReason::NormalExit,
             );
             self.session.mark_closed();
-            let _ = self.session.save();
+            if let Err(e) = self.session.save() {
+                crate::logging::warn(&format!("Failed to save session: {}", e));
+            }
             self.should_quit = true;
             return true;
         }
@@ -704,7 +706,9 @@ impl App {
 
         if repaired > 0 {
             self.reseed_compaction_from_provider_messages();
-            let _ = self.session.save();
+            if let Err(e) = self.session.save() {
+                crate::logging::warn(&format!("Failed to save session: {}", e));
+            }
         }
 
         repaired
@@ -776,7 +780,9 @@ impl App {
             });
             let _ = self.session.add_message(role, kept_blocks);
         }
-        let _ = self.session.save();
+        if let Err(e) = self.session.save() {
+            crate::logging::warn(&format!("Failed to save session: {}", e));
+        }
 
         self.push_display_message(DisplayMessage::system(format!(
             "Recovery complete. New session: {}. Tool calls stripped; context preserved.",

@@ -72,6 +72,43 @@ impl Tool for WebFetchTool {
             return Err(anyhow::anyhow!("URL must start with http:// or https://"));
         }
 
+        // SSRF protection: block requests to internal/private network addresses
+        if let Ok(parsed) = url::Url::parse(&params.url) {
+            if let Some(host) = parsed.host_str() {
+                if host == "localhost"
+                    || host == "127.0.0.1"
+                    || host == "::1"
+                    || host == "0.0.0.0"
+                    || host.starts_with("169.254.")
+                    || host == "metadata.google.internal"
+                    || host == "instance-data"
+                {
+                    return Err(anyhow::anyhow!(
+                        "URL host '{}' is blocked (SSRF protection)", host
+                    ));
+                }
+                // Block private IP ranges
+                if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                    match ip {
+                        std::net::IpAddr::V4(v4) => {
+                            if v4.is_private() || v4.is_loopback() || v4.is_link_local() {
+                                return Err(anyhow::anyhow!(
+                                    "URL IP '{}' is in a private range (SSRF protection)", host
+                                ));
+                            }
+                        }
+                        std::net::IpAddr::V6(v6) => {
+                            if v6.is_loopback() {
+                                return Err(anyhow::anyhow!(
+                                    "URL IP '{}' is a loopback address (SSRF protection)", host
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let timeout = params.timeout.unwrap_or(DEFAULT_TIMEOUT).min(MAX_TIMEOUT);
         let format = params.format.as_deref().unwrap_or("markdown");
 

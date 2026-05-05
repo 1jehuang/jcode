@@ -208,9 +208,9 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_
 global-hotkey = "0.7"
 
 [profile.release]
-opt-level = 1
+opt-level = 2
 debug = 0
-codegen-units = 256
+codegen-units = 64
 incremental = true
 
 [profile.selfdev]

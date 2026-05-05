@@ -34,7 +34,9 @@ impl App {
         let active_model = self.provider.model();
         self.update_context_limit_for_model(&active_model);
         self.session.model = Some(active_model.clone());
-        let _ = self.session.save();
+        if let Err(e) = self.session.save() {
+            crate::logging::warn(&format!("Failed to save session: {}", e));
+        }
         Ok(active_model)
     }
 
@@ -179,7 +181,9 @@ impl App {
                 self.status_detail = None;
                 self.update_context_limit_for_model(&next_model);
                 self.session.model = Some(self.provider.model());
-                let _ = self.session.save();
+                if let Err(e) = self.session.save() {
+                    crate::logging::warn(&format!("Failed to save session: {}", e));
+                }
                 self.push_display_message(DisplayMessage::system(format!(
                     "✓ Switched to model: {}",
                     next_model
@@ -1045,7 +1049,9 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
                 let active_model = app.provider.model();
                 app.update_context_limit_for_model(&active_model);
                 app.session.model = Some(active_model.clone());
-                let _ = app.session.save();
+                if let Err(e) = app.session.save() {
+                    crate::logging::warn(&format!("Failed to save session: {}", e));
+                }
                 app.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content: format!("✓ Switched to model: {}", active_model),

@@ -177,7 +177,9 @@ pub(super) fn handle_bus_event(
             app.invalidate_model_picker_cache();
             app.update_context_limit_for_model(&model);
             app.session.model = Some(model.clone());
-            let _ = app.session.save();
+            if let Err(e) = app.session.save() {
+                crate::logging::warn(&format!("Failed to save session: {}", e));
+            }
             app.push_display_message(crate::tui::DisplayMessage::system(message));
             app.set_status_notice(format!("Model → {}", model));
             if open_picker {
@@ -275,7 +277,9 @@ fn handle_manual_tool_completed(app: &mut App, result: ManualToolCompleted) {
         }],
         Some(result.duration_ms),
     );
-    let _ = app.session.save();
+    if let Err(e) = app.session.save() {
+        crate::logging::warn(&format!("Failed to save session: {}", e));
+    }
 
     if result.tool_call.name == "subagent" {
         app.subagent_status = None;
@@ -347,7 +351,9 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
             }],
             Some(StoredDisplayRole::BackgroundTask),
         );
-        let _ = app.session.save();
+        if let Err(e) = app.session.save() {
+            crate::logging::warn(&format!("Failed to save session: {}", e));
+        }
 
         if task.wake {
             app.pending_turn = true;

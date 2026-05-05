@@ -203,7 +203,7 @@ pub(super) fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<
                 AuthMethod::OpenRouterApiKey => ("🔑", "API Key", rgb(140, 180, 255)),
                 AuthMethod::CopilotOAuth => ("🔐", "OAuth", rgb(110, 200, 140)),
                 AuthMethod::GeminiOAuth => ("🔐", "OAuth", rgb(120, 190, 255)),
-                AuthMethod::Unknown => unreachable!(),
+                AuthMethod::Unknown => ("❓", "Unknown", rgb(150, 150, 150)),
             };
             if !detail_spans.is_empty() {
                 detail_spans.push(Span::styled(" · ", Style::default().fg(rgb(80, 80, 90))));

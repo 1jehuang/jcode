@@ -200,12 +200,11 @@ fn is_retryable_error(error_str: &str) -> bool {
     crate::provider::is_transient_transport_error(error_str)
         || error_str.contains("stream error")
         || error_str.contains("eof")
-        || error_str.contains("5")
-            && (error_str.contains("50")
-                || error_str.contains("502")
-                || error_str.contains("503")
-                || error_str.contains("504")
-                || error_str.contains("internal server error"))
+        || error_str.contains("500")
+        || error_str.contains("502")
+        || error_str.contains("503")
+        || error_str.contains("504")
+        || error_str.contains("internal server error")
         || error_str.contains("overloaded")
 }
 
@@ -510,6 +509,19 @@ impl Stream for OpenRouterStream {
                 Poll::Ready(Some(Ok(bytes))) => {
                     if let Ok(text) = std::str::from_utf8(&bytes) {
                         self.buffer.push_str(text);
+                    }
+                    // Prevent unbounded buffer growth from malformed SSE streams
+                    const MAX_SSE_BUFFER_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+                    if self.buffer.len() > MAX_SSE_BUFFER_SIZE {
+                        if let Some(last_boundary) = self.buffer.rfind("\n\n") {
+                            let remaining = self.buffer[last_boundary + 2..].to_string();
+                            self.buffer = remaining;
+                        } else {
+                            return Poll::Ready(Some(Err(anyhow::anyhow!(
+                                "SSE buffer exceeded {} bytes without complete event boundary",
+                                MAX_SSE_BUFFER_SIZE
+                            ))));
+                        }
                     }
                 }
                 Poll::Ready(Some(Err(e))) => {

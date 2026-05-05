@@ -153,11 +153,16 @@ impl Logger {
         let date = Local::now().format("%Y-%m-%d");
         let path = log_dir.join(format!("jcode-{}.log", date));
 
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .ok()?;
+        let file = {
+            let mut opts = OpenOptions::new();
+            opts.create(true).append(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            opts.open(&path).ok()?
+        };
 
         Some(Self { file })
     }

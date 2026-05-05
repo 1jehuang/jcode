@@ -272,7 +272,9 @@ impl App {
                                                     tool_duration_ms: None,
                                                 });
                                                 self.session.add_message(Role::Assistant, content_clone);
-                                                let _ = self.session.save();
+                                                if let Err(e) = self.session.save() {
+                                                    crate::logging::warn(&format!("Failed to save session: {}", e));
+                                                }
                                             }
                                             // Flush buffer and show partial response
                                             if let Some(chunk) = self.stream_buffer.flush() {
@@ -825,7 +827,9 @@ impl App {
                     tool_duration_ms: None,
                 });
                 let message_id = self.session.add_message(Role::Assistant, content_clone);
-                let _ = self.session.save();
+                if let Err(e) = self.session.save() {
+                    crate::logging::warn(&format!("Failed to save session: {}", e));
+                }
                 for tc in &tool_calls {
                     self.tool_result_ids.insert(tc.id.clone());
                 }
@@ -892,7 +896,9 @@ impl App {
                         });
                         self.session.add_message(Role::User, blocks);
                     }
-                    let _ = self.session.save();
+                    if let Err(e) = self.session.save() {
+                        crate::logging::warn(&format!("Failed to save session: {}", e));
+                    }
                     crate::logging::info(
                         "Continuing turn so model can inspect generated image visual context",
                     );
@@ -1162,7 +1168,9 @@ impl App {
                     Some(tool_duration_ms),
                 );
                 self.observe_tool_result(&tc, &output, is_error, tool_title.as_deref());
-                let _ = self.session.save();
+                if let Err(e) = self.session.save() {
+                    crate::logging::warn(&format!("Failed to save session: {}", e));
+                }
             }
 
             if !generated_image_contexts.is_empty() {
@@ -1175,7 +1183,9 @@ impl App {
                     });
                     self.session.add_message(Role::User, blocks);
                 }
-                let _ = self.session.save();
+                if let Err(e) = self.session.save() {
+                    crate::logging::warn(&format!("Failed to save session: {}", e));
+                }
             }
         }
 

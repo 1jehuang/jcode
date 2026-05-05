@@ -86,7 +86,9 @@ fn start_visible_overnight_turn(app: &mut App, content: String) {
             cache_control: None,
         }],
     );
-    let _ = app.session.save();
+    if let Err(e) = app.session.save() {
+        crate::logging::warn(&format!("Failed to save session: {}", e));
+    }
 
     app.is_processing = true;
     app.status = ProcessingStatus::Sending;
