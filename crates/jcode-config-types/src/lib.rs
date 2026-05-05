@@ -721,6 +721,8 @@ pub struct SafetyConfig {
     pub discord_bot_user_id: Option<String>,
     /// Enable Discord reply → agent directive feature (default: false)
     pub discord_reply_enabled: bool,
+    /// Enforce a directory boundary for path resolution (default: false)
+    pub restrict_path_resolution: bool,
 }
 
 impl Default for SafetyConfig {
@@ -747,6 +749,7 @@ impl Default for SafetyConfig {
             discord_channel_id: None,
             discord_bot_user_id: None,
             discord_reply_enabled: false,
+            restrict_path_resolution: false,
         }
     }
 }

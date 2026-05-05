@@ -134,6 +134,7 @@ pub struct ToolContext {
     pub stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<StdinInputRequest>>,
     pub graceful_shutdown_signal: Option<InterruptSignal>,
     pub execution_mode: ToolExecutionMode,
+    pub restrict_path_resolution: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,17 +153,74 @@ impl ToolContext {
             stdin_request_tx: self.stdin_request_tx.clone(),
             graceful_shutdown_signal: self.graceful_shutdown_signal.clone(),
             execution_mode: self.execution_mode,
+            restrict_path_resolution: self.restrict_path_resolution,
         }
     }
 
     pub fn resolve_path(&self, path: &Path) -> PathBuf {
-        if path.is_absolute() {
+        let resolved = if path.is_absolute() {
             path.to_path_buf()
         } else if let Some(ref base) = self.working_dir {
             base.join(path)
         } else {
             path.to_path_buf()
+        };
+
+        if self.restrict_path_resolution {
+            if let Some(ref base) = self.working_dir {
+                // To securely resolve a path without relying on canonicalize (which fails
+                // if the file does not exist), we normalize the path components in memory.
+                let base_canon = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+                
+                // Normalizing paths (like path-clean) by resolving `..` components manually.
+                let mut resolved_components = Vec::new();
+                for component in resolved.components() {
+                    match component {
+                        std::path::Component::Prefix(p) => resolved_components.push(std::path::Component::Prefix(p)),
+                        std::path::Component::RootDir => resolved_components.push(std::path::Component::RootDir),
+                        std::path::Component::CurDir => {}
+                        std::path::Component::ParentDir => {
+                            let last = resolved_components.last().copied();
+                            match last {
+                                Some(std::path::Component::RootDir) | Some(std::path::Component::Prefix(_)) => {}
+                                Some(std::path::Component::Normal(_)) => {
+                                    resolved_components.pop();
+                                }
+                                _ => {
+                                    resolved_components.push(std::path::Component::ParentDir);
+                                }
+                            }
+                        }
+                        std::path::Component::Normal(c) => resolved_components.push(std::path::Component::Normal(c)),
+                    }
+                }
+                let resolved_clean: PathBuf = resolved_components.into_iter().collect();
+
+                // Canonicalization of cleaned path may still fail for non-existent files.
+                // However, our clean path prevents simple bypasses via literal '..' prefixes.
+                if !resolved_clean.starts_with(&base_canon) {
+                    crate::logging::warn(&format!(
+                        "Path resolution restricted: {:?} is outside {:?}",
+                        resolved, base
+                    ));
+                    return base.to_path_buf();
+                }
+
+                // Make sure we also check against `canonicalize` when the file does exist,
+                // to prevent symlink bypasses.
+                if let Ok(resolved_canon) = resolved.canonicalize() {
+                    if !resolved_canon.starts_with(&base_canon) {
+                        crate::logging::warn(&format!(
+                            "Path resolution restricted (via symlink): {:?} is outside {:?}",
+                            resolved, base
+                        ));
+                        return base.to_path_buf();
+                    }
+                }
+            }
         }
+
+        resolved
     }
 }
 

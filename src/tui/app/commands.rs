@@ -640,6 +640,7 @@ fn launch_manual_subagent(app: &mut App, spec: ManualSubagentSpec) {
             stdin_request_tx: None,
             graceful_shutdown_signal: None,
             execution_mode: crate::tool::ToolExecutionMode::Direct,
+            restrict_path_resolution: crate::config::config().safety.restrict_path_resolution,
         };
 
         let start = Instant::now();

@@ -84,6 +84,7 @@ async fn main() -> Result<()> {
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
+        restrict_path_resolution: false,
     };
 
     let mut cases = Vec::new();

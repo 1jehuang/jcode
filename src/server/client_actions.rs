@@ -366,6 +366,7 @@ pub(super) fn handle_run_subagent(
             stdin_request_tx: None,
             graceful_shutdown_signal: None,
             execution_mode: crate::tool::ToolExecutionMode::Direct,
+            restrict_path_resolution: crate::config::config().safety.restrict_path_resolution,
         };
 
         let started = Instant::now();

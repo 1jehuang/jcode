@@ -415,3 +415,45 @@ async fn test_request_permission_is_ambient_only() {
         "request_permission should be available after ambient tool registration"
     );
 }
+
+#[tokio::test]
+async fn test_resolve_path_restrict_path_resolution() {
+    let temp_dir = std::env::temp_dir();
+    let temp_dir_str = temp_dir.to_string_lossy().to_string();
+
+    let mut ctx = ToolContext {
+        session_id: "test".to_string(),
+        message_id: "test".to_string(),
+        tool_call_id: "test".to_string(),
+        working_dir: Some(temp_dir.clone()),
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: ToolExecutionMode::Direct,
+        restrict_path_resolution: true,
+    };
+
+    // 1. Valid path within working_dir
+    let valid_path = Path::new("valid.txt");
+    let resolved = ctx.resolve_path(valid_path);
+    assert_eq!(resolved, temp_dir.join("valid.txt"));
+
+    // 2. Absolute path outside working_dir (rejected/clamped)
+    let absolute_path = Path::new("/etc/malicious");
+    let resolved = ctx.resolve_path(absolute_path);
+    assert_eq!(resolved, temp_dir);
+
+    // 3. Relative path containing `..` that escapes working_dir (rejected/clamped)
+    let escape_path = Path::new("../malicious");
+    let resolved = ctx.resolve_path(escape_path);
+    assert_eq!(resolved, temp_dir);
+
+    // 4. Relative path containing `..` that escapes, directed at non-existent files
+    let non_existent_escape = Path::new("../../non_existent/malicious");
+    let resolved = ctx.resolve_path(non_existent_escape);
+    assert_eq!(resolved, temp_dir);
+    
+    // 5. Valid path using `..` but staying within working_dir
+    let valid_dots = Path::new("sub/../valid.txt");
+    let resolved = ctx.resolve_path(valid_dots);
+    assert_eq!(resolved, temp_dir.join("sub/../valid.txt"));
+}
