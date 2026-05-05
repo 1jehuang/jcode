@@ -375,7 +375,7 @@ fn test_hard_compact_preserves_recent_turns() {
     );
 }
 
-// ── safe_cutoff_static: tool call/result pair integrity ─────────
+// ── safe_compaction_cutoff: tool call/result pair integrity ─────────
 
 #[test]
 fn test_safe_cutoff_preserves_tool_pairs() {
@@ -408,7 +408,7 @@ fn test_safe_cutoff_preserves_tool_pairs() {
     ];
 
     // Try to cut between tool_use (index 1) and tool_result (index 2)
-    let cutoff = CompactionManager::safe_cutoff_static(&messages, 2);
+    let cutoff = safe_compaction_cutoff(&messages, 2);
     // Should move back to include the tool_use at index 1
     assert!(
         cutoff <= 1,
@@ -426,7 +426,7 @@ fn test_safe_cutoff_no_tool_pairs() {
         make_text_message(Role::Assistant, "fine"),
     ];
 
-    let cutoff = CompactionManager::safe_cutoff_static(&messages, 2);
+    let cutoff = safe_compaction_cutoff(&messages, 2);
     assert_eq!(cutoff, 2, "no tool pairs, cutoff should stay unchanged");
 }
 
@@ -474,7 +474,7 @@ fn test_safe_cutoff_handles_chained_tool_dependencies_without_rescan() {
         make_text_message(Role::Assistant, "done"),
     ];
 
-    let cutoff = CompactionManager::safe_cutoff_static(&messages, 3);
+    let cutoff = safe_compaction_cutoff(&messages, 3);
     assert_eq!(
         cutoff, 0,
         "cutoff should walk back through nested tool dependencies until the kept suffix is self-contained"
