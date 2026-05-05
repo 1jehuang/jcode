@@ -388,20 +388,38 @@ async fn run_native_text_command(
     }
 
     let tokens = cursor_auth::resolve_direct_tokens(&client).await?;
-    let session_id = cursor_auth::session_id_for_access_token(&tokens.access_token);
-    let request_id = Uuid::new_v4().to_string();
-    let config_version = Uuid::new_v4().to_string();
     let body = build_native_request_body(prompt, model);
 
-    run_native_text_command_via_curl(
-        tx,
+    let first_result = run_native_text_command_via_curl(
+        tx.clone(),
         &tokens.access_token,
-        &session_id,
-        &request_id,
-        &config_version,
-        body,
+        &cursor_auth::session_id_for_access_token(&tokens.access_token),
+        &Uuid::new_v4().to_string(),
+        &Uuid::new_v4().to_string(),
+        body.clone(),
     )
-    .await
+    .await;
+
+    match first_result {
+        Ok(()) => Ok(()),
+        Err(err) if cursor_auth::error_indicates_not_logged_in(&err) => {
+            let refreshed = cursor_auth::refresh_resolved_tokens(&client, &tokens)
+                .await
+                .with_context(|| {
+                    format!("Cursor token was rejected and refresh also failed after: {err:#}")
+                })?;
+            run_native_text_command_via_curl(
+                tx,
+                &refreshed.access_token,
+                &cursor_auth::session_id_for_access_token(&refreshed.access_token),
+                &Uuid::new_v4().to_string(),
+                &Uuid::new_v4().to_string(),
+                body,
+            )
+            .await
+        }
+        Err(err) => Err(err),
+    }
 }
 
 async fn run_native_text_command_via_curl(

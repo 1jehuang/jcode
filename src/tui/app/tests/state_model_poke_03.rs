@@ -543,6 +543,36 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
         "OpenRouter route should be visible, got:\n{}",
         text
     );
+    let kimi26_auto_row = text
+        .lines()
+        .find(|line| line.contains("moonshotai/kimi-k2.6") && line.contains("auto"))
+        .unwrap_or("");
+    let kimi26_provider_row = text
+        .lines()
+        .find(|line| line.contains("moonshotai/kimi-k2.6") && line.contains("MoonshotAI"))
+        .unwrap_or("");
+    assert!(
+        kimi26_auto_row.contains('★'),
+        "OpenRouter auto route should carry the recommended marker, got row `{}` in:\n{}",
+        kimi26_auto_row,
+        text
+    );
+    assert!(
+        !kimi26_provider_row.contains('★'),
+        "OpenRouter provider-specific routes should not carry the recommended marker, got row `{}` in:\n{}",
+        kimi26_provider_row,
+        text
+    );
+    let kimi25_row = text
+        .lines()
+        .find(|line| line.contains("moonshotai/kimi-k2.5"))
+        .unwrap_or("");
+    assert!(
+        !kimi25_row.contains('★'),
+        "Kimi K2.5 should no longer be recommended, got row `{}` in:\n{}",
+        kimi25_row,
+        text
+    );
     assert!(
         text.contains("openai/gpt-5.5") && text.contains("OpenRouter/OpenAI"),
         "OpenRouter endpoint routes should not look like native OpenAI API-key rows, got:\n{}",

@@ -216,20 +216,8 @@ fn picker_render_width(picker: &crate::tui::InlineInteractiveState, max_width: u
         }
     }
 
-    let provider_cap = if picker.kind == crate::tui::PickerKind::Model {
-        if is_preview { 24 } else { 32 }
-    } else if is_preview {
-        16
-    } else {
-        20
-    };
-    let via_cap = if picker.kind == crate::tui::PickerKind::Model {
-        16
-    } else {
-        12
-    };
-    let mut provider_width = (max_provider_len + 1).min(provider_cap);
-    let mut via_width = (max_via_len + 1).min(via_cap);
+    let mut provider_width = max_provider_len + 1;
+    let mut via_width = max_via_len + 1;
     let model_cap = if picker.kind == crate::tui::PickerKind::Model {
         max_width
     } else if is_preview {
@@ -378,9 +366,25 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
     let height = inner.height as usize;
     let width = inner.width as usize;
 
-    let provider_cap = if is_preview { 24 } else { 32 };
-    let provider_width = (max_provider_len + 1).max(8).min(provider_cap);
-    let via_width = (max_via_len + 1).clamp(6, 16);
+    let mut provider_width = (max_provider_len + 1).max(8);
+    let mut via_width = (max_via_len + 1).max(6);
+    if !is_account_picker {
+        let min_model_width = 8usize;
+        let needed = marker_width + provider_width + via_width + min_model_width;
+        if needed > width {
+            let provider_floor = 8usize.min(provider_width);
+            let via_floor = 6usize.min(via_width);
+            let provider_reduction = needed
+                .saturating_sub(width)
+                .min(provider_width.saturating_sub(provider_floor));
+            provider_width = provider_width.saturating_sub(provider_reduction);
+            let still_needed = marker_width + provider_width + via_width + min_model_width;
+            let via_reduction = still_needed
+                .saturating_sub(width)
+                .min(via_width.saturating_sub(via_floor));
+            via_width = via_width.saturating_sub(via_reduction);
+        }
+    }
     let account_state_width = (max_account_state_len + 1).clamp(7, 10);
     let account_title_width = width.saturating_sub(marker_width + account_state_width);
     let model_width = width.saturating_sub(marker_width + provider_width + via_width);

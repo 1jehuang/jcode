@@ -424,6 +424,22 @@ impl Provider for LoginSmokeModelProvider {
                 detail: String::new(),
                 cheapness: None,
             },
+            crate::provider::ModelRoute {
+                model: "moonshotai/kimi-k2.6".to_string(),
+                provider: "MoonshotAI".to_string(),
+                api_method: "openrouter".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "moonshotai/kimi-k2.5".to_string(),
+                provider: "auto".to_string(),
+                api_method: "openrouter".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            },
         ]
     }
 

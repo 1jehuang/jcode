@@ -51,7 +51,7 @@ pub struct CursorDirectTokens {
     pub source: &'static str,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CursorAuthFileData {
     access_token: Option<String>,
@@ -63,6 +63,8 @@ struct CursorRefreshResponse {
     access_token: String,
     #[serde(default)]
     refresh_token: Option<String>,
+    #[serde(default)]
+    should_logout: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -472,6 +474,51 @@ pub async fn resolve_direct_tokens(client: &Client) -> Result<CursorDirectTokens
     })
 }
 
+/// Force-refresh a resolved Cursor token set, preserving the original source label.
+pub async fn refresh_resolved_tokens(
+    client: &Client,
+    tokens: &CursorDirectTokens,
+) -> Result<CursorDirectTokens> {
+    let refresh_token = tokens
+        .refresh_token
+        .as_deref()
+        .context("Cursor token was rejected and no refresh token is available")?;
+    let mut refreshed = refresh_direct_access_token(client, refresh_token).await?;
+    refreshed.source = tokens.source;
+    if tokens.source == "cursor_auth_file" {
+        let _ = save_auth_file_tokens(&refreshed);
+    }
+    Ok(refreshed)
+}
+
+fn save_auth_file_tokens(tokens: &CursorDirectTokens) -> Result<()> {
+    let file_path = cursor_auth_file_path()?;
+    if !file_path.exists()
+        || !crate::config::Config::external_auth_source_allowed_for_path(
+            CURSOR_AUTH_FILE_SOURCE_ID,
+            &file_path,
+        )
+    {
+        return Ok(());
+    }
+    let data = CursorAuthFileData {
+        access_token: Some(tokens.access_token.clone()),
+        refresh_token: tokens.refresh_token.clone(),
+    };
+    let serialized = serde_json::to_string_pretty(&data)?;
+    std::fs::write(&file_path, format!("{}\n", serialized))
+        .with_context(|| format!("Failed to update {}", file_path.display()))?;
+    Ok(())
+}
+
+pub fn error_indicates_not_logged_in(err: &anyhow::Error) -> bool {
+    let text = format!("{err:#}").to_ascii_lowercase();
+    text.contains("error_not_logged_in")
+        || text.contains("unauthenticated")
+        || text.contains("actionrequired\":\"login")
+        || text.contains("action required: login")
+}
+
 /// Build the `x-client-key` header expected by Cursor's native API.
 pub fn client_key_for_access_token(access_token: &str) -> String {
     sha256_hex(access_token)
@@ -522,6 +569,11 @@ async fn refresh_direct_access_token(
             .json()
             .await
             .context("Failed to decode Cursor token refresh response")?;
+        if parsed.should_logout || parsed.access_token.trim().is_empty() {
+            anyhow::bail!(
+                "Cursor refresh token was rejected; Cursor requested logout/login. Re-run Cursor login, then retry auth-test."
+            );
+        }
         Ok(CursorDirectTokens {
             access_token: parsed.access_token,
             refresh_token: parsed

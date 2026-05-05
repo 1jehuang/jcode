@@ -573,12 +573,7 @@ impl App {
             )
         }
 
-        const RECOMMENDED_MODELS: &[&str] = &[
-            "gpt-5.5",
-            "claude-opus-4-7",
-            "moonshotai/kimi-k2.6",
-            "moonshotai/kimi-k2.5",
-        ];
+        const RECOMMENDED_MODELS: &[&str] = &["gpt-5.5", "claude-opus-4-7", "moonshotai/kimi-k2.6"];
 
         const CLAUDE_OAUTH_ONLY_MODELS: &[&str] = &["claude-opus-4-7"];
 
@@ -591,6 +586,13 @@ impl App {
                 .iter()
                 .position(|model| *model == name)
                 .unwrap_or(usize::MAX)
+        }
+
+        fn route_can_be_recommended(route: &PickerOption) -> bool {
+            matches!(
+                route.api_method.as_str(),
+                "claude-oauth" | "openai-oauth" | "openai-api-key" | "copilot"
+            ) || (route.api_method == "openrouter" && route.provider == "auto")
         }
 
         let timestamp_started = std::time::Instant::now();
@@ -683,11 +685,7 @@ impl App {
                                 && (!(CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
                                     || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str())
                                     || COPILOT_OAUTH_MODELS.contains(&name.as_str()))
-                                    || ((route.api_method == "claude-oauth"
-                                        || route.api_method == "openai-oauth"
-                                        || route.api_method == "openai-api-key"
-                                        || route.api_method == "copilot")
-                                        && route.available)),
+                                    || (route_can_be_recommended(route) && route.available)),
                             recommendation_rank: recommendation_rank(name, RECOMMENDED_MODELS),
                             old: old_threshold_secs > 0
                                 && or_created.map(|t| t < old_threshold_secs).unwrap_or(false),
@@ -706,11 +704,7 @@ impl App {
                         && (!(CLAUDE_OAUTH_ONLY_MODELS.contains(&name.as_str())
                             || OPENAI_OAUTH_ONLY_MODELS.contains(&name.as_str())
                             || COPILOT_OAUTH_MODELS.contains(&name.as_str()))
-                            || ((route.api_method == "claude-oauth"
-                                || route.api_method == "openai-oauth"
-                                || route.api_method == "openai-api-key"
-                                || route.api_method == "copilot")
-                                && route.available));
+                            || (route_can_be_recommended(&route) && route.available));
                     entries.push(PickerEntry {
                         name: name.clone(),
                         options: vec![route],
