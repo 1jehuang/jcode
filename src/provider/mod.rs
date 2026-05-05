@@ -33,6 +33,7 @@ use async_trait::async_trait;
 #[cfg(test)]
 use jcode_provider_core::FailoverDecision;
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
 pub use jcode_provider_core::{
@@ -128,6 +129,20 @@ impl MultiProvider {
     #[cfg(test)]
     fn same_provider_account_candidates(provider: ActiveProvider) -> Vec<String> {
         account_failover::same_provider_account_candidates(provider)
+    }
+
+    fn dedupe_model_routes(routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
+        let mut seen = HashSet::new();
+        routes
+            .into_iter()
+            .filter(|route| {
+                seen.insert((
+                    route.provider.clone(),
+                    route.api_method.clone(),
+                    route.model.clone(),
+                ))
+            })
+            .collect()
     }
 
     async fn complete_with_failover(
@@ -1145,7 +1160,7 @@ impl Provider for MultiProvider {
             ));
         }
 
-        routes
+        Self::dedupe_model_routes(routes)
     }
 
     async fn prefetch_models(&self) -> Result<()> {
