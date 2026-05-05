@@ -385,11 +385,6 @@ fn map_transcript_mode(mode: TranscriptModeArg) -> crate::protocol::TranscriptMo
 }
 
 async fn run_default_command(args: Args) -> Result<()> {
-    // `Args::standalone` remains temporarily deprecated for compatibility while
-    // we continue surfacing the migration warning and behavior below.
-    #[allow(deprecated)]
-    let standalone = args.standalone;
-
     startup_profile::mark("run_main_none_branch");
 
     let explicit_provider_or_model = args.provider != ProviderChoice::Auto
@@ -419,7 +414,7 @@ async fn run_default_command(args: Args) -> Result<()> {
     startup_profile::mark("is_jcode_repo");
     let already_in_selfdev = crate::cli::selfdev::client_selfdev_requested();
 
-    if in_jcode_repo && !already_in_selfdev && !standalone && !args.no_selfdev {
+    if in_jcode_repo && !already_in_selfdev && !args.no_selfdev {
         output::stderr_info("📍 Detected jcode repository - enabling self-dev mode");
         output::stderr_info("   Using shared server with self-dev session mode");
         output::stderr_info("   (use --no-selfdev to disable auto-detection)");
@@ -427,27 +422,6 @@ async fn run_default_command(args: Args) -> Result<()> {
 
         crate::env::set_var(selfdev::CLIENT_SELFDEV_ENV, "1");
         crate::process_title::set_initial_title(&args);
-    }
-
-    if standalone {
-        output::stderr_info(
-            "\x1b[33m⚠️  Warning: --standalone is deprecated and will be removed in a future version.\x1b[0m",
-        );
-        output::stderr_info(
-            "\x1b[33m   The default server/client mode now handles all use cases including self-dev.\x1b[0m\n",
-        );
-        let (provider, registry) =
-            provider_init::init_provider_and_registry(&args.provider, args.model.as_deref())
-                .await?;
-        tui_launch::run_tui(
-            provider,
-            registry,
-            args.resume,
-            args.debug_socket,
-            startup_hints,
-        )
-        .await?;
-        return Ok(());
     }
 
     startup_profile::mark("client_mode_start");

@@ -63,14 +63,6 @@ pub(crate) struct Args {
     #[arg(long, global = true, hide = true)]
     pub(crate) fresh_spawn: bool,
 
-    /// DEPRECATED: Run standalone TUI without connecting to server.
-    /// The default mode is now always client/server (even for self-dev).
-    /// Standalone mode is missing features like graceful cancel with partial
-    /// content preservation on the server side. Will be removed in a future version.
-    #[arg(long, global = true, hide = true)]
-    #[deprecated = "Use default client/server mode instead"]
-    pub(crate) standalone: bool,
-
     /// Disable auto-detection of jcode repository and self-dev mode
     #[arg(long, global = true)]
     pub(crate) no_selfdev: bool,
