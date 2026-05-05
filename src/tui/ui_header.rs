@@ -220,6 +220,48 @@ pub(super) fn build_auth_status_line(auth: &AuthStatus, max_width: usize) -> Lin
     Line::from(spans)
 }
 
+fn header_provider_auth_tag(name: &str, auth: &AuthStatus) -> &'static str {
+    match name {
+        "anthropic" => {
+            if auth.anthropic.has_oauth {
+                "oauth"
+            } else if std::env::var("ANTHROPIC_API_KEY").is_ok() || auth.anthropic.has_api_key {
+                "api-key"
+            } else {
+                ""
+            }
+        }
+        "openai" => {
+            if auth.openai_has_oauth {
+                "oauth"
+            } else if auth.openai_has_api_key {
+                "api-key"
+            } else {
+                ""
+            }
+        }
+        "copilot" => {
+            if auth.copilot_has_api_token {
+                "oauth"
+            } else {
+                ""
+            }
+        }
+        "openrouter" | "openai-compatible" => "api-key",
+        other
+            if crate::provider_catalog::resolve_openai_compatible_profile_selection(other)
+                .is_some()
+                || crate::provider_catalog::openai_compatible_profile_id_for_display_name(
+                    other,
+                )
+                .is_some() =>
+        {
+            "api-key"
+        }
+        _ => "",
+    }
+}
+
 fn abbreviate_home(path: &str) -> String {
     if let Some(home) = dirs::home_dir() {
         let home_str = home.display().to_string();
@@ -461,45 +503,7 @@ pub(crate) fn build_header_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'st
             String::new()
         } else {
             let name = trimmed.to_lowercase();
-            let auth_tag = match name.as_str() {
-                "anthropic" => {
-                    if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-                        "api-key"
-                    } else if auth.anthropic.has_oauth {
-                        "oauth"
-                    } else {
-                        ""
-                    }
-                }
-                "openai" => {
-                    if auth.openai_has_api_key {
-                        "api-key"
-                    } else if auth.openai_has_oauth {
-                        "oauth"
-                    } else {
-                        ""
-                    }
-                }
-                "copilot" => {
-                    if auth.copilot_has_api_token {
-                        "oauth"
-                    } else {
-                        ""
-                    }
-                }
-                "openrouter" | "openai-compatible" => "api-key",
-                other
-                    if crate::provider_catalog::resolve_openai_compatible_profile_selection(other)
-                        .is_some()
-                        || crate::provider_catalog::openai_compatible_profile_id_for_display_name(
-                            other,
-                        )
-                        .is_some() =>
-                {
-                    "api-key"
-                }
-                _ => "",
-            };
+            let auth_tag = header_provider_auth_tag(&name, &auth);
             if auth_tag.is_empty() {
                 name
             } else {
@@ -828,6 +832,18 @@ mod tests {
         };
 
         assert_eq!(configured_auth_count(&auth), 4);
+    }
+
+    #[test]
+    fn header_provider_auth_tag_prefers_openai_oauth_over_api_key() {
+        let auth = AuthStatus {
+            openai: AuthState::Available,
+            openai_has_oauth: true,
+            openai_has_api_key: true,
+            ..AuthStatus::default()
+        };
+
+        assert_eq!(header_provider_auth_tag("openai", &auth), "oauth");
     }
 
     #[test]
