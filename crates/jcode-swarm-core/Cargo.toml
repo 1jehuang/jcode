@@ -6,3 +6,4 @@ publish = false
 
 [dependencies]
 jcode-plan = { path = "../jcode-plan" }
+serde = { version = "1", features = ["derive"] }
