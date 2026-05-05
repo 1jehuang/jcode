@@ -1,0 +1,104 @@
+{
+  "canceled_at": "2026-05-04T20:24:24Z",
+  "consecutive_transient_failures": 0,
+  "cycle_number": 2,
+  "last_cycle": {
+    "actionable_count": 2,
+    "completed_at": "2026-05-04T20:14:48Z",
+    "status": "actionable_locally_fixed_waiting_for_write_approval",
+    "surfaces_checked": [
+      "review_threads",
+      "review_comments",
+      "issue_comments",
+      "reviews",
+      "timeline"
+    ],
+    "unresolved_thread_count": 2,
+    "verification": [
+      "cd /tmp/move-in-out-inpect-app-pr25/mobile && npm test -- --run src/screens/CreateInspectionScreen.test.tsx src/state/propertyUnitCatalog.test.ts (17 passed)",
+      "cd /tmp/move-in-out-inpect-app-pr25 && git diff --check (passed)"
+    ]
+  },
+  "last_seen_review_markers": {
+    "issue_comments": {
+      "4374108794": "2026-05-04T20:05:27Z"
+    },
+    "review_comments": {
+      "3183715059": "2026-05-04T18:43:54Z",
+      "3183726717": "2026-05-04T18:45:48Z",
+      "3183757116": "2026-05-04T18:50:46Z",
+      "3183757119": "2026-05-04T18:50:46Z",
+      "3183757122": "2026-05-04T18:50:46Z",
+      "3184046850": "2026-05-04T19:42:19Z",
+      "3184195125": "2026-05-04T20:09:18Z",
+      "3184195131": "2026-05-04T20:09:18Z"
+    },
+    "review_threads": {
+      "PRRT_kwDOSQE1Ec5_cHz3": "2026-05-04T18:43:54Z",
+      "PRRT_kwDOSQE1Ec5_cJ1i": "2026-05-04T18:45:48Z",
+      "PRRT_kwDOSQE1Ec5_cPIc": "2026-05-04T18:50:46Z",
+      "PRRT_kwDOSQE1Ec5_cPIf": "2026-05-04T18:50:46Z",
+      "PRRT_kwDOSQE1Ec5_cPIi": "2026-05-04T18:50:46Z",
+      "PRRT_kwDOSQE1Ec5_dDUt": "2026-05-04T19:42:19Z",
+      "PRRT_kwDOSQE1Ec5_deOG": "2026-05-04T20:09:18Z",
+      "PRRT_kwDOSQE1Ec5_deOM": "2026-05-04T20:09:18Z"
+    },
+    "reviews": {
+      "4222580922": "2026-05-04T18:43:54Z",
+      "4222594924": "2026-05-04T18:45:48Z",
+      "4222630161": "2026-05-04T18:50:45Z",
+      "4222956957": "2026-05-04T19:42:19Z",
+      "4223129257": "2026-05-04T20:09:18Z"
+    },
+    "timeline": {
+      "25148583790": "2026-05-04T20:05:29Z",
+      "4222580922": "",
+      "4222594924": "",
+      "4222630161": "",
+      "4222956957": "",
+      "4223129257": "",
+      "4374108794": "2026-05-04T20:05:27Z",
+      "https://github.com/ShawnSantiago/move-in-out-inpect-app/commit/5f01bee95969e6c1c5f2325d03e5c2cdfe3da89b": "",
+      "https://github.com/ShawnSantiago/move-in-out-inpect-app/commit/c162816c818cd8082e96447a229ab6ed8497aae6": "",
+      "https://github.com/ShawnSantiago/move-in-out-inpect-app/commit/da8f51b0f51456413551f5285e2c8c2ace8911cd": "",
+      "https://github.com/ShawnSantiago/move-in-out-inpect-app/commit/ee45a3c3f456768be9f505fa0e03599729bc41c6": ""
+    }
+  },
+  "lock": null,
+  "next_resume": null,
+  "pending_actionable": [
+    {
+      "local_fix_path": "/tmp/move-in-out-inpect-app-pr25",
+      "path": "mobile/src/screens/CreateInspectionScreen.tsx",
+      "status": "locally_fixed_verified_not_pushed",
+      "summary": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Clear saved selection before continuing an in-progress edit**",
+      "thread_id": "PRRT_kwDOSQE1Ec5_deOG",
+      "url": "https://github.com/ShawnSantiago/move-in-out-inpect-app/pull/25#discussion_r3184195125"
+    },
+    {
+      "local_fix_path": "/tmp/move-in-out-inpect-app-pr25",
+      "path": "mobile/src/state/propertyUnitCatalog.ts",
+      "status": "locally_fixed_verified_not_pushed",
+      "summary": "**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Reject unit-label collisions when editing saved units**",
+      "thread_id": "PRRT_kwDOSQE1Ec5_deOM",
+      "url": "https://github.com/ShawnSantiago/move-in-out-inpect-app/pull/25#discussion_r3184195131"
+    }
+  ],
+  "pr": {
+    "number": 25,
+    "repo": "ShawnSantiago/move-in-out-inpect-app",
+    "url": "https://github.com/ShawnSantiago/move-in-out-inpect-app/pull/25"
+  },
+  "quiet_cycles": 0,
+  "schema_version": 1,
+  "stop_reason": "canceled_by_user_after_manual_validation_protocol",
+  "surface_last_successful_fetch": {
+    "issue_comments": "2026-05-04T20:14:48Z",
+    "review_comments": "2026-05-04T20:14:48Z",
+    "review_threads": "2026-05-04T20:14:48Z",
+    "reviews": "2026-05-04T20:14:48Z",
+    "timeline": "2026-05-04T20:14:48Z"
+  },
+  "terminal": true,
+  "write_authorized": false
+}
