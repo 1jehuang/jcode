@@ -984,6 +984,11 @@ impl App {
                 }
             }
 
+            if let Some(route) = Self::remote_openai_compatible_route_for_model(model) {
+                routes.push(route);
+                added_any = true;
+            }
+
             if Self::remote_model_should_offer_copilot_route(model) && !model.contains("[1m]") {
                 routes.push(crate::provider::build_copilot_route(
                     model,
@@ -1009,13 +1014,44 @@ impl App {
     }
 
     pub(super) fn remote_model_should_offer_copilot_route(model: &str) -> bool {
-        Self::remote_model_is_server_copilot_only(model)
-            || crate::provider::copilot::is_known_display_model(model)
+        Self::remote_openai_compatible_route_for_model(model).is_none()
+            && (Self::remote_model_is_server_copilot_only(model)
+                || crate::provider::copilot::is_known_display_model(model))
+    }
+
+    pub(super) fn remote_openai_compatible_route_for_model(
+        model: &str,
+    ) -> Option<crate::provider::ModelRoute> {
+        for profile in crate::provider_catalog::openai_compatible_profiles()
+            .iter()
+            .copied()
+        {
+            if !crate::provider_catalog::openai_compatible_profile_is_configured(profile) {
+                continue;
+            }
+            if !crate::provider_catalog::openai_compatible_profile_static_models(profile)
+                .iter()
+                .any(|candidate| candidate == model)
+            {
+                continue;
+            }
+            let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+            return Some(crate::provider::ModelRoute {
+                model: model.to_string(),
+                provider: resolved.display_name,
+                api_method: format!("openai-compatible:{}", resolved.id),
+                available: true,
+                detail: resolved.api_base,
+                cheapness: None,
+            });
+        }
+        None
     }
 
     pub(super) fn remote_model_is_server_copilot_only(model: &str) -> bool {
         !model.is_empty()
             && !model.contains('/')
+            && Self::remote_openai_compatible_route_for_model(model).is_none()
             && !matches!(
                 crate::provider::provider_for_model(model),
                 Some("claude" | "openai" | "gemini" | "cursor")

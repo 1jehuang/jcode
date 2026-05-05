@@ -169,6 +169,48 @@ fn test_model_picker_copilot_models_have_copilot_route() {
 }
 
 #[test]
+fn test_model_picker_remote_comtegra_model_uses_comtegra_route_not_copilot() {
+    let prev_key = std::env::var("COMTEGRA_API_KEY").ok();
+    crate::env::set_var("COMTEGRA_API_KEY", "test-key");
+
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_available_entries = vec!["glm-51-nvfp4".to_string()];
+
+    app.open_model_picker();
+
+    match prev_key {
+        Some(value) => crate::env::set_var("COMTEGRA_API_KEY", value),
+        None => crate::env::remove_var("COMTEGRA_API_KEY"),
+    }
+
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("model picker should be open");
+    let glm_entry = picker
+        .entries
+        .iter()
+        .find(|m| m.name == "glm-51-nvfp4")
+        .expect("glm-51-nvfp4 should be in picker");
+
+    assert!(
+        glm_entry.options.iter().any(|r| {
+            r.provider == "Comtegra GPU Cloud"
+                && r.api_method == "openai-compatible:comtegra"
+                && r.available
+        }),
+        "glm route should be Comtegra/api key, got: {:?}",
+        glm_entry.options
+    );
+    assert!(
+        !glm_entry.options.iter().any(|r| r.api_method == "copilot"),
+        "glm route should not fall back to Copilot, got: {:?}",
+        glm_entry.options
+    );
+}
+
+#[test]
 fn test_model_picker_preserves_recommendation_priority_order() {
     let mut app = create_test_app();
     configure_test_remote_models_with_openai_recommendations(&mut app);
