@@ -160,11 +160,22 @@ Use it when capturing comparable before/after numbers for refactors.
   `rustc` at about **1.09 GiB RSS** when available memory crossed the 10% threshold. A direct
   no-`sccache` build reproduced the same signal, so `sccache` was only reporting the termination.
   `scripts/dev_cargo.sh` now enables adaptive low-memory overrides for `--profile selfdev` when
-  Linux + earlyoom + no swap + <24 GiB RAM are detected: `CARGO_INCREMENTAL=0`,
-  `CARGO_PROFILE_SELFDEV_INCREMENTAL=false`, and `CARGO_PROFILE_SELFDEV_CODEGEN_UNITS=16`.
-  Use `JCODE_SELFDEV_LOW_MEMORY=off` to disable, or `JCODE_SELFDEV_LOW_MEMORY=on` to force.
-  Validation: the same root build completed under those settings in **2m34s** after the interrupted
-  partial build reused artifacts.
+  Linux + earlyoom + no swap + <24 GiB RAM + <8 GiB currently available RAM are detected:
+  `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_SELFDEV_INCREMENTAL=false`, and
+  `CARGO_PROFILE_SELFDEV_CODEGEN_UNITS=16`. Use `JCODE_SELFDEV_LOW_MEMORY=off` to disable, or
+  `JCODE_SELFDEV_LOW_MEMORY=on` to force. Validation: the original root build completed under
+  those settings in **2m34s** after the interrupted partial build reused artifacts; a later
+  benchmark with 9.4 GiB available showed that preserving the inherited selfdev profile can reduce
+  warm edit builds from about **60s** to about **14s** when there is enough headroom.
+- 2026-05-05: trimmed root compile surface by replacing broad `tokio/full` with explicit used
+  features, aligning Jcode-owned `crossterm` dependencies on 0.29, and replacing `qr2term` with
+  direct `qrcode` rendering. This removed the duplicate `crossterm 0.28` path from the `jcode`
+  tree while preserving login QR output. Validation: `cargo check --profile selfdev -p jcode --bin
+  jcode`, `cargo test --profile selfdev login_qr --lib -- --nocapture`, and coordinated
+  `selfdev build` passed.
+- 2026-05-05: removed unused `reqwest/blocking` from `jcode-provider-core`; static search showed
+  no blocking API usage in that crate. Validation: `cargo check --profile selfdev -p
+  jcode-provider-core` and full `cargo check --profile selfdev -p jcode --bin jcode` passed.
 - 2026-05-03: added `JCODE_DEV_FEATURE_PROFILE` to `scripts/dev_cargo.sh` so compile-speed probes and
   narrow inner-loop builds can consistently select feature sets without repeating Cargo flags. Profiles:
   `default`, `minimal`/`none` (`--no-default-features`), `pdf` (`--no-default-features --features pdf`),
