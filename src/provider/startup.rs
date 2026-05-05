@@ -285,7 +285,7 @@ impl MultiProvider {
                 }
             } else {
                 crate::logging::warn(&format!(
-                    "Unknown default_provider '{}' in config (expected: claude|openai|copilot|antigravity|gemini|cursor|openrouter or an OpenAI-compatible profile such as deepseek|zai|openai-compatible)",
+                    "Unknown default_provider '{}' in config (expected: claude|openai|copilot|antigravity|gemini|cursor|openrouter or an OpenAI-compatible profile such as deepseek|comtegra|zai|openai-compatible)",
                     pref
                 ));
             }

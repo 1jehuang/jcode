@@ -195,6 +195,12 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
             push("deepseek-v4-flash");
             push("deepseek-v4-pro");
         }
+        "comtegra" => {
+            push("gpt-oss-120b");
+            push("qwen35-122b");
+            push("gte-qwen2-7b");
+            push("glm-51-nvfp4");
+        }
         "kimi" => {
             push("kimi-for-coding");
         }

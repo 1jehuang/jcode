@@ -224,6 +224,17 @@ pub const DEEPSEEK_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     requires_api_key: true,
 };
 
+pub const COMTEGRA_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "comtegra",
+    display_name: "Comtegra GPU Cloud",
+    api_base: "https://llm.comtegra.cloud/v1",
+    api_key_env: "COMTEGRA_API_KEY",
+    env_file: "comtegra.env",
+    setup_url: "https://docs.cgc.comtegra.cloud/llm-api",
+    default_model: Some("glm-51-nvfp4"),
+    requires_api_key: true,
+};
+
 pub const FIRMWARE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "firmware",
     display_name: "Firmware",
@@ -444,7 +455,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 28] = [
+const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 29] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -456,6 +467,7 @@ const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 28] = [
     BASETEN_PROFILE,
     CORTECS_PROFILE,
     DEEPSEEK_PROFILE,
+    COMTEGRA_PROFILE,
     FIRMWARE_PROFILE,
     HUGGING_FACE_PROFILE,
     MOONSHOT_PROFILE,
@@ -700,6 +712,19 @@ pub const DEEPSEEK_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescri
     recommended: false,
     target: LoginProviderTarget::OpenAiCompatible(DEEPSEEK_PROFILE),
     order: LoginProviderSurfaceOrder::new(Some(21), Some(21), Some(21), Some(21), Some(21)),
+};
+
+pub const COMTEGRA_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "comtegra",
+    display_name: "Comtegra GPU Cloud",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &["cgc", "comtegra-gpu-cloud"],
+    menu_detail: "OpenAI-compatible LLM API",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(COMTEGRA_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(22), Some(22), Some(22), Some(22), Some(22)),
 };
 
 pub const FIRMWARE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
@@ -988,7 +1013,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-const LOGIN_PROVIDERS: [LoginProviderDescriptor; 39] = [
+const LOGIN_PROVIDERS: [LoginProviderDescriptor; 40] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     OPENAI_LOGIN_PROVIDER,
@@ -1006,6 +1031,7 @@ const LOGIN_PROVIDERS: [LoginProviderDescriptor; 39] = [
     BASETEN_LOGIN_PROVIDER,
     CORTECS_LOGIN_PROVIDER,
     DEEPSEEK_LOGIN_PROVIDER,
+    COMTEGRA_LOGIN_PROVIDER,
     FIRMWARE_LOGIN_PROVIDER,
     HUGGING_FACE_LOGIN_PROVIDER,
     MOONSHOT_LOGIN_PROVIDER,

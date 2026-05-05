@@ -91,6 +91,9 @@ fn auth_issue_profile_metadata_matches_direct_provider_endpoints() {
     assert_eq!(DEEPSEEK_PROFILE.api_base, "https://api.deepseek.com");
     assert_eq!(DEEPSEEK_PROFILE.default_model, Some("deepseek-v4-flash"));
     assert_eq!(DEEPSEEK_PROFILE.setup_url, "https://api-docs.deepseek.com/");
+    assert_eq!(COMTEGRA_PROFILE.api_base, "https://llm.comtegra.cloud/v1");
+    assert_eq!(COMTEGRA_PROFILE.default_model, Some("glm-51-nvfp4"));
+    assert_eq!(COMTEGRA_PROFILE.api_key_env, "COMTEGRA_API_KEY");
     assert!(!OPENAI_COMPAT_PROFILE.setup_url.contains("opencode.ai"));
 }
 
@@ -152,6 +155,10 @@ fn matrix_tui_login_selection_supports_numbers_and_names() {
     assert_eq!(
         resolve_login_selection("compat", &providers).map(|provider| provider.id),
         Some("openai-compatible")
+    );
+    assert_eq!(
+        resolve_login_selection("cgc", &providers).map(|provider| provider.id),
+        Some("comtegra")
     );
     assert!(resolve_login_selection("google", &providers).is_none());
 }

@@ -388,6 +388,7 @@ fn provider_keys_for_env(env_key: &str) -> &'static [&'static str] {
         "CHUTES_API_KEY" => &["chutes"],
         "BASETEN_API_KEY" => &["baseten"],
         "CORTECS_API_KEY" => &["cortecs"],
+        "COMTEGRA_API_KEY" => &["comtegra", "cgc"],
         "DEEPSEEK_API_KEY" => &["deepseek"],
         "FIRMWARE_API_KEY" => &["firmware"],
         "MOONSHOT_API_KEY" => &["moonshotai", "moonshot"],

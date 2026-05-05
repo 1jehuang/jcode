@@ -51,6 +51,8 @@ pub enum ProviderChoice {
     Ai302,
     Baseten,
     Cortecs,
+    #[value(alias = "cgc", alias = "comtegra-gpu-cloud")]
+    Comtegra,
     Deepseek,
     Firmware,
     #[value(alias = "hugging-face", alias = "hf")]
@@ -114,6 +116,7 @@ impl ProviderChoice {
             Self::Ai302 => "302ai",
             Self::Baseten => "baseten",
             Self::Cortecs => "cortecs",
+            Self::Comtegra => "comtegra",
             Self::Deepseek => "deepseek",
             Self::Firmware => "firmware",
             Self::HuggingFace => "huggingface",
@@ -154,6 +157,7 @@ pub fn profile_for_choice(choice: &ProviderChoice) -> Option<OpenAiCompatiblePro
         ProviderChoice::Ai302 => Some(crate::provider_catalog::AI302_PROFILE),
         ProviderChoice::Baseten => Some(crate::provider_catalog::BASETEN_PROFILE),
         ProviderChoice::Cortecs => Some(crate::provider_catalog::CORTECS_PROFILE),
+        ProviderChoice::Comtegra => Some(crate::provider_catalog::COMTEGRA_PROFILE),
         ProviderChoice::Deepseek => Some(crate::provider_catalog::DEEPSEEK_PROFILE),
         ProviderChoice::Firmware => Some(crate::provider_catalog::FIRMWARE_PROFILE),
         ProviderChoice::HuggingFace => Some(crate::provider_catalog::HUGGING_FACE_PROFILE),
@@ -197,6 +201,7 @@ pub fn login_provider_for_choice(choice: &ProviderChoice) -> Option<LoginProvide
         ProviderChoice::Ai302 => Some(crate::provider_catalog::AI302_LOGIN_PROVIDER),
         ProviderChoice::Baseten => Some(crate::provider_catalog::BASETEN_LOGIN_PROVIDER),
         ProviderChoice::Cortecs => Some(crate::provider_catalog::CORTECS_LOGIN_PROVIDER),
+        ProviderChoice::Comtegra => Some(crate::provider_catalog::COMTEGRA_LOGIN_PROVIDER),
         ProviderChoice::Deepseek => Some(crate::provider_catalog::DEEPSEEK_LOGIN_PROVIDER),
         ProviderChoice::Firmware => Some(crate::provider_catalog::FIRMWARE_LOGIN_PROVIDER),
         ProviderChoice::HuggingFace => Some(crate::provider_catalog::HUGGING_FACE_LOGIN_PROVIDER),
@@ -247,6 +252,7 @@ pub fn choice_for_login_provider(provider: LoginProviderDescriptor) -> Option<Pr
             ProviderChoice::Ai302,
             ProviderChoice::Baseten,
             ProviderChoice::Cortecs,
+            ProviderChoice::Comtegra,
             ProviderChoice::Deepseek,
             ProviderChoice::Firmware,
             ProviderChoice::HuggingFace,
@@ -1211,6 +1217,7 @@ async fn init_provider_with_options(
         | ProviderChoice::Ai302
         | ProviderChoice::Baseten
         | ProviderChoice::Cortecs
+        | ProviderChoice::Comtegra
         | ProviderChoice::Deepseek
         | ProviderChoice::Firmware
         | ProviderChoice::HuggingFace
