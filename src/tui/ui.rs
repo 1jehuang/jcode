@@ -1849,6 +1849,9 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // (e.g., diagram pane toggling, streaming text clearing, tool calls finishing).
     // Uses Color::Reset (terminal default bg) so text selection highlighting works
     // natively in all terminal emulators.
+    // Only clear on macOS where the stale-cell bug exists; other platforms benefit
+    // from ratatui's differential rendering.
+    #[cfg(target_os = "macos")]
     clear_area(frame, area);
 
     if let Some(scroll) = app.changelog_scroll() {

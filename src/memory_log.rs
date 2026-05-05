@@ -42,8 +42,9 @@ impl MemoryLogger {
 
     fn write_entry(&mut self, entry: &LogEntry) {
         if let Ok(json) = serde_json::to_string(entry) {
+            // Note: we skip flush() here to minimize time under the mutex lock.
+            // The OS will buffer and flush the write. For a debug log, this is acceptable.
             let _ = writeln!(self.file, "{}", json);
-            let _ = self.file.flush();
         }
     }
 }

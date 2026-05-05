@@ -833,6 +833,16 @@ impl CopilotApiProvider {
 
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
+            // Prevent unbounded buffer growth from malformed SSE streams
+            const MAX_SSE_BUFFER_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+            if buffer.len() > MAX_SSE_BUFFER_SIZE {
+                if let Some(last_boundary) = buffer.rfind("\n\n") {
+                    buffer = buffer[last_boundary + 2..].to_string();
+                } else {
+                    anyhow::bail!("SSE buffer exceeded {} bytes without complete event boundary", MAX_SSE_BUFFER_SIZE);
+                }
+            }
+
             // Process complete SSE lines
             while let Some(line_end) = buffer.find('\n') {
                 let line = buffer[..line_end].trim_end_matches('\r').to_string();
@@ -1137,8 +1147,10 @@ impl Provider for CopilotApiProvider {
             machine_id: self.machine_id.clone(),
             init_ready: self.init_ready.clone(),
             init_done: self.init_done.clone(),
+            // premium_mode is shared since it's a global setting
             premium_mode: self.premium_mode.clone(),
-            user_turn_count: self.user_turn_count.clone(),
+            // Fresh turn count for the fork - each fork is an independent session
+            user_turn_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             created_at: self.created_at,
         })
     }

@@ -117,16 +117,6 @@ impl Stream {
         )
     }
 
-    pub fn split(&mut self) -> (SplitReadRef<'_>, SplitWriteRef<'_>) {
-        let ptr = self as *mut Stream;
-        unsafe {
-            (
-                SplitReadRef { stream: &mut *ptr },
-                SplitWriteRef { stream: &mut *ptr },
-            )
-        }
-    }
-
     pub fn pair() -> io::Result<(Self, Self)> {
         use std::sync::atomic::{AtomicU64, Ordering};
         static PAIR_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -276,50 +266,6 @@ impl AsyncWrite for WriteHalf {
             Err(_) => return std::task::Poll::Pending,
         };
         std::pin::Pin::new(&mut *guard).poll_shutdown(cx)
-    }
-}
-
-/// Borrowed read reference for `stream.split()`.
-pub struct SplitReadRef<'a> {
-    stream: &'a mut Stream,
-}
-
-impl<'a> AsyncRead for SplitReadRef<'a> {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> std::task::Poll<io::Result<()>> {
-        std::pin::Pin::new(&mut *self.get_mut().stream).poll_read(cx, buf)
-    }
-}
-
-/// Borrowed write reference for `stream.split()`.
-pub struct SplitWriteRef<'a> {
-    stream: &'a mut Stream,
-}
-
-impl<'a> AsyncWrite for SplitWriteRef<'a> {
-    fn poll_write(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<io::Result<usize>> {
-        std::pin::Pin::new(&mut *self.get_mut().stream).poll_write(cx, buf)
-    }
-
-    fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<io::Result<()>> {
-        std::pin::Pin::new(&mut *self.get_mut().stream).poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<io::Result<()>> {
-        std::pin::Pin::new(&mut *self.get_mut().stream).poll_shutdown(cx)
     }
 }
 

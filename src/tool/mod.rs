@@ -164,6 +164,26 @@ impl ToolContext {
             path.to_path_buf()
         }
     }
+
+    /// Resolve a path and canonicalize it to prevent path traversal.
+    /// Returns an error if the path escapes the working directory.
+    pub fn resolve_path_safe(&self, path: &Path) -> Result<PathBuf> {
+        let resolved = self.resolve_path(path);
+        // Canonicalize to resolve symlinks and '..' components
+        let canonical = resolved.canonicalize().unwrap_or(resolved.clone());
+        // If we have a working dir, ensure the resolved path is within it
+        if let Some(ref base) = self.working_dir {
+            let canonical_base = base.canonicalize().unwrap_or_else(|_| base.clone());
+            if !canonical.starts_with(&canonical_base) {
+                return Err(anyhow::anyhow!(
+                    "Path '{}' resolves outside working directory '{}'",
+                    path.display(),
+                    base.display()
+                ));
+            }
+        }
+        Ok(canonical)
+    }
 }
 
 /// A tool that can be executed by the agent

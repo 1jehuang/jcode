@@ -146,7 +146,7 @@ pub async fn fetch_anthropic_model_catalog_oauth(
                 .header("Authorization", format!("Bearer {}", access_token))
                 .header(
                     "User-Agent",
-                    crate::provider::anthropic::CLAUDE_CLI_USER_AGENT,
+                    crate::provider::anthropic::claude_cli_user_agent(),
                 )
                 .header("anthropic-version", "2023-06-01")
                 .header(

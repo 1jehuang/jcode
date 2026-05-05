@@ -13,7 +13,9 @@ pub(super) fn persist_replay_display_message(
     }
     app.session
         .record_replay_display_message(role.to_string(), title, content.to_string());
-    let _ = app.session.save();
+    if let Err(e) = app.session.save() {
+        crate::logging::warn(&format!("Failed to save session: {}", e));
+    }
 }
 
 pub(super) fn persist_swarm_status_snapshot(app: &mut App) {
@@ -23,7 +25,9 @@ pub(super) fn persist_swarm_status_snapshot(app: &mut App) {
     }
     app.session
         .record_swarm_status_event(app.remote_swarm_members.clone());
-    let _ = app.session.save();
+    if let Err(e) = app.session.save() {
+        crate::logging::warn(&format!("Failed to save session: {}", e));
+    }
 }
 
 pub(super) fn persist_swarm_plan_snapshot(
@@ -40,7 +44,9 @@ pub(super) fn persist_swarm_plan_snapshot(
     }
     app.session
         .record_swarm_plan_event(swarm_id, version, items, participants, reason);
-    let _ = app.session.save();
+    if let Err(e) = app.session.save() {
+        crate::logging::warn(&format!("Failed to save session: {}", e));
+    }
 }
 
 pub(super) fn persist_remote_session_metadata<F>(app: &mut App, update: F) -> Result<()>

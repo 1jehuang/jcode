@@ -243,7 +243,9 @@ pub(super) fn activate_auto_poke_local(app: &mut App) {
                     cache_control: None,
                 }],
             );
-            let _ = app.session.save();
+            if let Err(e) = app.session.save() {
+                crate::logging::warn(&format!("Failed to save session: {}", e));
+            }
 
             app.is_processing = true;
             app.status = ProcessingStatus::Sending;
@@ -614,7 +616,9 @@ fn launch_manual_subagent(app: &mut App, spec: ManualSubagentSpec) {
         tool_duration_ms: None,
     });
     let message_id = app.session.add_message(Role::Assistant, content_blocks);
-    let _ = app.session.save();
+    if let Err(e) = app.session.save() {
+        crate::logging::warn(&format!("Failed to save session: {}", e));
+    }
     app.subagent_status = Some("starting subagent".to_string());
     app.set_status_notice("Running subagent");
 
@@ -710,7 +714,9 @@ fn handle_subagent_model_command(app: &mut App, trimmed: &str) -> bool {
 
     if matches!(rest, "inherit" | "reset" | "clear") {
         app.session.subagent_model = None;
-        let _ = app.session.save();
+        if let Err(e) = app.session.save() {
+            crate::logging::warn(&format!("Failed to save session: {}", e));
+        }
         app.push_display_message(DisplayMessage::system(format!(
             "Subagent model reset to inherit the current model (`{}`).",
             app.provider.model()
@@ -720,7 +726,9 @@ fn handle_subagent_model_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     app.session.subagent_model = Some(rest.to_string());
-    let _ = app.session.save();
+    if let Err(e) = app.session.save() {
+        crate::logging::warn(&format!("Failed to save session: {}", e));
+    }
     app.push_display_message(DisplayMessage::system(format!(
         "Subagent model pinned to `{}` for this session.",
         rest
@@ -1110,7 +1118,9 @@ fn handle_transcript_command(app: &mut App, trimmed: &str) -> bool {
     };
 
     if !app.is_remote && app.session.id == session_id {
-        let _ = app.session.save();
+        if let Err(e) = app.session.save() {
+            crate::logging::warn(&format!("Failed to save session: {}", e));
+        }
     }
 
     if trimmed == "/transcript path" {
@@ -1370,7 +1380,9 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
             });
         }
 
-        let _ = app.session.save();
+        if let Err(e) = app.session.save() {
+            crate::logging::warn(&format!("Failed to save session: {}", e));
+        }
         app.push_display_message(DisplayMessage::system(format!(
             "✓ Undid rewind. Restored {} message{}.",
             restored,
@@ -1438,7 +1450,9 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
 
                 app.provider_session_id = None;
                 app.session.provider_session_id = None;
-                let _ = app.session.save();
+                if let Err(e) = app.session.save() {
+                    crate::logging::warn(&format!("Failed to save session: {}", e));
+                }
 
                 app.push_display_message(DisplayMessage::system(format!(
                     "✓ Rewound to message {}. Removed {} message{}. Undo anytime with `/rewind undo`.",

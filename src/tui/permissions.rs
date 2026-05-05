@@ -52,7 +52,9 @@ impl PermissionsApp {
     fn approve_selected(&mut self) {
         if let Some(req) = self.requests.get(self.selected) {
             let id = req.id.clone();
-            let _ = safety::record_permission_via_file(&id, true, "permissions_tui", None);
+            if let Err(e) = safety::record_permission_via_file(&id, true, "permissions_tui", None) {
+                crate::logging::warn(&format!("Failed to record permission approval for {}: {}", id, e));
+            }
             self.requests.remove(self.selected);
             self.approved_count += 1;
             if self.selected >= self.requests.len() && self.selected > 0 {
@@ -67,7 +69,9 @@ impl PermissionsApp {
     fn deny_selected(&mut self, reason: Option<String>) {
         if let Some(req) = self.requests.get(self.selected) {
             let id = req.id.clone();
-            let _ = safety::record_permission_via_file(&id, false, "permissions_tui", reason);
+            if let Err(e) = safety::record_permission_via_file(&id, false, "permissions_tui", reason) {
+                crate::logging::warn(&format!("Failed to record permission denial for {}: {}", id, e));
+            }
             self.requests.remove(self.selected);
             self.denied_count += 1;
             if self.selected >= self.requests.len() && self.selected > 0 {
@@ -82,7 +86,9 @@ impl PermissionsApp {
     fn approve_all(&mut self) {
         while !self.requests.is_empty() {
             let id = self.requests[0].id.clone();
-            let _ = safety::record_permission_via_file(&id, true, "permissions_tui", None);
+            if let Err(e) = safety::record_permission_via_file(&id, true, "permissions_tui", None) {
+                crate::logging::warn(&format!("Failed to record permission approval for {}: {}", id, e));
+            }
             self.requests.remove(0);
             self.approved_count += 1;
         }
@@ -93,7 +99,9 @@ impl PermissionsApp {
     fn deny_all(&mut self) {
         while !self.requests.is_empty() {
             let id = self.requests[0].id.clone();
-            let _ = safety::record_permission_via_file(&id, false, "permissions_tui", None);
+            if let Err(e) = safety::record_permission_via_file(&id, false, "permissions_tui", None) {
+                crate::logging::warn(&format!("Failed to record permission denial for {}: {}", id, e));
+            }
             self.requests.remove(0);
             self.denied_count += 1;
         }

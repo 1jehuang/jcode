@@ -260,6 +260,45 @@ impl Default for CompactionConfig {
     }
 }
 
+impl CompactionConfig {
+    /// Validate configuration values are within acceptable ranges.
+    /// Returns a list of validation error messages (empty if valid).
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.ewma_alpha < 0.0 || self.ewma_alpha > 1.0 {
+            errors.push(format!(
+                "ewma_alpha must be 0.0-1.0, got {}",
+                self.ewma_alpha
+            ));
+        }
+        if self.proactive_floor < 0.0 || self.proactive_floor > 1.0 {
+            errors.push(format!(
+                "proactive_floor must be 0.0-1.0, got {}",
+                self.proactive_floor
+            ));
+        }
+        if self.topic_shift_threshold < 0.0 || self.topic_shift_threshold > 1.0 {
+            errors.push(format!(
+                "topic_shift_threshold must be 0.0-1.0, got {}",
+                self.topic_shift_threshold
+            ));
+        }
+        if self.relevance_keep_threshold < 0.0 || self.relevance_keep_threshold > 1.0 {
+            errors.push(format!(
+                "relevance_keep_threshold must be 0.0-1.0, got {}",
+                self.relevance_keep_threshold
+            ));
+        }
+        if self.lookahead_turns == 0 {
+            errors.push("lookahead_turns must be > 0".to_string());
+        }
+        if self.min_samples == 0 {
+            errors.push("min_samples must be > 0".to_string());
+        }
+        errors
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum NamedProviderType {
@@ -558,6 +597,21 @@ impl DisplayConfig {
             };
         }
     }
+
+    /// Validate configuration values are within acceptable ranges.
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.animation_fps == 0 || self.animation_fps > 120 {
+            errors.push(format!(
+                "animation_fps must be 1-120, got {}",
+                self.animation_fps
+            ));
+        }
+        if self.redraw_fps == 0 || self.redraw_fps > 120 {
+            errors.push(format!("redraw_fps must be 1-120, got {}", self.redraw_fps));
+        }
+        errors
+    }
 }
 
 /// Runtime feature toggles
@@ -672,6 +726,26 @@ impl Default for AmbientConfig {
             work_branch_prefix: "ambient/".to_string(),
             visible: true,
         }
+    }
+}
+
+impl AmbientConfig {
+    /// Validate configuration values are within acceptable ranges.
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.min_interval_minutes == 0 {
+            errors.push("min_interval_minutes must be > 0".to_string());
+        }
+        if self.max_interval_minutes == 0 {
+            errors.push("max_interval_minutes must be > 0".to_string());
+        }
+        if self.min_interval_minutes > self.max_interval_minutes {
+            errors.push(format!(
+                "min_interval_minutes ({}) must be <= max_interval_minutes ({})",
+                self.min_interval_minutes, self.max_interval_minutes
+            ));
+        }
+        errors
     }
 }
 

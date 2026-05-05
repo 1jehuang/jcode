@@ -440,7 +440,9 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
         app.session.provider_session_id = app.provider_session_id.clone();
         app.session
             .set_status(crate::session::SessionStatus::Reloaded);
-        let _ = app.session.save();
+        if let Err(e) = app.session.save() {
+            crate::logging::warn(&format!("Failed to save session: {}", e));
+        }
         app.save_input_for_reload(&app.session.id.clone());
         app.reload_requested = Some(app.session.id.clone());
         app.should_quit = true;
@@ -459,7 +461,9 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
         app.session.provider_session_id = app.provider_session_id.clone();
         app.session
             .set_status(crate::session::SessionStatus::Reloaded);
-        let _ = app.session.save();
+        if let Err(e) = app.session.save() {
+            crate::logging::warn(&format!("Failed to save session: {}", e));
+        }
         app.save_input_for_reload(&app.session.id.clone());
         app.restart_requested = Some(app.session.id.clone());
         app.should_quit = true;

@@ -1,4 +1,4 @@
-use super::commands::{REVIEW_PREFERRED_MODEL, active_session_id, active_working_dir};
+use super::commands::{active_session_id, active_working_dir, REVIEW_PREFERRED_MODEL};
 use super::{App, DisplayMessage};
 use crate::id;
 use crate::message::{ContentBlock, Role, ToolCall};
@@ -269,7 +269,9 @@ fn apply_judge_visible_context_if_needed(session: &mut Session, title_override: 
 
 pub(super) fn reset_current_session(app: &mut App) {
     app.session.mark_closed();
-    let _ = app.session.save();
+    if let Err(e) = app.session.save() {
+        crate::logging::warn(&format!("Failed to save session: {}", e));
+    }
     app.clear_provider_messages();
     app.clear_display_messages();
     app.queued_messages.clear();
@@ -662,7 +664,9 @@ pub(super) fn prepare_review_spawned_session(
             session.provider_key = provider_key_override;
         }
         apply_judge_visible_context_if_needed(&mut session, title_override.as_deref());
-        let _ = session.save();
+        if let Err(e) = session.save() {
+            crate::logging::warn(&format!("Failed to save session: {}", e));
+        }
     }
     App::save_startup_message_for_session(session_id, startup_message);
 }
@@ -898,7 +902,9 @@ pub(super) fn handle_autoreview_command_local(app: &mut App, trimmed: &str) -> b
     match rest {
         "on" => {
             app.set_autoreview_feature_enabled(true);
-            let _ = app.session.save();
+            if let Err(e) = app.session.save() {
+                crate::logging::warn(&format!("Failed to save session: {}", e));
+            }
             app.push_display_message(DisplayMessage::system(
                 "Autoreview enabled for this session.".to_string(),
             ));
@@ -907,7 +913,9 @@ pub(super) fn handle_autoreview_command_local(app: &mut App, trimmed: &str) -> b
         }
         "off" => {
             app.set_autoreview_feature_enabled(false);
-            let _ = app.session.save();
+            if let Err(e) = app.session.save() {
+                crate::logging::warn(&format!("Failed to save session: {}", e));
+            }
             app.push_display_message(DisplayMessage::system(
                 "Autoreview disabled for this session.".to_string(),
             ));
@@ -973,7 +981,9 @@ pub(super) fn handle_autojudge_command_local(app: &mut App, trimmed: &str) -> bo
     match rest {
         "on" => {
             app.set_autojudge_feature_enabled(true);
-            let _ = app.session.save();
+            if let Err(e) = app.session.save() {
+                crate::logging::warn(&format!("Failed to save session: {}", e));
+            }
             app.push_display_message(DisplayMessage::system(
                 "Autojudge enabled for this session.".to_string(),
             ));
@@ -982,7 +992,9 @@ pub(super) fn handle_autojudge_command_local(app: &mut App, trimmed: &str) -> bo
         }
         "off" => {
             app.set_autojudge_feature_enabled(false);
-            let _ = app.session.save();
+            if let Err(e) = app.session.save() {
+                crate::logging::warn(&format!("Failed to save session: {}", e));
+            }
             app.push_display_message(DisplayMessage::system(
                 "Autojudge disabled for this session.".to_string(),
             ));

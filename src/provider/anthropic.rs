@@ -37,13 +37,20 @@ const API_URL: &str = "https://api.anthropic.com/v1/messages";
 /// OAuth endpoint (with beta=true query param)
 const API_URL_OAUTH: &str = "https://api.anthropic.com/v1/messages?beta=true";
 
+/// Claude Code CLI version - single source of truth for all version strings.
+/// Update this constant when syncing with the official CLI version.
+const CLAUDE_CLI_VERSION: &str = "2.1.123";
+
 /// User-Agent for OAuth requests, matching the official Claude Code CLI.
-pub(crate) const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.123 (external, sdk-cli)";
+pub(crate) fn claude_cli_user_agent() -> String {
+    format!("claude-cli/{} (external, sdk-cli)", CLAUDE_CLI_VERSION)
+}
 
 /// Claude Code billing attribution text observed in the official CLI's system
 /// prompt blocks.
-pub(crate) const OAUTH_BILLING_HEADER: &str =
-    "cc_version=2.1.123; cc_entrypoint=sdk-cli; cch=33f85;";
+pub(crate) fn oauth_billing_header() -> String {
+    format!("cc_version={}; cc_entrypoint=sdk-cli; cch=33f85;", CLAUDE_CLI_VERSION)
+}
 
 /// Beta headers required for OAuth (tool-enabled Claude Code style)
 pub(crate) const OAUTH_BETA_HEADERS: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24";
@@ -295,7 +302,8 @@ async fn ensure_oauth_preflight(
     );
     headers.insert(
         reqwest::header::USER_AGENT,
-        reqwest::header::HeaderValue::from_static(CLAUDE_CLI_USER_AGENT),
+        reqwest::header::HeaderValue::from_str(&claude_cli_user_agent())
+            .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("claude-cli/2.1.123")),
     );
     headers.insert(
         reqwest::header::CONTENT_TYPE,
@@ -1419,7 +1427,7 @@ async fn stream_response(
         // 4. ?beta=true query param (in URL above)
         req = apply_oauth_attribution_headers(
             req.header("Authorization", format!("Bearer {}", token))
-                .header("User-Agent", CLAUDE_CLI_USER_AGENT)
+                .header("User-Agent", claude_cli_user_agent())
                 .header("anthropic-beta", oauth_beta_headers(model_name)),
             oauth_session_id,
         );
@@ -1483,6 +1491,18 @@ async fn stream_response(
         };
         let chunk_str = String::from_utf8_lossy(&chunk);
         buffer.push_str(&chunk_str);
+
+        // Prevent unbounded buffer growth from malformed SSE streams
+        const MAX_SSE_BUFFER_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+        if buffer.len() > MAX_SSE_BUFFER_SIZE {
+            // Try to find the last complete event boundary and trim
+            if let Some(last_boundary) = buffer.rfind("\n\n") {
+                let remaining = buffer.split_off(last_boundary + 2);
+                buffer = remaining;
+            } else {
+                anyhow::bail!("SSE buffer exceeded {} bytes without complete event boundary", MAX_SSE_BUFFER_SIZE);
+            }
+        }
 
         // Process complete SSE events
         while let Some(event) = parse_sse_event(&mut buffer) {
@@ -1779,7 +1799,7 @@ fn build_system_param_split(
         let mut blocks = Vec::new();
         blocks.push(ApiSystemBlock {
             block_type: "text",
-            text: format!("x-anthropic-billing-header: {}", OAUTH_BILLING_HEADER),
+            text: format!("x-anthropic-billing-header: {}", oauth_billing_header()),
             cache_control: None,
         });
         blocks.push(ApiSystemBlock {
