@@ -43,18 +43,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-const TOOL_INTENT_DESCRIPTION: &str = concat!(
-    "Short natural-language label explaining why this tool call is being made. ",
-    "Used for compact UI display only. Optional; do not use this instead of required tool parameters."
-);
-
-pub(crate) fn intent_schema_property() -> Value {
-    serde_json::json!({
-        "type": "string",
-        "description": TOOL_INTENT_DESCRIPTION,
-    })
-}
-
+pub(crate) use jcode_tool_core::intent_schema_property;
 pub use jcode_tool_core::{StdinInputRequest, Tool, ToolContext, ToolExecutionMode};
 pub use jcode_tool_types::{ToolImage, ToolOutput};
 

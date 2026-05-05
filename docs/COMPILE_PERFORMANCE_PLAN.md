@@ -368,6 +368,8 @@ Start with the highest-leverage cache boundaries:
   `ToolExecutionMode`, and `StdinInputRequest` out of `src/tool/mod.rs`. `jcode-tool-types` stays
   DTO-only, while channel/runtime-bearing context lives in the runtime-contract crate instead of
   contaminating pure type crates.
+- 2026-05-05: also moved the shared tool intent schema helper into `jcode-tool-core`, keeping the
+  root `src/tool/mod.rs` module focused on registry composition rather than shared schema contracts.
 - Validation: `cargo check -p jcode-tool-core --quiet`, `cargo check -p jcode-tool-types --quiet`,
   and `cargo check -p jcode --quiet` pass.
 - 2026-05-05: moved provider streaming contracts `StreamEvent` and `ConnectionPhase` from
