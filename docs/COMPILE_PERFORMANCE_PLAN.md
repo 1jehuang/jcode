@@ -370,6 +370,12 @@ Start with the highest-leverage cache boundaries:
   prepares a future `jcode-provider` crate.
 - Validation: `cargo check -p jcode-message-types --quiet`, `cargo test -p jcode-message-types --quiet`,
   and `cargo check -p jcode --quiet` pass.
+- 2026-05-05: moved core conversation DTOs `Message`, `ContentBlock`, `Role`, and `CacheControl`
+  into `jcode-message-types`, while keeping root-only redaction/generated-image/session helpers in
+  `src/message.rs`. Provider and agent contracts can now refer to message data through the lower
+  type crate rather than the root crate facade.
+- Validation: `cargo check -p jcode-message-types --quiet`, `cargo test -p jcode-message-types --quiet`,
+  and `cargo check -p jcode --quiet` pass.
 
 - 2026-03-30: moved the workspace-map subsystem into the new `crates/jcode-tui-workspace` crate.
 - Boundary decision: move **workspace map data/model + widget rendering** first, while keeping the surrounding
