@@ -31,10 +31,10 @@ pub use jcode_compaction_core::{
     CompactionStats, DEFAULT_TOKEN_BUDGET, EMBED_MAX_CHARS_PER_MSG, EMBEDDING_HISTORY_WINDOW,
     EMERGENCY_TOOL_RESULT_MAX_CHARS, MANUAL_COMPACT_MIN_THRESHOLD, MIN_TURNS_TO_KEEP,
     RECENT_TURNS_TO_KEEP, SEMANTIC_EMBED_CACHE_CAPACITY, SUMMARY_PROMPT, SYSTEM_OVERHEAD_TOKENS,
-    Summary, TOKEN_HISTORY_WINDOW, build_compaction_prompt, compacted_summary_text_block,
-    content_char_count, estimate_compaction_tokens, mean_embedding, message_char_count,
-    safe_compaction_cutoff, semantic_cache_key, semantic_goal_text, semantic_message_text,
-    summary_payload_char_count,
+    Summary, TOKEN_HISTORY_WINDOW, build_compaction_prompt, build_emergency_summary_text,
+    compacted_summary_text_block, content_char_count, emergency_truncate_tool_results,
+    estimate_compaction_tokens, mean_embedding, message_char_count, safe_compaction_cutoff,
+    semantic_cache_key, semantic_goal_text, semantic_message_text, summary_payload_char_count,
 };
 
 /// Result from background compaction task
@@ -1240,74 +1240,18 @@ impl CompactionManager {
         }
 
         let dropped_count = cutoff;
-
-        let mut summary_parts: Vec<String> = Vec::new();
-
-        if let Some(ref existing) = self.active_summary {
-            summary_parts.push(existing.text.clone());
-        }
-
-        summary_parts.push(format!(
-            "**[Emergency compaction]**: {} messages were dropped to recover from context overflow. \
-             The conversation had ~{}k tokens which exceeded the {}k limit.",
+        let summary_text = build_emergency_summary_text(
+            self.active_summary
+                .as_ref()
+                .map(|summary| summary.text.as_str()),
             dropped_count,
-            pre_tokens / 1000,
-            self.token_budget / 1000,
-        ));
-
-        let mut file_mentions = Vec::new();
-        let mut tool_names = std::collections::HashSet::new();
-        for msg in &active[..cutoff] {
-            for block in &msg.content {
-                match block {
-                    ContentBlock::ToolUse { name, .. } => {
-                        tool_names.insert(name.clone());
-                    }
-                    ContentBlock::Text { text, .. } => {
-                        for word in text.split_whitespace() {
-                            if (word.contains('/') || word.contains('.'))
-                                && word.len() > 3
-                                && word.len() < 120
-                                && !word.starts_with("http")
-                                && (word.contains(".rs")
-                                    || word.contains(".ts")
-                                    || word.contains(".py")
-                                    || word.contains(".toml")
-                                    || word.contains(".json")
-                                    || word.starts_with("src/")
-                                    || word.starts_with("./"))
-                            {
-                                let cleaned = word.trim_matches(|c: char| {
-                                    !c.is_alphanumeric()
-                                        && c != '/'
-                                        && c != '.'
-                                        && c != '_'
-                                        && c != '-'
-                                });
-                                file_mentions.push(cleaned.to_string());
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        if !tool_names.is_empty() {
-            let mut tools: Vec<_> = tool_names.into_iter().collect();
-            tools.sort();
-            summary_parts.push(format!("Tools used: {}", tools.join(", ")));
-        }
-
-        file_mentions.sort();
-        file_mentions.dedup();
-        if !file_mentions.is_empty() {
-            file_mentions.truncate(30);
-            summary_parts.push(format!("Files referenced: {}", file_mentions.join(", ")));
-        }
+            pre_tokens,
+            self.token_budget,
+            &active[..cutoff],
+        );
 
         let summary = Summary {
-            text: summary_parts.join("\n\n"),
+            text: summary_text,
             openai_encrypted_content: None,
             covers_up_to_turn: cutoff,
             original_turn_count: cutoff,
@@ -1352,29 +1296,7 @@ impl CompactionManager {
     pub fn emergency_truncate_with(&mut self, all_messages: &mut [Message]) -> usize {
         let start = self.compacted_count.min(all_messages.len());
         let active = &mut all_messages[start..];
-        let mut truncated = 0;
-
-        for msg in active.iter_mut() {
-            for block in msg.content.iter_mut() {
-                if let ContentBlock::ToolResult { content, .. } = block
-                    && content.len() > EMERGENCY_TOOL_RESULT_MAX_CHARS
-                {
-                    let original_len = content.len();
-                    let keep_head = EMERGENCY_TOOL_RESULT_MAX_CHARS / 2;
-                    let keep_tail = EMERGENCY_TOOL_RESULT_MAX_CHARS / 4;
-                    let head = &content[..keep_head];
-                    let tail_start = original_len.saturating_sub(keep_tail);
-                    let tail = &content[tail_start..];
-                    *content = format!(
-                        "{}\n\n... [{} chars truncated for context recovery] ...\n\n{}",
-                        head,
-                        original_len - keep_head - keep_tail,
-                        tail,
-                    );
-                    truncated += 1;
-                }
-            }
-        }
+        let truncated = emergency_truncate_tool_results(active, EMERGENCY_TOOL_RESULT_MAX_CHARS);
 
         if truncated > 0 {
             self.observed_input_tokens = None;

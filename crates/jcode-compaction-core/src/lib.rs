@@ -352,6 +352,141 @@ pub fn semantic_cache_key(text: &str) -> u64 {
     hasher.finish()
 }
 
+pub fn build_emergency_summary_text(
+    existing_summary: Option<&str>,
+    dropped_count: usize,
+    pre_tokens: u64,
+    token_budget: usize,
+    dropped_messages: &[Message],
+) -> String {
+    let mut summary_parts: Vec<String> = Vec::new();
+
+    if let Some(existing) = existing_summary
+        && !existing.is_empty()
+    {
+        summary_parts.push(existing.to_string());
+    }
+
+    summary_parts.push(format!(
+        "**[Emergency compaction]**: {} messages were dropped to recover from context overflow. \
+         The conversation had ~{}k tokens which exceeded the {}k limit.",
+        dropped_count,
+        pre_tokens / 1000,
+        token_budget / 1000,
+    ));
+
+    let mut file_mentions = Vec::new();
+    let mut tool_names = HashSet::new();
+    for msg in dropped_messages {
+        collect_emergency_summary_hints(msg, &mut tool_names, &mut file_mentions);
+    }
+
+    if !tool_names.is_empty() {
+        let mut tools: Vec<_> = tool_names.into_iter().collect();
+        tools.sort();
+        summary_parts.push(format!("Tools used: {}", tools.join(", ")));
+    }
+
+    file_mentions.sort();
+    file_mentions.dedup();
+    if !file_mentions.is_empty() {
+        file_mentions.truncate(30);
+        summary_parts.push(format!("Files referenced: {}", file_mentions.join(", ")));
+    }
+
+    summary_parts.join("\n\n")
+}
+
+fn collect_emergency_summary_hints(
+    msg: &Message,
+    tool_names: &mut HashSet<String>,
+    file_mentions: &mut Vec<String>,
+) {
+    for block in &msg.content {
+        match block {
+            ContentBlock::ToolUse { name, .. } => {
+                tool_names.insert(name.clone());
+            }
+            ContentBlock::Text { text, .. } => {
+                extract_file_mentions(text, file_mentions);
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn extract_file_mentions(text: &str, file_mentions: &mut Vec<String>) {
+    for word in text.split_whitespace() {
+        if looks_like_file_reference(word) {
+            let cleaned = clean_file_reference(word);
+            if !cleaned.is_empty() {
+                file_mentions.push(cleaned.to_string());
+            }
+        }
+    }
+}
+
+pub fn looks_like_file_reference(word: &str) -> bool {
+    (word.contains('/') || word.contains('.'))
+        && word.len() > 3
+        && word.len() < 120
+        && !word.starts_with("http")
+        && (word.contains(".rs")
+            || word.contains(".ts")
+            || word.contains(".py")
+            || word.contains(".toml")
+            || word.contains(".json")
+            || word.starts_with("src/")
+            || word.starts_with("./"))
+}
+
+pub fn clean_file_reference(word: &str) -> &str {
+    word.trim_matches(|c: char| {
+        !c.is_alphanumeric() && c != '/' && c != '.' && c != '_' && c != '-'
+    })
+}
+
+pub fn emergency_truncate_tool_results(messages: &mut [Message], max_chars: usize) -> usize {
+    let mut truncated = 0;
+
+    for msg in messages.iter_mut() {
+        for block in msg.content.iter_mut() {
+            if let ContentBlock::ToolResult { content, .. } = block
+                && content.len() > max_chars
+            {
+                *content = emergency_truncated_tool_result(content, max_chars);
+                truncated += 1;
+            }
+        }
+    }
+
+    truncated
+}
+
+pub fn emergency_truncated_tool_result(content: &str, max_chars: usize) -> String {
+    let original_len = content.len();
+    let keep_head = max_chars / 2;
+    let keep_tail = max_chars / 4;
+    let head = truncate_str_boundary(content, keep_head);
+    let tail = tail_str_boundary(content, keep_tail);
+    let truncated_len = original_len.saturating_sub(head.len() + tail.len());
+    format!(
+        "{}\n\n... [{} chars truncated for context recovery] ...\n\n{}",
+        head, truncated_len, tail,
+    )
+}
+
+pub fn tail_str_boundary(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut start = value.len().saturating_sub(max_bytes);
+    while start < value.len() && !value.is_char_boundary(start) {
+        start += 1;
+    }
+    &value[start..]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +592,38 @@ mod tests {
         assert_eq!(semantic_message_text(&message), "hello world");
         assert_eq!(semantic_goal_text(&[message]), "hello world tool output");
         assert_eq!(semantic_cache_key("stable"), semantic_cache_key("stable"));
+    }
+
+    #[test]
+    fn builds_emergency_summary_with_tools_and_files() {
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"file":"src/lib.rs"}),
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            Message::user("Edited src/compaction.rs and Cargo.toml, ignored https://example.com"),
+        ];
+
+        let summary =
+            build_emergency_summary_text(Some("previous"), 2, 201_000, 200_000, &messages);
+        assert!(summary.contains("previous"));
+        assert!(summary.contains("2 messages were dropped"));
+        assert!(summary.contains("Tools used: read"));
+        assert!(summary.contains("Files referenced: Cargo.toml, src/compaction.rs"));
+        assert!(!summary.contains("https://example.com"));
+    }
+
+    #[test]
+    fn emergency_truncation_is_utf8_safe() {
+        let original = format!("{}middle{}", "é".repeat(20), "尾".repeat(20));
+        let truncated = emergency_truncated_tool_result(&original, 25);
+        assert!(truncated.contains("chars truncated for context recovery"));
+        assert!(truncated.is_char_boundary(truncated.len()));
     }
 }
