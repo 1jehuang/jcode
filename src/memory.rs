@@ -10,6 +10,7 @@ use crate::memory_graph::{GRAPH_VERSION, MemoryGraph};
 use crate::memory_types::{
     InjectedMemoryItem, MemoryActivity, MemoryEvent, MemoryEventKind, MemoryState, StepResult,
     StepStatus,
+    ranking::{top_k_by_ord, top_k_by_score},
 };
 use crate::sidecar::Sidecar;
 use crate::storage;
@@ -29,7 +30,6 @@ pub(crate) mod model;
 mod pending;
 #[path = "memory_prompt.rs"]
 mod prompt_support;
-mod ranking;
 pub(crate) mod search;
 
 pub use activity::{
@@ -53,7 +53,6 @@ pub(crate) use prompt_support::{
     format_context_for_extraction, format_context_for_relevance, format_relevant_display_prompt,
     format_relevant_prompt,
 };
-use ranking::{top_k_by_ord, top_k_by_score};
 use search::{
     collect_skill_query_terms, memory_matches_search, normalize_memory_search_text,
     normalize_search_text, skill_retrieval_bonus,
