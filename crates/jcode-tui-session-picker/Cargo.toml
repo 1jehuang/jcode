@@ -5,6 +5,9 @@ edition = "2024"
 publish = false
 
 [dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+jcode-message-types = { path = "../jcode-message-types" }
+jcode-session-types = { path = "../jcode-session-types" }
 serde = { version = "1", features = ["derive"], optional = true }
 
 [features]

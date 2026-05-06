@@ -3015,6 +3015,9 @@ dependencies = [
 name = "jcode-tui-session-picker"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "jcode-message-types",
+ "jcode-session-types",
  "serde",
 ]
 

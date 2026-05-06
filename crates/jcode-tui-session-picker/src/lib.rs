@@ -1,3 +1,7 @@
+use chrono::{DateTime, Utc};
+use jcode_message_types::ToolCall;
+use jcode_session_types::SessionStatus;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SessionSource {
@@ -103,6 +107,83 @@ impl SessionFilterMode {
             Self::OpenCode => Some("◌ OpenCode"),
         }
     }
+}
+
+/// Session info for display in the interactive session picker.
+#[derive(Clone)]
+pub struct SessionInfo {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub short_name: String,
+    pub icon: String,
+    pub title: String,
+    pub message_count: usize,
+    pub user_message_count: usize,
+    pub assistant_message_count: usize,
+    pub created_at: DateTime<Utc>,
+    pub last_message_time: DateTime<Utc>,
+    pub last_active_at: Option<DateTime<Utc>>,
+    pub working_dir: Option<String>,
+    pub model: Option<String>,
+    pub provider_key: Option<String>,
+    pub is_canary: bool,
+    pub is_debug: bool,
+    pub saved: bool,
+    pub save_label: Option<String>,
+    pub status: SessionStatus,
+    pub needs_catchup: bool,
+    pub estimated_tokens: usize,
+    pub messages_preview: Vec<PreviewMessage>,
+    /// Lowercased searchable text used by picker filtering.
+    pub search_index: String,
+    /// Server name this session belongs to (if running).
+    pub server_name: Option<String>,
+    /// Server icon.
+    pub server_icon: Option<String>,
+    /// Human/session source classification shown in the UI.
+    pub source: SessionSource,
+    /// How this entry should be resumed when selected.
+    pub resume_target: ResumeTarget,
+    /// Backing external transcript/storage path when available.
+    pub external_path: Option<String>,
+}
+
+/// A group of sessions under a server.
+#[derive(Clone)]
+pub struct ServerGroup {
+    pub name: String,
+    pub icon: String,
+    pub version: String,
+    pub git_hash: String,
+    pub is_running: bool,
+    pub sessions: Vec<SessionInfo>,
+}
+
+#[derive(Clone)]
+pub struct PreviewMessage {
+    pub role: String,
+    pub content: String,
+    pub tool_calls: Vec<String>,
+    pub tool_data: Option<ToolCall>,
+    pub timestamp: Option<DateTime<Utc>>,
+}
+
+/// An item in the picker list, either a server/header row or a session row.
+#[derive(Clone)]
+pub enum PickerItem {
+    ServerHeader {
+        name: String,
+        icon: String,
+        version: String,
+        session_count: usize,
+    },
+    Session,
+    OrphanHeader {
+        session_count: usize,
+    },
+    SavedHeader {
+        session_count: usize,
+    },
 }
 
 pub fn session_is_claude_code(source: SessionSource, id: &str) -> bool {
