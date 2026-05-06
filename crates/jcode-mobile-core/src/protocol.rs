@@ -117,8 +117,13 @@ pub struct MobileGatewayConfig {
 }
 
 impl MobileGatewayConfig {
-    pub fn new(host: impl Into<String>, port: u16, use_tls: bool) -> anyhow::Result<Self> {
-        let host = normalize_gateway_host(&host.into())?;
+    pub fn new(host: impl Into<String>, port: u16, mut use_tls: bool) -> anyhow::Result<Self> {
+        let host_str = host.into();
+        let trimmed = host_str.trim();
+        if trimmed.starts_with("https://") || trimmed.starts_with("wss://") {
+            use_tls = true;
+        }
+        let host = normalize_gateway_host(trimmed)?;
         Ok(Self {
             host,
             port,
@@ -585,6 +590,20 @@ mod tests {
             endpoints.websocket_url,
             "wss://devbox.tailnet.ts.net:7643/ws"
         );
+    }
+
+    #[test]
+    fn gateway_config_auto_enables_tls_for_secure_schemes() {
+        let config = MobileGatewayConfig::new("https://secure.example.com", 7643, false);
+        assert!(config.is_ok());
+        let config = config.unwrap();
+        assert!(config.use_tls, "TLS should be enabled for https:// scheme");
+        assert_eq!(config.host, "secure.example.com");
+
+        let config = MobileGatewayConfig::new("wss://secure.example.com", 7643, false);
+        assert!(config.is_ok());
+        let config = config.unwrap();
+        assert!(config.use_tls, "TLS should be enabled for wss:// scheme");
     }
 
     #[test]
