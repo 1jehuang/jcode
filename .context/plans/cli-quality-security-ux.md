@@ -55,3 +55,7 @@ Melhorar o CLI/TUI do Jcode em fatias verificáveis, sem tentar reescrever tudo 
 - Zerar as ocorrências novas em `crates/jcode-build-support/src/lib.rs`, preservando stderr de smoke tests e registrando falhas de shutdown de processo.
 - Reduzir `src/overnight.rs` de `30` para `10` ocorrências, logando falhas best-effort de manifest/event/review/task-card em vez de engolir erros silenciosamente.
 - Atualizar `scripts/swallowed_error_budget.json` após limpeza intencional para que `scripts/cli_quality_preflight.sh --check --strict-swallowed` passe e bloqueie novas regressões.
+
+## Quarta fatia implementada
+- Ampliar `redact_secrets` para cobrir headers `Authorization`/`Proxy-Authorization`, tokens `Bearer`, variáveis genéricas com `PASSWORD`, `TOKEN` ou `SECRET`, e campos JSON sensíveis.
+- Adicionar regressões focadas para impedir vazamento de bearer token, basic auth, password, refresh token e client secret em histórico/export/tool output.

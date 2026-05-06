@@ -239,6 +239,28 @@ fn redact_secrets_redacts_mixed_case_token_assignments() {
 }
 
 #[test]
+fn redact_secrets_redacts_auth_headers_and_bearer_tokens() {
+    let input = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345\nproxy-authorization=Basic dXNlcjpwYXNzd29yZA==";
+    let out = redact_secrets(input);
+    assert!(out.contains("Authorization: [REDACTED_SECRET]"));
+    assert!(out.contains("proxy-authorization=[REDACTED_SECRET]"));
+    assert!(!out.contains("abcdefghijklmnopqrstuvwxyz012345"));
+    assert!(!out.contains("dXNlcjpwYXNzd29yZA=="));
+}
+
+#[test]
+fn redact_secrets_redacts_password_token_and_secret_json_values() {
+    let input = r#"{"password":"correct-horse-battery-staple","refresh_token":"refresh-secret-12345","clientSecret":"client-secret-12345"}"#;
+    let out = redact_secrets(input);
+    assert!(out.contains(r#""password":[REDACTED_SECRET]"#));
+    assert!(out.contains(r#""refresh_token":[REDACTED_SECRET]"#));
+    assert!(out.contains(r#""clientSecret":[REDACTED_SECRET]"#));
+    assert!(!out.contains("correct-horse-battery-staple"));
+    assert!(!out.contains("refresh-secret-12345"));
+    assert!(!out.contains("client-secret-12345"));
+}
+
+#[test]
 fn redact_secrets_leaves_normal_output_unchanged() {
     let input = "Found 5 files\nNo auth errors\nDone.";
     assert_eq!(redact_secrets(input), input);

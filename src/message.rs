@@ -55,7 +55,10 @@ pub fn redact_secrets(text: &str) -> String {
         && !text.contains("AIza")
         && !text.contains("ya29.")
         && !text.contains("xox")
+        && !lower.contains("bearer ")
         && !lower.contains("api_key")
+        && !lower.contains("authorization")
+        && !lower.contains("password")
         && !lower.contains("token")
     {
         return text.to_string();
@@ -73,6 +76,7 @@ pub fn redact_secrets(text: &str) -> String {
             r"ya29\.[A-Za-z0-9._-]{20,}",
             r"AIza[0-9A-Za-z_-]{20,}",
             r"xox[baprs]-[A-Za-z0-9-]{10,}",
+            r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}",
         ])
     });
 
@@ -109,6 +113,9 @@ pub fn redact_secrets(text: &str) -> String {
             r"(?m)^\s*(AZURE_OPENAI_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(CURSOR_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(GITHUB_TOKEN\s*=\s*)[^\r\n]+",
+            r"(?im)^(\s*(?:authorization|proxy-authorization)\s*[:=]\s*)[^\r\n]+",
+            r"(?im)^(\s*[A-Z0-9_]*(?:PASSWORD|TOKEN|SECRET)[A-Z0-9_]*\s*=\s*)[^\r\n]+",
+            r#"(?im)(\"[A-Za-z0-9_-]*(?:password|token|secret)[A-Za-z0-9_-]*\"\s*:\s*)\"[^\"\r\n]{4,}\""#,
         ])
     });
 
