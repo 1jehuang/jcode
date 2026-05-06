@@ -596,15 +596,34 @@ mod tests {
 
     #[test]
     fn load_for_working_dir_includes_builtin_karpathy_in_empty_tempdir() {
-        let temp = tempfile::tempdir().expect("tempdir");
-
-        let registry = SkillRegistry::load_for_working_dir(Some(temp.path())).expect("load skills");
+        let mut registry = SkillRegistry::default();
+        registry.load_builtin_skills().expect("load built-ins");
         let skill = registry
             .get("karpathy-guidelines")
             .expect("built-in karpathy skill should load");
 
         assert_eq!(skill.origin, SkillOrigin::Builtin);
         assert!(skill.content.contains("Think Before Coding"));
+    }
+
+    #[test]
+    fn all_embedded_harness_skills_parse_from_builtin_pack() {
+        let mut registry = SkillRegistry::default();
+        registry.load_builtin_skills().expect("load built-ins");
+
+        for name in ["karpathy-guidelines", "optimization", "clean-code-guardian"] {
+            let skill = registry
+                .get(name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(skill.origin, SkillOrigin::Builtin, "{name} origin");
+            assert!(
+                skill.path.to_string_lossy().starts_with("<builtin>/"),
+                "{name} path should be virtual built-in path: {}",
+                skill.path.display()
+            );
+            assert!(!skill.description.trim().is_empty(), "{name} description");
+            assert!(!skill.content.trim().is_empty(), "{name} content");
+        }
     }
 
     #[test]
@@ -617,6 +636,38 @@ mod tests {
 
         assert_eq!(skill.origin, SkillOrigin::ProjectLocal);
         assert_eq!(skill.description, "Test skill karpathy-guidelines");
+    }
+
+    #[test]
+    fn project_local_jcode_skills_override_claude_compat_skills() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_test_skill(temp.path(), ".claude", "karpathy-guidelines");
+        write_test_skill(temp.path(), ".jcode", "karpathy-guidelines");
+
+        let registry = SkillRegistry::load_for_working_dir(Some(temp.path())).expect("load skills");
+        let skill = registry.get("karpathy-guidelines").expect("skill");
+
+        assert_eq!(skill.origin, SkillOrigin::ProjectLocal);
+        assert!(skill.path.starts_with(temp.path().join(".jcode")));
+    }
+
+    #[test]
+    fn claude_compat_skills_override_builtins_when_no_jcode_override_exists() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_test_skill(temp.path(), ".claude", "karpathy-guidelines");
+
+        let mut registry = SkillRegistry::default();
+        registry.load_builtin_skills().expect("load built-ins");
+        registry
+            .load_from_dir_with_origin(
+                &temp.path().join(".claude").join("skills"),
+                SkillOrigin::ClaudeCompat,
+            )
+            .expect("load claude compat skills");
+        let skill = registry.get("karpathy-guidelines").expect("skill");
+
+        assert_eq!(skill.origin, SkillOrigin::ClaudeCompat);
+        assert!(skill.path.starts_with(temp.path().join(".claude")));
     }
 
     #[test]
