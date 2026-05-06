@@ -48,6 +48,7 @@ fn configure_system_allocator() {}
 
 fn main() -> Result<()> {
     configure_system_allocator();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

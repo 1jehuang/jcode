@@ -84,224 +84,251 @@ impl Provider for OpenAIProvider {
         let websocket_failure_streaks = Arc::clone(&self.websocket_failure_streaks);
         let model_for_transport = model_id.clone();
         let client = self.client.clone();
+        let panic_tx = tx.clone();
 
         tokio::spawn(async move {
-            // Attempt persistent WebSocket continuation first
-            if use_websocket_transport {
-                let continuation_result = try_persistent_ws_continuation(
-                    &persistent_ws,
-                    &request,
-                    &input,
-                    input_item_count,
-                    &tx,
-                )
-                .await;
-
-                match continuation_result {
-                    PersistentWsResult::Success => {
-                        record_websocket_success(
-                            &websocket_cooldowns,
-                            &websocket_failure_streaks,
-                            &model_for_transport,
-                        )
-                        .await;
-                        return;
-                    }
-                    PersistentWsResult::NotAvailable => {
-                        crate::logging::info(
-                            "No persistent WS connection available; using fresh connection",
-                        );
-                    }
-                    PersistentWsResult::Failed(err) => {
-                        crate::logging::warn(&format!(
-                            "Persistent WS continuation failed: {}; using fresh connection",
-                            err
-                        ));
-                        let mut guard = persistent_ws.lock().await;
-                        *guard = None;
-                    }
-                }
-            }
-
-            // Normal path: fresh connection with full input (with retry logic)
-            let mut last_error = None;
-            let mut force_https_for_request = false;
-            let mut skip_backoff_once = false;
-
-            for attempt in 0..MAX_RETRIES {
-                if attempt > 0 {
-                    emit_connection_phase(
+            let stream_task = async move {
+                // Attempt persistent WebSocket continuation first
+                if use_websocket_transport {
+                    let continuation_result = try_persistent_ws_continuation(
+                        &persistent_ws,
+                        &request,
+                        &input,
+                        input_item_count,
                         &tx,
-                        crate::message::ConnectionPhase::Retrying {
-                            attempt: attempt + 1,
-                            max: MAX_RETRIES,
-                        },
                     )
                     .await;
-                }
-                if attempt > 0 && !skip_backoff_once {
-                    let delay = RETRY_BASE_DELAY_MS * (1 << (attempt - 1));
-                    tokio::time::sleep(Duration::from_millis(delay)).await;
-                    crate::logging::info(&format!(
-                        "Retrying OpenAI API request (attempt {}/{})",
-                        attempt + 1,
-                        MAX_RETRIES
-                    ));
-                }
-                skip_backoff_once = false;
 
-                let transport = if force_https_for_request {
-                    OpenAITransport::HTTPS
-                } else {
-                    match transport_mode {
-                        OpenAITransportMode::HTTPS => OpenAITransport::HTTPS,
-                        OpenAITransportMode::WebSocket => OpenAITransport::WebSocket,
-                        OpenAITransportMode::Auto => {
-                            if !Self::should_prefer_websocket(&model_for_transport) {
-                                OpenAITransport::HTTPS
-                            } else if let Some(remaining) = websocket_cooldown_remaining(
-                                &websocket_cooldowns,
-                                &model_for_transport,
-                            )
-                            .await
-                            {
-                                crate::logging::info(&format!(
-                                    "OpenAI websocket cooldown active for model='{}' ({}s remaining); using HTTPS",
-                                    model_for_transport,
-                                    remaining.as_secs()
-                                ));
-                                emit_status_detail(
-                                    &tx,
-                                    format!("https cooldown {}", format_status_duration(remaining)),
-                                )
-                                .await;
-                                OpenAITransport::HTTPS
-                            } else {
-                                OpenAITransport::WebSocket
-                            }
-                        }
-                    }
-                };
-
-                let transport_label = transport.as_str();
-                let attempt_started = Instant::now();
-                crate::logging::info(&format!(
-                    "OpenAI stream attempt {}/{} using transport '{}'; model='{}'; mode='{}'",
-                    attempt + 1,
-                    MAX_RETRIES,
-                    transport_label,
-                    model_for_transport,
-                    transport_mode.as_str()
-                ));
-
-                let use_websocket = matches!(transport, OpenAITransport::WebSocket);
-                let result = if use_websocket {
-                    stream_response_websocket_persistent(
-                        Arc::clone(&credentials),
-                        request.clone(),
-                        tx.clone(),
-                        Arc::clone(&persistent_ws),
-                        input_item_count,
-                    )
-                    .await
-                } else {
-                    stream_response(
-                        client.clone(),
-                        Arc::clone(&credentials),
-                        request.clone(),
-                        if force_https_for_request {
-                            let reason = last_error
-                                .as_ref()
-                                .map(|error: &anyhow::Error| {
-                                    summarize_websocket_fallback_reason(&error.to_string())
-                                })
-                                .unwrap_or("websocket error");
-                            format!("https fallback: {}", reason)
-                        } else if let Some(remaining) =
-                            websocket_cooldown_remaining(&websocket_cooldowns, &model_for_transport)
-                                .await
-                        {
-                            format!("https cooldown {}", format_status_duration(remaining))
-                        } else {
-                            "https".to_string()
-                        },
-                        tx.clone(),
-                    )
-                    .await
-                };
-
-                match result {
-                    Ok(()) => {
-                        if use_websocket {
+                    match continuation_result {
+                        PersistentWsResult::Success => {
                             record_websocket_success(
                                 &websocket_cooldowns,
                                 &websocket_failure_streaks,
                                 &model_for_transport,
                             )
                             .await;
+                            return;
                         }
-                        return;
-                    }
-                    Err(OpenAIStreamFailure::FallbackToHttps(error)) => {
-                        let elapsed_ms = attempt_started.elapsed().as_millis();
-                        let reason = summarize_websocket_fallback_reason(&error.to_string());
-                        let fallback_reason =
-                            classify_websocket_fallback_reason(&error.to_string());
-                        crate::logging::warn(&format!(
-                            "WebSocket fallback after {}ms: {}",
-                            elapsed_ms, error
-                        ));
-                        emit_status_detail(&tx, format!("https fallback: {}", reason)).await;
-                        force_https_for_request = true;
-                        skip_backoff_once = true;
-                        if matches!(transport_mode, OpenAITransportMode::Auto) {
-                            let (streak, cooldown) = record_websocket_fallback(
-                                &websocket_cooldowns,
-                                &websocket_failure_streaks,
-                                &model_for_transport,
-                                fallback_reason,
-                            )
-                            .await;
+                        PersistentWsResult::NotAvailable => {
+                            crate::logging::info(
+                                "No persistent WS connection available; using fresh connection",
+                            );
+                        }
+                        PersistentWsResult::Failed(err) => {
                             crate::logging::warn(&format!(
-                                "OpenAI websocket backoff for model='{}': reason='{}' streak={} cooldown={}s",
-                                model_for_transport,
-                                fallback_reason.summary(),
-                                streak,
-                                cooldown.as_secs()
+                                "Persistent WS continuation failed: {}; using fresh connection",
+                                err
                             ));
-                        }
-                        // Clear persistent state on fallback
-                        {
                             let mut guard = persistent_ws.lock().await;
                             *guard = None;
                         }
-                        last_error = Some(error);
-                        continue;
                     }
-                    Err(OpenAIStreamFailure::Other(error)) => {
-                        let elapsed_ms = attempt_started.elapsed().as_millis();
-                        let error_str = error.to_string().to_lowercase();
-                        if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
-                            crate::logging::info(&format!(
-                                "Transient error after {}ms, will retry: {}",
+                }
+
+                // Normal path: fresh connection with full input (with retry logic)
+                let mut last_error = None;
+                let mut force_https_for_request = false;
+                let mut skip_backoff_once = false;
+
+                for attempt in 0..MAX_RETRIES {
+                    if attempt > 0 {
+                        emit_connection_phase(
+                            &tx,
+                            crate::message::ConnectionPhase::Retrying {
+                                attempt: attempt + 1,
+                                max: MAX_RETRIES,
+                            },
+                        )
+                        .await;
+                    }
+                    if attempt > 0 && !skip_backoff_once {
+                        let delay = RETRY_BASE_DELAY_MS * (1 << (attempt - 1));
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        crate::logging::info(&format!(
+                            "Retrying OpenAI API request (attempt {}/{})",
+                            attempt + 1,
+                            MAX_RETRIES
+                        ));
+                    }
+                    skip_backoff_once = false;
+
+                    let transport = if force_https_for_request {
+                        OpenAITransport::HTTPS
+                    } else {
+                        match transport_mode {
+                            OpenAITransportMode::HTTPS => OpenAITransport::HTTPS,
+                            OpenAITransportMode::WebSocket => OpenAITransport::WebSocket,
+                            OpenAITransportMode::Auto => {
+                                if !Self::should_prefer_websocket(&model_for_transport) {
+                                    OpenAITransport::HTTPS
+                                } else if let Some(remaining) = websocket_cooldown_remaining(
+                                    &websocket_cooldowns,
+                                    &model_for_transport,
+                                )
+                                .await
+                                {
+                                    crate::logging::info(&format!(
+                                        "OpenAI websocket cooldown active for model='{}' ({}s remaining); using HTTPS",
+                                        model_for_transport,
+                                        remaining.as_secs()
+                                    ));
+                                    emit_status_detail(
+                                        &tx,
+                                        format!(
+                                            "https cooldown {}",
+                                            format_status_duration(remaining)
+                                        ),
+                                    )
+                                    .await;
+                                    OpenAITransport::HTTPS
+                                } else {
+                                    OpenAITransport::WebSocket
+                                }
+                            }
+                        }
+                    };
+
+                    let transport_label = transport.as_str();
+                    let attempt_started = Instant::now();
+                    crate::logging::info(&format!(
+                        "OpenAI stream attempt {}/{} using transport '{}'; model='{}'; mode='{}'",
+                        attempt + 1,
+                        MAX_RETRIES,
+                        transport_label,
+                        model_for_transport,
+                        transport_mode.as_str()
+                    ));
+
+                    let use_websocket = matches!(transport, OpenAITransport::WebSocket);
+                    let result = if use_websocket {
+                        stream_response_websocket_persistent(
+                            Arc::clone(&credentials),
+                            request.clone(),
+                            tx.clone(),
+                            Arc::clone(&persistent_ws),
+                            input_item_count,
+                        )
+                        .await
+                    } else {
+                        stream_response(
+                            client.clone(),
+                            Arc::clone(&credentials),
+                            request.clone(),
+                            if force_https_for_request {
+                                let reason = last_error
+                                    .as_ref()
+                                    .map(|error: &anyhow::Error| {
+                                        summarize_websocket_fallback_reason(&error.to_string())
+                                    })
+                                    .unwrap_or("websocket error");
+                                format!("https fallback: {}", reason)
+                            } else if let Some(remaining) = websocket_cooldown_remaining(
+                                &websocket_cooldowns,
+                                &model_for_transport,
+                            )
+                            .await
+                            {
+                                format!("https cooldown {}", format_status_duration(remaining))
+                            } else {
+                                "https".to_string()
+                            },
+                            tx.clone(),
+                        )
+                        .await
+                    };
+
+                    match result {
+                        Ok(()) => {
+                            if use_websocket {
+                                record_websocket_success(
+                                    &websocket_cooldowns,
+                                    &websocket_failure_streaks,
+                                    &model_for_transport,
+                                )
+                                .await;
+                            }
+                            return;
+                        }
+                        Err(OpenAIStreamFailure::FallbackToHttps(error)) => {
+                            let elapsed_ms = attempt_started.elapsed().as_millis();
+                            let reason = summarize_websocket_fallback_reason(&error.to_string());
+                            let fallback_reason =
+                                classify_websocket_fallback_reason(&error.to_string());
+                            crate::logging::warn(&format!(
+                                "WebSocket fallback after {}ms: {}",
                                 elapsed_ms, error
                             ));
+                            emit_status_detail(&tx, format!("https fallback: {}", reason)).await;
+                            force_https_for_request = true;
+                            skip_backoff_once = true;
+                            if matches!(transport_mode, OpenAITransportMode::Auto) {
+                                let (streak, cooldown) = record_websocket_fallback(
+                                    &websocket_cooldowns,
+                                    &websocket_failure_streaks,
+                                    &model_for_transport,
+                                    fallback_reason,
+                                )
+                                .await;
+                                crate::logging::warn(&format!(
+                                    "OpenAI websocket backoff for model='{}': reason='{}' streak={} cooldown={}s",
+                                    model_for_transport,
+                                    fallback_reason.summary(),
+                                    streak,
+                                    cooldown.as_secs()
+                                ));
+                            }
+                            // Clear persistent state on fallback
+                            {
+                                let mut guard = persistent_ws.lock().await;
+                                *guard = None;
+                            }
                             last_error = Some(error);
                             continue;
                         }
-                        let _ = tx.send(Err(error)).await;
-                        return;
+                        Err(OpenAIStreamFailure::Other(error)) => {
+                            let elapsed_ms = attempt_started.elapsed().as_millis();
+                            let error_str = error.to_string().to_lowercase();
+                            if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
+                                crate::logging::info(&format!(
+                                    "Transient error after {}ms, will retry: {}",
+                                    elapsed_ms, error
+                                ));
+                                last_error = Some(error);
+                                continue;
+                            }
+                            let _ = tx.send(Err(error)).await;
+                            return;
+                        }
                     }
                 }
-            }
 
-            // All retries exhausted
-            if let Some(e) = last_error {
-                let _ = tx
+                // All retries exhausted
+                if let Some(e) = last_error {
+                    let _ = tx
+                        .send(Err(anyhow::anyhow!(
+                            "Failed after {} retries: {}",
+                            MAX_RETRIES,
+                            e
+                        )))
+                        .await;
+                }
+            };
+
+            let result = AssertUnwindSafe(stream_task).catch_unwind().await;
+
+            if let Err(panic_payload) = result {
+                let msg = if let Some(text) = panic_payload.downcast_ref::<&str>() {
+                    (*text).to_string()
+                } else if let Some(text) = panic_payload.downcast_ref::<String>() {
+                    text.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                crate::logging::error(&format!("OpenAI provider stream task panicked: {}", msg));
+                let _ = panic_tx
                     .send(Err(anyhow::anyhow!(
-                        "Failed after {} retries: {}",
-                        MAX_RETRIES,
-                        e
+                        "OpenAI provider stream task panicked: {}",
+                        msg
                     )))
                     .await;
             }

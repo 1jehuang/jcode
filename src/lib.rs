@@ -46,6 +46,7 @@ pub mod memory_log;
 pub mod memory_types;
 pub mod memory_wiki;
 pub mod message;
+pub mod network_retry;
 pub mod notifications;
 pub mod overnight;
 pub mod perf;

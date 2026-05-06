@@ -266,9 +266,9 @@ Two notable presets are:
 - Login: `jcode login --provider minimax`
 - Stored env file: `~/.config/jcode/minimax.env`
 - API key env var: `OPENAI_API_KEY`
-- Base URL: `https://api.minimaxi.com/v1`
+- Base URL: `https://api.minimax.io/v1`
 - Default model hint: `MiniMax-M2.7`
-- Docs: <https://platform.minimax.io/docs/api-reference/text-openai-api>
+- Docs: <https://platform.minimax.io/docs/guides/text-generation>
 
 These are first-class jcode provider presets, not just manual custom endpoint examples.
 You can still use `openai-compatible` for arbitrary custom providers when there is not a built-in preset.

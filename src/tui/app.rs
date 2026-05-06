@@ -304,6 +304,8 @@ pub enum ProcessingStatus {
     Thinking(Instant),
     /// Receiving streaming response
     Streaming,
+    /// Waiting for network connectivity before retrying an interrupted request
+    WaitingForNetwork { listener: String },
     /// Executing a tool
     RunningTool(String),
 }

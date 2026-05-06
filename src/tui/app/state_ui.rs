@@ -1487,6 +1487,8 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                 ProcessingStatus::Connecting(phase) => format!("connecting ({})", phase),
                 ProcessingStatus::Thinking(_) => "thinking".to_string(),
                 ProcessingStatus::Streaming => "streaming".to_string(),
+                ProcessingStatus::WaitingForNetwork { listener } =>
+                    format!("waiting for network ({})", listener),
                 ProcessingStatus::RunningTool(name) => format!("running tool ({})", name),
             }
         ));

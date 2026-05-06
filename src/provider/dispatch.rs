@@ -150,6 +150,17 @@ impl MultiProvider {
                     ))
                 }
             }
+            ActiveProvider::Bedrock => {
+                if let Some(bedrock) = self.bedrock_provider() {
+                    bedrock
+                        .complete(messages, tools, system, resume_session_id)
+                        .await
+                } else {
+                    Err(anyhow::anyhow!(
+                        "AWS Bedrock is not available. Configure AWS credentials and region, or set AWS_PROFILE/AWS_REGION."
+                    ))
+                }
+            }
             ActiveProvider::OpenRouter => {
                 let openrouter = self
                     .openrouter
@@ -305,6 +316,23 @@ impl MultiProvider {
                 } else {
                     Err(anyhow::anyhow!(
                         "Cursor is not available. Run `jcode login --provider cursor`."
+                    ))
+                }
+            }
+            ActiveProvider::Bedrock => {
+                if let Some(bedrock) = self.bedrock_provider() {
+                    bedrock
+                        .complete_split(
+                            messages,
+                            tools,
+                            system_static,
+                            system_dynamic,
+                            resume_session_id,
+                        )
+                        .await
+                } else {
+                    Err(anyhow::anyhow!(
+                        "AWS Bedrock is not available. Configure AWS credentials and region, or set AWS_PROFILE/AWS_REGION."
                     ))
                 }
             }

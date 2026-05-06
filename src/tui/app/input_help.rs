@@ -152,6 +152,9 @@ impl App {
             "save" => {
                 "`/save`\nBookmark the current session so it appears at the top of `/resume`.\n\n`/save <label>`\nBookmark with a custom label for easy identification.\n\nSaved sessions are shown in a dedicated \"Saved\" section in the session picker."
             }
+            "rename" => {
+                "`/rename <session name>`\nSet a custom display name for the current session.\n\n`/rename --clear`\nClear the custom name and return to the generated session title."
+            }
             "unsave" => "`/unsave`\nRemove the bookmark from the current session.",
             "client-reload" if self.is_remote => {
                 "`/client-reload`\nForce client binary reload in remote mode."

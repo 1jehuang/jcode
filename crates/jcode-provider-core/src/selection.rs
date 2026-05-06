@@ -10,6 +10,7 @@ pub enum ActiveProvider {
     Antigravity,
     Gemini,
     Cursor,
+    Bedrock,
     OpenRouter,
 }
 
@@ -21,6 +22,7 @@ pub struct ProviderAvailability {
     pub antigravity: bool,
     pub gemini: bool,
     pub cursor: bool,
+    pub bedrock: bool,
     pub openrouter: bool,
     pub copilot_premium_zero: bool,
 }
@@ -34,6 +36,7 @@ impl ProviderAvailability {
             ActiveProvider::Antigravity => self.antigravity,
             ActiveProvider::Gemini => self.gemini,
             ActiveProvider::Cursor => self.cursor,
+            ActiveProvider::Bedrock => self.bedrock,
             ActiveProvider::OpenRouter => self.openrouter,
         }
     }
@@ -54,6 +57,8 @@ pub fn auto_default_provider(availability: ProviderAvailability) -> ActiveProvid
         ActiveProvider::Gemini
     } else if availability.cursor {
         ActiveProvider::Cursor
+    } else if availability.bedrock {
+        ActiveProvider::Bedrock
     } else if availability.openrouter {
         ActiveProvider::OpenRouter
     } else {
@@ -69,6 +74,7 @@ pub fn parse_provider_hint(value: &str) -> Option<ActiveProvider> {
         "antigravity" => Some(ActiveProvider::Antigravity),
         "gemini" => Some(ActiveProvider::Gemini),
         "cursor" => Some(ActiveProvider::Cursor),
+        "bedrock" | "aws-bedrock" | "aws_bedrock" => Some(ActiveProvider::Bedrock),
         "openrouter" => Some(ActiveProvider::OpenRouter),
         _ => None,
     }
@@ -82,6 +88,7 @@ pub fn provider_label(provider: ActiveProvider) -> &'static str {
         ActiveProvider::Antigravity => "Antigravity",
         ActiveProvider::Gemini => "Gemini",
         ActiveProvider::Cursor => "Cursor",
+        ActiveProvider::Bedrock => "AWS Bedrock",
         ActiveProvider::OpenRouter => "OpenRouter",
     }
 }
@@ -94,6 +101,7 @@ pub fn provider_key(provider: ActiveProvider) -> &'static str {
         ActiveProvider::Antigravity => "antigravity",
         ActiveProvider::Gemini => "gemini",
         ActiveProvider::Cursor => "cursor",
+        ActiveProvider::Bedrock => "bedrock",
         ActiveProvider::OpenRouter => "openrouter",
     }
 }
@@ -106,6 +114,7 @@ pub fn provider_from_model_key(key: &str) -> Option<ActiveProvider> {
         "antigravity" => Some(ActiveProvider::Antigravity),
         "gemini" => Some(ActiveProvider::Gemini),
         "cursor" => Some(ActiveProvider::Cursor),
+        "bedrock" => Some(ActiveProvider::Bedrock),
         "openrouter" => Some(ActiveProvider::OpenRouter),
         _ => None,
     }
@@ -118,6 +127,8 @@ pub fn explicit_model_provider_prefix(model: &str) -> Option<(ActiveProvider, &'
         Some((ActiveProvider::Antigravity, "antigravity:", rest))
     } else if let Some(rest) = model.strip_prefix("cursor:") {
         Some((ActiveProvider::Cursor, "cursor:", rest))
+    } else if let Some(rest) = model.strip_prefix("bedrock:") {
+        Some((ActiveProvider::Bedrock, "bedrock:", rest))
     } else {
         None
     }
@@ -154,6 +165,7 @@ pub fn fallback_sequence(active: ActiveProvider) -> Vec<ActiveProvider> {
             ActiveProvider::Copilot,
             ActiveProvider::Gemini,
             ActiveProvider::Cursor,
+            ActiveProvider::Bedrock,
             ActiveProvider::OpenRouter,
         ],
         ActiveProvider::OpenAI => vec![
@@ -162,6 +174,7 @@ pub fn fallback_sequence(active: ActiveProvider) -> Vec<ActiveProvider> {
             ActiveProvider::Copilot,
             ActiveProvider::Gemini,
             ActiveProvider::Cursor,
+            ActiveProvider::Bedrock,
             ActiveProvider::OpenRouter,
         ],
         ActiveProvider::Copilot => vec![
@@ -171,6 +184,7 @@ pub fn fallback_sequence(active: ActiveProvider) -> Vec<ActiveProvider> {
             ActiveProvider::Antigravity,
             ActiveProvider::Gemini,
             ActiveProvider::Cursor,
+            ActiveProvider::Bedrock,
             ActiveProvider::OpenRouter,
         ],
         ActiveProvider::Antigravity => vec![
@@ -180,6 +194,7 @@ pub fn fallback_sequence(active: ActiveProvider) -> Vec<ActiveProvider> {
             ActiveProvider::Copilot,
             ActiveProvider::Gemini,
             ActiveProvider::Cursor,
+            ActiveProvider::Bedrock,
             ActiveProvider::OpenRouter,
         ],
         ActiveProvider::Gemini => vec![
@@ -189,6 +204,7 @@ pub fn fallback_sequence(active: ActiveProvider) -> Vec<ActiveProvider> {
             ActiveProvider::Antigravity,
             ActiveProvider::Copilot,
             ActiveProvider::Cursor,
+            ActiveProvider::Bedrock,
             ActiveProvider::OpenRouter,
         ],
         ActiveProvider::Cursor => vec![
@@ -198,6 +214,16 @@ pub fn fallback_sequence(active: ActiveProvider) -> Vec<ActiveProvider> {
             ActiveProvider::Copilot,
             ActiveProvider::Antigravity,
             ActiveProvider::Gemini,
+            ActiveProvider::OpenRouter,
+        ],
+        ActiveProvider::Bedrock => vec![
+            ActiveProvider::Bedrock,
+            ActiveProvider::Claude,
+            ActiveProvider::OpenAI,
+            ActiveProvider::Copilot,
+            ActiveProvider::Antigravity,
+            ActiveProvider::Gemini,
+            ActiveProvider::Cursor,
             ActiveProvider::OpenRouter,
         ],
         ActiveProvider::OpenRouter => vec![

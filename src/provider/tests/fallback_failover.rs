@@ -177,6 +177,7 @@ fn test_set_model_rejects_cross_provider_without_creds() {
         antigravity: RwLock::new(None),
         gemini: RwLock::new(None),
         cursor: RwLock::new(None),
+        bedrock: RwLock::new(None),
         openrouter: RwLock::new(None),
         active: RwLock::new(ActiveProvider::OpenAI),
         use_claude_cli: false,
@@ -188,8 +189,7 @@ fn test_set_model_rejects_cross_provider_without_creds() {
         .set_model("claude-sonnet-4-6")
         .expect_err("forced provider should reject when the forced provider has no creds");
     assert!(
-        err.to_string()
-            .contains("OpenAI credentials not available"),
+        err.to_string().contains("OpenAI credentials not available"),
         "expected credentials error, got: {}",
         err
     );
@@ -204,6 +204,7 @@ fn test_auto_default_prefers_openai_over_claude_when_both_available() {
         antigravity: false,
         gemini: false,
         cursor: false,
+        bedrock: false,
         openrouter: false,
         copilot_premium_zero: false,
     });
@@ -219,6 +220,7 @@ fn test_auto_default_prefers_copilot_when_zero_premium_mode_enabled() {
         antigravity: true,
         gemini: true,
         cursor: true,
+        bedrock: false,
         openrouter: true,
         copilot_premium_zero: true,
     });
@@ -288,6 +290,7 @@ fn test_no_provider_error_mentions_tokens_and_details() {
         antigravity: RwLock::new(None),
         gemini: RwLock::new(None),
         cursor: RwLock::new(None),
+        bedrock: RwLock::new(None),
         openrouter: RwLock::new(None),
         active: RwLock::new(ActiveProvider::OpenAI),
         use_claude_cli: false,

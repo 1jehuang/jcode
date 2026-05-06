@@ -2,6 +2,7 @@ mod accessors;
 mod account_failover;
 pub mod anthropic;
 pub mod antigravity;
+pub mod bedrock;
 pub mod claude;
 pub mod copilot;
 pub mod cursor;
@@ -110,7 +111,9 @@ pub struct MultiProvider {
     gemini: RwLock<Option<Arc<gemini::GeminiProvider>>>,
     /// Cursor provider (native/direct API, hot-swappable after login)
     cursor: RwLock<Option<Arc<cursor::CursorCliProvider>>>,
-    /// OpenRouter API provider (200+ models from various providers, hot-swappable after login)
+    /// AWS Bedrock provider (native Converse/ConverseStream, IAM/SigV4)
+    bedrock: RwLock<Option<Arc<bedrock::BedrockProvider>>>,
+    /// OpenRouter API provider
     openrouter: RwLock<Option<Arc<openrouter::OpenRouterProvider>>>,
     active: RwLock<ActiveProvider>,
     /// Use Claude CLI instead of direct API (legacy mode)
@@ -426,6 +429,16 @@ impl MultiProvider {
                 self.set_active_provider(ActiveProvider::Cursor);
                 Ok(())
             }
+            ActiveProvider::Bedrock => {
+                let Some(bedrock) = self.bedrock_provider() else {
+                    anyhow::bail!(
+                        "AWS Bedrock credentials not available. Configure AWS credentials and region first."
+                    );
+                };
+                bedrock.set_model(model)?;
+                self.set_active_provider(ActiveProvider::Bedrock);
+                Ok(())
+            }
             ActiveProvider::OpenRouter => {
                 let Some(openrouter) = self.openrouter_provider() else {
                     anyhow::bail!(
@@ -556,6 +569,7 @@ impl Provider for MultiProvider {
             ActiveProvider::Antigravity => "Antigravity",
             ActiveProvider::Gemini => "Gemini",
             ActiveProvider::Cursor => "Cursor",
+            ActiveProvider::Bedrock => "Bedrock",
             ActiveProvider::OpenRouter => "OpenRouter",
         }
     }
@@ -592,6 +606,10 @@ impl Provider for MultiProvider {
                 .cursor_provider()
                 .map(|o| o.model())
                 .unwrap_or_else(|| "composer-1.5".to_string()),
+            ActiveProvider::Bedrock => self
+                .bedrock_provider()
+                .map(|o| o.model())
+                .unwrap_or_else(|| "anthropic.claude-3-5-sonnet-20241022-v2:0".to_string()),
             ActiveProvider::OpenRouter => self
                 .openrouter_provider()
                 .map(|o| o.model())
@@ -627,6 +645,10 @@ impl Provider for MultiProvider {
                 .unwrap_or(false),
             ActiveProvider::Cursor => self
                 .cursor_provider()
+                .map(|provider| provider.supports_image_input())
+                .unwrap_or(false),
+            ActiveProvider::Bedrock => self
+                .bedrock_provider()
                 .map(|provider| provider.supports_image_input())
                 .unwrap_or(false),
             ActiveProvider::OpenRouter => self
@@ -737,6 +759,10 @@ impl Provider for MultiProvider {
             ActiveProvider::Cursor => self
                 .cursor_provider()
                 .map(|cursor| cursor.available_models_for_switching())
+                .unwrap_or_default(),
+            ActiveProvider::Bedrock => self
+                .bedrock_provider()
+                .map(|bedrock| bedrock.available_models_for_switching())
                 .unwrap_or_default(),
             ActiveProvider::OpenRouter => self
                 .openrouter_provider()
@@ -1334,6 +1360,7 @@ impl Provider for MultiProvider {
                 .cursor_provider()
                 .map(|o| o.handles_tools_internally())
                 .unwrap_or(false),
+            ActiveProvider::Bedrock => false,
             ActiveProvider::OpenRouter => false, // jcode executes tools
         }
     }
@@ -1346,6 +1373,7 @@ impl Provider for MultiProvider {
             ActiveProvider::Antigravity => None,
             ActiveProvider::Gemini => None,
             ActiveProvider::Cursor => None,
+            ActiveProvider::Bedrock => None,
             ActiveProvider::OpenRouter => None,
         }
     }
@@ -1485,6 +1513,7 @@ impl Provider for MultiProvider {
                 .cursor_provider()
                 .map(|o| o.supports_compaction())
                 .unwrap_or(false),
+            ActiveProvider::Bedrock => false,
             ActiveProvider::OpenRouter => self
                 .openrouter_provider()
                 .map(|o| o.supports_compaction())
@@ -1523,6 +1552,7 @@ impl Provider for MultiProvider {
                 .cursor_provider()
                 .map(|o| o.uses_jcode_compaction())
                 .unwrap_or(false),
+            ActiveProvider::Bedrock => false,
             ActiveProvider::OpenRouter => self
                 .openrouter_provider()
                 .map(|o| o.uses_jcode_compaction())
@@ -1616,6 +1646,9 @@ impl Provider for MultiProvider {
                     Err(anyhow::anyhow!("Cursor provider unavailable"))
                 }
             }
+            ActiveProvider::Bedrock => Err(anyhow::anyhow!(
+                "AWS Bedrock does not support native compaction"
+            )),
             ActiveProvider::OpenRouter => {
                 let provider = self.openrouter_provider();
                 if let Some(openrouter) = provider {
@@ -1687,6 +1720,7 @@ impl Provider for MultiProvider {
                 .cursor_provider()
                 .map(|o| o.context_window())
                 .unwrap_or(DEFAULT_CONTEXT_LIMIT),
+            ActiveProvider::Bedrock => DEFAULT_CONTEXT_LIMIT,
             ActiveProvider::OpenRouter => self
                 .openrouter_provider()
                 .map(|o| o.context_window())
@@ -1742,6 +1776,11 @@ impl Provider for MultiProvider {
         } else {
             None
         };
+        let bedrock_provider = if self.bedrock_provider().is_some() {
+            Some(Arc::new(bedrock::BedrockProvider::new()))
+        } else {
+            None
+        };
         let openrouter = if self
             .openrouter
             .read()
@@ -1761,6 +1800,7 @@ impl Provider for MultiProvider {
             antigravity: RwLock::new(antigravity_provider),
             gemini: RwLock::new(gemini_provider),
             cursor: RwLock::new(cursor_provider),
+            bedrock: RwLock::new(bedrock_provider),
             openrouter: RwLock::new(openrouter),
             active: RwLock::new(active),
             use_claude_cli: self.use_claude_cli,
@@ -1776,6 +1816,8 @@ impl Provider for MultiProvider {
             let _ = provider.set_model(&format!("antigravity:{}", current_model));
         } else if matches!(active, ActiveProvider::Cursor) {
             let _ = provider.set_model(&format!("cursor:{}", current_model));
+        } else if matches!(active, ActiveProvider::Bedrock) {
+            let _ = provider.set_model(&format!("bedrock:{}", current_model));
         } else {
             let _ = provider.set_model(&current_model);
         }
@@ -1798,6 +1840,7 @@ impl Provider for MultiProvider {
             ActiveProvider::Antigravity => None,
             ActiveProvider::Gemini => None,
             ActiveProvider::Cursor => None,
+            ActiveProvider::Bedrock => None,
             ActiveProvider::OpenRouter => None,
         }
     }

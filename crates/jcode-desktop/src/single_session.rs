@@ -14,9 +14,9 @@ pub(crate) const SINGLE_SESSION_FONT_FALLBACKS: &[&str] = &[
 ];
 pub(crate) const SINGLE_SESSION_DEFAULT_FONT_SIZE: f32 = 22.0;
 pub(crate) const SINGLE_SESSION_TITLE_FONT_SIZE: f32 = SINGLE_SESSION_DEFAULT_FONT_SIZE;
-pub(crate) const SINGLE_SESSION_BODY_FONT_SIZE: f32 = SINGLE_SESSION_DEFAULT_FONT_SIZE;
+pub(crate) const SINGLE_SESSION_BODY_FONT_SIZE: f32 = SINGLE_SESSION_DEFAULT_FONT_SIZE + 3.0;
 pub(crate) const SINGLE_SESSION_META_FONT_SIZE: f32 = SINGLE_SESSION_DEFAULT_FONT_SIZE;
-pub(crate) const SINGLE_SESSION_CODE_FONT_SIZE: f32 = SINGLE_SESSION_DEFAULT_FONT_SIZE;
+pub(crate) const SINGLE_SESSION_CODE_FONT_SIZE: f32 = SINGLE_SESSION_DEFAULT_FONT_SIZE + 3.0;
 pub(crate) const SINGLE_SESSION_BODY_LINE_HEIGHT: f32 = 1.45;
 pub(crate) const SINGLE_SESSION_CODE_LINE_HEIGHT: f32 = 1.35;
 pub(crate) const SINGLE_SESSION_META_LINE_HEIGHT: f32 = 1.25;
@@ -70,6 +70,7 @@ pub(crate) struct SingleSessionApp {
     pub(crate) session_switcher: SessionSwitcherState,
     pub(crate) stdin_response: Option<StdinResponseState>,
     welcome_name: Option<String>,
+    welcome_started_at: std::time::Instant,
     queued_drafts: Vec<(String, Vec<(String, String)>)>,
     selection_anchor: Option<SelectionPoint>,
     selection_focus: Option<SelectionPoint>,
@@ -488,6 +489,7 @@ impl SingleSessionApp {
             session_switcher: SessionSwitcherState::default(),
             stdin_response: None,
             welcome_name: desktop_welcome_name(),
+            welcome_started_at: std::time::Instant::now(),
             queued_drafts: Vec::new(),
             selection_anchor: None,
             selection_focus: None,
@@ -522,6 +524,7 @@ impl SingleSessionApp {
         self.session_switcher = SessionSwitcherState::default();
         self.stdin_response = None;
         self.welcome_name = desktop_welcome_name();
+        self.welcome_started_at = std::time::Instant::now();
         self.queued_drafts.clear();
         self.clear_selection();
         self.input_undo_stack.clear();
@@ -531,7 +534,7 @@ impl SingleSessionApp {
     pub(crate) fn status_title(&self) -> String {
         let title = self.title();
         format!(
-            "Jcode Desktop · single session · {title} · Enter send · Shift+Enter newline · Ctrl+Enter queue · Ctrl+P sessions · Ctrl+Shift+M models · Ctrl+; spawn · Esc quit · --workspace for Niri layout"
+            "Jcode Desktop · single session · {title} · Enter send · Shift+Enter newline · Ctrl+Enter queue · Ctrl+P sessions · Ctrl+Shift+M models · Ctrl+; spawn · Esc interrupt · --workspace for Niri layout"
         )
     }
 
@@ -549,13 +552,7 @@ impl SingleSessionApp {
         if self.should_show_session_title_header() {
             return self.title();
         }
-        if self.is_processing || !self.streaming_response.is_empty() {
-            "active conversation".to_string()
-        } else if self.session.is_some() || self.live_session_id.is_some() {
-            "conversation".to_string()
-        } else {
-            "fresh session".to_string()
-        }
+        String::new()
     }
 
     pub(crate) fn should_show_session_title_header(&self) -> bool {
@@ -574,7 +571,16 @@ impl SingleSessionApp {
     }
 
     pub(crate) fn has_frame_animation(&self) -> bool {
-        self.is_empty_fresh_session()
+        true
+    }
+
+    pub(crate) fn welcome_reveal_progress(&self) -> f32 {
+        if !self.is_empty_fresh_session() {
+            return 1.0;
+        }
+        let elapsed = self.welcome_started_at.elapsed().as_secs_f32();
+        let linear = ((elapsed - 0.18) / 1.65).clamp(0.0, 1.0);
+        linear * linear * (3.0 - 2.0 * linear)
     }
 
     fn current_session_id(&self) -> Option<&str> {
@@ -613,7 +619,7 @@ impl SingleSessionApp {
         let _ = tick;
         let status = self.status.as_deref().unwrap_or("ready");
         let mode = if self.is_processing {
-            "Ctrl+C interrupt"
+            "Esc interrupt"
         } else {
             "Enter send · Shift+Enter newline · Ctrl+Enter queue/send"
         };
@@ -725,13 +731,20 @@ impl SingleSessionApp {
             }
             KeyInput::PasteText => KeyOutcome::PasteText,
             KeyInput::QueueDraft if self.is_processing => self.queue_draft(),
+            KeyInput::RetrieveQueuedDraft => self.retrieve_queued_draft_for_edit(),
             KeyInput::QueueDraft => self.submit_draft(),
             KeyInput::SubmitDraft => self.submit_draft(),
             KeyInput::Escape if self.show_help => {
                 self.show_help = false;
                 KeyOutcome::Redraw
             }
-            KeyInput::Escape => KeyOutcome::Exit,
+            KeyInput::Escape => {
+                if self.is_processing {
+                    KeyOutcome::CancelGeneration
+                } else {
+                    KeyOutcome::None
+                }
+            }
             KeyInput::Enter => {
                 self.insert_draft_text("\n");
                 KeyOutcome::Redraw
@@ -784,6 +797,7 @@ impl SingleSessionApp {
                 self.delete_to_line_end();
                 KeyOutcome::Redraw
             }
+            KeyInput::CutInputLine => self.cut_input_line(),
             KeyInput::UndoInput => {
                 self.undo_input_change();
                 KeyOutcome::Redraw
@@ -916,7 +930,7 @@ impl SingleSessionApp {
     fn resume_selected_switcher_session(&mut self) -> KeyOutcome {
         if self.is_processing {
             self.status = Some(
-                "finish or Ctrl+C interrupt the running generation before switching sessions"
+                "finish or Esc interrupt the running generation before switching sessions"
                     .to_string(),
             );
             return KeyOutcome::Redraw;
@@ -982,7 +996,7 @@ impl SingleSessionApp {
             }
             KeyInput::CancelGeneration => KeyOutcome::CancelGeneration,
             KeyInput::Escape => {
-                self.status = Some("interactive input pending · Ctrl+C to cancel".to_string());
+                self.status = Some("interactive input pending · Esc to cancel".to_string());
                 KeyOutcome::Redraw
             }
             _ => KeyOutcome::None,
@@ -1061,13 +1075,15 @@ impl SingleSessionApp {
         }
     }
 
-    fn is_empty_fresh_session(&self) -> bool {
+    pub(crate) fn is_empty_fresh_session(&self) -> bool {
         self.session.is_none()
             && self.live_session_id.is_none()
             && self.messages.is_empty()
             && self.streaming_response.is_empty()
             && self.status.is_none()
             && self.error.is_none()
+            && self.draft.is_empty()
+            && self.pending_images.is_empty()
             && !self.show_help
             && !self.model_picker.open
             && !self.session_switcher.open
@@ -1390,6 +1406,29 @@ impl SingleSessionApp {
         self.input_undo_stack.clear();
         self.status = Some(format!("{} prompt(s) queued", self.queued_drafts.len()));
         KeyOutcome::Redraw
+    }
+
+    fn retrieve_queued_draft_for_edit(&mut self) -> KeyOutcome {
+        let Some((message, images)) = self.queued_drafts.pop() else {
+            return KeyOutcome::None;
+        };
+        self.remember_input_undo_state();
+        self.draft = message;
+        self.draft_cursor = self.draft.len();
+        self.pending_images = images;
+        self.status = Some(format!("{} prompt(s) queued", self.queued_drafts.len()));
+        KeyOutcome::Redraw
+    }
+
+    fn cut_input_line(&mut self) -> KeyOutcome {
+        if self.draft.is_empty() {
+            return KeyOutcome::None;
+        }
+        self.remember_input_undo_state();
+        let text = std::mem::take(&mut self.draft);
+        self.draft_cursor = 0;
+        self.status = Some("cut input line".to_string());
+        KeyOutcome::CutDraftToClipboard(text)
     }
 
     pub(crate) fn take_next_queued_draft(&mut self) -> Option<(String, Vec<(String, String)>)> {
@@ -1752,7 +1791,7 @@ fn stdin_response_styled_lines(state: &StdinResponseState) -> Vec<SingleSessionS
         ),
         blank_styled_line(),
         styled_line(
-            "Enter send · Ctrl+Enter send · Shift+Enter newline · Ctrl+V paste · Ctrl+U clear · Ctrl+C cancel",
+            "Enter send · Ctrl+Enter send · Shift+Enter newline · Ctrl+V paste · Ctrl+U clear · Esc cancel",
             SingleSessionLineStyle::Overlay,
         ),
     ]
@@ -2060,10 +2099,12 @@ const SINGLE_SESSION_HELP_SECTIONS: &[HelpSection] = &[
             ("Enter", "send prompt"),
             ("Shift+Enter", "insert newline"),
             ("Ctrl+Enter", "queue while running, send when idle"),
-            ("Ctrl+C", "interrupt running generation"),
+            ("Esc", "interrupt running generation"),
+            ("Ctrl+C/D", "interrupt running generation"),
             ("Ctrl+Shift+C", "copy latest assistant response"),
             ("Ctrl+V", "paste clipboard text"),
             ("Ctrl+V", "paste clipboard image when no text is present"),
+            ("Alt+V", "attach clipboard image, terminal-style"),
             ("Ctrl+I", "attach clipboard image to next prompt"),
             ("Ctrl+Shift+I", "clear pending image attachments"),
             ("Ctrl+Shift+M", "open model/account picker"),
@@ -2074,6 +2115,7 @@ const SINGLE_SESSION_HELP_SECTIONS: &[HelpSection] = &[
     HelpSection {
         title: "navigation",
         shortcuts: &[
+            ("Ctrl+Up", "pull latest queued prompt back into the input"),
             ("PageUp/PageDown", "scroll transcript"),
             ("Alt+Up/Down", "jump between user prompts"),
             ("Mouse wheel", "scroll transcript"),
@@ -2084,9 +2126,12 @@ const SINGLE_SESSION_HELP_SECTIONS: &[HelpSection] = &[
         shortcuts: &[
             ("Ctrl+A/E", "start/end of line"),
             ("Ctrl+U/K", "delete to line start/end"),
-            ("Ctrl+Backspace", "delete previous word"),
-            ("Alt+B/F", "move by word"),
+            ("Ctrl+W/Ctrl+Backspace", "delete previous word"),
+            ("Alt+Backspace", "delete previous word, terminal-style"),
+            ("Ctrl/Alt+←/→, Ctrl+B/F", "move by word"),
+            ("Alt+B/F", "move by word, terminal-style"),
             ("Alt+D", "delete next word"),
+            ("Ctrl+X", "cut input line to clipboard"),
             ("Ctrl+Z", "undo input edit"),
         ],
     },
@@ -2096,7 +2141,7 @@ const SINGLE_SESSION_HELP_SECTIONS: &[HelpSection] = &[
             ("Ctrl+;", "reset/spawn fresh desktop session"),
             ("Ctrl+R", "reload sessions/models while a picker is open"),
             ("Ctrl+?", "toggle this help"),
-            ("Esc", "close help or quit"),
+            ("Esc", "close help; interrupt while running; idle no-op"),
         ],
     },
 ];

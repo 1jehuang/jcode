@@ -238,6 +238,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(help_entry("/save [label]", "Bookmark session for /resume"));
     lines.push(help_entry(
+        "/rename <name>|--clear",
+        "Set or clear current session name",
+    ));
+    lines.push(help_entry(
         "/unsave",
         "Remove bookmark from current session",
     ));

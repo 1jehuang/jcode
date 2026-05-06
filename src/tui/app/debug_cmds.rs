@@ -119,6 +119,7 @@ impl App {
                             ProcessingStatus::Sending | ProcessingStatus::Connecting(_) => "running".to_string(),
                             ProcessingStatus::Thinking(_) => "thinking".to_string(),
                             ProcessingStatus::Streaming => "running".to_string(),
+                            ProcessingStatus::WaitingForNetwork { .. } => "waiting_network".to_string(),
                             ProcessingStatus::RunningTool(_) => "running".to_string(),
                         },
                         detail: self.subagent_status.clone(),

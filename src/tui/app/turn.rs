@@ -33,7 +33,7 @@ impl App {
         let mut redraw_period = crate::tui::redraw_interval(self);
         let mut redraw_interval = interval(redraw_period);
 
-        loop {
+        'turn_loop: loop {
             let desired_redraw = crate::tui::redraw_interval(self);
             if desired_redraw != redraw_period {
                 redraw_period = desired_redraw;
@@ -177,7 +177,28 @@ impl App {
                     }
                     // Poll API call
                     result = &mut api_future => {
-                        break result?;
+                        match result {
+                            Ok(stream) => break stream,
+                            Err(err) => {
+                                if let Some(reason) = crate::network_retry::classify_network_interruption(err.as_ref()) {
+                                    let plan = crate::network_retry::wait_plan();
+                                    self.push_display_message(DisplayMessage::system(format!(
+                                        "Stream interrupted, likely because {reason}. Waiting to retry: {}.",
+                                        plan.listener_summary
+                                    )));
+                                    self.status = ProcessingStatus::WaitingForNetwork {
+                                        listener: plan.listener_summary.clone(),
+                                    };
+                                    terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
+                                    crate::network_retry::wait_until_probably_online().await;
+                                    self.push_display_message(DisplayMessage::system(
+                                        "Network connectivity looks restored; retrying request.".to_string(),
+                                    ));
+                                    continue 'turn_loop;
+                                }
+                                return Err(err);
+                            }
+                        }
                     }
                 }
             };
@@ -569,6 +590,29 @@ impl App {
                                         }
                                     }
                                     StreamEvent::Error { message, .. } => {
+                                        let no_partial_output = text_content.is_empty()
+                                            && tool_calls.is_empty()
+                                            && current_tool.is_none()
+                                            && self.streaming_text.is_empty()
+                                            && !saw_message_end;
+                                        if no_partial_output {
+                                            if let Some(reason) = crate::network_retry::classify_message(&message) {
+                                                let plan = crate::network_retry::wait_plan();
+                                                self.push_display_message(DisplayMessage::system(format!(
+                                                    "Stream interrupted, likely because {reason}. Waiting to retry: {}.",
+                                                    plan.listener_summary
+                                                )));
+                                                self.status = ProcessingStatus::WaitingForNetwork {
+                                                    listener: plan.listener_summary.clone(),
+                                                };
+                                                terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
+                                                crate::network_retry::wait_until_probably_online().await;
+                                                self.push_display_message(DisplayMessage::system(
+                                                    "Network connectivity looks restored; retrying request.".to_string(),
+                                                ));
+                                                continue 'turn_loop;
+                                            }
+                                        }
                                         return Err(anyhow::anyhow!("Stream error: {}", message));
                                     }
                                     StreamEvent::ThinkingStart => {
@@ -782,8 +826,56 @@ impl App {
                                     }
                                 }
                             }
-                            Some(Err(e)) => return Err(e),
-                            None => break, // Stream ended
+                            Some(Err(e)) => {
+                                let no_partial_output = text_content.is_empty()
+                                    && tool_calls.is_empty()
+                                    && current_tool.is_none()
+                                    && self.streaming_text.is_empty()
+                                    && !saw_message_end;
+                                if no_partial_output {
+                                    if let Some(reason) = crate::network_retry::classify_network_interruption(e.as_ref()) {
+                                        let plan = crate::network_retry::wait_plan();
+                                        self.push_display_message(DisplayMessage::system(format!(
+                                            "Stream interrupted, likely because {reason}. Waiting to retry: {}.",
+                                            plan.listener_summary
+                                        )));
+                                        self.status = ProcessingStatus::WaitingForNetwork {
+                                            listener: plan.listener_summary.clone(),
+                                        };
+                                        terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
+                                        crate::network_retry::wait_until_probably_online().await;
+                                        self.push_display_message(DisplayMessage::system(
+                                            "Network connectivity looks restored; retrying request.".to_string(),
+                                        ));
+                                        continue 'turn_loop;
+                                    }
+                                }
+                                return Err(e);
+                            }
+                            None => {
+                                let no_partial_output = text_content.is_empty()
+                                    && tool_calls.is_empty()
+                                    && current_tool.is_none()
+                                    && self.streaming_text.is_empty()
+                                    && !saw_message_end;
+                                if no_partial_output {
+                                    let plan = crate::network_retry::wait_plan();
+                                    self.push_display_message(DisplayMessage::system(format!(
+                                        "Stream ended before the model response completed; this may be a network disconnect. Waiting to retry: {}.",
+                                        plan.listener_summary
+                                    )));
+                                    self.status = ProcessingStatus::WaitingForNetwork {
+                                        listener: plan.listener_summary.clone(),
+                                    };
+                                    terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
+                                    crate::network_retry::wait_until_probably_online().await;
+                                    self.push_display_message(DisplayMessage::system(
+                                        "Network connectivity looks restored; retrying request.".to_string(),
+                                    ));
+                                    continue 'turn_loop;
+                                }
+                                break;
+                            }
                         }
                     }
                 }

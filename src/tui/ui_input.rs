@@ -540,6 +540,26 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                 );
                 Line::from(spans)
             }
+            ProcessingStatus::WaitingForNetwork { listener } => {
+                let mut spans = vec![
+                    Span::styled("↻ ", Style::default().fg(rgb(255, 193, 7))),
+                    Span::styled(
+                        format!(
+                            "network disconnected, waiting to retry · {} · {}",
+                            listener,
+                            format_elapsed(elapsed)
+                        ),
+                        Style::default().fg(rgb(255, 193, 7)),
+                    ),
+                ];
+                if !queued_suffix.is_empty() {
+                    spans.push(Span::styled(
+                        queued_suffix.clone(),
+                        Style::default().fg(queued_color()),
+                    ));
+                }
+                Line::from(spans)
+            }
             ProcessingStatus::RunningTool(ref name) => {
                 let (left_bar, right_bar) = tool_activity_bars(
                     elapsed,

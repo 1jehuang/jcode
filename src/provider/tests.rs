@@ -93,6 +93,7 @@ fn test_multi_provider_with_cursor() -> MultiProvider {
         antigravity: RwLock::new(None),
         gemini: RwLock::new(None),
         cursor: RwLock::new(Some(Arc::new(cursor::CursorCliProvider::new()))),
+        bedrock: RwLock::new(None),
         openrouter: RwLock::new(None),
         active: RwLock::new(ActiveProvider::Cursor),
         use_claude_cli: false,

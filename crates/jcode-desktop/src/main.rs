@@ -123,8 +123,15 @@ const PANEL_SECTION_COLOR: [f32; 4] = [0.045, 0.055, 0.080, 0.95];
 const SELECTION_HIGHLIGHT_COLOR: [f32; 4] = [0.220, 0.420, 0.700, 0.22];
 const STREAMING_SHIMMER_SOFT_COLOR: [f32; 4] = [0.220, 0.520, 0.780, 0.055];
 const STREAMING_SHIMMER_CORE_COLOR: [f32; 4] = [0.220, 0.520, 0.780, 0.115];
+const WELCOME_AURORA_BLUE: [f32; 4] = [0.250, 0.520, 1.000, 0.145];
+const WELCOME_AURORA_VIOLET: [f32; 4] = [0.720, 0.360, 0.980, 0.125];
+const WELCOME_AURORA_MINT: [f32; 4] = [0.220, 0.840, 0.660, 0.115];
+const WELCOME_AURORA_WARM: [f32; 4] = [1.000, 0.620, 0.360, 0.075];
+const WELCOME_HANDWRITING_COLOR: [f32; 4] = [0.012, 0.080, 0.250, 0.94];
+const WELCOME_HANDWRITING_HIGHLIGHT_COLOR: [f32; 4] = [0.200, 0.520, 1.000, 0.42];
+const COMPOSER_LINE_COLOR: [f32; 4] = [0.060, 0.085, 0.145, 0.34];
+#[cfg(test)]
 const COMPOSER_CARD_BACKGROUND_COLOR: [f32; 4] = [0.990, 0.995, 1.000, 0.52];
-const COMPOSER_CARD_BORDER_COLOR: [f32; 4] = [0.085, 0.110, 0.160, 0.24];
 const NATIVE_SPINNER_TRACK_COLOR: [f32; 4] = [0.105, 0.135, 0.190, 0.16];
 const NATIVE_SPINNER_HEAD_COLOR: [f32; 4] = [0.045, 0.185, 0.470, 0.96];
 const CODE_BLOCK_BACKGROUND_COLOR: [f32; 4] = [0.075, 0.095, 0.135, 0.075];
@@ -288,7 +295,7 @@ async fn run() -> Result<()> {
                             selecting_body = false;
                             let selected = app.selected_single_session_text(window.inner_size());
                             if let Some(text) = selected {
-                                copy_text_to_clipboard(&text, &mut app);
+                                copy_text_to_clipboard(&text, "copied selection", &mut app);
                             }
                             window.set_title(&app.status_title());
                             window.request_redraw();
@@ -424,7 +431,12 @@ async fn run() -> Result<()> {
                             window.request_redraw();
                         }
                         KeyOutcome::CopyLatestResponse(text) => {
-                            copy_text_to_clipboard(&text, &mut app);
+                            copy_text_to_clipboard(&text, "copied latest response", &mut app);
+                            window.set_title(&app.status_title());
+                            window.request_redraw();
+                        }
+                        KeyOutcome::CutDraftToClipboard(text) => {
+                            copy_text_to_clipboard(&text, "cut input line", &mut app);
                             window.set_title(&app.status_title());
                             window.request_redraw();
                         }
@@ -1174,15 +1186,24 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         Key::Named(NamedKey::Enter) if modifiers.control_key() => KeyInput::QueueDraft,
         Key::Named(NamedKey::Enter) if modifiers.shift_key() => KeyInput::Enter,
         Key::Named(NamedKey::Enter) => KeyInput::SubmitDraft,
-        Key::Named(NamedKey::Backspace) if modifiers.control_key() => KeyInput::DeletePreviousWord,
+        Key::Named(NamedKey::Backspace) if modifiers.control_key() || modifiers.alt_key() => {
+            KeyInput::DeletePreviousWord
+        }
         Key::Named(NamedKey::Backspace) => KeyInput::Backspace,
         Key::Named(NamedKey::Delete) => KeyInput::DeleteNextChar,
         Key::Named(NamedKey::PageUp) => KeyInput::ScrollBodyPages(1),
         Key::Named(NamedKey::PageDown) => KeyInput::ScrollBodyPages(-1),
+        Key::Named(NamedKey::ArrowUp) if modifiers.control_key() => KeyInput::RetrieveQueuedDraft,
         Key::Named(NamedKey::ArrowUp) if modifiers.alt_key() => KeyInput::JumpPrompt(-1),
         Key::Named(NamedKey::ArrowDown) if modifiers.alt_key() => KeyInput::JumpPrompt(1),
         Key::Named(NamedKey::ArrowUp) => KeyInput::ModelPickerMove(-1),
         Key::Named(NamedKey::ArrowDown) => KeyInput::ModelPickerMove(1),
+        Key::Named(NamedKey::ArrowLeft) if modifiers.control_key() || modifiers.alt_key() => {
+            KeyInput::MoveCursorWordLeft
+        }
+        Key::Named(NamedKey::ArrowRight) if modifiers.control_key() || modifiers.alt_key() => {
+            KeyInput::MoveCursorWordRight
+        }
         Key::Named(NamedKey::ArrowLeft) => KeyInput::MoveCursorLeft,
         Key::Named(NamedKey::ArrowRight) => KeyInput::MoveCursorRight,
         Key::Named(NamedKey::Home) => KeyInput::MoveToLineStart,
@@ -1193,11 +1214,23 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("e") => {
             KeyInput::MoveToLineEnd
         }
+        Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("b") => {
+            KeyInput::MoveCursorWordLeft
+        }
+        Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("f") => {
+            KeyInput::MoveCursorWordRight
+        }
         Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("u") => {
             KeyInput::DeleteToLineStart
         }
         Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("k") => {
             KeyInput::DeleteToLineEnd
+        }
+        Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("w") => {
+            KeyInput::DeletePreviousWord
+        }
+        Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("x") => {
+            KeyInput::CutInputLine
         }
         Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("z") => {
             KeyInput::UndoInput
@@ -1209,7 +1242,10 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         {
             KeyInput::CopyLatestResponse
         }
-        Key::Character(text) if modifiers.control_key() && text.eq_ignore_ascii_case("c") => {
+        Key::Character(text)
+            if modifiers.control_key()
+                && (text.eq_ignore_ascii_case("c") || text.eq_ignore_ascii_case("d")) =>
+        {
             KeyInput::CancelGeneration
         }
         Key::Character(text) if modifiers.alt_key() && text.eq_ignore_ascii_case("b") => {
@@ -1220,6 +1256,9 @@ fn to_key_input(key: &Key, modifiers: ModifiersState) -> KeyInput {
         }
         Key::Character(text) if modifiers.alt_key() && text.eq_ignore_ascii_case("d") => {
             KeyInput::DeleteNextWord
+        }
+        Key::Character(text) if modifiers.alt_key() && text.eq_ignore_ascii_case("v") => {
+            KeyInput::AttachClipboardImage
         }
         Key::Character(text) if modifiers.control_key() && text == ";" => KeyInput::SpawnPanel,
         Key::Character(text) if modifiers.control_key() && (text == "?" || text == "/") => {
@@ -1300,10 +1339,10 @@ fn apply_single_session_error(app: &mut DesktopApp, error: anyhow::Error) {
     )));
 }
 
-fn copy_text_to_clipboard(text: &str, app: &mut DesktopApp) {
+fn copy_text_to_clipboard(text: &str, success_notice: &'static str, app: &mut DesktopApp) {
     match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text.to_string())) {
         Ok(()) => app.apply_session_event(session_launch::DesktopSessionEvent::Status(
-            "copied latest response".to_string(),
+            success_notice.to_string(),
         )),
         Err(error) => app.apply_session_event(session_launch::DesktopSessionEvent::Error(format!(
             "failed to copy latest response: {error}"
@@ -1592,7 +1631,9 @@ impl<'window> Canvas<'window> {
             self.single_session_text_buffers.clear();
         }
         let text_buffers = &self.single_session_text_buffers;
-        if let DesktopApp::SingleSession(single_session) = app {
+        if let DesktopApp::SingleSession(single_session) = app
+            && spinner_tick % 6 < 3
+        {
             push_single_session_caret(
                 &mut vertices,
                 single_session,

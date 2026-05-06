@@ -1412,6 +1412,20 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
+                if trimmed == "/clear" {
+                    remote.clear().await?;
+                    app.clear_provider_messages();
+                    app.clear_display_messages();
+                    app.queued_messages.clear();
+                    app.pasted_contents.clear();
+                    app.pending_images.clear();
+                    app.clear_streaming_render_state();
+                    app.is_processing = false;
+                    app.status = ProcessingStatus::Idle;
+                    app.set_status_notice("Session cleared");
+                    return Ok(());
+                }
+
                 if trimmed == "/observe"
                     || trimmed == "/observe on"
                     || trimmed == "/observe off"

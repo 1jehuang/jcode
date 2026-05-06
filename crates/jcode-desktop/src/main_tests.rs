@@ -168,7 +168,7 @@ fn single_session_typography_targets_jetbrains_mono_light_nerd() {
     );
     assert_eq!(
         SINGLE_SESSION_BODY_FONT_SIZE,
-        SINGLE_SESSION_DEFAULT_FONT_SIZE
+        SINGLE_SESSION_DEFAULT_FONT_SIZE + 3.0
     );
     assert_eq!(
         SINGLE_SESSION_META_FONT_SIZE,
@@ -176,7 +176,7 @@ fn single_session_typography_targets_jetbrains_mono_light_nerd() {
     );
     assert_eq!(
         SINGLE_SESSION_CODE_FONT_SIZE,
-        SINGLE_SESSION_DEFAULT_FONT_SIZE
+        SINGLE_SESSION_DEFAULT_FONT_SIZE + 3.0
     );
     assert!(SINGLE_SESSION_BODY_LINE_HEIGHT > SINGLE_SESSION_CODE_LINE_HEIGHT);
     assert!(SINGLE_SESSION_CODE_LINE_HEIGHT > SINGLE_SESSION_META_LINE_HEIGHT);
@@ -191,7 +191,8 @@ fn single_session_vertices_include_a_draft_caret() {
         build_single_session_vertices(&app, PhysicalSize::new(640, 480), 0.0, 0);
     push_single_session_caret(&mut typed_vertices, &app, PhysicalSize::new(640, 480), None);
 
-    assert!(typed_vertices.len() >= empty_vertices.len());
+    assert!(vertices_have_color(&empty_vertices, WELCOME_AURORA_BLUE));
+    assert!(!vertices_have_color(&typed_vertices, WELCOME_AURORA_BLUE));
     assert!(
         typed_vertices
             .iter()
@@ -200,15 +201,33 @@ fn single_session_vertices_include_a_draft_caret() {
 }
 
 #[test]
-fn single_session_vertices_include_composer_card() {
+fn single_session_vertices_include_composer_line() {
     let app = SingleSessionApp::new(None);
     let vertices = build_single_session_vertices(&app, PhysicalSize::new(900, 700), 0.0, 0);
 
-    assert!(vertices_have_color(
+    assert!(vertices_have_color(&vertices, COMPOSER_LINE_COLOR));
+    assert!(!vertices_have_color(
         &vertices,
         COMPOSER_CARD_BACKGROUND_COLOR
     ));
-    assert!(vertices_have_color(&vertices, COMPOSER_CARD_BORDER_COLOR));
+}
+
+#[test]
+fn fresh_single_session_uses_animated_welcome_ambient() {
+    let mut app = SingleSessionApp::new(None);
+    let size = PhysicalSize::new(900, 700);
+    let tick_zero = build_single_session_vertices(&app, size, 0.0, 0);
+    let tick_later = build_single_session_vertices(&app, size, 0.0, 18);
+
+    assert!(vertices_have_color(&tick_zero, WELCOME_AURORA_BLUE));
+    assert_ne!(
+        positions_for_color(&tick_zero, WELCOME_AURORA_BLUE),
+        positions_for_color(&tick_later, WELCOME_AURORA_BLUE)
+    );
+
+    app.handle_key(KeyInput::Character("hello".to_string()));
+    let typed = build_single_session_vertices(&app, size, 0.0, 18);
+    assert!(!vertices_have_color(&typed, WELCOME_AURORA_BLUE));
 }
 
 #[test]
@@ -330,7 +349,7 @@ fn single_session_composer_uses_next_prompt_number_and_status_footer() {
 
     assert_eq!(app.next_prompt_number(), 2);
     assert_eq!(app.composer_text(), "2› ");
-    assert!(app.composer_status_line().contains("Ctrl+C interrupt"));
+    assert!(app.composer_status_line().contains("Esc interrupt"));
 }
 
 #[test]
@@ -463,7 +482,7 @@ fn single_session_header_only_uses_previous_message_title_for_static_preview() {
         .push(SingleSessionMessage::assistant("live answer"));
 
     assert!(!app.should_show_session_title_header());
-    assert_eq!(single_session_text_key(&app, size).title, "conversation");
+    assert_eq!(single_session_text_key(&app, size).title, "");
 }
 
 #[test]
@@ -518,8 +537,88 @@ fn desktop_space_key_inserts_visible_prompt_space() {
 }
 
 #[test]
+fn desktop_arrow_word_navigation_maps_common_modifiers() {
+    assert_eq!(
+        to_key_input(&Key::Named(NamedKey::ArrowLeft), ModifiersState::CONTROL),
+        KeyInput::MoveCursorWordLeft
+    );
+    assert_eq!(
+        to_key_input(&Key::Named(NamedKey::ArrowRight), ModifiersState::CONTROL),
+        KeyInput::MoveCursorWordRight
+    );
+    assert_eq!(
+        to_key_input(&Key::Named(NamedKey::ArrowLeft), ModifiersState::ALT),
+        KeyInput::MoveCursorWordLeft
+    );
+    assert_eq!(
+        to_key_input(&Key::Named(NamedKey::ArrowRight), ModifiersState::ALT),
+        KeyInput::MoveCursorWordRight
+    );
+}
+
+#[test]
+fn desktop_maps_terminal_editing_shortcuts_from_tui() {
+    assert_eq!(
+        to_key_input(&Key::Character("b".into()), ModifiersState::CONTROL),
+        KeyInput::MoveCursorWordLeft
+    );
+    assert_eq!(
+        to_key_input(&Key::Character("f".into()), ModifiersState::CONTROL),
+        KeyInput::MoveCursorWordRight
+    );
+    assert_eq!(
+        to_key_input(&Key::Character("w".into()), ModifiersState::CONTROL),
+        KeyInput::DeletePreviousWord
+    );
+    assert_eq!(
+        to_key_input(&Key::Character("x".into()), ModifiersState::CONTROL),
+        KeyInput::CutInputLine
+    );
+    assert_eq!(
+        to_key_input(&Key::Named(NamedKey::Backspace), ModifiersState::ALT),
+        KeyInput::DeletePreviousWord
+    );
+    assert_eq!(
+        to_key_input(&Key::Named(NamedKey::ArrowUp), ModifiersState::CONTROL),
+        KeyInput::RetrieveQueuedDraft
+    );
+    assert_eq!(
+        to_key_input(&Key::Character("v".into()), ModifiersState::ALT),
+        KeyInput::AttachClipboardImage
+    );
+    assert_eq!(
+        to_key_input(&Key::Character("d".into()), ModifiersState::CONTROL),
+        KeyInput::CancelGeneration
+    );
+}
+
+#[test]
+fn single_session_cut_and_retrieve_queued_draft_match_tui_shortcuts() {
+    let mut app = SingleSessionApp::new(None);
+    app.handle_key(KeyInput::Character("cut me".to_string()));
+    assert_eq!(
+        app.handle_key(KeyInput::CutInputLine),
+        KeyOutcome::CutDraftToClipboard("cut me".to_string())
+    );
+    assert_eq!(app.composer_text(), "1› ");
+
+    app.is_processing = true;
+    app.handle_key(KeyInput::Character("queued".to_string()));
+    assert_eq!(app.handle_key(KeyInput::QueueDraft), KeyOutcome::Redraw);
+    assert_eq!(app.composer_text(), "1› ");
+    assert_eq!(
+        app.handle_key(KeyInput::RetrieveQueuedDraft),
+        KeyOutcome::Redraw
+    );
+    assert_eq!(app.composer_text(), "1› queued");
+}
+
+#[test]
 fn single_session_header_exposes_desktop_binary_and_version() {
-    let app = SingleSessionApp::new(None);
+    let mut app = SingleSessionApp::new(None);
+    app.apply_session_event(session_launch::DesktopSessionEvent::SessionStarted {
+        session_id: "session_header".to_string(),
+    });
     let key = single_session_text_key(&app, PhysicalSize::new(900, 700));
     let build_version = option_env!("JCODE_DESKTOP_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
 
@@ -532,14 +631,61 @@ fn single_session_header_exposes_desktop_binary_and_version() {
 }
 
 #[test]
-fn single_session_text_buffers_include_header_version_area() {
+fn fresh_single_session_startup_hides_top_left_chrome() {
     let app = SingleSessionApp::new(None);
+    let key = single_session_text_key(&app, PhysicalSize::new(900, 700));
+
+    assert_eq!(key.title, "");
+    assert_eq!(key.version, "");
+    assert_visual_text_contains(&key, "Hello there");
+    assert!(key.welcome_hint.is_empty());
+}
+
+#[test]
+fn single_session_text_buffers_include_header_version_area() {
+    let mut app = SingleSessionApp::new(None);
+    app.apply_session_event(session_launch::DesktopSessionEvent::SessionStarted {
+        session_id: "session_header_buffers".to_string(),
+    });
     let size = PhysicalSize::new(900, 700);
     let mut font_system = FontSystem::new();
     let buffers = single_session_text_buffers(&app, size, &mut font_system);
 
-    assert_eq!(buffers.len(), 5);
+    assert_eq!(buffers.len(), 6);
     assert_eq!(single_session_text_areas(&buffers, size).len(), 5);
+}
+
+#[test]
+fn fresh_welcome_hero_is_drawn_as_handwritten_strokes() {
+    let size = PhysicalSize::new(1000, 720);
+    let mut hidden = Vec::new();
+    let mut half = Vec::new();
+    let mut full = Vec::new();
+
+    push_handwritten_welcome_hero(&mut hidden, size, 0.0);
+    push_handwritten_welcome_hero(&mut half, size, 0.5);
+    push_handwritten_welcome_hero(&mut full, size, 1.0);
+
+    assert!(hidden.is_empty());
+    assert!(half.len() > hidden.len());
+    assert!(full.len() > half.len());
+    assert!(vertices_have_color(&full, WELCOME_HANDWRITING_COLOR));
+}
+
+#[test]
+fn fresh_welcome_hero_strokes_are_centered() {
+    let size = PhysicalSize::new(1000, 720);
+    let mut vertices = Vec::new();
+    push_handwritten_welcome_hero(&mut vertices, size, 1.0);
+    let points = vertices
+        .iter()
+        .filter(|vertex| vertex.color == WELCOME_HANDWRITING_COLOR)
+        .map(|vertex| vertex.position[0])
+        .collect::<Vec<_>>();
+    let min_x = points.iter().copied().fold(f32::INFINITY, f32::min);
+    let max_x = points.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+
+    assert!(((min_x + max_x) * 0.5).abs() < 0.03);
 }
 
 #[test]
@@ -576,7 +722,7 @@ fn single_session_visual_state_smoke_covers_markdown_spinner_and_switcher() {
     ));
 
     let markdown_key = single_session_text_key(&markdown_app, size);
-    assert_eq!(markdown_key.title, "active conversation");
+    assert_eq!(markdown_key.title, "");
     assert!(markdown_key.status.starts_with("receiving"));
     assert_visual_text_contains(&markdown_key, "# Heading");
     assert_visual_text_contains(&markdown_key, "▌ quoted");
@@ -600,7 +746,7 @@ fn single_session_visual_state_smoke_covers_markdown_spinner_and_switcher() {
         KeyOutcome::LoadSessionSwitcher
     );
     let switcher_key = single_session_text_key(&switcher_app, size);
-    assert_eq!(switcher_key.title, "fresh session");
+    assert_eq!(switcher_key.title, "");
     assert!(switcher_key.status.starts_with("loading recent sessions"));
     assert_visual_text_contains(&switcher_key, "desktop session switcher");
     assert_visual_text_contains(
@@ -770,12 +916,14 @@ fn positions_for_color(vertices: &[Vertex], color: [f32; 4]) -> Vec<[u32; 2]> {
 }
 
 fn assert_visual_text_contains(key: &SingleSessionTextKey, expected: &str) {
-    let body = key
+    let body_lines = key
         .body
         .iter()
         .map(|line| line.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
+        .chain(std::iter::once(key.welcome_hero.as_str()))
+        .chain(key.welcome_hint.iter().map(|line| line.text.as_str()))
+        .collect::<Vec<_>>();
+    let body = body_lines.join("\n");
     assert!(
         body.contains(expected),
         "expected visual body to contain {expected:?}, got:\n{body}"
@@ -860,7 +1008,20 @@ fn single_session_hotkey_help_toggles_discoverable_shortcuts() {
 
     assert_eq!(app.handle_key(KeyInput::Escape), KeyOutcome::Redraw);
     assert!(!app.show_help);
+    assert_eq!(app.handle_key(KeyInput::Escape), KeyOutcome::None);
     assert!(app.body_lines().join("\n").contains("1  question"));
+}
+
+#[test]
+fn single_session_escape_soft_interrupts_running_generation() {
+    let mut app = SingleSessionApp::new(None);
+    assert_eq!(app.handle_key(KeyInput::Escape), KeyOutcome::None);
+
+    app.is_processing = true;
+    assert_eq!(
+        app.handle_key(KeyInput::Escape),
+        KeyOutcome::CancelGeneration
+    );
 }
 
 fn help_has_shortcut(lines: &[String], shortcut: &str, description: &str) -> bool {
@@ -1481,6 +1642,27 @@ fn mouse_scroll_delta_maps_to_body_scroll_lines() {
 }
 
 #[test]
+fn long_single_session_transcript_exposes_scrollbar_metrics() {
+    let mut app = SingleSessionApp::new(None);
+    let size = PhysicalSize::new(900, 360);
+    for index in 0..48 {
+        app.messages
+            .push(SingleSessionMessage::assistant(format!("message {index}")));
+    }
+
+    let metrics = single_session_body_scroll_metrics(&app, size, 0).expect("scroll metrics");
+    assert!(metrics.total_lines > metrics.visible_lines);
+    assert!(metrics.max_scroll_lines > 0);
+
+    let vertices = build_single_session_vertices(&app, size, 0.0, 0);
+    assert!(
+        vertices
+            .iter()
+            .any(|vertex| vertex.color == [0.035, 0.065, 0.145, 0.34])
+    );
+}
+
+#[test]
 fn glyphon_caret_position_uses_shaped_draft_buffer() {
     let mut app = SingleSessionApp::new(None);
     app.handle_key(KeyInput::Character("hello".to_string()));
@@ -1521,19 +1703,14 @@ fn fresh_single_session_shows_animated_welcome_screen() {
     let first = single_session_text_key_for_tick(&app, PhysicalSize::new(900, 700), 0);
     let later = single_session_text_key_for_tick(&app, PhysicalSize::new(900, 700), 42);
 
-    let body = first
-        .body
-        .iter()
-        .map(|line| line.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
     assert!(
-        body.contains("Hello there") || body.contains("Welcome, "),
-        "expected generic or named welcome, got:\n{body}"
+        first.welcome_hero.contains("Hello there") || first.welcome_hero.contains("Welcome, "),
+        "expected generic or named welcome, got: {:?}",
+        first.welcome_hero
     );
-    assert_visual_text_contains(&first, "Start with a prompt");
-    assert_visual_text_contains(&first, "Ctrl+P opens recent sessions");
-    assert_ne!(first.body, later.body);
+    assert!(first.body.is_empty());
+    assert!(first.welcome_hint.is_empty());
+    assert_eq!(first.welcome_hero, later.welcome_hero);
 }
 
 #[test]

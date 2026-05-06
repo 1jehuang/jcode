@@ -913,6 +913,9 @@ impl crate::tui::TuiState for App {
                     ProcessingStatus::Streaming => {
                         ("running".to_string(), Some("streaming".to_string()))
                     }
+                    ProcessingStatus::WaitingForNetwork { listener } => {
+                        ("waiting_network".to_string(), Some(listener.clone()))
+                    }
                     ProcessingStatus::RunningTool(name) => {
                         ("running".to_string(), Some(format!("tool: {}", name)))
                     }

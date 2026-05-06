@@ -168,6 +168,9 @@ pub(super) fn format_status_for_debug(app: &dyn TuiState) -> String {
             let (input, output) = app.streaming_tokens();
             format!("Streaming (↑{} ↓{})", input, output)
         }
+        ProcessingStatus::WaitingForNetwork { ref listener } => {
+            format!("Waiting for network to retry ({})", listener)
+        }
         ProcessingStatus::RunningTool(ref name) => {
             if name == "batch"
                 && let Some(progress) = app.batch_progress()
