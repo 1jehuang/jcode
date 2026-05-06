@@ -51,6 +51,42 @@ fn test_platform_asset_name() {
 }
 
 #[test]
+fn test_host_asset_name_matches_bridge_release_convention() {
+    let name = get_host_asset_name();
+    assert!(name.starts_with("host-"));
+    #[cfg(windows)]
+    assert!(name.ends_with(".exe"));
+}
+
+#[test]
+fn ensure_native_host_binary_materializes_from_current_exe() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let host = ensure_native_host_binary().expect("create host copy");
+    assert!(host.exists());
+    assert_eq!(
+        host.file_stem().and_then(|stem| stem.to_str()),
+        Some("firefox-agent-bridge-host")
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn native_host_manifest_rejects_browser_cli_path() {
+    assert!(!native_host_manifest_path_is_valid(std::path::Path::new(
+        "browser.exe"
+    )));
+}
+
+#[test]
 fn test_should_prompt_extension_install_only_before_setup_complete() {
     let incomplete = BrowserStatus {
         backend: "firefox_agent_bridge",
