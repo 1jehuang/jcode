@@ -64,3 +64,8 @@ Melhorar o CLI/TUI do Jcode em fatias verificáveis, sem tentar reescrever tudo 
 - Extrair mais lógica inline de status do TUI para `jcode-tui-style`: `status_queue_suffix` e `retry_delay_label`.
 - Adicionar testes puros para sufixo de fila e formatação de retry em segundos, minutos e horas.
 - Aplicar os helpers em `src/tui/ui_input.rs`, mantendo o rendering real igual e tornando regressões de texto/status mais fáceis de testar.
+
+## Sexta fatia implementada
+- Extrair a composição textual do status `RunningTool` para `running_tool_status_spans`, isolando barras animadas, detalhe da ferramenta, avisos experimentais, subagente, transporte, elapsed, cache miss, atalho de background e fila.
+- Adicionar um snapshot textual unitário cobrindo o estado rico de `RunningTool`, incluindo websocket, provider upstream, cache miss e fila pendente.
+- Isso valida o rendering real do status sem depender de terminal gráfico e reduz risco de regressões nas próximas mudanças de UI.

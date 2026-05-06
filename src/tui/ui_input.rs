@@ -576,79 +576,35 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                 let experimental_notice = app.active_experimental_feature_notice();
                 let subagent = app.subagent_status();
 
-                let mut spans = vec![
-                    Span::styled(left_bar, Style::default().fg(anim_color)),
-                    Span::styled(" ", Style::default()),
-                    Span::styled(name.to_string(), Style::default().fg(anim_color).bold()),
-                    Span::styled(" ", Style::default()),
-                    Span::styled(right_bar, Style::default().fg(anim_color)),
-                ];
-
+                let mut progress_or_detail_spans = Vec::new();
                 // For batch tool: show "completed/total · last_tool" progress
                 if is_batch {
                     append_batch_progress_spans(
-                        &mut spans,
+                        &mut progress_or_detail_spans,
                         anim_color,
                         batch_prog,
                         batch_total_initial,
                     );
                 } else if let Some(detail) = tool_detail {
-                    spans.push(Span::styled(
+                    progress_or_detail_spans.push(Span::styled(
                         format!(" · {}", detail),
                         Style::default().fg(dim_color()),
                     ));
                 }
 
-                if let Some(notice) = experimental_notice {
-                    spans.push(Span::styled(
-                        format!(" · ⚠ {}", notice),
-                        Style::default().fg(rgb(255, 193, 7)).bold(),
-                    ));
-                }
-
-                if let Some(status) = subagent {
-                    spans.push(Span::styled(
-                        format!(" ({})", status),
-                        Style::default().fg(dim_color()),
-                    ));
-                }
-                for label in transport_context_labels(app) {
-                    spans.push(Span::styled(
-                        format!(" · {}", label),
-                        Style::default().fg(dim_color()),
-                    ));
-                }
-                spans.push(Span::styled(
-                    format!(" · {}", format_elapsed(elapsed)),
-                    Style::default().fg(dim_color()),
-                ));
-
-                if let Some(problem) = kv_cache_problem {
-                    let miss_tokens = problem.affected_tokens.unwrap_or(0);
-                    let miss_str = if miss_tokens >= 1000 {
-                        format!("{}k", miss_tokens / 1000)
-                    } else if miss_tokens > 0 {
-                        format!("{}", miss_tokens)
-                    } else {
-                        "kv".to_string()
-                    };
-                    spans.push(Span::styled(
-                        format!(" · ⚠ {} cache miss", miss_str),
-                        Style::default().fg(rgb(255, 193, 7)),
-                    ));
-                }
-
-                spans.push(Span::styled(
-                    " · Alt+B bg",
-                    Style::default().fg(rgb(100, 100, 100)),
-                ));
-
-                if !queued_suffix.is_empty() {
-                    spans.push(Span::styled(
-                        queued_suffix.clone(),
-                        Style::default().fg(queued_color()),
-                    ));
-                }
+                let spans = running_tool_status_spans(
+                    name,
+                    left_bar,
+                    right_bar,
+                    anim_color,
+                    elapsed,
+                    progress_or_detail_spans,
+                    experimental_notice,
+                    subagent,
+                    transport_context_labels(app),
+                    kv_cache_problem.map(|problem| problem.affected_tokens.unwrap_or(0)),
+                    &queued_suffix,
+                );
                 Line::from(spans)
             }
         }
@@ -721,6 +677,83 @@ fn streaming_status_spans(
             Style::default().fg(queued_color()),
         ));
     }
+    spans
+}
+
+#[allow(clippy::too_many_arguments)]
+fn running_tool_status_spans(
+    name: &str,
+    left_bar: String,
+    right_bar: String,
+    anim_color: Color,
+    elapsed: f32,
+    progress_or_detail_spans: Vec<Span<'static>>,
+    experimental_notice: Option<String>,
+    subagent: Option<String>,
+    transport_labels: Vec<String>,
+    cache_miss_tokens: Option<u64>,
+    queued_suffix: &str,
+) -> Vec<Span<'static>> {
+    let mut spans = vec![
+        Span::styled(left_bar, Style::default().fg(anim_color)),
+        Span::styled(" ", Style::default()),
+        Span::styled(name.to_string(), Style::default().fg(anim_color).bold()),
+        Span::styled(" ", Style::default()),
+        Span::styled(right_bar, Style::default().fg(anim_color)),
+    ];
+
+    spans.extend(progress_or_detail_spans);
+
+    if let Some(notice) = experimental_notice {
+        spans.push(Span::styled(
+            format!(" · ⚠ {}", notice),
+            Style::default().fg(rgb(255, 193, 7)).bold(),
+        ));
+    }
+
+    if let Some(status) = subagent {
+        spans.push(Span::styled(
+            format!(" ({})", status),
+            Style::default().fg(dim_color()),
+        ));
+    }
+    for label in transport_labels {
+        spans.push(Span::styled(
+            format!(" · {}", label),
+            Style::default().fg(dim_color()),
+        ));
+    }
+    spans.push(Span::styled(
+        format!(" · {}", format_elapsed(elapsed)),
+        Style::default().fg(dim_color()),
+    ));
+
+    if let Some(miss_tokens) = cache_miss_tokens {
+        let miss_str = if miss_tokens >= 1000 {
+            format!("{}k", miss_tokens / 1000)
+        } else if miss_tokens > 0 {
+            format!("{}", miss_tokens)
+        } else {
+            "kv".to_string()
+        };
+        spans.push(Span::styled(
+            format!(" · ⚠ {} cache miss", miss_str),
+            Style::default().fg(rgb(255, 193, 7)),
+        ));
+    }
+
+    spans.push(Span::styled(
+        " · Alt+B bg",
+        Style::default().fg(rgb(100, 100, 100)),
+    ));
+
+    if !queued_suffix.is_empty() {
+        spans.push(Span::styled(
+            queued_suffix.to_string(),
+            Style::default().fg(queued_color()),
+        ));
+    }
+
     spans
 }
 
@@ -910,6 +943,41 @@ mod tests {
         assert_eq!(spans.len(), 2);
         assert_eq!(spans[0].content.as_ref(), "⠋");
         assert_eq!(spans[1].content.as_ref(), " finalizing");
+    }
+
+    #[test]
+    fn running_tool_status_spans_capture_full_status_text() {
+        let anim_color = rgb(80, 200, 220);
+        let spans = running_tool_status_spans(
+            "bash",
+            "●◆··◆".to_string(),
+            "◆··◆●".to_string(),
+            anim_color,
+            65.0,
+            vec![Span::styled(
+                " · cargo test".to_string(),
+                Style::default().fg(dim_color()),
+            )],
+            Some("experimental shell".to_string()),
+            Some("worker ready".to_string()),
+            vec![
+                "using existing websocket".to_string(),
+                "via OpenRouter".to_string(),
+            ],
+            Some(12_300),
+            " · +2 queued",
+        );
+        let rendered = spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(
+            rendered,
+            "●◆··◆ bash ◆··◆● · cargo test · ⚠ experimental shell (worker ready) · using existing websocket · via OpenRouter · 1m 5s · ⚠ 12k cache miss · Alt+B bg · +2 queued"
+        );
+        assert_eq!(spans[0].style.fg, Some(anim_color));
+        assert!(spans[2].style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
