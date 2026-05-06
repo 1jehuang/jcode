@@ -75,6 +75,23 @@ fn test_end_cycle_input_minimal() {
 }
 
 #[test]
+fn test_end_cycle_input_accepts_stringified_counts() {
+    let input = json!({
+        "summary": "Done",
+        "memories_modified": "2",
+        "compactions": "1",
+        "next_schedule": {
+            "wake_in_minutes": "15"
+        }
+    });
+
+    let parsed: EndCycleInput = serde_json::from_value(input).unwrap();
+    assert_eq!(parsed.memories_modified, 2);
+    assert_eq!(parsed.compactions, 1);
+    assert_eq!(parsed.next_schedule.unwrap().wake_in_minutes, Some(15));
+}
+
+#[test]
 fn test_schedule_input_deserialization() {
     let input = json!({
         "wake_in_minutes": 15,
