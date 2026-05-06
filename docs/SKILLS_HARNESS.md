@@ -82,7 +82,7 @@ jcode-harness run "review this diff" --ndjson --mock-response "deterministic res
 
 The router is intentionally simple and deterministic:
 
-- coding, bug, test, refactor, review, implement, fix, PR, or diff tasks select `karpathy-guidelines` and `clean-code-guardian`;
+- coding, bug, test, refactor, review, implement, fix, pull request, or diff tasks select `karpathy-guidelines` and `clean-code-guardian`;
 - performance, latency, memory, throughput, CPU, RAM, or efficiency tasks select `optimization`;
 - LLM wiki, project memory, prior decision, provenance, transcript, or context-history tasks select `llmwiki-memory`;
 - explicit `--skill <name>` always includes that skill;

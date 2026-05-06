@@ -308,6 +308,11 @@ fn write_bytes_inner(path: &Path, bytes: &[u8], durable: bool) -> Result<()> {
 
         if path.exists() {
             let bak_path = path.with_extension("bak");
+            match std::fs::remove_file(&bak_path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
+            }
             std::fs::rename(path, &bak_path)?;
         }
 
@@ -335,6 +340,34 @@ fn write_bytes_inner(path: &Path, bytes: &[u8], durable: bool) -> Result<()> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use serde::Serialize;
+
+    use super::*;
+
+    #[derive(Serialize)]
+    struct TestDoc<'a> {
+        value: &'a str,
+    }
+
+    #[test]
+    fn repeated_writes_replace_existing_backup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+
+        write_json(&path, &TestDoc { value: "one" }).expect("first write");
+        write_json(&path, &TestDoc { value: "two" }).expect("second write");
+        write_json(&path, &TestDoc { value: "three" }).expect("third write");
+
+        let primary = std::fs::read_to_string(&path).expect("primary");
+        let backup = std::fs::read_to_string(path.with_extension("bak")).expect("backup");
+
+        assert!(primary.contains("three"));
+        assert!(backup.contains("two"));
+    }
 }
 
 pub enum StorageRecoveryEvent<'a> {

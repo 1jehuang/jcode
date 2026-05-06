@@ -697,8 +697,8 @@ fn streaming_status_spans(
 #[allow(clippy::too_many_arguments)]
 fn running_tool_status_spans(
     name: &str,
-    left_bar: String,
-    right_bar: String,
+    left_bar: &'static str,
+    right_bar: &'static str,
     anim_color: Color,
     elapsed: f32,
     progress_or_detail_spans: Vec<Span<'static>>,
@@ -958,8 +958,8 @@ mod tests {
         let anim_color = rgb(80, 200, 220);
         let spans = running_tool_status_spans(
             "bash",
-            "●◆··◆".to_string(),
-            "◆··◆●".to_string(),
+            "●◆··◆",
+            "◆··◆●",
             anim_color,
             65.0,
             vec![Span::styled(

@@ -11,7 +11,7 @@ Used by `skills list --json`, `skills show <name> --json`, and `skills doctor --
   "name": "karpathy-guidelines",
   "description": "Skill description",
   "origin": "built-in",
-  "path": "<builtin>/karpathy-guidelines/SKILL.md",
+  "path": "<builtin>/.jcode/skills/karpathy-guidelines/SKILL.md",
   "allowed_tools": null
 }
 ```
@@ -41,7 +41,7 @@ Shape:
       "name": "karpathy-guidelines",
       "description": "Skill description",
       "origin": "built-in",
-      "path": "<builtin>/karpathy-guidelines/SKILL.md",
+      "path": "<builtin>/.jcode/skills/karpathy-guidelines/SKILL.md",
       "allowed_tools": null
     }
   ]
@@ -68,7 +68,7 @@ Shape:
   "name": "karpathy-guidelines",
   "description": "Skill description",
   "origin": "built-in",
-  "path": "<builtin>/karpathy-guidelines/SKILL.md",
+  "path": "<builtin>/.jcode/skills/karpathy-guidelines/SKILL.md",
   "allowed_tools": null,
   "content": "Markdown body without YAML frontmatter"
 }
@@ -97,7 +97,7 @@ Shape:
     {
       "name": "karpathy-guidelines",
       "status": "ok",
-      "path": "<builtin>/karpathy-guidelines/SKILL.md"
+      "path": "<builtin>/.jcode/skills/karpathy-guidelines/SKILL.md"
     }
   ],
   "duplicates": [

@@ -1,7 +1,7 @@
 # Jcode Init Swarm Analysis Report
 
-Generated: 2026-05-06T21:06:00Z
-Root: `/home/chapzin/jcode-harness`
+Generated: `<generated-at>`
+Root: `<project-root>`
 Branch: `feature/embedded-skills-harness`
 
 ## Barrier status
@@ -10,10 +10,10 @@ All required discovery roles reported before synthesis:
 
 | Role | Session | Status | Scope |
 | --- | --- | --- | --- |
-| architect | `session_crab_1778101508607_ac90bf0a9eb7c8fb` | completed | repository structure, architecture boundaries, workflows, high-risk areas |
-| qa | `session_rhino_1778101508607_e2f92e30454a4686` | completed | tests, CI gaps, validation strategy, untested risk |
-| documenter | `session_dove_1778101508606_bd6e7eeeaf2ddca7` | completed | README, docs, onboarding, AGENTS.md gaps |
-| tooling-security | `session_elephant_1778101508606_8c35489ec1915ffd` | ready/reported | package managers, MCP, secrets boundaries, automation risk |
+| architect | `<architect-session>` | completed | repository structure, architecture boundaries, workflows, high-risk areas |
+| qa | `<qa-session>` | completed | tests, CI gaps, validation strategy, untested risk |
+| documenter | `<documenter-session>` | completed | README, docs, onboarding, AGENTS.md gaps |
+| tooling-security | `<tooling-security-session>` | ready/reported | package managers, MCP, secrets boundaries, automation risk |
 
 ## Evidence read for synthesis
 

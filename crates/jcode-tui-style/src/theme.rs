@@ -55,6 +55,11 @@ pub fn header_session_color() -> Color {
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const STATIC_ACTIVITY_INDICATOR: &str = "•";
 const TOOL_ACTIVITY_WIDTH: usize = 5;
+const TOOL_ACTIVITY_IDLE: &str = "·····";
+const TOOL_ACTIVITY_LEFT_FRAMES: [&str; TOOL_ACTIVITY_WIDTH] =
+    ["●◆··◆", "◆●◆··", "·◆●◆·", "··◆●◆", "◆··◆●"];
+const TOOL_ACTIVITY_RIGHT_FRAMES: [&str; TOOL_ACTIVITY_WIDTH] =
+    ["◆··◆●", "··◆●◆", "·◆●◆·", "◆●◆··", "●◆··◆"];
 
 fn safe_animation_fps(fps: f32) -> f32 {
     if fps.is_finite() && fps > 0.0 {
@@ -101,10 +106,12 @@ pub fn activity_indicator(
     }
 }
 
-pub fn tool_activity_bars(elapsed: f32, enable_decorative_animations: bool) -> (String, String) {
+pub fn tool_activity_bars(
+    elapsed: f32,
+    enable_decorative_animations: bool,
+) -> (&'static str, &'static str) {
     if !enable_decorative_animations {
-        let idle = "·".repeat(TOOL_ACTIVITY_WIDTH);
-        return (idle.clone(), idle);
+        return (TOOL_ACTIVITY_IDLE, TOOL_ACTIVITY_IDLE);
     }
 
     let elapsed = if elapsed.is_finite() {
@@ -113,26 +120,10 @@ pub fn tool_activity_bars(elapsed: f32, enable_decorative_animations: bool) -> (
         0.0
     };
     let head = ((elapsed * 8.0) as usize) % TOOL_ACTIVITY_WIDTH;
-
-    let build = |mirror: bool| -> String {
-        (0..TOOL_ACTIVITY_WIDTH)
-            .map(|i| {
-                let i = if mirror {
-                    TOOL_ACTIVITY_WIDTH - 1 - i
-                } else {
-                    i
-                };
-                let dist = (TOOL_ACTIVITY_WIDTH + i - head) % TOOL_ACTIVITY_WIDTH;
-                match dist {
-                    0 => '●',
-                    1 | 4 => '◆',
-                    _ => '·',
-                }
-            })
-            .collect()
-    };
-
-    (build(false), build(true))
+    (
+        TOOL_ACTIVITY_LEFT_FRAMES[head],
+        TOOL_ACTIVITY_RIGHT_FRAMES[head],
+    )
 }
 
 pub fn status_queue_suffix(pending_count: usize) -> Option<String> {
@@ -292,10 +283,10 @@ mod tests {
         assert_eq!(left.chars().count(), TOOL_ACTIVITY_WIDTH);
         assert_eq!(right.chars().count(), TOOL_ACTIVITY_WIDTH);
         assert!(left.contains('●'));
-        assert_eq!(right, left.chars().rev().collect::<String>());
+        assert_eq!(right, left.chars().rev().collect::<String>().as_str());
 
         let (reduced_left, reduced_right) = tool_activity_bars(0.0, false);
-        assert_eq!(reduced_left, "·".repeat(TOOL_ACTIVITY_WIDTH));
+        assert_eq!(reduced_left, TOOL_ACTIVITY_IDLE);
         assert_eq!(reduced_right, reduced_left);
     }
 

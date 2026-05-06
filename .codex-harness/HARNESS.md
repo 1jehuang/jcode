@@ -15,7 +15,7 @@ Use it for:
 Default project path:
 
 ```text
-/home/chapzin/jcode-harness
+<project-root>
 ```
 
 Recommended loop:

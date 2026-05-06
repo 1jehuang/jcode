@@ -15,7 +15,7 @@ Jcode is an open source agentic coding environment focused on terminal-first dev
 > **Detailed Analysis**: For generated symbol counts and dependency graphs, see `codebase-map.json` when present. Treat generated context as advisory and verify against `Cargo.toml` and the current tree.
 
 ## Quick Facts
-- Root: `/home/chapzin/jcode-harness`
+- Root: `<project-root>`
 - Primary languages: Rust for the application/workspace, Python for automation and black-box tests, JavaScript for the telemetry worker and related tooling.
 - Root package: `jcode` in `Cargo.toml`.
 - Main binaries: `jcode` at `src/main.rs`, `jcode-harness` at `src/bin/harness.rs`, `test_api` at `src/bin/test_api.rs`, plus dev-only binaries behind features.

@@ -1089,7 +1089,7 @@ fn collect_skill_candidates_from_dir(
             .strip_prefix("---")
             .and_then(|rest| rest.find("---").map(|end| &rest[..end]));
         let Some(yaml) = yaml else {
-            println!("invalid frontmatter: {}", skill_file.display());
+            eprintln!("invalid frontmatter: {}", skill_file.display());
             continue;
         };
         match serde_yaml::from_str::<SkillDoctorFrontmatter>(yaml) {
@@ -1098,7 +1098,7 @@ fn collect_skill_candidates_from_dir(
                 origin,
                 path: skill_file,
             }),
-            Err(err) => println!("invalid frontmatter: {} ({})", skill_file.display(), err),
+            Err(err) => eprintln!("invalid frontmatter: {} ({})", skill_file.display(), err),
         }
     }
     Ok(())

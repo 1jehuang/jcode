@@ -10,7 +10,8 @@ generatedAt: 2026-05-06T19:06:36.302Z
 
 ### Prerequisites
 
-- Node.js (LTS version recommended)
+- Rust toolchain with Cargo, matching the workspace edition in `Cargo.toml`.
+- Platform build tools required by common Rust crates.
 
 ### Installation
 
@@ -19,13 +20,24 @@ generatedAt: 2026-05-06T19:06:36.302Z
 git clone <repository-url>
 cd jcode-harness
 
-# Install dependencies
-npm install
+# Fetch and build Rust dependencies through Cargo
+cargo check -p jcode
 ```
 
 ### Running
 
 ```bash
-# See package.json for available scripts
-npm run <script-name>
+# Run the primary CLI
+cargo run -p jcode --bin jcode -- --help
+
+# Run the harness CLI
+cargo run -p jcode --bin jcode-harness -- --help
+```
+
+### Validation
+
+```bash
+cargo fmt --check
+cargo test -p jcode-storage
+cargo test -p jcode skill_router --lib
 ```
