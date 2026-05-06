@@ -48,3 +48,10 @@ Melhorar o CLI/TUI do Jcode em fatias verificáveis, sem tentar reescrever tudo 
 - O preflight roda formatação, `check_panic_budget.py`, `check_swallowed_error_budget.py`, `check_dependency_boundaries.py`, `cargo test -p jcode-tui-style` e `cargo check -p jcode`.
 - Como o orçamento de swallowed errors ainda tem dívida histórica ampla, o modo padrão reporta a falha como warning sem mascarar o output. Use `--strict-swallowed` para transformar essa etapa em bloqueio quando a dívida for reduzida ou ratchetada intencionalmente.
 - Use `--check` em CI/validação limpa para não modificar formatação.
+
+## Terceira fatia implementada
+- Reduzir ocorrências reais do orçamento de swallowed errors de `2126` para `2084` antes do ratchet.
+- Zerar as ocorrências novas em `crates/jcode-storage/src/lib.rs`, com tratamento explícito/log de falhas best-effort em hardening de permissões, sync, cleanup e recovery de backup.
+- Zerar as ocorrências novas em `crates/jcode-build-support/src/lib.rs`, preservando stderr de smoke tests e registrando falhas de shutdown de processo.
+- Reduzir `src/overnight.rs` de `30` para `10` ocorrências, logando falhas best-effort de manifest/event/review/task-card em vez de engolir erros silenciosamente.
+- Atualizar `scripts/swallowed_error_budget.json` após limpeza intencional para que `scripts/cli_quality_preflight.sh --check --strict-swallowed` passe e bloqueie novas regressões.

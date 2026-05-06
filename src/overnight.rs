@@ -30,6 +30,12 @@ pub use jcode_overnight_core::{
 const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const LONG_TURN_NOTICE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
+fn log_overnight_best_effort_error(context: &str, err: impl std::fmt::Display) {
+    crate::logging::warn(&format!(
+        "Overnight best-effort step failed: {context}: {err}"
+    ));
+}
+
 #[derive(Debug, Clone)]
 pub struct OvernightLaunch {
     pub manifest: OvernightManifest,
@@ -91,7 +97,9 @@ pub fn start_overnight_run(options: OvernightStartOptions) -> Result<OvernightLa
     if !options.use_current_session
         && let Ok(todos) = crate::todo::load_todos(&options.parent_session.id)
     {
-        let _ = crate::todo::save_todos(&coordinator_session_id, &todos);
+        if let Err(err) = crate::todo::save_todos(&coordinator_session_id, &todos) {
+            log_overnight_best_effort_error("copy parent todos to coordinator", err);
+        }
     }
 
     let manifest = OvernightManifest {
@@ -201,15 +209,21 @@ fn spawn_supervisor(
             let mut updated = load_manifest(&manifest.run_id).unwrap_or(manifest.clone());
             updated.status = OvernightRunStatus::Failed;
             updated.completed_at = Some(Utc::now());
-            let _ = save_manifest(&updated);
-            let _ = record_event(
+            if let Err(save_err) = save_manifest(&updated) {
+                log_overnight_best_effort_error("persist failed supervisor manifest", save_err);
+            }
+            if let Err(event_err) = record_event(
                 &updated,
                 "run_failed",
                 format!("Overnight supervisor failed: {}", err),
                 json!({ "error": crate::util::format_error_chain(&err) }),
                 true,
-            );
-            let _ = render_review_html(&updated);
+            ) {
+                log_overnight_best_effort_error("record supervisor failure", event_err);
+            }
+            if let Err(render_err) = render_review_html(&updated) {
+                log_overnight_best_effort_error("render failed supervisor review", render_err);
+            }
         }
     };
 
@@ -404,25 +418,33 @@ async fn run_turn_monitored(
             result = &mut run_future => return result,
             _ = sample_interval.tick() => {
                 let snapshot = gather_resource_snapshot(manifest.working_dir.as_deref().map(Path::new));
-                let _ = record_event(
+                if let Err(err) = record_event(
                     manifest,
                     "resource_sample",
                     resource_summary(&snapshot),
                     serde_json::to_value(&snapshot).unwrap_or_else(|_| json!({})),
                     false,
-                );
-                let _ = render_review_html(manifest);
+                ) {
+                    log_overnight_best_effort_error("record resource sample", err);
+                }
+                if let Err(err) = render_review_html(manifest) {
+                    log_overnight_best_effort_error("render resource sample review", err);
+                }
             }
             _ = long_notice_interval.tick() => {
                 let elapsed = Utc::now().signed_duration_since(started).num_minutes().max(0);
-                let _ = record_event(
+                if let Err(err) = record_event(
                     manifest,
                     "coordinator_turn_still_running",
                     format!("Coordinator turn still running after {}m", elapsed),
                     json!({ "elapsed_minutes": elapsed }),
                     true,
-                );
-                let _ = render_review_html(manifest);
+                ) {
+                    log_overnight_best_effort_error("record long-running coordinator notice", err);
+                }
+                if let Err(err) = render_review_html(manifest) {
+                    log_overnight_best_effort_error("render long-running coordinator review", err);
+                }
             }
         }
     }
@@ -649,7 +671,10 @@ fn disk_available_gb(path: &Path) -> Option<f64> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
-        let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+        let c_path = match CString::new(path.as_os_str().as_bytes()) {
+            Ok(path) => path,
+            Err(_) => return None,
+        };
         let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
         let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
         if rc != 0 {
@@ -668,10 +693,13 @@ fn disk_available_gb(path: &Path) -> Option<f64> {
 pub fn gather_git_snapshot(working_dir: Option<&Path>) -> GitSnapshot {
     let captured_at = Utc::now();
     let dir = working_dir.unwrap_or_else(|| Path::new("."));
-    let branch = run_git(dir, &["branch", "--show-current"])
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
+    let branch = match run_git(dir, &["branch", "--show-current"]) {
+        Ok(value) => {
+            let branch = value.trim().to_string();
+            (!branch.is_empty()).then_some(branch)
+        }
+        Err(_) => None,
+    };
     match run_git(dir, &["status", "--short"]) {
         Ok(status) => {
             let dirty_summary: Vec<String> = status
@@ -809,7 +837,7 @@ pub fn read_task_cards(manifest: &OvernightManifest) -> Result<Vec<OvernightTask
         let file_name = path
             .file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or_default();
+            .unwrap_or("");
         if file_name.starts_with('_')
             || path.extension().and_then(|ext| ext.to_str()) != Some("json")
         {
@@ -842,7 +870,11 @@ pub fn read_task_cards(manifest: &OvernightManifest) -> Result<Vec<OvernightTask
 }
 
 pub fn summarize_task_cards(manifest: &OvernightManifest) -> OvernightTaskCardSummary {
-    summarize_task_cards_slice(&read_task_cards(manifest).unwrap_or_default())
+    let cards = read_task_cards(manifest).unwrap_or_else(|err| {
+        log_overnight_best_effort_error("read task cards for summary", err);
+        Vec::new()
+    });
+    summarize_task_cards_slice(&cards)
 }
 
 pub fn format_progress_card_content(manifest: &OvernightManifest) -> Result<String> {
@@ -856,9 +888,15 @@ pub fn latest_progress_card_content() -> Result<Option<String>> {
 }
 
 pub fn build_progress_card(manifest: &OvernightManifest) -> OvernightProgressCard {
-    let events = read_events(manifest).unwrap_or_default();
+    let events = read_events(manifest).unwrap_or_else(|err| {
+        log_overnight_best_effort_error("read overnight events for progress card", err);
+        Vec::new()
+    });
     let preflight = read_preflight(manifest);
-    let task_cards = read_task_cards(manifest).unwrap_or_default();
+    let task_cards = read_task_cards(manifest).unwrap_or_else(|err| {
+        log_overnight_best_effort_error("read task cards for progress card", err);
+        Vec::new()
+    });
     build_progress_card_from_parts(
         manifest,
         &events,
@@ -872,7 +910,13 @@ fn read_preflight(manifest: &OvernightManifest) -> Option<OvernightPreflight> {
     if !manifest.preflight_path.exists() {
         return None;
     }
-    storage::read_json(&manifest.preflight_path).ok()
+    match storage::read_json(&manifest.preflight_path) {
+        Ok(preflight) => Some(preflight),
+        Err(err) => {
+            log_overnight_best_effort_error("read overnight preflight", err);
+            None
+        }
+    }
 }
 
 pub fn record_event(
@@ -919,7 +963,9 @@ pub fn record_event(
     if meaningful {
         let mut updated = load_manifest(&manifest.run_id).unwrap_or_else(|_| manifest.clone());
         updated.last_activity_at = event.timestamp;
-        let _ = save_manifest(&updated);
+        if let Err(err) = save_manifest(&updated) {
+            log_overnight_best_effort_error("update last overnight activity timestamp", err);
+        }
     }
 
     Ok(())
@@ -952,7 +998,10 @@ pub fn format_status_markdown(manifest: &OvernightManifest) -> String {
 }
 
 pub fn format_log_markdown(manifest: &OvernightManifest, max_lines: usize) -> String {
-    let events = read_events(manifest).unwrap_or_default();
+    let events = read_events(manifest).unwrap_or_else(|err| {
+        log_overnight_best_effort_error("read overnight events for log", err);
+        Vec::new()
+    });
     format_log_markdown_from_events(manifest, &events, max_lines)
 }
 
@@ -1020,7 +1069,10 @@ Notes:
 }
 
 pub fn render_review_html(manifest: &OvernightManifest) -> Result<()> {
-    let events = read_events(manifest).unwrap_or_default();
+    let events = read_events(manifest).unwrap_or_else(|err| {
+        log_overnight_best_effort_error("read overnight events for review", err);
+        Vec::new()
+    });
     let notes = std::fs::read_to_string(&manifest.review_notes_path).unwrap_or_else(|_| {
         "# Overnight review notes
 
@@ -1028,11 +1080,17 @@ Coordinator has not written notes yet."
             .to_string()
     });
     let preflight = if manifest.preflight_path.exists() {
-        std::fs::read_to_string(&manifest.preflight_path).unwrap_or_default()
+        std::fs::read_to_string(&manifest.preflight_path).unwrap_or_else(|err| {
+            log_overnight_best_effort_error("read overnight preflight for review", err);
+            String::new()
+        })
     } else {
         String::new()
     };
-    let task_cards = read_task_cards(manifest).unwrap_or_default();
+    let task_cards = read_task_cards(manifest).unwrap_or_else(|err| {
+        log_overnight_best_effort_error("read task cards for review", err);
+        Vec::new()
+    });
     let html = build_review_html(manifest, &events, &notes, &preflight, &task_cards);
     write_text_file(&manifest.review_path, &html)
 }

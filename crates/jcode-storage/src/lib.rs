@@ -57,11 +57,31 @@ fn runtime_user_discriminator() -> String {
 }
 
 fn ensure_private_runtime_dir(path: &Path) {
-    let _ = std::fs::create_dir_all(path);
+    if let Err(err) = std::fs::create_dir_all(path) {
+        eprintln!(
+            "warning: failed to create private runtime dir {}: {}",
+            path.display(),
+            err
+        );
+        return;
+    }
     #[cfg(unix)]
     {
-        let _ = jcode_core::fs::set_directory_permissions_owner_only(path);
+        if let Err(err) = jcode_core::fs::set_directory_permissions_owner_only(path) {
+            eprintln!(
+                "warning: failed to harden private runtime dir {}: {}",
+                path.display(),
+                err
+            );
+        }
     }
+}
+
+fn warn_storage_best_effort(context: &str, path: &Path, err: impl std::fmt::Display) {
+    eprintln!(
+        "warning: storage best-effort step failed: {context} {}: {err}",
+        path.display()
+    );
 }
 
 pub fn jcode_dir() -> Result<PathBuf> {
@@ -123,14 +143,20 @@ pub fn harden_user_config_permissions() {
     if let Some(config_dir) = dirs::config_dir() {
         let jcode_config_dir = config_dir.join("jcode");
         if jcode_config_dir.exists() {
-            let _ = jcode_core::fs::set_directory_permissions_owner_only(&jcode_config_dir);
+            if let Err(err) =
+                jcode_core::fs::set_directory_permissions_owner_only(&jcode_config_dir)
+            {
+                warn_storage_best_effort("harden config dir", &jcode_config_dir, err);
+            }
         }
     }
 
     if let Ok(jcode_home) = jcode_dir()
         && jcode_home.exists()
     {
-        let _ = jcode_core::fs::set_directory_permissions_owner_only(&jcode_home);
+        if let Err(err) = jcode_core::fs::set_directory_permissions_owner_only(&jcode_home) {
+            warn_storage_best_effort("harden jcode home", &jcode_home, err);
+        }
     }
 }
 
@@ -140,10 +166,14 @@ pub fn harden_user_config_permissions() {
 /// be tightened opportunistically.
 pub fn harden_secret_file_permissions(path: &Path) {
     if let Some(parent) = path.parent() {
-        let _ = jcode_core::fs::set_directory_permissions_owner_only(parent);
+        if let Err(err) = jcode_core::fs::set_directory_permissions_owner_only(parent) {
+            warn_storage_best_effort("harden secret parent", parent, err);
+        }
     }
     if path.exists() {
-        let _ = jcode_core::fs::set_permissions_owner_only(path);
+        if let Err(err) = jcode_core::fs::set_permissions_owner_only(path) {
+            warn_storage_best_effort("harden secret file", path, err);
+        }
     }
 }
 
@@ -199,7 +229,11 @@ pub fn write_text_secret(path: &Path, content: &str) -> Result<()> {
 }
 
 pub fn upsert_env_file_value(path: &Path, env_key: &str, value: Option<&str>) -> Result<()> {
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let existing = match std::fs::read_to_string(path) {
+        Ok(existing) => existing,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err.into()),
+    };
     let prefix = format!("{}=", env_key);
 
     let mut lines = Vec::new();
@@ -274,7 +308,7 @@ fn write_bytes_inner(path: &Path, bytes: &[u8], durable: bool) -> Result<()> {
 
         if path.exists() {
             let bak_path = path.with_extension("bak");
-            let _ = std::fs::rename(path, &bak_path);
+            std::fs::rename(path, &bak_path)?;
         }
 
         std::fs::rename(&tmp_path, path)?;
@@ -284,14 +318,20 @@ fn write_bytes_inner(path: &Path, bytes: &[u8], durable: bool) -> Result<()> {
             && let Some(parent) = path.parent()
             && let Ok(dir) = std::fs::File::open(parent)
         {
-            let _ = dir.sync_all();
+            if let Err(err) = dir.sync_all() {
+                warn_storage_best_effort("sync parent dir", parent, err);
+            }
         }
 
         Ok(())
     })();
 
     if result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
+        if let Err(err) = std::fs::remove_file(&tmp_path)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            warn_storage_best_effort("remove temporary file", &tmp_path, err);
+        }
     }
 
     result
@@ -340,7 +380,7 @@ where
                         on_recovery(StorageRecoveryEvent::RecoveredFromBackup {
                             backup_path: &bak_path,
                         });
-                        let _ = std::fs::copy(&bak_path, path);
+                        std::fs::copy(&bak_path, path)?;
                         Ok(val)
                     }
                     Err(bak_err) => Err(anyhow::anyhow!(

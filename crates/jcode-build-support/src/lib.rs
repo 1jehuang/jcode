@@ -276,7 +276,7 @@ fn read_binary_version_report(binary: &Path) -> Result<BinaryVersionReport> {
 
 pub fn smoke_test_binary(binary: &Path) -> Result<()> {
     let report = read_binary_version_report(binary)?;
-    if report.version.as_deref().unwrap_or_default().is_empty() {
+    if report.version.as_deref().unwrap_or("").is_empty() {
         anyhow::bail!(
             "Binary smoke test for {} returned JSON without a version field",
             binary.display()
@@ -290,7 +290,7 @@ fn validate_binary_version_matches_source_report(
     binary: &Path,
     source: &SourceState,
 ) -> Result<()> {
-    let git_hash = report.git_hash.as_deref().unwrap_or_default();
+    let git_hash = report.git_hash.as_deref().unwrap_or("");
     if git_hash.is_empty() {
         anyhow::bail!(
             "Binary {} version report did not include git_hash; rebuild before publishing {}",
@@ -335,7 +335,7 @@ fn dirty_status_paths(repo_dir: &Path) -> Result<Vec<(PathBuf, bool)>> {
         paths.push((PathBuf::from(path), deleted));
 
         if matches!(x, b'R' | b'C') || matches!(y, b'R' | b'C') {
-            let _ = entries.next();
+            entries.next();
         }
     }
 
@@ -432,7 +432,7 @@ fn validate_dev_binary_matches_source(
     source: &SourceState,
 ) -> Result<()> {
     let report = read_binary_version_report(binary)?;
-    if report.version.as_deref().unwrap_or_default().is_empty() {
+    if report.version.as_deref().unwrap_or("").is_empty() {
         anyhow::bail!(
             "Binary smoke test for {} returned JSON without a version field",
             binary.display()
@@ -572,7 +572,13 @@ pub fn smoke_test_server_binary(binary: &Path) -> Result<()> {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let Some(status) = child.try_wait()? {
-                let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+                let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_else(|err| {
+                    format!(
+                        "<failed to read smoke-test stderr {}: {}>",
+                        stderr_path.display(),
+                        err
+                    )
+                });
                 anyhow::bail!(
                     "server smoke test process exited early with status {:?}: {}",
                     status.code(),
@@ -594,7 +600,13 @@ pub fn smoke_test_server_binary(binary: &Path) -> Result<()> {
                     ) =>
                 {
                     if Instant::now() >= deadline {
-                        let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+                        let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_else(|err| {
+                            format!(
+                                "<failed to read smoke-test stderr {}: {}>",
+                                stderr_path.display(),
+                                err
+                            )
+                        });
                         anyhow::bail!(
                             "timed out waiting for server smoke test socket {}: {}",
                             socket_path.display(),
@@ -608,15 +620,25 @@ pub fn smoke_test_server_binary(binary: &Path) -> Result<()> {
         }
     })();
 
-    let _ = child.kill();
+    if let Err(err) = child.kill()
+        && err.kind() != std::io::ErrorKind::InvalidInput
+    {
+        eprintln!("warning: failed to stop smoke-test server process: {err}");
+    }
     let shutdown_deadline = Instant::now() + Duration::from_secs(2);
     loop {
         if child.try_wait()?.is_some() {
             break;
         }
         if Instant::now() >= shutdown_deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            if let Err(err) = child.kill()
+                && err.kind() != std::io::ErrorKind::InvalidInput
+            {
+                eprintln!("warning: failed to force-stop smoke-test server process: {err}");
+            }
+            if let Err(err) = child.wait() {
+                eprintln!("warning: failed waiting for smoke-test server process: {err}");
+            }
             break;
         }
         thread::sleep(Duration::from_millis(25));
@@ -687,12 +709,7 @@ pub fn publish_local_current_build_for_source(
     let previous_current_version = read_current_version()?;
     let versioned_path = install_binary_at_version(&binary, &source.version_label)?;
     let installed_report = read_binary_version_report(&versioned_path)?;
-    if installed_report
-        .version
-        .as_deref()
-        .unwrap_or_default()
-        .is_empty()
-    {
+    if installed_report.version.as_deref().unwrap_or("").is_empty() {
         anyhow::bail!(
             "Binary smoke test for {} returned JSON without a version field",
             versioned_path.display()
@@ -753,7 +770,7 @@ pub fn install_version(repo_dir: &std::path::Path, hash: &str) -> Result<PathBuf
 
 /// Update canary symlink to point to a version
 pub fn update_canary_symlink(hash: &str) -> Result<()> {
-    let _ = update_channel_symlink("canary", hash)?;
+    update_channel_symlink("canary", hash)?;
     Ok(())
 }
 
