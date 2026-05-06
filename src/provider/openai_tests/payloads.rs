@@ -18,6 +18,57 @@ fn test_build_response_request_includes_stream_for_http() {
 }
 
 #[test]
+fn test_chatgpt_payload_includes_native_image_generation_for_non_codex_models() {
+    let request = OpenAIProvider::build_response_request(
+        "gpt-5.5",
+        "system".to_string(),
+        &[],
+        &[],
+        true,
+        Some(DEFAULT_MAX_OUTPUT_TOKENS),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    assert!(request["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .any(|tool| tool["type"] == "image_generation"));
+}
+
+#[test]
+fn test_chatgpt_payload_excludes_native_image_generation_for_codex_models() {
+    for model in ["gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.3-codex-spark[1m]"] {
+        let request = OpenAIProvider::build_response_request(
+            model,
+            "system".to_string(),
+            &[],
+            &[],
+            true,
+            Some(DEFAULT_MAX_OUTPUT_TOKENS),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(
+            request["tools"]
+                .as_array()
+                .expect("tools array")
+                .iter()
+                .all(|tool| tool["type"] != "image_generation"),
+            "{model} should not receive the unsupported native image_generation tool"
+        );
+    }
+}
+
+#[test]
 fn test_websocket_payload_strips_stream_and_background() {
     let mut request = OpenAIProvider::build_response_request(
         "gpt-5.4",

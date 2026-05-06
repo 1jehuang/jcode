@@ -686,6 +686,14 @@ impl OpenAIProvider {
         format!("{}/compact", Self::responses_url(credentials))
     }
 
+    fn supports_native_image_generation(model_id: &str) -> bool {
+        let normalized = model_id
+            .strip_suffix("[1m]")
+            .unwrap_or(model_id)
+            .to_ascii_lowercase();
+        !normalized.contains("codex")
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "request construction threads explicit per-request OpenAI settings without hidden state"
@@ -704,7 +712,7 @@ impl OpenAIProvider {
         native_compaction_threshold: Option<usize>,
     ) -> Value {
         let mut tools = api_tools.to_vec();
-        if is_chatgpt_mode {
+        if is_chatgpt_mode && Self::supports_native_image_generation(model_id) {
             tools.push(serde_json::json!({ "type": "image_generation" }));
         }
 
