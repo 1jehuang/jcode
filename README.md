@@ -540,6 +540,9 @@ jcode
 # Run a single command non-interactively
 jcode run "say hello"
 
+# Stream machine-readable events for external orchestrators
+jcode run --ndjson "say hello"
+
 # Resume a previous session by memorable name
 jcode --resume fox
 
@@ -611,6 +614,7 @@ Notes:
 
 - [Ambient Mode / OpenClaw](docs/AMBIENT_MODE.md)
 - [Browser Provider Protocol](docs/BROWSER_PROVIDER_PROTOCOL.md)
+- [Non-Interactive Orchestrator API](docs/NON_INTERACTIVE_API.md)
 - [Memory Architecture](docs/MEMORY_ARCHITECTURE.md)
 - [Swarm Architecture](docs/SWARM_ARCHITECTURE.md)
 - [Server Architecture](docs/SERVER_ARCHITECTURE.md)
