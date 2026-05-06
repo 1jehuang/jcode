@@ -19,7 +19,7 @@ Built for multi-session workflows, infinite customizability, and performance.
 
 <br>
 
-[Features](#features) · [Install](#installation) · [Quick Start](#quick-start) · [Further Reading](#further-reading) · [Contributing](CONTRIBUTING.md)
+[Features](#features) · [Install](#installation) · [Quick Start](#quick-start) · [Sandboxing](#sandboxing) · [Further Reading](#further-reading) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -563,6 +563,25 @@ and hotkey-friendly dictation without requiring a bundled speech-to-text stack.
   <p><em>jcode workflow demonstration</em></p>
 
 </div>
+
+---
+
+## Sandboxing
+
+Use `--sandbox <DIR>` to confine jcode's file-system tools to a single directory tree:
+
+```bash
+jcode --sandbox /path/to/project
+JCODE_SANDBOX_ROOT=/path/to/project jcode
+```
+
+The sandbox path is canonicalized and stored with the session, so resumed sessions keep the same root. If `--cwd` is not also provided, jcode starts inside the sandbox root so relative paths begin there.
+
+When a sandbox is active, file-touching tools reject any resolved path outside the configured root. This covers reads, writes, edits, multi-edits, list/glob/grep/agentgrep, LSP/open/side-panel file access, and patch/apply-patch operations. Absolute paths, `..` escapes, and symlink escapes are checked against the root.
+
+The `bash` tool is only anchored to the sandbox root as its working directory. jcode cannot stop an arbitrary shell command from reading absolute paths such as `/etc/passwd` without OS-level sandboxing, so treat `bash` sandboxing as default containment for relative-path commands rather than a hard security boundary.
+
+External processes and MCP servers may have their own filesystem access unless they enforce the same root themselves.
 
 ---
 

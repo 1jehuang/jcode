@@ -55,7 +55,7 @@ impl Tool for WriteTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: WriteInput = serde_json::from_value(input)?;
 
-        let path = ctx.resolve_path(Path::new(&params.file_path));
+        let path = ctx.resolve_path_checked(Path::new(&params.file_path))?;
 
         // Create parent directories if needed
         if let Some(parent) = path.parent()

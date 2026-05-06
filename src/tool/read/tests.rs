@@ -8,6 +8,7 @@ fn make_ctx(working_dir: std::path::PathBuf) -> ToolContext {
         message_id: "test-message".to_string(),
         tool_call_id: "test-call".to_string(),
         working_dir: Some(working_dir),
+        sandbox_root: None,
         stdin_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,

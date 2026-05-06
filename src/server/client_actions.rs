@@ -349,12 +349,13 @@ pub(super) fn handle_run_subagent(
             name: tool_name.clone(),
         });
 
-        let (registry, session_id, working_dir) = {
+        let (registry, session_id, working_dir, sandbox_root) = {
             let agent_guard = agent.lock().await;
             (
                 agent_guard.registry(),
                 agent_guard.session_id().to_string(),
                 agent_guard.working_dir().map(std::path::PathBuf::from),
+                agent_guard.sandbox_root(),
             )
         };
 
@@ -363,6 +364,7 @@ pub(super) fn handle_run_subagent(
             message_id,
             tool_call_id: tool_call_id.clone(),
             working_dir,
+            sandbox_root,
             stdin_request_tx: None,
             graceful_shutdown_signal: None,
             execution_mode: crate::tool::ToolExecutionMode::Direct,

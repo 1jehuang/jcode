@@ -70,7 +70,13 @@ impl Tool for PatchTool {
         let mut results = Vec::new();
 
         for patch in patches {
-            let resolved_path = ctx.resolve_path(Path::new(&patch.path));
+            let resolved_path = match ctx.resolve_path_checked(Path::new(&patch.path)) {
+                Ok(p) => p,
+                Err(e) => {
+                    results.push(format!("✗ {}: {}", patch.path, e));
+                    continue;
+                }
+            };
             let result = apply_patch_with_diff(&patch, &resolved_path).await;
             match result {
                 Ok((msg, diff)) => {

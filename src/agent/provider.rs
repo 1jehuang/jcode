@@ -129,6 +129,15 @@ impl Agent {
         self.session.working_dir.as_deref()
     }
 
+    /// Get the configured sandbox root, if any. Tools should reject any
+    /// file-system path that does not canonicalize inside this directory.
+    pub fn sandbox_root(&self) -> Option<std::path::PathBuf> {
+        self.session
+            .sandbox_root
+            .as_deref()
+            .map(std::path::PathBuf::from)
+    }
+
     /// Get the stored messages (for transcript export)
     pub fn messages(&self) -> &[StoredMessage] {
         &self.session.messages

@@ -621,6 +621,7 @@ fn launch_manual_subagent(app: &mut App, spec: ManualSubagentSpec) {
     let registry = app.registry.clone();
     let session_id = app.session.id.clone();
     let working_dir = app.session.working_dir.clone();
+    let sandbox_root = app.session.sandbox_root.clone();
     let tool_call_for_task = tool_call.clone();
     tokio::spawn(async move {
         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
@@ -637,6 +638,7 @@ fn launch_manual_subagent(app: &mut App, spec: ManualSubagentSpec) {
             message_id: message_id.clone(),
             tool_call_id: tool_call_for_task.id.clone(),
             working_dir: working_dir.as_deref().map(PathBuf::from),
+            sandbox_root: sandbox_root.as_deref().map(PathBuf::from),
             stdin_request_tx: None,
             graceful_shutdown_signal: None,
             execution_mode: crate::tool::ToolExecutionMode::Direct,

@@ -39,6 +39,14 @@ pub(crate) struct Args {
     #[arg(short = 'C', long, global = true)]
     pub(crate) cwd: Option<String>,
 
+    /// Confine all file-system tool access to a single directory tree.
+    /// Path is canonicalized; any tool call whose target falls outside this
+    /// root (including absolute paths and symlink escapes) is rejected.
+    /// Also overrides `--cwd` if `--cwd` is not provided. May also be set via
+    /// the `JCODE_SANDBOX_ROOT` environment variable.
+    #[arg(long, global = true, value_name = "DIR")]
+    pub(crate) sandbox: Option<String>,
+
     /// Skip the automatic update check
     #[arg(long, global = true)]
     pub(crate) no_update: bool,
