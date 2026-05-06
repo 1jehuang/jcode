@@ -148,6 +148,11 @@ message_timestamps = true
 # Set to "main" for bleeding edge updates every time code is pushed
 update_channel = "stable"
 
+[memory]
+# Store all memories in one global file instead of separate per-project files.
+# This makes every workspace read/write ~/.jcode/memory/global.json.
+unified = false
+
 [provider]
 # Default model (optional, uses provider default if not set)
 # Set via /model picker with Ctrl+D to save as default

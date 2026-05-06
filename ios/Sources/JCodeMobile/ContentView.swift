@@ -300,6 +300,19 @@ struct MainView: View {
             .sheet(isPresented: $showSettings) {
                 SettingsSheet()
             }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showSettings = true
+                    } label: {
+                        Image(systemName: "gearshape.fill")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(JC.Colors.accent)
+                    }
+                    .accessibilityLabel("Settings")
+                    .accessibilityHint("Open connection, pairing, and session settings")
+                }
+            }
             .fullScreenCover(isPresented: $showFloatingCamera) {
                 CameraPickerView { image in
                     if let attachment = ImageAttachment.from(image: image) {
@@ -349,11 +362,12 @@ struct FloatingActions: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
         .padding(.trailing, JC.Spacing.md)
         .onChange(of: speech.transcript) { _, newValue in
-            guard speech.isRecording, !newValue.isEmpty else { return }
+            let dictated = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !dictated.isEmpty else { return }
             if prefixBeforeDictation.isEmpty {
-                draftMessage = newValue
+                draftMessage = dictated
             } else {
-                draftMessage = prefixBeforeDictation + " " + newValue
+                draftMessage = prefixBeforeDictation + " " + dictated
             }
         }
     }
@@ -724,7 +738,10 @@ struct ChatInputBar: View {
         let hasText = !model.draftMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasAttachments = !allAttachments.isEmpty
 
-        guard model.connectionState == .connected else { return false }
+        guard model.selectedServer != nil else { return false }
+        if model.connectionState != .connected {
+            return hasText && !hasAttachments && !model.isProcessing
+        }
         if model.isProcessing {
             return hasText && !hasAttachments
         }
@@ -748,6 +765,7 @@ struct SettingsSheet: View {
                 ScrollView {
                     VStack(spacing: JC.Spacing.xl) {
                         connectionSection
+                        repairPairingSection
                         serversSection
                         sessionsSection
                         modelSection
@@ -775,6 +793,37 @@ struct SettingsSheet: View {
         }
         .sheet(isPresented: $showAddServer) {
             AddServerSheet(isPresented: $showAddServer)
+        }
+    }
+
+    private var repairPairingSection: some View {
+        VStack(alignment: .leading, spacing: JC.Spacing.md) {
+            SectionHeader(title: "Repair / Pair Desktop")
+
+            VStack(alignment: .leading, spacing: JC.Spacing.md) {
+                Text("Use this if your iPhone loses pairing, you switch Macs, or the desktop gateway token changes.")
+                    .font(JC.Fonts.callout)
+                    .foregroundStyle(JC.Colors.textSecondary)
+
+                HStack(spacing: JC.Spacing.sm) {
+                    Button {
+                        showQRScanner = true
+                    } label: {
+                        Label("Scan QR", systemImage: "qrcode.viewfinder")
+                            .font(JC.Fonts.caption)
+                    }
+                    .buttonStyle(GhostButton())
+
+                    Button {
+                        showAddServer = true
+                    } label: {
+                        Label("Pair Manually", systemImage: "keyboard")
+                            .font(JC.Fonts.caption)
+                    }
+                    .buttonStyle(GhostButton())
+                }
+            }
+            .glassCard()
         }
     }
 

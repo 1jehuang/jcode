@@ -1140,6 +1140,33 @@ fn clipboard_image_paste_is_disabled_while_answering_stdin() {
 }
 
 #[test]
+fn dropped_image_base64_reads_supported_image_file() {
+    let dir = std::env::temp_dir().join(format!("jcode-desktop-drop-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("Screenshot 2026-05-01 at 9.58.07 PM.PNG");
+    std::fs::write(&path, b"not-a-real-png-but-dropped-bytes").unwrap();
+
+    let (media_type, data) = dropped_image_base64(&path).unwrap();
+
+    assert_eq!(media_type, "image/png");
+    assert_eq!(
+        data,
+        base64::engine::general_purpose::STANDARD.encode(b"not-a-real-png-but-dropped-bytes")
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
+fn dropped_image_base64_rejects_unsupported_file_extension() {
+    let path = std::path::Path::new("/tmp/not-an-image.txt");
+
+    let error = dropped_image_base64(path).unwrap_err().to_string();
+
+    assert!(error.contains("unsupported dropped file type"));
+}
+
+#[test]
 fn single_session_ctrl_enter_queues_while_processing_then_dequeues() {
     let mut app = SingleSessionApp::new(None);
     app.is_processing = true;

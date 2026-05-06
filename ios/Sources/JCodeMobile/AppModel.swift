@@ -40,6 +40,13 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func imagesEqual(_ lhs: [(String, String)], _ rhs: [(String, String)]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        return zip(lhs, rhs).allSatisfy { left, right in
+            left.0 == right.0 && left.1 == right.1
+        }
+    }
+
     @Published var connectionState: ConnectionState = .disconnected
     @Published var isProcessing: Bool = false
     @Published var availableModels: [String] = []
@@ -107,6 +114,23 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(generated, forKey: "jcode.device.id")
         return generated
     }()
+
+    private func activeSessionDefaultsKey(for credential: ServerCredential? = nil) -> String? {
+        guard let credential = credential ?? selectedServer else { return nil }
+        return "jcode.selected.session.\(credential.host).\(credential.port)"
+    }
+
+    private func rememberedSessionId(for credential: ServerCredential? = nil) -> String? {
+        guard let key = activeSessionDefaultsKey(for: credential) else { return nil }
+        let value = UserDefaults.standard.string(forKey: key)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? nil : value
+    }
+
+    private func rememberSessionId(_ sessionId: String, for credential: ServerCredential? = nil) {
+        let trimmed = sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let key = activeSessionDefaultsKey(for: credential) else { return }
+        UserDefaults.standard.set(trimmed, forKey: key)
+    }
 
     func loadSavedServers() async {
         let all = await credentialStore.all()
@@ -214,9 +238,10 @@ final class AppModel: ObservableObject {
             try await credentialStore.save(credential)
             await loadSavedServers()
             selectedServer = credential
-            statusMessage = "Paired with \(response.serverName) (\(response.serverVersion))."
+            statusMessage = "Paired with \(response.serverName) (\(response.serverVersion)). Connecting..."
             pairCodeInput = ""
             errorMessage = nil
+            await connectSelected()
         } catch let error as PairingError {
             switch error {
             case .serverUnreachable:
@@ -281,15 +306,20 @@ final class AppModel: ObservableObject {
         shouldAutoReconnect = true
         reconnecting = false
 
-        messages = []
+        let sessionToResume = activeSessionId.isEmpty ? rememberedSessionId(for: credential) : activeSessionId
+
+        // Keep the existing transcript visible while reconnecting. iOS can suspend the
+        // socket when the app backgrounds; clearing here makes it look like the phone
+        // forgot the conversation before the server has a chance to replay history.
         inFlightTools.removeAll()
         lastToolId = nil
         lastAssistantMessageId = nil
         lastAssistantIndex = nil
         toolMessageIndex.removeAll()
         toolSubIndex.removeAll()
-        activeSessionId = ""
-        sessions = []
+        if let sessionToResume {
+            activeSessionId = sessionToResume
+        }
         serverName = credential.serverName
         serverVersion = credential.serverVersion
         modelName = ""
@@ -300,7 +330,7 @@ final class AppModel: ObservableObject {
         await newClient.setDelegate(delegate)
 
         do {
-            try await newClient.connect()
+            try await newClient.connect(resumeSessionId: sessionToResume)
             client = newClient
             connectionState = .connected
             reconnecting = false
@@ -335,8 +365,17 @@ final class AppModel: ObservableObject {
     func sendDraft(images: [(String, String)] = []) async -> Bool {
         clearTransientMessages()
 
+        if connectionState != .connected {
+            guard selectedServer != nil else {
+                errorMessage = "Not connected."
+                return false
+            }
+            statusMessage = "Reconnecting before send..."
+            await connectSelected()
+        }
+
         guard connectionState == .connected else {
-            errorMessage = "Not connected."
+            errorMessage = "Not connected. Tap Connect in Settings or check the Mac gateway."
             return false
         }
 
@@ -389,7 +428,7 @@ final class AppModel: ObservableObject {
                 }
                 lastAssistantMessageId = messages.last(where: { $0.role == .assistant })?.id
             }
-            if let idx = messages.lastIndex(where: { $0.role == .user && $0.text == trimmed && $0.images == images }) {
+            if let idx = messages.lastIndex(where: { $0.role == .user && $0.text == trimmed && imagesEqual($0.images, images) }) {
                 messages.remove(at: idx)
             }
             errorMessage = isInterleaving
@@ -452,6 +491,7 @@ final class AppModel: ObservableObject {
         do {
             try await client.switchSession(sessionId)
             activeSessionId = sessionId
+            rememberSessionId(sessionId)
             statusMessage = "Switched to \(sessionId)"
             // History will be refreshed by server event.
         } catch {
@@ -461,6 +501,7 @@ final class AppModel: ObservableObject {
 
     private func applyConnectedServerInfo(_ info: ServerInfo) {
         activeSessionId = info.sessionId
+        rememberSessionId(info.sessionId)
         sessions = info.allSessions
         serverName = info.serverName ?? "jcode"
         serverVersion = info.serverVersion ?? ""

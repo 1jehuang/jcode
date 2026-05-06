@@ -185,6 +185,10 @@ impl MemoryManager {
             return Ok(Some(test_dir.join("test_project.json")));
         }
 
+        if crate::config::config().memory.unified {
+            return Ok(Some(self.global_memory_path()?));
+        }
+
         let project_dir = match self.get_project_dir() {
             Some(d) => d,
             None => return Ok(None),

@@ -7,7 +7,7 @@ pub use jcode_config_types::{
     AgentsConfig, AmbientConfig, AuthConfig, AutoJudgeConfig, AutoReviewConfig, CompactionConfig,
     CompactionMode, CrossProviderFailoverMode, DiagramDisplayMode, DiagramPanePosition,
     DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig, KeybindingsConfig,
-    MarkdownSpacingMode, NamedProviderAuth, NamedProviderConfig, NamedProviderModelConfig,
+    MarkdownSpacingMode, MemoryConfig, NamedProviderAuth, NamedProviderConfig, NamedProviderModelConfig,
     NamedProviderType, NativeScrollbarConfig, ProviderConfig, SafetyConfig,
     SessionPickerResumeAction, UpdateChannel,
 };
@@ -37,6 +37,9 @@ pub struct Config {
 
     /// Feature toggles
     pub features: FeatureConfig,
+
+    /// Memory storage configuration
+    pub memory: MemoryConfig,
 
     /// Auth trust / consent configuration
     pub auth: AuthConfig,

@@ -585,6 +585,17 @@ impl Default for FeatureConfig {
     }
 }
 
+/// Memory storage configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct MemoryConfig {
+    /// Store all memories in the global graph instead of per-project graph files.
+    ///
+    /// When enabled, project-scoped memory reads/writes resolve to
+    /// `~/.jcode/memory/global.json`, giving the user one unified memory file.
+    pub unified: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderConfig {
