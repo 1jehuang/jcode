@@ -162,6 +162,12 @@ openai_reasoning_effort = "low"
 # OpenAI service tier override (priority|flex)
 # Set `priority` to match Codex /fast behavior (higher speed, higher usage)
 # openai_service_tier = "priority"
+# Budget helper: set JCODE_CHEAP_MODE=1 to force lower-cost defaults at runtime:
+# - features.memory=false
+# - features.swarm=false
+# - openai_reasoning_effort=none
+# - cross_provider_failover=manual
+# - same_provider_account_failover=false
 # Cross-provider failover when the same prompt would be resent elsewhere.
 # countdown = 3-second countdown before retrying on another provider; press Esc to cancel (default)
 # manual = show a notice and let you switch yourself
