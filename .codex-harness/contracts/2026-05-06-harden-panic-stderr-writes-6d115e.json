@@ -1,0 +1,46 @@
+{
+  "id": "2026-05-06-harden-panic-stderr-writes-6d115e",
+  "title": "Harden panic stderr writes",
+  "goal": "Fix or harden stderr writes in signal/panic cleanup paths inspired by public issue #129 so broken stderr does not cause nested panic/abort.",
+  "createdAt": "2026-05-06T22:42:10.871Z",
+  "status": "active",
+  "requiredInputs": [],
+  "budget": {
+    "maxSteps": 8,
+    "maxMinutes": 60,
+    "maxToolCalls": 30
+  },
+  "permissions": [
+    "read repository",
+    "write source/tests",
+    "run cargo tests/checks",
+    "selfdev build",
+    "git commit"
+  ],
+  "completionConditions": [
+    "Localizar caminhos de panic hook/signal handler que escrevem em stderr",
+    "Substituir escrita frágil por helper best-effort sem panic",
+    "Adicionar testes unitários para helper/comportamento possível",
+    "Executar validações direcionadas e selfdev build",
+    "Commitar mudança focada"
+  ],
+  "outputPaths": [
+    "src/tui",
+    "src/main.rs",
+    "src/bin/harness.rs",
+    "tests"
+  ],
+  "verificationCommands": [
+    "cargo test -p jcode stderr --lib",
+    "cargo test -p jcode tui --lib",
+    "cargo check -p jcode",
+    "selfdev build target=auto"
+  ],
+  "failureTaxonomy": [
+    "Mudar semântica de sinais",
+    "Ocultar erros críticos fora de panic/signal cleanup",
+    "Falha em testes TUI/CLI",
+    "Alterar comportamento de stdout pipelines indevidamente"
+  ],
+  "notes": "Research found GitHub issue #129 and Ratatui panic-hook guidance. Implement best-effort stderr writes for fragile cleanup paths."
+}

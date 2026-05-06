@@ -1289,7 +1289,7 @@ impl SessionPicker {
         if keyboard_enhanced {
             super::disable_keyboard_enhancement();
         }
-        ratatui::restore();
+        let _ = ratatui::try_restore();
         super::mermaid::clear_image_state();
 
         result

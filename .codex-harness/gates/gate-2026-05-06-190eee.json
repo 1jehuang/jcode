@@ -1,0 +1,45 @@
+{
+  "id": "gate-2026-05-06-190eee",
+  "ts": "2026-05-06T22:45:25.063Z",
+  "contractId": "2026-05-06-harden-panic-stderr-writes-6d115e",
+  "verdict": "pass",
+  "outputChecks": [
+    {
+      "path": "src/tui",
+      "exists": true
+    },
+    {
+      "path": "src/main.rs",
+      "exists": true
+    },
+    {
+      "path": "src/bin/harness.rs",
+      "exists": true
+    },
+    {
+      "path": "tests",
+      "exists": true
+    }
+  ],
+  "checkedConditions": [
+    "Localizados panic hook e signal handler em src/cli/terminal.rs e restores frágeis em TUI",
+    "Substituídos ratatui::restore por try_restore em cleanup paths",
+    "Panic hook TUI reinstalado com try_restore e best-effort stderr write",
+    "Testes unitários cobrem BrokenPipe e escrita normal do helper",
+    "Validações direcionadas e selfdev build passaram"
+  ],
+  "uncheckedConditions": [
+    "Localizar caminhos de panic hook/signal handler que escrevem em stderr",
+    "Substituir escrita frágil por helper best-effort sem panic",
+    "Adicionar testes unitários para helper/comportamento possível",
+    "Executar validações direcionadas e selfdev build",
+    "Commitar mudança focada"
+  ],
+  "evidence": [
+    "trace-2026-05-06-d66d3fa4",
+    "src/cli/terminal.rs::best_effort_write_line_ignores_broken_pipe",
+    "src/tui/permissions.rs",
+    "src/tui/session_picker.rs"
+  ],
+  "notes": "Reload selfdev falhou por erro ambiental conhecido, build passou."
+}

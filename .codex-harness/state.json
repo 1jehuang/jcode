@@ -1,14 +1,14 @@
 {
   "version": 5,
   "projectName": "jcode-harness",
-  "focus": "Embedded skills scoping improvement",
+  "focus": "Harden panic stderr writes",
   "status": "done",
-  "activeContractId": "2026-05-06-embedded-skills-scoping-improvement-87c1a0",
+  "activeContractId": "2026-05-06-harden-panic-stderr-writes-6d115e",
   "counters": {
-    "contracts": 2,
-    "traces": 2,
-    "gates": 2,
-    "verifications": 2,
+    "contracts": 3,
+    "traces": 3,
+    "gates": 3,
+    "verifications": 3,
     "knowledgeItems": 0,
     "knowledgeQueries": 0,
     "evalCases": 0,
@@ -78,6 +78,27 @@
       "type": "gate_evaluated",
       "contractId": "2026-05-06-embedded-skills-scoping-improvement-87c1a0",
       "gateId": "gate-2026-05-06-7b6af3",
+      "verdict": "pass"
+    },
+    {
+      "ts": "2026-05-06T22:42:10.871Z",
+      "type": "contract_created",
+      "contractId": "2026-05-06-harden-panic-stderr-writes-6d115e",
+      "summary": "Harden panic stderr writes"
+    },
+    {
+      "ts": "2026-05-06T22:45:17.794Z",
+      "type": "verification_recorded",
+      "traceId": "trace-2026-05-06-d66d3fa4",
+      "contractId": "2026-05-06-harden-panic-stderr-writes-6d115e",
+      "status": "pass",
+      "summary": "Hardening stderr panic cleanup validations and selfdev build passed."
+    },
+    {
+      "ts": "2026-05-06T22:45:25.063Z",
+      "type": "gate_evaluated",
+      "contractId": "2026-05-06-harden-panic-stderr-writes-6d115e",
+      "gateId": "gate-2026-05-06-190eee",
       "verdict": "pass"
     }
   ]

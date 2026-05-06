@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::panic;
 
 use crate::{id, session, telemetry, tui};
@@ -19,13 +19,24 @@ pub fn get_current_session() -> Option<String> {
 }
 
 pub fn install_panic_hook() {
-    let default_hook = panic::take_hook();
+    install_jcode_panic_hook(false);
+}
+
+fn install_tui_panic_hook() {
+    install_jcode_panic_hook(true);
+}
+
+fn install_jcode_panic_hook(restore_tui: bool) {
     panic::set_hook(Box::new(move |info| {
         if is_stdout_broken_pipe_panic(info) {
             std::process::exit(0);
         }
 
-        default_hook(info);
+        if restore_tui {
+            let _ = ratatui::try_restore();
+        }
+
+        best_effort_stderr_line(&format!("panic: {info}"));
 
         if let Some(session_id) = get_current_session() {
             print_session_resume_hint(&session_id);
@@ -40,6 +51,17 @@ pub fn install_panic_hook() {
             }
         }
     }));
+}
+
+pub fn best_effort_stderr_line(message: &str) {
+    let mut stderr = io::stderr().lock();
+    best_effort_write_line(&mut stderr, message);
+}
+
+fn best_effort_write_line(writer: &mut impl Write, message: &str) {
+    let _ = writer.write_all(message.as_bytes());
+    let _ = writer.write_all(b"\n");
+    let _ = writer.flush();
 }
 
 fn is_stdout_broken_pipe_panic(info: &panic::PanicHookInfo<'_>) -> bool {
@@ -116,6 +138,10 @@ fn init_tui_terminal() -> Result<ratatui::DefaultTerminal> {
 
 pub fn init_tui_runtime() -> Result<(ratatui::DefaultTerminal, TuiRuntimeState)> {
     let terminal = init_tui_terminal()?;
+    // ratatui::try_init installs a restore hook that calls ratatui::restore(),
+    // which prints restore errors with eprintln!. Replace it after successful
+    // initialization so panic cleanup is best-effort even if stderr is closed.
+    install_tui_panic_hook();
     crate::tui::mermaid::install_jcode_mermaid_hooks();
     crate::tui::markdown::install_jcode_markdown_hooks();
     crate::tui::mermaid::init_picker();
@@ -159,7 +185,7 @@ pub fn cleanup_tui_runtime(state: &TuiRuntimeState, restore_terminal: bool) {
         if state.keyboard_enhanced {
             tui::disable_keyboard_enhancement();
         }
-        ratatui::restore();
+        let _ = ratatui::try_restore();
     }
 
     crate::tui::mermaid::clear_image_state();
@@ -179,13 +205,13 @@ pub fn cleanup_tui_runtime_for_run_result(
 
 pub fn print_session_resume_hint(session_id: &str) {
     let session_name = id::extract_session_name(session_id).unwrap_or(session_id);
-    eprintln!();
-    eprintln!(
+    best_effort_stderr_line("");
+    best_effort_stderr_line(&format!(
         "\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m",
         session_name
-    );
-    eprintln!("  jcode --resume {}", session_id);
-    eprintln!();
+    ));
+    best_effort_stderr_line(&format!("  jcode --resume {}", session_id));
+    best_effort_stderr_line("");
 }
 
 fn init_tui_terminal_resume() -> Result<ratatui::DefaultTerminal> {
@@ -292,6 +318,7 @@ pub fn spawn_session_signal_watchers() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{self, Write};
     use std::sync::Mutex;
 
     static TEST_SESSION_LOCK: Mutex<()> = Mutex::new(());
@@ -318,5 +345,30 @@ mod tests {
         } else {
             panic!("Session ID should be set");
         }
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed stderr"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed stderr"))
+        }
+    }
+
+    #[test]
+    fn best_effort_write_line_ignores_broken_pipe() {
+        let mut writer = FailingWriter;
+        best_effort_write_line(&mut writer, "panic cleanup should not double-panic");
+    }
+
+    #[test]
+    fn best_effort_write_line_writes_message_and_newline() {
+        let mut output = Vec::new();
+        best_effort_write_line(&mut output, "resume hint");
+        assert_eq!(output, b"resume hint\n");
     }
 }

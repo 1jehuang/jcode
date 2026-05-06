@@ -582,7 +582,7 @@ impl PermissionsApp {
             }
         };
 
-        ratatui::restore();
+        let _ = ratatui::try_restore();
         result
     }
 }
