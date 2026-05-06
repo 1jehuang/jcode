@@ -233,15 +233,16 @@ configure_linux_linker() {
   esac
 
   selected_linker_mode="$mode"
-  export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:-clang}"
 
   case "$mode" in
     lld)
+      export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:-clang}"
       append_rustflags "-C link-arg=-fuse-ld=lld"
       selected_linker_desc="clang + lld"
       log "using clang + lld"
       ;;
     mold)
+      export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:-clang}"
       append_rustflags "-C link-arg=-fuse-ld=mold"
       selected_linker_desc="clang + mold"
       log "using clang + mold"
