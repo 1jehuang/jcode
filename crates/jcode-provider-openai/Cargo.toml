@@ -1,0 +1,10 @@
+[package]
+name = "jcode-provider-openai"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+jcode-message-types = { path = "../jcode-message-types" }
+jcode-provider-core = { path = "../jcode-provider-core" }
+serde_json = "1"

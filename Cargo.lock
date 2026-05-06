@@ -2553,6 +2553,7 @@ dependencies = [
  "jcode-provider-core",
  "jcode-provider-gemini",
  "jcode-provider-metadata",
+ "jcode-provider-openai",
  "jcode-provider-openrouter",
  "jcode-selfdev-types",
  "jcode-session-types",
@@ -2871,6 +2872,15 @@ name = "jcode-provider-metadata"
 version = "0.1.0"
 dependencies = [
  "url",
+]
+
+[[package]]
+name = "jcode-provider-openai"
+version = "0.1.0"
+dependencies = [
+ "jcode-message-types",
+ "jcode-provider-core",
+ "serde_json",
 ]
 
 [[package]]

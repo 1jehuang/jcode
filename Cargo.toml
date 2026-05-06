@@ -36,6 +36,7 @@ members = [
     "crates/jcode-provider-metadata",
     "crates/jcode-provider-core",
     "crates/jcode-provider-openrouter",
+    "crates/jcode-provider-openai",
     "crates/jcode-provider-gemini",
     "crates/jcode-tui-markdown",
     "crates/jcode-tui-messages",
@@ -150,6 +151,7 @@ jcode-ambient-types = { path = "crates/jcode-ambient-types" }
 jcode-notify-email = { path = "crates/jcode-notify-email" }
 jcode-provider-metadata = { path = "crates/jcode-provider-metadata" }
 jcode-provider-core = { path = "crates/jcode-provider-core" }
+jcode-provider-openai = { path = "crates/jcode-provider-openai" }
 jcode-provider-openrouter = { path = "crates/jcode-provider-openrouter" }
 jcode-provider-gemini = { path = "crates/jcode-provider-gemini" }
 jcode-tui-markdown = { path = "crates/jcode-tui-markdown" }
