@@ -444,7 +444,7 @@ Generated from `docs/CODE_QUALITY_AUDIT_2026-04-18.md`. This section enumerates 
 - [ ] Remove or justify suppressions in `src/server/comm_sync.rs` (clippy::too_many_arguments)
 - [ ] Remove or justify suppressions in `src/server/debug_swarm_write.rs` (clippy::too_many_arguments)
 - [ ] Remove or justify suppressions in `src/server/startup_tests.rs` (unused_mut)
-- [ ] Remove or justify suppressions in `src/tui/app/remote.rs` (unused_imports, unused_imports)
+- [x] Remove or justify suppressions in `src/tui/app/remote.rs` (unused_imports, unused_imports)
 - [ ] Remove or justify suppressions in `src/tui/app/state_ui.rs` (unused_mut)
 - [ ] Remove or justify suppressions in `src/tui/info_widget.rs` (deprecated)
 
