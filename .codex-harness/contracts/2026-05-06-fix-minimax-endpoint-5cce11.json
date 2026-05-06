@@ -1,0 +1,45 @@
+{
+  "id": "2026-05-06-fix-minimax-endpoint-5cce11",
+  "title": "Fix MiniMax endpoint",
+  "goal": "Fix public issue #131 by correcting the MiniMax OpenAI-compatible endpoint from minimaxi.com to minimax.io with test coverage.",
+  "createdAt": "2026-05-06T22:46:34.562Z",
+  "status": "active",
+  "requiredInputs": [],
+  "budget": {
+    "maxSteps": 6,
+    "maxMinutes": 45,
+    "maxToolCalls": 20
+  },
+  "permissions": [
+    "read repository",
+    "write source/tests/docs if needed",
+    "run targeted tests/checks",
+    "selfdev build",
+    "git commit"
+  ],
+  "completionConditions": [
+    "Encontrar definição MiniMax usada por login/provider setup",
+    "Corrigir endpoint OpenAI-compatible para https://api.minimax.io/v1",
+    "Adicionar/ajustar teste cobrindo endpoint MiniMax",
+    "Executar validação direcionada, cargo check e selfdev build",
+    "Commitar mudança focada"
+  ],
+  "outputPaths": [
+    "src",
+    "crates",
+    "tests",
+    "docs"
+  ],
+  "verificationCommands": [
+    "cargo test -p jcode minimax --lib",
+    "cargo check -p jcode",
+    "selfdev build target=auto"
+  ],
+  "failureTaxonomy": [
+    "Alterar outros providers sem necessidade",
+    "Quebrar compatibilidade de profiles existentes",
+    "Teste insuficiente para endpoint",
+    "Falha de build"
+  ],
+  "notes": "Issue #131 reports jcode login --provider minimax shows https://api.minimaxi.com/v1 but MiniMax docs use https://api.minimax.io/v1."
+}

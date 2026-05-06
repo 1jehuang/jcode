@@ -525,6 +525,10 @@ impl Provider for OpenRouterProvider {
             request["tool_choice"] = serde_json::json!("auto");
         }
 
+        if let Some(effort) = self.reasoning_effort() {
+            request["reasoning"] = Self::openrouter_reasoning_payload(&effort);
+        }
+
         // Optional thinking override for OpenRouter (provider-specific).
         if let Some(enable) = thinking_enabled {
             request["thinking"] = serde_json::json!({
@@ -624,6 +628,31 @@ impl Provider for OpenRouterProvider {
 
     fn supports_image_input(&self) -> bool {
         false
+    }
+
+    fn reasoning_effort(&self) -> Option<String> {
+        self.reasoning_effort
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+    }
+
+    fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+        let normalized = Self::normalize_reasoning_effort(effort);
+        match self.reasoning_effort.write() {
+            Ok(mut guard) => {
+                *guard = normalized;
+                Ok(())
+            }
+            Err(poisoned) => {
+                *poisoned.into_inner() = normalized;
+                Ok(())
+            }
+        }
+    }
+
+    fn available_efforts(&self) -> Vec<&'static str> {
+        vec!["none", "low", "medium", "high", "xhigh"]
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
@@ -903,6 +932,7 @@ impl Provider for OpenRouterProvider {
             supports_model_catalog: self.supports_model_catalog,
             profile_id: self.profile_id.clone(),
             max_tokens: self.max_tokens,
+            reasoning_effort: Arc::new(std::sync::RwLock::new(self.reasoning_effort())),
             static_models: self.static_models.clone(),
             static_context_limits: self.static_context_limits.clone(),
             send_openrouter_headers: self.send_openrouter_headers,

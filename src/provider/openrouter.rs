@@ -507,6 +507,7 @@ pub struct OpenRouterProvider {
     supports_model_catalog: bool,
     profile_id: Option<String>,
     max_tokens: Option<u32>,
+    reasoning_effort: Arc<std::sync::RwLock<Option<String>>>,
     static_models: Vec<String>,
     static_context_limits: HashMap<String, usize>,
     send_openrouter_headers: bool,
@@ -541,6 +542,41 @@ impl OpenRouterProvider {
 
         let _ = profile_id;
         None
+    }
+
+    fn configured_reasoning_effort() -> Option<String> {
+        std::env::var("JCODE_OPENROUTER_REASONING_EFFORT")
+            .ok()
+            .and_then(|raw| Self::normalize_reasoning_effort(&raw))
+    }
+
+    pub(crate) fn normalize_reasoning_effort(raw: &str) -> Option<String> {
+        let value = raw.trim().to_ascii_lowercase();
+        if value.is_empty() || value == "auto" {
+            return None;
+        }
+        match value.as_str() {
+            "none" | "off" | "disabled" => Some("none".to_string()),
+            "low" | "medium" | "high" | "xhigh" => Some(value),
+            "max" => Some("xhigh".to_string()),
+            other => {
+                crate::logging::info(&format!(
+                    "Warning: Unsupported OpenRouter reasoning effort '{}'; expected none|low|medium|high|xhigh|max. Using 'xhigh'.",
+                    other
+                ));
+                Some("xhigh".to_string())
+            }
+        }
+    }
+
+    pub(crate) fn openrouter_reasoning_payload(effort: &str) -> serde_json::Value {
+        match effort {
+            "none" => serde_json::json!({ "enabled": false }),
+            // OpenRouter documents low/medium/high effort. jcode keeps xhigh as
+            // the UI's max level for parity with OpenAI and sends high to the API.
+            "xhigh" => serde_json::json!({ "effort": "high" }),
+            other => serde_json::json!({ "effort": other }),
+        }
     }
 
     pub(crate) fn supports_provider_routing_features(&self) -> bool {
@@ -632,6 +668,7 @@ impl OpenRouterProvider {
                 ),
             profile_id: Some(profile_name.to_string()),
             max_tokens: Self::configured_max_tokens(Some(profile_name)),
+            reasoning_effort: Arc::new(std::sync::RwLock::new(Self::configured_reasoning_effort())),
             static_models,
             static_context_limits,
             send_openrouter_headers: false,
@@ -744,6 +781,7 @@ impl OpenRouterProvider {
             supports_model_catalog,
             profile_id,
             max_tokens,
+            reasoning_effort: Arc::new(std::sync::RwLock::new(Self::configured_reasoning_effort())),
             static_models,
             static_context_limits,
             send_openrouter_headers,
@@ -907,6 +945,7 @@ impl OpenRouterProvider {
                 supports_model_catalog: true,
                 profile_id: None,
                 max_tokens: None,
+                reasoning_effort: Arc::new(std::sync::RwLock::new(None)),
                 static_models: Vec::new(),
                 static_context_limits: HashMap::new(),
                 send_openrouter_headers: true,

@@ -1,14 +1,14 @@
 {
   "version": 5,
   "projectName": "jcode-harness",
-  "focus": "Harden panic stderr writes",
+  "focus": "Support OpenRouter reasoning effort",
   "status": "done",
-  "activeContractId": "2026-05-06-harden-panic-stderr-writes-6d115e",
+  "activeContractId": "2026-05-06-support-openrouter-reasoning-effort-d511e5",
   "counters": {
-    "contracts": 3,
-    "traces": 3,
-    "gates": 3,
-    "verifications": 3,
+    "contracts": 5,
+    "traces": 5,
+    "gates": 5,
+    "verifications": 5,
     "knowledgeItems": 0,
     "knowledgeQueries": 0,
     "evalCases": 0,
@@ -99,6 +99,48 @@
       "type": "gate_evaluated",
       "contractId": "2026-05-06-harden-panic-stderr-writes-6d115e",
       "gateId": "gate-2026-05-06-190eee",
+      "verdict": "pass"
+    },
+    {
+      "ts": "2026-05-06T22:46:34.563Z",
+      "type": "contract_created",
+      "contractId": "2026-05-06-fix-minimax-endpoint-5cce11",
+      "summary": "Fix MiniMax endpoint"
+    },
+    {
+      "ts": "2026-05-06T22:50:44.089Z",
+      "type": "contract_created",
+      "contractId": "2026-05-06-support-openrouter-reasoning-effort-d511e5",
+      "summary": "Support OpenRouter reasoning effort"
+    },
+    {
+      "ts": "2026-05-06T22:51:30.672Z",
+      "type": "verification_recorded",
+      "traceId": "trace-2026-05-06-2c875d9a",
+      "contractId": "2026-05-06-support-openrouter-reasoning-effort-d511e5",
+      "status": "pass",
+      "summary": "OpenRouter reasoning effort support validations and selfdev build passed."
+    },
+    {
+      "ts": "2026-05-06T22:51:37.174Z",
+      "type": "gate_evaluated",
+      "contractId": "2026-05-06-support-openrouter-reasoning-effort-d511e5",
+      "gateId": "gate-2026-05-06-280039",
+      "verdict": "pass"
+    },
+    {
+      "ts": "2026-05-06T22:52:03.793Z",
+      "type": "verification_recorded",
+      "traceId": "trace-2026-05-06-178aa34a",
+      "contractId": "2026-05-06-fix-minimax-endpoint-5cce11",
+      "status": "pass",
+      "summary": "MiniMax endpoint already matches official https://api.minimax.io/v1 and existing test passes."
+    },
+    {
+      "ts": "2026-05-06T22:52:09.408Z",
+      "type": "gate_evaluated",
+      "contractId": "2026-05-06-fix-minimax-endpoint-5cce11",
+      "gateId": "gate-2026-05-06-96841d",
       "verdict": "pass"
     }
   ]

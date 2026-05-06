@@ -390,6 +390,7 @@ fn make_provider() -> OpenRouterProvider {
         supports_model_catalog: true,
         profile_id: None,
         max_tokens: None,
+        reasoning_effort: Arc::new(std::sync::RwLock::new(None)),
         static_models: Vec::new(),
         static_context_limits: HashMap::new(),
         send_openrouter_headers: true,
@@ -415,6 +416,7 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         supports_model_catalog: true,
         profile_id: None,
         max_tokens: None,
+        reasoning_effort: Arc::new(std::sync::RwLock::new(None)),
         static_models: Vec::new(),
         static_context_limits: HashMap::new(),
         send_openrouter_headers: false,
@@ -510,6 +512,31 @@ fn openrouter_provider_normalizes_bare_pinned_model_ids() {
     provider.set_model("gpt-5.4@OpenAI").unwrap();
 
     assert_eq!(provider.model(), "openai/gpt-5.4");
+}
+
+#[test]
+fn openrouter_reasoning_effort_accepts_jcode_max_level() {
+    let provider = make_provider();
+
+    provider.set_reasoning_effort("max").unwrap();
+
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("xhigh"));
+    assert_eq!(
+        provider.available_efforts(),
+        vec!["none", "low", "medium", "high", "xhigh"]
+    );
+}
+
+#[test]
+fn openrouter_reasoning_payload_maps_xhigh_to_supported_high_effort() {
+    assert_eq!(
+        OpenRouterProvider::openrouter_reasoning_payload("xhigh"),
+        serde_json::json!({ "effort": "high" })
+    );
+    assert_eq!(
+        OpenRouterProvider::openrouter_reasoning_payload("none"),
+        serde_json::json!({ "enabled": false })
+    );
 }
 
 #[test]

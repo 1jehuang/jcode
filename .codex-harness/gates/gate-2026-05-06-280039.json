@@ -1,0 +1,44 @@
+{
+  "id": "gate-2026-05-06-280039",
+  "ts": "2026-05-06T22:51:37.174Z",
+  "contractId": "2026-05-06-support-openrouter-reasoning-effort-d511e5",
+  "verdict": "pass",
+  "outputChecks": [
+    {
+      "path": "src/provider/openrouter.rs",
+      "exists": true
+    },
+    {
+      "path": "src/provider/openrouter_provider_impl.rs",
+      "exists": true
+    },
+    {
+      "path": "src/provider/openrouter_tests.rs",
+      "exists": true
+    },
+    {
+      "path": "src/provider/mod.rs",
+      "exists": true
+    }
+  ],
+  "checkedConditions": [
+    "ProviderManager agora delega set_reasoning_effort/reasoning_effort/available_efforts para OpenRouter",
+    "OpenRouterProvider armazena reasoning_effort e preserva em fork",
+    "max normaliza para xhigh e payload xhigh mapeia para OpenRouter effort high",
+    "Testes unitários cobrem max e payload none/xhigh",
+    "Validações direcionadas e selfdev build passaram"
+  ],
+  "uncheckedConditions": [
+    "Permitir set_reasoning_effort em OpenRouter",
+    "Normalizar max/xhigh e gerar payload OpenRouter compatível",
+    "Adicionar testes de normalização/payload",
+    "Executar validação direcionada, cargo check e selfdev build",
+    "Commitar mudança focada"
+  ],
+  "evidence": [
+    "trace-2026-05-06-2c875d9a",
+    "src/provider/openrouter_tests.rs::openrouter_reasoning_effort_accepts_jcode_max_level",
+    "src/provider/openrouter_tests.rs::openrouter_reasoning_payload_maps_xhigh_to_supported_high_effort"
+  ],
+  "notes": "OpenRouter docs expõem reasoning.effort low/medium/high, então o nível UI max/xhigh é traduzido para high no payload."
+}

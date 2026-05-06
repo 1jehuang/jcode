@@ -1,0 +1,41 @@
+{
+  "id": "gate-2026-05-06-96841d",
+  "ts": "2026-05-06T22:52:09.408Z",
+  "contractId": "2026-05-06-fix-minimax-endpoint-5cce11",
+  "verdict": "pass",
+  "outputChecks": [
+    {
+      "path": "src",
+      "exists": true
+    },
+    {
+      "path": "crates",
+      "exists": true
+    },
+    {
+      "path": "tests",
+      "exists": true
+    },
+    {
+      "path": "docs",
+      "exists": true
+    }
+  ],
+  "checkedConditions": [
+    "Definição MiniMax localizada em crates/jcode-provider-metadata/src/lib.rs",
+    "Endpoint já está corrigido para https://api.minimax.io/v1",
+    "Teste existente minimax_profile_uses_official_openai_compatible_configuration passou"
+  ],
+  "uncheckedConditions": [
+    "Encontrar definição MiniMax usada por login/provider setup",
+    "Corrigir endpoint OpenAI-compatible para https://api.minimax.io/v1",
+    "Adicionar/ajustar teste cobrindo endpoint MiniMax",
+    "Executar validação direcionada, cargo check e selfdev build",
+    "Commitar mudança focada"
+  ],
+  "evidence": [
+    "trace-2026-05-06-178aa34a",
+    "crates/jcode-provider-metadata/src/lib.rs"
+  ],
+  "notes": "Contrato concluído como already fixed no estado atual, sem mudanças adicionais."
+}

@@ -1,0 +1,45 @@
+{
+  "id": "2026-05-06-support-openrouter-reasoning-effort-d511e5",
+  "title": "Support OpenRouter reasoning effort",
+  "goal": "Fix public issue #147 by supporting reasoning effort changes for OpenRouter/DeepSeek-compatible models rather than limiting /effort to OpenAI only.",
+  "createdAt": "2026-05-06T22:50:44.088Z",
+  "status": "active",
+  "requiredInputs": [],
+  "budget": {
+    "maxSteps": 6,
+    "maxMinutes": 45,
+    "maxToolCalls": 20
+  },
+  "permissions": [
+    "read repository",
+    "write source/tests",
+    "run targeted tests/checks",
+    "selfdev build",
+    "git commit"
+  ],
+  "completionConditions": [
+    "Permitir set_reasoning_effort em OpenRouter",
+    "Normalizar max/xhigh e gerar payload OpenRouter compatível",
+    "Adicionar testes de normalização/payload",
+    "Executar validação direcionada, cargo check e selfdev build",
+    "Commitar mudança focada"
+  ],
+  "outputPaths": [
+    "src/provider/openrouter.rs",
+    "src/provider/openrouter_provider_impl.rs",
+    "src/provider/openrouter_tests.rs",
+    "src/provider/mod.rs"
+  ],
+  "verificationCommands": [
+    "cargo test -p jcode openrouter_reasoning --lib",
+    "cargo check -p jcode",
+    "selfdev build target=auto"
+  ],
+  "failureTaxonomy": [
+    "Enviar parâmetro incompatível para OpenRouter",
+    "Quebrar OpenAI reasoning effort existente",
+    "Perder estado de effort em forks",
+    "Falha de build"
+  ],
+  "notes": "Issue #147 reports DeepSeek-V4-Pro via OpenRouter cannot set max effort because provider manager returns OpenAI-only error. OpenRouter docs expose reasoning effort low/medium/high; jcode max/xhigh maps to high for API compatibility."
+}
