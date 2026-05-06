@@ -11,6 +11,7 @@ This document defines the minimum gates for calling this fork a releasable stand
 - `docs/JCODE_HARNESS_PRODUCT_PLAN.md` describes product thesis, principles, and next milestones.
 - `docs/SKILLS_HARNESS.md` documents public harness commands and examples.
 - `docs/JCODE_HARNESS_JSON_SCHEMAS.md` documents stable automation-facing JSON contracts.
+- `docs/JCODE_HARNESS_INIT_SWARM.md` documents `/init` multi-agent bootstrap behavior.
 - `docs/SKILLS_HARNESS_STATUS.md` lists implemented pillars, remaining work, and validation snapshot.
 
 **Checks:**
@@ -19,7 +20,27 @@ This document defines the minimum gates for calling this fork a releasable stand
 test -s docs/JCODE_HARNESS_PRODUCT_PLAN.md
 test -s docs/SKILLS_HARNESS.md
 test -s docs/JCODE_HARNESS_JSON_SCHEMAS.md
+test -s docs/JCODE_HARNESS_INIT_SWARM.md
 test -s docs/SKILLS_HARNESS_STATUS.md
+```
+
+## Gate 1b: Interactive `/init` swarm bootstrap
+
+**Goal:** `/init` must perform real LLM-driven project analysis by default, not only static file generation.
+
+**Acceptance criteria:**
+
+- Static scaffold files are written first, including `.jcode/init/SWARM_ANALYSIS_PLAN.md` and `.jcode/init/SWARM_ANALYSIS_REPORT.md`.
+- Default `/init` queues a hidden LLM turn that instructs the model to use parallel swarm agents.
+- Required discovery roles include architecture, QA, documentation/onboarding, and tooling/security.
+- Synthesis is explicitly blocked on an await/report barrier before final files are written.
+- `/init --no-swarm` remains available for deterministic scaffold-only recovery and tests.
+
+**Checks:**
+
+```bash
+cargo test -p jcode project_init --lib -- --nocapture
+cargo test -p jcode test_init_command --lib -- --nocapture
 ```
 
 ## Gate 2: Deterministic embedded skills

@@ -39,6 +39,8 @@ pub fn run_project_init(root: &Path, options: ProjectInitOptions) -> Result<Proj
         detected_stack: analysis.detected_stack.clone(),
         next_steps: vec![
             "Review AGENTS.md and .jcode/INIT_QUESTIONS.md".to_string(),
+            "Let `/init` finish its swarm analysis before treating generated plans as complete"
+                .to_string(),
             "Run `jcode-harness skills doctor`".to_string(),
             "Run `jcode memory wiki init` if using Living Memory".to_string(),
             "Review .jcode/mcp.json before enabling any MCP server".to_string(),
@@ -64,6 +66,18 @@ pub fn run_project_init(root: &Path, options: ProjectInitOptions) -> Result<Proj
     write_project_file(
         &root.join(".jcode/INIT_QUESTIONS.md"),
         &init_questions_md(),
+        options.force,
+        &mut report,
+    )?;
+    write_project_file(
+        &root.join(".jcode/init/SWARM_ANALYSIS_PLAN.md"),
+        &swarm_analysis_plan_md(&analysis),
+        options.force,
+        &mut report,
+    )?;
+    write_project_file(
+        &root.join(".jcode/init/SWARM_ANALYSIS_REPORT.md"),
+        &swarm_analysis_report_stub_md(),
         options.force,
         &mut report,
     )?;
@@ -232,6 +246,21 @@ fn init_questions_md() -> String {
     "# Jcode Harness Init Questions\n\nAnswer these to customize the harness for this project.\n\n## Project\n\n1. What is the main goal of this project?\n2. What commands must pass before work is considered done?\n3. What files/directories are forbidden to edit?\n4. What data is sensitive and must never enter memory?\n\n## Side panel/status\n\n1. What should always appear in the side panel?\n   - Current goal?\n   - Todo status?\n   - Test commands?\n   - Open risks?\n   - Architecture notes?\n2. Should side panel pages be linked files under `.jcode/side_panel/`?\n3. Which page should be focused by default?\n\n## MCP\n\n1. Which external systems should MCP access?\n2. Which MCP servers require credentials?\n3. Which MCP servers are allowed in CI?\n4. Should network MCP servers be disabled by default?\n\n## Skills\n\n1. Which built-in skills should be active by default?\n2. Which project-specific skills should be added?\n".to_string()
 }
 
+fn swarm_analysis_plan_md(analysis: &ProjectAnalysis) -> String {
+    format!(
+        "# Swarm Init Analysis Plan\n\nGenerated: {}\n\nThis file is the deterministic plan that `/init` gives to the LLM-driven swarm analysis turn. The static init pass creates scaffolding first; the queued LLM turn must then run parallel agents and synthesize their findings.\n\n## Detected stack seed\n\n{}\n\n## Blocking phase order\n\n1. **Discovery fan-out**: spawn parallel agents for architecture, testing/quality, documentation/onboarding, and tooling/MCP/security.\n2. **Barrier**: wait for all discovery agents to report before writing final recommendations.\n3. **Synthesis**: merge findings into `.jcode/init/SWARM_ANALYSIS_REPORT.md`, `.jcode/SKILLS_PLAN.md`, `.jcode/MCP_PLAN.md`, and side-panel status pages.\n4. **Verification plan**: record commands that should be run before real work begins.\n\n## Required swarm roles\n\n- `architect`: map project structure, boundaries, risks, and core workflows.\n- `qa`: identify tests, validation commands, CI gaps, and high-risk untested areas.\n- `documenter`: inspect README/docs/onboarding gaps and propose project-specific AGENTS.md improvements.\n- `tooling-security`: inspect package managers, MCP candidates, secrets boundaries, and automation risks.\n\n## Output requirements\n\n- Keep generated content project-specific.\n- Do not invent commands that are not supported by repository files.\n- Do not store secrets or environment values.\n- Clearly mark unknowns and questions for humans.\n",
+        Utc::now().to_rfc3339(),
+        bullet_list(&analysis.detected_stack),
+    )
+}
+
+fn swarm_analysis_report_stub_md() -> String {
+    format!(
+        "# Swarm Init Analysis Report\n\nGenerated: {}\n\nStatus: pending LLM/swarm analysis.\n\n`/init` should replace this stub after its parallel discovery agents finish and the synthesis phase completes.\n",
+        Utc::now().to_rfc3339()
+    )
+}
+
 fn skills_plan_md(analysis: &ProjectAnalysis) -> String {
     let mut recommended = vec!["karpathy-guidelines".to_string()];
     if analysis.detected_stack.iter().any(|s| s == "Rust") {
@@ -290,6 +319,16 @@ mod tests {
         let report = run_project_init(temp.path(), ProjectInitOptions::default()).expect("init");
         assert!(temp.path().join("AGENTS.md").exists());
         assert!(temp.path().join(".jcode/INIT_REPORT.md").exists());
+        assert!(
+            temp.path()
+                .join(".jcode/init/SWARM_ANALYSIS_PLAN.md")
+                .exists()
+        );
+        assert!(
+            temp.path()
+                .join(".jcode/init/SWARM_ANALYSIS_REPORT.md")
+                .exists()
+        );
         assert!(temp.path().join(".jcode/mcp.json").exists());
         assert!(temp.path().join(".jcode/memory_wiki/schema.md").exists());
         assert!(report.detected_stack.contains(&"Rust".to_string()));

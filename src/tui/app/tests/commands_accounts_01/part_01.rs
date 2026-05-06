@@ -511,6 +511,86 @@ fn test_btw_command_in_remote_mode_queues_followup_instead_of_erroring() {
 }
 
 #[test]
+fn test_init_command_writes_scaffold_and_queues_swarm_analysis() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path().join("home"));
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::write(workspace.join("Cargo.toml"), "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n").expect("cargo");
+
+    let mut app = create_test_app();
+    app.session.working_dir = Some(workspace.display().to_string());
+    app.input = "/init".to_string();
+    app.submit_input();
+
+    assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("jcode-init"));
+    assert!(workspace.join("AGENTS.md").exists());
+    assert!(workspace.join(".jcode/init/SWARM_ANALYSIS_PLAN.md").exists());
+    assert!(workspace.join(".jcode/init/SWARM_ANALYSIS_REPORT.md").exists());
+    assert_eq!(app.hidden_queued_system_messages.len(), 1);
+    let reminder = &app.hidden_queued_system_messages[0];
+    assert!(reminder.contains("LLM-driven swarm analysis phase"));
+    assert!(reminder.contains("Use the `swarm` tool"));
+    assert!(reminder.contains("architect"));
+    assert!(reminder.contains("qa"));
+    assert!(reminder.contains("documenter"));
+    assert!(reminder.contains("tooling-security"));
+    assert!(reminder.contains("await_members"));
+    assert!(reminder.contains("blocking"));
+    assert!(app.pending_queued_dispatch);
+    let msg = app
+        .display_messages()
+        .last()
+        .expect("missing init swarm message");
+    assert_eq!(msg.role, "system");
+    assert!(msg.content.contains("Running `/init` swarm analysis"));
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn test_init_command_no_swarm_only_writes_scaffold() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path().join("home"));
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+
+    let mut app = create_test_app();
+    app.session.working_dir = Some(workspace.display().to_string());
+    app.input = "/init --no-swarm".to_string();
+    app.submit_input();
+
+    assert!(workspace.join("AGENTS.md").exists());
+    assert!(app.hidden_queued_system_messages.is_empty());
+    assert!(!app.pending_queued_dispatch);
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn test_init_command_invalid_flag_shows_new_usage() {
+    let mut app = create_test_app();
+    app.input = "/init --bad".to_string();
+    app.submit_input();
+
+    let msg = app.display_messages().last().expect("missing init error");
+    assert_eq!(msg.role, "error");
+    assert!(msg.content.contains("Usage: `/init [--force] [--yes] [--no-swarm]`"));
+}
+
+#[test]
 fn test_git_command_shows_repo_status_for_working_directory() {
     let repo = create_real_git_repo_fixture();
     std::fs::write(repo.path().join("tracked.txt"), "after\n").expect("update tracked file");

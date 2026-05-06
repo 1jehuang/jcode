@@ -44,7 +44,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/commands", "Alias for /help"),
     RegisteredCommand::public(
         "/init",
-        "Initialize project docs, skills, MCP, memory, and side panel",
+        "Initialize project docs and run a blocking multi-agent swarm analysis",
     ),
     RegisteredCommand::public("/model", "List or switch models"),
     RegisteredCommand::public("/models", "Alias for /model"),
