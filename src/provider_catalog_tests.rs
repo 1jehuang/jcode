@@ -98,6 +98,15 @@ fn auth_issue_profile_metadata_matches_direct_provider_endpoints() {
 }
 
 #[test]
+fn minimax_token_plan_static_models_include_m27_and_m25_families() {
+    let models = openai_compatible_profile_static_models(MINIMAX_TOKEN_PLAN_PROFILE);
+    assert_eq!(models.first().map(String::as_str), Some("MiniMax-M2.7"));
+    assert!(models.iter().any(|model| model == "MiniMax-M2.7-highspeed"));
+    assert!(models.iter().any(|model| model == "MiniMax-M2.5"));
+    assert!(models.iter().any(|model| model == "MiniMax-M2.5-highspeed"));
+}
+
+#[test]
 fn auth_issue_runtime_display_name_tracks_direct_compatible_profiles() {
     let _lock = crate::storage::lock_test_env();
     let _guard = EnvGuard::save(&[

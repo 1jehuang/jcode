@@ -204,6 +204,15 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
         "kimi" => {
             push("kimi-for-coding");
         }
+        // MiniMax's Token Plan docs and OpenClaw's bundled MiniMax provider rely
+        // on a small static M2.7 catalog instead of depending solely on live
+        // discovery. Keep the M2.5 family as a fallback too because MiniMax's
+        // Token Plan /models endpoint still advertises it for compatible tools.
+        "minimax-token-plan" => {
+            push("MiniMax-M2.7-highspeed");
+            push("MiniMax-M2.5");
+            push("MiniMax-M2.5-highspeed");
+        }
         _ => {}
     }
 

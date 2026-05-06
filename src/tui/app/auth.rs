@@ -1533,7 +1533,10 @@ impl App {
                             {
                                 crate::env::set_var("JCODE_OPENROUTER_MODEL", default_model);
                             }
-                            self.start_openai_compatible_post_login_activation(provider.clone());
+                            self.start_openai_compatible_post_login_activation(
+                                provider.clone(),
+                                profile,
+                            );
                         }
 
                         let effective_default_model = resolved_openai_compatible
@@ -1745,7 +1748,11 @@ impl App {
         }
     }
 
-    fn start_openai_compatible_post_login_activation(&mut self, provider_label: String) {
+    fn start_openai_compatible_post_login_activation(
+        &mut self,
+        provider_label: String,
+        profile: crate::provider_catalog::OpenAiCompatibleProfile,
+    ) {
         self.set_status_notice(format!("{}: fetching models...", provider_label));
         self.invalidate_model_picker_cache();
         self.open_model_picker();
@@ -1788,21 +1795,33 @@ impl App {
                             })
                             .map(|route| route.model.clone());
 
-                        if let Some(model) = selected {
-                            match provider.set_model(&model) {
+                        let fallback_static_model = || {
+                            crate::provider_catalog::openai_compatible_profile_static_models(profile)
+                                .into_iter()
+                                .find(|model| crate::provider::is_listable_model_name(model))
+                                .map(|model| (format!("{}:{}", profile.id, model), model))
+                        };
+
+                        let selected = selected
+                            .map(|model| (model.clone(), model))
+                            .or_else(fallback_static_model);
+
+                        if let Some((model_to_set, model_display)) = selected {
+                            let _ = provider.switch_active_provider_to("openrouter");
+                            match provider.set_model(&model_to_set) {
                                 Ok(()) => {
                                     crate::bus::Bus::global().publish_models_updated();
                                     crate::bus::Bus::global().publish(
                                         crate::bus::BusEvent::ProviderModelActivated {
                                             session_id,
-                                            model: model.clone(),
+                                            model: model_display.clone(),
                                             message: format!(
                                                 "**{} is ready.**\n\nFetched model catalog: +{} models, +{} routes, ~{} changed.\nSwitched to `{}`. The model picker is open so you can choose another accessible model.\n\nIf the model list ever looks stale, run `/refresh-model-list`.",
                                                 provider_label,
                                                 summary.models_added,
                                                 summary.routes_added,
                                                 summary.routes_changed,
-                                                model
+                                                model_display
                                             ),
                                             open_picker: true,
                                         },
@@ -1812,11 +1831,16 @@ impl App {
                                     crate::bus::Bus::global().publish(
                                         crate::bus::BusEvent::LoginCompleted(
                                             crate::bus::LoginCompleted {
-                                                provider: provider_label,
-                                                success: false,
+                                                provider: provider_label.clone(),
+                                                success: true,
                                                 message: format!(
-                                                    "Fetched models, but failed to switch to `{}`: {}\n\nYou can run `/refresh-model-list` to retry model discovery.",
-                                                    model, error
+                                                    "**{} API key saved.**\n\nFetched model catalog and found `{}`. The current provider instance could not switch models automatically: {}\n\nUse `/model` to select `{}`, or start jcode with `--provider {} --model {}`.",
+                                                    provider_label,
+                                                    model_display,
+                                                    error,
+                                                    model_display,
+                                                    profile.id,
+                                                    model_display
                                                 ),
                                             },
                                         ),

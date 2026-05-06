@@ -379,6 +379,17 @@ pub const MINIMAX_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     requires_api_key: true,
 };
 
+pub const MINIMAX_TOKEN_PLAN_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "minimax-token-plan",
+    display_name: "MiniMax Token Plan",
+    api_base: "https://api.minimax.io/v1",
+    api_key_env: "MINIMAX_API_KEY",
+    env_file: "minimax-token-plan.env",
+    setup_url: "https://platform.minimax.io/docs/token-plan/quickstart",
+    default_model: Some("MiniMax-M2.7"),
+    requires_api_key: true,
+};
+
 pub const XAI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "xai",
     display_name: "xAI",
@@ -456,7 +467,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 29] = [
+const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 30] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -482,6 +493,7 @@ const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 29] = [
     DEEPINFRA_PROFILE,
     FIREWORKS_PROFILE,
     MINIMAX_PROFILE,
+    MINIMAX_TOKEN_PLAN_PROFILE,
     XAI_PROFILE,
     LMSTUDIO_PROFILE,
     OLLAMA_PROFILE,
@@ -915,6 +927,19 @@ pub const MINIMAX_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescrip
     order: LoginProviderSurfaceOrder::new(Some(38), Some(38), Some(38), Some(38), Some(38)),
 };
 
+pub const MINIMAX_TOKEN_PLAN_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "minimax-token-plan",
+    display_name: "MiniMax Token Plan",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &["minimax-coding-plan"],
+    menu_detail: "Token/Coding Plan API key (sk-cp), M2.7",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(MINIMAX_TOKEN_PLAN_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(39), Some(39), Some(39), Some(39), Some(39)),
+};
+
 pub const XAI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "xai",
     display_name: "xAI",
@@ -1032,7 +1057,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-const LOGIN_PROVIDERS: [LoginProviderDescriptor; 41] = [
+const LOGIN_PROVIDERS: [LoginProviderDescriptor; 42] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     OPENAI_LOGIN_PROVIDER,
@@ -1065,6 +1090,7 @@ const LOGIN_PROVIDERS: [LoginProviderDescriptor; 41] = [
     DEEPINFRA_LOGIN_PROVIDER,
     FIREWORKS_LOGIN_PROVIDER,
     MINIMAX_LOGIN_PROVIDER,
+    MINIMAX_TOKEN_PLAN_LOGIN_PROVIDER,
     XAI_LOGIN_PROVIDER,
     LMSTUDIO_LOGIN_PROVIDER,
     OLLAMA_LOGIN_PROVIDER,
@@ -1267,9 +1293,25 @@ mod tests {
     }
 
     #[test]
-    fn minimax_profile_uses_official_openai_compatible_configuration() {
+    fn minimax_profiles_use_expected_openai_compatible_configuration() {
         assert_eq!(MINIMAX_PROFILE.api_base, "https://api.minimaxi.com/v1");
         assert_eq!(MINIMAX_PROFILE.api_key_env, "OPENAI_API_KEY");
+        assert!(MINIMAX_PROFILE.setup_url.contains("/text-openai-api"));
+
+        assert_eq!(
+            MINIMAX_TOKEN_PLAN_PROFILE.api_base,
+            "https://api.minimax.io/v1"
+        );
+        assert_eq!(MINIMAX_TOKEN_PLAN_PROFILE.api_key_env, "MINIMAX_API_KEY");
+        assert_eq!(
+            MINIMAX_TOKEN_PLAN_PROFILE.env_file,
+            "minimax-token-plan.env"
+        );
+        assert!(
+            MINIMAX_TOKEN_PLAN_PROFILE
+                .setup_url
+                .contains("/token-plan/")
+        );
     }
 
     #[test]
@@ -1353,6 +1395,14 @@ mod tests {
         assert_eq!(
             resolve_login_provider("minimax-ai").map(|provider| provider.id),
             Some("minimax")
+        );
+        assert_eq!(
+            resolve_login_provider("minimax-coding-plan").map(|provider| provider.id),
+            Some("minimax-token-plan")
+        );
+        assert_eq!(
+            resolve_login_provider("minimax-token-plan").map(|provider| provider.id),
+            Some("minimax-token-plan")
         );
         assert_eq!(
             resolve_login_provider("grok").map(|provider| provider.id),

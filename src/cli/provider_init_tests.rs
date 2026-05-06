@@ -35,6 +35,10 @@ fn test_provider_choice_arg_values() {
     assert_eq!(ProviderChoice::Deepinfra.as_arg_value(), "deepinfra");
     assert_eq!(ProviderChoice::Fireworks.as_arg_value(), "fireworks");
     assert_eq!(ProviderChoice::Minimax.as_arg_value(), "minimax");
+    assert_eq!(
+        ProviderChoice::MinimaxTokenPlan.as_arg_value(),
+        "minimax-token-plan"
+    );
     assert_eq!(ProviderChoice::Xai.as_arg_value(), "xai");
     assert_eq!(ProviderChoice::Lmstudio.as_arg_value(), "lmstudio");
     assert_eq!(ProviderChoice::Ollama.as_arg_value(), "ollama");
@@ -54,6 +58,19 @@ fn test_provider_choice_arg_values() {
     assert_eq!(ProviderChoice::Antigravity.as_arg_value(), "antigravity");
     assert_eq!(ProviderChoice::Google.as_arg_value(), "google");
     assert_eq!(ProviderChoice::Auto.as_arg_value(), "auto");
+}
+
+#[test]
+fn test_minimax_token_plan_aliases_parse_to_token_plan_choice() {
+    use clap::ValueEnum;
+
+    for alias in ["minimax-token-plan", "minimax-coding-plan"] {
+        assert_eq!(
+            ProviderChoice::from_str(alias, false).ok(),
+            Some(ProviderChoice::MinimaxTokenPlan),
+            "alias {alias} should parse to minimax token plan"
+        );
+    }
 }
 
 #[test]

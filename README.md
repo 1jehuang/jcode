@@ -318,6 +318,7 @@ jcode works with subscription-backed OAuth flows and many provider integrations,
 - **Alibaba Cloud Coding Plan** (`jcode login --provider alibaba-coding-plan`)
 - **Fireworks** (`jcode login --provider fireworks`)
 - **MiniMax** (`jcode login --provider minimax`)
+- **MiniMax Token Plan / Coding Plan** (`jcode login --provider minimax-token-plan`)
 - **LM Studio** (`jcode login --provider lmstudio`)
 - **Ollama** (`jcode login --provider ollama`)
 - **Custom OpenAI-compatible endpoint** (`jcode login --provider openai-compatible`)
@@ -664,7 +665,8 @@ Set up jcode on this machine for me.
    - Azure OpenAI: `~/.config/jcode/azure-openai.env`, `AZURE_OPENAI_*`, or an existing `az login`
    - OpenRouter: `OPENROUTER_API_KEY`
    - Fireworks: `~/.config/jcode/fireworks.env`, `FIREWORKS_API_KEY`
-   - MiniMax: `~/.config/jcode/minimax.env`, `MINIMAX_API_KEY`
+   - MiniMax: `~/.config/jcode/minimax.env`, `OPENAI_API_KEY`
+   - MiniMax Token Plan / Coding Plan: `~/.config/jcode/minimax-token-plan.env`, `MINIMAX_API_KEY`
    - Alibaba Cloud Coding Plan: existing jcode config/env if present
 5. Prefer whichever provider is already configured and verify it with `jcode auth-test --all-configured` or a provider-specific auth test when appropriate.
 6. Only if no usable provider is already configured, guide me through the minimal manual step needed:
@@ -675,6 +677,7 @@ Set up jcode on this machine for me.
    - Azure OpenAI: `jcode login --provider azure`
    - Fireworks: `jcode login --provider fireworks`
    - MiniMax: `jcode login --provider minimax`
+   - MiniMax Token Plan / Coding Plan: `jcode login --provider minimax-token-plan`
    - Alibaba Cloud Coding Plan: `jcode login --provider alibaba-coding-plan`
    - OpenRouter: help me set `OPENROUTER_API_KEY`
    - Anthropic direct API: help me set `ANTHROPIC_API_KEY`

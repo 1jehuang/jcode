@@ -84,6 +84,8 @@ pub enum ProviderChoice {
     Fireworks,
     #[value(alias = "minimax-ai", alias = "minimaxi")]
     Minimax,
+    #[value(alias = "minimax-coding-plan")]
+    MinimaxTokenPlan,
     #[value(alias = "x.ai", alias = "x-ai", alias = "grok")]
     Xai,
     #[value(alias = "lm-studio")]
@@ -142,6 +144,7 @@ impl ProviderChoice {
             Self::Deepinfra => "deepinfra",
             Self::Fireworks => "fireworks",
             Self::Minimax => "minimax",
+            Self::MinimaxTokenPlan => "minimax-token-plan",
             Self::Xai => "xai",
             Self::Lmstudio => "lmstudio",
             Self::Ollama => "ollama",
@@ -183,6 +186,9 @@ pub fn profile_for_choice(choice: &ProviderChoice) -> Option<OpenAiCompatiblePro
         ProviderChoice::Deepinfra => Some(crate::provider_catalog::DEEPINFRA_PROFILE),
         ProviderChoice::Fireworks => Some(crate::provider_catalog::FIREWORKS_PROFILE),
         ProviderChoice::Minimax => Some(crate::provider_catalog::MINIMAX_PROFILE),
+        ProviderChoice::MinimaxTokenPlan => {
+            Some(crate::provider_catalog::MINIMAX_TOKEN_PLAN_PROFILE)
+        }
         ProviderChoice::Xai => Some(crate::provider_catalog::XAI_PROFILE),
         ProviderChoice::Lmstudio => Some(crate::provider_catalog::LMSTUDIO_PROFILE),
         ProviderChoice::Ollama => Some(crate::provider_catalog::OLLAMA_PROFILE),
@@ -229,6 +235,9 @@ pub fn login_provider_for_choice(choice: &ProviderChoice) -> Option<LoginProvide
         ProviderChoice::Deepinfra => Some(crate::provider_catalog::DEEPINFRA_LOGIN_PROVIDER),
         ProviderChoice::Fireworks => Some(crate::provider_catalog::FIREWORKS_LOGIN_PROVIDER),
         ProviderChoice::Minimax => Some(crate::provider_catalog::MINIMAX_LOGIN_PROVIDER),
+        ProviderChoice::MinimaxTokenPlan => {
+            Some(crate::provider_catalog::MINIMAX_TOKEN_PLAN_LOGIN_PROVIDER)
+        }
         ProviderChoice::Xai => Some(crate::provider_catalog::XAI_LOGIN_PROVIDER),
         ProviderChoice::Lmstudio => Some(crate::provider_catalog::LMSTUDIO_LOGIN_PROVIDER),
         ProviderChoice::Ollama => Some(crate::provider_catalog::OLLAMA_LOGIN_PROVIDER),
@@ -281,6 +290,7 @@ pub fn choice_for_login_provider(provider: LoginProviderDescriptor) -> Option<Pr
             ProviderChoice::Deepinfra,
             ProviderChoice::Fireworks,
             ProviderChoice::Minimax,
+            ProviderChoice::MinimaxTokenPlan,
             ProviderChoice::Xai,
             ProviderChoice::Lmstudio,
             ProviderChoice::Ollama,
@@ -1260,6 +1270,7 @@ async fn init_provider_with_options(
         | ProviderChoice::Deepinfra
         | ProviderChoice::Fireworks
         | ProviderChoice::Minimax
+        | ProviderChoice::MinimaxTokenPlan
         | ProviderChoice::Xai
         | ProviderChoice::Lmstudio
         | ProviderChoice::Ollama

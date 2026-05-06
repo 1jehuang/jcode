@@ -252,7 +252,7 @@ jcode --provider-profile my-api auth-test --no-tool-smoke
 
 This writes `[providers.my-api]` in `~/.jcode/config.toml` and stores the key in jcode's private app config dir, for example `~/.config/jcode/provider-my-api.env`. For localhost servers, use `--no-api-key`.
 
-Two notable presets are:
+Notable presets include:
 
 ### Fireworks
 - Login: `jcode login --provider fireworks`
@@ -269,6 +269,20 @@ Two notable presets are:
 - Base URL: `https://api.minimaxi.com/v1`
 - Default model hint: `MiniMax-M2.7`
 - Docs: <https://platform.minimax.io/docs/api-reference/text-openai-api>
+
+### MiniMax Token Plan / Coding Plan
+- Login: `jcode login --provider minimax-token-plan`
+- Alias: `minimax-coding-plan`
+- Stored env file: `~/.config/jcode/minimax-token-plan.env`
+- API key env var: `MINIMAX_API_KEY`
+- Base URL: `https://api.minimax.io/v1`
+- Default model hint: `MiniMax-M2.7`
+- Static model fallbacks: `MiniMax-M2.7`, `MiniMax-M2.7-highspeed`, `MiniMax-M2.5`, `MiniMax-M2.5-highspeed`
+- Docs: <https://platform.minimax.io/docs/token-plan/quickstart>
+
+MiniMax Token Plan keys currently use the `sk-cp-...` format. This preset reuses
+jcode's OpenAI-compatible provider path, so it adds no MiniMax-specific client or
+OAuth flow.
 
 These are first-class jcode provider presets, not just manual custom endpoint examples.
 You can still use `openai-compatible` for arbitrary custom providers when there is not a built-in preset.
