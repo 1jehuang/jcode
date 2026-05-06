@@ -19,6 +19,16 @@ fn stderr_text(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+fn write_skill(root: &std::path::Path, scope: &str, name: &str, description: &str) -> Result<()> {
+    let dir = root.join(scope).join("skills").join(name);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(
+        dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {description}\n---\n\nUse {name}.\n"),
+    )?;
+    Ok(())
+}
+
 #[test]
 fn harness_run_dry_run_auto_routes_optimization_only_for_perf_task() -> Result<()> {
     let temp = tempfile::Builder::new()
@@ -131,6 +141,158 @@ fn harness_run_dry_run_always_includes_all_builtin_harness_skills() -> Result<()
             "missing {skill}. stdout: {stdout}"
         );
     }
+
+    Ok(())
+}
+
+#[test]
+fn skills_doctor_reports_duplicate_names_across_origins() -> Result<()> {
+    let temp = tempfile::Builder::new()
+        .prefix("jcode-harness-cli-")
+        .tempdir()?;
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("workspace");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(&cwd)?;
+    write_skill(&cwd, ".claude", "shared-skill", "Claude compat duplicate")?;
+    write_skill(&home, "", "shared-skill", "Global duplicate")?;
+    write_skill(&cwd, ".jcode", "shared-skill", "Project duplicate")?;
+
+    let output = harness_command(&home, &cwd)
+        .args(["skills", "doctor"])
+        .output()?;
+    let stdout = stdout_text(&output);
+
+    assert!(
+        output.status.success(),
+        "skills doctor should succeed. stderr: {}",
+        stderr_text(&output)
+    );
+    assert!(stdout.contains("duplicates: 1 name(s)"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("duplicate shared-skill:"),
+        "stdout: {stdout}"
+    );
+    for origin in ["claude-compat", "global", "project-local"] {
+        assert!(
+            stdout.contains(origin),
+            "missing {origin}. stdout: {stdout}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn global_jcode_skill_overrides_claude_compat_but_not_project_local() -> Result<()> {
+    let temp = tempfile::Builder::new()
+        .prefix("jcode-harness-cli-")
+        .tempdir()?;
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("workspace");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(&cwd)?;
+    write_skill(&cwd, ".claude", "precedence-skill", "Claude compat version")?;
+    write_skill(&home, "", "precedence-skill", "Global version")?;
+
+    let global_output = harness_command(&home, &cwd)
+        .args(["skills", "show", "precedence-skill"])
+        .output()?;
+    let global_stdout = stdout_text(&global_output);
+    assert!(
+        global_output.status.success(),
+        "global show should succeed. stderr: {}",
+        stderr_text(&global_output)
+    );
+    assert!(
+        global_stdout.contains("origin: global"),
+        "stdout: {global_stdout}"
+    );
+    assert!(
+        global_stdout.contains("description: Global version"),
+        "stdout: {global_stdout}"
+    );
+
+    write_skill(&cwd, ".jcode", "precedence-skill", "Project version")?;
+    let project_output = harness_command(&home, &cwd)
+        .args(["skills", "show", "precedence-skill"])
+        .output()?;
+    let project_stdout = stdout_text(&project_output);
+    assert!(
+        project_output.status.success(),
+        "project show should succeed. stderr: {}",
+        stderr_text(&project_output)
+    );
+    assert!(
+        project_stdout.contains("origin: project-local"),
+        "stdout: {project_stdout}"
+    );
+    assert!(
+        project_stdout.contains("description: Project version"),
+        "stdout: {project_stdout}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn skills_list_and_sync_expose_builtin_harness_skills() -> Result<()> {
+    let temp = tempfile::Builder::new()
+        .prefix("jcode-harness-cli-")
+        .tempdir()?;
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("workspace");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(&cwd)?;
+
+    let list_output = harness_command(&home, &cwd)
+        .args(["skills", "list"])
+        .output()?;
+    let list_stdout = stdout_text(&list_output);
+    assert!(
+        list_output.status.success(),
+        "skills list should succeed. stderr: {}",
+        stderr_text(&list_output)
+    );
+    for skill in ["karpathy-guidelines", "clean-code-guardian", "optimization"] {
+        assert!(
+            list_stdout.contains(&format!("{skill}\tbuilt-in")),
+            "missing built-in {skill}. stdout: {list_stdout}"
+        );
+    }
+
+    let sync_output = harness_command(&home, &cwd)
+        .args(["skills", "sync"])
+        .output()?;
+    let sync_stdout = stdout_text(&sync_output);
+    assert!(
+        sync_output.status.success(),
+        "skills sync should succeed. stderr: {}",
+        stderr_text(&sync_output)
+    );
+    for skill in ["karpathy-guidelines", "clean-code-guardian", "optimization"] {
+        let synced = home.join("skills").join(skill).join("SKILL.md");
+        assert!(synced.exists(), "missing synced file: {}", synced.display());
+        assert!(
+            sync_stdout.contains(&synced.display().to_string()),
+            "sync output should mention {}. stdout: {sync_stdout}",
+            synced.display()
+        );
+    }
+
+    let second_sync = harness_command(&home, &cwd)
+        .args(["skills", "sync"])
+        .output()?;
+    let second_stdout = stdout_text(&second_sync);
+    assert!(
+        second_sync.status.success(),
+        "second sync stderr: {}",
+        stderr_text(&second_sync)
+    );
+    assert!(
+        second_stdout.contains("No built-in skills copied"),
+        "second sync should not overwrite by default. stdout: {second_stdout}"
+    );
 
     Ok(())
 }
