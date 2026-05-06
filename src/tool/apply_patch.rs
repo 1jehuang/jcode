@@ -85,7 +85,7 @@ impl Tool for ApplyPatchTool {
         for hunk in &hunks {
             match hunk {
                 PatchHunk::AddFile { path, contents } => {
-                    let resolved = ctx.resolve_path(Path::new(path));
+                    let resolved = ctx.resolve_path_checked(Path::new(path))?;
                     if let Some(parent) = resolved.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
@@ -100,7 +100,7 @@ impl Tool for ApplyPatchTool {
                     }
                 }
                 PatchHunk::DeleteFile { path } => {
-                    let resolved = ctx.resolve_path(Path::new(path));
+                    let resolved = ctx.resolve_path_checked(Path::new(path))?;
                     let old_contents = tokio::fs::read_to_string(&resolved)
                         .await
                         .unwrap_or_default();
@@ -122,12 +122,12 @@ impl Tool for ApplyPatchTool {
                     move_to,
                     chunks,
                 } => {
-                    let resolved = ctx.resolve_path(Path::new(path));
+                    let resolved = ctx.resolve_path_checked(Path::new(path))?;
                     match apply_update_chunks(&resolved, chunks).await {
                         Ok((old_contents, new_contents)) => {
                             let diff = generate_diff_summary(&old_contents, &new_contents);
                             if let Some(dest) = move_to {
-                                let dest_resolved = ctx.resolve_path(Path::new(dest));
+                                let dest_resolved = ctx.resolve_path_checked(Path::new(dest))?;
                                 if let Some(parent) = dest_resolved.parent() {
                                     tokio::fs::create_dir_all(parent).await?;
                                 }

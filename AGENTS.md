@@ -16,6 +16,11 @@
 ## Debug Socket
 - Use the debug socket for runtime level debugging
 
+## Sandboxing
+- `jcode --sandbox <DIR>` or `JCODE_SANDBOX_ROOT=<DIR>` confines file-system tools to one canonical directory tree.
+- New file-touching tools should use `ToolContext::resolve_path_checked` so absolute paths, `..` escapes, and symlink escapes are rejected outside the sandbox root.
+- The `bash` tool only forces its working directory to the sandbox root. It does not block arbitrary absolute-path reads without OS-level sandboxing.
+
 ## Install Notes
 - `~/.local/bin/jcode` is the launcher symlink used from `PATH`.
 - `~/.jcode/builds/current/jcode` is the active local/source-build channel; self-dev builds and `scripts/install_release.sh` point the launcher here.
@@ -24,4 +29,3 @@
 - `~/.jcode/builds/canary/jcode` still exists for canary/testing flows, but it is not the primary self-dev install path.
 - On Windows, the equivalents are `%LOCALAPPDATA%\\jcode\\bin\\jcode.exe` for the launcher, `%LOCALAPPDATA%\\jcode\\builds\\stable\\jcode.exe` for stable, and `%LOCALAPPDATA%\\jcode\\builds\\versions\\<version>\\jcode.exe` for immutable installs; `scripts/install.ps1` currently installs the stable channel.
 - Ensure `~/.local/bin` is **before** `~/.cargo/bin` in `PATH`.
-

@@ -51,6 +51,23 @@ fn parse_and_prepare_args() -> Result<Args> {
 
     output::set_quiet_enabled(args.quiet);
 
+    // Sandbox plumbing: --sandbox <dir> (or JCODE_SANDBOX_ROOT) confines
+    // file-system tool access to one tree. We canonicalize once here so the
+    // value stored downstream is absolute and stable across chdir.
+    if let Some(sandbox) = &args.sandbox {
+        let canon = std::path::PathBuf::from(sandbox)
+            .canonicalize()
+            .map_err(|e| anyhow::anyhow!("invalid --sandbox path '{}': {}", sandbox, e))?;
+        let canon_str = canon.to_string_lossy().to_string();
+        crate::env::set_var("JCODE_SANDBOX_ROOT", &canon_str);
+        logging::info(&format!("Sandbox root confined to: {}", canon_str));
+        // If the user did not also pass --cwd, chdir into the sandbox so any
+        // relative paths in their first prompt resolve inside it.
+        if args.cwd.is_none() {
+            std::env::set_current_dir(&canon)?;
+        }
+    }
+
     if let Some(cwd) = &args.cwd {
         std::env::set_current_dir(cwd)?;
         logging::info(&format!("Changed working directory to: {}", cwd));

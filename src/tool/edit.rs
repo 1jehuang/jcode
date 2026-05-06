@@ -72,7 +72,7 @@ impl Tool for EditTool {
             ));
         }
 
-        let path = ctx.resolve_path(Path::new(&params.file_path));
+        let path = ctx.resolve_path_checked(Path::new(&params.file_path))?;
 
         if !path.exists() {
             return Err(anyhow::anyhow!("File not found: {}", params.file_path));

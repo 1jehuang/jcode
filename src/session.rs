@@ -106,6 +106,11 @@ pub struct Session {
     /// Working directory (for self-dev detection)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
+    /// Optional sandbox root: if set, every file-system tool call is rejected
+    /// when the resolved path would land outside this directory. Stored as a
+    /// string so it survives serialization across session reloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_root: Option<String>,
     /// Memorable short name (e.g., "fox", "oak")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub short_name: Option<String>,
@@ -186,6 +191,8 @@ struct SessionStartupStub {
     #[serde(default)]
     working_dir: Option<String>,
     #[serde(default)]
+    sandbox_root: Option<String>,
+    #[serde(default)]
     short_name: Option<String>,
     #[serde(default)]
     status: SessionStatus,
@@ -210,6 +217,15 @@ fn current_working_dir_string() -> Option<String> {
     std::env::current_dir()
         .ok()
         .map(|p| p.to_string_lossy().to_string())
+}
+
+/// Read the active sandbox root from the `JCODE_SANDBOX_ROOT` env var, set by
+/// startup when `--sandbox` is passed. Returns `None` when no sandbox is in
+/// effect (default — current behavior).
+fn current_sandbox_root_string() -> Option<String> {
+    std::env::var("JCODE_SANDBOX_ROOT")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 fn env_flag_enabled(name: &str) -> bool {
@@ -277,6 +293,9 @@ impl Session {
         session.is_canary = stub.is_canary;
         session.testing_build = stub.testing_build;
         session.working_dir = stub.working_dir;
+        // Preserve previously-stored sandbox; fall back to env if absent so that
+        // a session resumed under `--sandbox` re-engages the confinement.
+        session.sandbox_root = stub.sandbox_root.or_else(current_sandbox_root_string);
         session.short_name = stub.short_name;
         session.status = stub.status;
         session.last_pid = stub.last_pid;
@@ -310,6 +329,7 @@ impl Session {
         session.is_canary = snapshot.is_canary;
         session.testing_build = snapshot.testing_build;
         session.working_dir = snapshot.working_dir;
+        session.sandbox_root = snapshot.sandbox_root.or_else(current_sandbox_root_string);
         session.short_name = snapshot.short_name;
         session.status = snapshot.status;
         session.last_pid = snapshot.last_pid;
@@ -667,6 +687,7 @@ impl Session {
             is_canary: false,
             testing_build: None,
             working_dir: current_working_dir_string(),
+            sandbox_root: current_sandbox_root_string(),
             short_name,
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
@@ -712,6 +733,7 @@ impl Session {
             is_canary: false,
             testing_build: None,
             working_dir: current_working_dir_string(),
+            sandbox_root: current_sandbox_root_string(),
             short_name: Some(short_name),
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
@@ -1363,6 +1385,8 @@ struct RemoteStartupSessionSnapshot {
     testing_build: Option<String>,
     #[serde(default)]
     working_dir: Option<String>,
+    #[serde(default)]
+    sandbox_root: Option<String>,
     #[serde(default)]
     short_name: Option<String>,
     #[serde(default)]

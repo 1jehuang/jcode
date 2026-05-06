@@ -578,9 +578,17 @@ impl Tool for BashTool {
         })
     }
 
-    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, mut ctx: ToolContext) -> Result<ToolOutput> {
         let mut params: BashInput = serde_json::from_value(input)?;
         let run_in_background = params.run_in_background.unwrap_or(false);
+        // When a sandbox root is configured, force the spawned shell's working
+        // directory to that root. We cannot stop a shell command from reading
+        // arbitrary absolute paths (e.g. `cat /etc/passwd`) without OS-level
+        // sandboxing, but we at least anchor relative-path commands inside the
+        // sandbox so the agent's default behavior stays contained.
+        if let Some(root) = ctx.sandbox_root.clone() {
+            ctx.working_dir = Some(root);
+        }
 
         if run_in_background {
             return self.execute_background(params, ctx).await;

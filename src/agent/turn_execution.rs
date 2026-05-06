@@ -332,6 +332,7 @@ impl Agent {
             message_id: self.session.id.clone(),
             tool_call_id: call_id,
             working_dir: self.working_dir().map(PathBuf::from),
+            sandbox_root: self.sandbox_root(),
             stdin_request_tx: self.stdin_request_tx.clone(),
             graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
             execution_mode: ToolExecutionMode::Direct,

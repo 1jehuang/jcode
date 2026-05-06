@@ -235,6 +235,16 @@ impl Tool for AgentGrepTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: AgentGrepInput = serde_json::from_value(input)?;
+        // Sandbox enforcement: agentgrep walks `path`/`file` itself via the
+        // upstream CLI, so we cannot rely on per-tool resolve checks deep in
+        // the call graph. Reject up front when either user-supplied path
+        // would land outside the configured sandbox root.
+        if let Some(p) = params.path.as_deref() {
+            ctx.resolve_path_checked(Path::new(p))?;
+        }
+        if let Some(f) = params.file.as_deref() {
+            ctx.resolve_path_checked(Path::new(f))?;
+        }
         let context_path = maybe_write_context_json(&params, &ctx)?;
         let request = summarize_agentgrep_request(&params, &ctx, context_path.as_deref());
         let started_at = std::time::Instant::now();
