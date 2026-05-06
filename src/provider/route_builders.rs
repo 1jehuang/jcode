@@ -82,6 +82,17 @@ fn build_openai_route(
     }
 }
 
+pub fn build_anthropic_vertex_route(model: &str) -> ModelRoute {
+    ModelRoute {
+        model: model.to_string(),
+        provider: "Vertex AI".to_string(),
+        api_method: "vertex".to_string(),
+        available: true,
+        detail: String::new(),
+        cheapness: cheapness_for_route(model, "Anthropic", "vertex"),
+    }
+}
+
 pub fn build_copilot_route(model: &str, available: bool, detail: impl Into<String>) -> ModelRoute {
     ModelRoute {
         model: model.to_string(),

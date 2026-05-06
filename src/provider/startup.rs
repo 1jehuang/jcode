@@ -77,6 +77,15 @@ impl MultiProvider {
         }
 
         let has_claude_creds = auth::claude::load_credentials().is_ok();
+        let has_vertex = std::env::var("ANTHROPIC_VERTEX_PROJECT_ID")
+            .ok()
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+            && std::env::var("CLOUD_ML_REGION")
+                .or_else(|_| std::env::var("ANTHROPIC_VERTEX_REGION"))
+                .ok()
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false);
         let has_openai_creds = auth::codex::load_credentials().is_ok();
         let has_copilot_api = auth_status.copilot_has_api_token;
         let has_antigravity_creds = auth::antigravity::load_tokens().is_ok();
@@ -102,7 +111,7 @@ impl MultiProvider {
             None
         };
 
-        let anthropic = if has_claude_creds && !use_claude_cli {
+        let anthropic = if (has_claude_creds || has_vertex) && !use_claude_cli {
             Some(Arc::new(anthropic::AnthropicProvider::new()))
         } else {
             None

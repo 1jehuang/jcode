@@ -178,12 +178,27 @@ impl App {
                 )
             } else {
                 match crate::provider::provider_for_model(&model) {
-                    Some("claude") => (
-                        "Anthropic".to_string(),
-                        "claude-oauth".to_string(),
-                        auth.anthropic.has_oauth || auth.anthropic.has_api_key,
-                        String::new(),
-                    ),
+                    Some("claude") => {
+                        let has_vertex = std::env::var("ANTHROPIC_VERTEX_PROJECT_ID")
+                            .ok()
+                            .map(|v| !v.trim().is_empty())
+                            .unwrap_or(false);
+                        if has_vertex {
+                            (
+                                "Vertex AI".to_string(),
+                                "vertex".to_string(),
+                                true,
+                                String::new(),
+                            )
+                        } else {
+                            (
+                                "Anthropic".to_string(),
+                                "claude-oauth".to_string(),
+                                auth.anthropic.has_oauth || auth.anthropic.has_api_key,
+                                String::new(),
+                            )
+                        }
+                    }
                     Some("openai") => unreachable!("OpenAI models are handled above"),
                     Some("gemini") => (
                         "Gemini".to_string(),
@@ -909,15 +924,23 @@ impl App {
 
             let mut added_any = false;
 
-            if crate::provider::provider_for_model(model) == Some("claude")
-                && auth.anthropic.has_oauth
-            {
-                let (available, detail) =
-                    crate::provider::anthropic_oauth_route_availability(model);
-                routes.push(crate::provider::build_anthropic_oauth_route(
-                    model, available, detail,
-                ));
-                added_any = true;
+            if crate::provider::provider_for_model(model) == Some("claude") {
+                let has_vertex = std::env::var("ANTHROPIC_VERTEX_PROJECT_ID")
+                    .ok()
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false);
+                if has_vertex {
+                    routes.push(crate::provider::build_anthropic_vertex_route(model));
+                    added_any = true;
+                }
+                if auth.anthropic.has_oauth {
+                    let (available, detail) =
+                        crate::provider::anthropic_oauth_route_availability(model);
+                    routes.push(crate::provider::build_anthropic_oauth_route(
+                        model, available, detail,
+                    ));
+                    added_any = true;
+                }
             }
 
             if crate::provider::ALL_OPENAI_MODELS.contains(&model.as_str()) {

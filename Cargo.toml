@@ -140,6 +140,7 @@ jcode-import-core = { path = "crates/jcode-import-core" }
 # OAuth
 base64 = "0.22"
 sha2 = "0.10"
+ring = "0.17"
 rand = "0.9.3"
 hex = "0.4"
 url = "2"

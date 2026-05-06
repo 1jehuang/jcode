@@ -44,10 +44,10 @@ pub use jcode_provider_core::{
 };
 pub(crate) use jcode_provider_core::{ProviderFailoverPrompt, parse_failover_prompt_message};
 pub use route_builders::{
-    build_anthropic_oauth_route, build_copilot_route, build_openai_api_key_route,
-    build_openai_oauth_route, build_openrouter_auto_route, build_openrouter_endpoint_route,
-    build_openrouter_fallback_provider_route, is_listable_model_name,
-    listable_model_names_from_routes, openrouter_catalog_model_id,
+    build_anthropic_oauth_route, build_anthropic_vertex_route, build_copilot_route,
+    build_openai_api_key_route, build_openai_oauth_route, build_openrouter_auto_route,
+    build_openrouter_endpoint_route, build_openrouter_fallback_provider_route,
+    is_listable_model_name, listable_model_names_from_routes, openrouter_catalog_model_id,
 };
 pub(crate) use routing::{
     anthropic_api_key_route_availability, anthropic_oauth_route_availability,
@@ -794,6 +794,15 @@ impl Provider for MultiProvider {
         let mut openrouter_scheduled_endpoint_refreshes = 0usize;
         let has_oauth = self.has_claude_runtime();
         let has_api_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
+        let has_vertex = std::env::var("ANTHROPIC_VERTEX_PROJECT_ID")
+            .ok()
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+            && std::env::var("CLOUD_ML_REGION")
+                .or_else(|_| std::env::var("ANTHROPIC_VERTEX_REGION"))
+                .ok()
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false);
         let anthropic_models = if let Some(anthropic) = self.anthropic_provider() {
             anthropic.available_models_for_switching()
         } else if let Some(claude) = self.claude_provider() {
@@ -807,7 +816,7 @@ impl Provider for MultiProvider {
             known_openai_model_ids()
         };
 
-        // Anthropic models (oauth and/or api-key)
+        // Anthropic models (oauth and/or api-key and/or vertex)
         for model in anthropic_models {
             let (available, detail) = if has_oauth && !has_api_key {
                 anthropic_oauth_route_availability(&model)
@@ -815,6 +824,9 @@ impl Provider for MultiProvider {
                 (true, String::new())
             };
 
+            if has_vertex {
+                routes.push(build_anthropic_vertex_route(&model));
+            }
             if has_oauth {
                 routes.push(build_anthropic_oauth_route(
                     &model,
@@ -833,7 +845,7 @@ impl Provider for MultiProvider {
                     cheapness: cheapness_for_route(&model, "Anthropic", "api-key"),
                 });
             }
-            if !has_oauth && !has_api_key {
+            if !has_vertex && !has_oauth && !has_api_key {
                 routes.push(ModelRoute {
                     model: model.to_string(),
                     provider: "Anthropic".to_string(),
@@ -1173,7 +1185,11 @@ impl Provider for MultiProvider {
                     Some(Arc::new(claude::ClaudeProvider::new()));
             }
         } else if self.anthropic_provider().is_none()
-            && crate::auth::claude::load_credentials().is_ok()
+            && (crate::auth::claude::load_credentials().is_ok()
+                || std::env::var("ANTHROPIC_VERTEX_PROJECT_ID")
+                    .ok()
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false))
         {
             crate::logging::info("Hot-initialized Anthropic provider after auth change");
             *self
