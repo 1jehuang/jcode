@@ -538,31 +538,19 @@ fn install_native_host_manifest() -> Result<bool> {
         && let Ok(contents) = std::fs::read_to_string(&manifest_path)
         && let Ok(existing) = serde_json::from_str::<serde_json::Value>(&contents)
         && let Some(existing_path) = existing["path"].as_str()
-        && std::path::Path::new(existing_path).exists()
+        && native_host_manifest_path_is_valid(std::path::Path::new(existing_path))
     {
         return Ok(false);
     }
 
-    let host_path = host_binary_path();
-    let browser_bin = browser_binary_path();
-
-    let effective_host = if host_path.exists() {
-        host_path.to_string_lossy().to_string()
-    } else if browser_bin.exists() {
-        return Err(anyhow::anyhow!(
-            "Host binary not found at {}. The native messaging host is required for the Firefox extension to communicate with the bridge.",
-            host_path.display()
-        ));
-    } else {
-        return Err(anyhow::anyhow!("No browser binaries found"));
-    };
+    let effective_host = ensure_native_host_binary()?;
 
     std::fs::create_dir_all(&manifest_dir)?;
 
     let manifest = serde_json::json!({
         "name": NATIVE_HOST_NAME,
         "description": "Native host for Firefox Agent Bridge (managed by jcode)",
-        "path": effective_host,
+        "path": effective_host.to_string_lossy().to_string(),
         "type": "stdio",
         "allowed_extensions": [
             EXTENSION_ID_LOCAL,
@@ -576,6 +564,44 @@ fn install_native_host_manifest() -> Result<bool> {
     register_windows_native_host_manifest(&manifest_path)?;
 
     Ok(true)
+}
+
+fn ensure_native_host_binary() -> Result<PathBuf> {
+    let host_path = host_binary_path();
+    if host_path.exists() {
+        return Ok(host_path);
+    }
+
+    let current_exe = std::env::current_exe().context(
+        "Native host binary is missing and the current jcode executable path could not be resolved",
+    )?;
+    std::fs::create_dir_all(browser_dir())?;
+    std::fs::copy(&current_exe, &host_path).with_context(|| {
+        format!(
+            "Failed to create native messaging host at {} from {}",
+            host_path.display(),
+            current_exe.display()
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&host_path)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&host_path, perms)?;
+    }
+
+    Ok(host_path)
+}
+
+fn native_host_manifest_path_is_valid(path: &std::path::Path) -> bool {
+    path.exists()
+        && path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(|stem| stem.eq_ignore_ascii_case("firefox-agent-bridge-host"))
+            .unwrap_or(false)
 }
 
 #[cfg(target_os = "windows")]

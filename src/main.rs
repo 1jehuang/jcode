@@ -53,5 +53,12 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
 
-    runtime.block_on(async { jcode::run().await })
+    runtime.block_on(async {
+        if jcode::browser_host::is_host_invocation() {
+            jcode::browser_host::run().await;
+            Ok(())
+        } else {
+            jcode::run().await
+        }
+    })
 }
