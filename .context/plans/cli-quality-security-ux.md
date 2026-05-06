@@ -39,6 +39,12 @@ Melhorar o CLI/TUI do Jcode em fatias verificáveis, sem tentar reescrever tudo 
 ## Próximas rodadas sugeridas
 1. Snapshot/debug-socket do status `RunningTool` para validar rendering real.
 2. Refatorar outros indicadores inline para helpers testáveis.
-3. Adicionar preflight composto que roda budgets de panic, swallowed errors, dependency boundaries e testes de tema.
+3. ~~Adicionar preflight composto que roda budgets de panic, swallowed errors, dependency boundaries e testes de tema.~~ Implementado em `scripts/cli_quality_preflight.sh`.
 4. Perfil de alocações/render frame em `draw_status` e idle animations.
 5. Revisão de redaction em logs, telemetry e tool outputs.
+
+## Segunda fatia implementada
+- Adicionar `scripts/cli_quality_preflight.sh` como gate rápido e reproduzível para CLI/TUI.
+- O preflight roda formatação, `check_panic_budget.py`, `check_swallowed_error_budget.py`, `check_dependency_boundaries.py`, `cargo test -p jcode-tui-style` e `cargo check -p jcode`.
+- Como o orçamento de swallowed errors ainda tem dívida histórica ampla, o modo padrão reporta a falha como warning sem mascarar o output. Use `--strict-swallowed` para transformar essa etapa em bloqueio quando a dívida for reduzida ou ratchetada intencionalmente.
+- Use `--check` em CI/validação limpa para não modificar formatação.
