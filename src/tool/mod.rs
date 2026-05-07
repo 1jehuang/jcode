@@ -38,7 +38,7 @@ use crate::provider::Provider;
 use crate::skill::SkillRegistry;
 use anyhow::Result;
 use jcode_message_types::ToolDefinition;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -328,7 +328,30 @@ impl Registry {
             "file_glob" => "glob",
             "file_grep" => "grep",
             "todoread" | "todowrite" | "todo_read" | "todo_write" => "todo",
+            // The API-facing "Skill" tool maps to the internal "skill_manage" tool.
+            "Skill" | "skill" => "skill_manage",
             other => other,
+        }
+    }
+
+    /// Transform tool input when the API-facing name differs from the internal tool name.
+    ///
+    /// The `Skill` tool exposed to the model uses `{skill, args}` parameters, but the
+    /// internal `skill_manage` tool expects `{action, name}`. This translates between them.
+    fn transform_input(name: &str, input: Value) -> Value {
+        match name {
+            "Skill" | "skill" => {
+                // {skill: "brain", args: "..."} -> {action: "load", name: "brain"}
+                if let Some(skill_name) = input.get("skill").and_then(|v| v.as_str()) {
+                    json!({
+                        "action": "load",
+                        "name": skill_name
+                    })
+                } else {
+                    input
+                }
+            }
+            _ => input,
         }
     }
 
@@ -356,6 +379,9 @@ impl Registry {
 
         // Drop the lock before executing
         drop(tools);
+
+        // Transform input for tools whose API-facing schema differs from the internal one.
+        let input = Self::transform_input(name, input);
 
         let started_at = std::time::Instant::now();
         let result = tool.execute(input.clone(), ctx).await;

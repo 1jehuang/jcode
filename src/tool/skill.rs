@@ -24,8 +24,10 @@ struct SkillInput {
     /// Action to perform: load (default), list, reload, reload_all, read
     #[serde(default = "default_action")]
     action: String,
-    /// Skill name (required for load, reload, read)
-    #[serde(default)]
+    /// Skill name (required for load, reload, read).
+    /// Accepts `skill` as alias so models confused between the public `Skill` tool
+    /// schema (`{skill}`) and the internal `skill_manage` schema (`{name}`) still work.
+    #[serde(default, alias = "skill")]
     name: Option<String>,
 }
 
@@ -89,7 +91,12 @@ impl Tool for SkillTool {
 
 impl SkillTool {
     async fn load_skill(&self, name: Option<String>) -> Result<ToolOutput> {
-        let name = name.ok_or_else(|| anyhow::anyhow!("'name' is required for load action"))?;
+        let name = name.ok_or_else(|| {
+            anyhow::anyhow!(
+                "'name' is required for load action. Pass {{\"action\":\"load\",\"name\":\"<skill>\"}} \
+                 or use the public Skill tool with {{\"skill\":\"<skill>\"}}."
+            )
+        })?;
 
         let registry = self.registry.read().await;
         let skill = registry
