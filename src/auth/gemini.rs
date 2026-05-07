@@ -300,14 +300,7 @@ pub async fn login(no_browser: bool) -> Result<GeminiTokens> {
         let auth_url = build_web_auth_url(&redirect_uri, &challenge, &state)?;
 
         eprintln!("\nOpening browser for Gemini login...\n");
-        eprintln!("If the browser didn't open, visit:\n{}\n", auth_url);
-        if let Some(qr) = crate::login_qr::indented_section(
-            &auth_url,
-            "Scan this QR on another device if this machine has no browser:",
-            "    ",
-        ) {
-            eprintln!("{qr}\n");
-        }
+        eprintln!("If the browser does not open, jcode will fall back to manual code entry.");
 
         let browser_opened = open::that(&auth_url).is_ok();
         if browser_opened {

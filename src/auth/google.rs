@@ -150,6 +150,17 @@ pub fn has_tokens() -> bool {
     tokens_path().map(|path| path.exists()).unwrap_or(false)
 }
 
+fn print_manual_auth_url(auth_url: &str) {
+    eprintln!("Open this URL in your browser:\n\n{}\n", auth_url);
+    if let Some(qr) = crate::login_qr::indented_section(
+        auth_url,
+        "Scan this QR on another device if needed:",
+        "    ",
+    ) {
+        eprintln!("{qr}\n");
+    }
+}
+
 pub async fn login(tier: GmailAccessTier, no_browser: bool) -> Result<GoogleTokens> {
     let creds = load_credentials()?;
     let (verifier, challenge) = super::oauth::generate_pkce_public();
@@ -164,17 +175,16 @@ pub async fn login(tier: GmailAccessTier, no_browser: bool) -> Result<GoogleToke
 
     let auth_url = build_auth_url(&creds, tier, &redirect_uri, &challenge, &state);
 
-    eprintln!("\nOpening browser for Google login...\n");
-    eprintln!("If the browser didn't open, visit:\n{}\n", auth_url);
-    if let Some(qr) = crate::login_qr::indented_section(
-        &auth_url,
-        "Scan this QR on another device if this machine has no browser:",
-        "    ",
-    ) {
-        eprintln!("{qr}\n");
+    let browser_suppressed = crate::auth::browser_suppressed(no_browser);
+    if browser_suppressed {
+        eprintln!("\nManual Google auth required.\n");
+        print_manual_auth_url(&auth_url);
+    } else {
+        eprintln!("\nOpening browser for Google login...\n");
+        eprintln!("If the browser does not open, jcode will fall back to manual callback paste.");
     }
 
-    let browser_opened = if crate::auth::browser_suppressed(no_browser) {
+    let browser_opened = if browser_suppressed {
         false
     } else {
         open::that(&auth_url).is_ok()
@@ -209,9 +219,10 @@ pub async fn login(tier: GmailAccessTier, no_browser: bool) -> Result<GoogleToke
             read_manual_callback_code(&state)?
         }
     } else {
-        eprintln!(
-            "Couldn't open a browser on this machine. Use the QR code above, then paste the full callback URL here.\n"
-        );
+        if !browser_suppressed {
+            eprintln!("Couldn't open a browser on this machine. Falling back to manual paste.\n");
+            print_manual_auth_url(&auth_url);
+        }
         read_manual_callback_code(&state)?
     };
 

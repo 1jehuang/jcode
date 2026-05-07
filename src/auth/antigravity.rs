@@ -235,14 +235,7 @@ pub async fn login(no_browser: bool) -> Result<AntigravityTokens> {
         && let Ok(listener) = crate::auth::oauth::bind_callback_listener(DEFAULT_PORT)
     {
         eprintln!("\nOpening browser for Antigravity login...\n");
-        eprintln!("If the browser didn't open, visit:\n{}\n", auth_url);
-        if let Some(qr) = crate::login_qr::indented_section(
-            &auth_url,
-            "Scan this QR on another device if this machine has no browser:",
-            "    ",
-        ) {
-            eprintln!("{qr}\n");
-        }
+        eprintln!("If the browser does not open, jcode will fall back to manual callback paste.");
 
         let browser_opened = open::that(&auth_url).is_ok();
         if browser_opened {
