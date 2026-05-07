@@ -128,6 +128,8 @@ jcode-harness
 jcode-harness smoke
 jcode-harness safe-eval
 jcode-harness safe-eval --json
+jcode-harness doctor
+jcode-harness doctor --json
 jcode-harness init --yes
 ```
 
@@ -147,6 +149,11 @@ ambient/proactive work, swarm auto-coordination, persistent semantic memory,
 autoreview, autojudge, gateway exposure, and external credential auto-trust. It
 also writes `.jcode/safe-eval/README.md` with a trust checklist and PowerShell
 activation file.
+
+Use `jcode-harness doctor --json` for offline diagnostics before running live
+providers. It reports safe-eval activation, telemetry opt-out state, platform,
+skill loading health, and project/global MCP config paths without contacting
+model providers or starting MCP/browser/Gmail integrations.
 
 ### Skills
 

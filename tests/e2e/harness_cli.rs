@@ -275,6 +275,7 @@ fn safe_eval_creates_isolated_profile_files_and_json_contract() -> Result<()> {
     assert!(safe_home.is_dir());
 
     let env_content = std::fs::read_to_string(env_file)?;
+    assert!(env_content.contains("export JCODE_SAFE_EVAL='1'"));
     assert!(env_content.contains("export JCODE_NO_TELEMETRY='1'"));
     assert!(env_content.contains("export DO_NOT_TRACK='1'"));
     assert!(env_content.contains("export JCODE_AMBIENT_ENABLED='false'"));
@@ -295,6 +296,61 @@ fn safe_eval_creates_isolated_profile_files_and_json_contract() -> Result<()> {
     );
     assert!(print_env_stdout.starts_with("source "));
     assert!(print_env_stdout.contains("safe-eval.env"));
+
+    Ok(())
+}
+
+#[test]
+fn doctor_json_reports_safe_eval_privacy_skills_and_mcp_without_network() -> Result<()> {
+    let temp = tempfile::Builder::new()
+        .prefix("jcode-harness-cli-")
+        .tempdir()?;
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("workspace");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(cwd.join(".jcode"))?;
+    std::fs::write(cwd.join(".jcode/mcp.json"), "{\"servers\":{}}\n")?;
+
+    let output = harness_command(&home, &cwd)
+        .args(["doctor", "--json"])
+        .output()?;
+    let stdout = stdout_text(&output);
+
+    assert!(output.status.success(), "stderr: {}", stderr_text(&output));
+    let report: Value = serde_json::from_str(&stdout)?;
+    assert_eq!(report["offline"], true);
+    assert_eq!(report["status"], "warn");
+    assert_eq!(report["jcode_home"]["source"], "env");
+    assert_eq!(report["safe_eval"]["active"], false);
+    assert_eq!(report["privacy"]["telemetry_opted_out"], false);
+    assert_eq!(report["skills"]["status"], "ok");
+    assert!(report["skills"]["builtins"].as_u64().unwrap() >= 4);
+    assert!(
+        report["mcp"]["configs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|config| config["scope"] == "project-jcode"
+                && config["exists"] == true
+                && config["requires_review"] == true)
+    );
+    assert!(
+        report["recommendations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item.as_str().unwrap().contains("safe-eval"))
+    );
+
+    let human_output = harness_command(&home, &cwd).args(["doctor"]).output()?;
+    let human_stdout = stdout_text(&human_output);
+    assert!(
+        human_output.status.success(),
+        "stderr: {}",
+        stderr_text(&human_output)
+    );
+    assert!(human_stdout.contains("jcode-harness doctor: warn"));
+    assert!(human_stdout.contains("MCP configs found: 1"));
 
     Ok(())
 }

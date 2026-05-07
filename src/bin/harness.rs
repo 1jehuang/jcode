@@ -24,6 +24,8 @@ enum Command {
     /// Create an isolated safe-evaluation profile for first-time local testing
     #[command(name = "safe-eval")]
     SafeEval(SafeEvalArgs),
+    /// Run offline onboarding diagnostics without contacting providers
+    Doctor(DoctorArgs),
     /// Run the deterministic tool harness smoke test
     Smoke(SmokeArgs),
     /// Run a single goal by delegating to the jcode run path with skill routing
@@ -71,6 +73,16 @@ struct SafeEvalArgs {
     /// Print only the shell command needed to activate the profile
     #[arg(long)]
     print_env: bool,
+}
+
+#[derive(Parser)]
+struct DoctorArgs {
+    /// Project directory to inspect (defaults to current directory)
+    #[arg(long)]
+    cwd: Option<String>,
+    /// Emit JSON report
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Parser, Clone)]
@@ -316,6 +328,7 @@ async fn main() -> Result<()> {
         None => jcode::run().await,
         Some(Command::Init(args)) => run_init(args),
         Some(Command::SafeEval(args)) => run_safe_eval(args),
+        Some(Command::Doctor(args)) => run_doctor(args),
         Some(Command::Smoke(args)) => run_smoke(args).await,
         Some(Command::Run(args)) => run_goal(args).await,
         Some(Command::Skills(args)) => run_skills(args),
@@ -503,6 +516,7 @@ fn safe_eval_env_vars(
     vec![
         ("JCODE_HOME", home.display().to_string()),
         ("JCODE_RUNTIME_DIR", runtime_dir.display().to_string()),
+        ("JCODE_SAFE_EVAL", "1".to_string()),
         ("JCODE_NO_TELEMETRY", "1".to_string()),
         ("DO_NOT_TRACK", "1".to_string()),
         ("JCODE_AMBIENT_ENABLED", "false".to_string()),
@@ -658,6 +672,238 @@ fn harden_private_dir(path: &std::path::Path) -> Result<()> {
 #[cfg(not(unix))]
 fn harden_private_dir(_path: &std::path::Path) -> Result<()> {
     Ok(())
+}
+
+fn run_doctor(args: DoctorArgs) -> Result<()> {
+    let root = args
+        .cwd
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?);
+    if !root.is_dir() {
+        anyhow::bail!(
+            "doctor cwd does not exist or is not a directory: {}",
+            root.display()
+        );
+    }
+
+    let jcode_home = jcode::storage::jcode_dir()?;
+    let jcode_home_source = if std::env::var("JCODE_HOME").is_ok() {
+        "env"
+    } else {
+        "default"
+    };
+    let safe_eval = build_safe_eval_doctor(&root, &jcode_home);
+    let privacy = build_privacy_doctor();
+    let features = build_feature_env_doctor();
+    let skills = build_skill_doctor_summary(&root);
+    let mcp_configs = build_mcp_doctor_configs(&root, &jcode_home);
+    let mut recommendations = Vec::new();
+
+    if !safe_eval["active"].as_bool().unwrap_or(false) {
+        recommendations.push(
+            "Run `jcode-harness safe-eval` before first evaluation or unknown repos.".to_string(),
+        );
+    }
+    if !privacy["telemetry_opted_out"].as_bool().unwrap_or(false) {
+        recommendations.push(
+            "Set `JCODE_NO_TELEMETRY=1` or `DO_NOT_TRACK=1` for sensitive evaluations.".to_string(),
+        );
+    }
+    if mcp_configs
+        .iter()
+        .any(|config| config["exists"].as_bool().unwrap_or(false))
+    {
+        recommendations.push(
+            "Review project-local MCP configs before allowing any server command to start."
+                .to_string(),
+        );
+    }
+    if std::env::consts::OS == "windows" {
+        recommendations.push("Windows support is still a high-risk path; prefer WSL2 or run `jcode-harness safe-eval` first.".to_string());
+    }
+    if skills["status"] != "ok" {
+        recommendations.push(
+            "Run `jcode-harness skills doctor` and fix malformed local skill frontmatter."
+                .to_string(),
+        );
+    }
+
+    let status = if recommendations.is_empty() {
+        "ok"
+    } else {
+        "warn"
+    };
+    let report = json!({
+        "status": status,
+        "offline": true,
+        "root": root,
+        "platform": {
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+        },
+        "jcode_home": {
+            "path": jcode_home,
+            "source": jcode_home_source,
+            "exists": jcode_home.exists(),
+        },
+        "safe_eval": safe_eval,
+        "privacy": privacy,
+        "features": features,
+        "skills": skills,
+        "mcp": {
+            "configs": mcp_configs,
+        },
+        "recommendations": recommendations,
+    });
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("jcode-harness doctor: {status}");
+    println!("Offline diagnostics: true");
+    println!("Root: {}", report["root"].as_str().unwrap_or("<unknown>"));
+    println!(
+        "Platform: {}/{}",
+        report["platform"]["os"].as_str().unwrap_or("unknown"),
+        report["platform"]["arch"].as_str().unwrap_or("unknown")
+    );
+    println!(
+        "JCODE_HOME: {} ({})",
+        report["jcode_home"]["path"].as_str().unwrap_or("<unknown>"),
+        report["jcode_home"]["source"].as_str().unwrap_or("unknown")
+    );
+    println!(
+        "Safe eval active: {}",
+        report["safe_eval"]["active"].as_bool().unwrap_or(false)
+    );
+    println!(
+        "Telemetry opted out: {}",
+        report["privacy"]["telemetry_opted_out"]
+            .as_bool()
+            .unwrap_or(false)
+    );
+    println!(
+        "Skills: {} loaded, built-ins {} ({})",
+        report["skills"]["loaded"].as_u64().unwrap_or(0),
+        report["skills"]["builtins"].as_u64().unwrap_or(0),
+        report["skills"]["status"].as_str().unwrap_or("unknown")
+    );
+    let mcp_count = report["mcp"]["configs"]
+        .as_array()
+        .map(|configs| {
+            configs
+                .iter()
+                .filter(|config| config["exists"].as_bool().unwrap_or(false))
+                .count()
+        })
+        .unwrap_or(0);
+    println!("MCP configs found: {mcp_count}");
+    if let Some(items) = report["recommendations"].as_array()
+        && !items.is_empty()
+    {
+        println!("Recommendations:");
+        for item in items {
+            println!("  - {}", item.as_str().unwrap_or(""));
+        }
+    }
+    Ok(())
+}
+
+fn build_safe_eval_doctor(
+    root: &std::path::Path,
+    active_home: &std::path::Path,
+) -> serde_json::Value {
+    let profile_dir = root.join(".jcode").join("safe-eval");
+    let expected_home = profile_dir.join("home");
+    let env_file = profile_dir.join("safe-eval.env");
+    let ps1_file = profile_dir.join("safe-eval.ps1");
+    let guide_file = profile_dir.join("README.md");
+    let active_marker = std::env::var("JCODE_SAFE_EVAL").ok().as_deref() == Some("1");
+    let active_home_matches = paths_equal(active_home, &expected_home);
+    json!({
+        "active": active_marker || active_home_matches,
+        "active_marker": active_marker,
+        "active_home_matches_profile": active_home_matches,
+        "profile_dir": profile_dir,
+        "expected_home": expected_home,
+        "files": [
+            { "name": "posix_env", "path": env_file, "exists": env_file.exists() },
+            { "name": "powershell_env", "path": ps1_file, "exists": ps1_file.exists() },
+            { "name": "guide", "path": guide_file, "exists": guide_file.exists() }
+        ]
+    })
+}
+
+fn build_privacy_doctor() -> serde_json::Value {
+    let jcode_no_telemetry = std::env::var("JCODE_NO_TELEMETRY").is_ok();
+    let do_not_track = std::env::var("DO_NOT_TRACK").is_ok();
+    json!({
+        "jcode_no_telemetry": jcode_no_telemetry,
+        "do_not_track": do_not_track,
+        "telemetry_opted_out": jcode_no_telemetry || do_not_track,
+    })
+}
+
+fn build_feature_env_doctor() -> serde_json::Value {
+    json!({
+        "ambient_enabled_env": std::env::var("JCODE_AMBIENT_ENABLED").ok(),
+        "ambient_proactive_env": std::env::var("JCODE_AMBIENT_PROACTIVE").ok(),
+        "swarm_enabled_env": std::env::var("JCODE_SWARM_ENABLED").ok(),
+        "memory_enabled_env": std::env::var("JCODE_MEMORY_ENABLED").ok(),
+        "memory_backend_env": std::env::var("JCODE_MEMORY_BACKEND").ok(),
+        "autoreview_enabled_env": std::env::var("JCODE_AUTOREVIEW_ENABLED").ok(),
+        "autojudge_enabled_env": std::env::var("JCODE_AUTOJUDGE_ENABLED").ok(),
+        "gateway_enabled_env": std::env::var("JCODE_GATEWAY_ENABLED").ok(),
+    })
+}
+
+fn build_skill_doctor_summary(root: &std::path::Path) -> serde_json::Value {
+    match jcode::skill::SkillRegistry::load_for_working_dir(Some(root)) {
+        Ok(registry) => json!({
+            "status": "ok",
+            "builtins": jcode::skill_pack::builtin_skills().len(),
+            "loaded": registry.list().len(),
+        }),
+        Err(err) => json!({
+            "status": "error",
+            "builtins": jcode::skill_pack::builtin_skills().len(),
+            "loaded": 0,
+            "error": err.to_string(),
+        }),
+    }
+}
+
+fn build_mcp_doctor_configs(
+    root: &std::path::Path,
+    jcode_home: &std::path::Path,
+) -> Vec<serde_json::Value> {
+    [
+        ("project-jcode", root.join(".jcode").join("mcp.json")),
+        ("project-claude", root.join(".claude").join("mcp.json")),
+        ("global-jcode", jcode_home.join("mcp.json")),
+    ]
+    .into_iter()
+    .map(|(scope, path)| {
+        let project_local = scope.starts_with("project-");
+        let exists = path.exists();
+        json!({
+            "scope": scope,
+            "path": path,
+            "exists": exists,
+            "requires_review": exists && project_local,
+        })
+    })
+    .collect()
+}
+
+fn paths_equal(left: &std::path::Path, right: &std::path::Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
 }
 
 async fn run_goal(args: RunArgs) -> Result<()> {

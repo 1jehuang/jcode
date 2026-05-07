@@ -25,6 +25,7 @@ Shape:
   "powershell_command": ". '/repo/.jcode/safe-eval/safe-eval.ps1'",
   "env": [
     { "name": "JCODE_HOME", "value": "/repo/.jcode/safe-eval/home" },
+    { "name": "JCODE_SAFE_EVAL", "value": "1" },
     { "name": "JCODE_NO_TELEMETRY", "value": "1" }
   ],
   "disabled_surfaces": ["telemetry", "ambient autonomous cycles"],
@@ -40,6 +41,70 @@ Guarantees:
 - `source_command` is a POSIX shell activation hint; `powershell_command` is a PowerShell activation hint.
 - `files_written` and `files_skipped` are absolute or cwd-relative paths matching the operator-provided `--cwd`/`--home` values.
 - The command is deterministic and does not contact model providers or start MCP/browser/Gmail integrations.
+
+## `doctor --json`
+
+Command:
+
+```bash
+jcode-harness doctor --json
+```
+
+Shape:
+
+```json
+{
+  "status": "warn",
+  "offline": true,
+  "root": "/repo",
+  "platform": { "os": "linux", "arch": "x86_64" },
+  "jcode_home": {
+    "path": "/repo/.jcode/safe-eval/home",
+    "source": "env",
+    "exists": true
+  },
+  "safe_eval": {
+    "active": true,
+    "active_marker": true,
+    "active_home_matches_profile": true,
+    "profile_dir": "/repo/.jcode/safe-eval",
+    "expected_home": "/repo/.jcode/safe-eval/home",
+    "files": [
+      { "name": "posix_env", "path": "/repo/.jcode/safe-eval/safe-eval.env", "exists": true }
+    ]
+  },
+  "privacy": {
+    "jcode_no_telemetry": true,
+    "do_not_track": true,
+    "telemetry_opted_out": true
+  },
+  "features": {
+    "ambient_enabled_env": "false",
+    "swarm_enabled_env": "false",
+    "memory_backend_env": "off"
+  },
+  "skills": { "status": "ok", "builtins": 4, "loaded": 4 },
+  "mcp": {
+    "configs": [
+      {
+        "scope": "project-jcode",
+        "path": "/repo/.jcode/mcp.json",
+        "exists": false,
+        "requires_review": false
+      }
+    ]
+  },
+  "recommendations": []
+}
+```
+
+Guarantees:
+
+- `offline` is always `true`; the command does not initialize providers or start MCP/browser/Gmail integrations.
+- `status` is `ok` when there are no recommendations, otherwise `warn`.
+- `safe_eval` reports both the explicit `JCODE_SAFE_EVAL=1` marker and whether active `JCODE_HOME` matches the generated profile home.
+- `mcp.configs` reports candidate config paths and marks project-local configs as `requires_review` only when they exist.
+- `recommendations` is an array of operator-facing strings suitable for onboarding checklists.
 
 ## Shared skill entry
 
