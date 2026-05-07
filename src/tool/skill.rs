@@ -27,6 +27,15 @@ struct SkillInput {
     /// Skill name (required for load, reload, read)
     #[serde(default)]
     name: Option<String>,
+    /// Alias used by the external Skill(...) wrapper.
+    #[serde(default)]
+    skill: Option<String>,
+}
+
+impl SkillInput {
+    fn requested_name(&self) -> Option<String> {
+        self.name.clone().or_else(|| self.skill.clone())
+    }
 }
 
 fn default_action() -> String {
@@ -56,6 +65,10 @@ impl Tool for SkillTool {
                 "name": {
                     "type": "string",
                     "description": "Skill name."
+                },
+                "skill": {
+                    "type": "string",
+                    "description": "Skill name alias accepted from the external Skill wrapper."
                 }
             }
         })
@@ -64,14 +77,17 @@ impl Tool for SkillTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: SkillInput = serde_json::from_value(input)?;
         let action_label = params.action.clone();
-        let name_label = params.name.clone().unwrap_or_else(|| "<none>".to_string());
+        let requested_name = params.requested_name();
+        let name_label = requested_name
+            .clone()
+            .unwrap_or_else(|| "<none>".to_string());
 
         match params.action.as_str() {
-            "load" => self.load_skill(params.name).await,
+            "load" => self.load_skill(requested_name).await,
             "list" => self.list_skills().await,
-            "reload" => self.reload_skill(params.name).await,
+            "reload" => self.reload_skill(requested_name).await,
             "reload_all" => self.reload_all_skills(ctx.working_dir.as_deref()).await,
-            "read" => self.read_skill(params.name).await,
+            "read" => self.read_skill(requested_name).await,
             _ => Ok(ToolOutput::new(format!(
                 "Unknown action: {}. Use 'load', 'list', 'reload', 'reload_all', or 'read'.",
                 params.action
@@ -277,6 +293,7 @@ mod tests {
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["action"].is_object());
         assert!(schema["properties"]["name"].is_object());
+        assert!(schema["properties"]["skill"].is_object());
     }
 
     #[tokio::test]
@@ -298,6 +315,23 @@ mod tests {
         let result = tool.execute(input, ctx).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("name"));
+    }
+
+    #[tokio::test]
+    async fn test_load_accepts_skill_alias() {
+        let tool = create_test_tool();
+        let ctx = create_test_context();
+        let input = json!({"action": "load", "skill": "missing"});
+
+        let result = tool.execute(input, ctx).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Skill 'missing' not found"),
+            "expected skill alias to be used as the requested skill name"
+        );
     }
 
     #[tokio::test]
