@@ -1,14 +1,14 @@
 {
   "version": 5,
   "projectName": "jcode-harness",
-  "focus": "Evaluate lib-bins gate",
+  "focus": "Issue #1 safe-eval validation",
   "status": "done",
-  "activeContractId": "2026-05-07-evaluate-lib-bins-gate-c13f1b",
+  "activeContractId": "2026-05-07-implement-safe-eval-command-ba6335",
   "counters": {
-    "contracts": 14,
-    "traces": 15,
-    "gates": 15,
-    "verifications": 13,
+    "contracts": 15,
+    "traces": 16,
+    "gates": 16,
+    "verifications": 14,
     "knowledgeItems": 0,
     "knowledgeQueries": 0,
     "evalCases": 0,
@@ -32,6 +32,11 @@
       "id": "decision-2026-05-07-0c3cbf",
       "ts": "2026-05-07T20:47:14.009Z",
       "text": "Do not promote lib-bins as a mandatory gate yet; local serial measurement hit the 600s Jcode supervision timeout while tests were still passing."
+    },
+    {
+      "id": "decision-2026-05-07-5b0347",
+      "ts": "2026-05-07T20:51:37.321Z",
+      "text": "Issue #1 first slice (`jcode-harness safe-eval`) is already present in current source and e2e coverage; validated locally and aligned selfdev jcode-harness binary before moving to next issue."
     }
   ],
   "events": [
@@ -388,6 +393,35 @@
       "status": "done",
       "focus": "Evaluate lib-bins gate",
       "activeContractId": "2026-05-07-evaluate-lib-bins-gate-c13f1b"
+    },
+    {
+      "ts": "2026-05-07T20:48:28.816Z",
+      "type": "contract_created",
+      "contractId": "2026-05-07-implement-safe-eval-command-ba6335",
+      "summary": "Implement safe-eval command"
+    },
+    {
+      "ts": "2026-05-07T20:51:20.736Z",
+      "type": "verification_recorded",
+      "traceId": "trace-2026-05-07-b46db491",
+      "contractId": "2026-05-07-implement-safe-eval-command-ba6335",
+      "status": "pass",
+      "summary": "safe-eval/doctor local validation passed"
+    },
+    {
+      "ts": "2026-05-07T20:51:28.913Z",
+      "type": "gate_evaluated",
+      "contractId": "2026-05-07-implement-safe-eval-command-ba6335",
+      "gateId": "gate-2026-05-07-4678a8",
+      "verdict": "pass"
+    },
+    {
+      "ts": "2026-05-07T20:51:37.321Z",
+      "type": "state_update",
+      "note": "Gate PASS. Committing governance, then continuing to issue #2 mock demos.",
+      "status": "done",
+      "focus": "Issue #1 safe-eval validation",
+      "activeContractId": "2026-05-07-implement-safe-eval-command-ba6335"
     }
   ]
 }

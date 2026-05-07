@@ -1,0 +1,51 @@
+{
+  "id": "2026-05-07-implement-safe-eval-command-ba6335",
+  "title": "Implement safe-eval command",
+  "goal": "Implement the first issue #1 slice: a safe evaluation profile command for trustworthy onboarding.",
+  "createdAt": "2026-05-07T20:48:28.815Z",
+  "status": "active",
+  "requiredInputs": [
+    "GitHub issue #1 body: first slice is jcode-harness safe-eval"
+  ],
+  "budget": {
+    "maxSteps": 10,
+    "maxMinutes": 60,
+    "maxToolCalls": 40
+  },
+  "permissions": [
+    "edit jcode-harness runtime and tests",
+    "run cargo fmt/check/tests locally",
+    "selfdev build/reload after runtime change",
+    "commit and push branch"
+  ],
+  "completionConditions": [
+    "`jcode-harness safe-eval` exists with human-readable output",
+    "`jcode-harness safe-eval --json` emits parseable deterministic JSON",
+    "The command writes or reports isolated eval environment artifacts without using network/provider credentials",
+    "Focused e2e tests pass locally before commit",
+    "Docs/status mention the new issue #1 safe-eval slice",
+    "Build/selfdev validation completed for runtime change"
+  ],
+  "outputPaths": [
+    "src/bin/harness.rs",
+    "tests/e2e/harness_cli.rs",
+    "docs/JCODE_HARNESS_JSON_SCHEMAS.md",
+    "docs/SKILLS_HARNESS_STATUS.md",
+    "docs/JCODE_HARNESS_RELEASE_GATES.md"
+  ],
+  "verificationCommands": [
+    "cargo fmt --check",
+    "cargo test --test e2e safe_eval -- --nocapture",
+    "cargo test --test e2e harness_cli -- --nocapture",
+    "cargo check -p jcode",
+    "selfdev build"
+  ],
+  "failureTaxonomy": [
+    "cli_contract_break",
+    "unsafe_profile_defaults",
+    "json_schema_invalid",
+    "test_failure",
+    "uncommitted_or_unpushed"
+  ],
+  "notes": "Local-first implementation and tests. No provider calls, network use, MCP installs, or credential access."
+}
