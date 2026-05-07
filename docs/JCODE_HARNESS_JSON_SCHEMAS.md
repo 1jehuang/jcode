@@ -71,11 +71,11 @@ Shape:
     "initialize": true,
     "shutdown": true,
     "session": {
-      "list": { "status": "available_via_cli" },
-      "spawn": { "status": "available_via_cli_dry_run" },
-      "attach": { "status": "available_via_cli_dry_run" },
-      "show": { "status": "available_via_cli" },
-      "resume": { "status": "available_via_cli_dry_run" }
+      "list": { "status": "implemented_offline", "method": "jcode/session.list" },
+      "spawn": { "status": "implemented_offline_dry_run", "method": "jcode/session.spawn" },
+      "attach": { "status": "implemented_offline_dry_run", "method": "jcode/session.attach" },
+      "show": { "status": "implemented_offline", "method": "jcode/session.show" },
+      "resume": { "status": "implemented_offline_dry_run", "method": "jcode/session.resume" }
     },
     "events": {
       "session_envelopes_ndjson": true,
@@ -102,28 +102,31 @@ Shape:
 Guarantees:
 
 - `acp manifest --json` is offline/read-only and does not initialize providers, tools, MCP servers, browser/Gmail integrations, or the TUI.
-- `protocol.status` is `preview`; registry submission remains explicitly not ready until session/tool/cancel semantics are implemented.
-- Capability entries describe currently available harness CLI surfaces and planned ACP methods, not full ACP conformance.
+- `protocol.status` is `preview`; registry submission remains explicitly not ready until live session execution, tool streaming, cancellation, and conformance fixtures are implemented.
+- Capability entries describe currently available harness CLI surfaces and implemented offline ACP session methods, not full ACP conformance.
 
 ## `acp serve --stdio`
 
 Command:
 
 ```bash
-printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize"}' '{"jsonrpc":"2.0","id":2,"method":"shutdown"}' | jcode-harness acp serve --stdio
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize"}' '{"jsonrpc":"2.0","id":2,"method":"jcode/session.list","params":{"source":"jcode","limit":5}}' '{"jsonrpc":"2.0","id":3,"method":"shutdown"}' | jcode-harness acp serve --stdio
 ```
 
 Shape:
 
 ```jsonl
 {"jsonrpc":"2.0","id":1,"result":{"protocol":"acp","serverInfo":{"name":"jcode-harness","version":"0.11.4"},"capabilities":{"initialize":true,"shutdown":true}}}
-{"jsonrpc":"2.0","id":2,"result":{"shutdown":true}}
+{"jsonrpc":"2.0","id":2,"result":{"status":"ok","command":"session list","offline":true,"read_only":true,"sessions":[]}}
+{"jsonrpc":"2.0","id":3,"result":{"shutdown":true}}
 ```
 
 Guarantees:
 
 - Transport is newline-delimited JSON-RPC 2.0 over stdin/stdout.
-- Implemented request methods are `initialize` and `shutdown`; `initialized` is accepted as a notification/no-op.
+- Implemented request methods are `initialize`, `shutdown`, and offline/read-only `jcode/session.list`, `jcode/session.show`, `jcode/session.spawn`, `jcode/session.attach`, and `jcode/session.resume`.
+- `initialized` is accepted as a notification/no-op.
+- ACP session methods return the same JSON report/envelope shapes as the corresponding CLI commands; `spawn`, `attach`, and `resume` remain dry-run only and do not execute providers/TUI flows.
 - Unsupported request methods return JSON-RPC `-32601` method-not-found errors.
 - Invalid JSON returns `-32700`; malformed JSON-RPC requests return `-32600`.
 - The preview stdio server does not start providers, tools, network-backed integrations, or the TUI.

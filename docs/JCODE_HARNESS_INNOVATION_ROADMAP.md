@@ -38,8 +38,8 @@ Make jcode-harness the fastest local-first agent runtime for serious engineering
 - `jcode session list/spawn/attach/resume --json` follow-up slices.
 - JSONL event stream for text/tool/usage/cache/compaction/memory events.
 - Local WebSocket gateway for external dashboards.
-- `jcode-harness acp manifest --json` and `jcode-harness acp serve --stdio`: preview ACP manifest plus JSON-RPC initialize/shutdown handshake.
-- Initial `jcode acp` server with text/tool/done mapping.
+- `jcode-harness acp manifest --json` and `jcode-harness acp serve --stdio`: preview ACP manifest plus JSON-RPC initialize/shutdown and offline `jcode/session.*` request handlers.
+- Initial `jcode acp` live server with text/tool/done mapping.
 
 ### Phase 2: Plan-first swarm
 
@@ -78,7 +78,7 @@ Make jcode-harness the fastest local-first agent runtime for serious engineering
 
 ## Completed initial implementation slices
 
-- `jcode-harness acp manifest --json` and `jcode-harness acp serve --stdio`: offline ACP preview manifest plus JSON-RPC initialize/shutdown handshake without starting providers/TUI/tools.
+- `jcode-harness acp manifest --json` and `jcode-harness acp serve --stdio`: offline ACP preview manifest plus JSON-RPC initialize/shutdown and read-only/dry-run `jcode/session.list|show|spawn|attach|resume` handlers without starting providers/TUI/tools.
 - `jcode-harness session show <id> --json`: read-only local session metadata and optional bounded preview without starting the TUI.
 - `jcode-harness session spawn <goal> --dry-run --json`: safe `jcode run` argv/cwd envelope for new headless runs without executing provider/TUI flows.
 - `jcode-harness session attach <id> --dry-run --json`: safe local attach argv/cwd envelope for external orchestrators without executing the TUI/provider flow.

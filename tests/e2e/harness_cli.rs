@@ -182,13 +182,149 @@ fn harness_acp_stdio_initialize_shutdown() -> Result<()> {
     );
     assert_eq!(
         responses[0]["result"]["capabilities"]["session"]["spawn"]["status"],
-        "available_via_cli_dry_run"
+        "implemented_offline_dry_run"
     );
     assert_eq!(responses[1]["id"], 2);
-    assert_eq!(responses[1]["error"]["code"], -32601);
-    assert_eq!(responses[1]["error"]["message"], "method not found");
+    assert_eq!(responses[1]["result"]["command"], "session list");
+    assert_eq!(responses[1]["result"]["offline"], true);
+    assert_eq!(responses[1]["result"]["read_only"], true);
     assert_eq!(responses[2]["id"], 3);
     assert_eq!(responses[2]["result"]["shutdown"], true);
+
+    Ok(())
+}
+
+#[test]
+fn harness_acp_stdio_session_methods_return_offline_envelopes() -> Result<()> {
+    use std::io::Write;
+
+    let temp = tempfile::Builder::new()
+        .prefix("jcode-harness-acp-session-")
+        .tempdir()?;
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("workspace");
+    let sessions_dir = home.join("sessions");
+    std::fs::create_dir_all(&sessions_dir)?;
+    std::fs::create_dir_all(&cwd)?;
+
+    std::fs::write(
+        sessions_dir.join("session_acp.json"),
+        serde_json::json!({
+            "id": "session_acp",
+            "title": "ACP local session",
+            "created_at": "2026-05-07T21:10:00Z",
+            "updated_at": "2026-05-07T21:15:00Z",
+            "last_active_at": "2026-05-07T21:16:00Z",
+            "working_dir": cwd,
+            "short_name": "acper",
+            "provider_key": "openai",
+            "model": "gpt-test",
+            "status": "Closed",
+            "messages": [
+                {"id": "m1", "role": "user", "content": [{"type": "text", "text": "acp hidden prompt"}]},
+                {"id": "m2", "role": "assistant", "content": [{"type": "text", "text": "acp visible preview"}]}
+            ]
+        })
+        .to_string(),
+    )?;
+
+    let mut child = harness_command(&home, &cwd)
+        .args(["acp", "serve", "--stdio"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    {
+        let stdin = child.stdin.as_mut().expect("child stdin");
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0","id":"list","method":"jcode/session.list","params":{"source":"jcode","includeTest":true,"limit":5}})
+        )?;
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0","id":"show","method":"jcode/session.show","params":{"id":"session_acp","preview":1}})
+        )?;
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0","id":"spawn","method":"jcode/session.spawn","params":{"goal":"ship acp envelope","cwd":cwd,"provider":"openai","model":"gpt-test","outputMode":"ndjson"}})
+        )?;
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0","id":"attach","method":"jcode/session.attach","params":{"id":"session_acp"}})
+        )?;
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0","id":"resume","method":"jcode/session.resume","params":{"id":"session_acp"}})
+        )?;
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0","id":"bad","method":"jcode/session.show","params":{}})
+        )?;
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0","id":"shutdown","method":"shutdown"})
+        )?;
+    }
+
+    let output = child.wait_with_output()?;
+    let stdout = stdout_text(&output);
+    assert!(output.status.success(), "stderr: {}", stderr_text(&output));
+    assert!(
+        !stdout.contains("acp hidden prompt"),
+        "ACP session methods must not leak hidden transcript content by default: {stdout}"
+    );
+    let responses = parse_ndjson(&output)?;
+    assert_eq!(responses.len(), 7, "stdout: {stdout}");
+
+    assert_eq!(responses[0]["id"], "list");
+    assert_eq!(responses[0]["result"]["command"], "session list");
+    assert!(
+        responses[0]["result"]["sessions"]
+            .as_array()
+            .expect("sessions")
+            .iter()
+            .any(|session| session["id"] == "session_acp")
+    );
+
+    assert_eq!(responses[1]["id"], "show");
+    assert_eq!(responses[1]["result"]["preview"]["returned"], 1);
+    assert_eq!(
+        responses[1]["result"]["preview"]["messages"][0]["content"],
+        "acp visible preview"
+    );
+
+    assert_eq!(responses[2]["id"], "spawn");
+    assert_eq!(responses[2]["result"]["command"], "session spawn");
+    assert_eq!(responses[2]["result"]["spawn"]["output_mode"], "ndjson");
+    assert!(
+        responses[2]["result"]["spawn"]["argv"]
+            .as_array()
+            .expect("spawn argv")
+            .iter()
+            .any(|arg| arg == "--ndjson")
+    );
+    assert_eq!(responses[2]["result"]["safety"]["executed"], false);
+
+    assert_eq!(responses[3]["id"], "attach");
+    assert_eq!(responses[3]["result"]["attach"]["argv"][2], "session_acp");
+    assert_eq!(responses[4]["id"], "resume");
+    assert_eq!(responses[4]["result"]["resume"]["argv"][2], "session_acp");
+
+    assert_eq!(responses[5]["id"], "bad");
+    assert_eq!(responses[5]["error"]["code"], -32602);
+    assert!(
+        responses[5]["error"]["data"]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("missing required param id"))
+    );
+    assert_eq!(responses[6]["result"]["shutdown"], true);
 
     Ok(())
 }

@@ -715,17 +715,18 @@ fn acp_manifest_json() -> serde_json::Value {
             {"name": "initialize", "kind": "request", "status": "implemented"},
             {"name": "shutdown", "kind": "request", "status": "implemented"},
             {"name": "initialized", "kind": "notification", "status": "implemented_noop"},
-            {"name": "jcode/session.list", "kind": "request", "status": "planned"},
-            {"name": "jcode/session.spawn", "kind": "request", "status": "planned_via_dry_run_envelope"},
-            {"name": "jcode/session.attach", "kind": "request", "status": "planned_via_dry_run_envelope"},
-            {"name": "jcode/session.resume", "kind": "request", "status": "planned_via_dry_run_envelope"},
+            {"name": "jcode/session.list", "kind": "request", "status": "implemented_offline"},
+            {"name": "jcode/session.show", "kind": "request", "status": "implemented_offline_metadata_preview_opt_in"},
+            {"name": "jcode/session.spawn", "kind": "request", "status": "implemented_offline_dry_run_envelope"},
+            {"name": "jcode/session.attach", "kind": "request", "status": "implemented_offline_dry_run_envelope"},
+            {"name": "jcode/session.resume", "kind": "request", "status": "implemented_offline_dry_run_envelope"},
             {"name": "$/cancelRequest", "kind": "notification", "status": "planned"}
         ],
         "registry": {
             "ready": false,
             "status": "preview_not_registry_ready",
             "missing": [
-                "session request handlers beyond initialize/shutdown",
+                "live session execution/streaming handlers",
                 "tool event streaming contract",
                 "cancellation semantics",
                 "versioned ACP conformance fixture"
@@ -746,11 +747,11 @@ fn acp_capabilities_json() -> serde_json::Value {
         "initialize": true,
         "shutdown": true,
         "session": {
-            "list": {"status": "available_via_cli", "command": "jcode-harness session list --json"},
-            "spawn": {"status": "available_via_cli_dry_run", "command": "jcode-harness session spawn <goal> --dry-run --json|--ndjson"},
-            "attach": {"status": "available_via_cli_dry_run", "command": "jcode-harness session attach <id> --dry-run --json|--ndjson"},
-            "show": {"status": "available_via_cli", "command": "jcode-harness session show <id> --json"},
-            "resume": {"status": "available_via_cli_dry_run", "command": "jcode-harness session resume <id> --dry-run --json|--ndjson"}
+            "list": {"status": "implemented_offline", "method": "jcode/session.list", "command": "jcode-harness session list --json"},
+            "spawn": {"status": "implemented_offline_dry_run", "method": "jcode/session.spawn", "command": "jcode-harness session spawn <goal> --dry-run --json|--ndjson"},
+            "attach": {"status": "implemented_offline_dry_run", "method": "jcode/session.attach", "command": "jcode-harness session attach <id> --dry-run --json|--ndjson"},
+            "show": {"status": "implemented_offline", "method": "jcode/session.show", "command": "jcode-harness session show <id> --json"},
+            "resume": {"status": "implemented_offline_dry_run", "method": "jcode/session.resume", "command": "jcode-harness session resume <id> --dry-run --json|--ndjson"}
         },
         "events": {
             "session_envelopes_ndjson": true,
@@ -769,7 +770,7 @@ fn run_acp_manifest(json_output: bool) -> Result<()> {
     } else {
         println!("jcode-harness ACP manifest: preview");
         println!("Transport: stdio JSON-RPC 2.0");
-        println!("Implemented methods: initialize, initialized, shutdown");
+        println!("Implemented methods: initialize, initialized, shutdown, jcode/session.* offline");
         println!("Registry ready: false");
     }
     Ok(())
@@ -857,9 +858,171 @@ fn acp_handle_jsonrpc_request(request: &serde_json::Value) -> Option<serde_json:
             "id": id,
             "result": {"shutdown": true}
         })),
+        "jcode/session.list" => Some(acp_jsonrpc_result(id, acp_session_list_result(request))),
+        "jcode/session.show" => Some(acp_jsonrpc_result(id, acp_session_show_result(request))),
+        "jcode/session.spawn" => Some(acp_jsonrpc_result(id, acp_session_spawn_result(request))),
+        "jcode/session.attach" => Some(acp_jsonrpc_result(id, acp_session_attach_result(request))),
+        "jcode/session.resume" => Some(acp_jsonrpc_result(id, acp_session_resume_result(request))),
         "initialized" => None,
         _ => Some(acp_jsonrpc_error(id, -32601, "method not found", None)),
     }
+}
+
+fn acp_jsonrpc_result(
+    id: serde_json::Value,
+    result: Result<serde_json::Value>,
+) -> serde_json::Value {
+    match result {
+        Ok(result) => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result,
+        }),
+        Err(error) => acp_jsonrpc_error(
+            id,
+            -32602,
+            "invalid params",
+            Some(json!({"detail": error.to_string()})),
+        ),
+    }
+}
+
+fn acp_request_params(
+    request: &serde_json::Value,
+) -> Result<Option<&serde_json::Map<String, serde_json::Value>>> {
+    match request.get("params") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Object(params)) => Ok(Some(params)),
+        Some(_) => anyhow::bail!("params must be a JSON object when present"),
+    }
+}
+
+fn acp_param_value<'a>(
+    params: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    names: &[&str],
+) -> Option<&'a serde_json::Value> {
+    let params = params?;
+    names.iter().find_map(|name| params.get(*name))
+}
+
+fn acp_optional_str<'a>(
+    params: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    names: &[&str],
+) -> Result<Option<&'a str>> {
+    match acp_param_value(params, names) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("{} must be a string", names[0])),
+    }
+}
+
+fn acp_required_str<'a>(
+    params: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    name: &str,
+) -> Result<&'a str> {
+    acp_optional_str(params, &[name])?
+        .ok_or_else(|| anyhow::anyhow!("missing required param {name}"))
+}
+
+fn acp_optional_bool(
+    params: Option<&serde_json::Map<String, serde_json::Value>>,
+    names: &[&str],
+) -> Result<Option<bool>> {
+    match acp_param_value(params, names) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => value
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("{} must be a boolean", names[0])),
+    }
+}
+
+fn acp_optional_usize(
+    params: Option<&serde_json::Map<String, serde_json::Value>>,
+    names: &[&str],
+) -> Result<Option<usize>> {
+    match acp_param_value(params, names) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => {
+            let number = value
+                .as_u64()
+                .ok_or_else(|| anyhow::anyhow!("{} must be a non-negative integer", names[0]))?;
+            usize::try_from(number)
+                .map(Some)
+                .map_err(|_| anyhow::anyhow!("{} is too large", names[0]))
+        }
+    }
+}
+
+fn acp_session_source_filter(value: Option<&str>) -> Result<HarnessSessionSourceFilter> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(HarnessSessionSourceFilter::All);
+    };
+    match value.to_ascii_lowercase().replace('-', "_").as_str() {
+        "all" => Ok(HarnessSessionSourceFilter::All),
+        "jcode" => Ok(HarnessSessionSourceFilter::Jcode),
+        "claude" | "claude_code" | "claudecode" => Ok(HarnessSessionSourceFilter::ClaudeCode),
+        "codex" => Ok(HarnessSessionSourceFilter::Codex),
+        "pi" => Ok(HarnessSessionSourceFilter::Pi),
+        "opencode" | "open_code" => Ok(HarnessSessionSourceFilter::Opencode),
+        _ => anyhow::bail!("unsupported session source '{value}'"),
+    }
+}
+
+fn acp_output_mode(value: Option<&str>) -> Result<SessionEnvelopeOutputMode> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(SessionEnvelopeOutputMode::Json);
+    };
+    match value.to_ascii_lowercase().replace('-', "_").as_str() {
+        "text" => Ok(SessionEnvelopeOutputMode::Text),
+        "json" => Ok(SessionEnvelopeOutputMode::Json),
+        "ndjson" | "jsonl" => Ok(SessionEnvelopeOutputMode::Ndjson),
+        _ => anyhow::bail!("unsupported outputMode '{value}'"),
+    }
+}
+
+fn acp_session_list_result(request: &serde_json::Value) -> Result<serde_json::Value> {
+    let params = acp_request_params(request)?;
+    let source = acp_session_source_filter(acp_optional_str(params, &["source"])?)?;
+    let include_test =
+        acp_optional_bool(params, &["includeTest", "include_test"])?.unwrap_or(false);
+    let limit = acp_optional_usize(params, &["limit"])?;
+    session_list_report(source, include_test, limit)
+}
+
+fn acp_session_show_result(request: &serde_json::Value) -> Result<serde_json::Value> {
+    let params = acp_request_params(request)?;
+    let id = acp_required_str(params, "id")?;
+    let preview = acp_optional_usize(params, &["preview"])?.unwrap_or(0);
+    session_show_report(id, preview)
+}
+
+fn acp_session_spawn_result(request: &serde_json::Value) -> Result<serde_json::Value> {
+    let params = acp_request_params(request)?;
+    let goal = acp_required_str(params, "goal")?;
+    let output_mode = acp_output_mode(acp_optional_str(params, &["outputMode", "output_mode"])?)?;
+    session_spawn_report(
+        goal,
+        acp_optional_str(params, &["cwd"])?,
+        acp_optional_str(params, &["provider"])?,
+        acp_optional_str(params, &["providerProfile", "provider_profile"])?,
+        acp_optional_str(params, &["model"])?,
+        output_mode,
+    )
+}
+
+fn acp_session_attach_result(request: &serde_json::Value) -> Result<serde_json::Value> {
+    let params = acp_request_params(request)?;
+    let id = acp_required_str(params, "id")?;
+    session_attach_report(id)
+}
+
+fn acp_session_resume_result(request: &serde_json::Value) -> Result<serde_json::Value> {
+    let params = acp_request_params(request)?;
+    let id = acp_required_str(params, "id")?;
+    session_resume_report(id)
 }
 
 fn acp_jsonrpc_error(
@@ -1178,6 +1341,31 @@ fn run_session(args: SessionArgs) -> Result<()> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionEnvelopeOutputMode {
+    Text,
+    Json,
+    Ndjson,
+}
+
+impl SessionEnvelopeOutputMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Json => "json",
+            Self::Ndjson => "ndjson",
+        }
+    }
+
+    fn argv_flag(self) -> Option<&'static str> {
+        match self {
+            Self::Text => None,
+            Self::Json => Some("--json"),
+            Self::Ndjson => Some("--ndjson"),
+        }
+    }
+}
+
 fn print_session_dry_run_report(
     report: &serde_json::Value,
     json_output: bool,
@@ -1227,107 +1415,30 @@ fn run_session_spawn(args: SessionSpawnArgs) -> Result<()> {
             "session spawn execution is not supported by jcode-harness yet; rerun with --dry-run to inspect the safe spawn envelope"
         );
     }
-    if args.goal.trim().is_empty() {
-        anyhow::bail!("session spawn goal must not be empty");
-    }
-    if let Some(provider) = args.provider.as_deref() {
-        ProviderChoice::from_str(provider, true)
-            .map_err(|err| anyhow::anyhow!("invalid provider '{}': {}", provider, err))?;
-    }
-
-    let root = resolve_existing_root(args.cwd.as_deref(), "session spawn")?;
-    let working_dir = root.to_string_lossy().to_string();
-    let working_dir_source = if args.cwd.is_some() {
-        "argument"
-    } else {
-        "current_dir"
-    };
-    let provider = args
-        .provider
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("auto");
     let output_mode = if args.json {
-        "json"
+        SessionEnvelopeOutputMode::Json
     } else if args.ndjson {
-        "ndjson"
+        SessionEnvelopeOutputMode::Ndjson
     } else {
-        "text"
+        SessionEnvelopeOutputMode::Text
     };
-
-    let mut argv = vec!["jcode".to_string(), "-C".to_string(), working_dir.clone()];
-    if let Some(profile) = args
-        .provider_profile
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        argv.push("--provider-profile".to_string());
-        argv.push(profile.to_string());
-    } else if provider != "auto" {
-        argv.push("-p".to_string());
-        argv.push(provider.to_string());
-    }
-    if let Some(model) = args
-        .model
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        argv.push("-m".to_string());
-        argv.push(model.to_string());
-    }
-    argv.push("run".to_string());
-    if args.json {
-        argv.push("--json".to_string());
-    } else if args.ndjson {
-        argv.push("--ndjson".to_string());
-    }
-    argv.push(args.goal.clone());
-    let command_display = argv
-        .iter()
-        .map(|arg| shell_quote(arg))
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    let report = json!({
-        "status": "ok",
-        "command": "session spawn",
-        "offline": true,
-        "read_only": true,
-        "dry_run": true,
-        "executed": false,
-        "source": "jcode",
-        "goal": &args.goal,
-        "spawn": {
-            "supported_by": "jcode-cli-run",
-            "execution_supported_by_harness": false,
-            "creates_new_session": true,
-            "requires_terminal": false,
-            "starts_tui": false,
-            "starts_provider": "on_execution",
-            "program": "jcode",
-            "argv": argv,
-            "cwd": &working_dir,
-            "cwd_source": working_dir_source,
-            "output_mode": output_mode,
-            "provider": provider,
-            "provider_profile": args.provider_profile.as_deref(),
-            "model": args.model.as_deref(),
-        },
-        "safety": {
-            "executed": false,
-            "writes": false,
-            "network_required_for_dry_run": false,
-            "credentials_required_for_dry_run": false,
-            "note": "Use the returned argv/cwd outside dry-run only after choosing an execution surface."
-        },
-    });
+    let report = session_spawn_report(
+        &args.goal,
+        args.cwd.as_deref(),
+        args.provider.as_deref(),
+        args.provider_profile.as_deref(),
+        args.model.as_deref(),
+        output_mode,
+    )?;
 
     if print_session_dry_run_report(&report, args.json, args.ndjson)? {
         return Ok(());
     }
+
+    let command_display = report["spawn"]["command_display"]
+        .as_str()
+        .unwrap_or("jcode run <goal>");
+    let working_dir = report["spawn"]["cwd"].as_str().unwrap_or("<unknown>");
 
     println!("jcode-harness session spawn dry-run");
     println!("Offline: true");
@@ -1339,21 +1450,138 @@ fn run_session_spawn(args: SessionSpawnArgs) -> Result<()> {
     Ok(())
 }
 
+fn session_spawn_report(
+    goal: &str,
+    cwd: Option<&str>,
+    provider: Option<&str>,
+    provider_profile: Option<&str>,
+    model: Option<&str>,
+    output_mode: SessionEnvelopeOutputMode,
+) -> Result<serde_json::Value> {
+    if goal.trim().is_empty() {
+        anyhow::bail!("session spawn goal must not be empty");
+    }
+
+    let provider = provider.map(str::trim).filter(|value| !value.is_empty());
+    let provider_profile = provider_profile
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if provider.is_some() && provider_profile.is_some() {
+        anyhow::bail!("session spawn provider and provider_profile are mutually exclusive");
+    }
+    if let Some(provider) = provider {
+        ProviderChoice::from_str(provider, true)
+            .map_err(|err| anyhow::anyhow!("invalid provider '{}': {}", provider, err))?;
+    }
+
+    let cwd = cwd.map(str::trim).filter(|value| !value.is_empty());
+    let root = resolve_existing_root(cwd, "session spawn")?;
+    let working_dir = root.to_string_lossy().to_string();
+    let working_dir_source = if cwd.is_some() {
+        "argument"
+    } else {
+        "current_dir"
+    };
+    let provider = provider.unwrap_or("auto");
+    let model = model.map(str::trim).filter(|value| !value.is_empty());
+
+    let mut argv = vec!["jcode".to_string(), "-C".to_string(), working_dir.clone()];
+    if let Some(profile) = provider_profile {
+        argv.push("--provider-profile".to_string());
+        argv.push(profile.to_string());
+    } else if provider != "auto" {
+        argv.push("-p".to_string());
+        argv.push(provider.to_string());
+    }
+    if let Some(model) = model {
+        argv.push("-m".to_string());
+        argv.push(model.to_string());
+    }
+    argv.push("run".to_string());
+    if let Some(flag) = output_mode.argv_flag() {
+        argv.push(flag.to_string());
+    }
+    argv.push(goal.to_string());
+    let command_display = argv
+        .iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    Ok(json!({
+        "status": "ok",
+        "command": "session spawn",
+        "offline": true,
+        "read_only": true,
+        "dry_run": true,
+        "executed": false,
+        "source": "jcode",
+        "goal": goal,
+        "spawn": {
+            "supported_by": "jcode-cli-run",
+            "execution_supported_by_harness": false,
+            "creates_new_session": true,
+            "requires_terminal": false,
+            "starts_tui": false,
+            "starts_provider": "on_execution",
+            "program": "jcode",
+            "argv": argv,
+            "command_display": command_display,
+            "cwd": &working_dir,
+            "cwd_source": working_dir_source,
+            "output_mode": output_mode.label(),
+            "provider": provider,
+            "provider_profile": provider_profile,
+            "model": model,
+        },
+        "safety": {
+            "executed": false,
+            "writes": false,
+            "network_required_for_dry_run": false,
+            "credentials_required_for_dry_run": false,
+            "note": "Use the returned argv/cwd outside dry-run only after choosing an execution surface."
+        },
+    }))
+}
+
 fn run_session_attach(args: SessionAttachArgs) -> Result<()> {
     if !args.dry_run {
         anyhow::bail!(
             "session attach execution is not supported by jcode-harness yet; rerun with --dry-run to inspect the safe attach envelope"
         );
     }
-    if args.id.contains(':') {
+    let report = session_attach_report(&args.id)?;
+
+    if print_session_dry_run_report(&report, args.json, args.ndjson)? {
+        return Ok(());
+    }
+
+    let session_id = report["id"].as_str().unwrap_or(&args.id);
+    let command_display = report["attach"]["command_display"]
+        .as_str()
+        .unwrap_or("jcode --resume <id>");
+    let working_dir = report["attach"]["cwd"].as_str().unwrap_or("<unknown>");
+
+    println!("jcode-harness session attach dry-run: {session_id}");
+    println!("Offline: true");
+    println!("Read only: true");
+    println!("Executed: false");
+    println!("Command: {command_display}");
+    println!("Working directory: {working_dir}");
+
+    Ok(())
+}
+
+fn session_attach_report(id: &str) -> Result<serde_json::Value> {
+    if id.contains(':') {
         anyhow::bail!(
             "session attach currently supports local jcode session ids only; use `session list --source jcode --json`"
         );
     }
 
-    let session_path = jcode::session::session_path(&args.id)?;
-    let journal_path = jcode::session::session_journal_path(&args.id)?;
-    let session = jcode::session::Session::load(&args.id)?;
+    let session_path = jcode::session::session_path(id)?;
+    let journal_path = jcode::session::session_journal_path(id)?;
+    let session = jcode::session::Session::load(id)?;
     let fallback_cwd = std::env::current_dir()?.to_string_lossy().to_string();
     let working_dir = session
         .working_dir
@@ -1375,7 +1603,13 @@ fn run_session_attach(args: SessionAttachArgs) -> Result<()> {
         "--resume".to_string(),
         session.id.clone(),
     ];
-    let report = json!({
+    let command_display = argv
+        .iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    Ok(json!({
         "status": "ok",
         "command": "session attach",
         "offline": true,
@@ -1398,6 +1632,7 @@ fn run_session_attach(args: SessionAttachArgs) -> Result<()> {
             "starts_provider": "on_interaction_or_resume_flow",
             "program": "jcode",
             "argv": argv,
+            "command_display": command_display,
             "cwd": working_dir,
             "cwd_source": working_dir_source,
             "live_session_detection": "not_attempted_offline_dry_run",
@@ -1409,20 +1644,7 @@ fn run_session_attach(args: SessionAttachArgs) -> Result<()> {
             "credentials_required_for_dry_run": false,
             "note": "Use the returned argv/cwd outside dry-run only after choosing an execution surface."
         },
-    });
-
-    if print_session_dry_run_report(&report, args.json, args.ndjson)? {
-        return Ok(());
-    }
-
-    println!("jcode-harness session attach dry-run: {}", session.id);
-    println!("Offline: true");
-    println!("Read only: true");
-    println!("Executed: false");
-    println!("Command: jcode --resume {}", session.id);
-    println!("Working directory: {working_dir}");
-
-    Ok(())
+    }))
 }
 
 fn run_session_resume(args: SessionResumeArgs) -> Result<()> {
@@ -1431,15 +1653,38 @@ fn run_session_resume(args: SessionResumeArgs) -> Result<()> {
             "session resume execution is not supported by jcode-harness yet; rerun with --dry-run to inspect the safe resume envelope"
         );
     }
-    if args.id.contains(':') {
+    let report = session_resume_report(&args.id)?;
+
+    if print_session_dry_run_report(&report, args.json, args.ndjson)? {
+        return Ok(());
+    }
+
+    let session_id = report["id"].as_str().unwrap_or(&args.id);
+    let command_display = report["resume"]["command_display"]
+        .as_str()
+        .unwrap_or("jcode --resume <id>");
+    let working_dir = report["resume"]["cwd"].as_str().unwrap_or("<unknown>");
+
+    println!("jcode-harness session resume dry-run: {session_id}");
+    println!("Offline: true");
+    println!("Read only: true");
+    println!("Executed: false");
+    println!("Command: {command_display}");
+    println!("Working directory: {working_dir}");
+
+    Ok(())
+}
+
+fn session_resume_report(id: &str) -> Result<serde_json::Value> {
+    if id.contains(':') {
         anyhow::bail!(
             "session resume currently supports local jcode session ids only; use `session list --source jcode --json`"
         );
     }
 
-    let session_path = jcode::session::session_path(&args.id)?;
-    let journal_path = jcode::session::session_journal_path(&args.id)?;
-    let session = jcode::session::Session::load(&args.id)?;
+    let session_path = jcode::session::session_path(id)?;
+    let journal_path = jcode::session::session_journal_path(id)?;
+    let session = jcode::session::Session::load(id)?;
     let fallback_cwd = std::env::current_dir()?.to_string_lossy().to_string();
     let working_dir = session
         .working_dir
@@ -1461,7 +1706,13 @@ fn run_session_resume(args: SessionResumeArgs) -> Result<()> {
         "--resume".to_string(),
         session.id.clone(),
     ];
-    let report = json!({
+    let command_display = argv
+        .iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    Ok(json!({
         "status": "ok",
         "command": "session resume",
         "offline": true,
@@ -1483,6 +1734,7 @@ fn run_session_resume(args: SessionResumeArgs) -> Result<()> {
             "starts_provider": "on_interaction_or_resume_flow",
             "program": "jcode",
             "argv": argv,
+            "command_display": command_display,
             "cwd": working_dir,
             "cwd_source": working_dir_source,
         },
@@ -1493,67 +1745,44 @@ fn run_session_resume(args: SessionResumeArgs) -> Result<()> {
             "credentials_required_for_dry_run": false,
             "note": "Use the returned argv/cwd outside dry-run only after choosing an execution surface."
         },
-    });
-
-    if print_session_dry_run_report(&report, args.json, args.ndjson)? {
-        return Ok(());
-    }
-
-    println!("jcode-harness session resume dry-run: {}", session.id);
-    println!("Offline: true");
-    println!("Read only: true");
-    println!("Executed: false");
-    println!("Command: jcode --resume {}", session.id);
-    println!("Working directory: {working_dir}");
-
-    Ok(())
+    }))
 }
 
 fn run_session_show(args: SessionShowArgs) -> Result<()> {
-    if args.id.contains(':') {
-        anyhow::bail!(
-            "session show currently supports local jcode session ids only; use `session list --source jcode --json`"
-        );
-    }
-
-    let session_path = jcode::session::session_path(&args.id)?;
-    let journal_path = jcode::session::session_journal_path(&args.id)?;
-    let session = jcode::session::Session::load(&args.id)?;
-    let preview_messages = session_preview_json(&session, args.preview);
-    let report = json!({
-        "status": "ok",
-        "command": "session show",
-        "offline": true,
-        "read_only": true,
-        "source": "jcode",
-        "id": &session.id,
-        "session_path": &session_path,
-        "session_exists": session_path.exists(),
-        "journal_path": &journal_path,
-        "journal_exists": journal_path.exists(),
-        "metadata": session_metadata_json(&session),
-        "preview": {
-            "requested": args.preview,
-            "returned": preview_messages.len(),
-            "content_truncated_to_chars": SESSION_SHOW_PREVIEW_CONTENT_CHARS,
-            "messages": preview_messages,
-        },
-    });
+    let report = session_show_report(&args.id, args.preview)?;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        println!("jcode-harness session show: {}", session.id);
+        println!(
+            "jcode-harness session show: {}",
+            report["id"].as_str().unwrap_or(&args.id)
+        );
         println!("Offline: true");
         println!("Read only: true");
-        println!("Title: {}", session.title.as_deref().unwrap_or("Untitled"));
-        println!("Status: {}", session.status.display());
-        println!("Messages stored: {}", session.messages.len());
+        println!(
+            "Title: {}",
+            report["metadata"]["title"].as_str().unwrap_or("Untitled")
+        );
+        println!(
+            "Status: {}",
+            report["metadata"]["status"].as_str().unwrap_or("unknown")
+        );
+        println!(
+            "Messages stored: {}",
+            report["metadata"]["stored_message_count"]
+                .as_u64()
+                .unwrap_or(0)
+        );
         if args.preview == 0 {
             println!("Preview: disabled (use --preview N)");
         } else {
             println!("Preview: last {} rendered messages", args.preview);
-            for message in session_preview_json(&session, args.preview) {
+            for message in report["preview"]["messages"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
                 println!(
                     "- [{}] {}",
                     message["role"].as_str().unwrap_or("unknown"),
@@ -1566,48 +1795,46 @@ fn run_session_show(args: SessionShowArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_session_list(args: SessionListArgs) -> Result<()> {
-    let mut sessions = jcode::tui::session_picker::load_sessions()?;
-    let loaded_count = sessions.len();
-
-    if args.source != HarnessSessionSourceFilter::All {
-        sessions.retain(|session| session_matches_source_filter(session, args.source));
+fn session_show_report(id: &str, preview: usize) -> Result<serde_json::Value> {
+    if id.contains(':') {
+        anyhow::bail!(
+            "session show currently supports local jcode session ids only; use `session list --source jcode --json`"
+        );
     }
 
-    let discovered_count = sessions.len();
-    let hidden_test_count = sessions
-        .iter()
-        .filter(|session| session.is_debug || session.is_canary)
-        .count();
-
-    if !args.include_test {
-        sessions.retain(|session| !session.is_debug && !session.is_canary);
-    }
-
-    if let Some(limit) = args.limit {
-        sessions.truncate(limit);
-    }
-
-    let sessions_dir = jcode::storage::jcode_dir()?.join("sessions");
-    let report = json!({
+    let session_path = jcode::session::session_path(id)?;
+    let journal_path = jcode::session::session_journal_path(id)?;
+    let session = jcode::session::Session::load(id)?;
+    let preview_messages = session_preview_json(&session, preview);
+    Ok(json!({
         "status": "ok",
-        "command": "session list",
+        "command": "session show",
         "offline": true,
         "read_only": true,
-        "sessions_dir": sessions_dir,
-        "loaded_count": loaded_count,
-        "session_count": sessions.len(),
-        "discovered_count": discovered_count,
-        "hidden_test_count": if args.include_test { 0 } else { hidden_test_count },
-        "include_test": args.include_test,
-        "source": session_source_filter_label(args.source),
-        "limit": args.limit,
-        "sessions": sessions.iter().map(session_info_json).collect::<Vec<_>>(),
-    });
+        "source": "jcode",
+        "id": &session.id,
+        "session_path": &session_path,
+        "session_exists": session_path.exists(),
+        "journal_path": &journal_path,
+        "journal_exists": journal_path.exists(),
+        "metadata": session_metadata_json(&session),
+        "preview": {
+            "requested": preview,
+            "returned": preview_messages.len(),
+            "content_truncated_to_chars": SESSION_SHOW_PREVIEW_CONTENT_CHARS,
+            "messages": preview_messages,
+        },
+    }))
+}
+
+fn run_session_list(args: SessionListArgs) -> Result<()> {
+    let report = session_list_report(args.source, args.include_test, args.limit)?;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
+        let sessions = report["sessions"].as_array().cloned().unwrap_or_default();
+        let hidden_test_count = report["hidden_test_count"].as_u64().unwrap_or(0);
         println!("jcode-harness session list: {} sessions", sessions.len());
         println!("Offline: true");
         println!("Read only: true");
@@ -1617,16 +1844,60 @@ fn run_session_list(args: SessionListArgs) -> Result<()> {
         for session in &sessions {
             println!(
                 "- {} [{}] {} ({}, {} messages)",
-                session.short_name,
-                session_source_label(session.source),
-                session.title,
-                session.status.display(),
-                session.message_count
+                session["short_name"].as_str().unwrap_or("unknown"),
+                session["source"].as_str().unwrap_or("unknown"),
+                session["title"].as_str().unwrap_or("Untitled"),
+                session["status"].as_str().unwrap_or("unknown"),
+                session["message_count"].as_u64().unwrap_or(0)
             );
         }
     }
 
     Ok(())
+}
+
+fn session_list_report(
+    source: HarnessSessionSourceFilter,
+    include_test: bool,
+    limit: Option<usize>,
+) -> Result<serde_json::Value> {
+    let mut sessions = jcode::tui::session_picker::load_sessions()?;
+    let loaded_count = sessions.len();
+
+    if source != HarnessSessionSourceFilter::All {
+        sessions.retain(|session| session_matches_source_filter(session, source));
+    }
+
+    let discovered_count = sessions.len();
+    let hidden_test_count = sessions
+        .iter()
+        .filter(|session| session.is_debug || session.is_canary)
+        .count();
+
+    if !include_test {
+        sessions.retain(|session| !session.is_debug && !session.is_canary);
+    }
+
+    if let Some(limit) = limit {
+        sessions.truncate(limit);
+    }
+
+    let sessions_dir = jcode::storage::jcode_dir()?.join("sessions");
+    Ok(json!({
+        "status": "ok",
+        "command": "session list",
+        "offline": true,
+        "read_only": true,
+        "sessions_dir": sessions_dir,
+        "loaded_count": loaded_count,
+        "session_count": sessions.len(),
+        "discovered_count": discovered_count,
+        "hidden_test_count": if include_test { 0 } else { hidden_test_count },
+        "include_test": include_test,
+        "source": session_source_filter_label(source),
+        "limit": limit,
+        "sessions": sessions.iter().map(session_info_json).collect::<Vec<_>>(),
+    }))
 }
 
 const SESSION_SHOW_PREVIEW_CONTENT_CHARS: usize = 4000;

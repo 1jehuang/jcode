@@ -134,13 +134,14 @@ selfdev build target=auto
 - New JSON fields are additive and backward-compatible.
 - Breaking CLI behavior changes require an explicit migration note.
 - Examples in docs are runnable or intentionally marked as conceptual.
-- Stable automation-facing schemas are documented for `init`, `acp manifest`, `acp serve --stdio`, `safe-eval`, `doctor`, `session list`, `session spawn --dry-run`, `session attach --dry-run`, `session dry-run --ndjson`, `session show`, `session resume --dry-run`, `demo`, `demo run`, skills JSON commands, `run` JSON/NDJSON, and `clean-code check`.
+- Stable automation-facing schemas are documented for `init`, `acp manifest`, `acp serve --stdio` including offline `jcode/session.*` methods, `safe-eval`, `doctor`, `session list`, `session spawn --dry-run`, `session attach --dry-run`, `session dry-run --ndjson`, `session show`, `session resume --dry-run`, `demo`, `demo run`, skills JSON commands, `run` JSON/NDJSON, and `clean-code check`.
 
 **Checks:**
 
 ```bash
 cargo run -q -p jcode --bin jcode-harness -- acp manifest --json | python3 -m json.tool >/dev/null
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize"}' '{"jsonrpc":"2.0","id":2,"method":"shutdown"}' | cargo run -q -p jcode --bin jcode-harness -- acp serve --stdio | python3 -c 'import json,sys; [json.loads(line) for line in sys.stdin if line.strip()]'
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"jcode/session.list","params":{"source":"jcode","limit":5}}' '{"jsonrpc":"2.0","id":2,"method":"shutdown"}' | cargo run -q -p jcode --bin jcode-harness -- acp serve --stdio | python3 -c 'import json,sys; rows=[json.loads(line) for line in sys.stdin if line.strip()]; assert rows[0]["result"]["command"] == "session list"'
 cargo run -q -p jcode --bin jcode-harness -- skills list --json | python3 -m json.tool >/dev/null
 cargo run -q -p jcode --bin jcode-harness -- skills show karpathy-guidelines --json | python3 -m json.tool >/dev/null
 cargo run -q -p jcode --bin jcode-harness -- skills show llmwiki-memory --json | python3 -m json.tool >/dev/null

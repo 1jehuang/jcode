@@ -238,8 +238,10 @@ jcode-harness acp serve --stdio
 
 `acp manifest --json` prints supported preview methods, safety guarantees, and
 registry gaps. `acp serve --stdio` speaks newline-delimited JSON-RPC 2.0 for the
-implemented `initialize`, `initialized` notification, and `shutdown` handshake;
-unknown methods return standard method-not-found errors.
+implemented `initialize`, `initialized` notification, `shutdown`, and safe
+offline `jcode/session.list|show|spawn|attach|resume` request methods. Session
+methods reuse the same read-only/dry-run envelopes as the CLI and still avoid
+starting providers, tools, network, credentials, or the TUI.
 
 ### Reproducible demos without credentials
 
