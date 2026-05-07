@@ -5,6 +5,21 @@ pub enum SkillMode {
     Always,
 }
 
+pub fn scoped_selection_for_working_dir(
+    goal: &str,
+    explicit: &[String],
+    mode: SkillMode,
+    working_dir: Option<&std::path::Path>,
+) -> Vec<String> {
+    let selected = select_skills(goal, explicit, mode);
+    let Some(working_dir) = working_dir else {
+        return selected;
+    };
+    crate::skill_scope::apply_policy_for_selection(working_dir, selected.clone(), explicit)
+        .map(|selection| selection.selected_names())
+        .unwrap_or(selected)
+}
+
 pub fn select_skills(goal: &str, explicit: &[String], mode: SkillMode) -> Vec<String> {
     if mode == SkillMode::Off {
         return explicit.to_vec();
@@ -83,12 +98,22 @@ pub fn select_skills(goal: &str, explicit: &[String], mode: SkillMode) -> Vec<St
 }
 
 pub fn build_skill_preface(goal: &str, explicit: &[String], mode: SkillMode) -> Option<String> {
-    let selected = select_skills(goal, explicit, mode);
+    let current_dir = std::env::current_dir().ok();
+    build_skill_preface_for_working_dir(goal, explicit, mode, current_dir.as_deref())
+}
+
+pub fn build_skill_preface_for_working_dir(
+    goal: &str,
+    explicit: &[String],
+    mode: SkillMode,
+    working_dir: Option<&std::path::Path>,
+) -> Option<String> {
+    let selected = scoped_selection_for_working_dir(goal, explicit, mode, working_dir);
     if selected.is_empty() {
         return None;
     }
 
-    let registry = crate::skill::SkillRegistry::load().ok()?;
+    let registry = crate::skill::SkillRegistry::load_for_working_dir(working_dir).ok()?;
     let mut out =
         String::from("Use these selected skills for this task. Do not load unrelated skills.\n");
     for name in selected {

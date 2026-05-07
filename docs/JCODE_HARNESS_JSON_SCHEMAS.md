@@ -227,6 +227,59 @@ Guarantees:
 - `duplicates` reports discovered duplicate names across standard origins before precedence resolution.
 - `skills` is the same effective-entry shape as `skills list --json`.
 
+## `skills scope --json`
+
+Commands:
+
+```bash
+jcode-harness skills scope init --json
+jcode-harness skills scope set optimization --state blocked --reason "benchmark-only" --json
+jcode-harness skills scope list --json
+```
+
+Shape:
+
+```json
+{
+  "policy_path": "/repo/.jcode/skills.scope.json",
+  "exists": true,
+  "created": true,
+  "updated": false,
+  "policy": {
+    "version": 1,
+    "default_state": "visible",
+    "skills": [
+      {
+        "name": "optimization",
+        "state": "blocked",
+        "reason": "benchmark-only"
+      }
+    ]
+  }
+}
+```
+
+Policy file shape, stored at `.jcode/skills.scope.json`:
+
+```json
+{
+  "version": 1,
+  "default_state": "visible",
+  "skills": [
+    { "name": "llmwiki-memory", "state": "discoverable", "reason": "manual provenance only" }
+  ]
+}
+```
+
+Guarantees:
+
+- States are `visible`, `discoverable`, or `blocked`.
+- `visible` skills can be selected automatically or explicitly.
+- `discoverable` skills are skipped during automatic routing, but allowed when passed with `--skill`.
+- `blocked` skills are removed from both automatic and explicit selection.
+- `skills match --json` and `jcode-harness run --dry-run` honor this policy before injecting skill prompts.
+- Invalid skill names containing path separators, `..`, or unsupported characters are rejected.
+
 ## `skills import --json`
 
 Command:
@@ -380,7 +433,24 @@ Shape:
       "path": "<builtin>/.jcode/skills/karpathy-guidelines/SKILL.md",
       "allowed_tools": null
     }
-  ]
+  ],
+  "policy": {
+    "policy_path": "/repo/.jcode/skills.scope.json",
+    "policy_exists": true,
+    "selected": [
+      { "name": "repo-reviewer", "state": "visible", "explicit": true, "selected": true }
+    ],
+    "skipped": [
+      {
+        "name": "optimization",
+        "state": "blocked",
+        "explicit": false,
+        "selected": false,
+        "reason": "state is blocked by project skill scope policy",
+        "policy_reason": "benchmark-only"
+      }
+    ]
+  }
 }
 ```
 
@@ -390,6 +460,7 @@ Guarantees:
 - Resolved entries use the shared skill entry shape after source precedence resolution.
 - Missing explicit skills are reported as `{ "name": "...", "missing": true }` instead of failing, so automation can decide whether to block.
 - `--cwd` changes repo-local skill resolution without requiring a provider call.
+- `policy` records the repo-local scope-policy decision for every raw selected skill.
 
 ## `skills llmwiki-bridge --json`
 

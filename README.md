@@ -164,10 +164,20 @@ jcode-harness skills show karpathy-guidelines
 jcode-harness skills show llmwiki-memory --json
 jcode-harness skills sync
 jcode-harness skills doctor --json
+jcode-harness skills scope init --json
+jcode-harness skills scope set optimization --state blocked --reason "benchmark-only" --json
+jcode-harness skills scope list --json
 jcode-harness skills import --json
 jcode-harness skills import --from .claude/skills --apply --json
 jcode-harness skills validate --cwd . --json
 ```
+
+`skills scope` manages `.jcode/skills.scope.json`, a repo-local policy that can
+mark skills as `visible`, `discoverable`, or `blocked`. `visible` skills can be
+auto-routed, `discoverable` skills only run when explicitly requested with
+`--skill`, and `blocked` skills are removed from both automatic and explicit
+selection. `jcode-harness run --dry-run` and `skills match --json` both honor
+this policy.
 
 `skills import` is safe-by-default: without `--apply` it only previews a local
 import plan. By default it scans `.agents/skills`, `.claude/skills`,

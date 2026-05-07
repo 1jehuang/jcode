@@ -556,6 +556,174 @@ fn skills_import_apply_copies_claude_skill_into_project_scope() -> Result<()> {
 }
 
 #[test]
+fn skills_scope_init_set_and_list_json_policy_file() -> Result<()> {
+    let temp = tempfile::Builder::new()
+        .prefix("jcode-harness-cli-")
+        .tempdir()?;
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("workspace");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(&cwd)?;
+
+    let init_output = harness_command(&home, &cwd)
+        .args(["skills", "scope", "init", "--json"])
+        .output()?;
+    let init_stdout = stdout_text(&init_output);
+    assert!(
+        init_output.status.success(),
+        "stderr: {}",
+        stderr_text(&init_output)
+    );
+    let init_report: Value = serde_json::from_str(&init_stdout)?;
+    assert_eq!(init_report["created"], true);
+    assert_eq!(init_report["policy"]["default_state"], "visible");
+    assert!(cwd.join(".jcode/skills.scope.json").is_file());
+
+    let set_output = harness_command(&home, &cwd)
+        .args([
+            "skills",
+            "scope",
+            "set",
+            "optimization",
+            "--state",
+            "blocked",
+            "--reason",
+            "benchmark-only in this repo",
+            "--json",
+        ])
+        .output()?;
+    let set_stdout = stdout_text(&set_output);
+    assert!(
+        set_output.status.success(),
+        "stderr: {}",
+        stderr_text(&set_output)
+    );
+    let set_report: Value = serde_json::from_str(&set_stdout)?;
+    assert_eq!(set_report["updated"], true);
+    let entry = set_report["policy"]["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "optimization")
+        .expect("optimization scope entry");
+    assert_eq!(entry["state"], "blocked");
+    assert_eq!(entry["reason"], "benchmark-only in this repo");
+
+    let list_output = harness_command(&home, &cwd)
+        .args(["skills", "scope", "list", "--json"])
+        .output()?;
+    let list_stdout = stdout_text(&list_output);
+    assert!(
+        list_output.status.success(),
+        "stderr: {}",
+        stderr_text(&list_output)
+    );
+    let list_report: Value = serde_json::from_str(&list_stdout)?;
+    assert_eq!(list_report["exists"], true);
+    assert_eq!(list_report["policy"]["skills"][0]["name"], "optimization");
+
+    Ok(())
+}
+
+#[test]
+fn skills_match_and_run_dry_run_respect_scope_policy() -> Result<()> {
+    let temp = tempfile::Builder::new()
+        .prefix("jcode-harness-cli-")
+        .tempdir()?;
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("workspace");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(&cwd)?;
+
+    for (name, state) in [
+        ("optimization", "blocked"),
+        ("clean-code-guardian", "discoverable"),
+    ] {
+        let output = harness_command(&home, &cwd)
+            .args(["skills", "scope", "set", name, "--state", state])
+            .output()?;
+        assert!(output.status.success(), "stderr: {}", stderr_text(&output));
+    }
+
+    let match_output = harness_command(&home, &cwd)
+        .args([
+            "skills",
+            "match",
+            "optimize this code path and review the diff",
+            "--json",
+        ])
+        .output()?;
+    let match_stdout = stdout_text(&match_output);
+    assert!(
+        match_output.status.success(),
+        "stderr: {}",
+        stderr_text(&match_output)
+    );
+    let report: Value = serde_json::from_str(&match_stdout)?;
+    let selected = report["selected"].as_array().unwrap();
+    assert!(
+        selected
+            .iter()
+            .any(|entry| entry["name"] == "karpathy-guidelines")
+    );
+    assert!(!selected.iter().any(|entry| entry["name"] == "optimization"));
+    assert!(
+        !selected
+            .iter()
+            .any(|entry| entry["name"] == "clean-code-guardian")
+    );
+    let skipped = report["policy"]["skipped"].as_array().unwrap();
+    assert!(
+        skipped
+            .iter()
+            .any(|entry| entry["name"] == "optimization" && entry["state"] == "blocked")
+    );
+    assert!(skipped.iter().any(|entry| entry["name"] == "clean-code-guardian"
+        && entry["state"] == "discoverable"));
+
+    let explicit_output = harness_command(&home, &cwd)
+        .args([
+            "skills",
+            "match",
+            "review this diff",
+            "--skill",
+            "clean-code-guardian",
+            "--json",
+        ])
+        .output()?;
+    let explicit_report: Value = serde_json::from_str(&stdout_text(&explicit_output))?;
+    assert!(
+        explicit_output.status.success(),
+        "stderr: {}",
+        stderr_text(&explicit_output)
+    );
+    assert!(
+        explicit_report["selected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "clean-code-guardian")
+    );
+
+    let dry_run_output = harness_command(&home, &cwd)
+        .args(["run", "optimize memory usage", "--dry-run"])
+        .output()?;
+    let dry_run_stdout = stdout_text(&dry_run_output);
+    assert!(
+        dry_run_output.status.success(),
+        "stderr: {}",
+        stderr_text(&dry_run_output)
+    );
+    assert!(
+        !dry_run_stdout.contains("## Skill: optimization"),
+        "blocked optimization should not be injected. stdout: {dry_run_stdout}"
+    );
+    assert_eq!(dry_run_stdout.trim(), "optimize memory usage");
+
+    Ok(())
+}
+
+#[test]
 fn skills_doctor_reports_duplicate_names_across_origins() -> Result<()> {
     let temp = tempfile::Builder::new()
         .prefix("jcode-harness-cli-")

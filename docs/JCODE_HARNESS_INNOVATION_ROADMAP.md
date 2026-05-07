@@ -73,5 +73,6 @@ Make jcode-harness the fastest local-first agent runtime for serious engineering
 
 - `jcode-harness safe-eval`: isolated first-run trust boundary.
 - `jcode-harness doctor`: offline onboarding diagnostics for safe-eval, privacy, skills, and MCP configs.
+- `jcode-harness skills scope`: repo-local Skill OS policy for visible, discoverable, and blocked skill states.
 - `jcode-harness skills import`: safe-by-default Skill OS import planner/apply path for `.agents`, `.claude`, `.codex`, and `.jcode` skill directories.
 - `jcode-harness skills validate`: offline Skill OS validation for frontmatter, precedence, risky prompt patterns, suspicious secrets, and runtime-compatible tool allowlists.

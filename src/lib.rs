@@ -73,6 +73,7 @@ pub mod skill;
 pub mod skill_import;
 pub mod skill_pack;
 pub mod skill_router;
+pub mod skill_scope;
 pub mod skill_validation;
 pub mod soft_interrupt_store;
 pub mod startup_profile;

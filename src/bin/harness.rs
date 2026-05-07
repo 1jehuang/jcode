@@ -121,6 +121,11 @@ enum SkillsCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Manage project-local skill scope policy states
+    Scope {
+        #[command(subcommand)]
+        command: SkillsScopeCommand,
+    },
     /// Preview or apply imports from other local skill ecosystems into jcode skills
     Import {
         /// Project directory for resolving default sources and project target
@@ -173,6 +178,47 @@ enum SkillsCommand {
     /// Print the permission-reviewed local LLM wiki MCP bridge contract
     LlmwikiBridge {
         /// Emit JSON contract for automation
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SkillsScopeCommand {
+    /// Create `.jcode/skills.scope.json` if it does not exist
+    Init {
+        /// Project directory for the policy file
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Overwrite an existing policy file with an empty default policy
+        #[arg(long)]
+        force: bool,
+        /// Emit JSON report
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the current project-local skill scope policy
+    List {
+        /// Project directory for the policy file
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Emit JSON report
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set one skill to visible, discoverable, or blocked
+    Set {
+        name: String,
+        /// Skill state in this repository
+        #[arg(long, value_enum)]
+        state: HarnessSkillScopeState,
+        /// Human-readable policy reason
+        #[arg(long)]
+        reason: Option<String>,
+        /// Project directory for the policy file
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Emit JSON report
         #[arg(long)]
         json: bool,
     },
@@ -255,6 +301,23 @@ enum HarnessSkillMode {
     Auto,
     Off,
     Always,
+}
+
+#[derive(Clone, ValueEnum)]
+enum HarnessSkillScopeState {
+    Visible,
+    Discoverable,
+    Blocked,
+}
+
+impl From<HarnessSkillScopeState> for jcode::skill_scope::SkillScopeState {
+    fn from(value: HarnessSkillScopeState) -> Self {
+        match value {
+            HarnessSkillScopeState::Visible => Self::Visible,
+            HarnessSkillScopeState::Discoverable => Self::Discoverable,
+            HarnessSkillScopeState::Blocked => Self::Blocked,
+        }
+    }
 }
 
 #[derive(Clone, ValueEnum)]
@@ -958,6 +1021,7 @@ async fn run_goal(args: RunArgs) -> Result<()> {
     if let Some(cwd) = &args.cwd {
         std::env::set_current_dir(cwd)?;
     }
+    let working_dir = std::env::current_dir()?;
     if let Some(profile_name) = args
         .provider_profile
         .as_deref()
@@ -977,8 +1041,15 @@ async fn run_goal(args: RunArgs) -> Result<()> {
     } else {
         ProviderChoice::Auto
     };
-    let message =
-        jcode::cli::commands::with_auto_skill_preface(&args.goal, &args.skill, args.skills.into());
+    let message = match jcode::skill_router::build_skill_preface_for_working_dir(
+        &args.goal,
+        &args.skill,
+        args.skills.into(),
+        Some(&working_dir),
+    ) {
+        Some(preface) => format!("{preface}\n---\n\nTask:\n{}", args.goal),
+        None => args.goal.clone(),
+    };
     if args.dry_run {
         println!("{}", message);
         return Ok(());
@@ -1063,6 +1134,7 @@ fn run_skills(args: SkillsArgs) -> Result<()> {
         }
         SkillsCommand::Sync { force } => jcode::cli::commands::run_skills_sync_command(force),
         SkillsCommand::Doctor { json } => jcode::cli::commands::run_skills_doctor_command(json),
+        SkillsCommand::Scope { command } => run_skills_scope(command),
         SkillsCommand::Import {
             cwd,
             from,
@@ -1082,6 +1154,73 @@ fn run_skills(args: SkillsArgs) -> Result<()> {
         } => run_skills_match(&goal, cwd, skills.into(), &skill, json),
         SkillsCommand::LlmwikiBridge { json } => run_llmwiki_bridge(json),
     }
+}
+
+fn run_skills_scope(command: SkillsScopeCommand) -> Result<()> {
+    match command {
+        SkillsScopeCommand::Init { cwd, force, json } => {
+            let root = resolve_existing_root(cwd.as_deref(), "skills scope init")?;
+            let report = jcode::skill_scope::init_policy(&root, force)?;
+            print_skill_scope_report(&report, json)
+        }
+        SkillsScopeCommand::List { cwd, json } => {
+            let root = resolve_existing_root(cwd.as_deref(), "skills scope list")?;
+            let report = jcode::skill_scope::list_policy(&root)?;
+            print_skill_scope_report(&report, json)
+        }
+        SkillsScopeCommand::Set {
+            name,
+            state,
+            reason,
+            cwd,
+            json,
+        } => {
+            let root = resolve_existing_root(cwd.as_deref(), "skills scope set")?;
+            let report = jcode::skill_scope::set_skill_state(&root, &name, state.into(), reason)?;
+            print_skill_scope_report(&report, json)
+        }
+    }
+}
+
+fn resolve_existing_root(cwd: Option<&str>, label: &str) -> Result<PathBuf> {
+    let root = cwd.map(PathBuf::from).unwrap_or(std::env::current_dir()?);
+    if !root.is_dir() {
+        anyhow::bail!(
+            "{label} cwd does not exist or is not a directory: {}",
+            root.display()
+        );
+    }
+    Ok(root)
+}
+
+fn print_skill_scope_report(
+    report: &jcode::skill_scope::SkillScopeReport,
+    json: bool,
+) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+        return Ok(());
+    }
+
+    println!("jcode-harness skills scope: {}", report.policy_path);
+    println!("Exists: {}", report.exists);
+    println!("Created: {}", report.created);
+    println!("Updated: {}", report.updated);
+    println!("Default state: {}", report.policy.default_state.label());
+    if report.policy.skills.is_empty() {
+        println!("No explicit skill scope entries.");
+    } else {
+        println!("Skill scope entries:");
+        for entry in &report.policy.skills {
+            let reason = entry
+                .reason
+                .as_deref()
+                .map(|reason| format!(" ({reason})"))
+                .unwrap_or_default();
+            println!("  - {}: {}{}", entry.name, entry.state.label(), reason);
+        }
+    }
+    Ok(())
 }
 
 fn run_skills_import(
@@ -1357,8 +1496,12 @@ fn run_skills_match(
     json_output: bool,
 ) -> Result<()> {
     let working_dir = cwd.map(PathBuf::from);
-    let registry = jcode::skill::SkillRegistry::load_for_working_dir(working_dir.as_deref())?;
-    let selected = jcode::skill_router::select_skills(goal, explicit, mode);
+    let root = working_dir.clone().unwrap_or(std::env::current_dir()?);
+    let registry = jcode::skill::SkillRegistry::load_for_working_dir(Some(&root))?;
+    let raw_selected = jcode::skill_router::select_skills(goal, explicit, mode);
+    let scope_selection =
+        jcode::skill_scope::apply_policy_for_selection(&root, raw_selected, explicit)?;
+    let selected = scope_selection.selected_names();
 
     if json_output {
         let entries = selected
@@ -1386,6 +1529,7 @@ fn run_skills_match(
                 "goal": goal,
                 "mode": format!("{:?}", mode).to_ascii_lowercase(),
                 "selected": entries,
+                "policy": scope_selection,
             }))?
         );
         return Ok(());
@@ -1393,6 +1537,17 @@ fn run_skills_match(
 
     if selected.is_empty() {
         println!("No skills selected for this task.");
+        if !scope_selection.skipped.is_empty() {
+            println!("Skipped by scope policy:");
+            for decision in scope_selection.skipped {
+                println!(
+                    "- {}\t{}\t{}",
+                    decision.name,
+                    decision.state.label(),
+                    decision.reason.unwrap_or_default()
+                );
+            }
+        }
         return Ok(());
     }
 
@@ -1407,6 +1562,17 @@ fn run_skills_match(
             );
         } else {
             println!("- {name}\tmissing");
+        }
+    }
+    if !scope_selection.skipped.is_empty() {
+        println!("Skipped by scope policy:");
+        for decision in scope_selection.skipped {
+            println!(
+                "- {}\t{}\t{}",
+                decision.name,
+                decision.state.label(),
+                decision.reason.unwrap_or_default()
+            );
         }
     }
     Ok(())
