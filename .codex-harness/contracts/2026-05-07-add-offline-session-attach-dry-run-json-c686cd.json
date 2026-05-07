@@ -1,0 +1,49 @@
+{
+  "id": "2026-05-07-add-offline-session-attach-dry-run-json-c686cd",
+  "title": "Add offline session attach dry-run JSON",
+  "goal": "Add the next issue #4 headless runtime slice: `jcode-harness session attach <id> --dry-run --json`, a safe local attach envelope for external orchestrators.",
+  "createdAt": "2026-05-07T22:20:05.877Z",
+  "status": "active",
+  "requiredInputs": [
+    "GitHub issue #4 headless orchestration API",
+    "Existing jcode CLI supports `--resume <session_id>` as the current attach surface"
+  ],
+  "budget": {
+    "maxSteps": 7,
+    "maxMinutes": 45,
+    "maxToolCalls": 35
+  },
+  "permissions": [
+    "Modify source, tests, docs, governance",
+    "Run cargo fmt/check/test and selfdev build",
+    "Commit and push"
+  ],
+  "completionConditions": [
+    "`jcode-harness session attach <id> --dry-run --json` exists",
+    "Command validates a local jcode session and emits stable attach metadata/envelope without transcript content",
+    "Omitting `--dry-run` fails safely without starting TUI/provider",
+    "Focused e2e, fmt/check, selfdev build, commit and push pass"
+  ],
+  "outputPaths": [
+    "src/bin/harness.rs",
+    "tests/e2e/harness_cli.rs",
+    "docs/JCODE_HARNESS_JSON_SCHEMAS.md",
+    "README.md",
+    "docs/JCODE_HARNESS_INNOVATION_ROADMAP.md",
+    "docs/JCODE_HARNESS_RELEASE_GATES.md",
+    "docs/SKILLS_HARNESS_STATUS.md",
+    ".codex-harness/**"
+  ],
+  "verificationCommands": [
+    "cargo fmt --check",
+    "cargo test -p jcode --test e2e harness_session_attach_dry_run_json -- --nocapture",
+    "cargo check -p jcode",
+    "jcode-harness session attach <fixture> --dry-run --json | python3 -m json.tool >/dev/null"
+  ],
+  "failureTaxonomy": [
+    "Accidentally starting TUI/provider instead of dry-run",
+    "Duplicating resume semantics without clearly marking attach mode",
+    "Leaking transcript content in attach metadata"
+  ],
+  "notes": "Keep actual attach execution unsupported in this slice. The dry-run envelope may point to current jcode CLI resume as the available operator-selected execution surface, but must not execute it."
+}

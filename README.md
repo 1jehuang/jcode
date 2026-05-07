@@ -141,6 +141,7 @@ jcode-harness demo run all --sandbox --json
 jcode-harness session list --json
 jcode-harness session list --source jcode --json
 jcode-harness session spawn "draft a release plan" --dry-run --json
+jcode-harness session attach <session-id> --dry-run --json
 jcode-harness session show <session-id> --json
 jcode-harness session show <session-id> --preview 3 --json
 jcode-harness session resume <session-id> --dry-run --json
@@ -183,6 +184,7 @@ TUI:
 jcode-harness session list --json
 jcode-harness session list --source jcode --json
 jcode-harness session spawn "draft a release plan" --dry-run --json
+jcode-harness session attach <session-id> --dry-run --json
 jcode-harness session show <session-id> --json
 jcode-harness session show <session-id> --preview 3 --json
 jcode-harness session resume <session-id> --dry-run --json
@@ -192,6 +194,11 @@ jcode-harness session resume <session-id> --dry-run --json
 argv/cwd envelope for creating a new headless run/session without starting a
 provider, TUI, network, or credential flow. Omitting `--dry-run` fails safely
 because the harness does not execute spawn flows yet.
+
+`session attach --dry-run --json` validates a local jcode session id and returns
+the current safe attach envelope for an operator-selected execution surface
+without starting the TUI/provider flow or emitting transcript content. Omitting
+`--dry-run` fails safely because the harness does not execute attach flows yet.
 
 `session show` currently supports local jcode sessions. It emits metadata only by
 default, and transcript content appears only when a bounded `--preview N` is

@@ -672,6 +672,97 @@ fn harness_session_spawn_dry_run_json_returns_safe_envelope() -> Result<()> {
 }
 
 #[test]
+fn harness_session_attach_dry_run_json_returns_safe_envelope() -> Result<()> {
+    let temp = tempfile::Builder::new()
+        .prefix("jcode-harness-session-attach-")
+        .tempdir()?;
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("workspace");
+    let sessions_dir = home.join("sessions");
+    std::fs::create_dir_all(&sessions_dir)?;
+    std::fs::create_dir_all(&cwd)?;
+
+    std::fs::write(
+        sessions_dir.join("session_attach.json"),
+        serde_json::json!({
+            "id": "session_attach",
+            "title": "Attach local session",
+            "created_at": "2026-05-07T20:50:00Z",
+            "updated_at": "2026-05-07T20:55:00Z",
+            "last_active_at": "2026-05-07T20:56:00Z",
+            "working_dir": cwd,
+            "short_name": "attacher",
+            "provider_key": "openai",
+            "model": "gpt-test",
+            "status": "Closed",
+            "messages": [
+                {"id": "m1", "role": "user", "content": [{"type": "text", "text": "attach transcript should stay hidden"}]},
+                {"id": "m2", "role": "assistant", "content": [{"type": "text", "text": "attach answer should stay hidden"}]}
+            ]
+        })
+        .to_string(),
+    )?;
+
+    let blocked = harness_command(&home, &cwd)
+        .args(["session", "attach", "session_attach", "--json"])
+        .output()?;
+    assert!(
+        !blocked.status.success(),
+        "attach execution should require --dry-run"
+    );
+    assert!(
+        stderr_text(&blocked).contains("--dry-run"),
+        "stderr: {}",
+        stderr_text(&blocked)
+    );
+
+    let output = harness_command(&home, &cwd)
+        .args(["session", "attach", "session_attach", "--dry-run", "--json"])
+        .output()?;
+    let stdout = stdout_text(&output);
+
+    assert!(output.status.success(), "stderr: {}", stderr_text(&output));
+    assert!(
+        !stdout.contains("attach transcript should stay hidden")
+            && !stdout.contains("attach answer should stay hidden"),
+        "attach dry-run must not emit transcript content. stdout: {stdout}"
+    );
+    let report: Value = serde_json::from_str(&stdout)?;
+    assert_eq!(report["status"], "ok");
+    assert_eq!(report["command"], "session attach");
+    assert_eq!(report["offline"], true);
+    assert_eq!(report["read_only"], true);
+    assert_eq!(report["dry_run"], true);
+    assert_eq!(report["executed"], false);
+    assert_eq!(report["source"], "jcode");
+    assert_eq!(report["id"], "session_attach");
+    assert_eq!(report["metadata"]["display_name"], "attacher");
+    assert_eq!(report["metadata"]["status"], "closed");
+    assert_eq!(report["attach"]["supported_by"], "jcode-cli-resume");
+    assert_eq!(report["attach"]["execution_supported_by_harness"], false);
+    assert_eq!(
+        report["attach"]["attach_mode"],
+        "local_session_resume_surface"
+    );
+    assert_eq!(report["attach"]["requires_terminal"], true);
+    assert_eq!(report["attach"]["starts_tui"], true);
+    assert_eq!(report["attach"]["program"], "jcode");
+    assert_eq!(report["attach"]["cwd_source"], "session");
+    assert_eq!(
+        report["attach"]["live_session_detection"],
+        "not_attempted_offline_dry_run"
+    );
+    let argv = report["attach"]["argv"].as_array().expect("argv array");
+    assert_eq!(argv, &vec!["jcode", "--resume", "session_attach"]);
+    assert_eq!(report["safety"]["executed"], false);
+    assert_eq!(report["safety"]["writes"], false);
+    assert_eq!(report["safety"]["network_required_for_dry_run"], false);
+    assert_eq!(report["safety"]["credentials_required_for_dry_run"], false);
+
+    Ok(())
+}
+
+#[test]
 fn harness_session_show_json_reports_metadata_and_opt_in_preview() -> Result<()> {
     let temp = tempfile::Builder::new()
         .prefix("jcode-harness-session-show-")
