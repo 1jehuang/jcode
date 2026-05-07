@@ -20,6 +20,14 @@ fn stderr_text(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+fn parse_ndjson(output: &std::process::Output) -> Result<Vec<Value>> {
+    stdout_text(output)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).map_err(Into::into))
+        .collect()
+}
+
 fn harness_command_with_piped_stdout(home: &std::path::Path, cwd: &std::path::Path) -> Command {
     let mut cmd = harness_command(home, cwd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -758,6 +766,140 @@ fn harness_session_attach_dry_run_json_returns_safe_envelope() -> Result<()> {
     assert_eq!(report["safety"]["writes"], false);
     assert_eq!(report["safety"]["network_required_for_dry_run"], false);
     assert_eq!(report["safety"]["credentials_required_for_dry_run"], false);
+
+    Ok(())
+}
+
+#[test]
+fn harness_session_dry_run_ndjson_envelopes() -> Result<()> {
+    let temp = tempfile::Builder::new()
+        .prefix("jcode-harness-session-ndjson-")
+        .tempdir()?;
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("workspace");
+    let sessions_dir = home.join("sessions");
+    std::fs::create_dir_all(&sessions_dir)?;
+    std::fs::create_dir_all(&cwd)?;
+
+    std::fs::write(
+        sessions_dir.join("session_ndjson.json"),
+        serde_json::json!({
+            "id": "session_ndjson",
+            "title": "NDJSON local session",
+            "created_at": "2026-05-07T21:00:00Z",
+            "updated_at": "2026-05-07T21:05:00Z",
+            "working_dir": cwd,
+            "short_name": "ndjsoner",
+            "provider_key": "openai",
+            "model": "gpt-test",
+            "status": "Closed",
+            "messages": [
+                {"id": "m1", "role": "user", "content": [{"type": "text", "text": "ndjson transcript should stay hidden"}]}
+            ]
+        })
+        .to_string(),
+    )?;
+
+    let conflict = harness_command(&home, &cwd)
+        .args([
+            "session",
+            "spawn",
+            "ndjson goal",
+            "--dry-run",
+            "--json",
+            "--ndjson",
+        ])
+        .output()?;
+    assert!(
+        !conflict.status.success(),
+        "--json and --ndjson should conflict"
+    );
+
+    let spawn_output = harness_command(&home, &cwd)
+        .args(["session", "spawn", "ndjson goal", "--dry-run", "--ndjson"])
+        .output()?;
+    assert!(
+        spawn_output.status.success(),
+        "stderr: {}",
+        stderr_text(&spawn_output)
+    );
+    let spawn_events = parse_ndjson(&spawn_output)?;
+    assert_eq!(spawn_events.len(), 3);
+    assert_eq!(spawn_events[0]["type"], "start");
+    assert_eq!(spawn_events[0]["command"], "session spawn");
+    assert_eq!(spawn_events[1]["type"], "envelope");
+    assert_eq!(spawn_events[1]["envelope"]["command"], "session spawn");
+    assert_eq!(
+        spawn_events[1]["envelope"]["spawn"]["output_mode"],
+        "ndjson"
+    );
+    assert!(
+        spawn_events[1]["envelope"]["spawn"]["argv"]
+            .as_array()
+            .expect("spawn argv")
+            .iter()
+            .any(|arg| arg == "--ndjson")
+    );
+    assert_eq!(spawn_events[2]["type"], "done");
+    assert_eq!(spawn_events[2]["executed"], false);
+
+    let attach_output = harness_command(&home, &cwd)
+        .args([
+            "session",
+            "attach",
+            "session_ndjson",
+            "--dry-run",
+            "--ndjson",
+        ])
+        .output()?;
+    let attach_stdout = stdout_text(&attach_output);
+    assert!(
+        attach_output.status.success(),
+        "stderr: {}",
+        stderr_text(&attach_output)
+    );
+    assert!(
+        !attach_stdout.contains("ndjson transcript should stay hidden"),
+        "attach ndjson must not emit transcript content: {attach_stdout}"
+    );
+    let attach_events = parse_ndjson(&attach_output)?;
+    assert_eq!(attach_events.len(), 3);
+    assert_eq!(attach_events[1]["envelope"]["command"], "session attach");
+    assert_eq!(
+        attach_events[1]["envelope"]["attach"]["argv"]
+            .as_array()
+            .expect("attach argv"),
+        &vec!["jcode", "--resume", "session_ndjson"]
+    );
+
+    let resume_output = harness_command(&home, &cwd)
+        .args([
+            "session",
+            "resume",
+            "session_ndjson",
+            "--dry-run",
+            "--ndjson",
+        ])
+        .output()?;
+    let resume_stdout = stdout_text(&resume_output);
+    assert!(
+        resume_output.status.success(),
+        "stderr: {}",
+        stderr_text(&resume_output)
+    );
+    assert!(
+        !resume_stdout.contains("ndjson transcript should stay hidden"),
+        "resume ndjson must not emit transcript content: {resume_stdout}"
+    );
+    let resume_events = parse_ndjson(&resume_output)?;
+    assert_eq!(resume_events.len(), 3);
+    assert_eq!(resume_events[1]["envelope"]["command"], "session resume");
+    assert_eq!(
+        resume_events[1]["envelope"]["resume"]["argv"]
+            .as_array()
+            .expect("resume argv"),
+        &vec!["jcode", "--resume", "session_ndjson"]
+    );
 
     Ok(())
 }

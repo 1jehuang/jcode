@@ -132,7 +132,7 @@ selfdev build target=auto
 - New JSON fields are additive and backward-compatible.
 - Breaking CLI behavior changes require an explicit migration note.
 - Examples in docs are runnable or intentionally marked as conceptual.
-- Stable automation-facing schemas are documented for `init`, `safe-eval`, `doctor`, `session list`, `session spawn --dry-run`, `session attach --dry-run`, `session show`, `session resume --dry-run`, `demo`, `demo run`, skills JSON commands, `run` JSON/NDJSON, and `clean-code check`.
+- Stable automation-facing schemas are documented for `init`, `safe-eval`, `doctor`, `session list`, `session spawn --dry-run`, `session attach --dry-run`, `session dry-run --ndjson`, `session show`, `session resume --dry-run`, `demo`, `demo run`, skills JSON commands, `run` JSON/NDJSON, and `clean-code check`.
 
 **Checks:**
 
@@ -144,6 +144,7 @@ cargo run -q -p jcode --bin jcode-harness -- skills doctor --json | python3 -m j
 cargo run -q -p jcode --bin jcode-harness -- skills llmwiki-bridge --json | python3 -m json.tool >/dev/null
 cargo run -q -p jcode --bin jcode-harness -- session list --json | python3 -m json.tool >/dev/null
 cargo run -q -p jcode --bin jcode-harness -- session spawn "review this diff" --dry-run --json | python3 -m json.tool >/dev/null
+cargo run -q -p jcode --bin jcode-harness -- session spawn "review this diff" --dry-run --ndjson | python3 -c 'import json,sys; [json.loads(line) for line in sys.stdin if line.strip()]'
 # Optional local smoke when a jcode session id is available:
 # cargo run -q -p jcode --bin jcode-harness -- session attach "$JCODE_SESSION_ID" --dry-run --json | python3 -m json.tool >/dev/null
 # cargo run -q -p jcode --bin jcode-harness -- session show "$JCODE_SESSION_ID" --json | python3 -m json.tool >/dev/null
@@ -154,6 +155,7 @@ cargo run -q -p jcode --bin jcode-harness -- demo run all --sandbox --json | pyt
 cargo test --test e2e harness_session_list_json -- --nocapture
 cargo test --test e2e harness_session_spawn_dry_run_json -- --nocapture
 cargo test --test e2e harness_session_attach_dry_run_json -- --nocapture
+cargo test --test e2e harness_session_dry_run_ndjson_envelopes -- --nocapture
 cargo test --test e2e harness_session_show_json -- --nocapture
 cargo test --test e2e harness_session_resume_dry_run_json -- --nocapture
 cargo test --test e2e harness_init_json -- --nocapture

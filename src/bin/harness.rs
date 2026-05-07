@@ -185,8 +185,11 @@ struct SessionSpawnArgs {
     #[arg(long)]
     dry_run: bool,
     /// Emit JSON report
-    #[arg(long)]
+    #[arg(long, conflicts_with = "ndjson")]
     json: bool,
+    /// Emit newline-delimited JSON events for the dry-run envelope
+    #[arg(long, conflicts_with = "json")]
+    ndjson: bool,
 }
 
 #[derive(Parser)]
@@ -197,8 +200,11 @@ struct SessionAttachArgs {
     #[arg(long)]
     dry_run: bool,
     /// Emit JSON report
-    #[arg(long)]
+    #[arg(long, conflicts_with = "ndjson")]
     json: bool,
+    /// Emit newline-delimited JSON events for the dry-run envelope
+    #[arg(long, conflicts_with = "json")]
+    ndjson: bool,
 }
 
 #[derive(Parser)]
@@ -221,8 +227,11 @@ struct SessionResumeArgs {
     #[arg(long)]
     dry_run: bool,
     /// Emit JSON report
-    #[arg(long)]
+    #[arg(long, conflicts_with = "ndjson")]
     json: bool,
+    /// Emit newline-delimited JSON events for the dry-run envelope
+    #[arg(long, conflicts_with = "json")]
+    ndjson: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -947,6 +956,49 @@ fn run_session(args: SessionArgs) -> Result<()> {
     }
 }
 
+fn print_session_dry_run_report(
+    report: &serde_json::Value,
+    json_output: bool,
+    ndjson_output: bool,
+) -> Result<bool> {
+    if ndjson_output {
+        let command = report
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("session");
+        for event in [
+            json!({
+                "type": "start",
+                "command": command,
+                "offline": true,
+                "read_only": true,
+                "dry_run": true,
+            }),
+            json!({
+                "type": "envelope",
+                "command": command,
+                "envelope": report,
+            }),
+            json!({
+                "type": "done",
+                "command": command,
+                "status": "ok",
+                "executed": false,
+            }),
+        ] {
+            println!("{}", serde_json::to_string(&event)?);
+        }
+        return Ok(true);
+    }
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(report)?);
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
 fn run_session_spawn(args: SessionSpawnArgs) -> Result<()> {
     if !args.dry_run {
         anyhow::bail!(
@@ -974,7 +1026,13 @@ fn run_session_spawn(args: SessionSpawnArgs) -> Result<()> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("auto");
-    let output_mode = if args.json { "json" } else { "text" };
+    let output_mode = if args.json {
+        "json"
+    } else if args.ndjson {
+        "ndjson"
+    } else {
+        "text"
+    };
 
     let mut argv = vec!["jcode".to_string(), "-C".to_string(), working_dir.clone()];
     if let Some(profile) = args
@@ -1001,6 +1059,8 @@ fn run_session_spawn(args: SessionSpawnArgs) -> Result<()> {
     argv.push("run".to_string());
     if args.json {
         argv.push("--json".to_string());
+    } else if args.ndjson {
+        argv.push("--ndjson".to_string());
     }
     argv.push(args.goal.clone());
     let command_display = argv
@@ -1043,16 +1103,16 @@ fn run_session_spawn(args: SessionSpawnArgs) -> Result<()> {
         },
     });
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        println!("jcode-harness session spawn dry-run");
-        println!("Offline: true");
-        println!("Read only: true");
-        println!("Executed: false");
-        println!("Command: {command_display}");
-        println!("Working directory: {working_dir}");
+    if print_session_dry_run_report(&report, args.json, args.ndjson)? {
+        return Ok(());
     }
+
+    println!("jcode-harness session spawn dry-run");
+    println!("Offline: true");
+    println!("Read only: true");
+    println!("Executed: false");
+    println!("Command: {command_display}");
+    println!("Working directory: {working_dir}");
 
     Ok(())
 }
@@ -1129,16 +1189,16 @@ fn run_session_attach(args: SessionAttachArgs) -> Result<()> {
         },
     });
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        println!("jcode-harness session attach dry-run: {}", session.id);
-        println!("Offline: true");
-        println!("Read only: true");
-        println!("Executed: false");
-        println!("Command: jcode --resume {}", session.id);
-        println!("Working directory: {working_dir}");
+    if print_session_dry_run_report(&report, args.json, args.ndjson)? {
+        return Ok(());
     }
+
+    println!("jcode-harness session attach dry-run: {}", session.id);
+    println!("Offline: true");
+    println!("Read only: true");
+    println!("Executed: false");
+    println!("Command: jcode --resume {}", session.id);
+    println!("Working directory: {working_dir}");
 
     Ok(())
 }
@@ -1213,16 +1273,16 @@ fn run_session_resume(args: SessionResumeArgs) -> Result<()> {
         },
     });
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        println!("jcode-harness session resume dry-run: {}", session.id);
-        println!("Offline: true");
-        println!("Read only: true");
-        println!("Executed: false");
-        println!("Command: jcode --resume {}", session.id);
-        println!("Working directory: {working_dir}");
+    if print_session_dry_run_report(&report, args.json, args.ndjson)? {
+        return Ok(());
     }
+
+    println!("jcode-harness session resume dry-run: {}", session.id);
+    println!("Offline: true");
+    println!("Read only: true");
+    println!("Executed: false");
+    println!("Command: jcode --resume {}", session.id);
+    println!("Working directory: {working_dir}");
 
     Ok(())
 }

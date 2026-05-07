@@ -1,11 +1,11 @@
 {
   "version": 5,
   "projectName": "jcode-harness",
-  "focus": "Add offline session attach dry-run JSON",
+  "focus": "Add session dry-run NDJSON envelope events",
   "status": "executing",
-  "activeContractId": "2026-05-07-add-offline-session-attach-dry-run-json-c686cd",
+  "activeContractId": "2026-05-07-add-session-dry-run-ndjson-envelope-events-3dc47d",
   "counters": {
-    "contracts": 24,
+    "contracts": 25,
     "traces": 23,
     "gates": 22,
     "verifications": 19,
@@ -65,14 +65,6 @@
     }
   ],
   "events": [
-    {
-      "ts": "2026-05-06T19:09:22.556Z",
-      "type": "state_update",
-      "note": "Criado .codex-harness, .context docs/agents/skills/workflow e workflow PREVC init-context-harness.",
-      "status": "done",
-      "focus": "Inicialização do harness e contexto concluída",
-      "activeContractId": ""
-    },
     {
       "ts": "2026-05-06T19:10:45.661Z",
       "type": "contract_created",
@@ -634,6 +626,12 @@
       "type": "contract_created",
       "contractId": "2026-05-07-add-offline-session-attach-dry-run-json-c686cd",
       "summary": "Add offline session attach dry-run JSON"
+    },
+    {
+      "ts": "2026-05-07T22:24:58.692Z",
+      "type": "contract_created",
+      "contractId": "2026-05-07-add-session-dry-run-ndjson-envelope-events-3dc47d",
+      "summary": "Add session dry-run NDJSON envelope events"
     }
   ]
 }

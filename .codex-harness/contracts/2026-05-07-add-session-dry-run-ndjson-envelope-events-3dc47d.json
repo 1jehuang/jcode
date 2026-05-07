@@ -1,0 +1,49 @@
+{
+  "id": "2026-05-07-add-session-dry-run-ndjson-envelope-events-3dc47d",
+  "title": "Add session dry-run NDJSON envelope events",
+  "goal": "Add the next issue #4 JSONL slice: NDJSON event output for dry-run session spawn, attach, and resume envelopes without starting providers or TUI flows.",
+  "createdAt": "2026-05-07T22:24:58.691Z",
+  "status": "active",
+  "requiredInputs": [
+    "GitHub issue #4 headless orchestration API",
+    "Existing spawn/attach/resume dry-run JSON envelopes"
+  ],
+  "budget": {
+    "maxSteps": 7,
+    "maxMinutes": 45,
+    "maxToolCalls": 35
+  },
+  "permissions": [
+    "Modify source, tests, docs, governance",
+    "Run cargo fmt/check/test and selfdev build",
+    "Commit and push"
+  ],
+  "completionConditions": [
+    "`jcode-harness session spawn|attach|resume ... --dry-run --ndjson` exists",
+    "NDJSON emits deterministic `start`, `envelope`, and `done` events with the existing safe envelope and no transcript content",
+    "`--json` and `--ndjson` are mutually exclusive",
+    "Focused e2e, fmt/check, selfdev build, commit and push pass"
+  ],
+  "outputPaths": [
+    "src/bin/harness.rs",
+    "tests/e2e/harness_cli.rs",
+    "docs/JCODE_HARNESS_JSON_SCHEMAS.md",
+    "README.md",
+    "docs/JCODE_HARNESS_INNOVATION_ROADMAP.md",
+    "docs/JCODE_HARNESS_RELEASE_GATES.md",
+    "docs/SKILLS_HARNESS_STATUS.md",
+    ".codex-harness/**"
+  ],
+  "verificationCommands": [
+    "cargo fmt --check",
+    "cargo test -p jcode --test e2e harness_session_dry_run_ndjson_envelopes -- --nocapture",
+    "cargo check -p jcode",
+    "jcode-harness session spawn \"fixture\" --dry-run --ndjson | python3 -c 'import json,sys; [json.loads(line) for line in sys.stdin if line.strip()]'"
+  ],
+  "failureTaxonomy": [
+    "Invalid JSONL output or pretty JSON mixed into NDJSON",
+    "Transcript content leaked in attach/resume envelope events",
+    "Breaking existing --json schemas"
+  ],
+  "notes": "Keep behavior additive. Do not change existing --json shape. NDJSON should be deterministic and parseable line-by-line."
+}

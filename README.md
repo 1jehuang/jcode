@@ -141,10 +141,13 @@ jcode-harness demo run all --sandbox --json
 jcode-harness session list --json
 jcode-harness session list --source jcode --json
 jcode-harness session spawn "draft a release plan" --dry-run --json
+jcode-harness session spawn "draft a release plan" --dry-run --ndjson
 jcode-harness session attach <session-id> --dry-run --json
+jcode-harness session attach <session-id> --dry-run --ndjson
 jcode-harness session show <session-id> --json
 jcode-harness session show <session-id> --preview 3 --json
 jcode-harness session resume <session-id> --dry-run --json
+jcode-harness session resume <session-id> --dry-run --ndjson
 jcode-harness safe-eval
 jcode-harness safe-eval --json
 jcode-harness doctor
@@ -184,10 +187,13 @@ TUI:
 jcode-harness session list --json
 jcode-harness session list --source jcode --json
 jcode-harness session spawn "draft a release plan" --dry-run --json
+jcode-harness session spawn "draft a release plan" --dry-run --ndjson
 jcode-harness session attach <session-id> --dry-run --json
+jcode-harness session attach <session-id> --dry-run --ndjson
 jcode-harness session show <session-id> --json
 jcode-harness session show <session-id> --preview 3 --json
 jcode-harness session resume <session-id> --dry-run --json
+jcode-harness session resume <session-id> --dry-run --ndjson
 ```
 
 `session spawn --dry-run --json` returns a safe `jcode run --json <goal>`
@@ -199,6 +205,11 @@ because the harness does not execute spawn flows yet.
 the current safe attach envelope for an operator-selected execution surface
 without starting the TUI/provider flow or emitting transcript content. Omitting
 `--dry-run` fails safely because the harness does not execute attach flows yet.
+
+`session spawn|attach|resume --dry-run --ndjson` emits deterministic
+newline-delimited `start`, `envelope`, and `done` events for dashboards and
+external orchestrators while preserving the same offline/read-only safety
+guarantees as `--json`.
 
 `session show` currently supports local jcode sessions. It emits metadata only by
 default, and transcript content appears only when a bounded `--preview N` is

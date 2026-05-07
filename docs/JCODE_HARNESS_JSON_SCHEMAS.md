@@ -348,6 +348,32 @@ Guarantees:
 - `attach.live_session_detection` is `not_attempted_offline_dry_run`; this slice does not probe running servers or sockets.
 - `safety.writes`, `network_required_for_dry_run`, and `credentials_required_for_dry_run` are always `false` for the dry-run report.
 
+## Session dry-run `--ndjson` envelope events
+
+Commands:
+
+```bash
+jcode-harness session spawn "draft the release plan" --dry-run --ndjson
+jcode-harness session attach session_visible --dry-run --ndjson
+jcode-harness session resume session_visible --dry-run --ndjson
+```
+
+Shape:
+
+```jsonl
+{"type":"start","command":"session spawn","offline":true,"read_only":true,"dry_run":true}
+{"type":"envelope","command":"session spawn","envelope":{"status":"ok","command":"session spawn","offline":true,"read_only":true,"dry_run":true,"executed":false}}
+{"type":"done","command":"session spawn","status":"ok","executed":false}
+```
+
+Guarantees:
+
+- `--ndjson` is available for dry-run `session spawn`, `session attach`, and `session resume`; it is mutually exclusive with `--json`.
+- The second event's `envelope` value is the same stable object emitted by the matching `--json` command, except compacted onto one JSON line.
+- Events are deterministic and newline-delimited: `start`, `envelope`, then `done`.
+- NDJSON dry-run output does not start the TUI, providers, servers, network-backed integrations, or credential prompts.
+- Attach/resume NDJSON envelopes reuse metadata-only session objects and intentionally exclude transcript content.
+
 ## `session show --json`
 
 Command:
