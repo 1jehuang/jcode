@@ -296,6 +296,86 @@ fn harness_run_ndjson_uses_mock_provider_without_network() -> Result<()> {
 }
 
 #[test]
+fn harness_demo_json_lists_offline_claim_demos_without_credentials() -> Result<()> {
+    let temp = tempfile::Builder::new()
+        .prefix("jcode-harness-demo-")
+        .tempdir()?;
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("workspace");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(&cwd)?;
+
+    let output = harness_command(&home, &cwd)
+        .args(["demo", "--cwd"])
+        .arg(&cwd)
+        .arg("--json")
+        .output()?;
+    let stdout = stdout_text(&output);
+
+    assert!(output.status.success(), "stderr: {}", stderr_text(&output));
+    let report: Value = serde_json::from_str(&stdout)?;
+    assert_eq!(report["status"], "ok");
+    assert_eq!(report["offline"], true);
+    assert_eq!(report["network_required"], false);
+    assert_eq!(report["credentials_required"], false);
+
+    let demos = report["demos"].as_array().expect("demos");
+    for surface in [
+        "safe-eval",
+        "mock-provider",
+        "memory",
+        "plan",
+        "swarm",
+        "browser",
+        "skills",
+        "release-gates",
+    ] {
+        assert!(
+            demos.iter().any(|demo| demo["surface"] == surface),
+            "missing surface {surface}. stdout: {stdout}"
+        );
+    }
+    for demo in demos {
+        assert_eq!(demo["offline"], true, "demo: {demo:?}");
+        assert_eq!(demo["network_required"], false, "demo: {demo:?}");
+        assert_eq!(demo["credentials_required"], false, "demo: {demo:?}");
+        assert!(demo["argv"].as_array().is_some_and(|argv| !argv.is_empty()));
+        assert!(
+            demo["expected_evidence"]
+                .as_array()
+                .is_some_and(|evidence| !evidence.is_empty())
+        );
+    }
+    assert!(demos.iter().any(|demo| {
+        demo["id"] == "mock-provider-run-json"
+            && demo["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("--mock-response"))
+    }));
+    assert!(
+        demos
+            .iter()
+            .any(|demo| demo["id"] == "release-gate-smoke" && demo["project_writes"] == true)
+    );
+
+    let human_output = harness_command(&home, &cwd)
+        .args(["demo", "--cwd"])
+        .arg(&cwd)
+        .output()?;
+    let human_stdout = stdout_text(&human_output);
+    assert!(
+        human_output.status.success(),
+        "stderr: {}",
+        stderr_text(&human_output)
+    );
+    assert!(human_stdout.contains("Reproducible demos:"));
+    assert!(human_stdout.contains("memory-llmwiki-bridge"));
+    assert!(human_stdout.contains("jcode-harness smoke"));
+
+    Ok(())
+}
+
+#[test]
 fn harness_smoke_runs_offline_tool_cases_with_deterministic_artifacts() -> Result<()> {
     let temp = tempfile::Builder::new()
         .prefix("jcode-harness-smoke-")

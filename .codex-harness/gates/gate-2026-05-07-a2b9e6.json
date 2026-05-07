@@ -1,0 +1,48 @@
+{
+  "id": "gate-2026-05-07-a2b9e6",
+  "ts": "2026-05-07T21:07:46.124Z",
+  "contractId": "2026-05-07-add-offline-demo-manifest-9c2f1d",
+  "verdict": "pass",
+  "outputChecks": [
+    {
+      "path": "src/bin/harness.rs",
+      "exists": true
+    },
+    {
+      "path": "tests/e2e/harness_cli.rs",
+      "exists": true
+    },
+    {
+      "path": "docs/JCODE_HARNESS_JSON_SCHEMAS.md",
+      "exists": true
+    },
+    {
+      "path": "docs/JCODE_HARNESS_RELEASE_GATES.md",
+      "exists": true
+    },
+    {
+      "path": "docs/SKILLS_HARNESS_STATUS.md",
+      "exists": true
+    }
+  ],
+  "checkedConditions": [
+    "`jcode-harness demo` prints a human-readable offline demo manifest",
+    "`jcode-harness demo --json` emits parseable deterministic JSON",
+    "Manifest covers safe-eval, mock-provider, memory, plan, swarm, browser, skills, and release-gates surfaces",
+    "Manifest command is non-executing and does not contact providers, network, MCP, browser, or credentials",
+    "Focused e2e test, JSON parse smoke, cargo check, and selfdev builds passed",
+    "JSON schemas, release gates, and status docs mention demo schema/evidence"
+  ],
+  "uncheckedConditions": [],
+  "evidence": [
+    "cargo fmt --check passed",
+    "git diff --check passed",
+    "cargo test --test e2e harness_demo_json_lists_offline_claim_demos_without_credentials -- --nocapture passed",
+    "cargo run -q -p jcode --bin jcode-harness -- demo --json | python3 -m json.tool >/dev/null passed",
+    "cargo check -p jcode passed",
+    "selfdev build target=auto passed and reload succeeded",
+    "scripts/dev_cargo.sh build --profile selfdev -p jcode --bin jcode-harness passed",
+    "target/selfdev/jcode-harness demo --json parsed successfully"
+  ],
+  "notes": "First issue #2 implementation is intentionally manifest-only: reproducible demo commands are listed with claims/evidence and write/network/credential flags, but not executed by the manifest command."
+}

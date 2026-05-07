@@ -132,7 +132,7 @@ selfdev build target=auto
 - New JSON fields are additive and backward-compatible.
 - Breaking CLI behavior changes require an explicit migration note.
 - Examples in docs are runnable or intentionally marked as conceptual.
-- Stable automation-facing schemas are documented for `init`, `safe-eval`, `doctor`, skills JSON commands, `run` JSON/NDJSON, and `clean-code check`.
+- Stable automation-facing schemas are documented for `init`, `safe-eval`, `doctor`, `demo`, skills JSON commands, `run` JSON/NDJSON, and `clean-code check`.
 
 **Checks:**
 
@@ -142,6 +142,7 @@ cargo run -q -p jcode --bin jcode-harness -- skills show karpathy-guidelines --j
 cargo run -q -p jcode --bin jcode-harness -- skills show llmwiki-memory --json | python3 -m json.tool >/dev/null
 cargo run -q -p jcode --bin jcode-harness -- skills doctor --json | python3 -m json.tool >/dev/null
 cargo run -q -p jcode --bin jcode-harness -- skills llmwiki-bridge --json | python3 -m json.tool >/dev/null
+cargo run -q -p jcode --bin jcode-harness -- demo --json | python3 -m json.tool >/dev/null
 cargo test --test e2e harness_init_json -- --nocapture
 cargo test --test e2e clean_code_check_json -- --nocapture
 cargo test --test e2e harness_smoke -- --nocapture

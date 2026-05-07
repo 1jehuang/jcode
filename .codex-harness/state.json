@@ -1,14 +1,14 @@
 {
   "version": 5,
   "projectName": "jcode-harness",
-  "focus": "Issue #1 safe-eval validation",
+  "focus": "Issue #2 offline demo manifest",
   "status": "done",
-  "activeContractId": "2026-05-07-implement-safe-eval-command-ba6335",
+  "activeContractId": "2026-05-07-add-offline-demo-manifest-9c2f1d",
   "counters": {
-    "contracts": 15,
-    "traces": 16,
-    "gates": 16,
-    "verifications": 14,
+    "contracts": 16,
+    "traces": 17,
+    "gates": 17,
+    "verifications": 15,
     "knowledgeItems": 0,
     "knowledgeQueries": 0,
     "evalCases": 0,
@@ -21,7 +21,7 @@
     {
       "id": "decision-2026-05-06-1c16f8",
       "ts": "2026-05-06T19:09:22.556Z",
-      "text": "Responder ao usuário em português conforme preferência global registrada."
+      "text": "Responder ao usu\u00e1rio em portugu\u00eas conforme prefer\u00eancia global registrada."
     },
     {
       "id": "decision-2026-05-07-f58c86",
@@ -37,6 +37,11 @@
       "id": "decision-2026-05-07-5b0347",
       "ts": "2026-05-07T20:51:37.321Z",
       "text": "Issue #1 first slice (`jcode-harness safe-eval`) is already present in current source and e2e coverage; validated locally and aligned selfdev jcode-harness binary before moving to next issue."
+    },
+    {
+      "id": "decision-2026-05-07-3d8a2f",
+      "ts": "2026-05-07T21:07:46.124Z",
+      "text": "For issue #2, implement a deterministic manifest-only `jcode-harness demo` first, rather than auto-running demos, so README/product claims are reproducible without triggering project writes, providers, network, MCP, browser, or credentials by default."
     }
   ],
   "events": [
@@ -50,7 +55,7 @@
       "type": "state_update",
       "note": "Criado .codex-harness, .context docs/agents/skills/workflow e workflow PREVC init-context-harness.",
       "status": "done",
-      "focus": "Inicialização do harness e contexto concluída",
+      "focus": "Inicializa\u00e7\u00e3o do harness e contexto conclu\u00edda",
       "activeContractId": ""
     },
     {
@@ -86,7 +91,7 @@
       "traceId": "trace-2026-05-06-fa63625f",
       "contractId": "2026-05-06-embedded-skills-scoping-improvement-87c1a0",
       "status": "pass",
-      "summary": "Validações direcionadas, smoke JSON e selfdev build passaram."
+      "summary": "Valida\u00e7\u00f5es direcionadas, smoke JSON e selfdev build passaram."
     },
     {
       "ts": "2026-05-06T22:38:08.746Z",
@@ -422,6 +427,35 @@
       "status": "done",
       "focus": "Issue #1 safe-eval validation",
       "activeContractId": "2026-05-07-implement-safe-eval-command-ba6335"
+    },
+    {
+      "ts": "2026-05-07T21:07:46.124Z",
+      "type": "contract_created",
+      "contractId": "2026-05-07-add-offline-demo-manifest-9c2f1d",
+      "summary": "Add offline demo manifest"
+    },
+    {
+      "ts": "2026-05-07T21:07:46.124Z",
+      "type": "verification_recorded",
+      "traceId": "trace-2026-05-07-c9a1e4",
+      "contractId": "2026-05-07-add-offline-demo-manifest-9c2f1d",
+      "status": "pass",
+      "summary": "demo manifest validation passed"
+    },
+    {
+      "ts": "2026-05-07T21:07:46.124Z",
+      "type": "gate_evaluated",
+      "contractId": "2026-05-07-add-offline-demo-manifest-9c2f1d",
+      "gateId": "gate-2026-05-07-a2b9e6",
+      "verdict": "pass"
+    },
+    {
+      "ts": "2026-05-07T21:07:46.124Z",
+      "type": "state_update",
+      "note": "Implemented, validated, and selfdev-built offline demo manifest for issue #2 first slice. Next: commit and push.",
+      "status": "done",
+      "focus": "Issue #2 offline demo manifest",
+      "activeContractId": "2026-05-07-add-offline-demo-manifest-9c2f1d"
     }
   ]
 }

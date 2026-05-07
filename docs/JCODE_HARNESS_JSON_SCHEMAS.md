@@ -582,6 +582,53 @@ Guarantees:
 - Commands that can write local files when invoked externally include an explicit `write_risk` field.
 - `permission_boundary` records the read/write/secret constraints that automation should surface before using the concrete MCP tools.
 
+## `demo --json`
+
+Command:
+
+```bash
+jcode-harness demo --cwd /repo --json
+```
+
+Shape:
+
+```json
+{
+  "status": "ok",
+  "offline": true,
+  "network_required": false,
+  "credentials_required": false,
+  "root": "/repo",
+  "demos": [
+    {
+      "id": "mock-provider-run-json",
+      "surface": "mock-provider",
+      "title": "Exercise the real Agent runtime with a deterministic provider response.",
+      "claim": "The run JSON contract can be parsed without network, model credentials, or quota.",
+      "command": "jcode-harness run 'review this diff' --json --mock-response 'mocked harness response'",
+      "argv": ["jcode-harness", "run", "review this diff", "--json", "--mock-response", "mocked harness response"],
+      "offline": true,
+      "network_required": false,
+      "credentials_required": false,
+      "project_writes": false,
+      "expected_evidence": ["provider is harness-mock"],
+      "notes": "May write normal session metadata under JCODE_HOME, but does not write project files."
+    }
+  ],
+  "recommended_flow": [
+    "Run safe-eval first in unfamiliar repositories."
+  ]
+}
+```
+
+Guarantees:
+
+- The manifest is deterministic for a given `--cwd` and does not execute the listed demos.
+- Top-level `offline`, `network_required`, and `credentials_required` describe the manifest command itself and are always `true`, `false`, and `false` respectively.
+- Every `demos[]` entry includes stable `id`, `surface`, `title`, `claim`, copy-paste `command`, structured `argv`, booleans for `offline`, `network_required`, `credentials_required`, and `project_writes`, plus non-empty `expected_evidence`.
+- Current surfaces include `safe-eval`, `mock-provider`, `memory`, `plan`, `swarm`, `browser`, `skills`, and `release-gates`.
+- Entries with `project_writes: true` are intended for temporary or safe-eval workspaces; the manifest still does not write those files by itself.
+
 ## `run --json`
 
 Command:

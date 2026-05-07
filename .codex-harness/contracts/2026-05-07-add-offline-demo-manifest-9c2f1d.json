@@ -1,0 +1,58 @@
+{
+  "id": "2026-05-07-add-offline-demo-manifest-9c2f1d",
+  "title": "Add offline demo manifest",
+  "goal": "Implement the first issue #2 slice: a deterministic `jcode-harness demo` manifest for reproducible mock demos across memory, plan, swarm, browser, skills, safe-eval, mock-provider, and release gates.",
+  "createdAt": "2026-05-07T21:07:46.124Z",
+  "status": "active",
+  "requiredInputs": [
+    "GitHub issue #2 body: add doctor plus mock demos for memory, plan, swarm, browser, skills, and release gates without credentials",
+    "Existing run --mock-response, doctor, init, smoke, skills match, and llmwiki bridge commands"
+  ],
+  "budget": {
+    "maxSteps": 10,
+    "maxMinutes": 60,
+    "maxToolCalls": 40
+  },
+  "permissions": [
+    "edit jcode-harness runtime and tests",
+    "update JSON schema and release/status docs",
+    "run cargo fmt/check/tests locally",
+    "selfdev build/reload after runtime change",
+    "commit and push branch"
+  ],
+  "completionConditions": [
+    "`jcode-harness demo` prints a human-readable offline demo manifest",
+    "`jcode-harness demo --json` emits parseable deterministic JSON",
+    "The manifest covers safe-eval, mock-provider, memory, plan, swarm, browser, skills, and release-gates surfaces",
+    "The manifest command itself does not execute demos, contact network/provider credentials, or start MCP/browser integrations",
+    "Focused e2e tests and JSON parse smoke pass locally",
+    "Docs/status/release gates document the new schema and validation evidence",
+    "Selfdev validation completed for jcode and jcode-harness binaries"
+  ],
+  "outputPaths": [
+    "src/bin/harness.rs",
+    "tests/e2e/harness_cli.rs",
+    "docs/JCODE_HARNESS_JSON_SCHEMAS.md",
+    "docs/JCODE_HARNESS_RELEASE_GATES.md",
+    "docs/SKILLS_HARNESS_STATUS.md"
+  ],
+  "verificationCommands": [
+    "cargo fmt --check",
+    "git diff --check",
+    "cargo test --test e2e harness_demo_json_lists_offline_claim_demos_without_credentials -- --nocapture",
+    "cargo run -q -p jcode --bin jcode-harness -- demo --json | python3 -m json.tool >/dev/null",
+    "cargo check -p jcode",
+    "selfdev build target=auto",
+    "scripts/dev_cargo.sh build --profile selfdev -p jcode --bin jcode-harness",
+    "target/selfdev/jcode-harness demo --json | python3 -m json.tool >/dev/null"
+  ],
+  "failureTaxonomy": [
+    "cli_contract_break",
+    "json_schema_invalid",
+    "demo_surface_missing",
+    "accidental_network_or_credential_use",
+    "test_failure",
+    "uncommitted_or_unpushed"
+  ],
+  "notes": "Manifest-only first slice for issue #2. It lists copy-paste demo commands and evidence expectations, but intentionally does not execute them or open network/provider/MCP/browser surfaces."
+}

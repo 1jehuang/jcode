@@ -26,6 +26,8 @@ enum Command {
     SafeEval(SafeEvalArgs),
     /// Run offline onboarding diagnostics without contacting providers
     Doctor(DoctorArgs),
+    /// Print reproducible offline mock demos for README/product claims
+    Demo(DemoArgs),
     /// Run the deterministic tool harness smoke test
     Smoke(SmokeArgs),
     /// Run a single goal by delegating to the jcode run path with skill routing
@@ -81,6 +83,16 @@ struct DoctorArgs {
     #[arg(long)]
     cwd: Option<String>,
     /// Emit JSON report
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct DemoArgs {
+    /// Project directory used in generated copy-paste commands
+    #[arg(long)]
+    cwd: Option<String>,
+    /// Emit JSON manifest
     #[arg(long)]
     json: bool,
 }
@@ -440,6 +452,7 @@ async fn main() -> Result<()> {
         Some(Command::Init(args)) => run_init(args),
         Some(Command::SafeEval(args)) => run_safe_eval(args),
         Some(Command::Doctor(args)) => run_doctor(args),
+        Some(Command::Demo(args)) => run_demo(args),
         Some(Command::Smoke(args)) => run_smoke(args).await,
         Some(Command::Run(args)) => run_goal(args).await,
         Some(Command::Skills(args)) => run_skills(args),
@@ -921,6 +934,191 @@ fn run_doctor(args: DoctorArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn run_demo(args: DemoArgs) -> Result<()> {
+    let root = resolve_existing_root(args.cwd.as_deref(), "demo")?;
+    let root = root.canonicalize().unwrap_or(root);
+    let manifest = build_demo_manifest(&root);
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&manifest)?);
+        return Ok(());
+    }
+
+    println!(
+        "jcode-harness demo: {}",
+        manifest["status"].as_str().unwrap_or("ok")
+    );
+    println!("Offline: true");
+    println!("Network required: false");
+    println!("Credentials required: false");
+    println!("Root: {}", manifest["root"].as_str().unwrap_or("<unknown>"));
+    println!("\nReproducible demos:");
+    if let Some(demos) = manifest["demos"].as_array() {
+        for demo in demos {
+            println!(
+                "- [{}] {}: {}",
+                demo["surface"].as_str().unwrap_or("unknown"),
+                demo["id"].as_str().unwrap_or("unknown"),
+                demo["title"].as_str().unwrap_or("")
+            );
+            println!("  $ {}", demo["command"].as_str().unwrap_or(""));
+        }
+    }
+    println!("\nRecommended flow:");
+    if let Some(flow) = manifest["recommended_flow"].as_array() {
+        for (idx, step) in flow.iter().enumerate() {
+            println!("{}. {}", idx + 1, step.as_str().unwrap_or(""));
+        }
+    }
+    Ok(())
+}
+
+fn build_demo_manifest(root: &std::path::Path) -> serde_json::Value {
+    let root_arg = root.display().to_string();
+    let demo_workspace = root.join(".jcode").join("demo").join("smoke");
+    json!({
+        "status": "ok",
+        "offline": true,
+        "network_required": false,
+        "credentials_required": false,
+        "root": root,
+        "demos": [
+            demo_manifest_entry(
+                "safe-eval-profile",
+                "safe-eval",
+                "Create an isolated trust-center profile for first evaluation.",
+                "Safe evaluation can be reproduced without importing existing credentials or long-lived state.",
+                vec!["jcode-harness", "safe-eval", "--cwd", &root_arg, "--json"],
+                true,
+                vec!["profile is safe-eval", "disabled_surfaces includes telemetry and external credential auto-trust", "activation files are written or skipped deterministically"],
+                "Writes only under .jcode/safe-eval unless --home points elsewhere."
+            ),
+            demo_manifest_entry(
+                "mock-provider-run-json",
+                "mock-provider",
+                "Exercise the real Agent runtime with a deterministic provider response.",
+                "The run JSON contract can be parsed without network, model credentials, or quota.",
+                vec!["jcode-harness", "run", "review this diff", "--json", "--mock-response", "mocked harness response"],
+                false,
+                vec!["provider is harness-mock", "model is harness-mock-model", "usage token counts are deterministic"],
+                "May write normal session metadata under JCODE_HOME, but does not write project files."
+            ),
+            demo_manifest_entry(
+                "memory-llmwiki-bridge",
+                "memory",
+                "Preview the local llmwiki memory bridge contract.",
+                "Memory integration has explicit read/write boundaries before any MCP tool is invoked.",
+                vec!["jcode-harness", "skills", "llmwiki-bridge", "--json"],
+                false,
+                vec!["offline is true", "network_required is false", "commands include wiki_query, wiki_search, wiki_sync, wiki_lint"],
+                "This command only prints a contract; it does not call MCP tools."
+            ),
+            demo_manifest_entry(
+                "plan-init-scaffold",
+                "plan",
+                "Generate deterministic project planning scaffolds.",
+                "Plan-first onboarding can be inspected as local files before any model/provider turn.",
+                vec!["jcode-harness", "init", "--cwd", &root_arg, "--yes", "--no-memory-wiki", "--json"],
+                true,
+                vec!["files_written/files_skipped report scaffold changes", "detected_stack is derived from local files", "next_steps are machine-readable"],
+                "Use a temporary checkout or safe-eval workspace if you do not want scaffold files in the repo."
+            ),
+            demo_manifest_entry(
+                "swarm-analysis-plan-scaffold",
+                "swarm",
+                "Create the local init swarm analysis plan artifact.",
+                "The swarm bootstrap claim has a reviewable local plan artifact before interactive execution.",
+                vec!["jcode-harness", "init", "--cwd", &root_arg, "--yes", "--json"],
+                true,
+                vec![".jcode/init/SWARM_ANALYSIS_PLAN.md is produced", "no provider is initialized by the CLI scaffold", "operator review happens before execution"],
+                "This is the deterministic scaffold side of the interactive /init swarm flow."
+            ),
+            demo_manifest_entry(
+                "browser-safety-doctor",
+                "browser",
+                "Inspect browser-adjacent safety without opening a browser.",
+                "Onboarding diagnostics can report platform/config risk without launching auth or browser integrations.",
+                vec!["jcode-harness", "doctor", "--cwd", &root_arg, "--json"],
+                false,
+                vec!["offline is true", "platform os/arch are reported", "mcp configs are review-only findings"],
+                "No browser window is opened; future browser demos should remain opt-in."
+            ),
+            demo_manifest_entry(
+                "skills-router-match",
+                "skills",
+                "Preview skill routing and scope-policy decisions.",
+                "Skill selection is explainable before a model prompt is sent.",
+                vec!["jcode-harness", "skills", "match", "fix this Rust bug", "--cwd", &root_arg, "--json"],
+                false,
+                vec!["selected preserves router order", "policy records selected/skipped decisions", "entries include origin and allowed_tools"],
+                "The command only reads skill metadata from built-in and local skill origins."
+            ),
+            demo_manifest_entry(
+                "release-gate-smoke",
+                "release-gates",
+                "Run the deterministic offline harness smoke gate.",
+                "Release claims can include a local tool-execution smoke without providers or network.",
+                vec!["jcode-harness", "smoke", "--cwd", &demo_workspace.display().to_string()],
+                true,
+                vec!["write/read/edit/patch/todo/batch cases pass", "network-backed cases are skipped by default", "deterministic artifacts are created under the demo workspace"],
+                "Use a disposable --cwd path because the smoke gate intentionally writes sample artifacts."
+            )
+        ],
+        "recommended_flow": [
+            "Run safe-eval first in unfamiliar repositories.",
+            "Use mock-provider run JSON/NDJSON demos for README screenshots and CI parser checks.",
+            "Use init/smoke demos in a disposable workspace when you need file-system evidence.",
+            "Treat browser, memory, and swarm demos as preview contracts until explicit opt-in execution is added."
+        ]
+    })
+}
+
+fn demo_manifest_entry(
+    id: &str,
+    surface: &str,
+    title: &str,
+    claim: &str,
+    argv: Vec<&str>,
+    project_writes: bool,
+    expected_evidence: Vec<&str>,
+    notes: &str,
+) -> serde_json::Value {
+    let argv = argv.into_iter().map(ToOwned::to_owned).collect::<Vec<_>>();
+    json!({
+        "id": id,
+        "surface": surface,
+        "title": title,
+        "claim": claim,
+        "command": shell_command(&argv),
+        "argv": argv,
+        "offline": true,
+        "network_required": false,
+        "credentials_required": false,
+        "project_writes": project_writes,
+        "expected_evidence": expected_evidence,
+        "notes": notes,
+    })
+}
+
+fn shell_command(argv: &[String]) -> String {
+    argv.iter()
+        .map(|part| shell_word(part))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_word(value: &str) -> String {
+    if !value.is_empty()
+        && value.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '=' | '@')
+        })
+    {
+        value.to_string()
+    } else {
+        shell_quote(value)
+    }
 }
 
 fn build_safe_eval_doctor(
