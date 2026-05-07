@@ -135,6 +135,9 @@ jcode
 ```bash
 jcode-harness
 jcode-harness smoke
+jcode-harness demo --json
+jcode-harness demo run mock-provider-run-json --json
+jcode-harness demo run all --sandbox --json
 jcode-harness safe-eval
 jcode-harness safe-eval --json
 jcode-harness doctor
@@ -163,6 +166,30 @@ Use `jcode-harness doctor --json` for offline diagnostics before running live
 providers. It reports safe-eval activation, telemetry opt-out state, platform,
 skill loading health, and project/global MCP config paths without contacting
 model providers or starting MCP/browser/Gmail integrations.
+
+### Reproducible demos without credentials
+
+Issue/README claims should be reproducible without provider keys, network calls,
+browser windows, or MCP server startup. The `demo` command prints a deterministic
+manifest for safe-eval, mock-provider, memory, plan, swarm, browser, skills, and
+release-gate demos:
+
+```bash
+jcode-harness demo --json
+jcode-harness demo run mock-provider-run-json --json
+```
+
+Some demos intentionally write scaffold or smoke-test files. They are blocked by
+default unless you opt into writes. Prefer the sandbox path, which executes all
+demos in a temporary workspace and removes it after the JSON report is rendered:
+
+```bash
+jcode-harness demo run all --sandbox --json
+```
+
+Use `--keep-sandbox` only when you want to inspect the generated files manually.
+Use `--allow-writes` only in a disposable or already activated safe-eval
+workspace.
 
 ### Skills
 

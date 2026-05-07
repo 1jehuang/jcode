@@ -1,0 +1,34 @@
+{
+  "id": "gate-2026-05-07-1c73d9",
+  "ts": "2026-05-07T21:25:14.317Z",
+  "contractId": "2026-05-07-document-reproducible-demo-commands-b0a5fd",
+  "verdict": "pass",
+  "outputChecks": [
+    {
+      "path": "README.md",
+      "exists": true
+    },
+    {
+      "path": "docs/SKILLS_HARNESS.md",
+      "exists": true
+    },
+    {
+      "path": "docs/JCODE_HARNESS_PRODUCT_PLAN.md",
+      "exists": true
+    }
+  ],
+  "checkedConditions": [
+    "README lists demo manifest, demo runner, and sandbox commands",
+    "docs/SKILLS_HARNESS.md explains demo safety boundaries",
+    "Product plan names demo as a scriptable harness command",
+    "Documented commands are validated locally"
+  ],
+  "uncheckedConditions": [],
+  "evidence": [
+    "/tmp/jcode-bg-tasks/0693964jtq.output",
+    "README.md",
+    "docs/SKILLS_HARNESS.md",
+    "docs/JCODE_HARNESS_PRODUCT_PLAN.md"
+  ],
+  "notes": "Docs-only slice. Validation confirmed markdown fences and copied demo commands."
+}

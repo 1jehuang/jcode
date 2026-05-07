@@ -73,6 +73,9 @@ jcode-harness clean-code check --json
 ```bash
 jcode-harness
 jcode-harness smoke
+jcode-harness demo --json
+jcode-harness demo run mock-provider-run-json --json
+jcode-harness demo run all --sandbox --json
 jcode-harness run "fix this Rust bug" --provider openai-compatible --model gpt-4.1
 jcode-harness run "optimize memory usage" --skills always --dry-run
 jcode-harness run "review this diff" --skill karpathy-guidelines --max-turns 3 --json
@@ -85,6 +88,27 @@ jcode-harness run "review this diff" --ndjson --mock-response "deterministic res
 `jcode-harness run` uses the same provider initialization, tool registry, and `Agent` runtime as `jcode run`, while remaining script-friendly. It prepends selected skill context before starting the agent loop.
 
 `--mock-response <text>` uses a deterministic local provider named `harness-mock`. It exercises the real `Agent` runtime, JSON/NDJSON output, session creation, usage reporting, and skill preface path without network access or provider credentials. This is intended for CI and contract smoke tests, not for production model calls.
+
+## Reproducible demo harness
+
+`jcode-harness demo --json` prints a deterministic manifest of offline demos that back product and README claims. The current manifest covers safe-eval, mock-provider, local memory bridge, plan/init scaffolding, swarm init scaffolding, browser-adjacent doctor diagnostics, skill routing, and release-gate smoke paths.
+
+Use the runner when you want real evidence instead of a static command list:
+
+```bash
+jcode-harness demo run mock-provider-run-json --json
+jcode-harness demo run all --json
+jcode-harness demo run all --sandbox --json
+```
+
+Safety boundaries:
+
+- The manifest command does not execute demos.
+- The runner only executes commands from the deterministic local manifest.
+- Demos that declare `project_writes: true` are blocked by default.
+- `demo run all --json` executes non-writing demos and reports writing demos as blocked with `status: "warn"`.
+- `demo run all --sandbox --json` executes all demos in a temporary workspace, reports `execution_root`/`executed_root`, and removes the sandbox by default.
+- `--keep-sandbox` keeps generated files for manual inspection; `--allow-writes` should only be used in disposable or safe-eval workspaces.
 
 ### Opt-in live-provider smoke
 

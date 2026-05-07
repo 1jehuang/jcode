@@ -1,13 +1,13 @@
 {
   "version": 5,
   "projectName": "jcode-harness",
-  "focus": "Issue #2 demo run sandbox",
+  "focus": "Document reproducible demo commands",
   "status": "done",
-  "activeContractId": "2026-05-07-add-demo-run-sandbox-6f0d2a",
+  "activeContractId": "2026-05-07-document-reproducible-demo-commands-b0a5fd",
   "counters": {
-    "contracts": 18,
+    "contracts": 19,
     "traces": 19,
-    "gates": 19,
+    "gates": 20,
     "verifications": 17,
     "knowledgeItems": 0,
     "knowledgeQueries": 0,
@@ -21,7 +21,7 @@
     {
       "id": "decision-2026-05-06-1c16f8",
       "ts": "2026-05-06T19:09:22.556Z",
-      "text": "Responder ao usu\u00e1rio em portugu\u00eas conforme prefer\u00eancia global registrada."
+      "text": "Responder ao usuário em português conforme preferência global registrada."
     },
     {
       "id": "decision-2026-05-07-f58c86",
@@ -65,7 +65,7 @@
       "type": "state_update",
       "note": "Criado .codex-harness, .context docs/agents/skills/workflow e workflow PREVC init-context-harness.",
       "status": "done",
-      "focus": "Inicializa\u00e7\u00e3o do harness e contexto conclu\u00edda",
+      "focus": "Inicialização do harness e contexto concluída",
       "activeContractId": ""
     },
     {
@@ -101,7 +101,7 @@
       "traceId": "trace-2026-05-06-fa63625f",
       "contractId": "2026-05-06-embedded-skills-scoping-improvement-87c1a0",
       "status": "pass",
-      "summary": "Valida\u00e7\u00f5es direcionadas, smoke JSON e selfdev build passaram."
+      "summary": "Validações direcionadas, smoke JSON e selfdev build passaram."
     },
     {
       "ts": "2026-05-06T22:38:08.746Z",
@@ -524,6 +524,19 @@
       "status": "done",
       "focus": "Issue #2 demo run sandbox",
       "activeContractId": "2026-05-07-add-demo-run-sandbox-6f0d2a"
+    },
+    {
+      "ts": "2026-05-07T21:24:56.488Z",
+      "type": "contract_created",
+      "contractId": "2026-05-07-document-reproducible-demo-commands-b0a5fd",
+      "summary": "Document reproducible demo commands"
+    },
+    {
+      "ts": "2026-05-07T21:25:14.317Z",
+      "type": "gate_evaluated",
+      "contractId": "2026-05-07-document-reproducible-demo-commands-b0a5fd",
+      "gateId": "gate-2026-05-07-1c73d9",
+      "verdict": "pass"
     }
   ]
 }

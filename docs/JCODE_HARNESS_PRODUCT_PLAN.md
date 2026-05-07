@@ -8,7 +8,7 @@ This fork is not a patch set of small upstream improvements. It is a new `jcode-
 
 - offline-first embedded skills and skill routing;
 - deterministic project initialization and governance artifacts;
-- scriptable `run`, `smoke`, `skills`, and quality-gate commands;
+- scriptable `run`, `smoke`, `demo`, `skills`, and quality-gate commands;
 - high-confidence local testing before any production claim;
 - clear compatibility boundaries with upstream jcode.
 

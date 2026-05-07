@@ -1,0 +1,47 @@
+{
+  "id": "2026-05-07-document-reproducible-demo-commands-b0a5fd",
+  "title": "Document reproducible demo commands",
+  "goal": "Expose the new reproducible demo commands in the main README and skills harness documentation so users can copy safe commands directly after the issue #2 CLI slices.",
+  "createdAt": "2026-05-07T21:24:56.487Z",
+  "status": "active",
+  "requiredInputs": [
+    "Committed demo manifest/runner/sandbox commands",
+    "README and docs/SKILLS_HARNESS.md currently had no demo quickstart"
+  ],
+  "budget": {
+    "maxSteps": 6,
+    "maxMinutes": 30,
+    "maxToolCalls": 20
+  },
+  "permissions": [
+    "edit docs only",
+    "run local docs and CLI smoke checks",
+    "commit and push branch"
+  ],
+  "completionConditions": [
+    "README lists demo manifest, demo runner, and sandbox commands",
+    "docs/SKILLS_HARNESS.md explains demo safety boundaries",
+    "Product plan names demo as a scriptable harness command",
+    "Documented commands are validated locally"
+  ],
+  "outputPaths": [
+    "README.md",
+    "docs/SKILLS_HARNESS.md",
+    "docs/JCODE_HARNESS_PRODUCT_PLAN.md"
+  ],
+  "verificationCommands": [
+    "git diff --check",
+    "cargo fmt --check",
+    "markdown fence balance check",
+    "target/selfdev/jcode-harness demo --json | python3 -m json.tool >/dev/null",
+    "target/selfdev/jcode-harness demo run mock-provider-run-json --json | python3 -m json.tool >/dev/null",
+    "target/selfdev/jcode-harness demo run all --sandbox --json"
+  ],
+  "failureTaxonomy": [
+    "stale_docs",
+    "invalid_command",
+    "markdown_error",
+    "uncommitted_or_unpushed"
+  ],
+  "notes": "Docs-only discoverability slice after `demo run --sandbox` landed."
+}
