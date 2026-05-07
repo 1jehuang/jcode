@@ -222,6 +222,15 @@ fn harness_acp_stdio_initialize_shutdown() -> Result<()> {
     assert_eq!(manifest["protocol"]["id"], "acp");
     assert_eq!(manifest["protocol"]["jsonrpc"], "2.0");
     assert_eq!(manifest["protocol"]["transport"][0], "stdio");
+    assert_eq!(manifest["capabilities"]["cancellation"]["supported"], true);
+    assert_eq!(
+        manifest["capabilities"]["cancellation"]["request"],
+        "jcode/session.cancel"
+    );
+    assert_eq!(
+        manifest["capabilities"]["cancellation"]["notification"],
+        "$/cancelRequest"
+    );
     assert_eq!(manifest["registry"]["ready"], false);
     assert_eq!(manifest["safety"]["starts_provider"], false);
 
@@ -349,6 +358,16 @@ fn harness_acp_stdio_session_methods_return_offline_envelopes() -> Result<()> {
         writeln!(
             stdin,
             "{}",
+            serde_json::json!({"jsonrpc":"2.0","method":"$/cancelRequest","params":{"id":"resume"}})
+        )?;
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0","id":"cancel_unknown","method":"jcode/session.cancel","params":{"id":"missing_acp_session","requestId":"resume","reason":"test offline cancel"}})
+        )?;
+        writeln!(
+            stdin,
+            "{}",
             serde_json::json!({"jsonrpc":"2.0","id":"bad","method":"jcode/session.show","params":{}})
         )?;
         writeln!(
@@ -366,7 +385,7 @@ fn harness_acp_stdio_session_methods_return_offline_envelopes() -> Result<()> {
         "ACP session methods must not leak hidden transcript content by default: {stdout}"
     );
     let responses = parse_ndjson(&output)?;
-    assert_eq!(responses.len(), 7, "stdout: {stdout}");
+    assert_eq!(responses.len(), 8, "stdout: {stdout}");
 
     assert_eq!(responses[0]["id"], "list");
     assert_eq!(responses[0]["result"]["command"], "session list");
@@ -402,14 +421,26 @@ fn harness_acp_stdio_session_methods_return_offline_envelopes() -> Result<()> {
     assert_eq!(responses[4]["id"], "resume");
     assert_eq!(responses[4]["result"]["resume"]["argv"][2], "session_acp");
 
-    assert_eq!(responses[5]["id"], "bad");
-    assert_eq!(responses[5]["error"]["code"], -32602);
+    assert_eq!(responses[5]["id"], "cancel_unknown");
+    assert_eq!(responses[5]["result"]["command"], "session cancel");
+    assert_eq!(responses[5]["result"]["offline"], true);
+    assert_eq!(responses[5]["result"]["session_exists"], false);
+    assert_eq!(responses[5]["result"]["cancel"]["request_id"], "resume");
+    assert_eq!(responses[5]["result"]["cancel"]["cancelled"], false);
+    assert_eq!(
+        responses[5]["result"]["cancel"]["outcome"],
+        "unknown_session_offline_acknowledged"
+    );
+    assert_eq!(responses[5]["result"]["safety"]["starts_provider"], false);
+
+    assert_eq!(responses[6]["id"], "bad");
+    assert_eq!(responses[6]["error"]["code"], -32602);
     assert!(
-        responses[5]["error"]["data"]["detail"]
+        responses[6]["error"]["data"]["detail"]
             .as_str()
             .is_some_and(|detail| detail.contains("missing required param id"))
     );
-    assert_eq!(responses[6]["result"]["shutdown"], true);
+    assert_eq!(responses[7]["result"]["shutdown"], true);
 
     Ok(())
 }
@@ -440,7 +471,7 @@ fn harness_acp_fixture_json_is_runnable_against_stdio_server() -> Result<()> {
     assert_eq!(fixture["command"], "acp fixture");
     assert_eq!(fixture["offline"], true);
     assert_eq!(fixture["read_only"], true);
-    assert_eq!(fixture["fixture"]["version"], 1);
+    assert_eq!(fixture["fixture"]["version"], 2);
     assert_eq!(fixture["safety"]["starts_provider"], false);
 
     for file in fixture["fixture_home_files"]
@@ -516,6 +547,18 @@ fn harness_acp_fixture_json_is_runnable_against_stdio_server() -> Result<()> {
     assert_eq!(
         by_id("session_resume")["result"]["command"],
         "session resume"
+    );
+    assert_eq!(
+        by_id("session_cancel_unknown")["result"]["command"],
+        "session cancel"
+    );
+    assert_eq!(
+        by_id("session_cancel_unknown")["result"]["session_exists"],
+        false
+    );
+    assert_eq!(
+        by_id("session_cancel_unknown")["result"]["cancel"]["outcome"],
+        "unknown_session_offline_acknowledged"
     );
     assert_eq!(by_id("invalid_params")["error"]["code"], -32602);
     assert_eq!(by_id("unknown_method")["error"]["code"], -32601);

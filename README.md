@@ -255,12 +255,16 @@ jcode-harness acp serve --stdio
 `acp manifest --json` prints supported preview methods, safety guarantees, and
 registry gaps. `acp serve --stdio` speaks newline-delimited JSON-RPC 2.0 for the
 implemented `initialize`, `initialized` notification, `shutdown`, and safe
-offline `jcode/session.list|show|spawn|attach|resume` request methods. Session
-methods reuse the same read-only/dry-run envelopes as the CLI and still avoid
-starting providers, tools, network, credentials, or the TUI. `acp fixture
---json` prints a versioned conformance fixture with newline-delimited JSON-RPC
-requests, expected responses, and a tiny local session file that clients can copy
-into a temporary `JCODE_HOME` for deterministic offline tests.
+offline `jcode/session.list|show|spawn|attach|resume|cancel` request methods,
+plus the standards-friendly `$/cancelRequest` notification as an offline no-op.
+Session methods reuse the same read-only/dry-run envelopes as the CLI where a
+CLI surface exists and still avoid starting providers, tools, network,
+credentials, or the TUI. `jcode/session.cancel` returns a structured offline
+control envelope for known or unknown sessions without contacting live provider
+or session processes. `acp fixture --json` prints a versioned conformance
+fixture with newline-delimited JSON-RPC requests, expected responses, and a tiny
+local session file that clients can copy into a temporary `JCODE_HOME` for
+deterministic offline tests.
 
 ### Reproducible demos without credentials
 

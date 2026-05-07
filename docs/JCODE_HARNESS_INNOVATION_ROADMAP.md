@@ -78,7 +78,7 @@ Make jcode-harness the fastest local-first agent runtime for serious engineering
 
 ## Completed initial implementation slices
 
-- `jcode-harness acp manifest --json`, `jcode-harness acp fixture --json`, and `jcode-harness acp serve --stdio`: offline ACP preview manifest, versioned conformance fixture, and JSON-RPC initialize/shutdown plus read-only/dry-run `jcode/session.list|show|spawn|attach|resume` handlers without starting providers/TUI/tools.
+- `jcode-harness acp manifest --json`, `jcode-harness acp fixture --json`, and `jcode-harness acp serve --stdio`: offline ACP preview manifest, versioned conformance fixture, JSON-RPC initialize/shutdown, read-only/dry-run `jcode/session.list|show|spawn|attach|resume` handlers, and offline-control `jcode/session.cancel` plus `$/cancelRequest` notification handling without starting providers/TUI/tools.
 - `jcode-harness session show <id> --json`: read-only local session metadata and optional bounded preview without starting the TUI.
 - `jcode-harness session spawn <goal> --dry-run --json`: safe `jcode run` argv/cwd envelope for new headless runs without executing provider/TUI flows.
 - `jcode-harness session attach <id> --dry-run --json`: safe local attach argv/cwd envelope for external orchestrators without executing the TUI/provider flow.

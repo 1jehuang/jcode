@@ -75,21 +75,32 @@ Shape:
       "spawn": { "status": "implemented_offline_dry_run", "method": "jcode/session.spawn" },
       "attach": { "status": "implemented_offline_dry_run", "method": "jcode/session.attach" },
       "show": { "status": "implemented_offline", "method": "jcode/session.show" },
-      "resume": { "status": "implemented_offline_dry_run", "method": "jcode/session.resume" }
+      "resume": { "status": "implemented_offline_dry_run", "method": "jcode/session.resume" },
+      "cancel": { "status": "implemented_offline_control", "method": "jcode/session.cancel" }
+    },
+    "control": {
+      "cancel_request_notification": { "status": "implemented_offline_noop", "method": "$/cancelRequest" },
+      "session_cancel_request": { "status": "implemented_offline_control", "method": "jcode/session.cancel" }
     },
     "events": {
       "session_envelopes_ndjson": true,
       "session_updates": false,
       "tool_events": false
     },
-    "conformance": { "fixture": true, "fixture_version": 1 },
-    "cancellation": { "supported": false },
+    "conformance": { "fixture": true, "fixture_version": 2 },
+    "cancellation": {
+      "supported": true,
+      "mode": "offline_control_only",
+      "notification": "$/cancelRequest",
+      "request": "jcode/session.cancel",
+      "live_provider_cancel": false
+    },
     "registry_submission": { "ready": false }
   },
   "conformance": {
     "fixture": {
       "status": "available",
-      "version": 1,
+      "version": 2,
       "command": "jcode-harness acp fixture --json"
     }
   },
@@ -110,7 +121,7 @@ Shape:
 Guarantees:
 
 - `acp manifest --json` is offline/read-only and does not initialize providers, tools, MCP servers, browser/Gmail integrations, or the TUI.
-- `protocol.status` is `preview`; registry submission remains explicitly not ready until live session execution, tool streaming, and cancellation semantics are implemented.
+- `protocol.status` is `preview`; registry submission remains explicitly not ready until live session execution, tool streaming, and live provider/session cancellation execution are implemented.
 - Capability entries describe currently available harness CLI surfaces and implemented offline ACP session methods, not full ACP conformance.
 
 ## `acp fixture --json`
@@ -131,7 +142,7 @@ Shape:
   "read_only": true,
   "fixture": {
     "id": "jcode-harness-acp-stdio-preview",
-    "version": 1,
+    "version": 2,
     "protocol": "acp",
     "jsonrpc": "2.0",
     "transport": "stdio",
@@ -181,9 +192,10 @@ Shape:
 Guarantees:
 
 - Transport is newline-delimited JSON-RPC 2.0 over stdin/stdout.
-- Implemented request methods are `initialize`, `shutdown`, and offline/read-only `jcode/session.list`, `jcode/session.show`, `jcode/session.spawn`, `jcode/session.attach`, and `jcode/session.resume`.
-- `initialized` is accepted as a notification/no-op.
+- Implemented request methods are `initialize`, `shutdown`, offline/read-only `jcode/session.list`, `jcode/session.show`, `jcode/session.spawn`, `jcode/session.attach`, `jcode/session.resume`, and offline-control `jcode/session.cancel`.
+- `initialized` and `$/cancelRequest` are accepted as notification/no-ops and produce no response.
 - ACP session methods return the same JSON report/envelope shapes as the corresponding CLI commands; `spawn`, `attach`, and `resume` remain dry-run only and do not execute providers/TUI flows.
+- `jcode/session.cancel` returns an offline envelope for known or unknown session ids; it records cancellation intent only and does not contact providers, session processes, tools, network, credentials, or the TUI.
 - Unsupported request methods return JSON-RPC `-32601` method-not-found errors.
 - Invalid JSON returns `-32700`; malformed JSON-RPC requests return `-32600`.
 - The preview stdio server does not start providers, tools, network-backed integrations, or the TUI.

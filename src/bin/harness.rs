@@ -747,7 +747,7 @@ fn acp_manifest_json() -> serde_json::Value {
         "conformance": {
             "fixture": {
                 "status": "available",
-                "version": 1,
+                "version": 2,
                 "command": "jcode-harness acp fixture --json"
             }
         },
@@ -760,7 +760,8 @@ fn acp_manifest_json() -> serde_json::Value {
             {"name": "jcode/session.spawn", "kind": "request", "status": "implemented_offline_dry_run_envelope"},
             {"name": "jcode/session.attach", "kind": "request", "status": "implemented_offline_dry_run_envelope"},
             {"name": "jcode/session.resume", "kind": "request", "status": "implemented_offline_dry_run_envelope"},
-            {"name": "$/cancelRequest", "kind": "notification", "status": "planned"}
+            {"name": "jcode/session.cancel", "kind": "request", "status": "implemented_offline_control_envelope"},
+            {"name": "$/cancelRequest", "kind": "notification", "status": "implemented_offline_noop"}
         ],
         "registry": {
             "ready": false,
@@ -768,7 +769,7 @@ fn acp_manifest_json() -> serde_json::Value {
             "missing": [
                 "live session execution/streaming handlers",
                 "tool event streaming contract",
-                "cancellation semantics"
+                "live provider/session cancellation execution"
             ]
         },
         "safety": {
@@ -790,15 +791,26 @@ fn acp_capabilities_json() -> serde_json::Value {
             "spawn": {"status": "implemented_offline_dry_run", "method": "jcode/session.spawn", "command": "jcode-harness session spawn <goal> --dry-run --json|--ndjson"},
             "attach": {"status": "implemented_offline_dry_run", "method": "jcode/session.attach", "command": "jcode-harness session attach <id> --dry-run --json|--ndjson"},
             "show": {"status": "implemented_offline", "method": "jcode/session.show", "command": "jcode-harness session show <id> --json"},
-            "resume": {"status": "implemented_offline_dry_run", "method": "jcode/session.resume", "command": "jcode-harness session resume <id> --dry-run --json|--ndjson"}
+            "resume": {"status": "implemented_offline_dry_run", "method": "jcode/session.resume", "command": "jcode-harness session resume <id> --dry-run --json|--ndjson"},
+            "cancel": {"status": "implemented_offline_control", "method": "jcode/session.cancel"}
+        },
+        "control": {
+            "cancel_request_notification": {"status": "implemented_offline_noop", "method": "$/cancelRequest"},
+            "session_cancel_request": {"status": "implemented_offline_control", "method": "jcode/session.cancel"}
         },
         "events": {
             "session_envelopes_ndjson": true,
             "session_updates": false,
             "tool_events": false
         },
-        "conformance": {"fixture": true, "fixture_version": 1},
-        "cancellation": {"supported": false},
+        "conformance": {"fixture": true, "fixture_version": 2},
+        "cancellation": {
+            "supported": true,
+            "mode": "offline_control_only",
+            "notification": "$/cancelRequest",
+            "request": "jcode/session.cancel",
+            "live_provider_cancel": false
+        },
         "registry_submission": {"ready": false}
     })
 }
@@ -811,7 +823,7 @@ fn acp_fixture_json() -> serde_json::Value {
         "read_only": true,
         "fixture": {
             "id": "jcode-harness-acp-stdio-preview",
-            "version": 1,
+            "version": 2,
             "protocol": "acp",
             "jsonrpc": "2.0",
             "transport": "stdio",
@@ -895,6 +907,17 @@ fn acp_fixture_json() -> serde_json::Value {
                 "expect": {"/result/status": "ok", "/result/command": "session resume", "/result/dry_run": true, "/result/executed": false}
             },
             {
+                "name": "cancel_request_notification",
+                "request": {"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": "session_resume"}},
+                "expect_response": false
+            },
+            {
+                "name": "session_cancel_unknown",
+                "request": {"jsonrpc": "2.0", "id": "session_cancel_unknown", "method": "jcode/session.cancel", "params": {"id": "session_missing_fixture", "requestId": "session_resume", "reason": "fixture offline cancel"}},
+                "expect_response": true,
+                "expect": {"/result/status": "ok", "/result/command": "session cancel", "/result/offline": true, "/result/session_exists": false, "/result/cancel/cancelled": false, "/result/cancel/outcome": "unknown_session_offline_acknowledged"}
+            },
+            {
                 "name": "invalid_params",
                 "request": {"jsonrpc": "2.0", "id": "invalid_params", "method": "jcode/session.show", "params": {}},
                 "expect_response": true,
@@ -928,7 +951,9 @@ fn run_acp_manifest(json_output: bool) -> Result<()> {
     } else {
         println!("jcode-harness ACP manifest: preview");
         println!("Transport: stdio JSON-RPC 2.0");
-        println!("Implemented methods: initialize, initialized, shutdown, jcode/session.* offline");
+        println!(
+            "Implemented methods: initialize, initialized, shutdown, jcode/session.* offline, $/cancelRequest notification"
+        );
         println!("Registry ready: false");
     }
     Ok(())
@@ -939,7 +964,7 @@ fn run_acp_fixture(json_output: bool) -> Result<()> {
     if json_output {
         println!("{}", serde_json::to_string_pretty(&fixture)?);
     } else {
-        println!("jcode-harness ACP fixture: version 1");
+        println!("jcode-harness ACP fixture: version 2");
         println!("Offline: true");
         println!("Read only: true");
         println!("Transport: stdio JSON-RPC 2.0");
@@ -1041,7 +1066,8 @@ fn acp_handle_jsonrpc_request(request: &serde_json::Value) -> Option<serde_json:
         "jcode/session.spawn" => Some(acp_jsonrpc_result(id, acp_session_spawn_result(request))),
         "jcode/session.attach" => Some(acp_jsonrpc_result(id, acp_session_attach_result(request))),
         "jcode/session.resume" => Some(acp_jsonrpc_result(id, acp_session_resume_result(request))),
-        "initialized" => None,
+        "jcode/session.cancel" => Some(acp_jsonrpc_result(id, acp_session_cancel_result(request))),
+        "initialized" | "$/cancelRequest" => None,
         _ => Some(acp_jsonrpc_error(id, -32601, "method not found", None)),
     }
 }
@@ -1102,6 +1128,18 @@ fn acp_required_str<'a>(
 ) -> Result<&'a str> {
     acp_optional_str(params, &[name])?
         .ok_or_else(|| anyhow::anyhow!("missing required param {name}"))
+}
+
+fn acp_required_str_any<'a>(
+    params: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    names: &[&str],
+) -> Result<&'a str> {
+    acp_optional_str(params, names)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "missing required param {}",
+            names.first().copied().unwrap_or("<unknown>")
+        )
+    })
 }
 
 fn acp_optional_bool(
@@ -1201,6 +1239,18 @@ fn acp_session_resume_result(request: &serde_json::Value) -> Result<serde_json::
     let params = acp_request_params(request)?;
     let id = acp_required_str(params, "id")?;
     session_resume_report(id)
+}
+
+fn acp_session_cancel_result(request: &serde_json::Value) -> Result<serde_json::Value> {
+    let params = acp_request_params(request)?;
+    let id = acp_required_str_any(params, &["id", "sessionId", "session_id"])?;
+    let request_id = acp_param_value(
+        params,
+        &["requestId", "request_id", "jsonrpcId", "jsonrpc_id"],
+    )
+    .cloned();
+    let reason = acp_optional_str(params, &["reason"])?;
+    session_cancel_report(id, request_id, reason)
 }
 
 fn acp_jsonrpc_error(
@@ -1922,6 +1972,82 @@ fn session_resume_report(id: &str) -> Result<serde_json::Value> {
             "network_required_for_dry_run": false,
             "credentials_required_for_dry_run": false,
             "note": "Use the returned argv/cwd outside dry-run only after choosing an execution surface."
+        },
+    }))
+}
+
+fn session_cancel_report(
+    id: &str,
+    request_id: Option<serde_json::Value>,
+    reason: Option<&str>,
+) -> Result<serde_json::Value> {
+    let id = id.trim();
+    if id.is_empty() {
+        anyhow::bail!("session cancel id must not be empty");
+    }
+
+    let session_path = jcode::session::session_path(id)?;
+    let journal_path = jcode::session::session_journal_path(id)?;
+    let session_exists = session_path.exists();
+    let journal_exists = journal_path.exists();
+    let mut metadata = serde_json::Value::Null;
+    let mut metadata_error = serde_json::Value::Null;
+
+    if session_exists {
+        match jcode::session::Session::load(id) {
+            Ok(session) => {
+                metadata = session_metadata_json(&session);
+            }
+            Err(error) => {
+                metadata_error = json!(error.to_string());
+            }
+        }
+    }
+
+    let outcome = if session_exists {
+        "offline_session_acknowledged"
+    } else {
+        "unknown_session_offline_acknowledged"
+    };
+
+    Ok(json!({
+        "status": "ok",
+        "command": "session cancel",
+        "offline": true,
+        "read_only": true,
+        "dry_run": true,
+        "executed": false,
+        "source": "jcode",
+        "id": id,
+        "session_path": &session_path,
+        "session_exists": session_exists,
+        "journal_path": &journal_path,
+        "journal_exists": journal_exists,
+        "metadata": metadata,
+        "metadata_error": metadata_error,
+        "cancel": {
+            "requested": true,
+            "accepted": true,
+            "cancelled": false,
+            "outcome": outcome,
+            "mode": "offline_control_envelope",
+            "request_id": request_id.unwrap_or(serde_json::Value::Null),
+            "reason": reason,
+            "notification_method": "$/cancelRequest",
+            "request_method": "jcode/session.cancel",
+            "live_session_detection": "not_attempted_offline_control",
+            "execution_supported_by_harness": false,
+            "provider_cancel_attempted": false,
+            "provider_cancelled": false,
+        },
+        "safety": {
+            "executed": false,
+            "writes": false,
+            "starts_tui": false,
+            "starts_provider": false,
+            "network_required_for_dry_run": false,
+            "credentials_required_for_dry_run": false,
+            "note": "Offline ACP preview records cancellation intent only; no provider, session process, tools, network, or TUI are contacted."
         },
     }))
 }
