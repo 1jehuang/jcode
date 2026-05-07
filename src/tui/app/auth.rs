@@ -19,6 +19,16 @@ impl App {
         open::that_detached(url).is_ok()
     }
 
+    fn manual_tui_oauth_section(browser_opened: bool, auth_url: &str, qr_heading: &str) -> String {
+        if browser_opened {
+            return String::new();
+        }
+        let qr_section = crate::login_qr::markdown_section_for_tui(auth_url, qr_heading)
+            .map(|section| format!("\n\n{section}"))
+            .unwrap_or_default();
+        format!("Manual fallback URL:\n{}\n{}\n\n", auth_url, qr_section)
+    }
+
     fn record_oauth_preflight(
         provider_id: &str,
         browser_opened: bool,
@@ -294,31 +304,27 @@ impl App {
             &challenge,
             &verifier,
         );
-        let qr_section = crate::login_qr::markdown_section_for_tui(
+        let browser_opened = Self::open_auth_browser(&auth_url);
+        let manual_section = Self::manual_tui_oauth_section(
+            browser_opened,
             &auth_url,
             "Scan this on another device if this machine has no browser:",
-        )
-        .map(|section| format!("\n\n{section}"))
-        .unwrap_or_default();
-
-        let browser_opened = Self::open_auth_browser(&auth_url);
+        );
         let preflight = Self::record_oauth_preflight("claude", browser_opened, None, None);
 
         self.push_display_message(DisplayMessage::system(format!(
             "**Claude OAuth Login** (account: `{}`)\n\n\
              Opening browser for authentication...\n\n\
-             If the browser didn't open, visit:\n{}\n\n\
-             {}{}{}After logging in, copy the callback URL or authorization code and **paste it here**. Type `/cancel` to abort.{}",
+             {}{}{}{}After logging in, copy the callback URL or authorization code and **paste it here**. Type `/cancel` to abort.",
             label,
-            auth_url,
             if preflight.is_empty() { "" } else { &preflight },
             if preflight.is_empty() { "" } else { "\n\n" },
+            manual_section,
             if preflight.is_empty() {
                 ""
             } else {
                 "Manual-safe fallback is already available here.\n\n"
-            },
-            qr_section
+            }
         )));
         self.set_status_notice(format!("Login [{}]: paste code...", label));
         self.begin_pending_login(PendingLogin::ClaudeAccount {
@@ -490,16 +496,14 @@ impl App {
             &state,
             Some("login"),
         );
-        let qr_section = crate::login_qr::markdown_section_for_tui(
-            &auth_url,
-            "Scan this on another device if this machine has no browser, then paste the full callback URL here:",
-        )
-        .map(|section| format!("\n\n{section}"))
-        .unwrap_or_default();
-
         let callback_listener = crate::auth::oauth::bind_callback_listener(port).ok();
         let callback_available = callback_listener.is_some();
         let browser_opened = Self::open_auth_browser(&auth_url);
+        let manual_section = Self::manual_tui_oauth_section(
+            browser_opened,
+            &auth_url,
+            "Scan this on another device if this machine has no browser, then paste the full callback URL here:",
+        );
         let label_owned = label.to_string();
 
         if let Some(listener) = callback_listener {
@@ -554,25 +558,23 @@ impl App {
         self.push_display_message(DisplayMessage::system(format!(
             "**OpenAI OAuth Login** (account: `{}`)\n\n\
              Opening browser for authentication...\n\n\
-             If the browser didn't open, visit:\n{}\n\n\
              **Note:** Wait a few seconds for the page to fully load before clicking Continue. \
              OpenAI's verification system may briefly disable the button.\n\n\
-             {}{}{}\
-             Or paste the full callback URL or query string here to finish from another device. Type `/cancel` to abort.{}",
+             {}{}{}{}\
+             Or paste the full callback URL or query string here to finish from another device. Type `/cancel` to abort.",
             label,
-            auth_url,
             if preflight.is_empty() {
                 String::new()
             } else {
                 format!("{}\n", preflight)
             },
             callback_line,
+            manual_section,
             if preflight.is_empty() {
                 String::new()
             } else {
                 "Manual-safe fallback is already active here.\n".to_string()
-            },
-            qr_section
+            }
         )));
         self.set_status_notice(format!("Login [{}]: waiting...", label));
         self.begin_pending_login(PendingLogin::OpenAiAccount {
@@ -675,14 +677,12 @@ impl App {
             }
         };
 
-        let qr_section = crate::login_qr::markdown_section_for_tui(
+        let browser_opened = Self::open_auth_browser(&auth_url);
+        let manual_section = Self::manual_tui_oauth_section(
+            browser_opened,
             &auth_url,
             "Scan this on another device if this machine has no browser, then paste the callback URL or authorization code here:",
-        )
-        .map(|section| format!("\n\n{section}"))
-        .unwrap_or_default();
-
-        let browser_opened = Self::open_auth_browser(&auth_url);
+        );
         let callback_available = callback_listener.is_some() && pending_state.is_some();
 
         if let (Some(listener), Some(expected_state)) = (callback_listener, pending_state.clone()) {
@@ -772,22 +772,20 @@ impl App {
         self.push_display_message(DisplayMessage::system(format!(
             "**Gemini OAuth Login**\n\n\
              Opening browser for authentication...\n\n\
-             If the browser didn't open, visit:\n{}\n\n\
-             {}{}{}\
-             Or paste the full callback URL, query string, or authorization code here to finish. Type `/cancel` to abort.{}",
-            auth_url,
+             {}{}{}{}\
+             Or paste the full callback URL, query string, or authorization code here to finish. Type `/cancel` to abort.",
             if preflight.is_empty() {
                 String::new()
             } else {
                 format!("{}\n", preflight)
             },
             callback_line,
+            manual_section,
             if preflight.is_empty() {
                 String::new()
             } else {
                 "Manual-safe fallback is already active here.\n".to_string()
-            },
-            qr_section
+            }
         )));
         self.set_status_notice("Login: waiting...");
         self.begin_pending_login(PendingLogin::Gemini {
@@ -1078,16 +1076,14 @@ impl App {
             }
         };
 
-        let qr_section = crate::login_qr::markdown_section_for_tui(
-            &auth_url,
-            "Scan this on another device if this machine has no browser, then paste the full callback URL or query string here:",
-        )
-        .map(|section| format!("\n\n{section}"))
-        .unwrap_or_default();
-
         let callback_listener = crate::auth::oauth::bind_callback_listener(port).ok();
         let callback_available = callback_listener.is_some();
         let browser_opened = Self::open_auth_browser(&auth_url);
+        let manual_section = Self::manual_tui_oauth_section(
+            browser_opened,
+            &auth_url,
+            "Scan this on another device if this machine has no browser, then paste the full callback URL or query string here:",
+        );
 
         if let Some(listener) = callback_listener {
             let verifier_clone = verifier.clone();
@@ -1163,10 +1159,8 @@ impl App {
         self.push_display_message(DisplayMessage::system(format!(
             "**Antigravity OAuth Login**\n\n\
              Opening browser for authentication...\n\n\
-             If the browser didn't open, visit:\n{}\n\n\
-             {}{}{}{}\
-             Or paste the full callback URL or query string here to finish. Type `/cancel` to abort.{}",
-            auth_url,
+             {}{}{}{}{}\
+             Or paste the full callback URL or query string here to finish. Type `/cancel` to abort.",
             if preflight.is_empty() {
                 String::new()
             } else {
@@ -1174,12 +1168,12 @@ impl App {
             },
             callback_line,
             manual_hint,
+            manual_section,
             if preflight.is_empty() {
                 String::new()
             } else {
                 "Manual-safe fallback is already active here.\n".to_string()
-            },
-            qr_section
+            }
         )));
         self.set_status_notice("Login: antigravity waiting...");
         self.begin_pending_login(PendingLogin::Antigravity {

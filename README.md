@@ -115,6 +115,13 @@ Secret policy is strict: do not sync tokens, API keys, private keys, `.env` valu
 
 ## Main commands
 
+### Provider authentication
+
+OpenAI/Codex OAuth uses the local callback URI
+`http://localhost:1455/auth/callback` by default. If that port is unavailable,
+jcode falls back to a manual paste flow. See `OAUTH.md` for the full provider
+auth notes.
+
 ### Interactive jcode
 
 ```bash

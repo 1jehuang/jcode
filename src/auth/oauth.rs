@@ -27,6 +27,9 @@ pub mod claude {
 }
 
 const CLAUDE_TOKEN_TIMEOUT_SECS: u64 = 15;
+const QR_BROWSERLESS_HEADING: &str =
+    "Scan this QR on another device if this machine has no browser:";
+const QR_CLAUDE_CALLBACK_HEADING: &str = "Scan this QR on another device, finish login there, then paste the full callback URL back here:";
 
 /// OpenAI Codex OAuth configuration
 pub mod openai {
@@ -450,6 +453,26 @@ pub async fn wait_for_callback_async_on_listener(
 }
 
 /// Perform OAuth login for Claude
+fn print_manual_oauth_url(auth_url: &str, qr_heading: &str) {
+    eprintln!("Open this URL in your browser:\n\n{}\n", auth_url);
+    if let Some(qr) = crate::login_qr::indented_section(auth_url, qr_heading, "    ") {
+        eprintln!("{qr}\n");
+    }
+}
+
+fn read_manual_auth_input(prompt: &str, empty_message: &str) -> Result<String> {
+    eprintln!("{prompt}\n");
+    eprint!("> ");
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!(empty_message.to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
 pub async fn login_claude(no_browser: bool) -> Result<OAuthTokens> {
     let (verifier, challenge) = generate_pkce();
     if let Ok(code) = std::env::var("JCODE_CLAUDE_AUTH_CODE") {
@@ -475,17 +498,16 @@ pub async fn login_claude(no_browser: bool) -> Result<OAuthTokens> {
         let auth_url = claude_auth_url(&redirect_uri, &challenge, &verifier);
         let manual_auth_url = claude_auth_url(claude::REDIRECT_URI, &challenge, &verifier);
 
-        eprintln!("\nOpen this URL in your browser:\n");
-        eprintln!("{}\n", auth_url);
-        if let Some(qr) = crate::login_qr::indented_section(
-            &manual_auth_url,
-            "No browser on this machine? Scan this QR on another device, finish login there, then paste the full callback URL back here:",
-            "    ",
-        ) {
-            eprintln!("{qr}\n");
+        let browser_suppressed = crate::auth::browser_suppressed(no_browser);
+        if browser_suppressed {
+            eprintln!("\nManual Claude auth required.\n");
+            print_manual_oauth_url(&manual_auth_url, QR_CLAUDE_CALLBACK_HEADING);
+        } else {
+            eprintln!("\nOpening browser for Claude login...\n");
+            eprintln!("If the browser does not open, jcode will fall back to manual code paste.");
         }
-        eprintln!("Opening browser for Claude login...\n");
-        let browser_opened = if crate::auth::browser_suppressed(no_browser) {
+
+        let browser_opened = if browser_suppressed {
             false
         } else {
             open::that(&auth_url).is_ok()
@@ -496,9 +518,10 @@ pub async fn login_claude(no_browser: bool) -> Result<OAuthTokens> {
                 redirect_uri
             );
         } else {
-            eprintln!(
-                "Couldn't open a browser on this machine. Use the QR code or manual URL above, then paste the callback URL here.\n"
-            );
+            eprintln!("Couldn't open a browser on this machine. Falling back to manual paste.\n");
+            if !browser_suppressed {
+                print_manual_oauth_url(&manual_auth_url, QR_CLAUDE_CALLBACK_HEADING);
+            }
         }
 
         if browser_opened {
@@ -523,51 +546,31 @@ pub async fn login_claude(no_browser: bool) -> Result<OAuthTokens> {
             }
         }
 
-        eprintln!("Paste the authorization code (or callback URL) here:\n");
-        eprint!("> ");
-        std::io::stdout().flush()?;
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        let trimmed = input.trim();
-        if trimmed.is_empty() {
-            anyhow::bail!("No authorization code entered.");
-        }
+        let input = read_manual_auth_input(
+            "Paste the authorization code (or callback URL) here:",
+            "No authorization code entered.",
+        )?;
         eprintln!("Exchanging code for tokens...");
-        let selected_redirect_uri = claude_redirect_uri_for_input(trimmed, &redirect_uri);
-        return exchange_claude_code(&verifier, trimmed, &selected_redirect_uri).await;
+        let selected_redirect_uri = claude_redirect_uri_for_input(&input, &redirect_uri);
+        return exchange_claude_code(&verifier, &input, &selected_redirect_uri).await;
     }
 
     // Last-resort manual flow if localhost callback binding is unavailable.
     let auth_url = claude_auth_url(claude::REDIRECT_URI, &challenge, &verifier);
 
-    eprintln!("\nOpen this URL in your browser:\n");
-    eprintln!("{}\n", auth_url);
-    if let Some(qr) = crate::login_qr::indented_section(
-        &auth_url,
-        "Scan this QR on another device if this machine has no browser:",
-        "    ",
-    ) {
-        eprintln!("{qr}\n");
-    }
-    eprintln!("Opening browser for Claude login...\n");
+    eprintln!("\nManual Claude auth required.\n");
+    print_manual_oauth_url(&auth_url, QR_BROWSERLESS_HEADING);
     if !crate::auth::browser_suppressed(no_browser)
         && let Err(err) = open::that(&auth_url)
     {
         eprintln!("warning: failed to open browser for Claude login: {err}");
     }
-    eprintln!("After logging in, copy and paste the callback URL or code here:\n");
-    eprint!("> ");
-    std::io::stdout().flush()?;
-
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        anyhow::bail!("No authorization code entered.");
-    }
-
+    let input = read_manual_auth_input(
+        "After logging in, copy and paste the callback URL or code here:",
+        "No authorization code entered.",
+    )?;
     eprintln!("Exchanging code for tokens...");
-    exchange_claude_code(&verifier, trimmed, claude::REDIRECT_URI).await
+    exchange_claude_code(&verifier, &input, claude::REDIRECT_URI).await
 }
 
 pub fn claude_auth_url(redirect_uri: &str, challenge: &str, state: &str) -> String {
@@ -872,16 +875,6 @@ pub async fn login_openai(no_browser: bool) -> Result<OAuthTokens> {
     let redirect_uri = openai::redirect_uri(port);
     let auth_url = openai_auth_url_with_prompt(&redirect_uri, &challenge, &state, Some("login"));
 
-    eprintln!("\nOpen this URL in your browser:\n");
-    eprintln!("{}\n", auth_url);
-    if let Some(qr) = crate::login_qr::indented_section(
-        &auth_url,
-        "Scan this QR on another device if this machine has no browser:",
-        "    ",
-    ) {
-        eprintln!("{qr}\n");
-    }
-
     let callback_listener = match bind_callback_listener(port) {
         Ok(listener) => Some(listener),
         Err(err) => {
@@ -889,7 +882,16 @@ pub async fn login_openai(no_browser: bool) -> Result<OAuthTokens> {
             None
         }
     };
-    let browser_opened = if crate::auth::browser_suppressed(no_browser) {
+    let browser_suppressed = crate::auth::browser_suppressed(no_browser);
+    if browser_suppressed {
+        eprintln!("\nManual OpenAI login required.\n");
+        print_manual_oauth_url(&auth_url, QR_BROWSERLESS_HEADING);
+    } else {
+        eprintln!("\nOpening browser for OpenAI login...\n");
+        eprintln!("If the browser does not open, jcode will fall back to manual callback paste.");
+    }
+
+    let browser_opened = if browser_suppressed {
         false
     } else {
         open::that(&auth_url).is_ok()
@@ -921,22 +923,18 @@ pub async fn login_openai(no_browser: bool) -> Result<OAuthTokens> {
                 port
             );
         }
-    } else if !browser_opened {
-        eprintln!(
-            "Couldn't open a browser on this machine. Use the QR code above, then paste the full callback URL here.\n"
-        );
+    } else {
+        eprintln!("Couldn't open a browser on this machine. Falling back to manual paste.\n");
+        if !browser_suppressed {
+            print_manual_oauth_url(&auth_url, QR_BROWSERLESS_HEADING);
+        }
     }
 
-    eprintln!("Paste the full callback URL (or query string) here:\n");
-    eprint!("> ");
-    std::io::stdout().flush()?;
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        anyhow::bail!("No callback URL entered.");
-    }
-    exchange_openai_callback_input(&verifier, trimmed, &state, &redirect_uri).await
+    let input = read_manual_auth_input(
+        "Paste the full callback URL (or query string) here:",
+        "No callback URL entered.",
+    )?;
+    exchange_openai_callback_input(&verifier, &input, &state, &redirect_uri).await
 }
 
 /// Save Claude tokens to jcode's credentials file (active account or first numbered account).
