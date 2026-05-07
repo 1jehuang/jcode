@@ -330,6 +330,6 @@ where
 
 fn auth_email_suffix(email: Option<&str>) -> String {
     email
-        .map(|email| format!(" for {}", email))
+        .map(|_| " for [redacted]".to_string())
         .unwrap_or_default()
 }

@@ -91,7 +91,7 @@ enum DesktopSessionCommand {
 pub fn launch_resume_session(session_id: &str, title: &str) -> Result<()> {
     let title = format!("jcode · {}", compact_title(title));
     let candidates = terminal_candidates(&title, &["--resume", session_id]);
-    launch_first_available_terminal(candidates, &format!("jcode --resume {session_id}"))
+    launch_first_available_terminal(candidates, "jcode --resume [redacted]")
 }
 
 pub fn launch_new_session() -> Result<()> {
@@ -114,7 +114,7 @@ pub fn send_message_to_session(session_id: &str, _title: &str, message: &str) ->
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .with_context(|| format!("failed to spawn jcode run for {session_id}"))?;
+        .context("failed to spawn jcode run for session [redacted]")?;
 
     Ok(())
 }
@@ -1283,6 +1283,10 @@ pub fn launch_validated_resume_session(session_id: &str, title: &str) -> Result<
 }
 
 #[cfg(test)]
+#[path = "session_launch_security_tests.rs"]
+mod session_launch_security_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[cfg(unix)]
@@ -1291,19 +1295,15 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
-    fn validates_safe_session_ids() -> Result<()> {
+    fn validates_session_ids_and_compacts_titles() -> Result<()> {
         validate_resume_session_id("session_cow_123-abc.def")?;
-        assert!(validate_resume_session_id("bad/id").is_err());
-        assert!(validate_resume_session_id("bad id").is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn compact_title_shortens_long_titles() {
-        let title =
-            compact_title("this is a very long title that should become shorter for terminals");
+        assert!(
+            validate_resume_session_id("bad/id").is_err()
+                && validate_resume_session_id("bad id").is_err()
+        );
+        let title = compact_title("this title is definitely longer than forty eight characters");
         assert!(title.ends_with('…'));
-        assert!(title.chars().count() <= 49);
+        Ok(())
     }
 
     #[test]

@@ -151,6 +151,18 @@ struct ScriptableAuthSuccess {
     email: Option<String>,
 }
 
+impl ScriptableAuthSuccess {
+    fn redacted_for_output(mut self) -> Self {
+        if self.account_label.is_some() {
+            self.account_label = Some("[redacted]".to_string());
+        }
+        if self.email.is_some() {
+            self.email = Some("[redacted]".to_string());
+        }
+        self
+    }
+}
+
 #[allow(deprecated)]
 pub async fn run_login(
     choice: &ProviderChoice,
@@ -951,11 +963,11 @@ async fn login_antigravity_flow(no_browser: bool) -> Result<()> {
         "Tokens saved to {}",
         crate::auth::antigravity::tokens_path()?.display()
     );
-    if let Some(email) = tokens.email.as_deref() {
-        eprintln!("Google account: {}", email);
+    if tokens.email.is_some() {
+        eprintln!("Google account: [redacted]");
     }
-    if let Some(project_id) = tokens.project_id.as_deref() {
-        eprintln!("Resolved Antigravity project: {}", project_id);
+    if tokens.project_id.is_some() {
+        eprintln!("Resolved Antigravity project: [redacted]");
     }
     crate::telemetry::record_auth_success("antigravity", "oauth");
     Ok(())
@@ -981,8 +993,8 @@ async fn login_gemini_flow(no_browser: bool) -> Result<()> {
         "Tokens saved to {}",
         crate::auth::gemini::tokens_path()?.display()
     );
-    if let Some(email) = tokens.email.as_deref() {
-        eprintln!("Google account: {}", email);
+    if tokens.email.is_some() {
+        eprintln!("Google account: [redacted]");
     }
     crate::telemetry::record_auth_success("gemini", "oauth");
     Ok(())
@@ -997,10 +1009,7 @@ async fn login_google_flow(no_browser: bool) -> Result<()> {
 
     let _creds = match auth::google::load_credentials() {
         Ok(creds) => {
-            eprintln!(
-                "✓ Google credentials found (client_id: {}...)\n",
-                &creds.client_id[..20.min(creds.client_id.len())]
-            );
+            eprintln!("✓ Google credentials found (client_id: [redacted])\n");
             creds
         }
         Err(_) => {

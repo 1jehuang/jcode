@@ -451,7 +451,7 @@ async fn burst_retry_takeover_without_local_history_keeps_existing_live_clients_
     }
 
     let final_client_map =
-        debug_run_command_json(debug_socket_path.clone(), "clients:map", None).await?;
+        wait_for_client_map(debug_socket_path.clone(), &initial_session_to_client).await?;
     let final_session_to_client = client_id_map(&final_client_map)?;
     assert_eq!(
         final_session_to_client, initial_session_to_client,
@@ -462,6 +462,36 @@ async fn burst_retry_takeover_without_local_history_keeps_existing_live_clients_
     abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
 
     Ok(())
+}
+
+async fn wait_for_client_map(
+    debug_socket_path: PathBuf,
+    expected_session_to_client: &std::collections::HashMap<String, String>,
+) -> Result<serde_json::Value> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let expected_count = expected_session_to_client.len() as u64;
+    let mut last_map = None;
+
+    while Instant::now() < deadline {
+        let map = debug_run_command_json(debug_socket_path.clone(), "clients:map", None).await?;
+        let count_matches =
+            map.get("count").and_then(|value| value.as_u64()) == Some(expected_count);
+        let mapping_matches = client_id_map(&map)
+            .map(|mapping| &mapping == expected_session_to_client)
+            .unwrap_or(false);
+        if count_matches && mapping_matches {
+            return Ok(map);
+        }
+        last_map = Some(map);
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    anyhow::bail!(
+        "timed out waiting for retry connections to detach; last clients:map = {}",
+        last_map
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "<none>".to_string())
+    )
 }
 
 /// Stress the burst attach path used when many spawned windows resume pre-created sessions.

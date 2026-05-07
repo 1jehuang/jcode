@@ -25,6 +25,23 @@ fn scriptable_resume_command_matches_input_kind() {
 }
 
 #[test]
+fn scriptable_auth_success_redacts_account_identifiers_for_json_output() {
+    let success = ScriptableAuthSuccess {
+        status: "authenticated",
+        provider: "copilot".to_string(),
+        account_label: Some("octocat".to_string()),
+        credentials_path: Some("/tmp/jcode/auth.json".to_string()),
+        email: Some("octocat@example.com".to_string()),
+    }
+    .redacted_for_output();
+
+    let json = serde_json::to_string(&success).expect("serialize success");
+    assert!(json.contains("[redacted]"));
+    assert!(!json.contains("octocat"));
+    assert!(!json.contains("octocat@example.com"));
+}
+
+#[test]
 fn load_pending_login_removes_expired_record() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("temp dir");
