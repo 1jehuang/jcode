@@ -212,6 +212,88 @@ Guarantees:
 - Session entries are sorted by most recent message time descending and expose stable metadata needed by future headless orchestration clients.
 - `resume_target.kind` is one of `jcode_session`, `claude_code_session`, `codex_session`, `pi_session`, or `opencode_session`.
 
+## `session show --json`
+
+Command:
+
+```bash
+jcode-harness session show session_visible --json
+jcode-harness session show session_visible --preview 3 --json
+```
+
+Shape:
+
+```json
+{
+  "status": "ok",
+  "command": "session show",
+  "offline": true,
+  "read_only": true,
+  "source": "jcode",
+  "id": "session_visible",
+  "session_path": "/home/user/.jcode/sessions/session_visible.json",
+  "session_exists": true,
+  "journal_path": "/home/user/.jcode/sessions/session_visible.journal.jsonl",
+  "journal_exists": false,
+  "metadata": {
+    "id": "session_visible",
+    "parent_id": null,
+    "short_name": "visible",
+    "display_name": "visible",
+    "title": "Visible local session",
+    "created_at": "2026-05-07T20:00:00+00:00",
+    "updated_at": "2026-05-07T20:05:00+00:00",
+    "last_active_at": "2026-05-07T20:06:00+00:00",
+    "working_dir": "/repo",
+    "model": "gpt-test",
+    "provider_key": "openai",
+    "provider_session_id": "provider-fixture",
+    "reasoning_effort": "medium",
+    "status": "closed",
+    "status_detail": null,
+    "stored_message_count": 4,
+    "user_message_count": 2,
+    "assistant_message_count": 1,
+    "env_snapshot_count": 0,
+    "memory_injection_count": 0,
+    "replay_event_count": 0,
+    "estimated_total_tokens": 0,
+    "is_canary": false,
+    "testing_build": null,
+    "is_debug": false,
+    "saved": true,
+    "save_label": "fixture",
+    "last_pid": null,
+    "has_compaction": false,
+    "compaction": null
+  },
+  "preview": {
+    "requested": 2,
+    "returned": 2,
+    "content_truncated_to_chars": 4000,
+    "messages": [
+      {
+        "index": 1,
+        "role": "assistant",
+        "content": "second visible answer",
+        "truncated": false,
+        "tool_calls": [],
+        "tool": null
+      }
+    ]
+  }
+}
+```
+
+Guarantees:
+
+- `offline` and `read_only` are always `true`; the command loads local session snapshot/journal files and does not start the TUI, model providers, servers, or network-backed integrations.
+- `session show` currently supports local jcode session ids only. Imported `claude_code`, `codex`, `pi`, and `opencode` show support is a future compatibility slice.
+- Default output uses `--preview 0`, so `preview.messages` is empty and transcript content is not emitted unless explicitly requested.
+- `--preview N` returns the last `N` rendered, visible messages. Internal system reminders remain hidden by the renderer.
+- Preview `content` is truncated to `content_truncated_to_chars` characters per rendered message, and `truncated` reports whether truncation occurred.
+- `metadata.compaction` intentionally reports compaction counters and presence flags only, not summary text or provider-encrypted content.
+
 ## Shared skill entry
 
 Used by `skills list --json`, `skills show <name> --json`, `skills doctor --json`, and resolved entries in `skills match <goal> --json`.

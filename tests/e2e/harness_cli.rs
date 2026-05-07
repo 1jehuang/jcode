@@ -588,6 +588,122 @@ fn harness_session_list_json_reports_local_sessions_without_tui() -> Result<()> 
 }
 
 #[test]
+fn harness_session_show_json_reports_metadata_and_opt_in_preview() -> Result<()> {
+    let temp = tempfile::Builder::new()
+        .prefix("jcode-harness-session-show-")
+        .tempdir()?;
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("workspace");
+    let sessions_dir = home.join("sessions");
+    std::fs::create_dir_all(&sessions_dir)?;
+    std::fs::create_dir_all(&cwd)?;
+
+    std::fs::write(
+        sessions_dir.join("session_show.json"),
+        serde_json::json!({
+            "id": "session_show",
+            "title": "Show local session",
+            "created_at": "2026-05-07T20:10:00Z",
+            "updated_at": "2026-05-07T20:20:00Z",
+            "last_active_at": "2026-05-07T20:21:00Z",
+            "working_dir": cwd,
+            "short_name": "showcase",
+            "provider_key": "openai",
+            "provider_session_id": "provider-fixture",
+            "model": "gpt-test",
+            "reasoning_effort": "medium",
+            "saved": true,
+            "save_label": "show-fixture",
+            "status": "Closed",
+            "messages": [
+                {
+                    "id": "m0",
+                    "role": "user",
+                    "display_role": "system",
+                    "content": [{"type": "text", "text": "<system-reminder>hidden default transcript secret</system-reminder>"}]
+                },
+                {"id": "m1", "role": "user", "content": [{"type": "text", "text": "first visible prompt"}]},
+                {"id": "m2", "role": "assistant", "content": [{"type": "text", "text": "second visible answer"}]},
+                {"id": "m3", "role": "user", "content": [{"type": "text", "text": "third visible follow-up"}]}
+            ],
+            "env_snapshots": [],
+            "memory_injections": [],
+            "replay_events": []
+        })
+        .to_string(),
+    )?;
+
+    let output = harness_command(&home, &cwd)
+        .args(["session", "show", "session_show", "--json"])
+        .output()?;
+    let stdout = stdout_text(&output);
+
+    assert!(output.status.success(), "stderr: {}", stderr_text(&output));
+    assert!(
+        !stdout.contains("first visible prompt")
+            && !stdout.contains("second visible answer")
+            && !stdout.contains("hidden default transcript secret"),
+        "default show output must not include transcript content. stdout: {stdout}"
+    );
+    let report: Value = serde_json::from_str(&stdout)?;
+    assert_eq!(report["status"], "ok");
+    assert_eq!(report["command"], "session show");
+    assert_eq!(report["offline"], true);
+    assert_eq!(report["read_only"], true);
+    assert_eq!(report["source"], "jcode");
+    assert_eq!(report["id"], "session_show");
+    assert_eq!(report["metadata"]["display_name"], "showcase");
+    assert_eq!(report["metadata"]["status"], "closed");
+    assert_eq!(report["metadata"]["stored_message_count"], 4);
+    assert_eq!(report["metadata"]["user_message_count"], 2);
+    assert_eq!(report["metadata"]["assistant_message_count"], 1);
+    assert_eq!(
+        report["metadata"]["provider_session_id"],
+        "provider-fixture"
+    );
+    assert_eq!(report["metadata"]["reasoning_effort"], "medium");
+    assert_eq!(report["preview"]["requested"], 0);
+    assert_eq!(report["preview"]["returned"], 0);
+    assert_eq!(
+        report["preview"]["messages"].as_array().map(Vec::len),
+        Some(0)
+    );
+
+    let preview_output = harness_command(&home, &cwd)
+        .args([
+            "session",
+            "show",
+            "session_show",
+            "--preview",
+            "2",
+            "--json",
+        ])
+        .output()?;
+    let preview_stdout = stdout_text(&preview_output);
+    assert!(
+        preview_output.status.success(),
+        "stderr: {}",
+        stderr_text(&preview_output)
+    );
+    let preview_report: Value = serde_json::from_str(&preview_stdout)?;
+    assert_eq!(preview_report["preview"]["requested"], 2);
+    assert_eq!(preview_report["preview"]["returned"], 2);
+    let messages = preview_report["preview"]["messages"]
+        .as_array()
+        .expect("preview messages");
+    assert_eq!(messages[0]["role"], "assistant");
+    assert_eq!(messages[0]["content"], "second visible answer");
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[1]["content"], "third visible follow-up");
+    assert!(
+        !preview_stdout.contains("hidden default transcript secret"),
+        "system reminder should remain hidden. stdout: {preview_stdout}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn harness_smoke_runs_offline_tool_cases_with_deterministic_artifacts() -> Result<()> {
     let temp = tempfile::Builder::new()
         .prefix("jcode-harness-smoke-")

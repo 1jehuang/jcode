@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use jcode::cli::provider_init::ProviderChoice;
 use jcode::id::new_id;
-use jcode::message::{Message, StreamEvent, ToolDefinition};
+use jcode::message::{Message, Role, StreamEvent, ToolDefinition};
 use jcode::provider::{EventStream, Provider};
 use jcode::tool::{Registry, ToolContext, ToolExecutionMode};
 use jcode::tui::session_picker::{ResumeTarget, SessionInfo, SessionSource};
@@ -139,6 +139,8 @@ struct SessionArgs {
 enum SessionCommand {
     /// List local and imported sessions discovered by the session picker
     List(SessionListArgs),
+    /// Show one local jcode session without starting the TUI
+    Show(SessionShowArgs),
 }
 
 #[derive(Parser)]
@@ -155,6 +157,18 @@ struct SessionListArgs {
     /// Maximum number of sessions to print after filtering
     #[arg(long)]
     limit: Option<usize>,
+}
+
+#[derive(Parser)]
+struct SessionShowArgs {
+    /// Local jcode session id from `jcode-harness session list --source jcode --json`
+    id: String,
+    /// Emit JSON report
+    #[arg(long)]
+    json: bool,
+    /// Include the last N rendered visible messages as a bounded preview
+    #[arg(long, default_value_t = 0)]
+    preview: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -872,7 +886,65 @@ fn harden_private_dir(_path: &std::path::Path) -> Result<()> {
 fn run_session(args: SessionArgs) -> Result<()> {
     match args.command {
         SessionCommand::List(args) => run_session_list(args),
+        SessionCommand::Show(args) => run_session_show(args),
     }
+}
+
+fn run_session_show(args: SessionShowArgs) -> Result<()> {
+    if args.id.contains(':') {
+        anyhow::bail!(
+            "session show currently supports local jcode session ids only; use `session list --source jcode --json`"
+        );
+    }
+
+    let session_path = jcode::session::session_path(&args.id)?;
+    let journal_path = jcode::session::session_journal_path(&args.id)?;
+    let session = jcode::session::Session::load(&args.id)?;
+    let preview_messages = session_preview_json(&session, args.preview);
+    let report = json!({
+        "status": "ok",
+        "command": "session show",
+        "offline": true,
+        "read_only": true,
+        "source": "jcode",
+        "id": &session.id,
+        "session_path": &session_path,
+        "session_exists": session_path.exists(),
+        "journal_path": &journal_path,
+        "journal_exists": journal_path.exists(),
+        "metadata": session_metadata_json(&session),
+        "preview": {
+            "requested": args.preview,
+            "returned": preview_messages.len(),
+            "content_truncated_to_chars": SESSION_SHOW_PREVIEW_CONTENT_CHARS,
+            "messages": preview_messages,
+        },
+    });
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("jcode-harness session show: {}", session.id);
+        println!("Offline: true");
+        println!("Read only: true");
+        println!("Title: {}", session.title.as_deref().unwrap_or("Untitled"));
+        println!("Status: {}", session.status.display());
+        println!("Messages stored: {}", session.messages.len());
+        if args.preview == 0 {
+            println!("Preview: disabled (use --preview N)");
+        } else {
+            println!("Preview: last {} rendered messages", args.preview);
+            for message in session_preview_json(&session, args.preview) {
+                println!(
+                    "- [{}] {}",
+                    message["role"].as_str().unwrap_or("unknown"),
+                    message["content"].as_str().unwrap_or_default()
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn run_session_list(args: SessionListArgs) -> Result<()> {
@@ -936,6 +1008,106 @@ fn run_session_list(args: SessionListArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+const SESSION_SHOW_PREVIEW_CONTENT_CHARS: usize = 4000;
+
+fn session_metadata_json(session: &jcode::session::Session) -> serde_json::Value {
+    let user_message_count = session
+        .messages
+        .iter()
+        .filter(|message| message.display_role.is_none() && message.role == Role::User)
+        .count();
+    let assistant_message_count = session
+        .messages
+        .iter()
+        .filter(|message| message.display_role.is_none() && message.role == Role::Assistant)
+        .count();
+    let total_tokens: u64 = session
+        .messages
+        .iter()
+        .filter_map(|message| message.token_usage.as_ref())
+        .map(|usage| {
+            usage.input_tokens
+                + usage.output_tokens
+                + usage.cache_read_input_tokens.unwrap_or(0)
+                + usage.cache_creation_input_tokens.unwrap_or(0)
+        })
+        .sum();
+
+    json!({
+        "id": &session.id,
+        "parent_id": &session.parent_id,
+        "short_name": &session.short_name,
+        "display_name": session.display_name(),
+        "title": &session.title,
+        "created_at": session.created_at.to_rfc3339(),
+        "updated_at": session.updated_at.to_rfc3339(),
+        "last_active_at": session.last_active_at.map(|time| time.to_rfc3339()),
+        "working_dir": &session.working_dir,
+        "model": &session.model,
+        "provider_key": &session.provider_key,
+        "provider_session_id": &session.provider_session_id,
+        "reasoning_effort": &session.reasoning_effort,
+        "status": session.status.display(),
+        "status_detail": session.status.detail(),
+        "stored_message_count": session.messages.len(),
+        "user_message_count": user_message_count,
+        "assistant_message_count": assistant_message_count,
+        "env_snapshot_count": session.env_snapshots.len(),
+        "memory_injection_count": session.memory_injections.len(),
+        "replay_event_count": session.replay_events.len(),
+        "estimated_total_tokens": total_tokens,
+        "is_canary": session.is_canary,
+        "testing_build": &session.testing_build,
+        "is_debug": session.is_debug,
+        "saved": session.saved,
+        "save_label": &session.save_label,
+        "last_pid": session.last_pid,
+        "has_compaction": session.compaction.is_some(),
+        "compaction": session.compaction.as_ref().map(|state| json!({
+            "covers_up_to_turn": state.covers_up_to_turn,
+            "original_turn_count": state.original_turn_count,
+            "compacted_count": state.compacted_count,
+            "has_summary": !state.summary_text.trim().is_empty(),
+            "has_openai_encrypted_content": state.openai_encrypted_content.is_some(),
+        })),
+    })
+}
+
+fn session_preview_json(
+    session: &jcode::session::Session,
+    preview_limit: usize,
+) -> Vec<serde_json::Value> {
+    if preview_limit == 0 {
+        return Vec::new();
+    }
+
+    let rendered = jcode::session::render_messages(session);
+    let start_index = rendered.len().saturating_sub(preview_limit);
+    rendered
+        .into_iter()
+        .enumerate()
+        .skip(start_index)
+        .map(|(index, message)| {
+            let truncated =
+                jcode::util::truncate_str(&message.content, SESSION_SHOW_PREVIEW_CONTENT_CHARS);
+            let content = truncated.to_string();
+            let is_truncated = content.len() < message.content.len();
+            json!({
+                "index": index,
+                "role": message.role,
+                "content": content,
+                "truncated": is_truncated,
+                "tool_calls": message.tool_calls,
+                "tool": message.tool_data.as_ref().map(|tool| json!({
+                    "id": &tool.id,
+                    "name": &tool.name,
+                    "intent": &tool.intent,
+                })),
+            })
+        })
+        .collect()
 }
 
 fn session_matches_source_filter(

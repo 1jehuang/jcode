@@ -140,6 +140,8 @@ jcode-harness demo run mock-provider-run-json --json
 jcode-harness demo run all --sandbox --json
 jcode-harness session list --json
 jcode-harness session list --source jcode --json
+jcode-harness session show <session-id> --json
+jcode-harness session show <session-id> --preview 3 --json
 jcode-harness safe-eval
 jcode-harness safe-eval --json
 jcode-harness doctor
@@ -178,10 +180,16 @@ TUI:
 ```bash
 jcode-harness session list --json
 jcode-harness session list --source jcode --json
+jcode-harness session show <session-id> --json
+jcode-harness session show <session-id> --preview 3 --json
 ```
 
-The command is offline/read-only, hides debug and canary sessions by default, and
-supports `--include-test`, `--source all|jcode|claude-code|codex|pi|opencode`, and
+`session show` currently supports local jcode sessions. It emits metadata only by
+default, and transcript content appears only when a bounded `--preview N` is
+requested.
+
+The commands are offline/read-only, hide debug and canary sessions by default, and
+support `--include-test`, `--source all|jcode|claude-code|codex|pi|opencode`, and
 `--limit N` for deterministic automation.
 
 ### Reproducible demos without credentials

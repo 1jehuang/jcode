@@ -1,14 +1,14 @@
 {
   "version": 5,
   "projectName": "jcode-harness",
-  "focus": "Add offline session list JSON",
+  "focus": "Add offline session show JSON",
   "status": "done",
-  "activeContractId": "2026-05-07-add-offline-session-list-json-ed330e",
+  "activeContractId": "2026-05-07-add-offline-session-show-json-b08332",
   "counters": {
-    "contracts": 20,
-    "traces": 21,
-    "gates": 21,
-    "verifications": 18,
+    "contracts": 21,
+    "traces": 23,
+    "gates": 22,
+    "verifications": 19,
     "knowledgeItems": 0,
     "knowledgeQueries": 0,
     "evalCases": 0,
@@ -57,6 +57,11 @@
       "id": "decision-2026-05-07-b132df",
       "ts": "2026-05-07T21:37:19.701Z",
       "text": "Expose `jcode-harness session list --json` as the first issue #4 headless runtime slice: read-only/offline session metadata now, while mutable spawn/attach/resume APIs remain follow-up work."
+    },
+    {
+      "id": "decision-2026-05-07-10dee0",
+      "ts": "2026-05-07T21:46:41.371Z",
+      "text": "Expose `jcode-harness session show <id> --json` as a local-session-only, read-only headless metadata API with transcript preview opt-in via bounded `--preview N`, keeping external imported session show semantics for later source-specific slices."
     }
   ],
   "events": [
@@ -579,6 +584,43 @@
       "status": "done",
       "focus": "Issue #4 session list JSON",
       "activeContractId": "2026-05-07-add-offline-session-list-json-ed330e"
+    },
+    {
+      "ts": "2026-05-07T21:40:00.110Z",
+      "type": "contract_created",
+      "contractId": "2026-05-07-add-offline-session-show-json-b08332",
+      "summary": "Add offline session show JSON"
+    },
+    {
+      "ts": "2026-05-07T21:44:30.784Z",
+      "type": "trace_recorded",
+      "traceId": "trace-2026-05-07-7cf7bcba",
+      "contractId": "2026-05-07-add-offline-session-show-json-b08332",
+      "kind": "attempt",
+      "summary": "Implemented offline session show JSON slice"
+    },
+    {
+      "ts": "2026-05-07T21:45:05.214Z",
+      "type": "verification_recorded",
+      "traceId": "trace-2026-05-07-704f7b17",
+      "contractId": "2026-05-07-add-offline-session-show-json-b08332",
+      "status": "pass",
+      "summary": "Focused session show validation passed"
+    },
+    {
+      "ts": "2026-05-07T21:46:41.371Z",
+      "type": "gate_evaluated",
+      "contractId": "2026-05-07-add-offline-session-show-json-b08332",
+      "gateId": "gate-2026-05-07-29505b",
+      "verdict": "pass"
+    },
+    {
+      "ts": "2026-05-07T21:46:41.371Z",
+      "type": "state_update",
+      "note": "Implemented and validated offline/read-only session show JSON. Next: commit and push.",
+      "status": "done",
+      "focus": "Issue #4 session show JSON",
+      "activeContractId": "2026-05-07-add-offline-session-show-json-b08332"
     }
   ]
 }

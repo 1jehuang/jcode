@@ -1,0 +1,46 @@
+{
+  "id": "gate-2026-05-07-29505b",
+  "ts": "2026-05-07T21:46:41.371Z",
+  "contractId": "2026-05-07-add-offline-session-show-json-b08332",
+  "verdict": "pass",
+  "outputChecks": [
+    {
+      "path": "src/bin/harness.rs",
+      "exists": true
+    },
+    {
+      "path": "tests/e2e/harness_cli.rs",
+      "exists": true
+    },
+    {
+      "path": "docs/JCODE_HARNESS_JSON_SCHEMAS.md",
+      "exists": true
+    },
+    {
+      "path": "README.md",
+      "exists": true
+    },
+    {
+      "path": "docs/JCODE_HARNESS_RELEASE_GATES.md",
+      "exists": true
+    }
+  ],
+  "checkedConditions": [
+    "`jcode-harness session show <id> --json` exists and is read-only/offline",
+    "Default output exposes metadata without transcript content",
+    "`--preview N` returns bounded visible message preview and hides system reminders",
+    "cargo fmt --check, focused e2e, cargo check -p jcode, docs/governance checks, and selfdev build passed"
+  ],
+  "uncheckedConditions": [],
+  "evidence": [
+    "/tmp/jcode-bg-tasks/262350zdma.output",
+    "/tmp/jcode-bg-tasks/313086hcaj.output",
+    "/tmp/jcode-bg-tasks/337776h5e7.output",
+    "src/bin/harness.rs",
+    "tests/e2e/harness_cli.rs",
+    "docs/JCODE_HARNESS_JSON_SCHEMAS.md",
+    "README.md",
+    "docs/JCODE_HARNESS_RELEASE_GATES.md"
+  ],
+  "notes": "The command is intentionally local-jcode-session only. Imported external session show support remains a follow-up because each source has different backing storage and privacy semantics."
+}

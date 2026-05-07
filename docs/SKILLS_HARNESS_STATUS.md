@@ -16,7 +16,7 @@ This checklist tracks the fork proposal described in `docs/SKILLS_HARNESS.md` an
 | Repo/task skill scoping preview | Done | `jcode-harness skills match <goal>` previews selected skills without provider calls, preserves explicit task-level skills first, resolves repo-local overrides via `--cwd`, and emits JSON for automation. | Extend only with backward-compatible fields and keep router order deterministic. |
 | Harness smoke | Done | `jcode-harness smoke` executes deterministic tool cases without model calls; `harness_smoke_runs_offline_tool_cases_with_deterministic_artifacts` asserts the default offline case list, excludes network-backed cases by default, and verifies final workspace artifacts. | Keep `--include-network` out of default CI unless separately reviewed. |
 | LLM wiki memory integration | Done | `llmwiki-memory` is an embedded skill that documents safe local LLM wiki MCP usage for durable project memory, provenance, transcript sync, and secret boundaries; router auto-selects it for wiki/context-history tasks; `jcode-harness skills llmwiki-bridge` prints the permission-reviewed offline mapping to concrete local wiki MCP commands without invoking them. | Keep the bridge preview offline; add direct MCP invocation only after a separate explicit permission and credential-boundary review. |
-| Documentation and discoverability | Partial | README, `docs/SKILLS_HARNESS.md`, `docs/CODEX_BOOTSTRAP.md`, `docs/JCODE_HARNESS_PRODUCT_PLAN.md`, `docs/JCODE_HARNESS_RELEASE_GATES.md`, `docs/JCODE_HARNESS_JSON_SCHEMAS.md`, `docs/JCODE_HARNESS_INIT_SWARM.md`, `docs/JCODE_HARNESS_RELEASE_NOTES_TEMPLATE.md`, and `.jcode/SKILLS_PLAN.md`; schema docs cover `init`, `safe-eval`, `doctor`, `session list`, `demo`, `demo run`, skills JSON commands, `run` JSON/NDJSON, and `clean-code check`. | Keep this status checklist updated after each implementation slice. |
+| Documentation and discoverability | Partial | README, `docs/SKILLS_HARNESS.md`, `docs/CODEX_BOOTSTRAP.md`, `docs/JCODE_HARNESS_PRODUCT_PLAN.md`, `docs/JCODE_HARNESS_RELEASE_GATES.md`, `docs/JCODE_HARNESS_JSON_SCHEMAS.md`, `docs/JCODE_HARNESS_INIT_SWARM.md`, `docs/JCODE_HARNESS_RELEASE_NOTES_TEMPLATE.md`, and `.jcode/SKILLS_PLAN.md`; schema docs cover `init`, `safe-eval`, `doctor`, `session list`, `session show`, `demo`, `demo run`, skills JSON commands, `run` JSON/NDJSON, and `clean-code check`. | Keep this status checklist updated after each implementation slice. |
 
 ## Latest validation snapshot
 
@@ -45,6 +45,7 @@ Commands recently run successfully:
 - `cargo run -q -p jcode --bin jcode-harness -- demo run all --sandbox --json | python3 -m json.tool >/dev/null`
 - `cargo run -q -p jcode --bin jcode-harness -- session list --json | python3 -m json.tool >/dev/null`
 - `cargo test --test e2e harness_session_list_json -- --nocapture`
+- `cargo test --test e2e harness_session_show_json -- --nocapture`
 - `cargo test --test e2e harness_live_provider -- --nocapture` (default path skips without live-provider env and makes no provider call)
 - `cargo test --test e2e harness_smoke -- --nocapture`
 - `cargo test --test e2e harness_init_json -- --nocapture`
