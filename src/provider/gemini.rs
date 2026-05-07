@@ -890,22 +890,79 @@ pub(crate) fn build_tools(tools: &[ToolDefinition]) -> Option<Vec<GeminiTool>> {
 }
 
 fn gemini_compatible_schema(schema: &Value) -> Value {
+    // Gemini's generateContent uses an OpenAPI 3.0 schema subset and rejects
+    // standard JSON-Schema metadata ($defs, $ref, $schema, etc.).
+    // MCP servers like notion and supabase emit schemas with $defs+$ref.
+    // We extract $defs from the root, then recursively inline $ref references
+    // and strip metadata keywords Gemini doesn't accept.
+    let defs = schema
+        .as_object()
+        .and_then(|m| m.get("$defs").or_else(|| m.get("definitions")))
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    sanitize_for_gemini(schema, &defs, 0)
+}
+
+const GEMINI_SCHEMA_MAX_DEPTH: usize = 24;
+
+fn sanitize_for_gemini(
+    schema: &Value,
+    defs: &serde_json::Map<String, Value>,
+    depth: usize,
+) -> Value {
+    if depth > GEMINI_SCHEMA_MAX_DEPTH {
+        // Avoid blow-up on circular schemas — return permissive empty object
+        return Value::Object(serde_json::Map::new());
+    }
     match schema {
         Value::Object(map) => {
+            // Resolve $ref by replacing the entire object with the target definition
+            if let Some(ref_str) = map.get("$ref").and_then(|v| v.as_str()) {
+                let name = ref_str
+                    .strip_prefix("#/$defs/")
+                    .or_else(|| ref_str.strip_prefix("#/definitions/"));
+                if let Some(target_name) = name
+                    && let Some(target) = defs.get(target_name)
+                {
+                    return sanitize_for_gemini(target, defs, depth + 1);
+                }
+                // Unresolvable $ref → permissive empty object
+                return Value::Object(serde_json::Map::new());
+            }
+
             let mut out = serde_json::Map::new();
             for (key, value) in map {
+                // Strip JSON-Schema metadata not supported by Gemini
+                if matches!(
+                    key.as_str(),
+                    "$defs"
+                        | "definitions"
+                        | "$schema"
+                        | "$id"
+                        | "$comment"
+                        | "$anchor"
+                        | "title"
+                ) {
+                    continue;
+                }
                 if key == "const" {
                     out.insert(
                         "enum".to_string(),
-                        Value::Array(vec![gemini_compatible_schema(value)]),
+                        Value::Array(vec![sanitize_for_gemini(value, defs, depth + 1)]),
                     );
                 } else {
-                    out.insert(key.clone(), gemini_compatible_schema(value));
+                    out.insert(key.clone(), sanitize_for_gemini(value, defs, depth + 1));
                 }
             }
             Value::Object(out)
         }
-        Value::Array(items) => Value::Array(items.iter().map(gemini_compatible_schema).collect()),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|i| sanitize_for_gemini(i, defs, depth + 1))
+                .collect(),
+        ),
         _ => schema.clone(),
     }
 }
