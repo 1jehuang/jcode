@@ -1,14 +1,14 @@
 {
   "version": 5,
   "projectName": "jcode-harness",
-  "focus": "Add CI-friendly harness smoke e2e",
+  "focus": "Document init and clean-code JSON schemas",
   "status": "done",
-  "activeContractId": "2026-05-07-add-ci-friendly-harness-smoke-e2e-9a00d9",
+  "activeContractId": "2026-05-07-document-init-and-clean-code-json-schemas-8680dc",
   "counters": {
-    "contracts": 10,
-    "traces": 9,
-    "gates": 11,
-    "verifications": 9,
+    "contracts": 11,
+    "traces": 10,
+    "gates": 12,
+    "verifications": 10,
     "knowledgeItems": 0,
     "knowledgeQueries": 0,
     "evalCases": 0,
@@ -253,6 +253,27 @@
       "type": "gate_evaluated",
       "contractId": "2026-05-07-add-ci-friendly-harness-smoke-e2e-9a00d9",
       "gateId": "gate-2026-05-07-81526d",
+      "verdict": "pass"
+    },
+    {
+      "ts": "2026-05-07T20:14:29.343Z",
+      "type": "contract_created",
+      "contractId": "2026-05-07-document-init-and-clean-code-json-schemas-8680dc",
+      "summary": "Document init and clean-code JSON schemas"
+    },
+    {
+      "ts": "2026-05-07T20:18:17.344Z",
+      "type": "verification_recorded",
+      "traceId": "trace-2026-05-07-8f1f1a03",
+      "contractId": "2026-05-07-document-init-and-clean-code-json-schemas-8680dc",
+      "status": "pass",
+      "summary": "Selfdev build passed for schemas JSON dirty fingerprint 7a69e4555fa6."
+    },
+    {
+      "ts": "2026-05-07T20:18:32.378Z",
+      "type": "gate_evaluated",
+      "contractId": "2026-05-07-document-init-and-clean-code-json-schemas-8680dc",
+      "gateId": "gate-2026-05-07-d0c848",
       "verdict": "pass"
     }
   ]

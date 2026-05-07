@@ -37,6 +37,74 @@ fn write_skill(root: &std::path::Path, scope: &str, name: &str, description: &st
 }
 
 #[test]
+fn harness_init_json_reports_scaffold_and_detected_stack_offline() -> Result<()> {
+    let temp = tempfile::Builder::new()
+        .prefix("jcode-harness-init-json-")
+        .tempdir()?;
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("workspace");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(&cwd)?;
+    std::fs::write(
+        cwd.join("Cargo.toml"),
+        "[package]\nname = \"schema-smoke\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )?;
+
+    let output = harness_command(&home, &cwd)
+        .args(["init", "--cwd"])
+        .arg(&cwd)
+        .args(["--yes", "--no-memory-wiki", "--json"])
+        .output()?;
+    let stdout = stdout_text(&output);
+
+    assert!(output.status.success(), "stderr: {}", stderr_text(&output));
+    let report: Value = serde_json::from_str(&stdout)?;
+    assert_eq!(
+        report["root"].as_str(),
+        Some(cwd.canonicalize()?.to_string_lossy().as_ref())
+    );
+
+    let files_written = report["files_written"].as_array().expect("files_written");
+    for expected_suffix in [
+        "AGENTS.md",
+        ".jcode/INIT_REPORT.md",
+        ".jcode/init/SWARM_ANALYSIS_PLAN.md",
+        ".jcode/mcp.json",
+    ] {
+        assert!(
+            files_written.iter().any(|path| path
+                .as_str()
+                .is_some_and(|path| path.ends_with(expected_suffix))),
+            "missing {expected_suffix}. stdout: {stdout}"
+        );
+    }
+    assert_eq!(report["files_skipped"].as_array().map(Vec::len), Some(0));
+    assert!(
+        report["detected_stack"]
+            .as_array()
+            .expect("detected_stack")
+            .iter()
+            .any(|stack| stack == "Rust"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        report["next_steps"]
+            .as_array()
+            .expect("next_steps")
+            .iter()
+            .any(|step| step
+                .as_str()
+                .is_some_and(|step| step.contains("jcode-harness skills doctor"))),
+        "stdout: {stdout}"
+    );
+    assert!(cwd.join("AGENTS.md").exists());
+    assert!(cwd.join(".jcode/mcp.json").exists());
+    assert!(!cwd.join(".jcode/memory_wiki").exists());
+
+    Ok(())
+}
+
+#[test]
 fn harness_run_dry_run_auto_routes_optimization_only_for_perf_task() -> Result<()> {
     let temp = tempfile::Builder::new()
         .prefix("jcode-harness-cli-")

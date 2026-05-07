@@ -1,0 +1,52 @@
+{
+  "id": "2026-05-07-document-init-and-clean-code-json-schemas-8680dc",
+  "title": "Document init and clean-code JSON schemas",
+  "goal": "Document remaining stable JSON schemas for `jcode-harness init --json` and `clean-code check --json`, and add focused e2e coverage for init JSON parseability.",
+  "createdAt": "2026-05-07T20:14:29.342Z",
+  "status": "active",
+  "requiredInputs": [
+    "Branch feature/embedded-skills-harness",
+    "Existing docs/JCODE_HARNESS_JSON_SCHEMAS.md",
+    "Existing clean-code JSON e2e coverage",
+    "Need focused init --json e2e parseability coverage"
+  ],
+  "budget": {
+    "maxSteps": 8,
+    "maxMinutes": 45,
+    "maxToolCalls": 35
+  },
+  "permissions": [
+    "Edit docs/tests/governance files in repo",
+    "Run offline tests/check/build",
+    "Do not introduce network/provider calls"
+  ],
+  "completionConditions": [
+    "docs/JCODE_HARNESS_JSON_SCHEMAS.md documents `init --json` shape and guarantees",
+    "docs/JCODE_HARNESS_JSON_SCHEMAS.md documents `clean-code check --json` shape and guarantees",
+    "An e2e test parses and asserts required `init --json` fields without provider/network calls",
+    "Status/release docs record the new schema/test coverage",
+    "Formatting, focused e2e, harness_cli e2e, cargo check, and selfdev build pass"
+  ],
+  "outputPaths": [
+    "docs/JCODE_HARNESS_JSON_SCHEMAS.md",
+    "docs/SKILLS_HARNESS_STATUS.md",
+    "docs/JCODE_HARNESS_RELEASE_NOTES_TEMPLATE.md",
+    "tests/e2e/harness_cli.rs"
+  ],
+  "verificationCommands": [
+    "cargo fmt --check",
+    "cargo test --test e2e harness_init_json -- --nocapture",
+    "cargo test --test e2e clean_code_check_json -- --nocapture",
+    "cargo test --test e2e harness_cli -- --nocapture",
+    "cargo check -p jcode",
+    "selfdev build target=auto"
+  ],
+  "failureTaxonomy": [
+    "Docs mismatch actual JSON fields",
+    "Init e2e writes outside isolated temp workspace",
+    "Network/provider call introduced by schema validation",
+    "Existing clean-code JSON contract regresses",
+    "Insufficient validation"
+  ],
+  "notes": "Continue next implementation slice from SKILLS_HARNESS_STATUS. This is docs/test only, no behavior change intended."
+}

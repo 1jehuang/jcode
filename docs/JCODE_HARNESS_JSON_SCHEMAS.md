@@ -2,6 +2,42 @@
 
 This document records the stable machine-readable contracts exposed by `jcode-harness`. Fields may be added in future releases, but existing fields should not be removed or renamed without a migration note.
 
+## `init --json`
+
+Command:
+
+```bash
+jcode-harness init --cwd /repo --yes --no-memory-wiki --json
+```
+
+Shape:
+
+```json
+{
+  "root": "/repo",
+  "files_written": [
+    "/repo/AGENTS.md",
+    "/repo/.jcode/INIT_REPORT.md",
+    "/repo/.jcode/mcp.json"
+  ],
+  "files_skipped": [],
+  "detected_stack": ["Rust"],
+  "next_steps": [
+    "Review AGENTS.md and .jcode/INIT_QUESTIONS.md",
+    "Run `jcode-harness skills doctor`"
+  ]
+}
+```
+
+Guarantees:
+
+- `root` is the resolved project directory used for initialization.
+- `files_written` and `files_skipped` contain project scaffold paths touched or preserved by the command.
+- `detected_stack` is derived from local repository files such as `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, and Docker files. It is an empty array when no known stack marker exists.
+- `next_steps` is an ordered array of operator-facing follow-up strings.
+- The command is deterministic for a given project file set, except generated Markdown contents may include timestamps.
+- The command does not initialize model providers, MCP servers, browser, Gmail, or network-backed tools.
+
 ## `safe-eval --json`
 
 Command:
@@ -597,6 +633,45 @@ Guarantees:
 - The first event is `type: "start"`.
 - The terminal success event is `type: "done"`.
 - Future event types may be added between `start` and `done`; consumers should ignore unknown event types unless they opt into them.
+
+## `clean-code check --json`
+
+Command:
+
+```bash
+jcode-harness clean-code check --json --fail-on warning src
+```
+
+Shape:
+
+```json
+{
+  "root": "/repo",
+  "files_scanned": 1,
+  "findings": [
+    {
+      "rule_id": "no-silent-error-swallowing",
+      "severity": "error",
+      "path": "src/main.rs",
+      "line": 42,
+      "message": "Result from fallible operation is ignored; handle or propagate the error",
+      "snippet": "let _ = std::fs::read_to_string(path);"
+    }
+  ],
+  "rules_loaded": 5
+}
+```
+
+Guarantees:
+
+- The command is an offline deterministic quality gate and does not call model providers or network-backed tools.
+- `root` is the cwd or explicit `--cwd` used to resolve relative scan paths.
+- `files_scanned` counts supported source files actually read. Unsupported files and skipped directories are omitted.
+- `findings` is an array sorted by scan order and includes stable `rule_id`, normalized lowercase `severity`, repo-relative `path` when possible, 1-based `line`, human-readable `message`, and source `snippet`.
+- `severity` is one of `info`, `warning`, or `error`.
+- `rules_loaded` is the number of built-in Clean Code Guardian rules loaded for the scan.
+- Exit status is non-zero when any finding severity is at or above `--fail-on`, while the JSON report is still printed to stdout for CI parsers.
+- `clean-code rules` intentionally emits YAML, not JSON. Parseability is covered separately by the rule-pack tests.
 
 ## Compatibility policy
 

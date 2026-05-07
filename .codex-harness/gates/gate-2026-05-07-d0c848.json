@@ -1,0 +1,47 @@
+{
+  "id": "gate-2026-05-07-d0c848",
+  "ts": "2026-05-07T20:18:32.378Z",
+  "contractId": "2026-05-07-document-init-and-clean-code-json-schemas-8680dc",
+  "verdict": "pass",
+  "outputChecks": [
+    {
+      "path": "docs/JCODE_HARNESS_JSON_SCHEMAS.md",
+      "exists": true
+    },
+    {
+      "path": "docs/SKILLS_HARNESS_STATUS.md",
+      "exists": true
+    },
+    {
+      "path": "docs/JCODE_HARNESS_RELEASE_NOTES_TEMPLATE.md",
+      "exists": true
+    },
+    {
+      "path": "tests/e2e/harness_cli.rs",
+      "exists": true
+    }
+  ],
+  "checkedConditions": [
+    "docs/JCODE_HARNESS_JSON_SCHEMAS.md documents `init --json` shape and guarantees.",
+    "docs/JCODE_HARNESS_JSON_SCHEMAS.md documents `clean-code check --json` shape and guarantees.",
+    "Added harness_init_json_reports_scaffold_and_detected_stack_offline e2e that parses and asserts required init JSON fields using isolated temp home/workspace without provider/network calls.",
+    "docs/SKILLS_HARNESS_STATUS.md and docs/JCODE_HARNESS_RELEASE_NOTES_TEMPLATE.md record the new schema/test coverage and focused validation commands.",
+    "cargo fmt --check, cargo test --test e2e harness_init_json -- --nocapture, cargo test --test e2e clean_code_check_json -- --nocapture, cargo test --test e2e harness_cli -- --nocapture, cargo check -p jcode, and selfdev build target=auto passed."
+  ],
+  "uncheckedConditions": [
+    "docs/JCODE_HARNESS_JSON_SCHEMAS.md documents `init --json` shape and guarantees",
+    "docs/JCODE_HARNESS_JSON_SCHEMAS.md documents `clean-code check --json` shape and guarantees",
+    "An e2e test parses and asserts required `init --json` fields without provider/network calls",
+    "Status/release docs record the new schema/test coverage",
+    "Formatting, focused e2e, harness_cli e2e, cargo check, and selfdev build pass"
+  ],
+  "evidence": [
+    "docs/JCODE_HARNESS_JSON_SCHEMAS.md",
+    "tests/e2e/harness_cli.rs",
+    "docs/SKILLS_HARNESS_STATUS.md",
+    "docs/JCODE_HARNESS_RELEASE_NOTES_TEMPLATE.md",
+    "/tmp/jcode-bg-tasks/025911txj7.output",
+    "/tmp/jcode-bg-tasks/0761047s6n.output"
+  ],
+  "notes": "This was docs/test-only. No network/provider calls were introduced."
+}

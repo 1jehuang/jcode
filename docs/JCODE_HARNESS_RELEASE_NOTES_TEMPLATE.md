@@ -66,6 +66,8 @@ cargo fmt --check
 cargo test -p jcode project_init --lib -- --nocapture
 cargo test -p jcode skill::tests --lib
 cargo test -p jcode clean_code --lib
+cargo test --test e2e harness_init_json -- --nocapture
+cargo test --test e2e clean_code_check_json -- --nocapture
 cargo test --test e2e harness_cli -- --nocapture
 cargo test --test e2e harness_smoke -- --nocapture
 cargo test --test e2e harness_live_provider -- --nocapture  # skips unless JCODE_HARNESS_LIVE_PROVIDER_SMOKE=1
