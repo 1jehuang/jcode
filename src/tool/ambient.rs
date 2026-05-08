@@ -8,10 +8,92 @@ use crate::safety::{self, PermissionRequest, PermissionResult, SafetySystem, Urg
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value, json};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
+
+// ---------------------------------------------------------------------------
+// Custom deserializer for string or u32 (for Claude tool parameter handling)
+// ---------------------------------------------------------------------------
+
+fn deserialize_string_or_u32<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+    struct StringOrU32;
+
+    impl<'de> Visitor<'de> for StringOrU32 {
+        type Value = u32;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("u32 or string representing u32")
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            u32::try_from(v).map_err(E::custom)
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            v.parse().map_err(E::custom)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrU32)
+}
+
+fn deserialize_string_or_option_u32<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+    struct StringOrOptionU32;
+
+    impl<'de> Visitor<'de> for StringOrOptionU32 {
+        type Value = Option<u32>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("optional u32 or string representing u32")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserialize_string_or_u32(deserializer).map(Some)
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            u32::try_from(v).map_err(E::custom).map(Some)
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            v.parse().map_err(E::custom).map(Some)
+        }
+    }
+
+    deserializer.deserialize_option(StringOrOptionU32)
+}
 
 // ---------------------------------------------------------------------------
 // Global state for ambient tools
@@ -122,7 +204,9 @@ impl EndAmbientCycleTool {
 #[derive(Deserialize)]
 struct EndCycleInput {
     summary: String,
+    #[serde(deserialize_with = "deserialize_string_or_u32")]
     memories_modified: u32,
+    #[serde(deserialize_with = "deserialize_string_or_u32")]
     compactions: u32,
     #[serde(default)]
     proactive_work: Option<String>,
@@ -132,7 +216,7 @@ struct EndCycleInput {
 
 #[derive(Deserialize)]
 struct NextScheduleInput {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_or_option_u32")]
     wake_in_minutes: Option<u32>,
     #[serde(default)]
     context: Option<String>,
@@ -280,7 +364,7 @@ impl ScheduleAmbientTool {
 
 #[derive(Deserialize)]
 struct ScheduleInput {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_or_option_u32")]
     wake_in_minutes: Option<u32>,
     #[serde(default)]
     wake_at: Option<String>,
@@ -717,7 +801,7 @@ impl ScheduleTool {
 #[derive(Deserialize)]
 struct ScheduleToolInput {
     task: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_or_option_u32")]
     wake_in_minutes: Option<u32>,
     #[serde(default)]
     wake_at: Option<String>,
