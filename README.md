@@ -199,10 +199,13 @@ emit one terminal bell byte to stderr before the usual user-facing
 completion/notification fan-out, keeping stdout and JSON streams clean.
 
 The structured execution-event foundation lives in
-[`docs/HARNESS_EVENTS.md`](docs/HARNESS_EVENTS.md). The first slice provides a
-versioned `HarnessEvent` schema, default payload redaction, and in-process
-`HarnessEventBus`; follow-up issues add NDJSON logs, replay, SSE dashboards,
-broker adapters, and interactive control transports.
+[`docs/HARNESS_EVENTS.md`](docs/HARNESS_EVENTS.md), with the consumer protocol
+and CI guide in
+[`docs/HARNESS_EVENTS_PROTOCOL.md`](docs/HARNESS_EVENTS_PROTOCOL.md). The first
+slice provides a versioned `HarnessEvent` schema, default payload redaction,
+in-process `HarnessEventBus`, local NDJSON logs, replay helpers, SSE framing,
+and benchmark baselines; follow-up issues add live local endpoints, broker
+adapters, and interactive control transports.
 
 ### Headless session metadata
 

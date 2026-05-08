@@ -2,6 +2,8 @@
 
 `harness-events` is the structured execution-event foundation for the jcode-harness cockpit. The first slice is intentionally local and in-process: it defines a typed event schema and a broadcast EventBus that future NDJSON, replay, SSE, broker, gRPC, and WebSocket adapters can consume.
 
+For consumer-facing examples, CI recipes, transport selection guidance, troubleshooting, and schema stability policy, see [`HARNESS_EVENTS_PROTOCOL.md`](HARNESS_EVENTS_PROTOCOL.md).
+
 ## Current scope
 
 Implemented in `src/harness_events.rs`:

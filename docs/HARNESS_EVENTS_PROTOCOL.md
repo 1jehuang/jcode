@@ -1,0 +1,260 @@
+# Harness Events Protocol Guide
+
+`harness-events` is the local-first execution event protocol for jcode-harness. It gives users, scripts, dashboards, CI jobs, and future swarms one consistent way to inspect what happened during a run without scraping terminal text.
+
+This guide is the consumer-facing companion to [`HARNESS_EVENTS.md`](HARNESS_EVENTS.md), which documents the Rust implementation details.
+
+## Quick start
+
+Run one command and inspect the event stream path:
+
+```bash
+jcode events path --run run_demo --json
+```
+
+For real headless runs, `jcode run --ndjson` includes `harness_run_id` and `harness_event_log` in its `start`, `done`, and `error` records when typed harness event logging is active:
+
+```bash
+jcode run --ndjson "summarize this repo" | tee run.ndjson
+```
+
+Then inspect the local event log:
+
+```bash
+RUN_ID=$(jq -r 'select(.type == "start") | .harness_run_id' run.ndjson | head -1)
+jcode events show --run "$RUN_ID" --json
+jcode events replay --run "$RUN_ID" > replay.md
+jcode events tail --run "$RUN_ID" --lines 20 --ndjson
+```
+
+If you already have a known synthetic or session run id, these commands are safe to run offline:
+
+```bash
+jcode events list --json
+jcode events replay --run run_demo --json
+jcode events bench --events 10000 --json > harness-events-bench.json
+```
+
+## Event schema reference
+
+Every event is one JSON object with a stable common envelope:
+
+```json
+{
+  "schema_version": 1,
+  "event_id": "hevt_demo",
+  "run_id": "run_demo",
+  "session_id": "session_demo",
+  "parent_event_id": "hevt_parent",
+  "timestamp": "2026-05-08T04:22:00Z",
+  "sequence": 3,
+  "level": "info",
+  "kind": "tool_finished",
+  "payload_class": "safe_metadata",
+  "payload": {
+    "tool": "cargo test",
+    "status": "ok",
+    "duration_ms": 1200
+  }
+}
+```
+
+Common fields:
+
+| Field | Meaning | Stability |
+| --- | --- | --- |
+| `schema_version` | Integer schema version. Current value is `1`. | Increment only for incompatible envelope changes. |
+| `event_id` | Unique event id. Also used as SSE `id`. | Stable per event. |
+| `run_id` | Correlation id for a run/session/log. | Stable for a run. |
+| `session_id` | Optional owning/observing session. | Optional. |
+| `parent_event_id` | Optional parent operation id. | Optional. |
+| `timestamp` | UTC event time. | RFC3339/chrono JSON format. |
+| `sequence` | Monotonic sequence per `run_id`. | Assigned by `HarnessEventBus`. |
+| `level` | `trace`, `debug`, `info`, `warn`, or `error`. | Additive. |
+| `kind` | Typed event kind, such as `run_started` or `tool_finished`. | Additive. |
+| `payload_class` | Declared sensitivity class. | Additive. |
+| `payload` | Redacted structured metadata. | Kind-specific, additive by key. |
+
+Initial event kinds include run start/completion/failure, skill selection, memory lookup start/finish, tool start/finish, file changed, test start/pass/fail, gate pass/fail, and human approval required.
+
+## Privacy and redaction
+
+The event bus redacts before events reach NDJSON, replay, SSE, or future transports. Consumers should assume payloads are safe for local audit, but producers should still avoid embedding raw prompts, file contents, secrets, or full tool output.
+
+Current policy:
+
+- `secret` and `user_content` payload classes are replaced wholesale with a redaction marker.
+- Sensitive keys such as API key, authorization, token, password, cookie, prompt, input, stdout, stderr, and tool output are recursively redacted.
+- Secret-looking values such as `Bearer ...`, `ghp_...`, `github_pat_...`, `sk-...`, and PEM private key material are redacted even under unknown keys.
+- Long strings are truncated and suffixed with `...[truncated]`.
+- Safe token metrics such as `input_tokens` and `output_tokens` remain visible.
+
+Example redacted payload:
+
+```json
+{
+  "payload_class": "safe_metadata",
+  "payload": {
+    "tool": "deploy",
+    "api_key": "[redacted]",
+    "input_tokens": 1234
+  }
+}
+```
+
+## NDJSON local logs
+
+NDJSON is the best default for CLI tools, CI jobs, dashboards that tail local files, and external automations.
+
+Properties:
+
+- one compact JSON event per line;
+- stdout-safe for `tail --ndjson` and `export`;
+- strict export/tail fail on malformed source logs;
+- replay/list/show use tolerant read reports so valid prefixes remain inspectable;
+- default directory is `$JCODE_RUNTIME_DIR/harness-events/` when `JCODE_RUNTIME_DIR` is set, otherwise the platform runtime directory.
+
+Useful commands:
+
+```bash
+jcode events path --run "$RUN_ID"
+jcode events list --json
+jcode events show --run "$RUN_ID" --json
+jcode events tail --run "$RUN_ID" --lines 50 --ndjson
+jcode events export --run "$RUN_ID" --output harness-events.ndjson --json
+```
+
+A minimal NDJSON stream looks like:
+
+```jsonl
+{"schema_version":1,"event_id":"hevt_start","run_id":"run_demo","timestamp":"2026-05-08T04:22:00Z","sequence":1,"level":"info","kind":"run_started","payload_class":"safe_metadata","payload":{"status":"started"}}
+{"schema_version":1,"event_id":"hevt_tool","run_id":"run_demo","parent_event_id":"hevt_start","timestamp":"2026-05-08T04:22:01Z","sequence":2,"level":"info","kind":"tool_finished","payload_class":"safe_metadata","payload":{"tool":"cargo test","status":"ok","duration_ms":1000}}
+{"schema_version":1,"event_id":"hevt_done","run_id":"run_demo","timestamp":"2026-05-08T04:22:02Z","sequence":3,"level":"info","kind":"run_completed","payload_class":"safe_metadata","payload":{"status":"ok","duration_ms":2000}}
+```
+
+## Replay and audit
+
+Replay reconstructs a local timeline without contacting providers or external services:
+
+```bash
+jcode events replay --run "$RUN_ID" > replay.md
+jcode events replay --run "$RUN_ID" --json > replay.json
+```
+
+Markdown replay contains:
+
+- summary status and duration;
+- diagnostics for corrupt/truncated lines;
+- failure points;
+- timeline grouped by run, planning, memory, tool execution, files, tests, gates, approval, and completion.
+
+JSON replay contains:
+
+- `summary`: status, event count, first/last timestamp, duration, path, diagnostics summary;
+- `timeline`: derived phase, elapsed milliseconds, parent id, child count, status, failure flag, details;
+- `diagnostics`: line-numbered parse/read diagnostics;
+- `events`: original redacted events.
+
+Corrupt or partial logs are not hidden. For example, a truncated line is reported with its line number while valid prefix events are still replayed.
+
+## SSE dashboard stream
+
+SSE is the planned one-way live dashboard transport. It is simpler than WebSocket for server-to-client progress because browsers support automatic reconnect through `EventSource` and `Last-Event-ID`.
+
+The protocol core is implemented and endpoint wiring is tracked by #20. A `HarnessEvent` maps to:
+
+```text
+id: hevt_tool
+event: tool_finished
+retry: 2000
+data: {"schema_version":1,"event_id":"hevt_tool","run_id":"run_demo","timestamp":"2026-05-08T04:22:01Z","sequence":2,"level":"info","kind":"tool_finished","payload_class":"safe_metadata","payload":{"tool":"cargo test","status":"ok"}}
+
+```
+
+Browser example for the future local endpoint:
+
+```js
+const source = new EventSource("http://127.0.0.1:PORT/events/runs/run_demo/stream");
+source.addEventListener("tool_finished", (event) => {
+  const harnessEvent = JSON.parse(event.data);
+  console.log(harnessEvent.sequence, harnessEvent.payload.tool);
+});
+source.onerror = () => console.warn("stream reconnecting");
+```
+
+Reconnect behavior should use `Last-Event-ID` to replay retained local events after the last observed `event_id`, then subscribe to live fan-out. Slow dashboard clients must not block agent execution; lagging in-memory subscribers may miss old events and should use NDJSON replay for durable audit.
+
+## Choosing a transport
+
+| Use case | Recommended transport | Why |
+| --- | --- | --- |
+| CLI scripts and CI artifacts | NDJSON | Stable, grep/jq-friendly, no server required. |
+| Local audit and evidence review | Replay Markdown/JSON | Summarizes phases, failures, durations, and diagnostics. |
+| Browser dashboard live progress | SSE | One-way server-to-client, EventSource reconnect, normal HTTP. |
+| Interactive dashboard control | WebSocket | Needed for bidirectional commands and approvals. |
+| Multi-agent queues and replayable fan-out | NATS/Redis Streams | Durable brokered delivery and work queues. |
+| Distributed typed agent RPC | gRPC | Strong contracts for remote workers/control plane. |
+
+Start with NDJSON/replay. Add SSE when you need live visual progress. Use WebSocket only when the UI must send real-time control messages.
+
+## CI recipe
+
+A GitHub Actions-style workflow can collect event evidence as artifacts:
+
+```yaml
+name: harness-events-smoke
+on: [pull_request]
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build -p jcode --bin jcode
+      - name: Run event benchmark baseline
+        run: |
+          ./target/debug/jcode events bench --events 1000 --json \
+            > harness-events-bench.json
+      - name: Validate harness event tests
+        run: cargo test -p jcode harness_events --lib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: harness-events-evidence
+          path: |
+            harness-events-bench.json
+```
+
+For provider-backed runs, also capture the `jcode run --ndjson` output and export the referenced `harness_event_log` path as an artifact.
+
+## Troubleshooting
+
+| Symptom | What to check | Fix |
+| --- | --- | --- |
+| `No harness event logs found.` | `JCODE_RUNTIME_DIR` and run id. | Use `jcode events path --run <id>` and verify the file exists. |
+| `status: corrupt` in `events list` | The first readable event could not be parsed. | Inspect the `error` field, then keep the raw file as evidence. |
+| `status: partial` | Some valid events were read, but at least one line was invalid/truncated. | Use `events replay --json` and inspect `diagnostics`. |
+| `tail --ndjson` or `export` fails | Strict machine path detected malformed NDJSON. | Use `replay` for tolerant audit, fix or quarantine the damaged log before automation consumes it. |
+| Sensitive value appears risky | Producer likely used too broad a safe metadata key. | Classify as `secret` or `user_content`, or add a redaction key rule. |
+| Live dashboard missed events | In-memory subscriber lagged. | Resume from NDJSON/replay with `Last-Event-ID` or future broker transport. |
+
+## Stability policy
+
+- `schema_version = 1` is the current event envelope version.
+- Additive enum variants and payload keys are allowed without changing `schema_version`.
+- Consumers must ignore unknown payload keys and unknown future event kinds where possible.
+- Incompatible envelope changes require incrementing `schema_version` and documenting migration.
+- Payload values are redacted before transport, so sinks must not attempt to recover raw secrets.
+- `event_id`, `run_id`, `timestamp`, `sequence`, `level`, `kind`, `payload_class`, and `payload` are the minimum fields consumers should expect for schema version 1.
+
+## Roadmap links
+
+- Epic: #16
+- NDJSON sink and CLI: #18
+- Replay/audit: #19
+- SSE endpoint: #20
+- Privacy/redaction: #21
+- Brokers: #22
+- gRPC: #23
+- WebSocket control: #24
+- Benchmarks: #25
+- Protocol docs: #26
