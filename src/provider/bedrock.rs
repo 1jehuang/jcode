@@ -296,25 +296,35 @@ impl BedrockProvider {
         let is_legacy_model_error = lower.contains("marked by provider as legacy")
             || lower.contains("model is marked") && lower.contains("legacy")
             || lower.contains("have not been actively using the model in the last 30 days");
-        let hint = if is_legacy_model_error {
-            "This Bedrock model is marked as legacy for this account. Choose an active Bedrock model or an active inference profile instead."
+        if is_legacy_model_error {
+            return format!(
+                "{} Original error: {}",
+                "This Bedrock model is marked as legacy for this account. Choose an active Bedrock model or an active inference profile instead.",
+                raw.trim()
+            );
         } else if lower.contains("doesn't support tool use")
             || lower.contains("does not support tool use")
             || lower.contains("tool use in streaming mode")
         {
-            "This Bedrock model does not support tool use with streaming. Choose a Bedrock model with tool support, such as a Claude or Nova profile, or use a no-tools Bedrock model route."
+            return format!(
+                "{} Original error: {}",
+                "This Bedrock model does not support tool use with streaming. Choose a Bedrock model with tool support, such as a Claude or Nova profile, or use a no-tools Bedrock model route.",
+                raw.trim()
+            );
         } else if lower.contains("no credentials")
             || lower.contains("could not load credentials")
             || lower.contains("credentials") && lower.contains("not loaded")
         {
-            "AWS credentials were not found. Set AWS_BEARER_TOKEN_BEDROCK, AWS_PROFILE, AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, or run `aws sso login`."
+            return "AWS credentials were not found. Set AWS_BEARER_TOKEN_BEDROCK, AWS_PROFILE, AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, or run `aws sso login`.".to_string();
         } else if lower.contains("expired") || lower.contains("sso") && lower.contains("token") {
-            "AWS SSO/session credentials look expired. Run `aws sso login --profile <profile>` and retry."
-        } else if lower.contains("accessdenied")
+            return "AWS SSO/session credentials look expired. Run `aws sso login --profile <profile>` and retry.".to_string();
+        }
+
+        let hint = if lower.contains("accessdenied")
             || lower.contains("access denied")
             || lower.contains("not authorized")
         {
-            "AWS IAM denied the Bedrock request. Ensure the principal can call bedrock:InvokeModel and bedrock:InvokeModelWithResponseStream."
+            "AWS IAM denied the Bedrock request. Ensure the principal can call bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream, bedrock:ListFoundationModels, and bedrock:ListInferenceProfiles as needed."
         } else if lower.contains("validationexception") && lower.contains("model")
             || lower.contains("model") && lower.contains("not found")
             || lower.contains("resource not found")
@@ -1545,6 +1555,26 @@ mod tests {
         );
         assert!(message.contains("does not support tool use"));
         assert!(!message.starts_with("This Bedrock model is marked as legacy"));
+    }
+
+    #[test]
+    fn expired_sso_error_is_concise_and_actionable() {
+        let message = BedrockProvider::classify_error_message(
+            "ServiceError(ServiceError { source: AccessDeniedException(AccessDeniedException { message: Some(\"Bearer Token has expired\") }) })",
+        );
+        assert_eq!(
+            message,
+            "AWS SSO/session credentials look expired. Run `aws sso login --profile <profile>` and retry."
+        );
+    }
+
+    #[test]
+    fn missing_credentials_error_omits_sdk_blob() {
+        let message = BedrockProvider::classify_error_message(
+            "CredentialsNotLoaded: could not load credentials from any provider; extensions_1x: noisy sdk internals",
+        );
+        assert!(message.contains("AWS credentials were not found"));
+        assert!(!message.contains("extensions_1x"));
     }
 
     #[test]
