@@ -90,6 +90,53 @@ fn cleanup_candidate_session_ids(
     )
 }
 
+fn await_candidate_session_ids(
+    owner_session_id: &str,
+    members: &[AgentInfo],
+    target_status: &[String],
+) -> Vec<String> {
+    let done_statuses = target_status
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    let mut ids = members
+        .iter()
+        .filter(|member| member.session_id != owner_session_id)
+        .filter(|member| member.report_back_to_session_id.as_deref() == Some(owner_session_id))
+        .filter(|member| {
+            member
+                .status
+                .as_deref()
+                .is_none_or(|status| !done_statuses.contains(status))
+        })
+        .map(|member| member.session_id.clone())
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids
+}
+
+async fn ensure_cleanup_coordinator(ctx: &ToolContext) -> Result<()> {
+    let request = Request::CommAssignRole {
+        id: REQUEST_ID,
+        session_id: ctx.session_id.clone(),
+        target_session: ctx.session_id.clone(),
+        role: "coordinator".to_string(),
+    };
+
+    match send_request(request).await {
+        Ok(response) => ensure_success(&response).map_err(|error| {
+            anyhow::anyhow!(
+                "Cleanup needs coordinator role before stopping workers: {}. Try `swarm assign_role target_session=current role=coordinator`, then retry cleanup.",
+                error
+            )
+        }),
+        Err(error) => Err(anyhow::anyhow!(
+            "Failed to verify cleanup coordinator role: {}",
+            error
+        )),
+    }
+}
+
 fn auto_assignment_needs_spawn(response: &ServerEvent) -> bool {
     check_error(response).is_some_and(|message| {
         message.contains(
@@ -135,6 +182,8 @@ async fn cleanup_swarm_workers(ctx: &ToolContext, params: &CommunicateInput) -> 
             target_status.join(", ")
         ));
     }
+
+    ensure_cleanup_coordinator(ctx).await?;
 
     let mut stopped = Vec::new();
     let mut failed = Vec::new();
@@ -614,7 +663,8 @@ impl Tool for CommunicateTool {
                 },
                 "session_ids": {
                     "type": "array",
-                    "items": {"type": "string"}
+                    "items": {"type": "string"},
+                    "description": "Optional session IDs for await_members. When omitted, await_members waits only for non-terminal workers spawned by this coordinator instead of scanning the whole swarm."
                 },
                 "mode": {
                     "type": "string",
@@ -1459,6 +1509,16 @@ impl Tool for CommunicateTool {
                     && !session_ids.iter().any(|id| id == &target_session)
                 {
                     session_ids.push(target_session);
+                }
+                if session_ids.is_empty() {
+                    let members = fetch_swarm_members(&ctx.session_id).await?;
+                    session_ids =
+                        await_candidate_session_ids(&ctx.session_id, &members, &target_status);
+                    if session_ids.is_empty() {
+                        return Ok(ToolOutput::new(
+                            "No scoped await_members candidates found. Default await_members only waits for non-terminal workers spawned by this coordinator. Pass explicit session_ids or target_session to await older or user-created agents.",
+                        ));
+                    }
                 }
                 let timeout_minutes = params.timeout_minutes.unwrap_or(60);
                 let timeout_secs = timeout_minutes * 60;

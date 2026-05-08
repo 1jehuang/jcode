@@ -1,5 +1,5 @@
 use super::{
-    CommunicateInput, CommunicateTool, cleanup_candidate_session_ids,
+    CommunicateInput, CommunicateTool, await_candidate_session_ids, cleanup_candidate_session_ids,
     default_await_target_statuses, default_cleanup_target_statuses, format_awaited_members,
     format_awaited_members_with_reports, format_members, format_plan_status,
     latest_assistant_report, resolve_optional_target_session,
