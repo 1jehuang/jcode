@@ -197,6 +197,8 @@ The gateway endpoint is exposed at `GET /events/runs/{urlencoded_run_id}/stream`
 
 The first #24 slice defines the bidirectional command envelope that a WebSocket UI can send without scraping terminal text. Commands are parsed and validated by `HarnessControlCommand`, then converted into redacted/auditable `HarnessEventDraft` values with `harness_control_command_event_draft`.
 
+The gateway bridge now intercepts supported control commands on `/ws` before forwarding normal newline-delimited protocol messages to the Unix-socket bridge. Non-control messages continue through the existing bridge unchanged. Handled control commands receive a JSON acknowledgement frame containing the emitted audit event.
+
 Example approval resolution command:
 
 ```json
@@ -219,6 +221,7 @@ Auditing behavior:
 - unauthorized write commands emit `control_command_rejected` at `warn` level;
 - free-form reasons are not copied into the audit payload, only `reason_present`, to avoid leaking user text;
 - command `args` still pass through the normal redaction rules before publication.
+- unsupported command names and ordinary protocol messages are not intercepted and continue through the existing bridge unchanged.
 
 ### CLI helpers
 

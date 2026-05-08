@@ -284,6 +284,82 @@ async fn test_gateway_http_sse_streams_live_bus_events() {
     let _ = server.await;
 }
 
+#[tokio::test]
+async fn test_gateway_ws_control_text_audits_approval_command() {
+    let bus = crate::harness_events::HarnessEventBus::with_capacity(8);
+    let mut rx = bus.subscribe();
+    let response = handle_harness_control_ws_text(
+        r#"{
+            "command":"resolve_human_approval",
+            "run_id":"run_gateway_control",
+            "approval_id":"approval_shell",
+            "decision":"approved",
+            "actor":"web-ui",
+            "reason":"clicked approve",
+            "client_command_id":"cmd_gateway_1"
+        }"#,
+        true,
+        &bus,
+    )
+    .expect("control command should be intercepted");
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+    assert_eq!(
+        event.kind,
+        crate::harness_events::HarnessEventKind::HumanApprovalResolved
+    );
+    assert_eq!(event.payload["approval_id"], "approval_shell");
+    assert_eq!(event.payload["reason_present"], true);
+    assert_eq!(response["type"], "harness_control_ack");
+    assert_eq!(response["event"]["kind"], "human_approval_resolved");
+    assert_eq!(response["event"]["payload"]["status"], "resolved");
+}
+
+#[test]
+fn test_gateway_ws_control_text_ignores_regular_protocol_messages() {
+    let bus = crate::harness_events::HarnessEventBus::with_capacity(8);
+    assert!(
+        handle_harness_control_ws_text(
+            r#"{"type":"client_input","command":"bash","payload":{"text":"hello"}}"#,
+            true,
+            &bus,
+        )
+        .is_none()
+    );
+    assert!(handle_harness_control_ws_text("not json", true, &bus).is_none());
+}
+
+#[tokio::test]
+async fn test_gateway_ws_control_text_rejects_unauthorized_write() {
+    let bus = crate::harness_events::HarnessEventBus::with_capacity(8);
+    let mut rx = bus.subscribe();
+    let response = handle_harness_control_ws_text(
+        r#"{"command":"cancel_run","run_id":"run_gateway_reject","actor":"web-ui","reason":"stop"}"#,
+        false,
+        &bus,
+    )
+    .expect("control command should be intercepted");
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+    assert_eq!(
+        event.kind,
+        crate::harness_events::HarnessEventKind::ControlCommandRejected
+    );
+    assert_eq!(event.level, crate::harness_events::HarnessEventLevel::Warn);
+    assert_eq!(event.payload["command"], "cancel_run");
+    assert_eq!(event.payload["authorized"], false);
+    assert_eq!(response["type"], "harness_control_rejected");
+    assert_eq!(response["event"]["kind"], "control_command_rejected");
+}
+
 async fn read_until_text(client: &mut tokio::net::TcpStream, response: &mut Vec<u8>, needle: &str) {
     let deadline = std::time::Duration::from_secs(2);
     tokio::time::timeout(deadline, async {

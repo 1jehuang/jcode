@@ -229,6 +229,8 @@ Start with NDJSON/replay. Add SSE when you need live visual progress. Use WebSoc
 
 The #24 control-channel foundation is transport-neutral: a WebSocket client sends a JSON command, the gateway validates read/write authorization, and the core converts the command into a redacted audit event. This keeps dashboard control auditable even before a full browser UI exists.
 
+On `/ws`, the gateway now intercepts supported command names before forwarding ordinary newline-delimited protocol messages to the existing Unix-socket bridge. A handled command returns a JSON response frame of type `harness_control_ack`, `harness_control_rejected`, or `harness_control_error` with the emitted audit event when available.
+
 Command envelope examples:
 
 ```json

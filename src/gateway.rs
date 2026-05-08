@@ -224,6 +224,7 @@ async fn handle_ws_connection(
     // Bridge WebSocket frames <-> newline-delimited JSON on the bridge stream
     let (ws_sink, ws_source) = ws_stream.split();
     let ws_sink = Arc::new(tokio::sync::Mutex::new(ws_sink));
+    let harness_event_bus = crate::harness_events::HarnessEventBus::global();
 
     let (bridge_reader, bridge_writer) = bridge_stream.into_split();
     let mut bridge_reader = BufReader::new(bridge_reader);
@@ -232,6 +233,7 @@ async fn handle_ws_connection(
     // Task 1: WebSocket → Unix socket (client requests)
     let writer_for_ws = Arc::clone(&bridge_writer);
     let sink_for_ping = Arc::clone(&ws_sink);
+    let sink_for_control = Arc::clone(&ws_sink);
     let sink_for_unix = Arc::clone(&ws_sink);
     let sink_for_keepalive = Arc::clone(&ws_sink);
     let ws_to_unix = tokio::spawn(async move {
@@ -239,6 +241,16 @@ async fn handle_ws_connection(
         while let Some(msg) = ws_source.next().await {
             match msg {
                 Ok(Message::Text(text)) => {
+                    if let Some(response) =
+                        handle_harness_control_ws_text(&text, true, harness_event_bus)
+                    {
+                        let mut sink = sink_for_control.lock().await;
+                        if sink.send(Message::Text(response)).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+
                     let mut writer = writer_for_ws.lock().await;
                     if text.ends_with('\n') {
                         if writer.write_all(text.as_bytes()).await.is_err() {
@@ -322,6 +334,88 @@ async fn handle_ws_connection(
 
     logging::info(&format!("Gateway: {} disconnected", device_name));
     Ok(())
+}
+
+fn handle_harness_control_ws_text(
+    text: &str,
+    write_authorized: bool,
+    bus: &crate::harness_events::HarnessEventBus,
+) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    let command_name = value.get("command")?.as_str()?;
+    if !is_harness_control_command_name(command_name) {
+        return None;
+    }
+
+    match crate::harness_events::HarnessControlCommand::parse_json(text) {
+        Ok(command) => {
+            let event = bus.publish(crate::harness_events::harness_control_command_event_draft(
+                &command,
+                write_authorized,
+            ));
+            let response_type = if matches!(
+                event.kind,
+                crate::harness_events::HarnessEventKind::ControlCommandRejected
+            ) {
+                "harness_control_rejected"
+            } else {
+                "harness_control_ack"
+            };
+            Some(
+                serde_json::json!({
+                    "type": response_type,
+                    "command": command.command_name(),
+                    "run_id": command.run_id(),
+                    "status": event.payload.get("status").cloned().unwrap_or_else(|| serde_json::Value::String("ok".to_string())),
+                    "event": event,
+                })
+                .to_string(),
+            )
+        }
+        Err(err) => {
+            let event = value
+                .get("run_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|run_id| !run_id.trim().is_empty())
+                .map(|run_id| {
+                    bus.publish(
+                        crate::harness_events::HarnessEventDraft::new(
+                            run_id,
+                            crate::harness_events::HarnessEventKind::ControlCommandRejected,
+                        )
+                        .with_level(crate::harness_events::HarnessEventLevel::Warn)
+                        .with_payload(serde_json::json!({
+                            "command": command_name,
+                            "status": "rejected",
+                            "authorized": false,
+                            "error": "invalid_command",
+                        })),
+                    )
+                });
+            Some(
+                serde_json::json!({
+                    "type": "harness_control_error",
+                    "command": command_name,
+                    "status": "rejected",
+                    "error": err.to_string(),
+                    "event": event,
+                })
+                .to_string(),
+            )
+        }
+    }
+}
+
+fn is_harness_control_command_name(command: &str) -> bool {
+    matches!(
+        command,
+        "subscribe_events"
+            | "resolve_human_approval"
+            | "pause_run"
+            | "resume_run"
+            | "cancel_run"
+            | "ui_command"
+    )
 }
 
 fn http_response(status: u16, status_text: &str, body: &str) -> Vec<u8> {
