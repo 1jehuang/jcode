@@ -62,6 +62,12 @@ pub struct SkillRegistry {
     skills: HashMap<String, Skill>,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct SkillInvocation<'a> {
+    pub name: &'a str,
+    pub args: &'a str,
+}
+
 impl SkillRegistry {
     /// Process-wide shared mutable registry used by both `skill_manage` and
     /// direct slash invocation paths. Keeping a single registry prevents slash
@@ -476,12 +482,25 @@ impl SkillRegistry {
 
     /// Check if a message is a skill invocation (starts with /)
     pub fn parse_invocation(input: &str) -> Option<&str> {
+        let invocation = Self::parse_invocation_with_args(input)?;
+        invocation.args.is_empty().then_some(invocation.name)
+    }
+
+    /// Parse `/skill` or `/skill task context` invocations.
+    pub fn parse_invocation_with_args(input: &str) -> Option<SkillInvocation<'_>> {
         let trimmed = input.trim();
-        if trimmed.starts_with('/') && !trimmed.contains(' ') {
-            Some(&trimmed[1..])
-        } else {
-            None
+        let command = trimmed.strip_prefix('/')?;
+        let split_at = command.find(char::is_whitespace);
+        let (name, args) = match split_at {
+            Some(idx) => (&command[..idx], command[idx..].trim_start()),
+            None => (command, ""),
+        };
+
+        if name.is_empty() {
+            return None;
         }
+
+        Some(SkillInvocation { name, args })
     }
 }
 
@@ -610,6 +629,31 @@ mod tests {
         assert!(entry.content.contains("/firefox-browser"));
         assert!(entry.content.contains("# Skill: firefox-browser"));
         assert_eq!(entry.source.as_deref(), Some("skill_registry"));
+    }
+
+    #[test]
+    fn parse_invocation_with_args_preserves_skill_context() {
+        let bare = SkillRegistry::parse_invocation_with_args(" /grill-me ")
+            .expect("bare skill invocation");
+        assert_eq!(bare.name, "grill-me");
+        assert_eq!(bare.args, "");
+        assert_eq!(
+            SkillRegistry::parse_invocation(" /grill-me "),
+            Some("grill-me")
+        );
+
+        let with_args =
+            SkillRegistry::parse_invocation_with_args("/grill-me   review this API plan")
+                .expect("skill invocation with args");
+        assert_eq!(with_args.name, "grill-me");
+        assert_eq!(with_args.args, "review this API plan");
+        assert_eq!(
+            SkillRegistry::parse_invocation("/grill-me review this"),
+            None
+        );
+
+        assert!(SkillRegistry::parse_invocation_with_args("/").is_none());
+        assert!(SkillRegistry::parse_invocation_with_args("not a slash command").is_none());
     }
 
     #[test]

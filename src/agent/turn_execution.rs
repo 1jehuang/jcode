@@ -600,15 +600,34 @@ impl Agent {
                 continue;
             }
 
-            // Check for skill invocation
-            if let Some(skill_name) = SkillRegistry::parse_invocation(input) {
-                if let Some(skill) = skills.get(skill_name) {
+            // Check for skill invocation. `/skill` activates the skill for the
+            // next prompt; `/skill task context` activates it and runs the
+            // context immediately under that skill.
+            if let Some(invocation) = SkillRegistry::parse_invocation_with_args(input) {
+                if let Some(skill) = skills.get(invocation.name) {
                     println!("Activating skill: {}", skill.name);
                     println!("{}\n", skill.description);
-                    self.active_skill = Some(skill_name.to_string());
-                    continue;
+                    self.active_skill = Some(invocation.name.to_string());
+                    let skill_args = invocation.args.trim();
+                    if skill_args.is_empty() {
+                        continue;
+                    }
+
+                    if let Err(e) = self.run_once(skill_args).await {
+                        eprintln!("\nError: {}\n", e);
+                    }
                 } else {
-                    println!("Unknown skill: /{}", skill_name);
+                    if !invocation.args.trim().is_empty() {
+                        // Preserve historical behavior for non-skill slash-prefixed
+                        // prompts with arguments by sending them to the model.
+                        if let Err(e) = self.run_once(input).await {
+                            eprintln!("\nError: {}\n", e);
+                        }
+                        println!();
+                        continue;
+                    }
+
+                    println!("Unknown skill: /{}", invocation.name);
                     println!(
                         "Available: {}",
                         skills
@@ -618,8 +637,9 @@ impl Agent {
                             .collect::<Vec<_>>()
                             .join(", ")
                     );
-                    continue;
                 }
+                println!();
+                continue;
             }
 
             if let Err(e) = self.run_once(input).await {

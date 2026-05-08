@@ -66,6 +66,57 @@ fn test_skill_invocation_not_queued() {
 }
 
 #[test]
+fn test_bare_skill_invocation_activates_without_provider_turn() {
+    let mut app = create_test_app();
+    let session_messages_before = app.session.messages.len();
+    app.input = "/karpathy-guidelines".to_string();
+
+    app.submit_input();
+
+    assert_eq!(app.active_skill.as_deref(), Some("karpathy-guidelines"));
+    assert!(!app.pending_turn);
+    assert!(!app.is_processing);
+    assert_eq!(app.session.messages.len(), session_messages_before);
+    assert_eq!(app.display_messages().len(), 1);
+    assert_eq!(app.display_messages()[0].role, "system");
+    assert!(
+        app.display_messages()[0]
+            .content
+            .contains("Activated skill")
+    );
+    assert!(app.display_messages()[0].content.contains("Send a message"));
+}
+
+#[test]
+fn test_skill_invocation_with_context_submits_context_under_active_skill() {
+    let mut app = create_test_app();
+    app.input = "/karpathy-guidelines review this diff".to_string();
+
+    app.submit_input();
+
+    assert_eq!(app.active_skill.as_deref(), Some("karpathy-guidelines"));
+    assert!(app.pending_turn);
+    assert!(app.is_processing);
+    assert_eq!(app.display_messages().len(), 2);
+    assert_eq!(app.display_messages()[0].role, "system");
+    assert!(app.display_messages()[0].content.contains("Applying it"));
+    assert_eq!(app.display_messages()[1].role, "user");
+    assert_eq!(app.display_messages()[1].content, "review this diff");
+
+    let last = app
+        .session
+        .messages
+        .last()
+        .expect("missing submitted context");
+    match last.content.as_slice() {
+        [crate::message::ContentBlock::Text { text, .. }] => {
+            assert_eq!(text, "review this diff");
+        }
+        other => panic!("expected one text block, got: {other:?}"),
+    }
+}
+
+#[test]
 fn test_multiple_queued_messages() {
     let mut app = create_test_app();
     app.is_processing = true;

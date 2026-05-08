@@ -1834,8 +1834,8 @@ impl App {
             return;
         }
 
-        let raw_input = std::mem::take(&mut self.input);
-        let input = self.expand_paste_placeholders(&raw_input);
+        let mut raw_input = std::mem::take(&mut self.input);
+        let mut input = self.expand_paste_placeholders(&raw_input);
         self.pasted_contents.clear();
         self.cursor_pos = 0;
         self.clear_input_undo_history();
@@ -1908,9 +1908,14 @@ impl App {
             return;
         }
 
-        // Check for skill invocation
-        if let Some(skill_name) = SkillRegistry::parse_invocation(&input) {
-            let mut skill = self.current_skills_snapshot().get(skill_name).cloned();
+        // Check for skill invocation. `/skill` only activates the skill for the
+        // next user turn; `/skill task context` activates it and submits the
+        // context immediately so providers never receive an empty/ambiguous turn.
+        if let Some(invocation) = SkillRegistry::parse_invocation_with_args(&input) {
+            let skill_name = invocation.name.to_string();
+            let skill_args = invocation.args.trim().to_string();
+            let has_skill_args = !skill_args.is_empty();
+            let mut skill = self.current_skills_snapshot().get(&skill_name).cloned();
 
             // Remote/minimal TUI clients may start with an empty skill snapshot, and
             // daemon-side `skill_manage reload_all` can update a different process.
@@ -1924,7 +1929,7 @@ impl App {
                     .as_deref()
                     .map(std::path::Path::new);
                 if let Ok(reloaded) = SkillRegistry::load_for_working_dir(working_dir) {
-                    skill = reloaded.get(skill_name).cloned();
+                    skill = reloaded.get(&skill_name).cloned();
                     self.skills = std::sync::Arc::new(reloaded.clone());
                     if let Ok(mut shared) = self.registry.skills().try_write() {
                         *shared = reloaded;
@@ -1933,26 +1938,48 @@ impl App {
             }
 
             if let Some(skill) = skill {
-                self.active_skill = Some(skill_name.to_string());
+                self.active_skill = Some(skill_name.clone());
                 self.push_display_message(DisplayMessage {
                     role: "system".to_string(),
-                    content: format!("Activated skill: {} - {}", skill.name, skill.description),
+                    content: if has_skill_args {
+                        format!(
+                            "Activated skill: {} - {}\nApplying it to your request now.",
+                            skill.name, skill.description
+                        )
+                    } else {
+                        format!(
+                            "Activated skill: {} - {}\nSend a message to use this skill.",
+                            skill.name, skill.description
+                        )
+                    },
                     tool_calls: vec![],
                     duration_secs: None,
                     title: None,
                     tool_data: None,
                 });
+                if has_skill_args {
+                    raw_input = skill_args.clone();
+                    input = skill_args;
+                } else {
+                    return;
+                }
             } else {
-                self.push_display_message(DisplayMessage {
-                    role: "error".to_string(),
-                    content: format!("Unknown skill: /{}", skill_name),
-                    tool_calls: vec![],
-                    duration_secs: None,
-                    title: None,
-                    tool_data: None,
-                });
+                if has_skill_args {
+                    // Preserve historical behavior for non-skill slash-prefixed
+                    // prompts with arguments by sending them as normal user input.
+                    // Bare `/unknown` remains an actionable Unknown skill error.
+                } else {
+                    self.push_display_message(DisplayMessage {
+                        role: "error".to_string(),
+                        content: format!("Unknown skill: /{}", skill_name),
+                        tool_calls: vec![],
+                        duration_secs: None,
+                        title: None,
+                        tool_data: None,
+                    });
+                    return;
+                }
             }
-            return;
         }
 
         // Add user message to display (show placeholder to user, not full paste)
