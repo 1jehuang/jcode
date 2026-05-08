@@ -1408,6 +1408,10 @@ pub fn default_comm_cleanup_target_statuses() -> Vec<String> {
         "completed".to_string(),
         "failed".to_string(),
         "stopped".to_string(),
+        "crashed".to_string(),
+        "closed".to_string(),
+        "disconnected".to_string(),
+        "running_stale".to_string(),
     ]
 }
 

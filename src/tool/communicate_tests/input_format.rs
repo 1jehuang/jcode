@@ -159,6 +159,85 @@ fn cleanup_candidates_default_to_owned_terminal_workers() {
 }
 
 #[test]
+fn cleanup_candidates_include_owned_stale_workers_by_default() {
+    let members = vec![
+        AgentInfo {
+            session_id: "coord".to_string(),
+            friendly_name: Some("coord".to_string()),
+            files_touched: vec![],
+            status: Some("ready".to_string()),
+            detail: None,
+            role: Some("coordinator".to_string()),
+            is_headless: None,
+            report_back_to_session_id: None,
+            run_id: None,
+            latest_completion_report: None,
+            live_attachments: None,
+            status_age_secs: None,
+        },
+        AgentInfo {
+            session_id: "owned-crashed".to_string(),
+            friendly_name: Some("owned-crashed".to_string()),
+            files_touched: vec![],
+            status: Some("crashed".to_string()),
+            detail: Some("recovered after reload".to_string()),
+            role: Some("agent".to_string()),
+            is_headless: Some(true),
+            report_back_to_session_id: Some("coord".to_string()),
+            run_id: Some("run-current".to_string()),
+            latest_completion_report: None,
+            live_attachments: None,
+            status_age_secs: Some(900),
+        },
+        AgentInfo {
+            session_id: "owned-running-stale".to_string(),
+            friendly_name: Some("owned-stale".to_string()),
+            files_touched: vec![],
+            status: Some("running_stale".to_string()),
+            detail: None,
+            role: Some("agent".to_string()),
+            is_headless: Some(true),
+            report_back_to_session_id: Some("coord".to_string()),
+            run_id: Some("run-current".to_string()),
+            latest_completion_report: None,
+            live_attachments: None,
+            status_age_secs: Some(600),
+        },
+        AgentInfo {
+            session_id: "foreign-crashed".to_string(),
+            friendly_name: Some("foreign".to_string()),
+            files_touched: vec![],
+            status: Some("crashed".to_string()),
+            detail: None,
+            role: Some("agent".to_string()),
+            is_headless: Some(true),
+            report_back_to_session_id: Some("other-coord".to_string()),
+            run_id: Some("run-foreign".to_string()),
+            latest_completion_report: None,
+            live_attachments: None,
+            status_age_secs: Some(1200),
+        },
+    ];
+    let statuses = default_cleanup_target_statuses();
+
+    assert_eq!(
+        cleanup_candidate_session_ids("coord", &members, &statuses, &[], false, None),
+        vec![
+            "owned-crashed".to_string(),
+            "owned-running-stale".to_string()
+        ]
+    );
+    assert_eq!(
+        cleanup_candidate_session_ids("coord", &members, &statuses, &[], true, None),
+        vec![
+            "foreign-crashed".to_string(),
+            "owned-crashed".to_string(),
+            "owned-running-stale".to_string()
+        ]
+    );
+}
+
+#[test]
 fn cleanup_candidates_can_be_scoped_by_run_id() {
     let members = vec![
         AgentInfo {

@@ -181,7 +181,7 @@ async fn cleanup_swarm_workers_with_run_id(
             .map(|run_id| format!(" for run_id={run_id}"))
             .unwrap_or_default();
         return Ok(format!(
-            "No cleanup candidates found{scope_suffix}. Default cleanup only stops sessions spawned by this coordinator with status in [{}].",
+            "No cleanup candidates found{scope_suffix}. Default cleanup only stops terminal/stale sessions spawned by this coordinator with status in [{}].",
             target_status.join(", ")
         ));
     }
