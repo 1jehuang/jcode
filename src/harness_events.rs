@@ -13,6 +13,8 @@ pub const HARNESS_EVENT_SCHEMA_VERSION: u16 = 1;
 pub const HARNESS_EVENT_REDACTED: &str = "[redacted]";
 pub const HARNESS_EVENT_TRUNCATED: &str = "...[truncated]";
 pub const DEFAULT_MAX_PAYLOAD_STRING_CHARS: usize = 4096;
+pub const HARNESS_EVENT_SSE_CONTENT_TYPE: &str = "text/event-stream";
+pub const DEFAULT_HARNESS_EVENT_SSE_RETRY_MS: u64 = 2_000;
 const DEFAULT_EVENT_BUS_CAPACITY: usize = 1024;
 const HARNESS_EVENT_LOG_DIR: &str = "harness-events";
 
@@ -405,6 +407,57 @@ pub fn append_harness_event_ndjson(
         .append(true)
         .open(path)?;
     write_harness_event_ndjson(&mut file, event)
+}
+
+pub fn render_harness_event_sse(
+    event: &HarnessEvent,
+    retry_ms: Option<u64>,
+) -> anyhow::Result<String> {
+    let mut output = Vec::new();
+    write_harness_event_sse(&mut output, event, retry_ms)?;
+    Ok(String::from_utf8(output)?)
+}
+
+pub fn write_harness_event_sse<W: Write>(
+    writer: &mut W,
+    event: &HarnessEvent,
+    retry_ms: Option<u64>,
+) -> anyhow::Result<()> {
+    writeln!(writer, "id: {}", sanitize_sse_field_value(&event.event_id))?;
+    writeln!(writer, "event: {}", harness_event_sse_event_name(event))?;
+    if let Some(retry_ms) = retry_ms {
+        writeln!(writer, "retry: {}", retry_ms)?;
+    }
+    let data = serde_json::to_string(event)?;
+    for line in data.lines() {
+        writeln!(writer, "data: {}", line)?;
+    }
+    writeln!(writer)?;
+    writer.flush()?;
+    Ok(())
+}
+
+pub fn harness_event_sse_event_name(event: &HarnessEvent) -> String {
+    event_label(&event.kind)
+}
+
+pub fn harness_events_after_last_event_id<'a>(
+    events: &'a [HarnessEvent],
+    last_event_id: Option<&str>,
+) -> &'a [HarnessEvent] {
+    let Some(last_event_id) = last_event_id.filter(|id| !id.is_empty()) else {
+        return events;
+    };
+
+    events
+        .iter()
+        .position(|event| event.event_id == last_event_id)
+        .map(|index| &events[index + 1..])
+        .unwrap_or(events)
+}
+
+fn sanitize_sse_field_value(value: &str) -> String {
+    value.replace(['\r', '\n'], " ")
 }
 
 pub fn run_harness_event_benchmark(
@@ -1257,6 +1310,64 @@ mod tests {
         let parsed: HarnessEvent = serde_json::from_str(text.trim_end()).unwrap();
         assert_eq!(parsed.event_id, "hevt_ndjson");
         assert_eq!(parsed.payload["status"], "ok");
+    }
+
+    #[test]
+    fn sse_renderer_maps_event_id_type_retry_and_json_data() {
+        let event = HarnessEvent::new(
+            "hevt_sse",
+            "run_sse",
+            DateTime::parse_from_rfc3339("2026-05-08T04:22:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            3,
+            HarnessEventLevel::Info,
+            HarnessEventKind::ToolFinished,
+            json!({"tool": "cargo test", "status": "ok"}),
+        );
+
+        let frame = render_harness_event_sse(&event, Some(DEFAULT_HARNESS_EVENT_SSE_RETRY_MS))
+            .expect("sse frame");
+
+        assert!(frame.starts_with("id: hevt_sse\nevent: tool_finished\nretry: 2000\n"));
+        assert!(frame.ends_with("\n\n"));
+        let data = frame
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("data line");
+        let parsed: HarnessEvent = serde_json::from_str(data).unwrap();
+        assert_eq!(parsed.event_id, "hevt_sse");
+        assert_eq!(parsed.kind, HarnessEventKind::ToolFinished);
+        assert_eq!(parsed.payload["tool"], "cargo test");
+    }
+
+    #[test]
+    fn sse_last_event_id_resume_returns_retained_tail() {
+        let bus = HarnessEventBus::with_capacity(8);
+        let first = bus.publish(HarnessEventDraft::run_started("run_sse_resume"));
+        let second = bus.publish(
+            HarnessEventDraft::new("run_sse_resume", HarnessEventKind::ToolFinished)
+                .with_payload(json!({"status": "ok"})),
+        );
+        let third = bus.publish(HarnessEventDraft::run_completed("run_sse_resume"));
+        let events = vec![first.clone(), second.clone(), third.clone()];
+
+        assert_eq!(
+            harness_events_after_last_event_id(&events, Some(&first.event_id)),
+            &[second.clone(), third.clone()]
+        );
+        assert_eq!(
+            harness_events_after_last_event_id(&events, Some(&third.event_id)),
+            &[]
+        );
+        assert_eq!(
+            harness_events_after_last_event_id(&events, None),
+            events.as_slice()
+        );
+        assert_eq!(
+            harness_events_after_last_event_id(&events, Some("missing_event_id")),
+            events.as_slice()
+        );
     }
 
     #[test]

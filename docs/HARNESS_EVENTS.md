@@ -129,6 +129,39 @@ Sink guarantees:
 
 The default log directory is under `JCODE_RUNTIME_DIR` when set, otherwise the platform runtime directory, in a `harness-events/` subdirectory. Runtime producer coverage is currently incremental: `jcode run --ndjson` writes typed run/tool summary events and exposes `harness_run_id` plus `harness_event_log` in its `start`, `done`, and `error` records.
 
+## SSE protocol core
+
+The first SSE slice is transport-neutral framing for future local dashboard endpoints. A `HarnessEvent` maps to a Server-Sent Events message as:
+
+- `Content-Type: text/event-stream`
+- `id`: `event_id`, used by browser `Last-Event-ID` resume.
+- `event`: the snake_case `HarnessEventKind`, such as `tool_finished`.
+- `retry`: optional reconnect delay, default helper value `2000` ms.
+- `data`: compact JSON serialization of the already-redacted `HarnessEvent`.
+
+Example frame:
+
+```text
+id: hevt_demo
+event: tool_finished
+retry: 2000
+data: {"schema_version":1,"event_id":"hevt_demo","run_id":"run_demo","timestamp":"2026-05-08T04:22:00Z","sequence":3,"level":"info","kind":"tool_finished","payload_class":"safe_metadata","payload":{"tool":"cargo test","status":"ok"}}
+
+```
+
+Browser clients can later consume the local endpoint with standard EventSource APIs:
+
+```js
+const events = new EventSource("http://127.0.0.1:PORT/events/runs/run_demo/stream");
+events.addEventListener("tool_finished", (event) => {
+  const harnessEvent = JSON.parse(event.data);
+  console.log(harnessEvent.sequence, harnessEvent.payload.status);
+});
+events.onerror = () => console.warn("event stream reconnecting");
+```
+
+The endpoint itself is not enabled in this slice. Server integration should reuse `write_harness_event_sse`, `render_harness_event_sse`, and `harness_events_after_last_event_id` so `Last-Event-ID` can replay retained local events before subscribing to live fan-out.
+
 ### CLI helpers
 
 `jcode events` exposes the local sink without mixing human text into NDJSON streams:
