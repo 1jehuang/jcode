@@ -14,6 +14,7 @@ Implemented in `src/harness_events.rs`:
 - `HarnessEventDraft` for producer-side construction.
 - `HarnessEventBus` for in-process pub/sub fan-out.
 - Default payload redaction before events leave the bus.
+- Local NDJSON writer/append helpers for already-redacted `HarnessEvent` objects.
 
 External transports are out of scope for this first slice. Consumers should subscribe to the in-process bus first, then later attach sinks such as NDJSON or SSE.
 
@@ -99,6 +100,34 @@ Retention, cleanup, and sampling policies for durable logs should be implemented
 - prefer artifact references over inline content;
 - classify prompts, file contents, raw tool stdout/stderr, and secrets as `user_content` or `secret`;
 - keep high-volume events at `trace`/`debug` for future sampling knobs.
+
+## NDJSON local sink
+
+The first NDJSON slice is a low-level sink API for redacted `HarnessEvent` objects:
+
+```rust
+use jcode::harness_events::{
+    HarnessEventBus,
+    HarnessEventDraft,
+    append_harness_event_ndjson,
+    harness_event_log_path,
+};
+
+let bus = HarnessEventBus::global();
+let event = bus.publish(HarnessEventDraft::run_started("run_123"));
+let path = harness_event_log_path("run_123");
+append_harness_event_ndjson(&path, &event)?;
+```
+
+Sink guarantees:
+
+- one compact JSON object per line;
+- every line is independently parseable as `HarnessEvent`;
+- parent directories are created on append;
+- file names are derived from sanitized `run_id` values;
+- payloads have already passed through the core redaction path.
+
+The default log directory is under `JCODE_RUNTIME_DIR` when set, otherwise the platform runtime directory, in a `harness-events/` subdirectory. Full CLI tail/export commands remain follow-up work for #18.
 
 ## Minimal producer usage
 

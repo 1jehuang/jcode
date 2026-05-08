@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use tokio::sync::broadcast;
 
@@ -10,6 +12,7 @@ pub const HARNESS_EVENT_REDACTED: &str = "[redacted]";
 pub const HARNESS_EVENT_TRUNCATED: &str = "...[truncated]";
 pub const DEFAULT_MAX_PAYLOAD_STRING_CHARS: usize = 4096;
 const DEFAULT_EVENT_BUS_CAPACITY: usize = 1024;
+const HARNESS_EVENT_LOG_DIR: &str = "harness-events";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -273,6 +276,58 @@ fn truncate_payload_string(value: &str) -> String {
     }
 }
 
+pub fn default_harness_event_log_dir() -> PathBuf {
+    crate::storage::runtime_dir().join(HARNESS_EVENT_LOG_DIR)
+}
+
+pub fn harness_event_log_path(run_id: &str) -> PathBuf {
+    default_harness_event_log_dir().join(format!("{}.ndjson", sanitize_run_id(run_id)))
+}
+
+pub fn write_harness_event_ndjson<W: Write>(
+    writer: &mut W,
+    event: &HarnessEvent,
+) -> anyhow::Result<()> {
+    serde_json::to_writer(&mut *writer, event)?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    Ok(())
+}
+
+pub fn append_harness_event_ndjson(
+    path: impl AsRef<Path>,
+    event: &HarnessEvent,
+) -> anyhow::Result<()> {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    write_harness_event_ndjson(&mut file, event)
+}
+
+fn sanitize_run_id(run_id: &str) -> String {
+    let sanitized: String = run_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .take(120)
+        .collect();
+    if sanitized.is_empty() {
+        "run".to_string()
+    } else {
+        sanitized
+    }
+}
+
 pub struct HarnessEventBus {
     sender: broadcast::Sender<HarnessEvent>,
     sequences: Mutex<HashMap<String, u64>>,
@@ -461,6 +516,72 @@ mod tests {
         assert!(!serialized.contains("ghp_should_not_escape"));
         assert_eq!(event.payload["token"], HARNESS_EVENT_REDACTED);
         assert_eq!(event.payload["status"], "ok");
+    }
+
+    #[test]
+    fn ndjson_writer_emits_one_parseable_line() {
+        let timestamp = DateTime::parse_from_rfc3339("2026-05-08T03:10:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let event = HarnessEvent::new(
+            "hevt_ndjson",
+            "run_ndjson",
+            timestamp,
+            1,
+            HarnessEventLevel::Info,
+            HarnessEventKind::RunStarted,
+            json!({"status": "ok"}),
+        );
+        let mut output = Vec::new();
+
+        write_harness_event_ndjson(&mut output, &event).unwrap();
+
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.ends_with('\n'));
+        assert_eq!(text.lines().count(), 1);
+        let parsed: HarnessEvent = serde_json::from_str(text.trim_end()).unwrap();
+        assert_eq!(parsed.event_id, "hevt_ndjson");
+        assert_eq!(parsed.payload["status"], "ok");
+    }
+
+    #[test]
+    fn ndjson_append_creates_file_and_preserves_redaction() {
+        let temp = tempfile::Builder::new()
+            .prefix("jcode-harness-events-ndjson-")
+            .tempdir()
+            .unwrap();
+        let path = temp.path().join("events").join("run.ndjson");
+        let bus = HarnessEventBus::with_capacity(8);
+
+        let first = bus.publish(
+            HarnessEventDraft::new("run_file", HarnessEventKind::ToolStarted).with_payload(json!({
+                "tool": "bash",
+                "token": "ghp_never_write_me"
+            })),
+        );
+        let second = bus.publish(HarnessEventDraft::run_completed("run_file"));
+
+        append_harness_event_ndjson(&path, &first).unwrap();
+        append_harness_event_ndjson(&path, &second).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("ghp_never_write_me"));
+        let lines = text.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+        let first_parsed: HarnessEvent = serde_json::from_str(lines[0]).unwrap();
+        let second_parsed: HarnessEvent = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(first_parsed.payload["token"], HARNESS_EVENT_REDACTED);
+        assert_eq!(first_parsed.sequence, 1);
+        assert_eq!(second_parsed.sequence, 2);
+    }
+
+    #[test]
+    fn event_log_path_sanitizes_run_id() {
+        let path = harness_event_log_path("run/with spaces/and:*chars");
+        let file_name = path.file_name().and_then(|name| name.to_str()).unwrap();
+
+        assert_eq!(file_name, "run_with_spaces_and__chars.ndjson");
+        assert!(path.ends_with("harness-events/run_with_spaces_and__chars.ndjson"));
     }
 
     #[tokio::test]
