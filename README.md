@@ -200,9 +200,9 @@ completion/notification fan-out, keeping stdout and JSON streams clean.
 
 The structured execution-event foundation lives in
 [`docs/HARNESS_EVENTS.md`](docs/HARNESS_EVENTS.md). The first slice provides a
-versioned `HarnessEvent` schema and in-process `HarnessEventBus`; follow-up
-issues add NDJSON logs, replay, SSE dashboards, broker adapters, and interactive
-control transports.
+versioned `HarnessEvent` schema, default payload redaction, and in-process
+`HarnessEventBus`; follow-up issues add NDJSON logs, replay, SSE dashboards,
+broker adapters, and interactive control transports.
 
 ### Headless session metadata
 

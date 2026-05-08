@@ -6,6 +6,9 @@ use std::sync::{Mutex, OnceLock};
 use tokio::sync::broadcast;
 
 pub const HARNESS_EVENT_SCHEMA_VERSION: u16 = 1;
+pub const HARNESS_EVENT_REDACTED: &str = "[redacted]";
+pub const HARNESS_EVENT_TRUNCATED: &str = "...[truncated]";
+pub const DEFAULT_MAX_PAYLOAD_STRING_CHARS: usize = 4096;
 const DEFAULT_EVENT_BUS_CAPACITY: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -38,6 +41,22 @@ pub enum HarnessEventKind {
     HumanApprovalRequired,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessEventPayloadClass {
+    SafeMetadata,
+    SensitiveMetadata,
+    Secret,
+    UserContent,
+    ArtifactReference,
+}
+
+impl HarnessEventPayloadClass {
+    pub fn redacts_whole_payload(self) -> bool {
+        matches!(self, Self::Secret | Self::UserContent)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct HarnessEvent {
     pub schema_version: u16,
@@ -51,6 +70,7 @@ pub struct HarnessEvent {
     pub sequence: u64,
     pub level: HarnessEventLevel,
     pub kind: HarnessEventKind,
+    pub payload_class: HarnessEventPayloadClass,
     pub payload: Value,
 }
 
@@ -74,7 +94,8 @@ impl HarnessEvent {
             sequence,
             level,
             kind,
-            payload,
+            payload_class: HarnessEventPayloadClass::SafeMetadata,
+            payload: redact_harness_event_payload(payload, HarnessEventPayloadClass::SafeMetadata),
         }
     }
 
@@ -87,6 +108,12 @@ impl HarnessEvent {
         self.parent_event_id = Some(parent_event_id.into());
         self
     }
+
+    pub fn with_payload_class(mut self, payload_class: HarnessEventPayloadClass) -> Self {
+        self.payload_class = payload_class;
+        self.payload = redact_harness_event_payload(self.payload, payload_class);
+        self
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,6 +123,7 @@ pub struct HarnessEventDraft {
     parent_event_id: Option<String>,
     level: HarnessEventLevel,
     kind: HarnessEventKind,
+    payload_class: HarnessEventPayloadClass,
     payload: Value,
 }
 
@@ -107,6 +135,7 @@ impl HarnessEventDraft {
             parent_event_id: None,
             level: HarnessEventLevel::Info,
             kind,
+            payload_class: HarnessEventPayloadClass::SafeMetadata,
             payload: json!({}),
         }
     }
@@ -141,6 +170,106 @@ impl HarnessEventDraft {
     pub fn with_payload(mut self, payload: Value) -> Self {
         self.payload = payload;
         self
+    }
+
+    pub fn with_payload_class(mut self, payload_class: HarnessEventPayloadClass) -> Self {
+        self.payload_class = payload_class;
+        self
+    }
+}
+
+pub fn redact_harness_event_payload(
+    payload: Value,
+    payload_class: HarnessEventPayloadClass,
+) -> Value {
+    if payload_class.redacts_whole_payload() {
+        return json!({
+            "redacted": true,
+            "payload_class": payload_class,
+        });
+    }
+
+    redact_value(payload)
+}
+
+fn redact_value(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| {
+                    if is_sensitive_payload_key(&key) {
+                        (key, Value::String(HARNESS_EVENT_REDACTED.to_string()))
+                    } else {
+                        (key, redact_value(value))
+                    }
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.into_iter().map(redact_value).collect()),
+        Value::String(value) if looks_like_secret_value(&value) => {
+            Value::String(HARNESS_EVENT_REDACTED.to_string())
+        }
+        Value::String(value) => Value::String(truncate_payload_string(&value)),
+        other => other,
+    }
+}
+
+fn is_sensitive_payload_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+
+    matches!(
+        normalized.as_str(),
+        "apikey"
+            | "authorization"
+            | "authtoken"
+            | "cookie"
+            | "credential"
+            | "credentials"
+            | "filecontent"
+            | "input"
+            | "password"
+            | "privatekey"
+            | "prompt"
+            | "rawprompt"
+            | "refreshtoken"
+            | "secret"
+            | "setcookie"
+            | "stderr"
+            | "stdout"
+            | "token"
+            | "tooloutput"
+            | "usercontent"
+    ) || normalized.contains("apikey")
+        || normalized.contains("privatekey")
+        || normalized.contains("secret")
+        || normalized.contains("token")
+}
+
+fn looks_like_secret_value(value: &str) -> bool {
+    let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    lower.starts_with("bearer ")
+        || trimmed.starts_with("ghp_")
+        || trimmed.starts_with("gho_")
+        || trimmed.starts_with("github_pat_")
+        || trimmed.starts_with("sk-")
+        || trimmed.contains("-----BEGIN ")
+}
+
+fn truncate_payload_string(value: &str) -> String {
+    let mut chars = value.chars();
+    let truncated: String = chars
+        .by_ref()
+        .take(DEFAULT_MAX_PAYLOAD_STRING_CHARS)
+        .collect();
+    if chars.next().is_none() {
+        value.to_string()
+    } else {
+        format!("{truncated}{HARNESS_EVENT_TRUNCATED}")
     }
 }
 
@@ -179,7 +308,8 @@ impl HarnessEventBus {
             sequence,
             level: draft.level,
             kind: draft.kind,
-            payload: draft.payload,
+            payload_class: draft.payload_class,
+            payload: redact_harness_event_payload(draft.payload, draft.payload_class),
         };
         let _ = self.sender.send(event.clone());
         event
@@ -236,8 +366,101 @@ mod tests {
         assert_eq!(value["sequence"], 7);
         assert_eq!(value["level"], "info");
         assert_eq!(value["kind"], "tool_finished");
+        assert_eq!(value["payload_class"], "safe_metadata");
         assert_eq!(value["payload"]["tool"], "cargo test");
         assert_eq!(value["payload"]["status"], "passed");
+    }
+
+    #[tokio::test]
+    async fn event_bus_redacts_sensitive_keys_by_default() {
+        let bus = HarnessEventBus::with_capacity(8);
+
+        let event = bus.publish(
+            HarnessEventDraft::new("run_redact", HarnessEventKind::ToolStarted).with_payload(
+                json!({
+                    "tool": "deploy",
+                    "api_key": "sk-live-secret",
+                    "nested": {
+                        "Authorization": "Bearer should-not-leak",
+                        "safe": "metadata"
+                    },
+                    "items": [{"password": "hunter2"}]
+                }),
+            ),
+        );
+
+        let serialized = serde_json::to_string(&event).unwrap();
+        assert!(!serialized.contains("sk-live-secret"));
+        assert!(!serialized.contains("Bearer should-not-leak"));
+        assert!(!serialized.contains("hunter2"));
+        assert_eq!(event.payload["tool"], "deploy");
+        assert_eq!(event.payload["api_key"], HARNESS_EVENT_REDACTED);
+        assert_eq!(
+            event.payload["nested"]["Authorization"],
+            HARNESS_EVENT_REDACTED
+        );
+        assert_eq!(event.payload["nested"]["safe"], "metadata");
+        assert_eq!(
+            event.payload["items"][0]["password"],
+            HARNESS_EVENT_REDACTED
+        );
+    }
+
+    #[tokio::test]
+    async fn user_content_payload_is_redacted_wholesale() {
+        let bus = HarnessEventBus::with_capacity(8);
+
+        let event = bus.publish(
+            HarnessEventDraft::new("run_user_content", HarnessEventKind::HumanApprovalRequired)
+                .with_payload_class(HarnessEventPayloadClass::UserContent)
+                .with_payload(json!({
+                    "prompt": "please do a private thing",
+                    "file_content": "secret source text"
+                })),
+        );
+
+        let serialized = serde_json::to_string(&event).unwrap();
+        assert!(!serialized.contains("private thing"));
+        assert!(!serialized.contains("secret source text"));
+        assert_eq!(event.payload_class, HarnessEventPayloadClass::UserContent);
+        assert_eq!(event.payload["redacted"], true);
+        assert_eq!(event.payload["payload_class"], "user_content");
+    }
+
+    #[test]
+    fn long_payload_strings_are_truncated() {
+        let long = "x".repeat(DEFAULT_MAX_PAYLOAD_STRING_CHARS + 8);
+
+        let redacted = redact_harness_event_payload(
+            json!({"summary": long}),
+            HarnessEventPayloadClass::SafeMetadata,
+        );
+        let summary = redacted["summary"].as_str().unwrap();
+
+        assert!(summary.ends_with(HARNESS_EVENT_TRUNCATED));
+        assert_eq!(
+            summary.chars().count(),
+            DEFAULT_MAX_PAYLOAD_STRING_CHARS + HARNESS_EVENT_TRUNCATED.chars().count()
+        );
+    }
+
+    #[test]
+    fn direct_event_constructor_redacts_secret_values() {
+        let timestamp = Utc::now();
+        let event = HarnessEvent::new(
+            "hevt_secret",
+            "run_secret",
+            timestamp,
+            1,
+            HarnessEventLevel::Info,
+            HarnessEventKind::GatePassed,
+            json!({"token": "ghp_should_not_escape", "status": "ok"}),
+        );
+
+        let serialized = serde_json::to_string(&event).unwrap();
+        assert!(!serialized.contains("ghp_should_not_escape"));
+        assert_eq!(event.payload["token"], HARNESS_EVENT_REDACTED);
+        assert_eq!(event.payload["status"], "ok");
     }
 
     #[tokio::test]
