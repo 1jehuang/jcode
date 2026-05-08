@@ -90,31 +90,6 @@ fn cleanup_candidate_session_ids(
     )
 }
 
-fn await_candidate_session_ids(
-    owner_session_id: &str,
-    members: &[AgentInfo],
-    target_status: &[String],
-) -> Vec<String> {
-    let done_statuses = target_status
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::HashSet<_>>();
-    let mut ids = members
-        .iter()
-        .filter(|member| member.session_id != owner_session_id)
-        .filter(|member| member.report_back_to_session_id.as_deref() == Some(owner_session_id))
-        .filter(|member| {
-            member
-                .status
-                .as_deref()
-                .is_none_or(|status| !done_statuses.contains(status))
-        })
-        .map(|member| member.session_id.clone())
-        .collect::<Vec<_>>();
-    ids.sort();
-    ids
-}
-
 async fn ensure_cleanup_coordinator(ctx: &ToolContext) -> Result<()> {
     let request = Request::CommAssignRole {
         id: REQUEST_ID,
@@ -233,6 +208,7 @@ async fn await_swarm_progress(
         session_id: ctx.session_id.clone(),
         target_status: default_run_await_statuses(),
         session_ids,
+        owned_only: None,
         mode: Some("any".to_string()),
         timeout_secs: Some(timeout_minutes.max(1) * 60),
     };
@@ -1510,16 +1486,7 @@ impl Tool for CommunicateTool {
                 {
                     session_ids.push(target_session);
                 }
-                if session_ids.is_empty() {
-                    let members = fetch_swarm_members(&ctx.session_id).await?;
-                    session_ids =
-                        await_candidate_session_ids(&ctx.session_id, &members, &target_status);
-                    if session_ids.is_empty() {
-                        return Ok(ToolOutput::new(
-                            "No scoped await_members candidates found. Default await_members only waits for non-terminal workers spawned by this coordinator. Pass explicit session_ids or target_session to await older or user-created agents.",
-                        ));
-                    }
-                }
+                let owned_only = session_ids.is_empty().then_some(true);
                 let timeout_minutes = params.timeout_minutes.unwrap_or(60);
                 let timeout_secs = timeout_minutes * 60;
 
@@ -1528,6 +1495,7 @@ impl Tool for CommunicateTool {
                     session_id: ctx.session_id.clone(),
                     target_status,
                     session_ids,
+                    owned_only,
                     mode: params.mode.clone(),
                     timeout_secs: Some(timeout_secs),
                 };

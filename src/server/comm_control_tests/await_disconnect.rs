@@ -24,6 +24,7 @@ async fn await_members_stops_when_requesting_client_disconnects() {
         requester.to_string(),
         vec!["completed".to_string()],
         vec![],
+        false,
         None,
         Some(60),
         CommAwaitMembersContext {

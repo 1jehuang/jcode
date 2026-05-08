@@ -576,6 +576,11 @@ pub enum Request {
         /// Specific session IDs to watch. If empty, watches all non-self members.
         #[serde(default)]
         session_ids: Vec<String>,
+        /// If true and `session_ids` is empty, snapshot only non-terminal workers spawned by this
+        /// session instead of watching every member in the swarm. Server handlers default this to
+        /// true for empty `session_ids` to avoid capturing stale agents from older runs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owned_only: Option<bool>,
         /// Whether to wait for all matching members or wake when any member matches.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mode: Option<String>,

@@ -27,6 +27,8 @@ pub struct PersistedAwaitMembersState {
     pub swarm_id: String,
     pub target_status: Vec<String>,
     pub requested_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owned_only: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     pub created_at_unix_ms: u64,
@@ -126,6 +128,7 @@ pub(super) fn request_key(
     swarm_id: &str,
     requested_ids: &[String],
     target_status: &[String],
+    owned_only: bool,
     mode: Option<&str>,
 ) -> String {
     let mut requested = requested_ids.to_vec();
@@ -141,6 +144,7 @@ pub(super) fn request_key(
             swarm_id.to_string(),
             requested.join("\u{1f}"),
             target.join("\u{1f}"),
+            format!("owned_only={owned_only}"),
             mode.unwrap_or("all").to_string(),
         ],
     )
@@ -160,6 +164,7 @@ pub(super) fn ensure_pending_state(
     swarm_id: &str,
     requested_ids: &[String],
     target_status: &[String],
+    owned_only: bool,
     mode: Option<&str>,
     deadline_unix_ms: u64,
 ) -> PersistedAwaitMembersState {
@@ -173,6 +178,7 @@ pub(super) fn ensure_pending_state(
         swarm_id: swarm_id.to_string(),
         target_status: target_status.to_vec(),
         requested_ids: requested_ids.to_vec(),
+        owned_only,
         mode: mode.map(str::to_string),
         created_at_unix_ms: now_unix_ms(),
         deadline_unix_ms,
