@@ -5,6 +5,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::net::ToSocketAddrs;
+use std::path::PathBuf;
 
 use crate::{browser, gateway, memory, session, storage, tui};
 
@@ -998,6 +999,399 @@ pub fn run_skills_doctor_command(emit_json: bool) -> Result<()> {
             skill.origin.label(),
             skill.path.display()
         );
+    }
+    Ok(())
+}
+
+pub fn run_skills_scope_init_command(
+    cwd: Option<String>,
+    force: bool,
+    emit_json: bool,
+) -> Result<()> {
+    let root = resolve_existing_root(cwd.as_deref(), "skills scope init")?;
+    let report = crate::skill_scope::init_policy(&root, force)?;
+    print_skill_scope_report(&report, emit_json)
+}
+
+pub fn run_skills_scope_list_command(cwd: Option<String>, emit_json: bool) -> Result<()> {
+    let root = resolve_existing_root(cwd.as_deref(), "skills scope list")?;
+    let report = crate::skill_scope::list_policy(&root)?;
+    print_skill_scope_report(&report, emit_json)
+}
+
+pub fn run_skills_scope_set_command(
+    cwd: Option<String>,
+    name: &str,
+    state: crate::skill_scope::SkillScopeState,
+    reason: Option<String>,
+    emit_json: bool,
+) -> Result<()> {
+    let root = resolve_existing_root(cwd.as_deref(), "skills scope set")?;
+    let report = crate::skill_scope::set_skill_state(&root, name, state, reason)?;
+    print_skill_scope_report(&report, emit_json)
+}
+
+fn resolve_existing_root(cwd: Option<&str>, label: &str) -> Result<PathBuf> {
+    let root = cwd.map(PathBuf::from).unwrap_or(std::env::current_dir()?);
+    if !root.is_dir() {
+        anyhow::bail!(
+            "{label} cwd does not exist or is not a directory: {}",
+            root.display()
+        );
+    }
+    Ok(root)
+}
+
+fn print_skill_scope_report(
+    report: &crate::skill_scope::SkillScopeReport,
+    emit_json: bool,
+) -> Result<()> {
+    if emit_json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+        return Ok(());
+    }
+
+    println!("jcode skills scope: {}", report.policy_path);
+    println!("Exists: {}", report.exists);
+    println!("Created: {}", report.created);
+    println!("Updated: {}", report.updated);
+    println!("Default state: {}", report.policy.default_state.label());
+    if report.policy.skills.is_empty() {
+        println!("No explicit skill scope entries.");
+    } else {
+        println!("Skill scope entries:");
+        for entry in &report.policy.skills {
+            let reason = entry
+                .reason
+                .as_deref()
+                .map(|reason| format!(" ({reason})"))
+                .unwrap_or_default();
+            println!("  - {}: {}{}", entry.name, entry.state.label(), reason);
+        }
+    }
+    Ok(())
+}
+
+pub struct SkillsImportCommandOptions {
+    pub cwd: Option<String>,
+    pub sources: Vec<PathBuf>,
+    pub scope: crate::skill_import::SkillImportScope,
+    pub apply: bool,
+    pub force: bool,
+    pub json: bool,
+}
+
+pub fn run_skills_import_command(options: SkillsImportCommandOptions) -> Result<()> {
+    let root = resolve_existing_root(options.cwd.as_deref(), "skills import")?;
+    let sources = options
+        .sources
+        .into_iter()
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            }
+        })
+        .collect();
+    let report = crate::skill_import::run_import(crate::skill_import::SkillImportOptions {
+        root,
+        sources,
+        scope: options.scope,
+        apply: options.apply,
+        force: options.force,
+    })?;
+
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_skill_import_report(&report);
+    }
+
+    if report.should_fail() {
+        anyhow::bail!("skill import failed with {} error(s)", report.errors);
+    }
+    Ok(())
+}
+
+fn print_skill_import_report(report: &crate::skill_import::SkillImportReport) {
+    println!("jcode skills import: {}", report.status.label());
+    println!("Offline diagnostics: true");
+    println!("Dry run: {}", report.dry_run);
+    println!(
+        "Target: {} ({})",
+        report.target.scope.label(),
+        report.target.path
+    );
+    println!(
+        "Planned: {} write(s), copied {}, skipped {}",
+        report.planned, report.copied, report.skipped
+    );
+    println!(
+        "Findings: {} error(s), {} warning(s)",
+        report.errors, report.warnings
+    );
+    println!("Sources:");
+    for source in &report.sources {
+        println!(
+            "  - {}: {} checked, exists={} ({})",
+            source.origin, source.checked, source.exists, source.path
+        );
+    }
+
+    if report.actions.is_empty() {
+        println!("No skill import actions planned.");
+        return;
+    }
+
+    println!("Actions:");
+    for action in &report.actions {
+        let name = action.name.as_deref().unwrap_or("<invalid>");
+        let reason = action
+            .reason
+            .as_ref()
+            .map(|reason| format!(" ({reason})"))
+            .unwrap_or_default();
+        println!(
+            "  - {} {} -> {} [{} applied={}]{}",
+            action.action.label(),
+            action.source_path,
+            action.target_path,
+            name,
+            action.applied,
+            reason
+        );
+    }
+}
+
+pub fn run_skills_validate_command(cwd: Option<String>, emit_json: bool) -> Result<()> {
+    let root = resolve_existing_root(cwd.as_deref(), "skills validate")?;
+    let report = crate::skill_validation::validate_for_working_dir(&root)?;
+    if emit_json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_skill_validation_report(&report);
+    }
+
+    if report.should_fail() {
+        anyhow::bail!("skill validation failed with {} error(s)", report.errors);
+    }
+    Ok(())
+}
+
+fn print_skill_validation_report(report: &crate::skill_validation::SkillValidationReport) {
+    println!("jcode skills validate: {}", report.status.label());
+    println!("Offline diagnostics: true");
+    println!("Root: {}", report.root);
+    println!(
+        "Skills checked: {} (valid {}, invalid {})",
+        report.checked, report.valid, report.invalid
+    );
+    println!(
+        "Findings: {} error(s), {} warning(s)",
+        report.errors, report.warnings
+    );
+
+    println!("Origins:");
+    for origin in &report.origins {
+        println!(
+            "  - {}: {} checked, exists={} ({})",
+            origin.origin, origin.checked, origin.exists, origin.path
+        );
+    }
+
+    if report.findings.is_empty() {
+        println!("No findings.");
+        return;
+    }
+
+    println!("Findings detail:");
+    for finding in &report.findings {
+        println!(
+            "  - [{}] {} {}: {}",
+            finding.severity.label(),
+            finding.code,
+            finding.path,
+            finding.message
+        );
+    }
+}
+
+pub fn run_skills_match_command(
+    goal: &str,
+    cwd: Option<String>,
+    mode: crate::skill_router::SkillMode,
+    explicit: &[String],
+    emit_json: bool,
+) -> Result<()> {
+    let root = resolve_existing_root(cwd.as_deref(), "skills match")?;
+    let registry = crate::skill::SkillRegistry::load_for_working_dir(Some(&root))?;
+    let raw_selected = crate::skill_router::select_skills(goal, explicit, mode);
+    let scope_selection =
+        crate::skill_scope::apply_policy_for_selection(&root, raw_selected, explicit)?;
+    let selected = scope_selection.selected_names();
+
+    if emit_json {
+        let entries = selected
+            .iter()
+            .map(|name| {
+                if let Some(skill) = registry.get(name) {
+                    serde_json::json!({
+                        "name": skill.name,
+                        "description": skill.description,
+                        "origin": skill.origin.label(),
+                        "path": skill.path.display().to_string(),
+                        "allowed_tools": skill.allowed_tools,
+                    })
+                } else {
+                    serde_json::json!({
+                        "name": name,
+                        "missing": true,
+                    })
+                }
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "goal": goal,
+                "mode": format!("{:?}", mode).to_ascii_lowercase(),
+                "selected": entries,
+                "policy": scope_selection,
+            }))?
+        );
+        return Ok(());
+    }
+
+    if selected.is_empty() {
+        println!("No skills selected for this task.");
+        if !scope_selection.skipped.is_empty() {
+            println!("Skipped by scope policy:");
+            for decision in scope_selection.skipped {
+                println!(
+                    "- {}\t{}\t{}",
+                    decision.name,
+                    decision.state.label(),
+                    decision.reason.unwrap_or_default()
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    println!("Selected skills for task:");
+    for name in selected {
+        if let Some(skill) = registry.get(&name) {
+            println!(
+                "- {}\t{}\t{}",
+                skill.name,
+                skill.origin.label(),
+                skill.description
+            );
+        } else {
+            println!("- {name}\tmissing");
+        }
+    }
+    if !scope_selection.skipped.is_empty() {
+        println!("Skipped by scope policy:");
+        for decision in scope_selection.skipped {
+            println!(
+                "- {}\t{}\t{}",
+                decision.name,
+                decision.state.label(),
+                decision.reason.unwrap_or_default()
+            );
+        }
+    }
+    Ok(())
+}
+
+pub fn run_llmwiki_bridge_command(emit_json: bool) -> Result<()> {
+    let contract = serde_json::json!({
+        "skill": "llmwiki-memory",
+        "kind": "local-mcp-bridge-preview",
+        "offline": true,
+        "network_required": false,
+        "permission_boundary": {
+            "default": "read-only preview; this command never invokes MCP tools",
+            "writes": "wiki_sync may write local raw/session pages only when the operator explicitly invokes it outside this preview",
+            "secrets": "do not record credentials, tokens, private keys, or unredacted personal data in wiki pages"
+        },
+        "commands": [
+            {
+                "name": "wiki_query",
+                "purpose": "Retrieve synthesized project memory, decisions, and prior context by question.",
+                "mcp_tool": "mcp__llmwiki__wiki_query",
+                "example": { "question": "what did we decide about embedded skills?", "max_pages": 5 }
+            },
+            {
+                "name": "wiki_search",
+                "purpose": "Find literal text across wiki pages and optionally raw session transcripts.",
+                "mcp_tool": "mcp__llmwiki__wiki_search",
+                "example": { "term": "llmwiki-memory", "include_raw": false }
+            },
+            {
+                "name": "wiki_read_page",
+                "purpose": "Read one known wiki or raw page by path for provenance.",
+                "mcp_tool": "mcp__llmwiki__wiki_read_page",
+                "example": { "path": "wiki/index.md" }
+            },
+            {
+                "name": "wiki_sync",
+                "purpose": "Import new local agent session transcripts into raw/sessions for future wiki use.",
+                "mcp_tool": "mcp__llmwiki__wiki_sync",
+                "example": { "dry_run": true },
+                "write_risk": "local-files"
+            },
+            {
+                "name": "wiki_export",
+                "purpose": "Export a machine-readable wiki index or flattened dump for handoff/context packaging.",
+                "mcp_tool": "mcp__llmwiki__wiki_export",
+                "example": { "format": "llms-txt" }
+            },
+            {
+                "name": "wiki_lint",
+                "purpose": "Check wiki integrity before relying on it as durable memory.",
+                "mcp_tool": "mcp__llmwiki__wiki_lint",
+                "example": {}
+            }
+        ],
+        "recommended_flow": [
+            "Query wiki for prior decisions before planning.",
+            "Verify wiki claims against repository files or issues.",
+            "Record durable learnings only after checking local secret boundaries."
+        ]
+    });
+
+    if emit_json {
+        println!("{}", serde_json::to_string_pretty(&contract)?);
+    } else {
+        println!(
+            "jcode skills llmwiki-bridge: {}",
+            contract["kind"].as_str().unwrap_or("preview")
+        );
+        println!(
+            "Skill: {}",
+            contract["skill"].as_str().unwrap_or("llmwiki-memory")
+        );
+        println!("Offline: true");
+        println!("Network required: false");
+        println!(
+            "Permission boundary: {}",
+            contract["permission_boundary"]["default"]
+                .as_str()
+                .unwrap_or("read-only preview")
+        );
+        println!("Commands:");
+        if let Some(commands) = contract["commands"].as_array() {
+            for command in commands {
+                println!(
+                    "  - {} -> {}",
+                    command["name"].as_str().unwrap_or("<unknown>"),
+                    command["mcp_tool"].as_str().unwrap_or("<unknown>")
+                );
+            }
+        }
     }
     Ok(())
 }

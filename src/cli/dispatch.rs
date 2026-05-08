@@ -7,7 +7,7 @@ use std::time::Instant;
 use super::args::{
     AmbientCommand, Args, AuthCommand, CleanCodeCommand, CleanCodeFailOnArg, Command,
     MemoryCommand, MemoryWikiCommand, ModelCommand, ProviderCommand, RestartCommand,
-    SessionCommand, SkillCommand, TranscriptModeArg,
+    SessionCommand, SkillCommand, SkillScopeCommand, TranscriptModeArg,
 };
 use crate::{
     agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
@@ -207,6 +207,50 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             SkillCommand::Show { name, json } => commands::run_skills_show_command(&name, json)?,
             SkillCommand::Sync { force } => commands::run_skills_sync_command(force)?,
             SkillCommand::Doctor { json } => commands::run_skills_doctor_command(json)?,
+            SkillCommand::Scope { command } => match command {
+                SkillScopeCommand::Init { cwd, force, json } => {
+                    commands::run_skills_scope_init_command(cwd, force, json)?
+                }
+                SkillScopeCommand::List { cwd, json } => {
+                    commands::run_skills_scope_list_command(cwd, json)?
+                }
+                SkillScopeCommand::Set {
+                    name,
+                    state,
+                    reason,
+                    cwd,
+                    json,
+                } => {
+                    commands::run_skills_scope_set_command(cwd, &name, state.into(), reason, json)?
+                }
+            },
+            SkillCommand::Import {
+                cwd,
+                from,
+                scope,
+                dry_run: _,
+                apply,
+                force,
+                json,
+            } => commands::run_skills_import_command(commands::SkillsImportCommandOptions {
+                cwd,
+                sources: from,
+                scope: scope.into(),
+                apply,
+                force,
+                json,
+            })?,
+            SkillCommand::Validate { cwd, json } => {
+                commands::run_skills_validate_command(cwd, json)?
+            }
+            SkillCommand::Match {
+                goal,
+                cwd,
+                skills,
+                skill,
+                json,
+            } => commands::run_skills_match_command(&goal, cwd, skills.into(), &skill, json)?,
+            SkillCommand::LlmwikiBridge { json } => commands::run_llmwiki_bridge_command(json)?,
         },
         Some(Command::CleanCode(subcmd)) => match subcmd {
             CleanCodeCommand::Check {

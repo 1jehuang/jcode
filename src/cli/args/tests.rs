@@ -397,6 +397,123 @@ fn provider_add_subcommand_parses_agent_friendly_flags() {
 }
 
 #[test]
+fn skills_scope_subcommands_parse() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "skills",
+        "scope",
+        "set",
+        "llmwiki-memory",
+        "--state",
+        "discoverable",
+        "--reason",
+        "only on memory tasks",
+        "--cwd",
+        "/tmp/project",
+        "--json",
+    ])
+    .unwrap();
+
+    match args.command {
+        Some(Command::Skills(SkillCommand::Scope {
+            command:
+                SkillScopeCommand::Set {
+                    name,
+                    state,
+                    reason,
+                    cwd,
+                    json,
+                },
+        })) => {
+            assert_eq!(name, "llmwiki-memory");
+            assert_eq!(state, SkillScopeStateArg::Discoverable);
+            assert_eq!(reason.as_deref(), Some("only on memory tasks"));
+            assert_eq!(cwd.as_deref(), Some("/tmp/project"));
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+}
+
+#[test]
+fn skills_import_validate_match_and_bridge_parse() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "skills",
+        "import",
+        "--from",
+        ".claude/skills",
+        "--scope",
+        "global",
+        "--apply",
+        "--force",
+        "--json",
+    ])
+    .unwrap();
+    match args.command {
+        Some(Command::Skills(SkillCommand::Import {
+            from,
+            scope,
+            apply,
+            force,
+            json,
+            ..
+        })) => {
+            assert_eq!(from, vec![std::path::PathBuf::from(".claude/skills")]);
+            assert_eq!(scope, SkillImportScopeArg::Global);
+            assert!(apply);
+            assert!(force);
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+
+    let args =
+        Args::try_parse_from(["jcode", "skills", "validate", "--cwd", ".", "--json"]).unwrap();
+    match args.command {
+        Some(Command::Skills(SkillCommand::Validate { cwd, json })) => {
+            assert_eq!(cwd.as_deref(), Some("."));
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+
+    let args = Args::try_parse_from([
+        "jcode",
+        "skills",
+        "match",
+        "fix this bug",
+        "--skills",
+        "always",
+        "--skill",
+        "custom",
+        "--json",
+    ])
+    .unwrap();
+    match args.command {
+        Some(Command::Skills(SkillCommand::Match {
+            goal,
+            skills,
+            skill,
+            json,
+            ..
+        })) => {
+            assert_eq!(goal, "fix this bug");
+            assert_eq!(skills, SkillModeArg::Always);
+            assert_eq!(skill, vec!["custom"]);
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+
+    let args = Args::try_parse_from(["jcode", "skills", "llmwiki-bridge", "--json"]).unwrap();
+    match args.command {
+        Some(Command::Skills(SkillCommand::LlmwikiBridge { json })) => assert!(json),
+        other => panic!("unexpected command: {:?}", other),
+    }
+}
+
+#[test]
 fn restart_save_subcommand_parses() {
     let args = Args::try_parse_from(["jcode", "restart", "save"]).unwrap();
     match args.command {

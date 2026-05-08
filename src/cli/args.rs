@@ -419,6 +419,156 @@ pub(crate) enum SkillCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Manage project-local skill scope policy states
+    Scope {
+        #[command(subcommand)]
+        command: SkillScopeCommand,
+    },
+    /// Preview or apply imports from other local skill ecosystems into jcode skills
+    Import {
+        /// Project directory for resolving default sources and project target
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Source skills directory. Repeat to import from multiple dirs. Defaults to .agents/.claude/.codex/.jcode skills.
+        #[arg(long = "from", value_name = "DIR")]
+        from: Vec<std::path::PathBuf>,
+        /// Destination skill scope
+        #[arg(long, value_enum, default_value = "project")]
+        scope: SkillImportScopeArg,
+        /// Preview only. This is also the default unless --apply is passed.
+        #[arg(long, conflicts_with = "apply")]
+        dry_run: bool,
+        /// Actually copy planned skills into the destination scope
+        #[arg(long, conflicts_with = "dry_run")]
+        apply: bool,
+        /// Allow apply mode to overwrite files for existing target skills
+        #[arg(long)]
+        force: bool,
+        /// Emit JSON report
+        #[arg(long)]
+        json: bool,
+    },
+    /// Validate skill files, precedence, and risky prompt/tool patterns without invoking providers
+    Validate {
+        /// Project directory for resolving repo-local skills
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Emit JSON report
+        #[arg(long)]
+        json: bool,
+    },
+    /// Preview task-scoped skill selection for a goal without invoking a model
+    Match {
+        goal: String,
+        /// Project directory for resolving repo-local skills
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Automatic skill routing mode
+        #[arg(long, value_enum, default_value = "auto")]
+        skills: SkillModeArg,
+        /// Explicit task-level skill to include before automatic matches
+        #[arg(long = "skill")]
+        skill: Vec<String>,
+        /// Emit JSON report
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the permission-reviewed local LLM wiki MCP bridge contract
+    LlmwikiBridge {
+        /// Emit JSON contract for automation
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum SkillScopeCommand {
+    /// Create `.jcode/skills.scope.json` if it does not exist
+    Init {
+        /// Project directory for the policy file
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Overwrite an existing policy file with an empty default policy
+        #[arg(long)]
+        force: bool,
+        /// Emit JSON report
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the current project-local skill scope policy
+    List {
+        /// Project directory for the policy file
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Emit JSON report
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set one skill to visible, discoverable, or blocked
+    Set {
+        name: String,
+        /// Skill state in this repository
+        #[arg(long, value_enum)]
+        state: SkillScopeStateArg,
+        /// Human-readable policy reason
+        #[arg(long)]
+        reason: Option<String>,
+        /// Project directory for the policy file
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Emit JSON report
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum SkillScopeStateArg {
+    Visible,
+    Discoverable,
+    Blocked,
+}
+
+impl From<SkillScopeStateArg> for crate::skill_scope::SkillScopeState {
+    fn from(value: SkillScopeStateArg) -> Self {
+        match value {
+            SkillScopeStateArg::Visible => Self::Visible,
+            SkillScopeStateArg::Discoverable => Self::Discoverable,
+            SkillScopeStateArg::Blocked => Self::Blocked,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum SkillImportScopeArg {
+    Project,
+    Global,
+}
+
+impl From<SkillImportScopeArg> for crate::skill_import::SkillImportScope {
+    fn from(value: SkillImportScopeArg) -> Self {
+        match value {
+            SkillImportScopeArg::Project => Self::Project,
+            SkillImportScopeArg::Global => Self::Global,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum SkillModeArg {
+    Auto,
+    Off,
+    Always,
+}
+
+impl From<SkillModeArg> for crate::skill_router::SkillMode {
+    fn from(value: SkillModeArg) -> Self {
+        match value {
+            SkillModeArg::Auto => Self::Auto,
+            SkillModeArg::Off => Self::Off,
+            SkillModeArg::Always => Self::Always,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
