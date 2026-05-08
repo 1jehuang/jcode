@@ -623,6 +623,33 @@ fn events_path_tail_and_export_parse() {
         other => panic!("unexpected command: {:?}", other),
     }
 
+    let args = Args::try_parse_from([
+        "jcode",
+        "events",
+        "prune",
+        "--keep-logs",
+        "3",
+        "--max-total-bytes",
+        "4096",
+        "--apply",
+        "--json",
+    ])
+    .unwrap();
+    match args.command {
+        Some(Command::Events(EventCommand::Prune {
+            keep_logs,
+            max_total_bytes,
+            apply,
+            json,
+        })) => {
+            assert_eq!(keep_logs, Some(3));
+            assert_eq!(max_total_bytes, Some(4096));
+            assert!(apply);
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+
     let args =
         Args::try_parse_from(["jcode", "events", "bench", "--events", "2500", "--json"]).unwrap();
     match args.command {

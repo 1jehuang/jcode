@@ -94,9 +94,24 @@ Examples:
 
 ## Retention and sampling status
 
-This first privacy slice is in-memory only. The core `HarnessEventBus` does not write durable event logs, so there is no persistent retention store yet. Its broadcast ring is bounded by capacity and old in-memory events are dropped by Tokio broadcast semantics when receivers lag.
+Durable NDJSON logs now have explicit local retention controls. `jcode events prune` is safe by default: it reports the logs that would be removed and only deletes files when `--apply` is present.
 
-Retention, cleanup, and sampling policies for durable logs should be implemented with #18/#19. Until then:
+Examples:
+
+```bash
+jcode events prune --keep-logs 50
+jcode events prune --keep-logs 50 --json
+jcode events prune --keep-logs 50 --max-total-bytes 104857600 --apply
+```
+
+Retention policy semantics:
+
+- logs are ordered newest-first by filesystem modification time;
+- `--keep-logs N` keeps at most the newest `N` local `.ndjson` logs;
+- `--max-total-bytes B` keeps newest logs until adding the next log would exceed `B` bytes;
+- `--apply` is required for deletion, otherwise the command is a dry-run report.
+
+Sampling is still producer-side guidance until high-volume runtime producers are broader. Until then:
 
 - do not store raw event payloads outside the bus;
 - prefer artifact references over inline content;
@@ -178,6 +193,7 @@ jcode events tail --run run_123 --lines 50 --ndjson
 jcode events export --run run_123 --output run.ndjson --json
 jcode events export --run run_123 > run.ndjson
 jcode events sse --run run_123 --last-event-id hevt_seen > run.sse
+jcode events prune --keep-logs 50 --json
 jcode events replay --run run_123 > replay.md
 jcode events replay --run run_123 --json > replay.json
 jcode events bench --events 10000 --json > harness-events-bench.json
@@ -190,6 +206,7 @@ jcode events bench --events 10000 --json > harness-events-bench.json
 - `export` validates each source line as `HarnessEvent` before rewriting normalized NDJSON.
 - `export --json` requires `--output` so stdout remains machine-safe.
 - `sse` validates the local log and writes EventSource-compatible SSE frames to stdout or `--output`; `--last-event-id` emits only events after a retained event id.
+- `prune` reports retention candidates by newest-first log order; pass `--apply` to actually delete local event logs.
 - `replay` reconstructs a local audit timeline as Markdown by default, or JSON with `--json`. Replay output includes phase grouping, elapsed milliseconds, parent event references, child counts, duration hints, and explicit failure points.
 
 Replay and indexing use a tolerant read report for auditability: valid event lines are retained, invalid or truncated lines are surfaced as line-numbered diagnostics, and JSON replay includes a `diagnostics` array alongside `summary`, `timeline`, and `events`. Strict NDJSON consumers such as `tail --ndjson` and `export` still fail on malformed input so automation does not silently consume damaged streams.

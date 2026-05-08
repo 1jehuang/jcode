@@ -158,6 +158,44 @@ pub struct HarnessEventBenchmarkReport {
     pub notes: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct HarnessEventRetentionPolicy {
+    pub max_logs: Option<usize>,
+    pub max_total_bytes: Option<u64>,
+    pub dry_run: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct HarnessEventRetentionEntry {
+    pub run_id: String,
+    pub path: String,
+    pub bytes: u64,
+    pub modified_timestamp: Option<DateTime<Utc>>,
+    pub reason: String,
+    pub deleted: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct HarnessEventRetentionReport {
+    pub log_dir: String,
+    pub dry_run: bool,
+    pub before_logs: usize,
+    pub before_bytes: u64,
+    pub kept_logs: usize,
+    pub kept_bytes: u64,
+    pub pruned_logs: usize,
+    pub pruned_bytes: u64,
+    pub candidates: Vec<HarnessEventRetentionEntry>,
+}
+
+#[derive(Clone, Debug)]
+struct HarnessEventRetentionLogEntry {
+    run_id: String,
+    path: PathBuf,
+    bytes: u64,
+    modified_timestamp: Option<DateTime<Utc>>,
+}
+
 impl HarnessEvent {
     pub fn new(
         event_id: impl Into<String>,
@@ -458,6 +496,107 @@ pub fn harness_events_after_last_event_id<'a>(
 
 fn sanitize_sse_field_value(value: &str) -> String {
     value.replace(['\r', '\n'], " ")
+}
+
+pub fn apply_harness_event_log_retention(
+    policy: HarnessEventRetentionPolicy,
+) -> anyhow::Result<HarnessEventRetentionReport> {
+    apply_harness_event_log_retention_in_dir(default_harness_event_log_dir(), policy)
+}
+
+pub fn apply_harness_event_log_retention_in_dir(
+    log_dir: impl AsRef<Path>,
+    policy: HarnessEventRetentionPolicy,
+) -> anyhow::Result<HarnessEventRetentionReport> {
+    let log_dir = log_dir.as_ref();
+    if policy.max_logs.is_none() && policy.max_total_bytes.is_none() {
+        anyhow::bail!("retention policy must set max_logs or max_total_bytes");
+    }
+
+    let mut entries = collect_harness_event_retention_entries(log_dir)?;
+    entries.sort_by(|a, b| {
+        b.modified_timestamp
+            .cmp(&a.modified_timestamp)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+
+    let before_logs = entries.len();
+    let before_bytes = entries.iter().map(|entry| entry.bytes).sum();
+    let mut kept_logs = 0usize;
+    let mut kept_bytes = 0u64;
+    let mut candidates = Vec::new();
+
+    for entry in entries {
+        let reason = if policy
+            .max_logs
+            .is_some_and(|max_logs| kept_logs >= max_logs)
+        {
+            Some("max_logs")
+        } else if policy
+            .max_total_bytes
+            .is_some_and(|max_bytes| kept_bytes.saturating_add(entry.bytes) > max_bytes)
+        {
+            Some("max_total_bytes")
+        } else {
+            None
+        };
+
+        if let Some(reason) = reason {
+            if !policy.dry_run {
+                std::fs::remove_file(&entry.path)?;
+            }
+            candidates.push(HarnessEventRetentionEntry {
+                run_id: entry.run_id,
+                path: entry.path.display().to_string(),
+                bytes: entry.bytes,
+                modified_timestamp: entry.modified_timestamp,
+                reason: reason.to_string(),
+                deleted: !policy.dry_run,
+            });
+        } else {
+            kept_logs += 1;
+            kept_bytes = kept_bytes.saturating_add(entry.bytes);
+        }
+    }
+
+    let pruned_logs = candidates.len();
+    let pruned_bytes = candidates.iter().map(|entry| entry.bytes).sum();
+    Ok(HarnessEventRetentionReport {
+        log_dir: log_dir.display().to_string(),
+        dry_run: policy.dry_run,
+        before_logs,
+        before_bytes,
+        kept_logs,
+        kept_bytes,
+        pruned_logs,
+        pruned_bytes,
+        candidates,
+    })
+}
+
+fn collect_harness_event_retention_entries(
+    log_dir: &Path,
+) -> anyhow::Result<Vec<HarnessEventRetentionLogEntry>> {
+    if !log_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(log_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("ndjson") {
+            continue;
+        }
+        let metadata = entry.metadata()?;
+        entries.push(HarnessEventRetentionLogEntry {
+            run_id: run_id_from_event_log_path(&path),
+            path,
+            bytes: metadata.len(),
+            modified_timestamp: metadata.modified().ok().map(DateTime::<Utc>::from),
+        });
+    }
+    Ok(entries)
 }
 
 pub fn run_harness_event_benchmark(
@@ -1142,6 +1281,23 @@ mod tests {
         }
     }
 
+    fn write_retention_test_log(dir: &Path, run_id: &str, event_id: &str) -> PathBuf {
+        let path = dir.join(format!("{run_id}.ndjson"));
+        let event = HarnessEvent::new(
+            event_id,
+            run_id,
+            DateTime::parse_from_rfc3339("2026-05-08T04:40:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            1,
+            HarnessEventLevel::Info,
+            HarnessEventKind::RunCompleted,
+            json!({"status": "ok"}),
+        );
+        append_harness_event_ndjson(&path, &event).unwrap();
+        path
+    }
+
     #[test]
     fn event_serializes_stable_common_fields() {
         let timestamp = DateTime::parse_from_rfc3339("2026-05-08T03:00:00Z")
@@ -1605,6 +1761,95 @@ mod tests {
                 .unwrap_or_default()
                 .contains("line 1")
         );
+    }
+
+    #[test]
+    fn retention_dry_run_reports_prunable_logs_without_deleting() {
+        let temp = tempfile::Builder::new()
+            .prefix("jcode-harness-events-retention-dry-run-")
+            .tempdir()
+            .unwrap();
+        let dir = temp.path().join("harness-events");
+        let old = write_retention_test_log(&dir, "run_old", "hevt_old");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let new = write_retention_test_log(&dir, "run_new", "hevt_new");
+
+        let report = apply_harness_event_log_retention_in_dir(
+            &dir,
+            HarnessEventRetentionPolicy {
+                max_logs: Some(1),
+                max_total_bytes: None,
+                dry_run: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.before_logs, 2);
+        assert_eq!(report.kept_logs, 1);
+        assert_eq!(report.pruned_logs, 1);
+        assert_eq!(report.candidates[0].run_id, "run_old");
+        assert_eq!(report.candidates[0].reason, "max_logs");
+        assert!(!report.candidates[0].deleted);
+        assert!(old.exists());
+        assert!(new.exists());
+    }
+
+    #[test]
+    fn retention_apply_deletes_old_logs() {
+        let temp = tempfile::Builder::new()
+            .prefix("jcode-harness-events-retention-apply-")
+            .tempdir()
+            .unwrap();
+        let dir = temp.path().join("harness-events");
+        let old = write_retention_test_log(&dir, "run_old", "hevt_old");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let new = write_retention_test_log(&dir, "run_new", "hevt_new");
+
+        let report = apply_harness_event_log_retention_in_dir(
+            &dir,
+            HarnessEventRetentionPolicy {
+                max_logs: Some(1),
+                max_total_bytes: None,
+                dry_run: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.pruned_logs, 1);
+        assert_eq!(report.candidates[0].run_id, "run_old");
+        assert!(report.candidates[0].deleted);
+        assert!(!old.exists());
+        assert!(new.exists());
+    }
+
+    #[test]
+    fn retention_max_total_bytes_limits_kept_logs() {
+        let temp = tempfile::Builder::new()
+            .prefix("jcode-harness-events-retention-bytes-")
+            .tempdir()
+            .unwrap();
+        let dir = temp.path().join("harness-events");
+        let old = write_retention_test_log(&dir, "run_old", "hevt_old");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let new = write_retention_test_log(&dir, "run_new", "hevt_new");
+        let new_bytes = std::fs::metadata(&new).unwrap().len();
+
+        let report = apply_harness_event_log_retention_in_dir(
+            &dir,
+            HarnessEventRetentionPolicy {
+                max_logs: None,
+                max_total_bytes: Some(new_bytes),
+                dry_run: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.kept_logs, 1);
+        assert_eq!(report.kept_bytes, new_bytes);
+        assert_eq!(report.pruned_logs, 1);
+        assert_eq!(report.candidates[0].run_id, "run_old");
+        assert_eq!(report.candidates[0].reason, "max_total_bytes");
+        assert!(old.exists());
     }
 
     #[test]

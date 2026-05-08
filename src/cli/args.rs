@@ -491,6 +491,25 @@ pub(crate) enum EventCommand {
         output: Option<std::path::PathBuf>,
     },
 
+    /// Prune local harness event logs using safe retention limits
+    Prune {
+        /// Keep at most this many newest local event logs
+        #[arg(long)]
+        keep_logs: Option<usize>,
+
+        /// Keep at most this many bytes of newest local event logs
+        #[arg(long)]
+        max_total_bytes: Option<u64>,
+
+        /// Actually delete prunable logs. Without this flag the command is a dry-run.
+        #[arg(long)]
+        apply: bool,
+
+        /// Emit JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Run a synthetic harness-events overhead baseline benchmark
     Bench {
         /// Number of synthetic events to emit and process

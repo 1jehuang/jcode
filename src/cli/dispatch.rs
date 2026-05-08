@@ -273,6 +273,12 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             } => {
                 commands::run_events_sse_command(&run, last_event_id.as_deref(), retry_ms, output)?
             }
+            EventCommand::Prune {
+                keep_logs,
+                max_total_bytes,
+                apply,
+                json,
+            } => commands::run_events_prune_command(keep_logs, max_total_bytes, apply, json)?,
             EventCommand::Bench { events, json } => {
                 commands::run_events_bench_command(events, json)?
             }

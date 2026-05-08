@@ -399,6 +399,68 @@ pub fn run_events_sse_command(
     Ok(())
 }
 
+pub fn run_events_prune_command(
+    keep_logs: Option<usize>,
+    max_total_bytes: Option<u64>,
+    apply: bool,
+    emit_json: bool,
+) -> Result<()> {
+    if keep_logs.is_none() && max_total_bytes.is_none() {
+        anyhow::bail!("set --keep-logs or --max-total-bytes to define a retention limit");
+    }
+    if keep_logs == Some(0) {
+        anyhow::bail!("--keep-logs must be greater than zero");
+    }
+    if max_total_bytes == Some(0) {
+        anyhow::bail!("--max-total-bytes must be greater than zero");
+    }
+
+    let report = crate::harness_events::apply_harness_event_log_retention(
+        crate::harness_events::HarnessEventRetentionPolicy {
+            max_logs: keep_logs,
+            max_total_bytes,
+            dry_run: !apply,
+        },
+    )?;
+
+    if emit_json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!(
+        "Harness event retention {}",
+        if report.dry_run { "dry-run" } else { "applied" }
+    );
+    println!("Log dir: {}", report.log_dir);
+    println!(
+        "Before: {} log(s), {} byte(s)",
+        report.before_logs, report.before_bytes
+    );
+    println!(
+        "Kept: {} log(s), {} byte(s)",
+        report.kept_logs, report.kept_bytes
+    );
+    println!(
+        "Pruned: {} log(s), {} byte(s)",
+        report.pruned_logs, report.pruned_bytes
+    );
+    if !report.candidates.is_empty() {
+        println!("run_id\treason\tbytes\tdeleted\tpath");
+        for entry in &report.candidates {
+            println!(
+                "{}\t{}\t{}\t{}\t{}",
+                entry.run_id, entry.reason, entry.bytes, entry.deleted, entry.path
+            );
+        }
+    }
+    if report.dry_run && report.pruned_logs > 0 {
+        println!("Re-run with --apply to delete the listed log(s).");
+    }
+
+    Ok(())
+}
+
 pub fn run_events_bench_command(events: usize, emit_json: bool) -> Result<()> {
     if events == 0 {
         anyhow::bail!("--events must be greater than zero");
