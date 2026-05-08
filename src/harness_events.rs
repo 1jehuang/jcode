@@ -19,6 +19,7 @@ pub const HARNESS_EVENT_BROKER_PROTOCOL_VERSION: u16 = 1;
 pub const HARNESS_EVENT_BROKER_DELIVERY_SEMANTICS: &str = "at_least_once";
 pub const HARNESS_EVENT_MIN_LEVEL_ENV: &str = "JCODE_HARNESS_EVENTS_MIN_LEVEL";
 pub const HARNESS_EVENT_TOOL_SAMPLE_EVERY_ENV: &str = "JCODE_HARNESS_EVENTS_TOOL_SAMPLE_EVERY";
+pub const HARNESS_EVENT_REDIS_URL_ENV: &str = "JCODE_HARNESS_EVENTS_REDIS_URL";
 pub const DEFAULT_HARNESS_EVENT_REDIS_STREAM_READ_COUNT: usize = 1024;
 const DEFAULT_EVENT_BUS_CAPACITY: usize = 1024;
 const HARNESS_EVENT_LOG_DIR: &str = "harness-events";
@@ -3927,6 +3928,58 @@ mod tests {
         )
         .unwrap_err();
         assert!(missing_id_err.to_string().contains("missing message id"));
+    }
+
+    #[cfg(feature = "harness-events-redis")]
+    #[test]
+    fn redis_stream_live_round_trip_runs_when_url_env_is_set() -> anyhow::Result<()> {
+        let Some(url) = std::env::var_os(HARNESS_EVENT_REDIS_URL_ENV) else {
+            eprintln!(
+                "skipping live Redis Streams integration test: {HARNESS_EVENT_REDIS_URL_ENV} not set"
+            );
+            return Ok(());
+        };
+        let url = url
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("{HARNESS_EVENT_REDIS_URL_ENV} is not valid UTF-8"))?;
+        let unique = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        let run_id = format!("run_redis_live_{unique}");
+        let event = HarnessEvent::new(
+            "hevt_redis_live",
+            &run_id,
+            Utc::now(),
+            1,
+            HarnessEventLevel::Info,
+            HarnessEventKind::RunCompleted,
+            json!({"status": "ok", "api_key": "sk-live-should-redact"}),
+        );
+        let route = harness_event_broker_route(&event);
+        let client = redis::Client::open(url.as_str())?;
+        let mut cleanup = client.get_connection()?;
+        let _: usize = redis::cmd("DEL")
+            .arg(&route.redis_stream_key)
+            .query(&mut cleanup)?;
+
+        let mut sink = HarnessEventRedisStreamSink::from_url(&url)?;
+        let ack = sink.publish_event(&event)?;
+        let source = HarnessEventRedisStreamSource::from_url_for_run(&url, &run_id)?;
+        let deliveries = source.read_deliveries_after(&run_id, None)?;
+
+        assert!(ack.durable);
+        assert!(ack.message_id.as_deref().is_some_and(|id| id.contains('-')));
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].message_id, ack.message_id);
+        assert_eq!(deliveries[0].envelope.event.event_id, "hevt_redis_live");
+        assert_eq!(
+            deliveries[0].envelope.event.payload["api_key"],
+            HARNESS_EVENT_REDACTED
+        );
+        assert_eq!(deliveries[0].route.redis_stream_key, route.redis_stream_key);
+
+        let _: usize = redis::cmd("DEL")
+            .arg(&route.redis_stream_key)
+            .query(&mut cleanup)?;
+        Ok(())
     }
 
     #[test]

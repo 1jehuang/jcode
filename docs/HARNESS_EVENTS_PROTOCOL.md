@@ -260,7 +260,13 @@ Broker payload and ack contract:
 - Redis `XADD` id should map to `message_id`; `XACK` only applies when consumer groups are used. The helper policy is: `acked` and `dropped` outcomes call `XACK`, while `nacked` remains pending for retry or redelivery.
 - The memory broker is not durable and should not be used as audit evidence; use it to verify adapter-independent publish/consume/ack behavior before wiring NATS or Redis.
 - Broker fanout must never delete or rewrite local NDJSON evidence. In normal mode broker publish errors are captured in `HarnessEventFanoutReport.broker_error`; strict mode may return an error after the local write has already succeeded.
-- Redis support remains opt-in. The default build has no Redis dependency, and Redis integration tests should be gated on both the cargo feature and an explicit broker URL environment variable.
+- Redis support remains opt-in. The default build has no Redis dependency. The live Redis round-trip test is gated on both the cargo feature and `JCODE_HARNESS_EVENTS_REDIS_URL`; when the env var is unset, the test logs a skip message and exits successfully.
+
+Redis operational policy for this MVP:
+
+- Backpressure is bounded at the source boundary with `DEFAULT_HARNESS_EVENT_REDIS_STREAM_READ_COUNT` and per-call `XRANGE ... COUNT`; worker loops should page rather than read unbounded streams.
+- Reconnect is caller-managed: a Redis command error is surfaced as evidence/error, and the caller should rebuild the sink/source from the configured URL on the next retry. Local NDJSON fanout remains the source of audit truth during broker outages.
+- Consumer-group processing can use the same delivery parser and ack command policy when the future `XREADGROUP` worker loop lands.
 
 ## WebSocket control command core
 
