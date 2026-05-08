@@ -15,6 +15,8 @@ pub const HARNESS_EVENT_TRUNCATED: &str = "...[truncated]";
 pub const DEFAULT_MAX_PAYLOAD_STRING_CHARS: usize = 4096;
 pub const HARNESS_EVENT_SSE_CONTENT_TYPE: &str = "text/event-stream";
 pub const DEFAULT_HARNESS_EVENT_SSE_RETRY_MS: u64 = 2_000;
+pub const HARNESS_EVENT_BROKER_PROTOCOL_VERSION: u16 = 1;
+pub const HARNESS_EVENT_BROKER_DELIVERY_SEMANTICS: &str = "at_least_once";
 pub const HARNESS_EVENT_MIN_LEVEL_ENV: &str = "JCODE_HARNESS_EVENTS_MIN_LEVEL";
 pub const HARNESS_EVENT_TOOL_SAMPLE_EVERY_ENV: &str = "JCODE_HARNESS_EVENTS_TOOL_SAMPLE_EVERY";
 const DEFAULT_EVENT_BUS_CAPACITY: usize = 1024;
@@ -251,7 +253,7 @@ pub struct HarnessEventSinkAck {
     pub message_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HarnessEventBrokerRoute {
     pub run_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -261,6 +263,45 @@ pub struct HarnessEventBrokerRoute {
     pub nats_subject: String,
     pub redis_stream_key: String,
     pub durable_consumer: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessEventAckOutcome {
+    Pending,
+    Acked,
+    Nacked,
+    Redelivered,
+    Dropped,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct HarnessEventBrokerEnvelope {
+    pub protocol_version: u16,
+    pub delivery_semantics: String,
+    pub dedupe_key: String,
+    pub event: HarnessEvent,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct HarnessEventDelivery {
+    pub route: HarnessEventBrokerRoute,
+    pub envelope: HarnessEventBrokerEnvelope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    pub redelivered: bool,
+    pub delivery_attempt: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct HarnessEventDeliveryAck {
+    pub outcome: HarnessEventAckOutcome,
+    pub dedupe_key: String,
+    pub event_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 pub trait HarnessEventSink {
@@ -1004,6 +1045,74 @@ pub fn harness_event_broker_route(event: &HarnessEvent) -> HarnessEventBrokerRou
         nats_subject: subject_parts.join("."),
         redis_stream_key,
         durable_consumer,
+    }
+}
+
+pub fn harness_event_dedupe_key(event: &HarnessEvent) -> String {
+    format!("v{}:{}", event.schema_version, event.event_id)
+}
+
+pub fn harness_event_broker_envelope(event: &HarnessEvent) -> HarnessEventBrokerEnvelope {
+    HarnessEventBrokerEnvelope {
+        protocol_version: HARNESS_EVENT_BROKER_PROTOCOL_VERSION,
+        delivery_semantics: HARNESS_EVENT_BROKER_DELIVERY_SEMANTICS.to_string(),
+        dedupe_key: harness_event_dedupe_key(event),
+        event: event.clone(),
+    }
+}
+
+pub fn serialize_harness_event_broker_payload(event: &HarnessEvent) -> anyhow::Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&harness_event_broker_envelope(event))?)
+}
+
+pub fn deserialize_harness_event_broker_payload(
+    payload: &[u8],
+) -> anyhow::Result<HarnessEventBrokerEnvelope> {
+    let envelope = serde_json::from_slice::<HarnessEventBrokerEnvelope>(payload)?;
+    if envelope.protocol_version != HARNESS_EVENT_BROKER_PROTOCOL_VERSION {
+        anyhow::bail!(
+            "unsupported harness event broker protocol version {}",
+            envelope.protocol_version
+        );
+    }
+    if envelope.delivery_semantics != HARNESS_EVENT_BROKER_DELIVERY_SEMANTICS {
+        anyhow::bail!(
+            "unsupported harness event broker delivery semantics {}",
+            envelope.delivery_semantics
+        );
+    }
+    if envelope.dedupe_key != harness_event_dedupe_key(&envelope.event) {
+        anyhow::bail!("invalid harness event broker payload dedupe key");
+    }
+    Ok(envelope)
+}
+
+pub fn harness_event_delivery(
+    event: &HarnessEvent,
+    message_id: Option<String>,
+    redelivered: bool,
+    delivery_attempt: u32,
+) -> HarnessEventDelivery {
+    HarnessEventDelivery {
+        route: harness_event_broker_route(event),
+        envelope: harness_event_broker_envelope(event),
+        message_id,
+        redelivered,
+        delivery_attempt: delivery_attempt.max(1),
+    }
+}
+
+pub fn harness_event_delivery_ack(
+    delivery: &HarnessEventDelivery,
+    outcome: HarnessEventAckOutcome,
+    detail: Option<String>,
+) -> HarnessEventDeliveryAck {
+    HarnessEventDeliveryAck {
+        outcome,
+        dedupe_key: delivery.envelope.dedupe_key.clone(),
+        event_id: delivery.envelope.event.event_id.clone(),
+        message_id: delivery.message_id.clone(),
+        detail,
     }
 }
 
@@ -2868,6 +2977,70 @@ mod tests {
                 .any(|ch| matches!(ch, '*' | '>' | '.' | ':' | '/' | ' '))
         );
         assert_eq!(encode_harness_event_broker_token(""), "b00");
+    }
+
+    #[test]
+    fn broker_payload_round_trips_redacted_harness_event_json() {
+        let event = HarnessEvent::new(
+            "hevt_payload",
+            "run_payload",
+            DateTime::parse_from_rfc3339("2026-05-08T05:30:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            4,
+            HarnessEventLevel::Info,
+            HarnessEventKind::ToolFinished,
+            json!({"status": "ok", "api_key": "sk-should-not-leak"}),
+        );
+
+        let payload = serialize_harness_event_broker_payload(&event).unwrap();
+        let payload_text = String::from_utf8(payload.clone()).unwrap();
+        let envelope = deserialize_harness_event_broker_payload(&payload).unwrap();
+
+        assert!(!payload_text.contains("sk-should-not-leak"));
+        assert_eq!(
+            envelope.protocol_version,
+            HARNESS_EVENT_BROKER_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            envelope.delivery_semantics,
+            HARNESS_EVENT_BROKER_DELIVERY_SEMANTICS
+        );
+        assert_eq!(envelope.dedupe_key, "v1:hevt_payload");
+        assert_eq!(envelope.event.payload["api_key"], HARNESS_EVENT_REDACTED);
+        assert_eq!(envelope.event.event_id, event.event_id);
+    }
+
+    #[test]
+    fn broker_delivery_and_ack_carry_dedupe_and_message_metadata() {
+        let event = HarnessEvent::new(
+            "hevt_delivery",
+            "run delivery",
+            DateTime::parse_from_rfc3339("2026-05-08T05:31:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            8,
+            HarnessEventLevel::Info,
+            HarnessEventKind::RunCompleted,
+            json!({"status": "ok"}),
+        );
+
+        let delivery = harness_event_delivery(&event, Some("nats:42".to_string()), true, 0);
+        let ack = harness_event_delivery_ack(
+            &delivery,
+            HarnessEventAckOutcome::Acked,
+            Some("processed".to_string()),
+        );
+
+        assert_eq!(delivery.delivery_attempt, 1);
+        assert!(delivery.redelivered);
+        assert_eq!(delivery.envelope.dedupe_key, "v1:hevt_delivery");
+        assert_eq!(delivery.message_id.as_deref(), Some("nats:42"));
+        assert_eq!(ack.outcome, HarnessEventAckOutcome::Acked);
+        assert_eq!(ack.dedupe_key, "v1:hevt_delivery");
+        assert_eq!(ack.event_id, "hevt_delivery");
+        assert_eq!(ack.message_id.as_deref(), Some("nats:42"));
+        assert_eq!(ack.detail.as_deref(), Some("processed"));
     }
 
     #[test]

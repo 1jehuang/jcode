@@ -245,6 +245,16 @@ Route mapping for future adapters:
 
 Route metadata is derived with `harness_event_broker_route(&event)` and must not be written back into the event schema. Run, session, and task ids are hex-encoded before entering subjects/keys so broker separators and wildcards cannot collide with user-provided ids. Broker outage policy should be: write local NDJSON first, attempt broker publish second, surface broker failures as warnings/evidence instead of deleting or rewriting local proof.
 
+Broker payload and ack contract:
+
+- `serialize_harness_event_broker_payload` wraps a redacted `HarnessEvent` in a versioned envelope.
+- `delivery_semantics` is currently `at_least_once`, never exactly-once.
+- consumers must deduplicate by `dedupe_key`, which is derived from `schema_version` and `event_id`.
+- `HarnessEventDelivery` carries route, message id, redelivery flag, and attempt count for adapter-specific consumers.
+- `HarnessEventDeliveryAck` records `pending`, `acked`, `nacked`, `redelivered`, or `dropped` outcomes without promising that NATS and Redis have identical ack semantics.
+- JetStream publish ack should mean broker persistence; consumer ack should mean processing completed.
+- Redis `XADD` id should map to `message_id`; `XACK` only applies when consumer groups are used.
+
 ## WebSocket control command core
 
 The #24 control-channel foundation is transport-neutral: a WebSocket client sends a JSON command, the gateway validates read/write authorization, and the core converts the command into a redacted audit event. This keeps dashboard control auditable even before a full browser UI exists.
