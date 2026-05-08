@@ -554,3 +554,62 @@ fn test_account_usage_probe_detects_all_accounts_exhausted() {
     assert!(probe.best_available_alternative().is_none());
     assert!(probe.switch_guidance().is_none());
 }
+
+#[test]
+fn test_parse_openai_usage_payload_reports_low_percentages_correctly() {
+    // Regression test: the live `wham/usage` payload returns `used_percent`
+    // values in `[0, 100]`. A weekly bucket reporting `1` (1% used) must not
+    // be misclassified as a fully exhausted ratio of `1.0` (100% used).
+    // Mirrors a real production response from
+    // `https://chatgpt.com/backend-api/wham/usage`.
+    let json = serde_json::json!({
+        "plan_type": "prolite",
+        "rate_limit": {
+            "allowed": true,
+            "limit_reached": false,
+            "primary_window": {
+                "used_percent": 5,
+                "reset_at": 1_778_283_299_i64
+            },
+            "secondary_window": {
+                "used_percent": 1,
+                "reset_at": 1_778_870_099_i64
+            }
+        },
+        "additional_rate_limits": [{
+            "limit_name": "GPT-5.3-Codex-Spark",
+            "rate_limit": {
+                "allowed": true,
+                "primary_window": { "used_percent": 5, "reset_at": 1_778_283_310_i64 },
+                "secondary_window": { "used_percent": 1, "reset_at": 1_778_870_110_i64 }
+            }
+        }]
+    });
+
+    let parsed = openai_helpers::parse_openai_usage_payload(&json);
+
+    assert!(!parsed.hard_limit_reached);
+    let by_name: std::collections::HashMap<_, _> = parsed
+        .limits
+        .iter()
+        .map(|l| (l.name.as_str(), l.usage_percent))
+        .collect();
+    assert_eq!(by_name.get("5-hour window"), Some(&5.0));
+    assert_eq!(by_name.get("7-day window"), Some(&1.0));
+    assert_eq!(by_name.get("GPT-5.3-Codex-Spark (5h)"), Some(&5.0));
+    assert_eq!(by_name.get("GPT-5.3-Codex-Spark (7d)"), Some(&1.0));
+}
+
+#[test]
+fn test_normalize_ratio_treats_low_integer_values_as_percent() {
+    // Direct unit test for the normalization helper to lock in the contract.
+    assert!((openai_helpers::normalize_ratio(0.0) - 0.0).abs() < 1e-6);
+    assert!((openai_helpers::normalize_ratio(1.0) - 0.01).abs() < 1e-6);
+    assert!((openai_helpers::normalize_ratio(5.0) - 0.05).abs() < 1e-6);
+    assert!((openai_helpers::normalize_ratio(50.0) - 0.5).abs() < 1e-6);
+    assert!((openai_helpers::normalize_ratio(100.0) - 1.0).abs() < 1e-6);
+    // Out of range / weird inputs are clamped, not exploded.
+    assert!((openai_helpers::normalize_ratio(150.0) - 1.0).abs() < 1e-6);
+    assert!((openai_helpers::normalize_ratio(-5.0) - 0.0).abs() < 1e-6);
+    assert!((openai_helpers::normalize_ratio(f32::NAN) - 0.0).abs() < 1e-6);
+}
