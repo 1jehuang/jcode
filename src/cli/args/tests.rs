@@ -514,6 +514,52 @@ fn skills_import_validate_match_and_bridge_parse() {
 }
 
 #[test]
+fn events_path_tail_and_export_parse() {
+    let args =
+        Args::try_parse_from(["jcode", "events", "path", "--run", "run_123", "--json"]).unwrap();
+    match args.command {
+        Some(Command::Events(EventCommand::Path { run, json })) => {
+            assert_eq!(run, "run_123");
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+
+    let args = Args::try_parse_from([
+        "jcode", "events", "tail", "--run", "run_123", "--lines", "5", "--ndjson",
+    ])
+    .unwrap();
+    match args.command {
+        Some(Command::Events(EventCommand::Tail { run, lines, ndjson })) => {
+            assert_eq!(run, "run_123");
+            assert_eq!(lines, 5);
+            assert!(ndjson);
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+
+    let args = Args::try_parse_from([
+        "jcode",
+        "events",
+        "export",
+        "--run",
+        "run_123",
+        "--output",
+        "run.ndjson",
+        "--json",
+    ])
+    .unwrap();
+    match args.command {
+        Some(Command::Events(EventCommand::Export { run, output, json })) => {
+            assert_eq!(run, "run_123");
+            assert_eq!(output, Some(std::path::PathBuf::from("run.ndjson")));
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+}
+
+#[test]
 fn restart_save_subcommand_parses() {
     let args = Args::try_parse_from(["jcode", "restart", "save"]).unwrap();
     match args.command {

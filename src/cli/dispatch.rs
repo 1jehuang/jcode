@@ -5,7 +5,7 @@ use std::process::{Command as ProcessCommand, Stdio};
 use std::time::Instant;
 
 use super::args::{
-    AmbientCommand, Args, AuthCommand, CleanCodeCommand, CleanCodeFailOnArg, Command,
+    AmbientCommand, Args, AuthCommand, CleanCodeCommand, CleanCodeFailOnArg, Command, EventCommand,
     MemoryCommand, MemoryWikiCommand, ModelCommand, ProviderCommand, RestartCommand,
     SessionCommand, SkillCommand, SkillScopeCommand, TranscriptModeArg,
 };
@@ -251,6 +251,15 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 json,
             } => commands::run_skills_match_command(&goal, cwd, skills.into(), &skill, json)?,
             SkillCommand::LlmwikiBridge { json } => commands::run_llmwiki_bridge_command(json)?,
+        },
+        Some(Command::Events(subcmd)) => match subcmd {
+            EventCommand::Path { run, json } => commands::run_events_path_command(&run, json)?,
+            EventCommand::Tail { run, lines, ndjson } => {
+                commands::run_events_tail_command(&run, lines, ndjson)?
+            }
+            EventCommand::Export { run, output, json } => {
+                commands::run_events_export_command(&run, output, json)?
+            }
         },
         Some(Command::CleanCode(subcmd)) => match subcmd {
             CleanCodeCommand::Check {

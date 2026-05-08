@@ -146,6 +146,142 @@ pub fn run_session_rename_command(
     Ok(())
 }
 
+#[derive(Serialize)]
+struct HarnessEventPathReport {
+    run_id: String,
+    path: String,
+}
+
+#[derive(Serialize)]
+struct HarnessEventExportReport {
+    run_id: String,
+    input_path: String,
+    output_path: Option<String>,
+    events: usize,
+}
+
+pub fn run_events_path_command(run_id: &str, emit_json: bool) -> Result<()> {
+    let path = crate::harness_events::harness_event_log_path(run_id);
+
+    if emit_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&HarnessEventPathReport {
+                run_id: run_id.to_string(),
+                path: path.display().to_string(),
+            })?
+        );
+    } else {
+        println!("{}", path.display());
+    }
+
+    Ok(())
+}
+
+pub fn run_events_tail_command(run_id: &str, lines: usize, emit_ndjson: bool) -> Result<()> {
+    if lines == 0 {
+        anyhow::bail!("--lines must be greater than zero");
+    }
+
+    let path = crate::harness_events::harness_event_log_path(run_id);
+    let events = crate::harness_events::read_harness_event_ndjson(&path)?;
+    let start = events.len().saturating_sub(lines);
+    let selected = &events[start..];
+
+    if emit_ndjson {
+        let mut stdout = std::io::stdout().lock();
+        write_events_ndjson(&mut stdout, selected)?;
+        return Ok(());
+    }
+
+    println!(
+        "Harness events for run {}: showing {} of {} event(s)",
+        run_id,
+        selected.len(),
+        events.len()
+    );
+    println!("Log: {}", path.display());
+    println!("sequence\ttimestamp\tlevel\tkind\tevent_id");
+    for event in selected {
+        println!(
+            "{}\t{}\t{}\t{}\t{}",
+            event.sequence,
+            event.timestamp,
+            harness_event_label(&event.level),
+            harness_event_label(&event.kind),
+            event.event_id,
+        );
+    }
+
+    Ok(())
+}
+
+pub fn run_events_export_command(
+    run_id: &str,
+    output: Option<PathBuf>,
+    emit_json: bool,
+) -> Result<()> {
+    if emit_json && output.is_none() {
+        anyhow::bail!("--json requires --output so stdout stays valid NDJSON when exporting");
+    }
+
+    let input_path = crate::harness_events::harness_event_log_path(run_id);
+    let events = crate::harness_events::read_harness_event_ndjson(&input_path)?;
+
+    if let Some(output_path) = output {
+        if let Some(parent) = output_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&output_path)?;
+        write_events_ndjson(&mut file, &events)?;
+
+        let report = HarnessEventExportReport {
+            run_id: run_id.to_string(),
+            input_path: input_path.display().to_string(),
+            output_path: Some(output_path.display().to_string()),
+            events: events.len(),
+        };
+        if emit_json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            println!(
+                "Exported {} harness event(s) for run {} to {}",
+                report.events,
+                run_id,
+                report.output_path.as_deref().unwrap_or("<stdout>")
+            );
+        }
+    } else {
+        let mut stdout = std::io::stdout().lock();
+        write_events_ndjson(&mut stdout, &events)?;
+    }
+
+    Ok(())
+}
+
+fn write_events_ndjson(
+    writer: &mut impl Write,
+    events: &[crate::harness_events::HarnessEvent],
+) -> Result<()> {
+    for event in events {
+        crate::harness_events::write_harness_event_ndjson(writer, event)?;
+    }
+    Ok(())
+}
+
+fn harness_event_label(value: &impl Serialize) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 async fn run_ambient_visible() -> Result<()> {
     use crate::ambient::VisibleCycleContext;
 

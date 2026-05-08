@@ -87,6 +87,7 @@ pub(crate) fn initial_title(args: &Args) -> String {
         Some(Command::Provider(_)) => "jcode provider".to_string(),
         Some(Command::Memory(_)) => "jcode memory".to_string(),
         Some(Command::Skills(_)) => "jcode skills".to_string(),
+        Some(Command::Events(_)) => "jcode events".to_string(),
         Some(Command::CleanCode(_)) => "jcode clean-code".to_string(),
         Some(Command::Session(_)) => "jcode session".to_string(),
         Some(Command::Ambient(subcommand)) => match subcommand {

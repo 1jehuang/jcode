@@ -127,7 +127,25 @@ Sink guarantees:
 - file names are derived from sanitized `run_id` values;
 - payloads have already passed through the core redaction path.
 
-The default log directory is under `JCODE_RUNTIME_DIR` when set, otherwise the platform runtime directory, in a `harness-events/` subdirectory. Full CLI tail/export commands remain follow-up work for #18.
+The default log directory is under `JCODE_RUNTIME_DIR` when set, otherwise the platform runtime directory, in a `harness-events/` subdirectory. Runtime producer wiring for automatic per-run logs remains follow-up work for #18.
+
+### CLI helpers
+
+`jcode events` exposes the local sink without mixing human text into NDJSON streams:
+
+```bash
+jcode events path --run run_123
+jcode events path --run run_123 --json
+jcode events tail --run run_123 --lines 50
+jcode events tail --run run_123 --lines 50 --ndjson
+jcode events export --run run_123 --output run.ndjson --json
+jcode events export --run run_123 > run.ndjson
+```
+
+- `path` prints the sanitized default log path for a run id.
+- `tail --ndjson` writes only raw event NDJSON to stdout.
+- `export` validates each source line as `HarnessEvent` before rewriting normalized NDJSON.
+- `export --json` requires `--output` so stdout remains machine-safe.
 
 ## Minimal producer usage
 

@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use tokio::sync::broadcast;
@@ -309,6 +309,49 @@ pub fn append_harness_event_ndjson(
     write_harness_event_ndjson(&mut file, event)
 }
 
+pub fn read_harness_event_ndjson(path: impl AsRef<Path>) -> anyhow::Result<Vec<HarnessEvent>> {
+    let path = path.as_ref();
+    let file = std::fs::File::open(path).map_err(|err| {
+        anyhow::anyhow!(
+            "failed to open harness event log {}: {}",
+            path.display(),
+            err
+        )
+    })?;
+    let reader = BufReader::new(file);
+    let mut events = Vec::new();
+
+    for (line_index, line) in reader.lines().enumerate() {
+        let line_number = line_index + 1;
+        let line = line.map_err(|err| {
+            anyhow::anyhow!(
+                "failed to read harness event log {} line {}: {}",
+                path.display(),
+                line_number,
+                err
+            )
+        })?;
+        if line.trim().is_empty() {
+            anyhow::bail!(
+                "invalid harness event NDJSON at {} line {}: blank line",
+                path.display(),
+                line_number
+            );
+        }
+        let event = serde_json::from_str::<HarnessEvent>(&line).map_err(|err| {
+            anyhow::anyhow!(
+                "invalid harness event NDJSON at {} line {}: {}",
+                path.display(),
+                line_number,
+                err
+            )
+        })?;
+        events.push(event);
+    }
+
+    Ok(events)
+}
+
 fn sanitize_run_id(run_id: &str) -> String {
     let sanitized: String = run_id
         .chars()
@@ -573,6 +616,53 @@ mod tests {
         assert_eq!(first_parsed.payload["token"], HARNESS_EVENT_REDACTED);
         assert_eq!(first_parsed.sequence, 1);
         assert_eq!(second_parsed.sequence, 2);
+    }
+
+    #[test]
+    fn ndjson_reader_round_trips_multiple_events() {
+        let temp = tempfile::Builder::new()
+            .prefix("jcode-harness-events-read-")
+            .tempdir()
+            .unwrap();
+        let path = temp.path().join("run.ndjson");
+        let bus = HarnessEventBus::with_capacity(8);
+        let first = bus.publish(HarnessEventDraft::run_started("run_read"));
+        let second = bus.publish(HarnessEventDraft::run_completed("run_read"));
+
+        append_harness_event_ndjson(&path, &first).unwrap();
+        append_harness_event_ndjson(&path, &second).unwrap();
+
+        let events = read_harness_event_ndjson(&path).unwrap();
+        assert_eq!(events, vec![first, second]);
+    }
+
+    #[test]
+    fn ndjson_reader_reports_corrupt_line_number() {
+        let temp = tempfile::Builder::new()
+            .prefix("jcode-harness-events-corrupt-")
+            .tempdir()
+            .unwrap();
+        let path = temp.path().join("run.ndjson");
+        let bus = HarnessEventBus::with_capacity(8);
+
+        append_harness_event_ndjson(
+            &path,
+            &bus.publish(HarnessEventDraft::run_started("run_bad")),
+        )
+        .unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"not-json\n")
+            .unwrap();
+
+        let err = read_harness_event_ndjson(&path).unwrap_err().to_string();
+        assert!(err.contains("line 2"), "unexpected error: {err}");
+        assert!(
+            err.contains("invalid harness event NDJSON"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

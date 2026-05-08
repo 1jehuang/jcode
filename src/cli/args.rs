@@ -236,6 +236,10 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Skills(SkillCommand),
 
+    /// Harness event log helpers
+    #[command(subcommand)]
+    Events(EventCommand),
+
     /// Clean Code Guardian quality gate
     #[command(name = "clean-code", subcommand)]
     CleanCode(CleanCodeCommand),
@@ -389,6 +393,50 @@ pub(crate) enum Command {
     Restart {
         #[command(subcommand)]
         action: RestartCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum EventCommand {
+    /// Print the default local NDJSON log path for a run id
+    Path {
+        /// Harness run id
+        #[arg(long)]
+        run: String,
+
+        /// Emit JSON instead of a plain path
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Print recent events from a run's local NDJSON log
+    Tail {
+        /// Harness run id
+        #[arg(long)]
+        run: String,
+
+        /// Maximum events to print from the end of the log
+        #[arg(long, default_value_t = 100)]
+        lines: usize,
+
+        /// Emit raw event NDJSON instead of a human-readable table
+        #[arg(long)]
+        ndjson: bool,
+    },
+
+    /// Export a run's local NDJSON log to stdout or a file
+    Export {
+        /// Harness run id
+        #[arg(long)]
+        run: String,
+
+        /// Output file. If omitted, NDJSON is written to stdout.
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+
+        /// Emit a JSON summary after writing --output
+        #[arg(long)]
+        json: bool,
     },
 }
 
