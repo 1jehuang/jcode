@@ -78,7 +78,17 @@ fn collect_checkable_files(root: &str, cache: &mut Option<&mut IncrementalCache>
     if let Ok(entries) = std::fs::read_dir(root) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() { continue; }
+            if path.is_dir() {
+                // 跳过隐藏目录和常见构建目录
+                let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if dir_name.starts_with('.') || matches!(dir_name, "node_modules" | "target" | "dist" | "build" | ".git") {
+                    continue;
+                }
+                // 递归检查子目录
+                let sub_root = path.to_string_lossy().to_string();
+                files.extend(collect_checkable_files(&sub_root, cache));
+                continue;
+            }
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                 if is_checkable_ext(ext) {
                     if let Some(ref mut c) = cache {
@@ -112,6 +122,7 @@ impl RegexAstCheck {
     fn check_file_ast(path: &Path, content: &str) -> Vec<crate::Issue> {
         let mut issues = Vec::new();
         let path_str = path.display().to_string();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         // 1. 检查大括号平衡
         let open_braces = content.matches('{').count();
@@ -152,7 +163,7 @@ impl RegexAstCheck {
                 issues.push(crate::Issue::warning_with_fix(
                     "ast",
                     &format!("{}:{} trailing whitespace", path_str, line_no + 1),
-                    "Remove trailing whitespace",
+                    "Remove trailing whitespace (auto-fix available)",
                 ));
                 break; // 每个文件只报告一次
             }
@@ -163,7 +174,7 @@ impl RegexAstCheck {
             issues.push(crate::Issue::warning_with_fix(
                 "ast",
                 &format!("{}: file contains tab characters", path_str),
-                "Use spaces instead of tabs (e.g. `rustfmt` or `prettier`)",
+                "Use spaces instead of tabs (auto-fix available)",
             ));
         }
 
@@ -172,18 +183,97 @@ impl RegexAstCheck {
             issues.push(crate::Issue::warning_with_fix(
                 "ast",
                 &format!("{}: missing trailing newline", path_str),
-                "Add a newline at the end of the file",
+                "Add a newline at the end of the file (auto-fix available)",
             ));
         }
 
         // 7. Rust-specific: 检查 println! 是否该换成 logging
-        if path.extension().map(|e| e == "rs").unwrap_or(false) {
+        if ext == "rs" {
             if content.contains("println!") {
                 issues.push(crate::Issue::warning_with_fix(
                     "ast",
                     &format!("{}: uses println! — consider using tracing::info! instead", path_str),
-                    "Replace println! with tracing::info! or similar",
+                    "Replace println! with tracing::info! or similar (auto-fix available)",
                 ));
+            }
+        }
+
+        // 8. 检查 TODO/FIXME/XXX 注释
+        for (line_no, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.contains("TODO") || trimmed.contains("FIXME") || trimmed.contains("XXX") {
+                if trimmed.starts_with("//") || trimmed.starts_with('#') || trimmed.starts_with("/*") {
+                    issues.push(crate::Issue::info(
+                        "ast",
+                        &format!("{}:{} {} found", path_str, line_no + 1,
+                            if trimmed.contains("FIXME") { "FIXME" }
+                            else if trimmed.contains("TODO") { "TODO" }
+                            else { "XXX" }),
+                    ));
+                }
+            }
+        }
+
+        // 9. 检查命名规范 (Rust: snake_case 函数, TypeScript/JS: camelCase 函数)
+        if ext == "rs" {
+            // Rust: 检查函数定义是否是 snake_case
+            let fn_re = regex::Regex::new(r"(?m)^\s*(pub\s+)?(async\s+)?fn\s+([a-zA-Z_][a-zA-Z0-9_]*)").unwrap();
+            for cap in fn_re.captures_iter(content) {
+                let fn_name = cap.get(3).map(|m| m.as_str()).unwrap_or("");
+                if !fn_name.starts_with("test_") && !fn_name.starts_with("should_") {
+                    if fn_name.contains(|c: char| c.is_uppercase()) {
+                        // Find the line number
+                        let line_no = content[..cap.get(0).unwrap().start()].lines().count() + 1;
+                        issues.push(crate::Issue::warning_with_fix(
+                            "ast",
+                            &format!("{}:{} function '{}' should use snake_case", path_str, line_no, fn_name),
+                            "Rename to snake_case format",
+                        ));
+                    }
+                }
+            }
+        } else if matches!(ext, "ts" | "tsx" | "js" | "jsx") {
+            // TS/JS: 检查 function 定义是否是 camelCase
+            let fn_re = regex::Regex::new(r"(?m)^\s*(export\s+)?(async\s+)?function\s+([a-zA-Z_$][a-zA-Z0-9_$]*)").unwrap();
+            for cap in fn_re.captures_iter(content) {
+                let fn_name = cap.get(3).map(|m| m.as_str()).unwrap_or("");
+                if fn_name.starts_with('_') || fn_name.to_uppercase() == fn_name {
+                    continue; // 跳过下划线前缀和全大写
+                }
+                if fn_name.contains('_') && !fn_name.starts_with('_') {
+                    let line_no = content[..cap.get(0).unwrap().start()].lines().count() + 1;
+                    issues.push(crate::Issue::info(
+                        "ast",
+                        &format!("{}:{} function '{}' may want camelCase (JS/TS convention)", path_str, line_no, fn_name),
+                    ));
+                }
+            }
+        }
+
+        // 10. 魔法数字检查 (Rust + TS/JS)
+        if matches!(ext, "rs" | "ts" | "tsx" | "js" | "jsx") {
+            // 检查裸数字（不是赋值给常量、不是条件判断中的简单数字）
+            // 简化的魔法数字检测，匹配 == number, = number (非 0/1)
+            for (line_no, line) in content.lines().enumerate() {
+                // 跳过注释行
+                let trimmed = line.trim();
+                if trimmed.starts_with("//") || trimmed.starts_with('#') || trimmed.starts_with("/*") || trimmed.starts_with('*') {
+                    continue;
+                }
+                // 检查 == 42, > 42 等
+                let magic_re = regex::Regex::new(r"(?:==|!=|<=|>=|<|>|=)\s*(\d{3,})").unwrap();
+                for cap in magic_re.captures_iter(line) {
+                    let num_str = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+                    let num: i64 = num_str.parse().unwrap_or(0);
+                    // 排除常见的 100, 200, 300, 404, 500 等状态码
+                    if num > 10 && !matches!(num, 100 | 200 | 201 | 204 | 300 | 301 | 302 | 400 | 401 | 403 | 404 | 500 | 502 | 503) {
+                        issues.push(crate::Issue::info(
+                            "ast",
+                            &format!("{}:{} magic number {} — consider using a named constant", path_str, line_no + 1, num_str),
+                        ));
+                        break; // 每行只报告一次
+                    }
+                }
             }
         }
 
@@ -288,7 +378,13 @@ impl CargoTypeCheck {
             };
             Some(crate::Issue::warning_with_fix("type", line, fix_suggestion))
         } else {
-            None
+            // 也捕获不含方括号的错误/警告
+            let lower = line.to_lowercase();
+            if lower.contains("error") && !lower.contains("error[") && !lower.starts_with(' ') {
+                Some(crate::Issue::error("type", line))
+            } else {
+                None
+            }
         }
     }
 }
@@ -298,13 +394,14 @@ impl TypeCheck for CargoTypeCheck {
     async fn check(&self, root: &str) -> anyhow::Result<Vec<crate::Issue>> {
         let mut issues = Vec::new();
 
-        let output = tokio::process::Command::new("cargo")
+        // 尝试 Rust cargo check
+        let cargo_result = tokio::process::Command::new("cargo")
             .args(["check", "--message-format=short"])
             .current_dir(root)
             .output()
             .await;
 
-        match output {
+        match cargo_result {
             Ok(o) => {
                 let stderr = String::from_utf8_lossy(&o.stderr);
                 for line in stderr.lines() {
@@ -317,23 +414,9 @@ impl TypeCheck for CargoTypeCheck {
                     *cache = Some((SystemTime::now(), issues.clone()));
                 }
             }
-            Err(e) => {
+            Err(_) => {
                 // 如果 cargo 不可用（非 Rust 项目），尝试使用 tsc
-                if let Ok(tsc_output) = tokio::process::Command::new("npx")
-                    .args(["tsc", "--noEmit"])
-                    .current_dir(root)
-                    .output()
-                    .await
-                {
-                    let stdout = String::from_utf8_lossy(&tsc_output.stdout);
-                    for line in stdout.lines() {
-                        if line.contains("error TS") {
-                            issues.push(crate::Issue::error("type", line));
-                        }
-                    }
-                } else {
-                    issues.push(crate::Issue::info("type", &format!("No type checker available: {}", e)));
-                }
+                issues.extend(Self::try_typescript_check(root).await);
             }
         }
 
@@ -341,6 +424,37 @@ impl TypeCheck for CargoTypeCheck {
             issues.push(crate::Issue::info("type", "Type check passed"));
         }
         Ok(issues)
+    }
+}
+
+impl CargoTypeCheck {
+    /// 尝试 TypeScript 类型检查 (tsc --noEmit)
+    async fn try_typescript_check(root: &str) -> Vec<crate::Issue> {
+        let mut issues = Vec::new();
+
+        for cmd in &[["npx", "tsc", "--noEmit"], ["npx", "tsc", "--noEmit", "--project", "tsconfig.json"]] {
+            if let Ok(o) = tokio::process::Command::new(cmd[0])
+                .args(&cmd[1..])
+                .current_dir(root)
+                .output()
+                .await
+            {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                for line in stdout.lines() {
+                    if line.contains("error TS") {
+                        issues.push(crate::Issue::error("type", line));
+                    }
+                }
+                if !issues.is_empty() {
+                    break;
+                }
+            }
+        }
+
+        if issues.is_empty() {
+            issues.push(crate::Issue::info("type", "TypeScript type check passed or unavailable"));
+        }
+        issues
     }
 }
 
@@ -374,6 +488,15 @@ impl RuleBasedAiCheck {
              "Using dbg!() — remove before committing"),
             ("println_in_prod", r"^\s*println!", "warning",
              "Using println! in production code — use a logger (unless in test code)"),
+            // 新增检查模式
+            ("eval_danger", r"\beval\s*\(", "error",
+             "Using eval() — security risk, find a safer alternative"),
+            ("injection_risk", r"\.inner_html\s*=", "warning",
+             "Setting inner_html — potential XSS risk, use safe APIs"),
+            ("insecure_compare", r#"(==|!=)\s*['\"][^'\"]{10,}['\"]"#, "info",
+             "Possible hardcoded comparison string — consider environment variable"),
+            ("excessive_complexity", r"if\s*\([^)]{80,}\)", "warning",
+             "Overly complex condition — consider extracting into a named variable"),
         ]
     }
 }
@@ -388,7 +511,7 @@ impl AiLogicCheck for RuleBasedAiCheck {
         let files = collect_checkable_files(root, &mut Some(&mut cache));
         for path in &files {
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if matches!(ext, "rs" | "ts" | "tsx") {
+                if matches!(ext, "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go") {
                     if let Ok(content) = std::fs::read_to_string(path) {
                         for (id, pattern, severity, msg) in &patterns {
                             if let Ok(re) = regex::Regex::new(pattern) {

@@ -65,7 +65,7 @@ impl StepStatus {
         }
     }
     
-    pub fn from_str(s: &str) -> Self {
+    pub fn from_status_str(s: &str) -> Self {
         match s {
             "approved" => StepStatus::Approved,
             "rejected" => StepStatus::Rejected { reason: "".to_string() },
@@ -418,9 +418,8 @@ impl Plan {
 
     /// 获取计划完成百分比
     pub fn progress_percent(&self) -> f64 {
-        if self.stats.total_steps == 0 { return 100.0; }
-        
-        let done = self.stats.completed_count + self.stats.skipped_count + self.stats.rejected_count as u32;
+        if self.stats.total_steps == 0 { return 100.0; }      
+        let done = self.stats.completed_count + self.stats.skipped_count + self.stats.rejected_count;
         (done as f64 / self.stats.total_steps as f64) * 100.0
     }
 
@@ -438,7 +437,7 @@ impl Plan {
             String::from(""),
         ];
 
-        for (_i, step) in self.ordered_steps().iter().enumerate() {
+        for step in self.ordered_steps().iter() {
             let status_icon = match step.status.as_str() {
                 "pending" => "⏳",
                 "approved" => "✅",
@@ -494,6 +493,12 @@ pub struct VersionedPlan {
     pub items: Vec<PlanStep>,
     pub task_progress: std::collections::HashMap<String, SwarmTaskProgress>,
     pub participants: std::collections::HashSet<String>,
+}
+
+impl Default for VersionedPlan {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl VersionedPlan {

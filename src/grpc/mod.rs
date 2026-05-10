@@ -5,7 +5,14 @@ pub mod proto {
 pub mod tls;
 pub mod auth_interceptor;
 
-pub use auth_interceptor::{AuthService, TokenInterceptor, ClientTokenInterceptor};
+pub use auth_interceptor::{
+    AuthService, TokenInterceptor, ClientTokenInterceptor,
+    TokenScope, TokenIdentity, RateLimiter,
+};
+pub use tls::{
+    TlsConfig, TlsConfigBuilder, MtlsClientStatus,
+    check_mtls_config, self_signed_help,
+};
 
 use proto::{
     session_service_server::SessionService,
@@ -27,10 +34,16 @@ use parking_lot::RwLock;
 // ══════════════════════════════════════════════════════════════════
 
 /// gRPC 服务器构建器 — 支持 TLS、mTLS、API Token 认证
+///
+/// ## 增强说明
+/// - 新增 `with_auth_service()` 直接传入 AuthService
+/// - `serve()` 添加 TLS/mTLS/Token 状态日志
 pub struct GrpcServerBuilder {
     provider: Option<Arc<dyn crate::provider::Provider>>,
     tls_config: Option<Arc<tonic::transport::server::ServerTlsConfig>>,
     token_interceptor: Option<TokenInterceptor>,
+    /// 是否启用 mTLS (仅用于日志)
+    mtls_enabled: bool,
 }
 
 impl GrpcServerBuilder {
@@ -39,6 +52,7 @@ impl GrpcServerBuilder {
             provider: None,
             tls_config: None,
             token_interceptor: None,
+            mtls_enabled: false,
         }
     }
 
@@ -55,15 +69,27 @@ impl GrpcServerBuilder {
 
     /// 从 TLS 配置文件和 mTLS 标记自动构建 TLS 配置
     pub fn with_tls_files(mut self, cert_path: &str, key_path: &str, ca_cert_path: Option<&str>, mtls: bool) -> anyhow::Result<Self> {
-        let tls = tls::load_tls_config(cert_path, key_path, ca_cert_path)?;
-        let server_tls = tls::build_server_tls_config(&tls, mtls)?;
+        let tls_cfg = tls::load_tls_config(cert_path, key_path, ca_cert_path)?;
+        if mtls {
+            tls::check_mtls_config(&tls_cfg)?;
+        }
+        let server_tls = tls::build_server_tls_config(&tls_cfg, mtls)?;
         self.tls_config = Some(server_tls);
+        self.mtls_enabled = mtls;
         Ok(self)
     }
 
     /// 配置 API Token 认证拦截器
     pub fn with_token_auth(mut self, interceptor: TokenInterceptor) -> Self {
         self.token_interceptor = Some(interceptor);
+        self
+    }
+
+    /// 直接传入 AuthService 配置（更灵活）
+    pub fn with_auth_service(mut self, auth: &AuthService) -> Self {
+        let api_token = auth.api_token.as_ref().clone();
+        self.token_interceptor = Some(TokenInterceptor::new(api_token, auth.mtls_enabled));
+        self.mtls_enabled = auth.mtls_enabled;
         self
     }
 
@@ -77,8 +103,16 @@ impl GrpcServerBuilder {
                 if grpc_cfg.mtls_enabled { Some(&grpc_cfg.tls_ca_cert_path) } else { None },
             ) {
                 Ok(tls_cfg) => {
+                    if grpc_cfg.mtls_enabled {
+                        if let Err(e) = tls::check_mtls_config(&tls_cfg) {
+                            tracing::warn!("mTLS config incomplete: {}", e);
+                        }
+                    }
                     match tls::build_server_tls_config(&tls_cfg, grpc_cfg.mtls_enabled) {
-                        Ok(server_tls) => { self.tls_config = Some(server_tls); }
+                        Ok(server_tls) => {
+                            self.tls_config = Some(server_tls);
+                            self.mtls_enabled = grpc_cfg.mtls_enabled;
+                        }
                         Err(e) => tracing::warn!("Failed to build TLS config: {}", e),
                     }
                 }
@@ -100,6 +134,23 @@ impl GrpcServerBuilder {
             crate::cli::provider_init::init_provider(&pc, None).await?
         };
 
+        // 记录安全配置状态
+        if self.tls_config.is_some() {
+            if self.mtls_enabled {
+                tracing::info!("🔒 mTLS enabled: bidirectional certificate verification");
+            } else {
+                tracing::info!("🔒 TLS enabled: server certificate only");
+            }
+        } else {
+            tracing::info!("🔓 TLS disabled: unencrypted connections");
+        }
+
+        if self.token_interceptor.is_some() {
+            tracing::info!("🔑 API Token authentication enabled");
+        } else {
+            tracing::info!("🔓 API Token authentication disabled");
+        }
+
         let sessions = Arc::new(RwLock::new(std::collections::HashMap::new()));
 
         macro_rules! register_all_services {
@@ -119,7 +170,7 @@ impl GrpcServerBuilder {
 
         let server = tonic::transport::Server::builder();
 
-        let mut server = if let Some(tls) = self.tls_config {
+        let server = if let Some(tls) = self.tls_config {
             server.tls_config((*tls).clone())
                 .map_err(|e| anyhow::anyhow!("TLS config error: {}", e))?
         } else {
