@@ -170,7 +170,7 @@ impl GrpcServerBuilder {
 
         let server = tonic::transport::Server::builder();
 
-        let server = if let Some(tls) = self.tls_config {
+        let mut server = if let Some(tls) = self.tls_config {
             server.tls_config((*tls).clone())
                 .map_err(|e| anyhow::anyhow!("TLS config error: {}", e))?
         } else {

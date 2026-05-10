@@ -207,7 +207,7 @@ impl AuthService {
         // 验证 Token
         let is_valid = if !tokens.is_empty() {
             tokens.contains_key(bearer_token)
-        } else if let Some(ref primary) = primary_token {
+        } else if let Some(primary) = primary_token {
             bearer_token == primary.as_str()
         } else {
             // Token auth 未配置，跳过
