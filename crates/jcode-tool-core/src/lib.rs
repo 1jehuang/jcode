@@ -3,6 +3,11 @@ mod sub_agent;
 mod tool_discovery;
 mod macros;
 pub mod permissions;
+pub mod result_budget;
+pub mod file_history;
+pub mod debug_log;
+pub mod error_types;
+pub mod settings_priority;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -202,3 +207,24 @@ pub use sub_agent::{
     SubAgentProgress, OutputFormat, Artifact, ArtifactType, SubAgentId,
 };
 pub use tool_discovery::{ToolDiscoveryEngine, ToolEmbeddingIndex, ToolSearchResult};
+
+// Re-exports from Claude Code ported modules
+pub use permissions::{
+    PermissionMode, PermissionBehavior, PermissionResult, ToolPermissionContext,
+    ToolFilterContext, ToolSafetyContext, PermissionRule,
+};
+pub use result_budget::{
+    ToolResultBudgetManager, ToolResultBudgetConfig, ToolResultDecision,
+    ContentReplacementState, ReplacedResult, ReplacementReason,
+};
+pub use file_history::{FileHistory, MessageSnapshot, FileSnapshot, RewindResult, RestoredFile};
+pub use debug_log::{DebugLogManager, LogLevel, LogEntry, BufferedWriter};
+pub use error_types::{
+    ToolError, ConfigError, ShellError, AbortError, PermissionError,
+    NetworkError, BudgetError, JcodeError,
+    error_message, is_abort_error, short_error_stack, is_fs_not_found, is_timeout_error,
+};
+pub use settings_priority::{
+    SettingsPriorityResolver, SettingSource, SettingValue,
+    source_display_name, parse_setting_sources_flag,
+};

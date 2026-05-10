@@ -19,7 +19,6 @@ pub use auto_fix::{AutoFixer, FixAction};
 use phases::{
     AstCheck, TypeCheck, AiLogicCheck,
     RegexAstCheck, CargoTypeCheck, RuleBasedAiCheck,
-    GitDiffAstCheck,
 };
 use std::time::Instant;
 

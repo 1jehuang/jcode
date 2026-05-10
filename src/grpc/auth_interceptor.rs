@@ -38,6 +38,7 @@ pub enum TokenScope {
 }
 
 impl TokenScope {
+    #[allow(dead_code)]
     fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "readonly" | "read-only" | "ro" => TokenScope::ReadOnly,
