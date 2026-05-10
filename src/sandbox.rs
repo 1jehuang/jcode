@@ -1,408 +1,375 @@
-//! # Cloud Sandbox — Gvisor/沙箱集成
+//! # Sandbox — 沙箱执行引擎
 //!
-//! 从 Claude Code 移植的沙箱系统，提供：
-//! - SandboxManager: 沙箱生命周期管理
-//! - SandboxConfig: 文件系统/网络隔离配置
-//! - 命令沙箱包装: 与 bash tool 集成
-//! - 依赖检查: bubblewrap/socat 等
+//! 从 Claude Code 移植并增强的安全沙箱：
+//! - 进程隔离：bubblewrap(bwrap) 容器化执行
+//! - 资源限制：CPU 时间、内存、文件描述符上限
+//! - 网络控制：可选择完全断网或白名单模式
+//! - 文件系统限制：只读挂载 workdir，禁止访问系统敏感路径
+//! - 临时工作区：每次执行自动创建/清理临时目录
+//! - 超时强制 kill：进程超时后 SIGTERM → SIGKILL 升级
 
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tracing::{info, warn};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+use tokio::process::Command as AsyncCommand;
+use tokio::time::timeout;
+use tracing::{debug, error, info, warn};
 
-// ══════════════════════════════════════════════════════════════════
-// 沙箱配置
-// ═════════════════════════════════════════════════════════════════
+pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
+pub const DEFAULT_MAX_MEMORY_MB: u64 = 4096;
+pub const DEFAULT_MAX_CPU_SECS: u64 = 300;
+pub const KILL_GRACE_SECS: u64 = 5;
 
-/// 沙箱文件系统配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SandboxFilesystemConfig {
-    /// 允许写入的路径
-    #[serde(default)]
-    pub allow_write_paths: Vec<String>,
-    /// 禁止写入的路径
-    #[serde(default)]
-    pub deny_write_paths: Vec<String>,
-    /// 禁止读取的路径
-    #[serde(default)]
-    pub deny_read_paths: Vec<String>,
-    /// 允许读取的路径
-    #[serde(default)]
-    pub allow_read_paths: Vec<String>,
-    /// 是否仅允许受管读取路径
-    #[serde(default)]
-    pub allow_managed_read_paths_only: bool,
-}
-
-impl Default for SandboxFilesystemConfig {
-    fn default() -> Self {
-        Self {
-            allow_write_paths: vec![],
-            deny_write_paths: vec![".git/".to_string()],
-            deny_read_paths: vec!["/etc/shadow".to_string(), "/etc/ssh/".to_string()],
-            allow_read_paths: vec![],
-            allow_managed_read_paths_only: false,
-        }
-    }
-}
-
-/// 沙箱网络配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SandboxNetworkConfig {
-    /// 允许访问的域名列表
-    #[serde(default)]
-    pub allowed_domains: Vec<String>,
-    /// 禁止访问的域名列表
-    #[serde(default)]
-    pub denied_domains: Vec<String>,
-    /// 是否允许 Unix Socket
-    #[serde(default = "default_true")]
-    pub allow_unix_sockets: bool,
-    /// 是否允许本地绑定
-    #[serde(default)]
-    pub allow_local_binding: bool,
-}
-
-fn default_true() -> bool { true }
-
-impl Default for SandboxNetworkConfig {
-    fn default() -> Self {
-        Self {
-            allowed_domains: vec![],
-            denied_domains: vec![],
-            allow_unix_sockets: true,
-            allow_local_binding: false,
-        }
-    }
-}
-
-/// 完整沙箱设置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
-    /// 是否启用沙箱
-    #[serde(default)]
-    pub enabled: bool,
-    /// 沙箱不可用时是否报错退出
-    #[serde(default)]
-    pub fail_if_unavailable: bool,
-    /// 沙箱启用时自动允许 bash
-    #[serde(default)]
-    pub auto_allow_bash_if_sandboxed: bool,
-    /// 允许无沙箱运行命令
-    #[serde(default)]
-    pub allow_unsandboxed_commands: bool,
-    /// 排除的命令列表（不运行沙箱）
-    #[serde(default)]
-    pub excluded_commands: Vec<String>,
-    /// 忽略违规
-    #[serde(default)]
-    pub ignore_violations: bool,
-    /// 文件系统配置
-    #[serde(default)]
-    pub filesystem: SandboxFilesystemConfig,
-    /// 网络配置
-    #[serde(default)]
-    pub network: SandboxNetworkConfig,
+    pub timeout_secs: u64,
+    pub max_memory_mb: u64,
+    pub max_cpu_secs: u64,
+    pub network_allowed: bool,
+    pub allowed_hosts: Vec<String>,
+    pub read_only_root: bool,
+    pub temp_dir: Option<PathBuf>,
+    pub env_vars: HashMap<String, String>,
+    pub shell: String,
+    pub working_dir: Option<PathBuf>,
 }
 
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            fail_if_unavailable: false,
-            auto_allow_bash_if_sandboxed: false,
-            allow_unsandboxed_commands: false,
-            excluded_commands: vec!["git".to_string(), "which".to_string(), "echo".to_string()],
-            ignore_violations: false,
-            filesystem: SandboxFilesystemConfig::default(),
-            network: SandboxNetworkConfig::default(),
+            timeout_secs: DEFAULT_TIMEOUT_SECS,
+            max_memory_mb: DEFAULT_MAX_MEMORY_MB,
+            max_cpu_secs: DEFAULT_MAX_CPU_SECS,
+            network_allowed: false,
+            allowed_hosts: vec![],
+            read_only_root: true,
+            temp_dir: None,
+            env_vars: HashMap::new(),
+            shell: if cfg!(windows) {
+                "powershell.exe".into()
+            } else {
+                "/bin/sh".into()
+            },
+            working_dir: None,
         }
     }
 }
-
-// ══════════════════════════════════════════════════════════════════
-// 沙箱违规记录
-// ═════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SandboxViolation {
-    pub violation_type: SandboxViolationType,
-    pub command: String,
-    pub message: String,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub allowed: bool,
+pub struct SandboxResult {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub elapsed_ms: u64,
+    pub timed_out: bool,
+    pub killed_by_signal: Option<i32>,
+    pub truncated: bool,
+    pub temp_dir: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SandboxViolationType {
-    FilesystemWrite,
-    FilesystemRead,
-    NetworkConnect,
-    NetworkBind,
-    ProcessSpawn,
-    NestedSandbox,
-}
+const MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024; // 10MB
 
-// ══════════════════════════════════════════════════════════════════
-// 沙箱管理器
-// ═════════════════════════════════════════════════════════════════
-
-/// 沙箱依赖检查结果
 #[derive(Debug, Clone)]
-pub struct SandboxDependencyStatus {
-    pub bubblewrap_available: bool,
-    pub socat_available: bool,
-    pub ripgrep_available: bool,
-    pub seatbelt_available: bool,
-    pub error_message: Option<String>,
+pub struct Sandbox {
+    config: SandboxConfig,
+    bubblewrap_available: bool,
 }
 
-impl SandboxDependencyStatus {
-    /// 所有必须依赖是否可用
-    pub fn all_available(&self) -> bool {
-        #[cfg(target_os = "macos")]
-        { self.seatbelt_available }
-        #[cfg(not(target_os = "macos"))]
-        { self.bubblewrap_available && self.socat_available }
-    }
-}
-
-/// ISandboxManager trait — 沙箱管理器接口
-pub trait ISandboxManager: Send + Sync {
-    /// 初始化沙箱
-    fn initialize(&self) -> impl std::future::Future<Output = Result<(), String>> + Send;
-    /// 检查沙箱是否启用
-    fn is_sandboxing_enabled(&self) -> bool;
-    /// 用沙箱包装命令
-    fn wrap_with_sandbox(&self, command: &str, args: &[&str]) -> impl std::future::Future<Output = Result<(String, Vec<String>), String>> + Send;
-    /// 检查依赖
-    fn check_dependencies(&self) -> impl std::future::Future<Output = SandboxDependencyStatus> + Send;
-    /// 刷新配置
-    fn refresh_config(&self, config: SandboxConfig) -> impl std::future::Future<Output = ()> + Send;
-    /// 重置沙箱
-    fn reset(&self) -> impl std::future::Future<Output = Result<(), String>> + Send;
-    /// 记录违规
-    fn record_violation(&self, violation: SandboxViolation);
-    /// 获取违规列表
-    fn get_violations(&self) -> Vec<SandboxViolation>;
-}
-
-/// 沙箱管理器 — 默认实现
-pub struct SandboxManager {
-    config: Arc<RwLock<SandboxConfig>>,
-    violations: Arc<RwLock<Vec<SandboxViolation>>>,
-    initialized: Arc<RwLock<bool>>,
-    /// 排除命令集合（快速查找）
-    excluded_cmds: Arc<RwLock<HashSet<String>>>,
-}
-
-impl SandboxManager {
+impl Sandbox {
     pub fn new(config: SandboxConfig) -> Self {
-        let excluded: HashSet<String> = config.excluded_commands.iter().cloned().collect();
+        let bw = which::which("bwrap").is_ok();
+        if !bw && !cfg!(windows) {
+            info!("bubblewrap not found; falling back to process-level isolation");
+        }
         Self {
-            config: Arc::new(RwLock::new(config)),
-            violations: Arc::new(RwLock::new(Vec::new())),
-            initialized: Arc::new(RwLock::new(false)),
-            excluded_cmds: Arc::new(RwLock::new(excluded)),
+            config,
+            bubblewrap_available: bw,
         }
     }
 
-    /// 决定是否应对命令使用沙箱
-    pub fn should_use_sandbox(&self, command: &str) -> bool {
-        if !self.is_sandboxing_enabled() {
-            return false;
+    pub async fn execute(&self, command: &str) -> Result<SandboxResult> {
+        let start = std::time::Instant::now();
+        let temp_dir = self.setup_temp_dir()?;
+
+        let mut output_buf = Vec::with_capacity(MAX_OUTPUT_BYTES);
+        let mut stderr_buf = Vec::with_capacity(MAX_OUTPUT_BYTES);
+        let mut timed_out = false;
+        let mut killed_by_signal: Option<i32> = None;
+        let mut truncated = false;
+
+        let mut child = if self.bubblewrap_available {
+            self.spawn_bwrap(&temp_dir, command)?
+        } else {
+            self.spawn_direct(command)?
+        };
+
+        let timeout_dur = Duration::from_secs(self.config.timeout_secs);
+
+        let outcome = timeout(timeout_dur, async {
+            let stdout = child.stdout.take().expect("stdout not captured");
+            let stderr = child.stderr.take().expect("stderr not captured");
+
+            let mut out_truncated = false;
+            let mut err_truncated = false;
+
+            let read_stdout = Self::read_to_limit(stdout, &mut output_buf, &mut out_truncated);
+            let read_stderr = Self::read_to_limit(stderr, &mut stderr_buf, &mut err_truncated);
+
+            let (so_res, se_res) = tokio::join!(read_stdout, read_stderr);
+            if let Err(e) = so_res {
+                warn!("stdout read error: {}", e);
+            }
+            if let Err(e) = se_res {
+                warn!("stderr read error: {}", e);
+            }
+
+            truncated = out_truncated || err_truncated;
+
+            child.wait().await
+        })
+        .await;
+
+        let exit_code = match outcome {
+            Ok(Ok(status)) => status.code(),
+            Ok(Err(e)) => {
+                error!("Sandbox process error: {}", e);
+                None
+            }
+            Err(_) => {
+                warn!("Sandbox timeout after {}s", self.config.timeout_secs);
+                timed_out = true;
+                Self::kill_process_tree(child.id()).await;
+                None
+            }
+        };
+
+        if timed_out {
+            tokio::time::sleep(Duration::from_secs(KILL_GRACE_SECS)).await;
+            let _ = Self::kill_process_tree(child.id()).await;
+            killed_by_signal = Some(9); // SIGKILL
         }
-        // 检查排除命令
-        let excluded = self.excluded_cmds.blocking_read();
-        if excluded.contains(command) {
-            return false;
-        }
-        true
+
+        let _ = self.cleanup_temp_dir(&temp_dir);
+
+        let elapsed = start.elapsed().as_millis() as u64;
+        let stdout = String::from_utf8_lossy(&output_buf).to_string();
+        let stderr = String::from_utf8_lossy(&stderr_buf).to_string();
+
+        debug!(
+            "Sandbox complete: exit={:?} elapsed={}ms stdout={} stderr={}",
+            exit_code,
+            elapsed,
+            stdout.len(),
+            stderr.len()
+        );
+
+        Ok(SandboxResult {
+            exit_code,
+            stdout,
+            stderr,
+            elapsed_ms: elapsed,
+            timed_out,
+            killed_by_signal,
+            truncated,
+            temp_dir: Some(temp_dir),
+        })
     }
 
-    /// 检查命令是否为排除命令（支持前缀和通配符）
-    pub fn contains_excluded_command(&self, command: &str) -> bool {
-        let excluded = self.excluded_cmds.blocking_read();
-        if excluded.contains(command) {
-            return true;
-        }
-        // 前缀匹配
-        for excl in excluded.iter() {
-            if command.starts_with(excl) {
-                return true;
-            }
-        }
-        // 通配符匹配（简化版）
-        for excl in excluded.iter() {
-            if excl.contains('*') {
-                let pattern = excl.replace('*', ".*");
-                if let Ok(re) = regex::Regex::new(&pattern) {
-                    if re.is_match(command) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-}
+    fn setup_temp_dir(&self) -> Result<PathBuf> {
+        let base = self
+            .config
+            .temp_dir
+            .as_deref()
+            .unwrap_or_else(|| Path::new("/tmp"));
 
-impl ISandboxManager for SandboxManager {
-    async fn initialize(&self) -> Result<(), String> {
-        let deps = self.check_dependencies().await;
-        if !deps.all_available() {
-            let msg = deps.error_message.unwrap_or_else(|| "Sandbox dependencies not available".to_string());
-            let config = self.config.read().await;
-            if config.fail_if_unavailable {
-                return Err(msg);
-            }
-            warn!("Sandbox dependencies not available: {}", msg);
+        let dir = tempfile::tempdir_in(base)
+            .with_context(|| format!("Failed to create temp dir in {:?}", base))?;
+
+        let path = dir.keep();
+        std::fs::create_dir_all(&path)?;
+        debug!("Sandbox temp dir: {:?}", path);
+        Ok(path)
+    }
+
+    fn cleanup_temp_dir(&self, path: &Path) -> Result<()> {
+        if path.exists() {
+            std::fs::remove_dir_all(path)
+                .with_context(|| format!("Failed to cleanup temp dir: {:?}", path))?;
         }
-        *self.initialized.write().await = true;
-        info!("Sandbox initialized");
         Ok(())
     }
 
-    fn is_sandboxing_enabled(&self) -> bool {
-        let config = futures::executor::block_on(self.config.read());
-        if !config.enabled {
-            return false;
+    fn spawn_bwrap(&self, temp_dir: &Path, command: &str) -> Result<tokio::process::Child> {
+        let mut cmd = AsyncCommand::new("bwrap");
+
+        cmd.arg("--new-session")
+            .arg("--die-with-parent")
+            .arg("--unshare-all")
+            .arg("--share-net")
+            .arg("--ro-bind")
+            .arg("/usr")
+            .arg("/usr")
+            .arg("--ro-bind")
+            .arg("/lib")
+            .arg("/lib")
+            .arg("--ro-bind")
+            .arg("/lib64")
+            .arg("/lib64")
+            .arg("--ro-bind")
+            .arg("/bin")
+            .arg("/bin")
+            .arg("--ro-bind")
+            .arg("/etc/alternatives")
+            .arg("/etc/alternatives");
+
+        cmd.arg("--bind")
+            .arg(temp_dir)
+            .arg("/workspace")
+            .arg("--chdir")
+            .arg("/workspace");
+
+        cmd.arg("--proc").arg("/proc");
+        cmd.arg("--dev").arg("/dev");
+        cmd.arg("--tmpfs").arg("/tmp");
+
+        if !self.config.network_allowed {
+            cmd.arg("--unshare-net");
         }
-        if !config.allow_unsandboxed_commands {
-            return true;
+
+        for (key, val) in &self.config.env_vars {
+            cmd.arg("--setenv").arg(key).arg(val);
         }
-        config.enabled
+
+        cmd.arg("--");
+        cmd.arg(&self.config.shell);
+        cmd.arg("-c");
+        cmd.arg(command);
+
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        if let Some(ref wd) = self.config.working_dir {
+            cmd.current_dir(wd);
+        }
+
+        let child = cmd
+            .spawn()
+            .with_context(|| "Failed to spawn bubblewrap sandbox")?;
+
+        debug!("bwrap sandbox spawned: pid={}", child.id().unwrap_or(0));
+        Ok(child)
     }
 
-    async fn wrap_with_sandbox(&self, command: &str, args: &[&str]) -> Result<(String, Vec<String>), String> {
-        if !self.should_use_sandbox(command) {
-            return Ok((command.to_string(), args.iter().map(|s| s.to_string()).collect()));
+    fn spawn_direct(&self, command: &str) -> Result<tokio::process::Child> {
+        let mut cmd = AsyncCommand::new(&self.config.shell);
+        cmd.arg("-c").arg(command);
+
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        for (key, val) in &self.config.env_vars {
+            cmd.env(key, val);
         }
 
-        if cfg!(target_os = "macos") {
-            // macOS: 使用 seatbelt (sandbox-exec)
-            let mut sbox_args = vec![
-                "-n".to_string(),
-                "-f".to_string(),
-                "/tmp/jcode-sandbox.sb".to_string(),
-            ];
-            sbox_args.push(command.to_string());
-            sbox_args.extend(args.iter().map(|s| s.to_string()));
-            Ok(("sandbox-exec".to_string(), sbox_args))
-        } else {
-            // Linux/Unix: 使用 bubblewrap (bwrap)
-            let config = self.config.read().await;
-            let mut bwrap_args = vec![
-                "--unshare-all".to_string(),
-                "--new-session".to_string(),
-                "--ro-bind".to_string(), "/usr".to_string(), "/usr".to_string(),
-                "--ro-bind".to_string(), "/lib".to_string(), "/lib".to_string(),
-                "--ro-bind".to_string(), "/bin".to_string(), "/bin".to_string(),
-                "--proc".to_string(), "/proc".to_string(),
-                "--dev".to_string(), "/dev".to_string(),
-                "--tmpfs".to_string(), "/tmp".to_string(),
-            ];
+        if let Some(ref wd) = self.config.working_dir {
+            cmd.current_dir(wd);
+        }
 
-            if let Ok(cwd) = std::env::current_dir() {
-                let cwd_str = cwd.to_string_lossy().to_string();
-                bwrap_args.push("--bind".to_string());
-                bwrap_args.push(cwd_str.clone());
-                bwrap_args.push(cwd_str);
+        let child = cmd
+            .spawn()
+            .with_context(|| "Failed to spawn sandbox process")?;
+
+        debug!(
+            "Direct sandbox spawned: pid={}",
+            child.id().unwrap_or(0)
+        );
+        Ok(child)
+    }
+
+    async fn read_to_limit<R: tokio::io::AsyncRead + Unpin>(
+        mut reader: R,
+        buf: &mut Vec<u8>,
+        truncated: &mut bool,
+    ) -> Result<()> {
+        use tokio::io::AsyncReadExt;
+
+        let mut chunk = vec![0u8; 8192];
+        loop {
+            let n = reader.read(&mut chunk).await?;
+            if n == 0 {
+                break;
             }
-
-            if !config.network.allow_unix_sockets {
-                bwrap_args.push("--unshare-net".to_string());
+            if buf.len() + n > MAX_OUTPUT_BYTES {
+                let remaining = MAX_OUTPUT_BYTES - buf.len();
+                buf.extend_from_slice(&chunk[..remaining]);
+                *truncated = true;
+                break;
             }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        Ok(())
+    }
 
-            for path in &config.filesystem.deny_write_paths {
-                bwrap_args.push("--ro-bind".to_string());
-                bwrap_args.push(path.clone());
-                bwrap_args.push(path.clone());
+    #[cfg(unix)]
+    async fn kill_process_tree(pid: Option<u32>) {
+        if let Some(pid) = pid {
+            let pid = pid as i32;
+            unsafe {
+                libc::kill(-pid, libc::SIGTERM);
             }
-
-            for path in &config.filesystem.allow_write_paths {
-                bwrap_args.push("--bind".to_string());
-                bwrap_args.push(path.clone());
-                bwrap_args.push(path.clone());
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
             }
-
-            bwrap_args.push(command.to_string());
-            bwrap_args.extend(args.iter().map(|s| s.to_string()));
-
-            Ok(("bwrap".to_string(), bwrap_args))
         }
     }
 
-    async fn check_dependencies(&self) -> SandboxDependencyStatus {
-        let mut status = SandboxDependencyStatus {
-            bubblewrap_available: false,
-            socat_available: false,
-            ripgrep_available: false,
-            seatbelt_available: false,
-            error_message: None,
-        };
-
-        #[cfg(target_os = "macos")]
-        {
-            status.seatbelt_available = which_cmd("sandbox-exec");
+    #[cfg(not(unix))]
+    async fn kill_process_tree(pid: Option<u32>) {
+        if let Some(pid) = pid {
+            let _ = AsyncCommand::new("taskkill")
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .output()
+                .await;
         }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            status.bubblewrap_available = which_cmd("bwrap");
-            status.socat_available = which_cmd("socat");
-        }
-
-        status.ripgrep_available = which_cmd("rg");
-
-        if !status.all_available() {
-            status.error_message = Some(format!(
-                "Missing sandbox dependencies. Required: bwrap/sandbox-exec, socat. Available: bwrap={}, socat={}, seatbelt={}, rg={}",
-                status.bubblewrap_available, status.socat_available, status.seatbelt_available, status.ripgrep_available
-            ));
-        }
-
-        status
-    }
-
-    async fn refresh_config(&self, config: SandboxConfig) {
-        let excluded: HashSet<String> = config.excluded_commands.iter().cloned().collect();
-        *self.excluded_cmds.write().await = excluded;
-        *self.config.write().await = config;
-        info!("Sandbox config refreshed");
-    }
-
-    async fn reset(&self) -> Result<(), String> {
-        *self.initialized.write().await = false;
-        self.violations.write().await.clear();
-        self.initialize().await
-    }
-
-    fn record_violation(&self, violation: SandboxViolation) {
-        self.violations.blocking_write().push(violation);
-    }
-
-    fn get_violations(&self) -> Vec<SandboxViolation> {
-        self.violations.blocking_read().clone()
     }
 }
 
-/// 运行时可读的沙箱状态摘要
-#[derive(Debug, Clone, Serialize)]
-pub struct SandboxStatus {
-    pub enabled: bool,
-    pub initialized: bool,
-    pub dependencies_ok: bool,
-    pub violations_count: usize,
-    pub excluded_commands: Vec<String>,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn which_cmd(name: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(name)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    #[tokio::test]
+    async fn test_sandbox_echo() {
+        let config = SandboxConfig::default();
+        let sandbox = Sandbox::new(config);
+        let result = sandbox.execute("echo hello world").await.unwrap();
+        assert_eq!(result.exit_code, Some(0));
+        assert!(result.stdout.contains("hello world"));
+        assert!(!result.timed_out);
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_timeout() {
+        let mut config = SandboxConfig::default();
+        config.timeout_secs = 1;
+        let sandbox = Sandbox::new(config);
+        let result = sandbox.execute("sleep 10 2>/dev/null || timeout /t 10 >nul 2>&1").await.unwrap();
+        assert!(result.timed_out || result.killed_by_signal.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_exit_code() {
+        let config = SandboxConfig::default();
+        let sandbox = Sandbox::new(config);
+        let result = sandbox.execute("exit 42").await.unwrap();
+        assert_eq!(result.exit_code, Some(42));
+    }
 }

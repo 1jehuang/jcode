@@ -117,6 +117,9 @@ pub mod file_refs;
 pub mod bridge;
 pub mod error_types;
 pub mod completion;
+pub mod auto_test_loop;
+pub mod git_workflow;
+pub mod task_decomposer;
 
 use anyhow::Result;
 use std::sync::Mutex;
