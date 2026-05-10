@@ -681,6 +681,11 @@ pub enum ServerEvent {
     #[serde(rename = "message_end")]
     MessageEnd,
 
+    /// Reasoning/thinking content from the model (e.g., OpenRouter reasoning_content).
+    /// Sent at turn completion with the full accumulated reasoning text.
+    #[serde(rename = "reasoning_content")]
+    ReasoningContent { content: String },
+
     /// Upstream provider info (e.g., which provider OpenRouter routed to)
     #[serde(rename = "upstream_provider")]
     UpstreamProvider { provider: String },

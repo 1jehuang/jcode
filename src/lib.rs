@@ -120,6 +120,14 @@ pub mod completion;
 pub mod auto_test_loop;
 pub mod git_workflow;
 pub mod task_decomposer;
+pub mod semantic_memory;
+pub mod precise_edit;
+pub mod permission_rules;
+pub mod context_pruner;
+pub mod atomic_edit_coordinator;
+pub mod skill_system;
+pub mod plan_verifier;
+pub mod streaming_diff_preview;
 
 use anyhow::Result;
 use std::sync::Mutex;

@@ -182,7 +182,10 @@ impl Agent {
             let mut stop_reason: Option<String> = None;
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
-            let store_reasoning_content = self.provider.name() == "openrouter";
+            let store_reasoning_content = matches!(
+                self.provider.name().as_ref(),
+                "openrouter" | "bedrock" | "gemini" | "claude"
+            );
             let mut reasoning_content = String::new();
             let mut openai_native_compaction: Option<(String, usize)> = None;
             // Track tool_use_id -> name for tool results
@@ -578,6 +581,9 @@ impl Agent {
             if store_reasoning_content && !reasoning_content.is_empty() {
                 content_blocks.push(ContentBlock::Reasoning {
                     text: reasoning_content.clone(),
+                });
+                let _ = event_tx.send(ServerEvent::ReasoningContent {
+                    content: reasoning_content.clone(),
                 });
             }
             for tc in &tool_calls {
