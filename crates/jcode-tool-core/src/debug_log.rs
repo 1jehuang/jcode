@@ -12,7 +12,7 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -160,7 +160,7 @@ impl DebugLogManager {
         if let Some(ref file) = debug_file {
             if let Some(parent) = file.parent() {
                 let _ = fs::create_dir_all(parent);
-                let latest = parent.join("latest");
+                let _latest = parent.join("latest");
                 #[cfg(unix)]
                 {
                     let _ = std::os::unix::fs::symlink(file, &latest);

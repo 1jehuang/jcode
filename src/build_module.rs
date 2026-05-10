@@ -305,7 +305,10 @@ impl BuildExecutor {
                 let exec = &*self;
                 let req = request.clone();
                 async move {
-                    let _permit = sem.acquire().await.unwrap();
+                    let _permit = sem.acquire().await;
+                    if _permit.is_err() {
+                        tracing::warn!("[Build] Semaphore closed, continuing without permit");
+                    }
                     let id = proj.id.clone();
                     let result = exec
                         .build_project(&proj.project_type, &proj.root_path, &req)

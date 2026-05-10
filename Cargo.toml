@@ -77,6 +77,8 @@ members = [
     "crates/jcode-completion",
     # 微型 CI
     "crates/jcode-micro-ci",
+    # 代码价值六维分类
+    "crates/jcode-code-value",
     # CI 配置生成器
     "crates/jcode-ci-generator",
     # 项目构建器 (Builder模式)
@@ -85,6 +87,9 @@ members = [
     "crates/jcode-skills",
     # Qwen 补全 LoRA 训练
     "crates/jcode-lora-train",
+    # Vendor: agentgrep (git 依赖本地化，消除供应链风险)
+    # 运行 scripts/vendor_agentgrep.sh 填充此目录
+    "crates/vendor-agentgrep",
 ]
 
 # Workspace 包元数据 (供成员 crate 继承)
@@ -206,7 +211,7 @@ lsp-types = { workspace = true }
 uuid = { version = "1", features = ["v4", "v5"] }
 proctitle = "0.1"
 which = "6"
-md5 = "0.7"              # MD5 hashing for auto mode
+# md5 已被替换为 sha2 (2026-05-10) — md5 = "0.7"
 cron = "0.12"             # Cron expression parsing for task scheduler
 
 # Embeddings (local inference) - behind feature flag (163 crates, slow to compile)
@@ -282,13 +287,15 @@ jcode-tool-types = { path = "crates/jcode-tool-types" }
 jcode-side-panel-types = { path = "crates/jcode-side-panel-types" }
 jcode-lock-manager = { path = "crates/jcode-lock-manager" }
 jcode-micro-ci = { path = "crates/jcode-micro-ci" }
+jcode-code-value = { path = "crates/jcode-code-value" }
 jcode-completion = { path = "crates/jcode-completion" }
 
 # Archive extraction (for auto-update)
 flate2 = "1"
 tar = "0.4"
 tempfile = "3"
-agentgrep = { git = "https://github.com/1jehuang/agentgrep.git", tag = "v0.1.2" }
+agentgrep = { path = "crates/vendor-agentgrep" }
+# 注: 如果 crates/vendor-agentgrep 不存在，运行 scripts/vendor_agentgrep.sh 创建
 qrcode = { version = "0.14.1", default-features = false }
 aws-config = "1.8.16"
 aws-credential-types = "1.2.14"

@@ -35,13 +35,9 @@ dependencies = [
 
 [[package]]
 name = "agentgrep"
-version = "0.1.2"
-source = "git+https://github.com/1jehuang/agentgrep.git?tag=v0.1.2#63e420bb4e035490d28cbca3f58e26baf297048e"
+version = "0.1.0"
 dependencies = [
- "clap",
- "globset",
- "ignore",
- "regex",
+ "anyhow",
  "serde",
  "serde_json",
 ]
@@ -3762,6 +3758,7 @@ dependencies = [
  "jcode-background-types",
  "jcode-batch-types",
  "jcode-build-support",
+ "jcode-code-value",
  "jcode-compaction-core",
  "jcode-completion",
  "jcode-config-types",
@@ -3807,7 +3804,6 @@ dependencies = [
  "jcode-usage-types",
  "libc",
  "lsp-types",
- "md5",
  "once_cell",
  "open",
  "parking_lot",
@@ -3951,6 +3947,19 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "jcode-code-value"
+version = "0.12.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
  "tracing",
 ]
 

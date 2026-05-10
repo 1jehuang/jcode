@@ -1,0 +1,30 @@
+[Unit]
+Description=JCode gRPC Server — AI-powered development agent
+Documentation=https://github.com/1jehuang/jcode
+After=network.target
+
+[Service]
+Type=simple
+User=jcode
+Group=jcode
+ExecStart=/usr/local/bin/jcode-server
+Restart=on-failure
+RestartSec=5
+# 环境变量配置
+Environment=JCODE_GRPC_PORT=50051
+Environment=JCODE_BIND_ADDR=0.0.0.0
+Environment=RUST_LOG=info
+# 安全限制
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# 日志
+StandardOutput=journal
+StandardError=journal
+# 资源限制
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

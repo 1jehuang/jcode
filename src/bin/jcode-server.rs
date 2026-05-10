@@ -7,18 +7,34 @@ use jcode::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let grpc_port: u16 = 50051;
-    let ws_port: u16 = 8080;
-    let rest_port: u16 = 8081;
+    // 从环境变量读取端口配置，带合理的默认值
+    let grpc_port: u16 = std::env::var("JCODE_GRPC_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50051);
+    let ws_port: u16 = std::env::var("JCODE_WS_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8080);
+    let rest_port: u16 = std::env::var("JCODE_REST_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8081);
+
+    // 绑定地址可配置，默认 0.0.0.0
+    let bind_addr = std::env::var("JCODE_BIND_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0".to_string());
 
     println!("🚀 Starting jcode Multi-Protocol Server");
     println!("====================================");
-    println!("gRPC:      0.0.0.0:{}", grpc_port);
-    println!("WebSocket: 0.0.0.0:{}", ws_port);
-    println!("REST:      0.0.0.0:{}", rest_port);
+    println!("gRPC:      {}:{}", bind_addr, grpc_port);
+    println!("WebSocket: {}:{}", bind_addr, ws_port);
+    println!("REST:      {}:{}", bind_addr, rest_port);
     println!("====================================");
 
-    let grpc_addr: SocketAddr = format!("0.0.0.0:{}", grpc_port).parse()?;
+    let grpc_addr: SocketAddr = format!("{}:{}", bind_addr, grpc_port)
+        .parse()
+        .map_err(|e| format!("Invalid gRPC bind address: {}", e))?;
     let grpc_builder = GrpcServerBuilder::new();
 
     let ws_server = WebSocketServer::new(ws_port);

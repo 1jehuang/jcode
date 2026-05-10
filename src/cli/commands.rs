@@ -16,6 +16,172 @@ mod restart;
 
 pub use super::auth_test::run_auth_test_command;
 pub(crate) use super::auth_test::run_post_login_validation;
+/// Analyze code value using six-dimension classification.
+/// Runs `cargo check` in the project and classifies all diagnostics.
+pub async fn run_code_value_command(
+    input_path: Option<&str>,
+    manifest_path: &str,
+    emit_json: bool,
+    output_path: Option<&str>,
+) -> Result<()> {
+    use jcode_code_value::{CargoDiagnosticParser, Classifier};
+    use std::path::Path;
+
+    let diagnostics = if let Some(path) = input_path {
+        let parser = CargoDiagnosticParser::new();
+        parser.parse_file(Path::new(path))
+            .map_err(|e| anyhow::anyhow!("无法解析 cargo JSON 文件: {}", e))?
+    } else {
+        eprintln!("🔍 运行 cargo check --message-format=json ...");
+
+        let output = std::process::Command::new("cargo")
+            .args([
+                "check",
+                "--message-format=json",
+                "--manifest-path",
+                manifest_path,
+            ])
+            .output()
+            .map_err(|e| anyhow::anyhow!("无法启动 cargo check: {}", e))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        if !stderr.is_empty() {
+            let trimmed = stderr.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with("warning:") {
+                eprintln!("cargo check stderr: {}", trimmed);
+            }
+        }
+
+        let parser = CargoDiagnosticParser::new();
+        parser.parse_json(&stdout)?
+    };
+
+    if diagnostics.is_empty() {
+        if emit_json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "clean",
+                    "message": "没有发现任何诊断项（warning/error），代码质量良好。",
+                    "generated_at": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                    "total_diagnostics": 0,
+                    "by_category": [],
+                    "diagnostics": []
+                }))?
+            );
+        } else {
+            println!("\n✅ 代码价值评估完成：未发现任何诊断项（warning/error），代码质量良好。\n");
+        }
+        return Ok(());
+    }
+
+    let classifier = Classifier::new();
+    let report = classifier.classify(diagnostics);
+
+    if emit_json {
+        let json_str = serde_json::to_string_pretty(&report)?;
+        if let Some(path) = output_path {
+            std::fs::write(path, &json_str)
+                .map_err(|e| anyhow::anyhow!("无法写入输出文件 {}: {}", path, e))?;
+            println!("📄 JSON 报告已写入: {}", path);
+        } else {
+            println!("{}", json_str);
+        }
+    } else {
+        print_human_report(&report);
+        if let Some(path) = output_path {
+            let json_str = serde_json::to_string_pretty(&report)?;
+            std::fs::write(path, &json_str)
+                .map_err(|e| anyhow::anyhow!("无法写入输出文件 {}: {}", path, e))?;
+            println!("\n📄 JSON 报告已保存至: {}", path);
+        }
+    }
+
+    Ok(())
+}
+
+fn print_human_report(report: &jcode_code_value::ClassificationReport) {
+    println!();
+    println!("╔══════════════════════════════════════════════════╗");
+    println!("║        📊 代码价值六维分类评估报告              ║");
+    println!("╠══════════════════════════════════════════════════╣");
+    println!(
+        "║  生成时间: {:36} ║",
+        report.generated_at
+    );
+    println!(
+        "║  诊断总数: {:>4} 项                             ║",
+        report.total_diagnostics
+    );
+    println!("╠══════════════════════════════════════════════════╣");
+
+    for summary in &report.by_category {
+        let pct = if report.total_diagnostics > 0 {
+            (summary.count as f64 / report.total_diagnostics as f64) * 100.0
+        } else {
+            0.0
+        };
+        let icon = match summary.category {
+            jcode_code_value::CodeValueCategory::Reserved => "📌",
+            jcode_code_value::CodeValueCategory::Legacy => "🕰️",
+            jcode_code_value::CodeValueCategory::MissingFeature => "🔧",
+            jcode_code_value::CodeValueCategory::Invalid => "🚫",
+            jcode_code_value::CodeValueCategory::Duplicate => "📋",
+            jcode_code_value::CodeValueCategory::Redundant => "🧹",
+        };
+        println!(
+            "║  {} {}({}): {:>4} 项 ({:>5.1}%)                   ║",
+            icon,
+            summary.category.display_name(),
+            summary.severity,
+            summary.count,
+            pct
+        );
+    }
+
+    println!("╠══════════════════════════════════════════════════╣");
+    println!("║  📋 详情列表 (按文件路径排列)                  ║");
+    println!("╚══════════════════════════════════════════════════╝");
+    println!();
+
+    for (i, diag) in report.diagnostics.iter().enumerate() {
+        let icon = match diag.category {
+            jcode_code_value::CodeValueCategory::Reserved => "📌",
+            jcode_code_value::CodeValueCategory::Legacy => "🕰️",
+            jcode_code_value::CodeValueCategory::MissingFeature => "🔧",
+            jcode_code_value::CodeValueCategory::Invalid => "🚫",
+            jcode_code_value::CodeValueCategory::Duplicate => "📋",
+            jcode_code_value::CodeValueCategory::Redundant => "🧹",
+        };
+
+        println!(
+            "  {}. {} [{}] {}({:.0}%)",
+            i + 1,
+            icon,
+            diag.category.display_name(),
+            diag.lint_code,
+            diag.confidence * 100.0
+        );
+        println!(
+            "     📍 {}:{}:{}",
+            diag.file_path, diag.line, diag.column
+        );
+        if let Some(ref name) = diag.item_name {
+            println!("     🏷️  项目: `{}`", name);
+        }
+        println!("     💬 {}", diag.message);
+        println!(
+            "     📝 理由: {}",
+            diag.rationale
+        );
+        println!();
+    }
+
+    println!("════════════════════════════════════════════════════");
+}
+
 #[cfg(test)]
 pub(crate) use super::auth_test::{
     AuthTestChoicePlan, AuthTestTarget, ResolvedAuthTestTarget, auth_test_choice_plan,

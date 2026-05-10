@@ -1,0 +1,57 @@
+# ============================================================
+# SELinux Policy — JCode Server
+# 适用: 银河麒麟 V10 / CentOS 8 / RHEL 8+
+#
+# 编译和安装:
+#   checkmodule -M -m -o jcode.mod jcode.te
+#   semodule_package -o jcode.pp -m jcode.mod
+#   sudo semodule -i jcode.pp
+# ============================================================
+
+module jcode 1.0.0;
+
+require {
+    type init_t;
+    type etc_t;
+    type var_log_t;
+    type var_lib_t;
+    type proc_t;
+    type sysfs_t;
+    type tmp_t;
+    type unconfined_t;
+    class capability { dac_override sys_ptrace sys_admin };
+    class file { create read write unlink open getattr setattr };
+    class dir { create read write add_name remove_name search };
+    class process { signal signull };
+    class netlink_audit_socket { create read write nlmsg_relay };
+    class tcp_socket { create connect read write bind name_connect };
+    class udp_socket { create connect read write bind };
+}
+
+# ── JCode Server 域 ──
+type jcode_t;
+type jcode_exec_t;
+init_daemon_domain(jcode_t, jcode_exec_t)
+
+# ── 文件系统 ──
+allow jcode_t etc_t:file read;
+allow jcode_t var_log_t:dir { create read write add_name search };
+allow jcode_t var_log_t:file { create read write open };
+allow jcode_t var_lib_t:dir { create read write add_name search };
+allow jcode_t var_lib_t:file { create read write open rename unlink };
+allow jcode_t tmp_t:dir { create read write add_name search };
+allow jcode_t tmp_t:file { create read write open };
+
+# ── 网络 ──
+allow jcode_t self:tcp_socket { create connect read write bind };
+allow jcode_t self:udp_socket { create connect read write bind };
+
+# ── 进程 ──
+allow jcode_t self:process { signal signull };
+allow jcode_t self:capability { dac_override sys_ptrace };
+allow jcode_t self:netlink_audit_socket { create read write nlmsg_relay };
+
+# ── 系统文件 ──
+allow jcode_t proc_t:file read;
+allow jcode_t sysfs_t:dir read;
+allow jcode_t sysfs_t:file read;

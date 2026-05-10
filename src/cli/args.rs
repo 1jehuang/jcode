@@ -400,6 +400,27 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: RestartCommand,
     },
+
+    /// Analyze code value using six-dimension classification
+    /// (预留/遗留/缺失功能/无效/重复/冗余)
+    CodeValue {
+        /// Path to cargo check JSON output file.
+        /// If omitted, runs `cargo check` in the current directory.
+        #[arg(short, long)]
+        input: Option<String>,
+
+        /// Cargo manifest path (Cargo.toml) for running cargo check.
+        #[arg(long, default_value = "Cargo.toml")]
+        manifest_path: String,
+
+        /// Emit JSON report instead of human-readable output.
+        #[arg(long)]
+        json: bool,
+
+        /// Output file path to write the report JSON.
+        #[arg(short, long)]
+        output: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]

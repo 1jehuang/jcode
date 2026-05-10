@@ -57,7 +57,8 @@ pub struct BridgeConfig {
 impl Default for BridgeConfig {
     fn default() -> Self {
         Self {
-            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            bind_addr: "127.0.0.1:0".parse()
+                .expect("Hardcoded bind address literal should be valid"),
             max_connections: 100,
             heartbeat_interval_secs: 30,
             connection_timeout_secs: 90,

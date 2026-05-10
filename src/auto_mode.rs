@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::SystemTime;
 
@@ -582,8 +583,8 @@ impl AutoMode {
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64,
-            content_hash: format!("{:x}", md5::compute(content)),
-            result_hash: format!("{:x}", md5::compute(result)),
+            content_hash: format!("{:x}", sha2::Sha256::digest(content.as_bytes())),
+            result_hash: format!("{:x}", sha2::Sha256::digest(result.as_bytes())),
             success,
             execution_time_ms,
         };

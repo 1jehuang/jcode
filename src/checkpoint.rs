@@ -65,7 +65,9 @@ impl CheckpointManager {
         state.sequence += 1;
         let name = format!("{}@v{}", &hash[..16], state.sequence);
         let bp = self.storage_dir.join(&name);
-        std::fs::create_dir_all(bp.parent().unwrap()).map_err(|e| e.to_string())?;
+        let bp_parent = bp.parent()
+            .ok_or_else(|| format!("Invalid checkpoint path (no parent): {}", bp.display()))?;
+        std::fs::create_dir_all(bp_parent).map_err(|e| e.to_string())?;
         std::fs::write(&bp, &content).map_err(|e| e.to_string())?;
         if !state.tracked_files.contains(&file_path.to_string()) {
             state.tracked_files.push(file_path.to_string());
@@ -88,7 +90,9 @@ impl CheckpointManager {
             let hash = format!("{:x}", Sha256::digest(&content));
             let name = format!("{}@v{}", &hash[..16], state.sequence);
             let bp = self.storage_dir.join(&name);
-            std::fs::create_dir_all(bp.parent().unwrap()).map_err(|e| e.to_string())?;
+            let bp_parent = bp.parent()
+                .ok_or_else(|| format!("Invalid checkpoint path (no parent): {}", bp.display()))?;
+            std::fs::create_dir_all(bp_parent).map_err(|e| e.to_string())?;
             std::fs::write(&bp, &content).map_err(|e| e.to_string())?;
             backups.insert(tf.clone(), FileBackup {
                 backup_file: Some(name), version: state.sequence, backup_time: Utc::now(),

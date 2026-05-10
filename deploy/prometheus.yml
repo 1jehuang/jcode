@@ -1,0 +1,19 @@
+# ============================================================
+# Prometheus 配置 — 抓取 OTel Collector 指标
+# ============================================================
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'jcode-otel-collector'
+    static_configs:
+      - targets: ['otel-collector:8889']
+        labels:
+          service: jcode-server
+
+  - job_name: 'jcode-direct'
+    static_configs:
+      - targets: ['jcode-server:9090']
+        labels:
+          service: jcode-server

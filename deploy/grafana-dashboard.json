@@ -1,0 +1,81 @@
+{
+  "__inputs": [],
+  "__requires": [],
+  "title": "JCode Server Dashboard",
+  "uid": "jcode-server",
+  "version": 1,
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "panels": [
+    {
+      "title": "LLM Requests / sec",
+      "type": "graph",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+      "targets": [
+        {"expr": "rate(jcode_llm_requests_total[1m])", "legendFormat": "requests/s"}
+      ]
+    },
+    {
+      "title": "LLM Latency (p50/p95/p99)",
+      "type": "graph",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(jcode_llm_latency_ms_bucket[1m])) by (le))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(jcode_llm_latency_ms_bucket[1m])) by (le))", "legendFormat": "p95"},
+        {"expr": "histogram_quantile(0.99, sum(rate(jcode_llm_latency_ms_bucket[1m])) by (le))", "legendFormat": "p99"}
+      ]
+    },
+    {
+      "title": "Token Usage (input / output)",
+      "type": "graph",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+      "targets": [
+        {"expr": "rate(jcode_llm_input_tokens_total[1m])", "legendFormat": "input"},
+        {"expr": "rate(jcode_llm_output_tokens_total[1m])", "legendFormat": "output"}
+      ]
+    },
+    {
+      "title": "Tool Execution / sec",
+      "type": "graph",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
+      "targets": [
+        {"expr": "rate(jcode_tool_executions_total[1m])", "legendFormat": "tools/s"},
+        {"expr": "rate(jcode_tool_errors_total[1m])", "legendFormat": "errors/s"}
+      ]
+    },
+    {
+      "title": "Memory Usage (MB)",
+      "type": "graph",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
+      "targets": [
+        {"expr": "jcode_memory_used_mb", "legendFormat": "used"},
+        {"expr": "jcode_memory_warning_threshold_mb", "legendFormat": "warning"},
+        {"expr": "jcode_memory_critical_threshold_mb", "legendFormat": "critical"}
+      ]
+    },
+    {
+      "title": "Active Sessions",
+      "type": "singlestat",
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 8},
+      "targets": [
+        {"expr": "jcode_sessions_active"}
+      ]
+    },
+    {
+      "title": "Session Cost (USD)",
+      "type": "graph",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "targets": [
+        {"expr": "rate(jcode_cost_usd_total[1m])", "legendFormat": "cost/s"}
+      ]
+    },
+    {
+      "title": "Cache Hit Ratio",
+      "type": "graph",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "targets": [
+        {"expr": "rate(jcode_cache_hits_total[1m]) / (rate(jcode_cache_hits_total[1m]) + rate(jcode_cache_misses_total[1m]))", "legendFormat": "hit ratio"}
+      ]
+    }
+  ]
+}

@@ -311,6 +311,14 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         }) => {
             commands::run_build_command(&message, manual, no_verify, max_retries).await?;
         }
+        Some(Command::CodeValue {
+            input,
+            manifest_path,
+            json,
+            output,
+        }) => {
+            commands::run_code_value_command(input.as_deref(), &manifest_path, json, output.as_deref()).await?;
+        }
         Some(Command::Restart { action }) => match action {
             RestartCommand::Save { auto_restore } => {
                 commands::run_restart_save_command(auto_restore).await?

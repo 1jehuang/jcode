@@ -1,0 +1,12 @@
+# ============================================================
+# Cargo 依赖补丁 — 将 git 依赖替换为本地 vendor 版本
+# 消除供应链风险
+#
+# 使用方法:
+#   运行 scripts/vendor_agentgrep.sh 完成 vendor 后，
+#   将本文件重命名为 patches.toml 或直接添加到 config.toml:
+#     cat patches.toml.example >> config.toml
+# ============================================================
+
+[patch."https://github.com/1jehuang/agentgrep.git"]
+agentgrep = { path = "crates/vendor-agentgrep" }

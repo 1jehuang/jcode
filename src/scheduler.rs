@@ -631,7 +631,9 @@ impl Optimizer {
                 let gpu_score = (r.gpu_count as i64 - requirements.resources.gpu as i64).abs();
                 cpu_score + mem_score + gpu_score
             })
-            .unwrap()
+            .unwrap_or_else(|| {
+                panic!("select_best_fit called with empty resource list")
+            })
     }
 
     fn select_worst_fit<'a>(
@@ -645,7 +647,9 @@ impl Optimizer {
                 let mem_score = (r.memory_gb as i64 - requirements.resources.memory as i64).abs();
                 cpu_score + mem_score
             })
-            .unwrap()
+            .unwrap_or_else(|| {
+                panic!("select_worst_fit called with empty resource list")
+            })
     }
 
     fn select_load_balanced<'a>(&self, resources: &[&'a Resource]) -> &'a Resource {
@@ -655,7 +659,9 @@ impl Optimizer {
                 let b_load = (b.current_load.cpu_usage + b.current_load.memory_usage + b.current_load.gpu_usage) / 3.0;
                 a_load.partial_cmp(&b_load).unwrap_or(std::cmp::Ordering::Equal)
             })
-            .unwrap()
+            .unwrap_or_else(|| {
+                panic!("select_load_balanced called with empty resource list")
+            })
     }
 }
 

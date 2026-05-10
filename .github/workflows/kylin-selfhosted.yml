@@ -1,0 +1,158 @@
+# ============================================================
+# KylinOS V10 — Self-Hosted Runner CI
+# 验证 JCode 在银河麒麟操作系统上的兼容性
+#
+# 前置条件:
+#   1. 在 KylinOS V10 虚拟机上注册 self-hosted runner:
+#      https://github.com/1jehuang/jcode/settings/actions/runners
+#   2. 安装 Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+#   3. 安装依赖: sudo apt install -y build-essential pkg-config libssl-dev
+#
+# 触发方式:
+#   - 每周日凌晨 2:00 自动运行
+#   - 手动触发: workflow_dispatch
+#   - PR 包含 "kylin" 标签时触发
+# ============================================================
+
+name: KylinOS Compatibility
+
+on:
+  schedule:
+    # 每周日 UTC 02:00 (北京时间 10:00)
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      test_level:
+        description: '测试级别'
+        type: choice
+        options:
+          - quick       # 仅编译检查
+          - full        # 编译 + 单元测试 + 冒烟
+        default: quick
+  pull_request:
+    types: [labeled]
+    # 仅当标签为 kylin 时触发
+
+jobs:
+  detect:
+    name: 检测 PR 标签
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            LABELS='${{ toJson(github.event.pull_request.labels) }}'
+            if echo "$LABELS" | grep -q '"kylin"'; then
+              echo "should_run=true" >> $GITHUB_OUTPUT
+            else
+              echo "should_run=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          fi
+
+  build-kylin-x86_64:
+    name: 构建 & 测试 (x86_64)
+    needs: detect
+    if: needs.detect.outputs.should_run == 'true'
+    runs-on: [self-hosted, kylin, x86_64]
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: 检查 Rust 工具链
+        run: |
+          rustc --version
+          cargo --version
+          rustup target list --installed
+
+      - name: 缓存 cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: kylin-x86_64
+
+      - name: 检查 vendor 依赖
+        run: |
+          if [[ ! -d crates/vendor-agentgrep ]]; then
+            echo "⚠️  vendor-agentgrep 不存在，尝试 git clone..."
+            git clone --depth 1 --branch v0.1.2 \
+              https://github.com/1jehuang/agentgrep.git \
+              crates/vendor-agentgrep
+          fi
+          echo "✅ vendor-agentgrep: $(ls crates/vendor-agentgrep/Cargo.toml 2>/dev/null && echo OK || echo MISSING)"
+
+      - name: cargo check (快速)
+        run: |
+          cargo check --workspace --exclude jcode-embedding 2>&1 | tail -20
+
+      - name: cargo build (正式)
+        run: |
+          cargo build --release --workspace --exclude jcode-embedding 2>&1 | tail -10
+
+      - name: 运行兼容性测试脚本
+        run: |
+          bash packaging/kylin/test_compatibility.sh 2>&1 | tail -50
+
+      - name: 运行 TUI 核心测试
+        run: |
+          cargo test --package jcode-tui-core 2>&1 | tail -30
+
+      - name: 冒烟测试 (CLI)
+        run: |
+          ./target/release/jcode --help > /dev/null 2>&1 && echo "✅ --help OK"
+          ./target/release/jcode --version > /dev/null 2>&1 && echo "✅ --version OK"
+
+      - name: KylinOS 终端兼容性报告
+        run: |
+          echo "## KylinOS 终端报告" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "TERM: $TERM" >> $GITHUB_STEP_SUMMARY
+          echo "Colors: $(tput colors 2>/dev/null || echo 'N/A')" >> $GITHUB_STEP_SUMMARY
+          echo "Locale: $LANG" >> $GITHUB_STEP_SUMMARY
+          echo "glibc: $(ldd --version 2>&1 | head -1)" >> $GITHUB_STEP_SUMMARY
+          echo "Kernel: $(uname -a)" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  build-kylin-arm64:
+    name: 构建 & 测试 (aarch64)
+    needs: detect
+    if: needs.detect.outputs.should_run == 'true'
+    runs-on: [self-hosted, kylin, arm64]
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: 检查 Rust 工具链
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: 缓存 cargo (ARM64)
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: kylin-arm64
+
+      - name: cargo check
+        run: |
+          cargo check --workspace --exclude jcode-embedding 2>&1 | tail -20
+
+      - name: cargo build
+        run: |
+          cargo build --release --workspace --exclude jcode-embedding 2>&1 | tail -10
+
+      - name: ARM64 兼容性检查
+        run: |
+          file target/release/jcode
+          ldd target/release/jcode | head -20
+
+      - name: 冒烟测试
+        run: |
+          ./target/release/jcode --help > /dev/null 2>&1 && echo "✅ --help OK"

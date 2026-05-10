@@ -1,0 +1,58 @@
+[Unit]
+Description=JCode Server — AI-powered development agent (gRPC + WebSocket + REST)
+Documentation=https://github.com/1jehuang/jcode
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+# ── 用户 ──
+Type=simple
+User=jcode
+Group=jcode
+RuntimeDirectory=jcode
+RuntimeDirectoryMode=0755
+
+# ── 可执行文件 ──
+ExecStart=/usr/local/bin/jcode-server
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# ── 环境变量 ──
+Environment=JCODE_GRPC_PORT=50051
+Environment=JCODE_WS_PORT=8080
+Environment=JCODE_REST_PORT=8081
+Environment=JCODE_BIND_ADDR=0.0.0.0
+Environment=RUST_LOG=jcode=info
+
+# ── 安全限制 ──
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+# MemoryDenyWriteExecute=true  # 如果使用 JIT 编译的 regex，需要设为 false
+
+# ── 文件系统 ──
+ReadWritePaths=/var/lib/jcode
+ReadWritePaths=/var/log/jcode
+ReadWritePaths=%t/jcode
+
+# ── 资源限制 ──
+LimitNOFILE=65536
+LimitNPROC=4096
+LimitCORE=0
+
+# ── 日志 ──
+StandardOutput=journal
+StandardError=journal
+
+# ── 超时 ──
+TimeoutStartSec=30
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

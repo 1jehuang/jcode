@@ -16,7 +16,6 @@
 //! - `is_abort_error()` — 检测中止错误
 //! - `short_error_stack()` — 获取短错误栈
 
-use std::fmt;
 use thiserror::Error;
 
 /// 工具错误 — 执行工具时发生的错误
@@ -186,7 +185,7 @@ impl From<&str> for JcodeError {
 
 /// 将任意错误转换为友好显示字符串
 /// 源自 Claude Code 的 `errorMessage()`
-pub fn error_message(err: &(dyn std::error::Error)) -> String {
+pub fn error_message(err: &dyn std::error::Error) -> String {
     let msg = err.to_string();
 
     // 截取短栈
@@ -201,7 +200,7 @@ pub fn error_message(err: &(dyn std::error::Error)) -> String {
 
 /// 检查是否中止错误
 /// 源自 Claude Code 的 `isAbortError()`
-pub fn is_abort_error(err: &(dyn std::error::Error)) -> bool {
+pub fn is_abort_error(err: &dyn std::error::Error) -> bool {
     let msg = err.to_string().to_lowercase();
     msg.contains("cancelled")
         || msg.contains("canceled")
@@ -212,7 +211,7 @@ pub fn is_abort_error(err: &(dyn std::error::Error)) -> bool {
 
 /// 获取短错误栈（适用于 UI 显示）
 /// 源自 Claude Code 的 `shortErrorStack()`
-pub fn short_error_stack(err: &(dyn std::error::Error)) -> String {
+pub fn short_error_stack(err: &dyn std::error::Error) -> String {
     let msg = err.to_string();
     if msg.len() > 200 {
         format!("{}... ({} chars total)", &msg[..197], msg.len())
@@ -223,13 +222,13 @@ pub fn short_error_stack(err: &(dyn std::error::Error)) -> String {
 
 /// 检查文件系统错误
 /// 源自 Claude Code 的 `isFsInaccessible()` / `isENOENT()`
-pub fn is_fs_not_found(err: &(dyn std::error::Error)) -> bool {
+pub fn is_fs_not_found(err: &dyn std::error::Error) -> bool {
     let msg = err.to_string();
     msg.contains("No such file") || msg.contains("entity not found") || msg.contains("ENOENT")
 }
 
 /// 检测超时错误
-pub fn is_timeout_error(err: &(dyn std::error::Error)) -> bool {
+pub fn is_timeout_error(err: &dyn std::error::Error) -> bool {
     let msg = err.to_string().to_lowercase();
     msg.contains("timeout") || msg.contains("timed out")
 }

@@ -1,0 +1,110 @@
+# ============================================================
+# JCode — Docker Compose 部署
+#
+# 启动: docker compose up -d
+# 停止: docker compose down
+# 日志: docker compose logs -f jcode-server
+# ============================================================
+
+services:
+  jcode-server:
+    image: jcode:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jcode-server
+    restart: unless-stopped
+    ports:
+      - "50051:50051"   # gRPC
+      - "8080:8080"     # WebSocket
+      - "8081:8081"     # REST
+    environment:
+      - JCODE_GRPC_PORT=50051
+      - JCODE_WS_PORT=8080
+      - JCODE_REST_PORT=8081
+      - JCODE_BIND_ADDR=0.0.0.0
+      - RUST_LOG=jcode=info
+      # OTLP Metrics (可选, 需要 OTEL Collector)
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - OTEL_SERVICE_NAME=jcode-server
+    volumes:
+      - jcode-data:/home/jcode/.jcode
+      - ./config.toml:/home/jcode/.jcode/config.toml:ro
+    healthcheck:
+      test: ["CMD", "jcode", "--version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - jcode-net
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '1'
+          memory: 1G
+
+  # ── 可选: OTel Collector (Metrics/Traces 收集) ──
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: otel-collector
+    profiles:
+      - monitoring
+    command:
+      - "--config=/etc/otel-collector-config.yaml"
+    volumes:
+      - ./deploy/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4318:4318"     # OTLP HTTP
+      - "4317:4317"     # OTLP gRPC
+    networks:
+      - jcode-net
+
+  # ── 可选: Prometheus (指标存储) ──
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    profiles:
+      - monitoring
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - jcode-net
+
+  # ── 可选: Grafana (指标可视化) ──
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    profiles:
+      - monitoring
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=jcode
+      - GF_INSTALL_PLUGINS=
+    volumes:
+      - ./deploy/grafana-dashboard.json:/etc/grafana/provisioning/dashboards/jcode.json:ro
+      - ./deploy/grafana-datasource.yaml:/etc/grafana/provisioning/datasources/prometheus.yaml:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - jcode-net
+    depends_on:
+      - prometheus
+
+volumes:
+  jcode-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  jcode-net:
+    driver: bridge

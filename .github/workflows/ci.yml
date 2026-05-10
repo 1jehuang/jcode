@@ -68,6 +68,19 @@ jobs:
         shell: bash
         run: python3 scripts/check_swallowed_error_budget.py
 
+      - name: Check vendored dependencies are in sync
+        shell: bash
+        run: |
+          if [[ -d crates/vendor-agentgrep ]]; then
+            echo "✅ vendored-agentgrep present"
+          else
+            echo "⚠️  vendored-agentgrep missing — run scripts/vendor_agentgrep.sh"
+          fi
+          if grep -q 'git =' Cargo.toml | grep -c 'github.com'; then
+            echo "⚠️  git dependencies still present:"
+            grep 'git =' Cargo.toml | grep -v workspace
+          fi
+
   mobile-simulator:
     name: Mobile Simulator (Linux)
     runs-on: ubuntu-latest

@@ -1,4 +1,4 @@
-﻿﻿use super::*;
+﻿use super::*;
 
 impl App {
     fn format_failover_count(value: usize) -> String {

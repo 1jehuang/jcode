@@ -162,7 +162,9 @@ impl ChromeNativeHost {
             .join("chrome-bridge");
         std::fs::create_dir_all(&config_dir).map_err(|e| format!("Failed to create config dir: {}", e))?;
         let config_path = config_dir.join("bridge-config.json");
-        std::fs::write(&config_path, serde_json::to_string_pretty(&mcp_config).unwrap())
+        let config_json = serde_json::to_string_pretty(&mcp_config)
+            .map_err(|e| format!("Failed to serialize MCP config: {}", e))?;
+        std::fs::write(&config_path, &config_json)
             .map_err(|e| format!("Failed to write config: {}", e))?;
 
         *self.running.write().await = true;

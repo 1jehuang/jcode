@@ -1,0 +1,16 @@
+[package]
+name = "jcode-code-value"
+version.workspace = true
+edition.workspace = true
+description = "代码价值六维分类 — 预留/遗留/缺失功能/无效/重复/冗余 自动分类引擎"
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+regex = { workspace = true }
