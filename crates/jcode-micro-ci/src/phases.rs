@@ -432,7 +432,7 @@ impl CargoTypeCheck {
     async fn try_typescript_check(root: &str) -> Vec<crate::Issue> {
         let mut issues = Vec::new();
 
-        for cmd in &[["npx", "tsc", "--noEmit"], ["npx", "tsc", "--noEmit", "--project", "tsconfig.json"]] {
+        for cmd in &[&["npx", "tsc", "--noEmit"][..], &["npx", "tsc", "--noEmit", "--project", "tsconfig.json"][..]] {
             if let Ok(o) = tokio::process::Command::new(cmd[0])
                 .args(&cmd[1..])
                 .current_dir(root)
