@@ -153,6 +153,8 @@ struct SessionTelemetry {
     swarm_task_count: u32,
     swarm_success_count: u32,
     user_cancelled_count: u32,
+    /// Number of token budget auto-continue loops completed this session
+    auto_continue_count: u32,
     tool_cat_read_search: u32,
     tool_cat_write: u32,
     tool_cat_shell: u32,
@@ -1329,6 +1331,7 @@ fn begin_session_with_mode(
         swarm_task_count: 0,
         swarm_success_count: 0,
         user_cancelled_count: 0,
+        auto_continue_count: 0,
         tool_cat_read_search: 0,
         tool_cat_write: 0,
         tool_cat_shell: 0,
@@ -1688,6 +1691,21 @@ pub fn end_session_with_reason(provider_end: &str, model_end: &str, reason: Sess
 
 pub fn record_crash(provider_end: &str, model_end: &str, reason: SessionEndReason) {
     emit_lifecycle_event("session_crash", provider_end, model_end, reason, true);
+}
+
+/// Record a token budget auto-continue completion event.
+///
+/// Called when the auto-continue loop stops (budget exhausted or diminishing returns).
+pub fn record_auto_continue_completed(
+    _continuation_count: u32,
+    _duration_ms: u64,
+    _diminishing_returns: bool,
+) {
+    if let Ok(mut guard) = SESSION_STATE.lock()
+        && let Some(ref mut state) = *guard
+    {
+        state.auto_continue_count = state.auto_continue_count.saturating_add(1);
+    }
 }
 
 pub fn current_provider_model() -> Option<(String, String)> {

@@ -12,6 +12,7 @@ mod streaming;
 mod tools;
 mod turn_execution;
 mod turn_loops;
+mod turn_strategy;
 mod turn_streaming_broadcast;
 mod turn_streaming_mpsc;
 mod utils;
@@ -19,6 +20,7 @@ mod utils;
 use self::streaming::{
     send_stream_keepalive_broadcast, send_stream_keepalive_mpsc, stream_keepalive_ticker,
 };
+use crate::token_budget::TokenBudgetTracker;
 use self::tools::{print_tool_summary, tool_output_to_content_blocks};
 use self::utils::trace_enabled;
 use crate::build;
@@ -49,6 +51,7 @@ pub use jcode_agent_runtime::{
     BackgroundToolSignal, GracefulShutdownSignal, InterruptSignal, SoftInterruptMessage,
     SoftInterruptQueue, SoftInterruptSource, StreamError,
 };
+pub use self::turn_strategy::{StandardTurnStrategy, TurnStrategy};
 
 const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "communicate"];
 static RECOVERED_TEXT_WRAPPED_TOOL_CALLS: std::sync::atomic::AtomicU64 =
@@ -133,6 +136,12 @@ pub struct Agent {
     rewind_undo_snapshot: Option<RewindUndoSnapshot>,
     /// Channel for tools to request stdin input from the user
     stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::tool::StdinInputRequest>>,
+    /// Token budget tracker for auto-continue on long tasks.
+    /// Tracks cumulative token usage across turns and decides when to nudge continuation.
+    token_budget_tracker: TokenBudgetTracker,
+    /// Multi-project workspace manager for cross-project operations.
+    /// Enables jcode to work with multiple projects simultaneously.
+    workspace_manager: Option<Arc<crate::workspace_manager::WorkspaceManager>>,
 }
 
 impl Agent {
@@ -179,6 +188,8 @@ impl Agent {
             memory_enabled: crate::config::config().features.memory,
             rewind_undo_snapshot: None,
             stdin_request_tx: None,
+            token_budget_tracker: TokenBudgetTracker::from_config(),
+            workspace_manager: crate::workspace_manager::global_workspace(),
         }
     }
 
@@ -261,8 +272,8 @@ impl Agent {
         ));
         let compaction = self.registry.compaction();
         let mut manager = match compaction.try_write() {
-            Ok(manager) => manager,
-            Err(_) => {
+            Some(manager) => manager,
+            None => {
                 logging::warn(
                     "seed_compaction_from_session: compaction lock unavailable, skipping restore",
                 );
@@ -408,7 +419,7 @@ impl Agent {
 
         self.session.compaction = Some(state.clone());
         let compaction = self.registry.compaction();
-        if let Ok(mut manager) = compaction.try_write() {
+        if let Some(mut manager) = compaction.try_write() {
             manager.set_budget(self.provider.context_window());
             manager.restore_persisted_stored_state_with(&state, &self.session.messages);
         }
@@ -433,7 +444,7 @@ impl Agent {
         if self.provider.uses_jcode_compaction() || self.session.compaction.is_some() {
             let compaction = self.registry.compaction();
             match compaction.try_write() {
-                Ok(mut manager) => {
+                Some(mut manager) => {
                     let discarded_oversized_native =
                         manager.discard_oversized_openai_native_compaction();
                     let messages = {
@@ -482,7 +493,7 @@ impl Agent {
                     ));
                     return (messages, event);
                 }
-                Err(_) => {
+                None => {
                     logging::info("messages_for_provider: compaction lock failed, using session");
                 }
             };

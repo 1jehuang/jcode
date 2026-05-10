@@ -33,6 +33,8 @@ impl Tool for GlobTool {
         "Find files by glob."
     }
 
+    fn is_read_only(&self) -> bool { true }
+
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",

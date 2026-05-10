@@ -1,0 +1,30 @@
+[package]
+name = "jcode-session-persist"
+version.workspace = true
+edition.workspace = true
+description = "会话管理与持久化 - 移植自 Claude Code: JSONL存储/快照恢复/对话摘要/增量恢复"
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+fs2 = "0.4"
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+indexmap = { version = "2", features = ["serde"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"
+criterion = "0.5"
+
+[[bench]]
+name = "session_persist_bench"
+harness = false
+path = "benches/session_persist_bench.rs"

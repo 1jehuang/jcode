@@ -1,0 +1,147 @@
+﻿cargo :     Blocking waiting for file lock on package cache
+所在位置 行:1 字符: 207
++ ... cargo/opensource/jcode; cargo check -p jcode-p2-features 2>&1 | Out-F ...
++                             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Blocking wa...n package cache:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Checking jcode-p2-features v0.12.0 (D:\studying\Codecargo\opensource\jcode\crates\jcode-p2-features)
+error[E0425]: cannot find value `other` in this scope
+   --> crates\jcode-p2-features\src\brief_mode.rs:301:47
+    |
+301 |                         _ => format!("{:?}", &other),
+    |                                               ^^^^^ not found in this scope
+
+warning: unused imports: `Deserialize` and `Serialize`
+  --> crates\jcode-p2-features\src\brief_mode.rs:18:13
+   |
+18 | use serde::{Deserialize, Serialize};
+   |             ^^^^^^^^^^^  ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `HeaderValue`
+  --> crates\jcode-p2-features\src\notification.rs:21:34
+   |
+21 | use reqwest::header::{HeaderMap, HeaderValue};
+   |                                  ^^^^^^^^^^^
+
+error[E0596]: cannot borrow `ctx` as mutable, as it is not declared as mutable
+   --> crates\jcode-p2-features\src\workflow.rs:253:50
+    |
+253 |         let result = self.execute_workflow(&def, &mut ctx).await;
+    |                                                  ^^^^^^^^ cannot borrow as mutable
+    |
+help: consider changing this to be mutable
+    |
+251 |         let mut ctx = WorkflowContext::new(initial_vars.unwrap_or_default());
+    |             +++
+
+error[E0004]: non-exhaustive patterns: `Ok(serde_json::Value::Null)`, `Ok(serde_json::Value::Bool(_))`, `Ok(serde_json:
+:Value::Number(_))` and 1 more not covered
+   --> crates\jcode-p2-features\src\powershell.rs:148:27
+    |
+148 |                     match serde_json::from_str(&stdout) {
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ patterns `Ok(serde_json::Value::Null)`, `Ok(serde_json::V
+alue::Bool(_))`, `Ok(serde_json::Value::Number(_))` and 1 more not covered
+    |
+note: `Result<serde_json::Value, serde_json::Error>` defined here
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\result.rs
+:557:1
+    |
+557 | pub enum Result<T, E> {
+    | ^^^^^^^^^^^^^^^^^^^^^
+...
+561 |     Ok(#[stable(feature = "rust1", since = "1.0.0")] T),
+    |     -- not covered
+    = note: the matched value is of type `Result<serde_json::Value, serde_json::Error>`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern as shown, or multi
+ple match arms
+    |
+151 ~                         Err(_) => vec![],
+152 ~                         _ => todo!(), // 非 JSON 输出, 作为纯文本处理
+    |
+
+error[E0004]: non-exhaustive patterns: `&FileContent::UrlReference { .. }` not covered
+   --> crates\jcode-p2-features\src\kairos_file.rs:166:28
+    |
+166 |         let result = match &transfer.content {
+    |                            ^^^^^^^^^^^^^^^^^ pattern `&FileContent::UrlReference { .. }` not covered
+    |
+note: `FileContent` defined here
+   --> crates\jcode-p2-features\src\kairos_file.rs:60:10
+    |
+ 60 | pub enum FileContent {
+    |          ^^^^^^^^^^^
+...
+ 66 |     UrlReference { url: String },
+    |     ------------ not covered
+    = note: the matched value is of type `&FileContent`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pat
+tern as shown
+    |
+173 ~             },
+174 +             &FileContent::UrlReference { .. } => todo!()
+    |
+
+error[E0615]: attempted to take value of method `ok` on type `Result<HeaderValue, InvalidHeaderValue>`
+   --> crates\jcode-p2-features\src\notification.rs:392:113
+    |
+392 |                 Some((k.parse::<reqwest::header::HeaderName>().ok()?, reqwest::header::HeaderValue::from_str(v).o
+k?))
+    |                                                                                                                 ^
+^ method, not a field
+    |
+help: use parentheses to call the method
+    |
+392 |                 Some((k.parse::<reqwest::header::HeaderName>().ok()?, reqwest::header::HeaderValue::from_str(v).o
+k()?))
+    |                                                                                                                  
+ ++
+
+warning: unused variable: `fallback_step_id`
+   --> crates\jcode-p2-features\src\workflow.rs:333:51
+    |
+333 |                         ErrorStrategy::Fallback { fallback_step_id } => {
+    |                                                   ^^^^^^^^^^^^^^^^ help: try ignoring the field: `fallback_step_i
+d: _`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `rendered_cmd`
+   --> crates\jcode-p2-features\src\workflow.rs:356:25
+    |
+356 |                     let rendered_cmd = _ctx.render_template(cmd);
+    |                         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rendered_cmd`
+
+warning: unused variable: `key`
+   --> crates\jcode-p2-features\src\config_wizard.rs:195:59
+    |
+195 |     fn add_select_one(&mut self, title: &str, desc: &str, key: &str, required: bool, options: Vec<SelectOption>) 
+{
+    |                                                           ^^^ help: if this is intentional, prefix it with an und
+erscore: `_key`
+
+warning: unused variable: `key`
+   --> crates\jcode-p2-features\src\config_wizard.rs:209:59
+    |
+209 |     fn add_text_input(&mut self, title: &str, desc: &str, key: &str, required: bool, placeholder: Option<String>,
+ is_password: bool) {
+    |                                                           ^^^ help: if this is intentional, prefix it with an und
+erscore: `_key`
+
+warning: unused variable: `config`
+   --> crates\jcode-p2-features\src\notification.rs:400:59
+    |
+400 |     async fn send_email(&self, msg: &NotificationMessage, config: &ChannelConfig) -> Result<(), String> {
+    |                                                           ^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_config`
+
+Some errors have detailed explanations: E0004, E0425, E0596, E0615.
+For more information about an error, try `rustc --explain E0004`.
+warning: `jcode-p2-features` (lib) generated 7 warnings
+error: could not compile `jcode-p2-features` (lib) due to 5 previous errors; 7 warnings emitted

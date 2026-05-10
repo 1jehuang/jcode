@@ -1,0 +1,25 @@
+[package]
+name = "jcode-p2-features"
+version.workspace = true
+edition.workspace = true
+description = "P2 锦上添花功能集 — REPL/Notebook/Workflow/Mermaid/UsageOverlay 等"
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+regex = { workspace = true }
+tempfile = { workspace = true }
+reqwest = { workspace = true }
+toml = "0.8"
+which = "7"
+
+[dev-dependencies]
+tokio-test = "0.4"

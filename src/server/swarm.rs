@@ -134,14 +134,14 @@ pub(super) async fn touch_swarm_task_progress(
             progress.assigned_session_id = Some(session_id.to_string());
         }
         progress.last_heartbeat_unix_ms = Some(now_ms);
-        progress.heartbeat_count = Some(progress.heartbeat_count.unwrap_or(0) + 1);
+        progress.heartbeat_count += 1;
         if let Some(detail) = detail {
             progress.last_detail = Some(truncate_detail(&detail, 120));
         }
         if let Some(summary) = checkpoint_summary {
             progress.last_checkpoint_unix_ms = Some(now_ms);
             progress.checkpoint_summary = Some(truncate_detail(&summary, 120));
-            progress.checkpoint_count = Some(progress.checkpoint_count.unwrap_or(0) + 1);
+            progress.checkpoint_count += 1;
         }
         if item.status == "running_stale" {
             item.status = "running".to_string();

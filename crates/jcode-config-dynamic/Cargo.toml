@@ -1,0 +1,31 @@
+[package]
+name = "jcode-config-dynamic"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+description = "Dynamic configuration system for JCode - ported from Claude Code config.ts, settings.ts (multi-source merge, hot-reload, write protection)"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt", "sync", "time"] }
+futures = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Utilities
+uuid = { version = "1", features = ["v4"] }
+anyhow = "1"
+thiserror = "1"
+tracing = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+# File system
+dirs = "5"
+notify = "6"  # 文件系统监听
+
+# Config types
+jcode-config-types = { path = "../jcode-config-types" }

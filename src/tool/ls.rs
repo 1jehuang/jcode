@@ -53,6 +53,8 @@ impl Tool for LsTool {
         "List directory contents."
     }
 
+    fn is_read_only(&self) -> bool { true }
+
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",

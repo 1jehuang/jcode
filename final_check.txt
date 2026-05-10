@@ -1,0 +1,693 @@
+﻿cargo :     Blocking waiting for file lock on package cache
+所在位置 行:1 字符: 207
++ ... urce/jcode; cargo check -p jcode-p2-features -p jcode-mcp-advanced 2> ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Blocking wa...n package cache:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Checking jcode-p2-features v0.12.0 (D:\studying\Codecargo\opensource\jcode\crates\jcode-p2-features)
+    Checking jcode-mcp-advanced v0.12.0 (D:\studying\Codecargo\opensource\jcode\crates\jcode-mcp-advanced)
+warning: unused import: `ClientCapabilities`
+  --> crates\jcode-mcp-advanced\src\transport.rs:11:99
+   |
+11 | use crate::types::{JsonRpcRequest, JsonRpcResponse, JsonRpcSuccessResponse, JsonRpcErrorResponse, ClientCapabiliti
+es};
+   |                                                                                                   ^^^^^^^^^^^^^^^^
+^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `error`
+  --> crates\jcode-mcp-advanced\src\client.rs:20:22
+   |
+20 | use tracing::{debug, error, info, warn};
+   |                      ^^^^^
+
+warning: unused import: `SamplingMessage`
+  --> crates\jcode-mcp-advanced\src\sampling.rs:11:77
+   |
+11 | use crate::types::{CreateMessageRequest, CreateMessageResult, ContentBlock, SamplingMessage};
+   |                                                                             ^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `rand::thread_rng`: Renamed to `rng`
+  --> crates\jcode-mcp-advanced\src\connection_manager.rs:50:33
+   |
+50 |             let mut rng = rand::thread_rng();
+   |                                 ^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: unused imports: `Deserialize` and `Serialize`
+  --> crates\jcode-p2-features\src\brief_mode.rs:18:13
+   |
+18 | use serde::{Deserialize, Serialize};
+   |             ^^^^^^^^^^^  ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `HeaderValue`
+  --> crates\jcode-p2-features\src\notification.rs:21:34
+   |
+21 | use reqwest::header::{HeaderMap, HeaderValue};
+   |                                  ^^^^^^^^^^^
+
+error[E0599]: no method named `tools` found for struct `tokio::sync::RwLockWriteGuard<'_, MCPToolRegistry>` in the curr
+ent scope
+   --> crates\jcode-mcp-advanced\src\client.rs:257:29
+    |
+257 |                 Ok(registry.tools().to_vec())
+    |                             ^^^^^ private field, not a method
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+   --> crates\jcode-mcp-advanced\src\client.rs:314:25
+    |
+314 |         let transport = self.get_transport()?;
+    |                         ^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `impl std::future::Futur
+e<Output = Result<TransportEnum, std::string::String>>`
+    |
+    = help: the nightly-only, unstable trait `Try` is not implemented for `impl std::future::Future<Output = Result<Tra
+nsportEnum, std::string::String>>`
+help: consider `await`ing on the `Future`
+    |
+314 |         let transport = self.get_transport().await?;
+    |                                             ++++++
+
+error[E0282]: type annotations needed
+   --> crates\jcode-mcp-advanced\src\client.rs:314:13
+    |
+314 |         let transport = self.get_transport()?;
+    |             ^^^^^^^^^
+...
+323 |         match transport.send(request).await {
+    |               --------- type must be known at this point
+    |
+help: consider giving `transport` an explicit type
+    |
+314 |         let transport: /* Type */ = self.get_transport()?;
+    |                      ++++++++++++
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+   --> crates\jcode-mcp-advanced\src\client.rs:339:25
+    |
+339 |         let transport = self.get_transport()?;
+    |                         ^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `impl std::future::Futur
+e<Output = Result<TransportEnum, std::string::String>>`
+    |
+    = help: the nightly-only, unstable trait `Try` is not implemented for `impl std::future::Future<Output = Result<Tra
+nsportEnum, std::string::String>>`
+help: consider `await`ing on the `Future`
+    |
+339 |         let transport = self.get_transport().await?;
+    |                                             ++++++
+
+error[E0282]: type annotations needed
+   --> crates\jcode-mcp-advanced\src\client.rs:339:13
+    |
+339 |         let transport = self.get_transport()?;
+    |             ^^^^^^^^^
+...
+348 |         match transport.send(request).await {
+    |               --------- type must be known at this point
+    |
+help: consider giving `transport` an explicit type
+    |
+339 |         let transport: /* Type */ = self.get_transport()?;
+    |                      ++++++++++++
+
+error[E0599]: no method named `clone` found for opaque type `impl std::future::Future<Output = ConnectionState>` in the
+ current scope
+   --> crates\jcode-mcp-advanced\src\client.rs:362:35
+    |
+362 |         self.conn_manager.state().clone()
+    |                                   ^^^^^ method not found in `impl std::future::Future<Output = ConnectionState>`
+
+error[E0599]: no method named `is_connected` found for opaque type `impl std::future::Future<Output = ConnectionState>`
+ in the current scope
+   --> crates\jcode-mcp-advanced\src\client.rs:367:35
+    |
+367 |         self.conn_manager.state().is_connected()
+    |                                   ^^^^^^^^^^^^ method not found in `impl std::future::Future<Output = ConnectionS
+tate>`
+    |
+    = help: items from traits can only be used if the trait is implemented and in scope
+note: `McpTransport` defines an item `is_connected`, perhaps you need to implement it
+   --> crates\jcode-mcp-advanced\src\transport.rs:40:1
+    |
+ 40 | pub trait McpTransport: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+367 |         self.conn_manager.state().await.is_connected()
+    |                                   ++++++
+
+error[E0369]: binary operation `==` cannot be applied to type `std::option::Option<ToolsCapability>`
+  --> crates\jcode-mcp-advanced\src\types.rs:82:5
+   |
+79 | #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+   |                        --------- in this derive macro expansion
+...
+82 |     pub tools: Option<ToolsCapability>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: an implementation of `PartialEq` might be missing for `ToolsCapability`
+  --> crates\jcode-mcp-advanced\src\types.rs:92:1
+   |
+92 | pub struct ToolsCapability {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^ must implement `PartialEq`
+help: consider annotating `ToolsCapability` with `#[derive(PartialEq)]`
+   |
+92 + #[derive(PartialEq)]
+93 | pub struct ToolsCapability {
+   |
+
+error[E0369]: binary operation `==` cannot be applied to type `std::option::Option<ResourceCapability>`
+  --> crates\jcode-mcp-advanced\src\types.rs:84:5
+   |
+79 | #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+   |                        --------- in this derive macro expansion
+...
+84 |     pub resources: Option<ResourceCapability>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: an implementation of `PartialEq` might be missing for `ResourceCapability`
+  --> crates\jcode-mcp-advanced\src\types.rs:97:1
+   |
+97 | pub struct ResourceCapability {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ must implement `PartialEq`
+help: consider annotating `ResourceCapability` with `#[derive(PartialEq)]`
+   |
+97 + #[derive(PartialEq)]
+98 | pub struct ResourceCapability {
+   |
+
+error[E0369]: binary operation `==` cannot be applied to type `std::option::Option<PromptCapability>`
+   --> crates\jcode-mcp-advanced\src\types.rs:86:5
+    |
+ 79 | #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+    |                        --------- in this derive macro expansion
+...
+ 86 |     pub prompts: Option<PromptCapability>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+note: an implementation of `PartialEq` might be missing for `PromptCapability`
+   --> crates\jcode-mcp-advanced\src\types.rs:103:1
+    |
+103 | pub struct PromptCapability {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ must implement `PartialEq`
+help: consider annotating `PromptCapability` with `#[derive(PartialEq)]`
+    |
+103 + #[derive(PartialEq)]
+104 | pub struct PromptCapability {
+    |
+
+error[E0369]: binary operation `==` cannot be applied to type `std::option::Option<LoggingCapability>`
+   --> crates\jcode-mcp-advanced\src\types.rs:88:5
+    |
+ 79 | #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+    |                        --------- in this derive macro expansion
+...
+ 88 |     pub logging: Option<LoggingCapability>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+note: an implementation of `PartialEq` might be missing for `LoggingCapability`
+   --> crates\jcode-mcp-advanced\src\types.rs:108:1
+    |
+108 | pub struct LoggingCapability {}
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ must implement `PartialEq`
+help: consider annotating `LoggingCapability` with `#[derive(PartialEq)]`
+    |
+108 + #[derive(PartialEq)]
+109 | pub struct LoggingCapability {}
+    |
+
+error[E0277]: the trait bound `ToolsCapability: std::cmp::Eq` is not satisfied
+   --> crates\jcode-mcp-advanced\src\types.rs:82:5
+    |
+ 79 | #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+    |                                   -- in this derive macro expansion
+...
+ 82 |     pub tools: Option<ToolsCapability>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::cmp::Eq` is not implemented for `ToolsCapability`
+    |
+help: the trait `std::cmp::Eq` is implemented for `std::option::Option<T>`
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs
+:595:16
+    |
+595 | #[derive_const(Eq)]
+    |                ^^
+    = note: required for `std::option::Option<ToolsCapability>` to implement `std::cmp::Eq`
+note: required by a bound in `AssertParamIsEq`
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\cmp.rs:37
+1:31
+    |
+371 | pub struct AssertParamIsEq<T: Eq + PointeeSized> {
+    |                               ^^ required by this bound in `AssertParamIsEq`
+help: consider annotating `ToolsCapability` with `#[derive(Eq)]`
+    |
+ 92 + #[derive(Eq)]
+ 93 | pub struct ToolsCapability {
+    |
+
+error[E0277]: the trait bound `ResourceCapability: std::cmp::Eq` is not satisfied
+   --> crates\jcode-mcp-advanced\src\types.rs:84:5
+    |
+ 79 | #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+    |                                   -- in this derive macro expansion
+...
+ 84 |     pub resources: Option<ResourceCapability>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::cmp::Eq` is not implemented for `ResourceCapability
+`
+    |
+help: the trait `std::cmp::Eq` is implemented for `std::option::Option<T>`
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs
+:595:16
+    |
+595 | #[derive_const(Eq)]
+    |                ^^
+    = note: required for `std::option::Option<ResourceCapability>` to implement `std::cmp::Eq`
+note: required by a bound in `AssertParamIsEq`
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\cmp.rs:37
+1:31
+    |
+371 | pub struct AssertParamIsEq<T: Eq + PointeeSized> {
+    |                               ^^ required by this bound in `AssertParamIsEq`
+help: consider annotating `ResourceCapability` with `#[derive(Eq)]`
+    |
+ 97 + #[derive(Eq)]
+ 98 | pub struct ResourceCapability {
+    |
+
+error[E0277]: the trait bound `PromptCapability: std::cmp::Eq` is not satisfied
+   --> crates\jcode-mcp-advanced\src\types.rs:86:5
+    |
+ 79 | #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+    |                                   -- in this derive macro expansion
+...
+ 86 |     pub prompts: Option<PromptCapability>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::cmp::Eq` is not implemented for `PromptCapability`
+    |
+help: the trait `std::cmp::Eq` is implemented for `std::option::Option<T>`
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs
+:595:16
+    |
+595 | #[derive_const(Eq)]
+    |                ^^
+    = note: required for `std::option::Option<PromptCapability>` to implement `std::cmp::Eq`
+note: required by a bound in `AssertParamIsEq`
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\cmp.rs:37
+1:31
+    |
+371 | pub struct AssertParamIsEq<T: Eq + PointeeSized> {
+    |                               ^^ required by this bound in `AssertParamIsEq`
+help: consider annotating `PromptCapability` with `#[derive(Eq)]`
+    |
+103 + #[derive(Eq)]
+104 | pub struct PromptCapability {
+    |
+
+error[E0277]: the trait bound `LoggingCapability: std::cmp::Eq` is not satisfied
+   --> crates\jcode-mcp-advanced\src\types.rs:88:5
+    |
+ 79 | #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+    |                                   -- in this derive macro expansion
+...
+ 88 |     pub logging: Option<LoggingCapability>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::cmp::Eq` is not implemented for `LoggingCapability`
+    |
+help: the trait `std::cmp::Eq` is implemented for `std::option::Option<T>`
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs
+:595:16
+    |
+595 | #[derive_const(Eq)]
+    |                ^^
+    = note: required for `std::option::Option<LoggingCapability>` to implement `std::cmp::Eq`
+note: required by a bound in `AssertParamIsEq`
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\cmp.rs:37
+1:31
+    |
+371 | pub struct AssertParamIsEq<T: Eq + PointeeSized> {
+    |                               ^^ required by this bound in `AssertParamIsEq`
+help: consider annotating `LoggingCapability` with `#[derive(Eq)]`
+    |
+108 + #[derive(Eq)]
+109 | pub struct LoggingCapability {}
+    |
+
+warning: unreachable call
+  --> crates\jcode-mcp-advanced\src\transport.rs:92:32
+   |
+92 |             write_tx: Arc::new(tokio::sync::Mutex::new(
+   |                                ^^^^^^^^^^^^^^^^^^^^^^^ unreachable call
+93 |                 // placeholder, replaced on connect
+94 |                 unimplemented!()
+   |                 ---------------- any code following this expression is unreachable
+   |
+   = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable call
+  --> crates\jcode-mcp-advanced\src\transport.rs:96:31
+   |
+96 |             read_rx: Arc::new(tokio::sync::Mutex::new(unimplemented!())),
+   |                               ^^^^^^^^^^^^^^^^^^^^^^^ ---------------- any code following this expression is unrea
+chable
+   |                               |
+   |                               unreachable call
+
+error[E0599]: the method `write_all` exists for struct `MutexGuard<'_, Option<BufWriter<ChildStdin>>>`, but its trait b
+ounds were not satisfied
+   --> crates\jcode-mcp-advanced\src\transport.rs:166:20
+    |
+166 |             writer.write_all(header.as_bytes()).await?;
+    |                    ^^^^^^^^^ method cannot be called on `MutexGuard<'_, Option<BufWriter<ChildStdin>>>` due to un
+satisfied trait bounds
+    |
+   ::: C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs
+:600:1
+    |
+600 | pub enum Option<T> {
+    | ------------------ doesn't satisfy `_: AsyncWriteExt` or `_: AsyncWrite`
+    |
+   ::: C:\Users\lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-1.49.0\src\sync\mutex.rs:151:1
+    |
+151 | pub struct MutexGuard<'a, T: ?Sized> {
+    | ------------------------------------ doesn't satisfy `_: AsyncWriteExt` or `_: AsyncWrite`
+    |
+    = note: the following trait bounds were not satisfied:
+            `tokio::sync::MutexGuard<'_, std::option::Option<tokio::io::BufWriter<tokio::process::ChildStdin>>>: AsyncW
+rite`
+            which is required by `tokio::sync::MutexGuard<'_, std::option::Option<tokio::io::BufWriter<tokio::process::
+ChildStdin>>>: AsyncWriteExt`
+            `std::option::Option<tokio::io::BufWriter<tokio::process::ChildStdin>>: AsyncWrite`
+            which is required by `std::option::Option<tokio::io::BufWriter<tokio::process::ChildStdin>>: AsyncWriteExt`
+    = note: the full name for the type has been written to 'D:\studying\Codecargo\opensource\jcode\target\debug\deps\jc
+ode_mcp_advanced-4881f3085b672e41.long-type-8050121280929179103.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+error[E0599]: the method `write_all` exists for struct `MutexGuard<'_, Option<BufWriter<ChildStdin>>>`, but its trait b
+ounds were not satisfied
+   --> crates\jcode-mcp-advanced\src\transport.rs:167:20
+    |
+167 |             writer.write_all(json_str.as_bytes()).await?;
+    |                    ^^^^^^^^^ method cannot be called on `MutexGuard<'_, Option<BufWriter<ChildStdin>>>` due to un
+satisfied trait bounds
+    |
+   ::: C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs
+:600:1
+    |
+600 | pub enum Option<T> {
+    | ------------------ doesn't satisfy `_: AsyncWriteExt` or `_: AsyncWrite`
+    |
+   ::: C:\Users\lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-1.49.0\src\sync\mutex.rs:151:1
+    |
+151 | pub struct MutexGuard<'a, T: ?Sized> {
+    | ------------------------------------ doesn't satisfy `_: AsyncWriteExt` or `_: AsyncWrite`
+    |
+    = note: the following trait bounds were not satisfied:
+            `tokio::sync::MutexGuard<'_, std::option::Option<tokio::io::BufWriter<tokio::process::ChildStdin>>>: AsyncW
+rite`
+            which is required by `tokio::sync::MutexGuard<'_, std::option::Option<tokio::io::BufWriter<tokio::process::
+ChildStdin>>>: AsyncWriteExt`
+            `std::option::Option<tokio::io::BufWriter<tokio::process::ChildStdin>>: AsyncWrite`
+            which is required by `std::option::Option<tokio::io::BufWriter<tokio::process::ChildStdin>>: AsyncWriteExt`
+    = note: the full name for the type has been written to 'D:\studying\Codecargo\opensource\jcode\target\debug\deps\jc
+ode_mcp_advanced-4881f3085b672e41.long-type-8050121280929179103.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+error[E0599]: the method `flush` exists for struct `MutexGuard<'_, Option<BufWriter<ChildStdin>>>`, but its trait bound
+s were not satisfied
+   --> crates\jcode-mcp-advanced\src\transport.rs:168:20
+    |
+168 |             writer.flush().await?;
+    |                    ^^^^^ method cannot be called on `MutexGuard<'_, Option<BufWriter<ChildStdin>>>` due to unsati
+sfied trait bounds
+    |
+   ::: C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs
+:600:1
+    |
+600 | pub enum Option<T> {
+    | ------------------ doesn't satisfy `_: AsyncWriteExt` or `_: AsyncWrite`
+    |
+   ::: C:\Users\lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-1.49.0\src\sync\mutex.rs:151:1
+    |
+151 | pub struct MutexGuard<'a, T: ?Sized> {
+    | ------------------------------------ doesn't satisfy `_: AsyncWriteExt` or `_: AsyncWrite`
+    |
+    = note: the following trait bounds were not satisfied:
+            `tokio::sync::MutexGuard<'_, std::option::Option<tokio::io::BufWriter<tokio::process::ChildStdin>>>: AsyncW
+rite`
+            which is required by `tokio::sync::MutexGuard<'_, std::option::Option<tokio::io::BufWriter<tokio::process::
+ChildStdin>>>: AsyncWriteExt`
+            `std::option::Option<tokio::io::BufWriter<tokio::process::ChildStdin>>: AsyncWrite`
+            which is required by `std::option::Option<tokio::io::BufWriter<tokio::process::ChildStdin>>: AsyncWriteExt`
+    = note: the full name for the type has been written to 'D:\studying\Codecargo\opensource\jcode\target\debug\deps\jc
+ode_mcp_advanced-4881f3085b672e41.long-type-8050121280929179103.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+error[E0599]: the method `write_all` exists for struct `MutexGuard<'_, Option<BufWriter<ChildStdin>>>`, but its trait b
+ounds were not satisfied
+   --> crates\jcode-mcp-advanced\src\transport.rs:191:16
+    |
+191 |         writer.write_all(header.as_bytes()).await?;
+    |                ^^^^^^^^^ method cannot be called on `MutexGuard<'_, Option<BufWriter<ChildStdin>>>` due to unsati
+sfied trait bounds
+    |
+   ::: C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs
+:600:1
+    |
+600 | pub enum Option<T> {
+    | ------------------ doesn't satisfy `_: AsyncWriteExt` or `_: AsyncWrite`
+    |
+   ::: C:\Users\lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-1.49.0\src\sync\mutex.rs:151:1
+    |
+151 | pub struct MutexGuard<'a, T: ?Sized> {
+    | ------------------------------------ doesn't satisfy `_: AsyncWriteExt` or `_: AsyncWrite`
+    |
+    = note: the following trait bounds were not satisfied:
+            `tokio::sync::MutexGuard<'_, std::option::Option<tokio::io::BufWriter<tokio::process::ChildStdin>>>: AsyncW
+rite`
+            which is required by `tokio::sync::MutexGuard<'_, std::option::Option<tokio::io::BufWriter<tokio::process::
+ChildStdin>>>: AsyncWriteExt`
+            `std::option::Option<tokio::io::BufWriter<tokio::process::ChildStdin>>: AsyncWrite`
+            which is required by `std::option::Option<tokio::io::BufWriter<tokio::process::ChildStdin>>: AsyncWriteExt`
+    = note: the full name for the type has been written to 'D:\studying\Codecargo\opensource\jcode\target\debug\deps\jc
+ode_mcp_advanced-4881f3085b672e41.long-type-13675092323304632313.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+error[E0599]: the method `write_all` exists for struct `MutexGuard<'_, Option<BufWriter<ChildStdin>>>`, but its trait b
+ounds were not satisfied
+   --> crates\jcode-mcp-advanced\src\transport.rs:192:16
+    |
+192 |         writer.write_all(json_str.as_bytes()).await?;
+    |                ^^^^^^^^^ method cannot be called on `MutexGuard<'_, Option<BufWriter<ChildStdin>>>` due to unsati
+sfied trait bounds
+    |
+   ::: C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs
+:600:1
+    |
+600 | pub enum Option<T> {
+    | ------------------ doesn't satisfy `_: AsyncWriteExt` or `_: AsyncWrite`
+    |
+   ::: C:\Users\lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-1.49.0\src\sync\mutex.rs:151:1
+    |
+151 | pub struct MutexGuard<'a, T: ?Sized> {
+    | ------------------------------------ doesn't satisfy `_: AsyncWriteExt` or `_: AsyncWrite`
+    |
+    = note: the following trait bounds were not satisfied:
+            `tokio::sync::MutexGuard<'_, std::option::Option<tokio::io::BufWriter<tokio::process::ChildStdin>>>: AsyncW
+rite`
+            which is required by `tokio::sync::MutexGuard<'_, std::option::Option<tokio::io::BufWriter<tokio::process::
+ChildStdin>>>: AsyncWriteExt`
+            `std::option::Option<tokio::io::BufWriter<tokio::process::ChildStdin>>: AsyncWrite`
+            which is required by `std::option::Option<tokio::io::BufWriter<tokio::process::ChildStdin>>: AsyncWriteExt`
+    = note: the full name for the type has been written to 'D:\studying\Codecargo\opensource\jcode\target\debug\deps\jc
+ode_mcp_advanced-4881f3085b672e41.long-type-13675092323304632313.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+error[E0599]: the method `flush` exists for struct `MutexGuard<'_, Option<BufWriter<ChildStdin>>>`, but its trait bound
+s were not satisfied
+   --> crates\jcode-mcp-advanced\src\transport.rs:193:16
+    |
+193 |         writer.flush().await?;
+    |                ^^^^^ method cannot be called on `MutexGuard<'_, Option<BufWriter<ChildStdin>>>` due to unsatisfie
+d trait bounds
+    |
+   ::: C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs
+:600:1
+    |
+600 | pub enum Option<T> {
+    | ------------------ doesn't satisfy `_: AsyncWriteExt` or `_: AsyncWrite`
+    |
+   ::: C:\Users\lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-1.49.0\src\sync\mutex.rs:151:1
+    |
+151 | pub struct MutexGuard<'a, T: ?Sized> {
+    | ------------------------------------ doesn't satisfy `_: AsyncWriteExt` or `_: AsyncWrite`
+    |
+    = note: the following trait bounds were not satisfied:
+            `tokio::sync::MutexGuard<'_, std::option::Option<tokio::io::BufWriter<tokio::process::ChildStdin>>>: AsyncW
+rite`
+            which is required by `tokio::sync::MutexGuard<'_, std::option::Option<tokio::io::BufWriter<tokio::process::
+ChildStdin>>>: AsyncWriteExt`
+            `std::option::Option<tokio::io::BufWriter<tokio::process::ChildStdin>>: AsyncWrite`
+            which is required by `std::option::Option<tokio::io::BufWriter<tokio::process::ChildStdin>>: AsyncWriteExt`
+    = note: the full name for the type has been written to 'D:\studying\Codecargo\opensource\jcode\target\debug\deps\jc
+ode_mcp_advanced-4881f3085b672e41.long-type-13675092323304632313.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+warning: use of deprecated method `rand::Rng::gen_range`: Renamed to `random_range`
+  --> crates\jcode-mcp-advanced\src\connection_manager.rs:51:30
+   |
+51 |             let j: i64 = rng.gen_range(-jitter_range..=jitter_range);
+   |                              ^^^^^^^^^
+
+warning: unused import: `AsyncReadExt`
+  --> crates\jcode-mcp-advanced\src\transport.rs:14:17
+   |
+14 | use tokio::io::{AsyncReadExt, AsyncWriteExt};
+   |                 ^^^^^^^^^^^^
+
+warning: unused variable: `stdin`
+   --> crates\jcode-mcp-advanced\src\transport.rs:124:13
+    |
+124 |         let stdin = child.stdin.take()
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_stdin`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `stdout`
+   --> crates\jcode-mcp-advanced\src\transport.rs:126:13
+    |
+126 |         let stdout = child.stdout.take()
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_stdout`
+
+warning: unused variable: `body`
+   --> crates\jcode-mcp-advanced\src\transport.rs:331:13
+    |
+331 |         let body = response.text().await?;
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_body`
+
+warning: unused variable: `fallback_step_id`
+   --> crates\jcode-p2-features\src\workflow.rs:333:51
+    |
+333 |                         ErrorStrategy::Fallback { fallback_step_id } => {
+    |                                                   ^^^^^^^^^^^^^^^^ help: try ignoring the field: `fallback_step_i
+d: _`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `rendered_cmd`
+   --> crates\jcode-p2-features\src\workflow.rs:356:25
+    |
+356 |                     let rendered_cmd = _ctx.render_template(cmd);
+    |                         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rendered_cmd`
+
+warning: unused variable: `key`
+   --> crates\jcode-p2-features\src\config_wizard.rs:195:59
+    |
+195 |     fn add_select_one(&mut self, title: &str, desc: &str, key: &str, required: bool, options: Vec<SelectOption>) 
+{
+    |                                                           ^^^ help: if this is intentional, prefix it with an und
+erscore: `_key`
+
+warning: unused variable: `key`
+   --> crates\jcode-p2-features\src\config_wizard.rs:209:59
+    |
+209 |     fn add_text_input(&mut self, title: &str, desc: &str, key: &str, required: bool, placeholder: Option<String>,
+ is_password: bool) {
+    |                                                           ^^^ help: if this is intentional, prefix it with an und
+erscore: `_key`
+
+warning: unreachable pattern
+   --> crates\jcode-p2-features\src\brief_mode.rs:301:25
+    |
+301 |                         other_val => format!("{:?}", other_val),
+    |                         ^^^^^^^^^ no value can reach this
+    |
+note: multiple earlier patterns match some of the same values
+   --> crates\jcode-p2-features\src\brief_mode.rs:301:25
+    |
+288 |                         serde_json::Value::String(s) => s.clone(),
+    |                         ---------------------------- matches some of the same values
+289 |                         serde_json::Value::Number(n) => n.to_string(),
+    |                         ---------------------------- matches some of the same values
+290 |                         serde_json::Value::Bool(b) => b.to_string(),
+    |                         -------------------------- matches some of the same values
+291 |                         serde_json::Value::Null => "null".into(),
+    |                         ----------------------- matches some of the same values
+...
+301 |                         other_val => format!("{:?}", other_val),
+    |                         ^^^^^^^^^ ...and 1 other patterns collectively make this unreachable
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+error[E0382]: borrow of moved value: `tools`
+    --> crates\jcode-mcp-advanced\src\tool_registry.rs:56:59
+     |
+  45 |     pub fn update_tools(&mut self, tools: Vec<McpTool>) {
+     |                                    ----- move occurs because `tools` has type `Vec<types::McpTool>`, which does 
+not implement the `Copy` trait
+  46 |         let now = Instant::now();
+  47 |         for tool in tools {
+     |                     ----- `tools` moved due to this implicit call to `.into_iter()`
+...
+  56 |         let current_names: std::collections::HashSet<_> = tools.iter().map(|t| t.name.clone()).collect();
+     |                                                           ^^^^^ value borrowed here after move
+     |
+note: `into_iter` takes ownership of the receiver `self`, which moves `tools`
+    --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\iter\tra
+its\collect.rs:310:18
+     |
+ 310 |     fn into_iter(self) -> Self::IntoIter;
+     |                  ^^^^
+     = note: borrow occurs due to deref coercion to `[types::McpTool]`
+note: deref defined here
+    --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\vec\mod
+.rs:3661:5
+     |
+3661 |     type Target = [T];
+     |     ^^^^^^^^^^^
+help: consider iterating over a slice of the `Vec<types::McpTool>`'s content to avoid moving into the `for` loop
+     |
+  47 |         for tool in &tools {
+     |                     +
+
+warning: unused variable: `request`
+  --> crates\jcode-mcp-advanced\src\sampling.rs:53:32
+   |
+53 |     pub async fn sample(&self, request: CreateMessageRequest) -> Result<CreateResult, String> {
+   |                                ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request`
+
+warning: unused variable: `cb`
+  --> crates\jcode-mcp-advanced\src\sampling.rs:58:13
+   |
+58 |         let cb = self.callback.as_ref().unwrap();
+   |             ^^ help: if this is intentional, prefix it with an underscore: `_cb`
+
+warning: unused variable: `config`
+   --> crates\jcode-p2-features\src\notification.rs:400:59
+    |
+400 |     async fn send_email(&self, msg: &NotificationMessage, config: &ChannelConfig) -> Result<(), String> {
+    |                                                           ^^^^^^ help: if this is intentional, prefix it with an 
+underscore: `_config`
+
+warning: variant `Skip` is never constructed
+  --> crates\jcode-p2-features\src\brief_mode.rs:25:5
+   |
+22 | enum LineFormat {
+   |      ---------- variant in this enum
+...
+25 |     Skip,
+   |     ^^^^
+   |
+   = note: `LineFormat` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored durin
+g dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0277, E0282, E0369, E0382, E0599.
+For more information about an error, try `rustc --explain E0277`.
+warning: `jcode-mcp-advanced` (lib) generated 13 warnings
+error: could not compile `jcode-mcp-advanced` (lib) due to 22 previous errors; 13 warnings emitted
+warning: build failed, waiting for other jobs to finish...
+warning: `jcode-p2-features` (lib) generated 9 warnings (run `cargo fix --lib -p jcode-p2-features` to apply 7 suggesti
+ons)

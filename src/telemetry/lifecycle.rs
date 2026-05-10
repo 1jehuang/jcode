@@ -88,6 +88,7 @@ pub(super) fn emit_lifecycle_event(
                 swarm_task_count: s.swarm_task_count,
                 swarm_success_count: s.swarm_success_count,
                 user_cancelled_count: s.user_cancelled_count,
+                auto_continue_count: s.auto_continue_count,
                 tool_cat_read_search: s.tool_cat_read_search,
                 tool_cat_write: s.tool_cat_write,
                 tool_cat_shell: s.tool_cat_shell,

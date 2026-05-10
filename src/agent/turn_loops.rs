@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent::turn_strategy::{TurnStrategy, StandardTurnStrategy};
 
 impl Agent {
     /// Run turns until no more tool calls
@@ -7,6 +8,17 @@ impl Agent {
     pub(super) const MAX_INCOMPLETE_CONTINUATION_ATTEMPTS: u32 = 3;
 
     pub(super) async fn run_turn(&mut self, print_output: bool) -> Result<String> {
+        self.run_turn_with_strategy(&StandardTurnStrategy::new(), print_output).await
+    }
+
+    /// Run a turn with a pluggable strategy. Each phase of the turn loop
+    /// delegates to the strategy, enabling different behaviors (swarm, batch, etc.)
+    /// without duplicating the stream handling and tool execution logic.
+    pub(crate) async fn run_turn_with_strategy<S: TurnStrategy>(
+        &mut self,
+        strategy: &S,
+        print_output: bool,
+    ) -> Result<String> {
         self.set_log_context();
         let mut final_text = String::new();
         let trace = trace_enabled();
@@ -14,55 +26,35 @@ impl Agent {
         let mut incomplete_continuations = 0u32;
 
         loop {
-            let repaired = self.repair_missing_tool_outputs();
+            // Phase 1: Repair missing tool outputs
+            let repaired = strategy.repair(self);
             if repaired > 0 {
                 logging::warn(&format!(
                     "Recovered {} missing tool output(s) before API call",
                     repaired
                 ));
             }
-            let (messages, compaction_event) = self.messages_for_provider();
+
+            // Phase 2-3: Prepare messages + handle compaction
+            let (messages, compaction_event) = strategy.prepare_messages(self);
             if let Some(event) = compaction_event {
-                // Reset cache tracker and tool lock on compaction since the message history changes
-                self.cache_tracker.reset();
-                self.locked_tools = None;
-                if print_output {
-                    let tokens_str = event
-                        .pre_tokens
-                        .map(|t| format!(" ({} tokens)", t))
-                        .unwrap_or_default();
-                    println!("📦 Context compacted ({}){}", event.trigger, tokens_str);
-                }
+                strategy.handle_compaction(self, &event, print_output);
             }
 
-            let tools = self.tool_definitions().await;
+            // Phase 4-8: Tools + memory + prompt + cache + microcompact
+            let tools = strategy.tool_defs(self).await;
             let messages: std::sync::Arc<[Message]> = messages.into();
-            // Non-blocking memory: uses pending result from last turn, spawns check for next turn
-            let memory_pending =
-                self.build_memory_prompt_nonblocking_shared(std::sync::Arc::clone(&messages), None);
-            // Use split prompt for better caching - static content cached, dynamic not
-            let split_prompt = self.build_system_prompt_split(None);
+            let memory_pending = strategy.build_memory(self, std::sync::Arc::clone(&messages));
+            let split_prompt = strategy.build_prompt(self);
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
+            strategy.record_cache(self, &messages);
+            let mut messages_with_memory: Vec<Message> = messages.to_vec();
+            strategy.microcompact(&mut messages_with_memory, print_output);
 
-            // Check for client-side cache violations before memory injection.
-            // Memory is an ephemeral suffix that changes each turn; tracking it would cause
-            // false-positive violations every turn (prior turn's memory ≠ current history prefix).
-            self.record_client_cache_request(&messages);
-
-            // Inject memory as a user message at the end (preserves cache prefix)
-            let mut messages_with_memory: Vec<Message> = messages.iter().cloned().collect();
-            if let Some(memory) = memory_pending.as_ref() {
-                let memory_count = memory.count.max(1);
-                let age_ms = memory.computed_at.elapsed().as_millis() as u64;
-                crate::memory::record_injected_prompt(&memory.prompt, memory_count, age_ms);
+            // Phase 9: Inject memory
+            if let Some(ref memory) = memory_pending {
+                strategy.inject_memory(&mut messages_with_memory, memory);
                 self.record_memory_injection_in_session(memory);
-                logging::info(&format!(
-                    "Memory injected as message ({} chars)",
-                    memory.prompt.len()
-                ));
-                let memory_msg =
-                    format!("<system-reminder>\n{}\n</system-reminder>", memory.prompt);
-                messages_with_memory.push(Message::user(&memory_msg));
             }
 
             logging::info(&format!(
@@ -103,9 +95,7 @@ impl Agent {
                     if self.try_auto_compact_after_context_limit(&e.to_string()) {
                         context_limit_retries += 1;
                         if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
-                            logging::warn(
-                                "Context-limit compaction retry limit reached; giving up",
-                            );
+                            logging::warn("Context-limit compaction retry limit reached; giving up");
                             return Err(anyhow::anyhow!(
                                 "Context limit exceeded after {} compaction retries",
                                 Self::MAX_CONTEXT_LIMIT_RETRIES
@@ -602,14 +592,66 @@ impl Agent {
                 continue;
             }
 
-            // If no tool calls, we're done
+            // If no tool calls, check token budget auto-continue before stopping
             if tool_calls.is_empty() {
+                // First: handle incomplete/truncated responses (max_tokens hit)
                 if self.maybe_continue_incomplete_response(
                     stop_reason.as_deref(),
                     &mut incomplete_continuations,
                 )? {
                     continue;
                 }
+
+                // Second: check token budget for auto-continue on long tasks
+                let global_turn_tokens = usage_input.unwrap_or(0) + usage_output.unwrap_or(0);
+                match self.token_budget_tracker.check(global_turn_tokens) {
+                    crate::token_budget::BudgetDecision::Continue {
+                        nudge_message,
+                        continuation_count,
+                        pct,
+                        turn_tokens,
+                        budget,
+                    } => {
+                        logging::info(&format!(
+                            "Token budget auto-continue #{continuation_count}: {pct}% ({turn_tokens}/{budget} tokens)"
+                        ));
+                        if print_output {
+                            println!(
+                                "\n[auto-continue] Budget at {pct}% — continuing task (#{continuation_count})\n"
+                            );
+                        }
+                        // Inject nudge as a user message so the model continues
+                        self.add_message(Role::User, vec![ContentBlock::Text {
+                            text: nudge_message,
+                            cache_control: None,
+                        }]);
+                        self.session.save()?;
+                        continue;
+                    }
+                    crate::token_budget::BudgetDecision::Stop { completion_event } => {
+                        if let Some(ev) = completion_event {
+                            logging::info(&format!(
+                                "Token budget complete: {} continuations in {}ms (diminished={})",
+                                ev.continuation_count, ev.duration_ms, ev.diminishing_returns
+                            ));
+                            if print_output {
+                                println!(
+                                    "\n[auto-continue] Task complete after {} turn(s)\n",
+                                    ev.continuation_count
+                                );
+                            }
+                            // Record telemetry
+                            crate::telemetry::record_auto_continue_completed(
+                                ev.continuation_count,
+                                ev.duration_ms,
+                                ev.diminishing_returns,
+                            );
+                        }
+                        // Reset budget tracker for next user request
+                        self.token_budget_tracker.reset();
+                    }
+                }
+
                 logging::info("Turn complete - no tool calls, returning");
                 if print_output {
                     println!();

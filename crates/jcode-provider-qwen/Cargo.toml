@@ -1,0 +1,22 @@
+[package]
+name = "jcode-provider-qwen"
+version = "0.1.0"
+edition = "2024"
+description = "Qwen3.5-35B-A3B local model provider via Ollama for JCode"
+
+[dependencies]
+jcode-provider-core = { path = "../jcode-provider-core" }
+jcode-message-types = { path = "../jcode-message-types" }
+anyhow = "1"
+async-trait = "0.1"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "time"] }
+futures = "0.3"
+tokio-stream = "0.1"
+bytes = "1"
+tracing = "0.1"
+url = "2"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }

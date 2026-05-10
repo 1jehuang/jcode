@@ -377,6 +377,24 @@ pub(crate) enum Command {
         output: Option<String>,
     },
 
+    /// Build mode: plan + execute + verify pipeline
+    Build {
+        /// The build request / goal description
+        message: String,
+
+        /// Disable auto-approve (ask for each step)
+        #[arg(long)]
+        manual: bool,
+
+        /// Skip post-build micro-ci verification
+        #[arg(long)]
+        no_verify: bool,
+
+        /// Max retries per failed step
+        #[arg(long, default_value = "3")]
+        max_retries: u32,
+    },
+
     /// Save or restore the current set of open jcode windows across a system reboot
     Restart {
         #[command(subcommand)]

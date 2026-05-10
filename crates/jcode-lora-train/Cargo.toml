@@ -1,0 +1,14 @@
+[package]
+name = "jcode-lora-train"
+version = "0.1.0"
+edition = "2021"
+description = "Qwen LoRA fine-tuning for code completion — data collection + inference adapter"
+
+[dependencies]
+tokio = { workspace = true, features = ["fs", "sync"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+chrono = { workspace = true }
+jcode-completion = { path = "../jcode-completion" }

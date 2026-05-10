@@ -1,0 +1,52 @@
+[package]
+name = "jcode-unified-scheduler"
+version = "0.1.0"
+edition = "2024"
+description = "Ruflo-Parallax 统一调度层: 任务调度(GOAP/A*) + 算力调度(DP/Pipeline)融合"
+license = "MIT"
+
+[dependencies]
+# 异步运行时
+tokio = { version = "1", features = ["full", "sync", "rt-multi-thread", "time"] }
+tokio-util = "0.7"
+# 序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 数据结构
+uuid = { version = "1", features = ["v4", "serde"] }
+priority-queue = "2"        # BinaryHeap 替代, 支持优先级更新
+indexmap = "2"               # 有序 HashMap, 用于 DAG
+dashmap = "6"                # 并发 HashMap
+# 日志
+tracing = "0.1"
+tracing-subscriber = "0.3"
+# 时间
+chrono = { version = "0.4", features = ["serde"] }
+# 数学/算法
+num-traits = "0.2"
+ordered-float = "4"
+# 错误处理
+thiserror = "2"
+anyhow = "1"
+# 哈希
+fxhash = "0.2"
+# 可选: 本地 LLM 路由
+reqwest = { version = "0.12", default-features = false, features = ["json"], optional = true }
+
+[features]
+default = ["core"]
+core = []                      # 核心调度功能
+goap = []                      # GOAP A* 规划器 (Ruflo)
+parallax = []                  # 两阶段调度器 (Parallax)
+water-filling = []             # 注水负载均衡
+remote-routing = ["reqwest"]   # 远程路由决策
+
+[dev-dependencies]
+criterion = "0.5"
+tokio-test = "0.4"
+tempfile = "3"
+rand = "0.8"
+
+[[bench]]
+name = "scheduler_benchmark"
+harness = false

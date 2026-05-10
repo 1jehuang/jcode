@@ -38,7 +38,7 @@ impl Agent {
         let compaction = self.registry.compaction();
 
         let (dropped, usage_pct) = match compaction.try_write() {
-            Ok(mut manager) => {
+            Some(mut manager) => {
                 let (dropped, usage_pct) = {
                     let all_messages = self.session.provider_messages();
                     manager.update_observed_input_tokens(context_limit);
@@ -58,7 +58,7 @@ impl Agent {
                 self.sync_session_compaction_state_from_manager(&manager);
                 (dropped, usage_pct)
             }
-            Err(_) => {
+            None => {
                 logging::warn("Context-limit auto-recovery skipped: compaction manager lock busy");
                 return false;
             }
@@ -91,14 +91,14 @@ impl Agent {
     fn try_recover_oversized_openai_native_compaction(&mut self) -> bool {
         let compaction = self.registry.compaction();
         let recovered = match compaction.try_write() {
-            Ok(mut manager) => {
+            Some(mut manager) => {
                 if !manager.discard_oversized_openai_native_compaction() {
                     return false;
                 }
                 self.sync_session_compaction_state_from_manager(&manager);
                 true
             }
-            Err(_) => {
+            None => {
                 logging::warn(
                     "OpenAI native compaction recovery skipped: compaction manager lock busy",
                 );
@@ -172,7 +172,7 @@ impl Agent {
             cache_creation_input_tokens,
         );
         let compaction = self.registry.compaction();
-        if let Ok(mut manager) = compaction.try_write() {
+        if let Some(mut manager) = compaction.try_write() {
             manager.update_observed_input_tokens(observed);
             manager.push_token_snapshot(observed);
         };
@@ -194,7 +194,7 @@ impl Agent {
             return;
         }
         let compaction = self.registry.compaction();
-        if let Ok(mut manager) = compaction.try_write() {
+        if let Some(mut manager) = compaction.try_write() {
             manager.push_embedding_snapshot(text);
         };
     }

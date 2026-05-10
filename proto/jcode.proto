@@ -1,0 +1,1868 @@
+syntax = "proto3";
+
+package jcode;
+
+import "google/protobuf/struct.proto";
+
+option go_package = "github.com/1jehuang/jcode/proto";
+option java_multiple_files = true;
+option java_package = "com.jcode";
+option java_outer_classname = "JcodeProto";
+
+service SessionService {
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
+  rpc UpdateSession(UpdateSessionRequest) returns (UpdateSessionResponse);
+  rpc DeleteSession(DeleteSessionRequest) returns (DeleteSessionResponse);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+}
+
+message CreateSessionRequest {
+  string workspace_name = 1;
+  string workspace_path = 2;
+  string tenant_id = 3;
+}
+
+message CreateSessionResponse {
+  Session session = 1;
+}
+
+message GetSessionRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+}
+
+message GetSessionResponse {
+  Session session = 1;
+}
+
+message UpdateSessionRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  SessionStatus status = 3;
+}
+
+message UpdateSessionResponse {
+  Session session = 1;
+}
+
+message DeleteSessionRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+}
+
+message DeleteSessionResponse {
+  bool success = 1;
+}
+
+message ListSessionsRequest {
+  string tenant_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListSessionsResponse {
+  repeated Session sessions = 1;
+  string next_page_token = 2;
+}
+
+message Session {
+  string id = 1;
+  string workspace_name = 2;
+  string workspace_path = 3;
+  SessionStatus status = 4;
+  string tenant_id = 5;
+  string created_at = 6;
+  string last_active_at = 7;
+  int32 context_tokens = 8;
+}
+
+enum SessionStatus {
+  SESSION_STATUS_UNSPECIFIED = 0;
+  SESSION_STATUS_ACTIVE = 1;
+  SESSION_STATUS_IDLE = 2;
+  SESSION_STATUS_SUSPENDED = 3;
+  SESSION_STATUS_TERMINATED = 4;
+}
+
+service ChatService {
+  rpc Chat(ChatRequest) returns (ChatResponse);
+  rpc ChatStream(ChatStreamRequest) returns (stream ChatStreamResponse);
+  rpc CancelChat(CancelChatRequest) returns (CancelChatResponse);
+}
+
+message ChatRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  repeated Message messages = 3;
+  string model = 4;
+  float temperature = 5;
+  int32 max_tokens = 6;
+  repeated Tool tools = 7;
+}
+
+message ChatResponse {
+  string id = 1;
+  string model = 2;
+  string content = 3;
+  Usage usage = 4;
+  repeated ToolCall tool_calls = 5;
+}
+
+message ChatStreamRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  repeated Message messages = 3;
+  string model = 4;
+  float temperature = 5;
+  int32 max_tokens = 6;
+  repeated Tool tools = 7;
+}
+
+message ChatStreamResponse {
+  string id = 1;
+  string model = 2;
+  string content = 3;
+  bool done = 4;
+  Usage usage = 5;
+  repeated ToolCall tool_calls = 6;
+}
+
+message CancelChatRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+}
+
+message CancelChatResponse {
+  bool success = 1;
+}
+
+message Message {
+  string role = 1;
+  string content = 2;
+  repeated MessagePart parts = 3;
+}
+
+message MessagePart {
+  oneof content {
+    string text = 1;
+    ImageContent image = 2;
+    FileContent file = 3;
+  }
+}
+
+message ImageContent {
+  string url = 1;
+  string format = 2;
+}
+
+message FileContent {
+  string path = 1;
+  string content = 2;
+}
+
+message Tool {
+  string name = 1;
+  string description = 2;
+  google.protobuf.Struct parameters = 3;
+}
+
+message ToolCall {
+  string tool_name = 1;
+  google.protobuf.Struct arguments = 2;
+}
+
+message Usage {
+  int32 prompt_tokens = 1;
+  int32 completion_tokens = 2;
+  int32 total_tokens = 3;
+}
+
+service MemoryService {
+  rpc AddMemory(AddMemoryRequest) returns (AddMemoryResponse);
+  rpc RetrieveMemory(RetrieveMemoryRequest) returns (RetrieveMemoryResponse);
+  rpc ClearMemory(ClearMemoryRequest) returns (ClearMemoryResponse);
+}
+
+message AddMemoryRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string content = 3;
+  float importance = 4;
+  string context = 5;
+  MemoryType memory_type = 6;
+}
+
+message AddMemoryResponse {
+  MemoryEntry entry = 1;
+}
+
+message RetrieveMemoryRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string query = 3;
+  int32 limit = 4;
+}
+
+message RetrieveMemoryResponse {
+  repeated MemoryEntry entries = 1;
+}
+
+message ClearMemoryRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+}
+
+message ClearMemoryResponse {
+  bool success = 1;
+}
+
+message MemoryEntry {
+  string id = 1;
+  string content = 2;
+  float importance = 3;
+  string context = 4;
+  MemoryType memory_type = 5;
+  string created_at = 6;
+}
+
+enum MemoryType {
+  MEMORY_TYPE_UNSPECIFIED = 0;
+  MEMORY_TYPE_FACT = 1;
+  MEMORY_TYPE_PREFERENCE = 2;
+  MEMORY_TYPE_ENTITY = 3;
+  MEMORY_TYPE_CORRECTION = 4;
+}
+
+service AgentService {
+  rpc CreateAgent(CreateAgentRequest) returns (CreateAgentResponse);
+  rpc AssignTask(AssignTaskRequest) returns (AssignTaskResponse);
+  rpc GetAgent(GetAgentRequest) returns (GetAgentResponse);
+  rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
+}
+
+message CreateAgentRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string name = 3;
+  AgentRole role = 4;
+}
+
+message CreateAgentResponse {
+  Agent agent = 1;
+}
+
+message AssignTaskRequest {
+  string agent_id = 1;
+  string tenant_id = 2;
+  string task_description = 3;
+  TaskPriority priority = 4;
+}
+
+message AssignTaskResponse {
+  Agent agent = 1;
+}
+
+message GetAgentRequest {
+  string agent_id = 1;
+  string tenant_id = 2;
+}
+
+message GetAgentResponse {
+  Agent agent = 1;
+}
+
+message ListAgentsRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+}
+
+message ListAgentsResponse {
+  repeated Agent agents = 1;
+}
+
+message Agent {
+  string id = 1;
+  string name = 2;
+  AgentRole role = 3;
+  AgentStatus status = 4;
+  string session_id = 5;
+  string tenant_id = 6;
+}
+
+enum AgentRole {
+  AGENT_ROLE_UNSPECIFIED = 0;
+  AGENT_ROLE_COORDINATOR = 1;
+  AGENT_ROLE_WORKER = 2;
+  AGENT_ROLE_SPECIALIST = 3;
+}
+
+enum AgentStatus {
+  AGENT_STATUS_UNSPECIFIED = 0;
+  AGENT_STATUS_IDLE = 1;
+  AGENT_STATUS_WORKING = 2;
+  AGENT_STATUS_WAITING = 3;
+  AGENT_STATUS_COMPLETED = 4;
+}
+
+enum TaskPriority {
+  TASK_PRIORITY_UNSPECIFIED = 0;
+  TASK_PRIORITY_LOW = 1;
+  TASK_PRIORITY_MEDIUM = 2;
+  TASK_PRIORITY_HIGH = 3;
+  TASK_PRIORITY_URGENT = 4;
+}
+
+service ToolService {
+  rpc ExecuteTool(ExecuteToolRequest) returns (ExecuteToolResponse);
+  rpc ListTools(ListToolsRequest) returns (ListToolsResponse);
+}
+
+message ExecuteToolRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string tool_name = 3;
+  google.protobuf.Struct parameters = 4;
+}
+
+message ExecuteToolResponse {
+  bool success = 1;
+  string output = 2;
+}
+
+message ListToolsRequest {
+  string tenant_id = 1;
+}
+
+message ListToolsResponse {
+  repeated ToolInfo tools = 1;
+}
+
+message ToolInfo {
+  string name = 1;
+  string description = 2;
+  google.protobuf.Struct input_schema = 3;
+}
+
+service TenantService {
+  rpc CreateTenant(CreateTenantRequest) returns (CreateTenantResponse);
+  rpc GetTenant(GetTenantRequest) returns (GetTenantResponse);
+  rpc UpdateTenant(UpdateTenantRequest) returns (UpdateTenantResponse);
+  rpc DeleteTenant(DeleteTenantRequest) returns (DeleteTenantResponse);
+}
+
+message CreateTenantRequest {
+  string name = 1;
+  string domain = 2;
+  TenantLimits limits = 3;
+}
+
+message CreateTenantResponse {
+  Tenant tenant = 1;
+}
+
+message GetTenantRequest {
+  string tenant_id = 1;
+}
+
+message GetTenantResponse {
+  Tenant tenant = 1;
+}
+
+message UpdateTenantRequest {
+  string tenant_id = 1;
+  string name = 2;
+  TenantLimits limits = 3;
+}
+
+message UpdateTenantResponse {
+  Tenant tenant = 1;
+}
+
+message DeleteTenantRequest {
+  string tenant_id = 1;
+}
+
+message DeleteTenantResponse {
+  bool success = 1;
+}
+
+message Tenant {
+  string id = 1;
+  string name = 2;
+  string domain = 3;
+  TenantLimits limits = 4;
+  string created_at = 5;
+}
+
+message TenantLimits {
+  int32 max_sessions = 1;
+  int32 max_agents_per_session = 2;
+  int32 max_tokens_per_request = 3;
+}
+
+service JoyCodeService {
+  rpc GeneratePatch(GeneratePatchRequest) returns (GeneratePatchResponse);
+  rpc ReviewCode(ReviewCodeRequest) returns (ReviewCodeResponse);
+  rpc GenerateTests(GenerateTestsRequest) returns (GenerateTestsResponse);
+  rpc ApplyPatch(ApplyPatchRequest) returns (ApplyPatchResponse);
+}
+
+message GeneratePatchRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string problem_description = 3;
+  string repository_path = 4;
+  repeated string target_files = 5;
+  string model = 6;
+}
+
+message GeneratePatchResponse {
+  string patch_id = 1;
+  repeated Patch candidates = 2;
+  string summary = 3;
+}
+
+message Patch {
+  string id = 1;
+  string diff = 2;
+  string description = 3;
+  float confidence = 4;
+  repeated CodeChange changes = 5;
+}
+
+message CodeChange {
+  string file_path = 1;
+  string change_type = 2;
+  int32 start_line = 3;
+  int32 end_line = 4;
+  string original_code = 5;
+  string modified_code = 6;
+}
+
+message ReviewCodeRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  repeated string files = 3;
+  string repository_path = 4;
+  ReviewMode mode = 5;
+}
+
+message ReviewCodeResponse {
+  string review_id = 1;
+  repeated CodeReview reviews = 2;
+  string overall_feedback = 3;
+}
+
+message CodeReview {
+  string file_path = 1;
+  repeated ReviewIssue issues = 2;
+  int32 score = 3;
+}
+
+message ReviewIssue {
+  int32 line = 1;
+  string severity = 2;
+  string category = 3;
+  string description = 4;
+  string suggestion = 5;
+}
+
+enum ReviewMode {
+  REVIEW_MODE_UNSPECIFIED = 0;
+  REVIEW_MODE_QUICK = 1;
+  REVIEW_MODE_DEEP = 2;
+  REVIEW_MODE_SECURITY = 3;
+  REVIEW_MODE_PERFORMANCE = 4;
+}
+
+message GenerateTestsRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string target_file = 3;
+  string repository_path = 4;
+  TestType test_type = 5;
+}
+
+message GenerateTestsResponse {
+  string test_id = 1;
+  repeated TestFile tests = 2;
+  string coverage_info = 3;
+}
+
+message TestFile {
+    string file_path = 1;
+    string content = 2;
+    TestType test_type = 3;
+}
+
+enum TestType {
+  TEST_TYPE_UNSPECIFIED = 0;
+  TEST_TYPE_UNIT = 1;
+  TEST_TYPE_INTEGRATION = 2;
+  TEST_TYPE_E2E = 3;
+}
+
+message ApplyPatchRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string patch_id = 3;
+  string repository_path = 4;
+  bool dry_run = 5;
+}
+
+message ApplyPatchResponse {
+  bool success = 1;
+  string message = 2;
+  repeated AppliedFile applied_files = 3;
+}
+
+message AppliedFile {
+  string file_path = 1;
+  bool applied = 2;
+  string error = 3;
+}
+
+service OpenCodeService {
+  rpc CompleteCode(CompleteCodeRequest) returns (CompleteCodeResponse);
+  rpc GenerateCode(GenerateCodeRequest) returns (GenerateCodeResponse);
+  rpc RefactorCode(RefactorCodeRequest) returns (RefactorCodeResponse);
+  rpc ExtractMethod(ExtractMethodRequest) returns (ExtractMethodResponse);
+  rpc InlineFunction(InlineFunctionRequest) returns (InlineFunctionResponse);
+  rpc RenameSymbol(RenameSymbolRequest) returns (RenameSymbolResponse);
+  rpc MoveSymbol(MoveSymbolRequest) returns (MoveSymbolResponse);
+  rpc EncapsulateField(EncapsulateFieldRequest) returns (EncapsulateFieldResponse);
+  rpc PlanProject(PlanProjectRequest) returns (PlanProjectResponse);
+  rpc GoToDefinition(GoToDefinitionRequest) returns (GoToDefinitionResponse);
+  rpc FindReferences(FindReferencesRequest) returns (FindReferencesResponse);
+  rpc Hover(HoverRequest) returns (HoverResponse);
+  rpc DocumentSymbols(DocumentSymbolsRequest) returns (DocumentSymbolsResponse);
+  rpc AnalyzeProject(AnalyzeProjectRequest) returns (AnalyzeProjectResponse);
+  rpc QuickFix(QuickFixRequest) returns (QuickFixResponse);
+  rpc GenerateDocumentation(GenerateDocumentationRequest) returns (GenerateDocumentationResponse);
+  rpc GenerateImage(GenerateImageRequest) returns (GenerateImageResponse);
+  rpc AnalyzeImage(AnalyzeImageRequest) returns (AnalyzeImageResponse);
+  rpc AnalyzeChart(AnalyzeChartRequest) returns (AnalyzeChartResponse);
+  rpc AnalyzeDocument(AnalyzeDocumentRequest) returns (AnalyzeDocumentResponse);
+  rpc CacheAnalysis(CacheAnalysisRequest) returns (CacheAnalysisResponse);
+  rpc InvalidateCache(InvalidateCacheRequest) returns (InvalidateCacheResponse);
+  rpc FormatCode(FormatCodeRequest) returns (FormatCodeResponse);
+  rpc WorkspaceSymbols(WorkspaceSymbolsRequest) returns (WorkspaceSymbolsResponse);
+  rpc CodeLens(CodeLensRequest) returns (CodeLensResponse);
+  rpc SemanticTokens(SemanticTokensRequest) returns (SemanticTokensResponse);
+  rpc AnalyzeCodeSemantics(AnalyzeCodeSemanticsRequest) returns (AnalyzeCodeSemanticsResponse);
+  rpc OptimizeCode(OptimizeCodeRequest) returns (OptimizeCodeResponse);
+  rpc ReviewCodeQuality(ReviewCodeQualityRequest) returns (ReviewCodeQualityResponse);
+  rpc CollaborativeEdit(CollaborativeEditRequest) returns (CollaborativeEditResponse);
+  rpc BatchRefactor(BatchRefactorRequest) returns (BatchRefactorResponse);
+  rpc IncrementalAnalyze(IncrementalAnalyzeRequest) returns (IncrementalAnalyzeResponse);
+  rpc WarmupCache(WarmupCacheRequest) returns (WarmupCacheResponse);
+  rpc GetPerformanceStats(GetPerformanceStatsRequest) returns (GetPerformanceStatsResponse);
+  rpc SubscribeToChanges(SubscribeToChangesRequest) returns (stream SubscribeToChangesResponse);
+  rpc GetActiveUsers(GetActiveUsersRequest) returns (GetActiveUsersResponse);
+  rpc LockFile(LockFileRequest) returns (LockFileResponse);
+  rpc ParseAst(ParseAstRequest) returns (ParseAstResponse);
+  rpc InferTypes(InferTypesRequest) returns (InferTypesResponse);
+  rpc ResolveSymbols(ResolveSymbolsRequest) returns (ResolveSymbolsResponse);
+  rpc ValidateCode(ValidateCodeRequest) returns (ValidateCodeResponse);
+  rpc EnforceStyle(EnforceStyleRequest) returns (EnforceStyleResponse);
+  rpc DetectErrors(DetectErrorsRequest) returns (DetectErrorsResponse);
+  rpc GoToTypeDefinition(GoToTypeDefinitionRequest) returns (GoToTypeDefinitionResponse);
+  rpc GoToImplementation(GoToImplementationRequest) returns (GoToImplementationResponse);
+  rpc FindImplementations(FindImplementationsRequest) returns (FindImplementationsResponse);
+  rpc FindDerivedClasses(FindDerivedClassesRequest) returns (FindDerivedClassesResponse);
+  rpc LogError(LogErrorRequest) returns (LogErrorResponse);
+  rpc GetLogs(GetLogsRequest) returns (GetLogsResponse);
+  rpc SetLogLevel(SetLogLevelRequest) returns (SetLogLevelResponse);
+  rpc DetectDesignPatterns(DetectDesignPatternsRequest) returns (DetectDesignPatternsResponse);
+  rpc AnalyzeAntiPatterns(AnalyzeAntiPatternsRequest) returns (AnalyzeAntiPatternsResponse);
+  rpc CrossFileRefactor(CrossFileRefactorRequest) returns (CrossFileRefactorResponse);
+  rpc DetectCodeSmells(DetectCodeSmellsRequest) returns (DetectCodeSmellsResponse);
+}
+
+service PluginService {
+  rpc LoadPlugin(LoadPluginRequest) returns (LoadPluginResponse);
+  rpc UnloadPlugin(UnloadPluginRequest) returns (UnloadPluginResponse);
+  rpc ListPlugins(ListPluginsRequest) returns (ListPluginsResponse);
+  rpc ExecutePlugin(ExecutePluginRequest) returns (ExecutePluginResponse);
+}
+
+service UserPreferencesService {
+  rpc GetPreferences(GetPreferencesRequest) returns (PreferencesResponse);
+  rpc SetPreferences(SetPreferencesRequest) returns (PreferencesResponse);
+}
+
+service DistributedService {
+  rpc DistributeTask(DistributeTaskRequest) returns (DistributeTaskResponse);
+  rpc GetClusterStatus(ClusterStatusRequest) returns (ClusterStatusResponse);
+}
+
+message CompleteCodeRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  int32 cursor_position = 5;
+  string language = 6;
+  int32 max_results = 7;
+}
+
+message CompleteCodeResponse {
+  repeated CodeCompletion completions = 1;
+  string error = 2;
+}
+
+message CodeCompletion {
+  string text = 1;
+  string detail = 2;
+  string kind = 3;
+  int32 start_position = 4;
+  int32 end_position = 5;
+  float score = 6;
+}
+
+message GenerateCodeRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string prompt = 3;
+  string language = 4;
+  string framework = 5;
+  bool include_tests = 6;
+}
+
+message GenerateCodeResponse {
+  string generated_code = 1;
+  string explanation = 2;
+  repeated CodeFile files = 3;
+  string error = 4;
+}
+
+message CodeFile {
+  string file_path = 1;
+  string content = 2;
+}
+
+message RefactorCodeRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  string refactor_type = 5;
+  string target_method = 6;
+}
+
+message RefactorCodeResponse {
+  string refactored_code = 1;
+  string diff = 2;
+  repeated RefactorOperation operations = 3;
+  string error = 4;
+}
+
+message RefactorOperation {
+  string description = 1;
+  string location = 2;
+  string change_type = 3;
+}
+
+message PlanProjectRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string project_description = 3;
+  string tech_stack = 4;
+  bool include_docs = 5;
+}
+
+message PlanProjectResponse {
+  string plan_id = 1;
+  string architecture = 2;
+  repeated ProjectModule modules = 3;
+  string timeline = 4;
+  string error = 5;
+}
+
+message ProjectModule {
+  string name = 1;
+  string description = 2;
+  string responsibility = 3;
+  repeated string dependencies = 4;
+}
+
+message GoToDefinitionRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  int32 line = 4;
+  int32 character = 5;
+}
+
+message GoToDefinitionResponse {
+  repeated Location locations = 1;
+  string error = 2;
+}
+
+message FindReferencesRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  int32 line = 4;
+  int32 character = 5;
+  bool include_declaration = 6;
+}
+
+message FindReferencesResponse {
+  repeated Reference references = 1;
+  string error = 2;
+}
+
+message HoverRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  int32 line = 4;
+  int32 character = 5;
+}
+
+message HoverResponse {
+  string contents = 1;
+  string error = 2;
+}
+
+message DocumentSymbolsRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+}
+
+message DocumentSymbolsResponse {
+  repeated SymbolInformation symbols = 1;
+  string error = 2;
+}
+
+message Location {
+  string file_path = 1;
+  int32 line = 2;
+  int32 character = 3;
+  int32 end_line = 4;
+  int32 end_character = 5;
+}
+
+message Reference {
+  Location location = 1;
+  string role = 2;
+}
+
+message SymbolInformation {
+  string name = 1;
+  string kind = 2;
+  Location location = 3;
+  string container_name = 4;
+}
+
+message AnalyzeProjectRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string project_path = 3;
+  bool include_dependencies = 4;
+}
+
+message AnalyzeProjectResponse {
+  string project_id = 1;
+  ProjectAnalysis analysis = 2;
+  repeated FileInfo files = 3;
+  DependencyGraph dependency_graph = 4;
+  string error = 5;
+}
+
+message ProjectAnalysis {
+  string name = 1;
+  string description = 2;
+  string language = 3;
+  string framework = 4;
+  int32 file_count = 5;
+  int32 line_count = 6;
+  repeated string dependencies = 7;
+}
+
+message FileInfo {
+  string file_path = 1;
+  string language = 2;
+  int32 line_count = 3;
+  int32 symbol_count = 4;
+  repeated string imports = 5;
+}
+
+message DependencyGraph {
+  repeated DependencyNode nodes = 1;
+  repeated DependencyEdge edges = 2;
+}
+
+message DependencyNode {
+  string id = 1;
+  string name = 2;
+  string type = 3;
+  string file_path = 4;
+}
+
+message DependencyEdge {
+  string from = 1;
+  string to = 2;
+  string type = 3;
+}
+
+message QuickFixRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  int32 line = 5;
+  int32 character = 6;
+  string issue_type = 7;
+}
+
+message QuickFixResponse {
+  repeated Fix suggestions = 1;
+  string error = 2;
+}
+
+message Fix {
+  string id = 1;
+  string description = 2;
+  string fix_type = 3;
+  string code_change = 4;
+  repeated Location locations = 5;
+  bool is_safe = 6;
+}
+
+message GenerateDocumentationRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  bool include_comments = 5;
+  bool include_examples = 6;
+}
+
+message GenerateDocumentationResponse {
+  string documentation = 1;
+  repeated DocComment comments = 2;
+  string error = 3;
+}
+
+message DocComment {
+  string symbol_name = 1;
+  string documentation = 2;
+  Location location = 3;
+}
+
+message ExtractMethodRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  int32 start_line = 5;
+  int32 end_line = 6;
+  string method_name = 7;
+}
+
+message ExtractMethodResponse {
+  string refactored_code = 1;
+  string new_method = 2;
+  string diff = 3;
+  bool success = 4;
+  string error = 5;
+}
+
+message InlineFunctionRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  string function_name = 5;
+}
+
+message InlineFunctionResponse {
+  string refactored_code = 1;
+  string diff = 2;
+  bool success = 3;
+  string error = 4;
+}
+
+message RenameSymbolRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  string old_name = 5;
+  string new_name = 6;
+  bool rename_all_occurrences = 7;
+}
+
+message RenameSymbolResponse {
+  string updated_code = 1;
+  int32 renamed_count = 2;
+  repeated Location locations = 3;
+  bool success = 4;
+  string error = 5;
+}
+
+message MoveSymbolRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string source_file = 3;
+  string target_file = 4;
+  string symbol_name = 5;
+}
+
+message MoveSymbolResponse {
+  string updated_source = 1;
+  string updated_target = 2;
+  bool success = 3;
+  string error = 4;
+}
+
+message EncapsulateFieldRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  string struct_name = 5;
+  string field_name = 6;
+  bool generate_getter = 7;
+  bool generate_setter = 8;
+}
+
+message EncapsulateFieldResponse {
+  string refactored_code = 1;
+  string getter_method = 2;
+  string setter_method = 3;
+  bool success = 4;
+  string error = 5;
+}
+
+message AnalyzeDocumentRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string document_text = 3;
+  string document_url = 4;
+  string analysis_type = 5;
+}
+
+message AnalyzeDocumentResponse {
+  string summary = 1;
+  repeated DocumentSection sections = 2;
+  string key_points = 3;
+  string error = 4;
+}
+
+message DocumentSection {
+  string title = 1;
+  string content = 2;
+  int32 start_index = 3;
+  int32 end_index = 4;
+}
+
+message FormatCodeRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  string language = 5;
+  string style = 6;
+}
+
+message FormatCodeResponse {
+  string formatted_code = 1;
+  bool success = 2;
+  string error = 3;
+}
+
+message WorkspaceSymbolsRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string query = 3;
+  repeated string file_paths = 4;
+}
+
+message WorkspaceSymbol {
+  string name = 1;
+  string kind = 2;
+  Location location = 3;
+  string container_name = 4;
+}
+
+message WorkspaceSymbolsResponse {
+  repeated WorkspaceSymbol symbols = 1;
+  string error = 2;
+}
+
+message CodeLensRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+}
+
+message CodeLens {
+  Location location = 1;
+  string command = 2;
+  string title = 3;
+  map<string, string> arguments = 4;
+}
+
+message CodeLensResponse {
+  repeated CodeLens lenses = 1;
+  string error = 2;
+}
+
+message SemanticTokensRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  int32 start_line = 5;
+  int32 end_line = 6;
+}
+
+message SemanticToken {
+  int32 line = 1;
+  int32 character = 2;
+  int32 length = 3;
+  string token_type = 4;
+  repeated string token_modifiers = 5;
+}
+
+message SemanticTokensResponse {
+  repeated SemanticToken tokens = 1;
+  string error = 2;
+}
+
+message UserPreferences {
+  string user_id = 1;
+  string theme = 2;
+  string font_family = 3;
+  int32 font_size = 4;
+  bool auto_complete = 5;
+  bool auto_format = 6;
+  string preferred_language = 7;
+  map<string, bool> enabled_features = 8;
+  map<string, string> editor_settings = 9;
+}
+
+message GetPreferencesRequest {
+  string user_id = 1;
+}
+
+message SetPreferencesRequest {
+  UserPreferences preferences = 1;
+}
+
+message PreferencesResponse {
+  UserPreferences preferences = 1;
+  bool success = 2;
+  string error = 3;
+}
+
+message DistributedTask {
+  string task_id = 1;
+  string task_type = 2;
+  string data = 3;
+  string status = 4;
+  int32 priority = 5;
+  string worker_id = 6;
+}
+
+message DistributeTaskRequest {
+  string session_id = 1;
+  DistributedTask task = 2;
+}
+
+message DistributeTaskResponse {
+  string task_id = 1;
+  bool accepted = 2;
+  string worker_id = 3;
+  string error = 4;
+}
+
+message ClusterStatusRequest {
+  string session_id = 1;
+}
+
+message ClusterNode {
+  string node_id = 1;
+  string status = 2;
+  int32 load = 3;
+  int32 tasks_count = 4;
+}
+
+message ClusterStatusResponse {
+  repeated ClusterNode nodes = 1;
+  int32 total_nodes = 2;
+  int32 active_nodes = 3;
+  string error = 4;
+}
+
+message AnalyzeCodeSemanticsRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  bool include_call_graph = 5;
+  bool include_type_hierarchy = 6;
+  bool include_dependencies = 7;
+}
+
+message CodeSemanticInfo {
+  string file_path = 1;
+  repeated SymbolDetails symbols = 2;
+  repeated CallGraphEdge call_graph = 3;
+  repeated TypeHierarchy type_hierarchy = 4;
+  repeated DependencyInfo dependencies = 5;
+  CodeMetrics metrics = 6;
+}
+
+message SymbolDetails {
+  string name = 1;
+  string kind = 2;
+  Location location = 3;
+  string type_info = 4;
+  string visibility = 5;
+  repeated string parameters = 6;
+  string return_type = 7;
+}
+
+message CallGraphEdge {
+  string caller = 1;
+  string callee = 2;
+  Location caller_location = 3;
+  Location callee_location = 4;
+}
+
+message TypeHierarchy {
+  string type_name = 1;
+  string kind = 2;
+  repeated string parents = 3;
+  repeated string children = 4;
+}
+
+message DependencyInfo {
+  string name = 1;
+  string source = 2;
+  string version = 3;
+  bool is_dev = 4;
+}
+
+message CodeMetrics {
+  int32 lines_of_code = 1;
+  int32 functions_count = 2;
+  int32 structs_count = 3;
+  int32 complexity = 4;
+  int32 cyclomatic_complexity = 5;
+  double maintainability_index = 6;
+}
+
+message AnalyzeCodeSemanticsResponse {
+  CodeSemanticInfo semantic_info = 1;
+  string error = 2;
+}
+
+message OptimizeCodeRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  repeated string optimizations = 5;
+  bool auto_apply = 6;
+}
+
+message OptimizationResult {
+  string type = 1;
+  string description = 2;
+  string before = 3;
+  string after = 4;
+  Location location = 5;
+  double improvement = 6;
+}
+
+message OptimizeCodeResponse {
+  string optimized_code = 1;
+  repeated OptimizationResult optimizations = 2;
+  bool success = 3;
+  string error = 4;
+}
+
+message ReviewCodeQualityRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  repeated string rules = 5;
+}
+
+message CodeIssue {
+  string id = 1;
+  string severity = 2;
+  string category = 3;
+  string message = 4;
+  Location location = 5;
+  string suggestion = 6;
+}
+
+message ReviewCodeQualityResponse {
+  repeated CodeIssue issues = 1;
+  int32 error_count = 2;
+  int32 warning_count = 3;
+  int32 info_count = 4;
+  double quality_score = 5;
+  string error = 6;
+}
+
+message CollaborativeEditRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string user_id = 4;
+  string edit_type = 5;
+  string content = 6;
+  int32 start_line = 7;
+  int32 end_line = 8;
+}
+
+message CollaborativeEditResponse {
+  bool accepted = 1;
+  string version = 2;
+  repeated string active_users = 3;
+  string error = 4;
+}
+
+message BatchRefactorRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  repeated string file_paths = 3;
+  string refactor_type = 4;
+  string old_value = 5;
+  string new_value = 6;
+}
+
+message BatchRefactorResponse {
+  int32 files_modified = 1;
+  int32 changes_count = 2;
+  repeated string modified_files = 3;
+  bool success = 4;
+  string error = 5;
+}
+
+message IncrementalAnalyzeRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  string previous_hash = 5;
+  int32 changed_start_line = 6;
+  int32 changed_end_line = 7;
+}
+
+message IncrementalAnalyzeResponse {
+  bool cache_hit = 1;
+  string analysis_hash = 2;
+  repeated SymbolDetails updated_symbols = 3;
+  repeated CallGraphEdge updated_call_graph = 4;
+  CodeMetrics metrics = 5;
+  int32 analysis_time_ms = 6;
+  string error = 7;
+}
+
+message WarmupCacheRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  repeated string file_paths = 3;
+  bool preload_models = 4;
+}
+
+message WarmupCacheResponse {
+  int32 files_cached = 1;
+  int32 models_preloaded = 2;
+  int32 total_time_ms = 3;
+  bool success = 4;
+  string error = 5;
+}
+
+message GetPerformanceStatsRequest {
+  string session_id = 1;
+}
+
+message PerformanceStats {
+  int32 active_sessions = 1;
+  int32 active_users = 2;
+  int64 total_requests = 3;
+  int64 cache_hits = 4;
+  int64 cache_misses = 5;
+  double avg_response_time_ms = 6;
+  double peak_memory_mb = 7;
+  int32 cpu_usage_percent = 8;
+}
+
+message GetPerformanceStatsResponse {
+  PerformanceStats stats = 1;
+  string error = 2;
+}
+
+message SubscribeToChangesRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  repeated string file_paths = 3;
+}
+
+message SubscribeToChangesResponse {
+  string file_path = 1;
+  string change_type = 2;
+  string content = 3;
+  string user_id = 4;
+  string timestamp = 5;
+}
+
+message GetActiveUsersRequest {
+  string session_id = 1;
+  string project_id = 2;
+}
+
+message ActiveUser {
+  string user_id = 1;
+  string username = 2;
+  string file_path = 3;
+  string last_activity = 4;
+}
+
+message GetActiveUsersResponse {
+  repeated ActiveUser users = 1;
+  int32 count = 2;
+  string error = 3;
+}
+
+message LockFileRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string user_id = 4;
+  bool lock = 5;
+}
+
+message LockFileResponse {
+  bool success = 1;
+  bool locked = 2;
+  string locked_by = 3;
+  string error = 4;
+}
+
+message ParseAstRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  string language = 5;
+}
+
+message AstNode {
+  string id = 1;
+  string type = 2;
+  string value = 3;
+  int32 line = 4;
+  int32 character = 5;
+  int32 end_line = 6;
+  int32 end_character = 7;
+  repeated AstNode children = 8;
+  map<string, string> properties = 9;
+}
+
+message ParseAstResponse {
+  AstNode root = 1;
+  int32 node_count = 2;
+  string error = 3;
+}
+
+message InferTypesRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+}
+
+message TypeInfo {
+  string symbol_name = 1;
+  string type = 2;
+  Location location = 3;
+  bool is_inferred = 4;
+  string documentation = 5;
+}
+
+message InferTypesResponse {
+  repeated TypeInfo types = 1;
+  string error = 2;
+}
+
+message ResolveSymbolsRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  bool include_definitions = 5;
+  bool include_references = 6;
+}
+
+message SymbolResolution {
+  string name = 1;
+  string kind = 2;
+  Location definition = 3;
+  repeated Location references = 4;
+  string type_info = 5;
+  string visibility = 6;
+}
+
+message ResolveSymbolsResponse {
+  repeated SymbolResolution symbols = 1;
+  int32 resolved_count = 2;
+  string error = 3;
+}
+
+message ValidateCodeRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  string language = 5;
+  bool check_syntax = 6;
+  bool check_types = 7;
+  bool check_style = 8;
+}
+
+message ValidationError {
+  string code = 1;
+  string message = 2;
+  Location location = 3;
+  string severity = 4;
+  string suggestion = 5;
+}
+
+message ValidateCodeResponse {
+  bool valid = 1;
+  repeated ValidationError errors = 2;
+  int32 error_count = 3;
+  int32 warning_count = 4;
+  string error = 5;
+}
+
+message EnforceStyleRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  string style_guide = 5;
+  bool auto_fix = 6;
+}
+
+message StyleViolation {
+  string rule = 1;
+  string message = 2;
+  Location location = 3;
+  string fix = 4;
+  bool auto_fixable = 5;
+}
+
+message EnforceStyleResponse {
+  string formatted_code = 1;
+  repeated StyleViolation violations = 2;
+  int32 violation_count = 3;
+  int32 fixed_count = 4;
+  string error = 5;
+}
+
+message DetectErrorsRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  string language = 5;
+}
+
+message ErrorDetection {
+  string type = 1;
+  string message = 2;
+  Location location = 3;
+  string confidence = 4;
+  repeated string suggestions = 5;
+}
+
+message DetectErrorsResponse {
+  repeated ErrorDetection errors = 1;
+  int32 error_count = 2;
+  int32 warning_count = 3;
+  int32 info_count = 4;
+  string error = 5;
+}
+
+message GoToTypeDefinitionRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  int32 line = 5;
+  int32 character = 6;
+}
+
+message GoToTypeDefinitionResponse {
+  repeated Location locations = 1;
+  string error = 2;
+}
+
+message GoToImplementationRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  int32 line = 5;
+  int32 character = 6;
+}
+
+message GoToImplementationResponse {
+  repeated Location locations = 1;
+  string error = 2;
+}
+
+message FindImplementationsRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  string symbol_name = 5;
+}
+
+message ImplementationInfo {
+  Location location = 1;
+  string kind = 2;
+  string signature = 3;
+}
+
+message FindImplementationsResponse {
+  repeated ImplementationInfo implementations = 1;
+  int32 count = 2;
+  string error = 3;
+}
+
+message FindDerivedClassesRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+  string class_name = 5;
+}
+
+message DerivedClassInfo {
+  string name = 1;
+  Location location = 2;
+  int32 depth = 3;
+}
+
+message FindDerivedClassesResponse {
+  repeated DerivedClassInfo derived_classes = 1;
+  int32 count = 2;
+  string error = 3;
+}
+
+message LogErrorRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string error_code = 3;
+  string message = 4;
+  string stack_trace = 5;
+  string context = 6;
+  string level = 7;
+}
+
+message LogErrorResponse {
+  bool success = 1;
+  string error_id = 2;
+  string error = 3;
+}
+
+message GetLogsRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string level = 3;
+  int32 limit = 4;
+  string start_time = 5;
+  string end_time = 6;
+}
+
+message LogEntry {
+  string timestamp = 1;
+  string level = 2;
+  string message = 3;
+  string error_code = 4;
+  string stack_trace = 5;
+  string context = 6;
+}
+
+message GetLogsResponse {
+  repeated LogEntry entries = 1;
+  int32 count = 2;
+  string error = 3;
+}
+
+message SetLogLevelRequest {
+  string level = 1;
+}
+
+message SetLogLevelResponse {
+  bool success = 1;
+  string current_level = 2;
+  string error = 3;
+}
+
+message DetectDesignPatternsRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+}
+
+message DesignPatternMatch {
+  string pattern_name = 1;
+  string pattern_type = 2;
+  string description = 3;
+  float confidence = 4;
+  repeated Location locations = 5;
+  string suggestion = 6;
+}
+
+message DetectDesignPatternsResponse {
+  repeated DesignPatternMatch patterns = 1;
+  int32 pattern_count = 2;
+  string error = 3;
+}
+
+message AnalyzeAntiPatternsRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+}
+
+message AntiPatternMatch {
+  string pattern_name = 1;
+  string severity = 2;
+  string description = 3;
+  Location location = 4;
+  string suggestion = 5;
+}
+
+message AnalyzeAntiPatternsResponse {
+  repeated AntiPatternMatch patterns = 1;
+  int32 anti_pattern_count = 2;
+  string error = 3;
+}
+
+message CrossFileRefactorRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  repeated string file_paths = 3;
+  string refactor_type = 4;
+  string old_value = 5;
+  string new_value = 6;
+  bool dry_run = 7;
+}
+
+message RefactorChange {
+  string file_path = 1;
+  int32 line = 2;
+  string old_text = 3;
+  string new_text = 4;
+}
+
+message CrossFileRefactorResponse {
+  bool success = 1;
+  repeated RefactorChange changes = 2;
+  int32 changed_files = 3;
+  int32 changed_lines = 4;
+  bool dry_run = 5;
+  string error = 6;
+}
+
+message DetectCodeSmellsRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string file_path = 3;
+  string code = 4;
+}
+
+message CodeSmell {
+  string smell_type = 1;
+  string severity = 2;
+  string message = 3;
+  Location location = 4;
+  float confidence = 5;
+  string suggestion = 6;
+}
+
+message DetectCodeSmellsResponse {
+  repeated CodeSmell smells = 1;
+  int32 smell_count = 2;
+  string error = 3;
+}
+
+message GenerateImageRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string prompt = 3;
+  string style = 4;
+  string size = 5;
+  int32 num_images = 6;
+}
+
+message GenerateImageResponse {
+  repeated ImageResult images = 1;
+  string error = 2;
+}
+
+message ImageResult {
+  string url = 1;
+  string base64_data = 2;
+  string prompt = 3;
+  string style = 4;
+}
+
+message AnalyzeImageRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string image_url = 3;
+  bytes image_data = 4;
+  string prompt = 5;
+}
+
+message AnalyzeImageResponse {
+  string description = 1;
+  repeated ObjectDetection objects = 2;
+  string text_content = 3;
+  string error = 4;
+}
+
+message ObjectDetection {
+  string name = 1;
+  float confidence = 2;
+  BoundingBox bounding_box = 3;
+}
+
+message BoundingBox {
+  int32 x = 1;
+  int32 y = 2;
+  int32 width = 3;
+  int32 height = 4;
+}
+
+message AnalyzeChartRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string chart_url = 3;
+  bytes chart_data = 4;
+  string chart_type = 5;
+}
+
+message AnalyzeChartResponse {
+  string summary = 1;
+  repeated DataPoint data_points = 2;
+  string chart_type = 3;
+  string insights = 4;
+  string error = 5;
+}
+
+message DataPoint {
+  string label = 1;
+  float value = 2;
+  string category = 3;
+}
+
+message CacheAnalysisRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string analysis_type = 3;
+  string target_path = 4;
+  bool use_cache = 5;
+}
+
+message CacheAnalysisResponse {
+  bool cache_hit = 1;
+  string cached_result_id = 2;
+  int64 cache_age_seconds = 3;
+  string error = 4;
+}
+
+message InvalidateCacheRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string cache_key = 3;
+  string target_path = 4;
+}
+
+message InvalidateCacheResponse {
+  bool success = 1;
+  int32 invalidated_count = 2;
+  string error = 3;
+}
+
+message LoadPluginRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string plugin_path = 3;
+  string plugin_url = 4;
+  map<string, string> config = 5;
+}
+
+message LoadPluginResponse {
+  string plugin_id = 1;
+  string name = 2;
+  string version = 3;
+  bool success = 4;
+  string error = 5;
+}
+
+message UnloadPluginRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string plugin_id = 3;
+}
+
+message UnloadPluginResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message ListPluginsRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+}
+
+message ListPluginsResponse {
+  repeated PluginInfo plugins = 1;
+  string error = 2;
+}
+
+message PluginInfo {
+  string plugin_id = 1;
+  string name = 2;
+  string version = 3;
+  string description = 4;
+  bool enabled = 5;
+  repeated string capabilities = 6;
+}
+
+message ExecutePluginRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string plugin_id = 3;
+  string command = 4;
+  map<string, string> parameters = 5;
+}
+
+message ExecutePluginResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}

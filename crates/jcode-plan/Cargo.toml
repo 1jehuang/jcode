@@ -1,8 +1,18 @@
 [package]
 name = "jcode-plan"
-version = "0.1.0"
-edition = "2024"
-publish = false
+version.workspace = true
+edition.workspace = true
+description = "计划模式双状态机 — Plan/Execute 双模式切换 + 审批流"
+authors.workspace = true
+license.workspace = true
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+indexmap = { workspace = true, features = ["serde"] }

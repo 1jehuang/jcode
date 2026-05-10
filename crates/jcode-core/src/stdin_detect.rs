@@ -279,7 +279,7 @@ mod macos {
 mod windows {
     use super::*;
 
-    pub fn check(pid: u32) -> StdinState {
+    pub fn check(_pid: u32) -> StdinState {
         // Windows: use NtQueryInformationThread to check thread state
         // A process blocked on ReadFile/ReadConsole on stdin will have
         // its thread in a Wait state with a wait reason of UserRequest

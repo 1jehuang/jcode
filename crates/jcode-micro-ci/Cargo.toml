@@ -1,0 +1,17 @@
+[package]
+name = "jcode-micro-ci"
+version = "0.1.0"
+edition = "2021"
+description = "Micro CI — local pre-push checks: AST validation + type checking + AI logic verification"
+
+[dependencies]
+tokio = { workspace = true, features = ["fs", "process", "sync", "rt", "macros"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+regex = "1"
+parking_lot = "0.12"
+chrono = { workspace = true }
+jcode-cross-file-repair = { path = "../jcode-cross-file-repair" }
+async-trait = "0.1"

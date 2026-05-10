@@ -6,6 +6,13 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 fn main() {
+    // Compile gRPC proto files
+    tonic_build::configure()
+        .build_server(true)
+        .build_client(true)
+        .compile(&["proto/jcode.proto"], &["proto/"])
+        .expect("Failed to compile proto files. Ensure protoc is installed.");
+
     let pkg_version = env!("CARGO_PKG_VERSION");
     let base_version = parse_semver(pkg_version).unwrap_or((0, 0, 0));
     let build_semver = resolve_build_semver(base_version).unwrap_or_else(|err| {

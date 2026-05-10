@@ -303,6 +303,14 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             )
             .await?;
         }
+        Some(Command::Build {
+            message,
+            manual,
+            no_verify,
+            max_retries,
+        }) => {
+            commands::run_build_command(&message, manual, no_verify, max_retries).await?;
+        }
         Some(Command::Restart { action }) => match action {
             RestartCommand::Save { auto_restore } => {
                 commands::run_restart_save_command(auto_restore).await?
@@ -754,6 +762,7 @@ pub(crate) async fn spawn_server(
     {
         let _child = server::spawn_server_notify(&mut cmd).await?;
         startup_profile::mark("server_ready");
+        Ok(())
     }
     #[cfg(not(unix))]
     {
@@ -798,8 +807,6 @@ pub(crate) async fn spawn_server(
             timeout.as_millis()
         );
     }
-
-    Ok(())
 }
 
 #[cfg(test)]

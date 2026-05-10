@@ -254,7 +254,7 @@ async fn wait_for_dictation_exit(
                 let guard = child.lock().await;
                 guard.as_ref().and_then(|process| process.id())
             };
-            if let Some(pid) = pid {
+            if let Some(_pid) = pid {
                 #[cfg(unix)]
                 {
                     let _ = crate::platform::signal_detached_process_group(pid, libc::SIGINT);

@@ -29,10 +29,8 @@ use anyhow::Result;
 use chrono::Utc;
 use jcode_storage as storage;
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
 
 pub use jcode_selfdev_types::{
     BinaryChoice, BinaryVersionReport, BuildInfo, CanaryStatus, CrashInfo, DevBinarySourceMetadata,

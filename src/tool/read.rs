@@ -126,6 +126,8 @@ impl Tool for ReadTool {
         "Read a file. Supports text files, image files, and PDFs."
     }
 
+    fn is_read_only(&self) -> bool { true }
+
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",

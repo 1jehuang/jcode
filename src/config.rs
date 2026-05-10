@@ -73,9 +73,12 @@ pub struct Config {
 
     /// Auto-judge configuration
     pub autojudge: AutoJudgeConfig,
+
+    /// gRPC server configuration (mTLS, API Token)
+    pub grpc: GrpcConfig,
 }
 
-/// External dictation / speech-to-text integration.
+/// 外部 dictation / speech-to-text integration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DictationConfig {
@@ -96,6 +99,40 @@ impl Default for DictationConfig {
             mode: crate::protocol::TranscriptMode::Send,
             key: "off".to_string(),
             timeout_secs: 90,
+        }
+    }
+}
+
+/// gRPC server configuration (mTLS, API Token)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GrpcConfig {
+    /// gRPC server listen port (default: 50051)
+    pub port: u16,
+    /// API Token for gRPC auth
+    pub api_token: String,
+    /// mTLS: server certificate file path (PEM)
+    pub tls_cert_path: String,
+    /// mTLS: server private key file path (PEM)
+    pub tls_key_path: String,
+    /// mTLS: CA certificate (for client verification)
+    pub tls_ca_cert_path: String,
+    /// Enable mTLS (require both server cert + client CA verification)
+    pub mtls_enabled: bool,
+    /// Enable API Token validation
+    pub token_auth_enabled: bool,
+}
+
+impl Default for GrpcConfig {
+    fn default() -> Self {
+        Self {
+            port: 50051,
+            api_token: String::new(),
+            tls_cert_path: String::new(),
+            tls_key_path: String::new(),
+            tls_ca_cert_path: String::new(),
+            mtls_enabled: false,
+            token_auth_enabled: false,
         }
     }
 }

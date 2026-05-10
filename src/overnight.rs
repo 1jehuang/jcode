@@ -6,7 +6,6 @@ use crate::tool::Registry;
 use anyhow::{Context, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::{Value, json};
-use std::ffi::CString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

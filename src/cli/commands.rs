@@ -1347,6 +1347,107 @@ fn filter_cli_model_routes_for_choice(
         filtered
     }
 }
+
+/// Run the build mode: plan → execute → verify
+pub async fn run_build_command(
+    message: &str,
+    manual: bool,
+    no_verify: bool,
+    max_retries: u32,
+) -> Result<()> {
+    use crate::build::{BuildConfig, BuildEngine, BuildReport, ProgressBar, BuildStatus};
+
+    eprintln!("\n🏗️  Build Mode — Plan → Execute → Verify\n");
+
+    // 1. Initialize build engine
+    let config = BuildConfig {
+        auto_approve: !manual,
+        max_retries,
+        run_ci_after_build: !no_verify,
+        report_path: None,
+    };
+    let engine = BuildEngine::new(config);
+
+    // 2. Initialize provider and agent
+    let (provider, registry) = super::provider_init::init_provider_and_registry(
+        &super::provider_init::ProviderChoice::Auto,
+        None,
+    )
+    .await?;
+    let mut agent = crate::agent::Agent::new(provider.clone(), registry);
+
+    // 3. Use BuildTurnStrategy instead of standard
+    let strategy = engine.strategy();
+
+    eprintln!("📋 Phase 1: Plan — Analyzing request...\n");
+
+    // 4. Run the build using the strategy
+    let build_start = std::time::Instant::now();
+    let bar = ProgressBar::new(max_retries.max(1), " Build Steps");
+
+    // Execute the build turn with BuildTurnStrategy
+    let result: Result<String> = agent
+        .run_turn_with_strategy(&strategy, true)
+        .await;
+
+    drop(bar);
+
+    // 5. Generate report
+    let mut report = BuildReport::new(message);
+    let elapsed = build_start.elapsed();
+    report.status = if result.is_ok() {
+        BuildStatus::Success
+    } else {
+        BuildStatus::Failed
+    };
+    report.execution_time_ms = elapsed.as_millis() as u64;
+    report.total_time_ms = elapsed.as_millis() as u64;
+
+    // 6. Post-build micro-ci verification
+    if !no_verify && result.is_ok() {
+        eprintln!("\n🔍 Phase 4: Verify — Running micro-ci checks...\n");
+        match jcode_micro_ci::MicroCi::new(
+            jcode_micro_ci::CiConfig {
+                workspace_root: ".".to_string(),
+                ..Default::default()
+            },
+        )
+        .run()
+        .await
+        {
+            ci_report if ci_report.passed => {
+                report.ci_passed = true;
+                eprintln!("{}", ci_report.to_string().trim_end());
+                eprintln!("\n✅ CI verification passed!\n");
+            }
+            ci_report => {
+                report.ci_passed = false;
+                eprintln!("{}", ci_report.to_string().trim_end());
+                if !ci_report.issues.is_empty() {
+                    eprintln!("\n⚠️  CI found issues — review and fix before deploying.\n");
+                }
+            }
+        }
+    }
+
+    // 7. Print report
+    eprintln!("\n{}", report.to_string().trim_end());
+
+    // 8. Print result
+    match result {
+        Ok(_) => {
+            if manual {
+                eprintln!("\n💡 Tip: Use `--manual` next time for auto-approve.");
+            }
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("\n❌ Build failed: {:#}", e);
+            Err(e)
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "commands_tests.rs"]
 mod tests;

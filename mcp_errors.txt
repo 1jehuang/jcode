@@ -1,0 +1,800 @@
+﻿cargo :     Blocking waiting for file lock on package cache
+所在位置 行:1 字符: 207
++ ... argo/opensource/jcode; cargo check -p jcode-mcp-advanced 2>&1 | Out-F ...
++                            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Blocking wa...n package cache:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Checking jcode-mcp-advanced v0.12.0 (D:\studying\Codecargo\opensource\jcode\crates\jcode-mcp-advanced)
+error: expected one of `>`, a const expression, lifetime, or type, found `}`
+  --> crates\jcode-mcp-advanced\src\transport.rs:85:1
+   |
+79 | pub struct StdioTransport {
+   |            -------------- while parsing this struct
+...
+84 |     connected: Arc<std::sync::atomic::AtomicBool>,
+   |                                                   - expected one of `>`, a const expression, lifetime, or type
+85 | }
+   | ^ unexpected token
+   |
+help: you might have meant to end the type parameters here
+   |
+83 |     read_rx: Arc<tokio::sync::Mutex<tokio::io::BufReader<tokio::process::ChildStdout>>>,
+   |                                                                                       +
+
+error: expected a trait, found type
+  --> crates\jcode-mcp-advanced\src\sampling.rs:14:146
+   |
+14 | ...<dyn std::future::Future<Output = CreateMessageResult> + Send + _>> + Send + Sync>;
+   |                                                                    ^
+
+error[E0428]: the name `TransportEnum` is defined multiple times
+   --> crates\jcode-mcp-advanced\src\transport.rs:404:1
+    |
+247 | pub enum TransportEnum {
+    | ---------------------- previous definition of the type `TransportEnum` here
+...
+404 | pub enum TransportEnum {
+    | ^^^^^^^^^^^^^^^^^^^^^^ `TransportEnum` redefined here
+    |
+    = note: `TransportEnum` must be defined only once in the type namespace of this module
+
+error[E0432]: unresolved import `connection_manager::types`
+  --> crates\jcode-mcp-advanced\src\lib.rs:35:5
+   |
+35 |     types::ConnectionState,
+   |     ^^^^^ could not find `types` in `connection_manager`
+
+error[E0425]: cannot find type `JsonRpcSuccessResponse` in this scope
+   --> crates\jcode-mcp-advanced\src\transport.rs:176:23
+    |
+176 |             let resp: JsonRpcSuccessResponse = serde_json::from_value(response_value)?;
+    |                       ^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: crates\jcode-mcp-advanced\src\types.rs:64:1
+    |
+ 64 | pub enum JsonRpcResponse {
+    | ------------------------ similarly named enum `JsonRpcResponse` defined here
+    |
+help: an enum with a similar name exists
+    |
+176 -             let resp: JsonRpcSuccessResponse = serde_json::from_value(response_value)?;
+176 +             let resp: JsonRpcResponse = serde_json::from_value(response_value)?;
+    |
+help: consider importing this struct through its public re-export
+    |
+ 11 + use crate::JsonRpcSuccessResponse;
+    |
+
+error[E0425]: cannot find type `JsonRpcErrorResponse` in this scope
+   --> crates\jcode-mcp-advanced\src\transport.rs:179:23
+    |
+179 |             let resp: JsonRpcErrorResponse = serde_json::from_value(response_value)?;
+    |                       ^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: crates\jcode-mcp-advanced\src\types.rs:64:1
+    |
+ 64 | pub enum JsonRpcResponse {
+    | ------------------------ similarly named enum `JsonRpcResponse` defined here
+    |
+help: an enum with a similar name exists
+    |
+179 -             let resp: JsonRpcErrorResponse = serde_json::from_value(response_value)?;
+179 +             let resp: JsonRpcResponse = serde_json::from_value(response_value)?;
+    |
+help: consider importing this struct through its public re-export
+    |
+ 11 + use crate::JsonRpcErrorResponse;
+    |
+
+error[E0433]: failed to resolve: use of undeclared type `ClientCapabilities`
+   --> crates\jcode-mcp-advanced\src\transport.rs:415:45
+    |
+415 |             Self::Http(t) => { t.initialize(ClientCapabilities::default()).await?; Ok(()) }
+    |                                             ^^^^^^^^^^^^^^^^^^ use of undeclared type `ClientCapabilities`
+    |
+help: consider importing this struct through its public re-export
+    |
+ 11 + use crate::ClientCapabilities;
+    |
+
+error[E0425]: cannot find value `request` in this scope
+   --> crates\jcode-mcp-advanced\src\transport.rs:437:54
+    |
+437 |             Self::Stdio(t) => McpTransport::close(t, request).await,
+    |                                                      ^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `request` in this scope
+   --> crates\jcode-mcp-advanced\src\transport.rs:438:52
+    |
+438 |             Self::Sse(t) => McpTransport::close(t, request).await,
+    |                                                    ^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `request` in this scope
+   --> crates\jcode-mcp-advanced\src\transport.rs:439:53
+    |
+439 |             Self::Http(t) => McpTransport::close(t, request).await,
+    |                                                     ^^^^^^^ not found in this scope
+
+warning: unused import: `error`
+  --> crates\jcode-mcp-advanced\src\client.rs:20:22
+   |
+20 | use tracing::{debug, error, info, warn};
+   |                      ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated function `rand::thread_rng`: Renamed to `rng`
+  --> crates\jcode-mcp-advanced\src\connection_manager.rs:50:33
+   |
+50 |             let mut rng = rand::thread_rng();
+   |                                 ^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+error[E0119]: conflicting implementations of trait `Debug` for type `transport::TransportEnum`
+   --> crates\jcode-mcp-advanced\src\transport.rs:403:10
+    |
+246 | #[derive(Debug, Clone)]
+    |          ----- first implementation here
+...
+403 | #[derive(Debug, Clone)]
+    |          ^^^^^ conflicting implementation for `transport::TransportEnum`
+
+error[E0119]: conflicting implementations of trait `Clone` for type `transport::TransportEnum`
+   --> crates\jcode-mcp-advanced\src\transport.rs:403:17
+    |
+246 | #[derive(Debug, Clone)]
+    |                 ----- first implementation here
+...
+403 | #[derive(Debug, Clone)]
+    |                 ^^^^^ conflicting implementation for `transport::TransportEnum`
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> crates\jcode-mcp-advanced\src\transport.rs:437:31
+    |
+437 |             Self::Stdio(t) => McpTransport::close(t, request).await,
+    |                               ^^^^^^^^^^^^^^^^^^^    ------- unexpected argument #2
+    |
+note: method defined here
+   --> crates\jcode-mcp-advanced\src\transport.rs:48:14
+    |
+ 48 |     async fn close(&self) -> TransportResult<()>;
+    |              ^^^^^
+help: remove the extra argument
+    |
+437 -             Self::Stdio(t) => McpTransport::close(t, request).await,
+437 +             Self::Stdio(t) => McpTransport::close(t).await,
+    |
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> crates\jcode-mcp-advanced\src\transport.rs:438:29
+    |
+438 |             Self::Sse(t) => McpTransport::close(t, request).await,
+    |                             ^^^^^^^^^^^^^^^^^^^    ------- unexpected argument #2
+    |
+note: method defined here
+   --> crates\jcode-mcp-advanced\src\transport.rs:48:14
+    |
+ 48 |     async fn close(&self) -> TransportResult<()>;
+    |              ^^^^^
+help: remove the extra argument
+    |
+438 -             Self::Sse(t) => McpTransport::close(t, request).await,
+438 +             Self::Sse(t) => McpTransport::close(t).await,
+    |
+
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+   --> crates\jcode-mcp-advanced\src\transport.rs:439:30
+    |
+439 |             Self::Http(t) => McpTransport::close(t, request).await,
+    |                              ^^^^^^^^^^^^^^^^^^^    ------- unexpected argument #2
+    |
+note: method defined here
+   --> crates\jcode-mcp-advanced\src\transport.rs:48:14
+    |
+ 48 |     async fn close(&self) -> TransportResult<()>;
+    |              ^^^^^
+help: remove the extra argument
+    |
+439 -             Self::Http(t) => McpTransport::close(t, request).await,
+439 +             Self::Http(t) => McpTransport::close(t).await,
+    |
+
+error[E0034]: multiple applicable items in scope
+   --> crates\jcode-mcp-advanced\src\client.rs:108:25
+    |
+108 |         match transport.connect().await {
+    |                         ^^^^^^^ multiple `connect` found
+    |
+note: candidate #1 is defined in an impl for the type `transport::TransportEnum`
+   --> crates\jcode-mcp-advanced\src\transport.rs:254:5
+    |
+254 |     pub async fn connect(&self) -> TransportResult<()> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: candidate #2 is defined in an impl for the type `transport::TransportEnum`
+   --> crates\jcode-mcp-advanced\src\transport.rs:411:5
+    |
+411 |     pub async fn connect(&self) -> TransportResult<()> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0282]: type annotations needed
+   --> crates\jcode-mcp-advanced\src\client.rs:112:28
+    |
+112 |                     error: e.to_string(),
+    |                            ^ cannot infer type
+
+error[E0034]: multiple applicable items in scope
+   --> crates\jcode-mcp-advanced\src\client.rs:167:25
+    |
+167 |         match transport.send(request).await {
+    |                         ^^^^ multiple `send` found
+    |
+note: candidate #1 is defined in an impl for the type `transport::TransportEnum`
+   --> crates\jcode-mcp-advanced\src\transport.rs:262:5
+    |
+262 |     pub async fn send(&self, request: JsonRpcRequest) -> TransportResult<JsonRpcResponse> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: candidate #2 is defined in an impl for the type `transport::TransportEnum`
+   --> crates\jcode-mcp-advanced\src\transport.rs:419:5
+    |
+419 |     pub async fn send(&self, request: JsonRpcRequest) -> TransportResult<JsonRpcResponse> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0034]: multiple applicable items in scope
+   --> crates\jcode-mcp-advanced\src\client.rs:190:19
+    |
+190 |         transport.notify(notify).await.map_err(|e| e.to_string())
+    |                   ^^^^^^ multiple `notify` found
+    |
+note: candidate #1 is defined in an impl for the type `transport::TransportEnum`
+   --> crates\jcode-mcp-advanced\src\transport.rs:270:5
+    |
+270 |     pub async fn notify(&self, request: JsonRpcRequest) -> TransportResult<()> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: candidate #2 is defined in an impl for the type `transport::TransportEnum`
+   --> crates\jcode-mcp-advanced\src\transport.rs:427:5
+    |
+427 |     pub async fn notify(&self, request: JsonRpcRequest) -> TransportResult<()> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0282]: type annotations needed
+   --> crates\jcode-mcp-advanced\src\client.rs:190:9
+    |
+190 |         transport.notify(notify).await.map_err(|e| e.to_string())
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> crates\jcode-mcp-advanced\src\client.rs:190:49
+    |
+190 |         transport.notify(notify).await.map_err(|e| e.to_string())
+    |                                                 ^  - type must be known at this point
+    |
+help: consider giving this closure parameter an explicit type
+    |
+190 |         transport.notify(notify).await.map_err(|e: /* Type */| e.to_string())
+    |                                                  ++++++++++++
+
+error[E0034]: multiple applicable items in scope
+   --> crates\jcode-mcp-advanced\src\client.rs:197:31
+    |
+197 |             let _ = transport.close().await;
+    |                               ^^^^^ multiple `close` found
+    |
+note: candidate #1 is defined in an impl for the type `transport::TransportEnum`
+   --> crates\jcode-mcp-advanced\src\transport.rs:278:5
+    |
+278 |     pub async fn close(&self) -> TransportResult<()> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: candidate #2 is defined in an impl for the type `transport::TransportEnum`
+   --> crates\jcode-mcp-advanced\src\transport.rs:435:5
+    |
+435 |     pub async fn close(&self) -> TransportResult<()> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> crates\jcode-mcp-advanced\src\client.rs:214:42
+    |
+214 |         let delay = policy.backoff_delay(attempt)
+    |                            ------------- ^^^^^^^ expected `u32`, found future
+    |                            |
+    |                            arguments to this method are incorrect
+    |
+note: calling an async function returns a future
+   --> crates\jcode-mcp-advanced\src\client.rs:214:42
+    |
+214 |         let delay = policy.backoff_delay(attempt)
+    |                                          ^^^^^^^
+note: method defined here
+   --> crates\jcode-mcp-advanced\src\connection_manager.rs:36:12
+    |
+ 36 |     pub fn backoff_delay(&self, attempt: u32) -> Option<Duration> {
+    |            ^^^^^^^^^^^^^        ------------
+help: consider `await`ing on the `Future`
+    |
+214 |         let delay = policy.backoff_delay(attempt.await)
+    |                                                 ++++++
+
+error[E0308]: mismatched types
+   --> crates\jcode-mcp-advanced\src\client.rs:218:69
+    |
+218 |         self.conn_manager.set_state(ConnectionState::Reconnecting { attempt });
+    |                                                                     ^^^^^^^ expected `u32`, found future
+    |
+note: calling an async function returns a future
+   --> crates\jcode-mcp-advanced\src\client.rs:218:69
+    |
+218 |         self.conn_manager.set_state(ConnectionState::Reconnecting { attempt });
+    |                                                                     ^^^^^^^
+help: consider `await`ing on the `Future`
+    |
+218 |         self.conn_manager.set_state(ConnectionState::Reconnecting { attempt.await });
+    |                                                                            ++++++
+
+error[E0277]: the trait bound `impl futures::Future<Output = u32>: tracing::Value` is not satisfied
+   --> crates\jcode-mcp-advanced\src\client.rs:220:9
+    |
+220 |         info!(attempt = attempt, delay_ms = delay.as_millis(), "Attempting reconnect");
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `tracing::Value`
+ is not implemented for `impl futures::Future<Output = u32>`
+    |
+    = help: the following other types implement trait `tracing::Value`:
+              &'a T
+              &'a mut T
+              (dyn StdError + 'static)
+              (dyn StdError + Send + 'static)
+              (dyn StdError + Send + Sync + 'static)
+              (dyn StdError + Sync + 'static)
+              Arguments<'_>
+              Box<T>
+            and 35 others
+    = note: required for the cast from `&impl futures::Future<Output = u32>` to `&dyn tracing::Value`
+    = note: this error originates in the macro `$crate::valueset_all` which comes from the expansion of the macro `info
+` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0034]: multiple applicable items in scope
+   --> crates\jcode-mcp-advanced\src\client.rs:241:25
+    |
+241 |         match transport.send(request).await {
+    |                         ^^^^ multiple `send` found
+    |
+note: candidate #1 is defined in an impl for the type `transport::TransportEnum`
+   --> crates\jcode-mcp-advanced\src\transport.rs:262:5
+    |
+262 |     pub async fn send(&self, request: JsonRpcRequest) -> TransportResult<JsonRpcResponse> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: candidate #2 is defined in an impl for the type `transport::TransportEnum`
+   --> crates\jcode-mcp-advanced\src\transport.rs:419:5
+    |
+419 |     pub async fn send(&self, request: JsonRpcRequest) -> TransportResult<JsonRpcResponse> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+   --> crates\jcode-mcp-advanced\src\client.rs:266:25
+    |
+266 |         let transport = self.get_transport()?;
+    |                         ^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `impl futures::Future<Ou
+tput = Result<transport::TransportEnum, std::string::String>>`
+    |
+    = help: the nightly-only, unstable trait `Try` is not implemented for `impl futures::Future<Output = Result<transpo
+rt::TransportEnum, std::string::String>>`
+help: consider `await`ing on the `Future`
+    |
+266 |         let transport = self.get_transport().await?;
+    |                                             ++++++
+
+error[E0282]: type annotations needed
+   --> crates\jcode-mcp-advanced\src\client.rs:266:13
+    |
+266 |         let transport = self.get_transport()?;
+    |             ^^^^^^^^^
+...
+278 |         match transport.send(request).await {
+    |               --------- type must be known at this point
+    |
+help: consider giving `transport` an explicit type
+    |
+266 |         let transport: /* Type */ = self.get_transport()?;
+    |                      ++++++++++++
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+   --> crates\jcode-mcp-advanced\src\client.rs:308:25
+    |
+308 |         let transport = self.get_transport()?;
+    |                         ^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `impl futures::Future<Ou
+tput = Result<transport::TransportEnum, std::string::String>>`
+    |
+    = help: the nightly-only, unstable trait `Try` is not implemented for `impl futures::Future<Output = Result<transpo
+rt::TransportEnum, std::string::String>>`
+help: consider `await`ing on the `Future`
+    |
+308 |         let transport = self.get_transport().await?;
+    |                                             ++++++
+
+error[E0282]: type annotations needed
+   --> crates\jcode-mcp-advanced\src\client.rs:308:13
+    |
+308 |         let transport = self.get_transport()?;
+    |             ^^^^^^^^^
+...
+317 |         match transport.send(request).await {
+    |               --------- type must be known at this point
+    |
+help: consider giving `transport` an explicit type
+    |
+308 |         let transport: /* Type */ = self.get_transport()?;
+    |                      ++++++++++++
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+   --> crates\jcode-mcp-advanced\src\client.rs:333:25
+    |
+333 |         let transport = self.get_transport()?;
+    |                         ^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to type `impl futures::Future<Ou
+tput = Result<transport::TransportEnum, std::string::String>>`
+    |
+    = help: the nightly-only, unstable trait `Try` is not implemented for `impl futures::Future<Output = Result<transpo
+rt::TransportEnum, std::string::String>>`
+help: consider `await`ing on the `Future`
+    |
+333 |         let transport = self.get_transport().await?;
+    |                                             ++++++
+
+error[E0282]: type annotations needed
+   --> crates\jcode-mcp-advanced\src\client.rs:333:13
+    |
+333 |         let transport = self.get_transport()?;
+    |             ^^^^^^^^^
+...
+342 |         match transport.send(request).await {
+    |               --------- type must be known at this point
+    |
+help: consider giving `transport` an explicit type
+    |
+333 |         let transport: /* Type */ = self.get_transport()?;
+    |                      ++++++++++++
+
+error[E0599]: no method named `clone` found for opaque type `impl futures::Future<Output = ConnectionState>` in the cur
+rent scope
+   --> crates\jcode-mcp-advanced\src\client.rs:356:35
+    |
+356 |         self.conn_manager.state().clone()
+    |                                   ^^^^^ method not found in `impl futures::Future<Output = ConnectionState>`
+
+error[E0599]: no method named `is_connected` found for opaque type `impl futures::Future<Output = ConnectionState>` in 
+the current scope
+   --> crates\jcode-mcp-advanced\src\client.rs:361:35
+    |
+361 |         self.conn_manager.state().is_connected()
+    |                                   ^^^^^^^^^^^^ method not found in `impl futures::Future<Output = ConnectionState
+>`
+    |
+    = help: items from traits can only be used if the trait is implemented and in scope
+note: `McpTransport` defines an item `is_connected`, perhaps you need to implement it
+   --> crates\jcode-mcp-advanced\src\transport.rs:40:1
+    |
+ 40 | pub trait McpTransport: Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: consider `await`ing on the `Future` and calling the method on its `Output`
+    |
+361 |         self.conn_manager.state().await.is_connected()
+    |                                   ++++++
+
+error[E0592]: duplicate definitions with name `connect`
+   --> crates\jcode-mcp-advanced\src\transport.rs:254:5
+    |
+254 |     pub async fn connect(&self) -> TransportResult<()> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ duplicate definitions for `connect`
+...
+411 |     pub async fn connect(&self) -> TransportResult<()> {
+    |     -------------------------------------------------- other definition for `connect`
+
+error[E0592]: duplicate definitions with name `send`
+   --> crates\jcode-mcp-advanced\src\transport.rs:262:5
+    |
+262 |     pub async fn send(&self, request: JsonRpcRequest) -> TransportResult<JsonRpcResponse> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ duplicate definitions f
+or `send`
+...
+419 |     pub async fn send(&self, request: JsonRpcRequest) -> TransportResult<JsonRpcResponse> {
+    |     ------------------------------------------------------------------------------------- other definition for `s
+end`
+
+error[E0592]: duplicate definitions with name `notify`
+   --> crates\jcode-mcp-advanced\src\transport.rs:270:5
+    |
+270 |     pub async fn notify(&self, request: JsonRpcRequest) -> TransportResult<()> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ duplicate definitions for `notify`
+...
+427 |     pub async fn notify(&self, request: JsonRpcRequest) -> TransportResult<()> {
+    |     -------------------------------------------------------------------------- other definition for `notify`
+
+error[E0592]: duplicate definitions with name `close`
+   --> crates\jcode-mcp-advanced\src\transport.rs:278:5
+    |
+278 |     pub async fn close(&self) -> TransportResult<()> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ duplicate definitions for `close`
+...
+435 |     pub async fn close(&self) -> TransportResult<()> {
+    |     ------------------------------------------------ other definition for `close`
+
+error[E0592]: duplicate definitions with name `is_connected`
+   --> crates\jcode-mcp-advanced\src\transport.rs:286:5
+    |
+286 |     fn is_connected(&self) -> bool {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ duplicate definitions for `is_connected`
+...
+443 |     fn is_connected(&self) -> bool {
+    |     ------------------------------ other definition for `is_connected`
+
+error[E0369]: binary operation `==` cannot be applied to type `std::option::Option<ToolsCapability>`
+  --> crates\jcode-mcp-advanced\src\types.rs:82:5
+   |
+79 | #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+   |                        --------- in this derive macro expansion
+...
+82 |     pub tools: Option<ToolsCapability>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: an implementation of `PartialEq` might be missing for `ToolsCapability`
+  --> crates\jcode-mcp-advanced\src\types.rs:92:1
+   |
+92 | pub struct ToolsCapability {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^ must implement `PartialEq`
+help: consider annotating `ToolsCapability` with `#[derive(PartialEq)]`
+   |
+92 + #[derive(PartialEq)]
+93 | pub struct ToolsCapability {
+   |
+
+error[E0369]: binary operation `==` cannot be applied to type `std::option::Option<ResourceCapability>`
+  --> crates\jcode-mcp-advanced\src\types.rs:84:5
+   |
+79 | #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+   |                        --------- in this derive macro expansion
+...
+84 |     pub resources: Option<ResourceCapability>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: an implementation of `PartialEq` might be missing for `ResourceCapability`
+  --> crates\jcode-mcp-advanced\src\types.rs:97:1
+   |
+97 | pub struct ResourceCapability {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ must implement `PartialEq`
+help: consider annotating `ResourceCapability` with `#[derive(PartialEq)]`
+   |
+97 + #[derive(PartialEq)]
+98 | pub struct ResourceCapability {
+   |
+
+error[E0369]: binary operation `==` cannot be applied to type `std::option::Option<PromptCapability>`
+   --> crates\jcode-mcp-advanced\src\types.rs:86:5
+    |
+ 79 | #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+    |                        --------- in this derive macro expansion
+...
+ 86 |     pub prompts: Option<PromptCapability>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+note: an implementation of `PartialEq` might be missing for `PromptCapability`
+   --> crates\jcode-mcp-advanced\src\types.rs:103:1
+    |
+103 | pub struct PromptCapability {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ must implement `PartialEq`
+help: consider annotating `PromptCapability` with `#[derive(PartialEq)]`
+    |
+103 + #[derive(PartialEq)]
+104 | pub struct PromptCapability {
+    |
+
+error[E0369]: binary operation `==` cannot be applied to type `std::option::Option<LoggingCapability>`
+   --> crates\jcode-mcp-advanced\src\types.rs:88:5
+    |
+ 79 | #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+    |                        --------- in this derive macro expansion
+...
+ 88 |     pub logging: Option<LoggingCapability>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+note: an implementation of `PartialEq` might be missing for `LoggingCapability`
+   --> crates\jcode-mcp-advanced\src\types.rs:108:1
+    |
+108 | pub struct LoggingCapability {}
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ must implement `PartialEq`
+help: consider annotating `LoggingCapability` with `#[derive(PartialEq)]`
+    |
+108 + #[derive(PartialEq)]
+109 | pub struct LoggingCapability {}
+    |
+
+error[E0277]: the trait bound `ToolsCapability: std::cmp::Eq` is not satisfied
+   --> crates\jcode-mcp-advanced\src\types.rs:82:5
+    |
+ 79 | #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+    |                                   -- in this derive macro expansion
+...
+ 82 |     pub tools: Option<ToolsCapability>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::cmp::Eq` is not implemented for `ToolsCapability`
+    |
+help: the trait `std::cmp::Eq` is implemented for `std::option::Option<T>`
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs
+:595:16
+    |
+595 | #[derive_const(Eq)]
+    |                ^^
+    = note: required for `std::option::Option<ToolsCapability>` to implement `std::cmp::Eq`
+note: required by a bound in `AssertParamIsEq`
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\cmp.rs:37
+1:31
+    |
+371 | pub struct AssertParamIsEq<T: Eq + PointeeSized> {
+    |                               ^^ required by this bound in `AssertParamIsEq`
+help: consider annotating `ToolsCapability` with `#[derive(Eq)]`
+    |
+ 92 + #[derive(Eq)]
+ 93 | pub struct ToolsCapability {
+    |
+
+error[E0277]: the trait bound `ResourceCapability: std::cmp::Eq` is not satisfied
+   --> crates\jcode-mcp-advanced\src\types.rs:84:5
+    |
+ 79 | #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+    |                                   -- in this derive macro expansion
+...
+ 84 |     pub resources: Option<ResourceCapability>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::cmp::Eq` is not implemented for `ResourceCapability
+`
+    |
+help: the trait `std::cmp::Eq` is implemented for `std::option::Option<T>`
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs
+:595:16
+    |
+595 | #[derive_const(Eq)]
+    |                ^^
+    = note: required for `std::option::Option<ResourceCapability>` to implement `std::cmp::Eq`
+note: required by a bound in `AssertParamIsEq`
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\cmp.rs:37
+1:31
+    |
+371 | pub struct AssertParamIsEq<T: Eq + PointeeSized> {
+    |                               ^^ required by this bound in `AssertParamIsEq`
+help: consider annotating `ResourceCapability` with `#[derive(Eq)]`
+    |
+ 97 + #[derive(Eq)]
+ 98 | pub struct ResourceCapability {
+    |
+
+error[E0277]: the trait bound `PromptCapability: std::cmp::Eq` is not satisfied
+   --> crates\jcode-mcp-advanced\src\types.rs:86:5
+    |
+ 79 | #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+    |                                   -- in this derive macro expansion
+...
+ 86 |     pub prompts: Option<PromptCapability>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::cmp::Eq` is not implemented for `PromptCapability`
+    |
+help: the trait `std::cmp::Eq` is implemented for `std::option::Option<T>`
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs
+:595:16
+    |
+595 | #[derive_const(Eq)]
+    |                ^^
+    = note: required for `std::option::Option<PromptCapability>` to implement `std::cmp::Eq`
+note: required by a bound in `AssertParamIsEq`
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\cmp.rs:37
+1:31
+    |
+371 | pub struct AssertParamIsEq<T: Eq + PointeeSized> {
+    |                               ^^ required by this bound in `AssertParamIsEq`
+help: consider annotating `PromptCapability` with `#[derive(Eq)]`
+    |
+103 + #[derive(Eq)]
+104 | pub struct PromptCapability {
+    |
+
+error[E0277]: the trait bound `LoggingCapability: std::cmp::Eq` is not satisfied
+   --> crates\jcode-mcp-advanced\src\types.rs:88:5
+    |
+ 79 | #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+    |                                   -- in this derive macro expansion
+...
+ 88 |     pub logging: Option<LoggingCapability>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::cmp::Eq` is not implemented for `LoggingCapability`
+    |
+help: the trait `std::cmp::Eq` is implemented for `std::option::Option<T>`
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs
+:595:16
+    |
+595 | #[derive_const(Eq)]
+    |                ^^
+    = note: required for `std::option::Option<LoggingCapability>` to implement `std::cmp::Eq`
+note: required by a bound in `AssertParamIsEq`
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\cmp.rs:37
+1:31
+    |
+371 | pub struct AssertParamIsEq<T: Eq + PointeeSized> {
+    |                               ^^ required by this bound in `AssertParamIsEq`
+help: consider annotating `LoggingCapability` with `#[derive(Eq)]`
+    |
+108 + #[derive(Eq)]
+109 | pub struct LoggingCapability {}
+    |
+
+warning: unreachable call
+  --> crates\jcode-mcp-advanced\src\transport.rs:92:32
+   |
+92 |             write_tx: Arc::new(tokio::sync::Mutex::new(
+   |                                ^^^^^^^^^^^^^^^^^^^^^^^ unreachable call
+93 |                 // placeholder, replaced on connect
+94 |                 unimplemented!()
+   |                 ---------------- any code following this expression is unreachable
+   |
+   = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable call
+  --> crates\jcode-mcp-advanced\src\transport.rs:96:31
+   |
+96 |             read_rx: Arc::new(tokio::sync::Mutex::new(unimplemented!())),
+   |                               ^^^^^^^^^^^^^^^^^^^^^^^ ---------------- any code following this expression is unrea
+chable
+   |                               |
+   |                               unreachable call
+
+error[E0282]: type annotations needed
+   --> crates\jcode-mcp-advanced\src\transport.rs:165:17
+    |
+165 |             let mut writer = self.write_tx.lock().await;
+    |                 ^^^^^^^^^^
+166 |             writer.write_all(header.as_bytes()).await?;
+    |             ------ type must be known at this point
+    |
+help: consider giving `writer` an explicit type
+    |
+165 |             let mut writer: /* Type */ = self.write_tx.lock().await;
+    |                           ++++++++++++
+
+error[E0282]: type annotations needed
+   --> crates\jcode-mcp-advanced\src\transport.rs:190:13
+    |
+190 |         let mut writer = self.write_tx.lock().await;
+    |             ^^^^^^^^^^
+191 |         writer.write_all(header.as_bytes()).await?;
+    |         ------ type must be known at this point
+    |
+help: consider giving `writer` an explicit type
+    |
+190 |         let mut writer: /* Type */ = self.write_tx.lock().await;
+    |                       ++++++++++++
+
+error[E0282]: type annotations needed
+   --> crates\jcode-mcp-advanced\src\transport.rs:201:13
+    |
+201 |         let mut child_guard = self.child.lock().await;
+    |             ^^^^^^^^^^^^^^^
+202 |         if let Some(mut child) = child_guard.take() {
+    |                                  ----------- type must be known at this point
+    |
+help: consider giving `child_guard` an explicit type
+    |
+201 |         let mut child_guard: /* Type */ = self.child.lock().await;
+    |                            ++++++++++++
+
+error[E0282]: type annotations needed
+   --> crates\jcode-mcp-advanced\src\transport.rs:207:19
+    |
+207 |             match child.try_wait()? {
+    |                   ^^^^^ cannot infer type
+
+warning: use of deprecated method `rand::Rng::gen_range`: Renamed to `random_range`
+  --> crates\jcode-mcp-advanced\src\connection_manager.rs:51:30
+   |
+51 |             let j: i64 = rng.gen_range(-jitter_range..=jitter_range);
+   |                              ^^^^^^^^^
+
+Some errors have detailed explanations: E0034, E0061, E0119, E0277, E0282, E0308, E0369, E0425, E0428...
+For more information about an error, try `rustc --explain E0034`.
+warning: `jcode-mcp-advanced` (lib) generated 5 warnings
+error: could not compile `jcode-mcp-advanced` (lib) due to 51 previous errors; 5 warnings emitted

@@ -361,6 +361,13 @@ pub struct AgentsConfig {
     pub memory_model: Option<String>,
     /// Whether memory should use the sidecar for relevance/extraction.
     pub memory_sidecar_enabled: bool,
+    /// Token budget for auto-continue (0 = disabled).
+    /// When set, the agent will automatically continue long tasks until
+    /// the budget is exhausted or diminishing returns are detected.
+    /// Default: 0 (disabled). Recommended: 500000 (500K tokens).
+    ///
+    /// Ported from Claude Code's task_budget / auto-continue feature.
+    pub token_budget: u64,
 }
 
 /// Automatic end-of-turn code review configuration.
@@ -769,6 +776,75 @@ impl Default for GatewayConfig {
             enabled: false,
             port: 7643,
             bind_addr: "0.0.0.0".to_string(),
+        }
+    }
+}
+
+// =============================================================================
+// Multi-project workspace configuration
+// =============================================================================
+
+/// Workspace configuration for multi-project support.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkspaceConfig {
+    /// Enable multi-project workspace mode (default: false)
+    pub enabled: bool,
+    /// Path to the workspace configuration file (.jcode-workspace.json)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
+    /// Auto-discover projects in subdirectories on startup
+    pub auto_discover: bool,
+    /// Maximum number of projects in a workspace (0 = unlimited)
+    pub max_projects: usize,
+    /// Default project to activate on startup (empty = most recently used)
+    pub default_project: Option<String>,
+    /// Global build settings applied across all projects unless overridden
+    #[serde(default)]
+    pub global_build: GlobalBuildConfig,
+}
+
+impl Default for WorkspaceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            config_path: None,
+            auto_discover: true,
+            max_projects: 20,
+            default_project: None,
+            global_build: GlobalBuildConfig::default(),
+        }
+    }
+}
+
+/// Global build configuration that applies across all workspace projects.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GlobalBuildConfig {
+    /// Enable parallel builds across multiple projects
+    pub parallel_builds: bool,
+    /// Maximum number of parallel build jobs (default: number of CPUs)
+    pub max_parallel_jobs: Option<usize>,
+    /// Default build output directory name
+    pub output_dir: String,
+    /// Whether to cache build artifacts between sessions
+    pub cache_artifacts: bool,
+    /// Fail fast on first project build error vs continue building others
+    pub fail_fast: bool,
+    /// Environment variables injected into all build processes
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+}
+
+impl Default for GlobalBuildConfig {
+    fn default() -> Self {
+        Self {
+            parallel_builds: false,
+            max_parallel_jobs: None,
+            output_dir: "build".to_string(),
+            cache_artifacts: true,
+            fail_fast: true,
+            env: std::collections::HashMap::new(),
         }
     }
 }

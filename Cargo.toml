@@ -58,7 +58,69 @@ members = [
     "crates/jcode-mobile-core",
     "crates/jcode-mobile-sim",
     "crates/jcode-desktop",
+    # 新增: Claude Code 移植模块
+    "crates/jcode-sandbox",
+    "crates/jcode-mcp-advanced",
+    "crates/jcode-hooks",
+    "crates/jcode-lsp",
+    "crates/jcode-p2-features",
+    "crates/jcode-session-persist",
+    # 编译引擎
+    "crates/jcode-build-engine",
+    # 锁管理器
+    "crates/jcode-lock-manager",
+    # 多文件原子化编辑 (Swarm 能力强化)
+    "crates/jcode-multi-file-edit",
+    # 跨文件修复引擎
+    "crates/jcode-cross-file-repair",
+    # 自动补全引擎
+    "crates/jcode-completion",
+    # 微型 CI
+    "crates/jcode-micro-ci",
+    # CI 配置生成器
+    "crates/jcode-ci-generator",
+    # 项目构建器 (Builder模式)
+    "crates/jcode-project-builder",
+    # Skills 模式 + 链式调用
+    "crates/jcode-skills",
+    # Qwen 补全 LoRA 训练
+    "crates/jcode-lora-train",
 ]
+
+# Workspace 包元数据 (供成员 crate 继承)
+[workspace.package]
+edition = "2024"
+version = "0.12.0"
+authors = ["JCode Contributors"]
+license = "MIT"
+
+[workspace.dependencies]
+# 共享依赖 — 所有 crate 通过 workspace = true 引用
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+url = "2"
+futures = "0.3"
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["codec"] }
+pin-project-lite = "0.2"
+async-stream = "0.3"
+indexmap = "2"
+lsp-types = "0.95"
+tempfile = "3"
+glob = "0.3"
+path-clean = "1"
+dirs = "5"
+wildmatch = "2"
+base64 = "0.22"
 
 [lib]
 name = "jcode"
@@ -90,6 +152,14 @@ required-features = ["dev-bins"]
 name = "tui_bench"
 path = "src/bin/tui_bench.rs"
 required-features = ["dev-bins"]
+
+[[bin]]
+name = "jcode-grpc"
+path = "src/bin/jcode-grpc.rs"
+
+[[bin]]
+name = "jcode-server"
+path = "src/bin/jcode-server.rs"
 
 [dependencies]
 # Memory allocator (reduces fragmentation for long-running server)
@@ -130,8 +200,14 @@ libc = "0.2"             # Unix system calls (flock)
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 urlencoding = "2"        # URL encoding for web search
+tracing = "0.1"          # Structured logging
+once_cell = "1"          # Lazy static initialization
+lsp-types = { workspace = true }
 uuid = { version = "1", features = ["v4", "v5"] }
 proctitle = "0.1"
+which = "6"
+md5 = "0.7"              # MD5 hashing for auto mode
+cron = "0.12"             # Cron expression parsing for task scheduler
 
 # Embeddings (local inference) - behind feature flag (163 crates, slow to compile)
 jcode-embedding = { path = "crates/jcode-embedding", optional = true }
@@ -204,6 +280,9 @@ jcode-task-types = { path = "crates/jcode-task-types" }
 jcode-tool-core = { path = "crates/jcode-tool-core" }
 jcode-tool-types = { path = "crates/jcode-tool-types" }
 jcode-side-panel-types = { path = "crates/jcode-side-panel-types" }
+jcode-lock-manager = { path = "crates/jcode-lock-manager" }
+jcode-micro-ci = { path = "crates/jcode-micro-ci" }
+jcode-completion = { path = "crates/jcode-completion" }
 
 # Archive extraction (for auto-update)
 flate2 = "1"
@@ -218,6 +297,18 @@ aws-types = "1.3.15"
 aws-smithy-types = "1.4.7"
 aws-sdk-bedrock = "1.141.0"
 aws-sdk-sts = "1.103.0"
+
+# gRPC dependencies
+tonic = { version = "0.11", features = ["tls", "tls-roots"] }
+prost = "0.12"
+prost-types = "0.12"
+tracing-subscriber = "0.3"
+parking_lot = "0.12"
+
+# REST dependencies
+axum = "0.7"
+hyper = "1"
+futures-util = "0.3"
 
 [features]
 # Keep the heavyweight local ONNX/tokenizer embedding stack opt-in. It remains
@@ -279,3 +370,4 @@ codegen-units = 256
 async-stream = "0.3"
 
 [build-dependencies]
+tonic-build = "0.11"

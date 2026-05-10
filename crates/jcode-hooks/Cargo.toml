@@ -1,0 +1,21 @@
+[package]
+name = "jcode-hooks"
+version.workspace = true
+edition.workspace = true
+description = "Hook 事件广播系统 - 7类Hook点 + 发布订阅 + 中间件链"
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"

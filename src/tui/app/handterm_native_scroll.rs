@@ -1,7 +1,6 @@
 use super::App;
-use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::UnboundedReceiver;
 
 #[cfg(unix)]
 use std::io::{Read, Write};

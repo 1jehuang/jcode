@@ -1,4 +1,4 @@
-#![cfg_attr(test, allow(clippy::items_after_test_module))]
+﻿#![cfg_attr(test, allow(clippy::items_after_test_module))]
 
 use super::client_lifecycle::process_message_streaming_mpsc;
 use super::{
@@ -822,8 +822,7 @@ pub(super) fn handle_compact(
             return;
         }
 
-        let result = match compaction.try_write() {
-            Ok(mut manager) => {
+        let result = match compaction.try_write() { Some(mut manager) => {
                 let stats = manager.stats_with(&messages);
                 let status_msg = format!(
                     "**Context Status:**\n\
@@ -872,7 +871,7 @@ pub(super) fn handle_compact(
                     },
                 }
             }
-            Err(_) => ServerEvent::CompactResult {
+            None => ServerEvent::CompactResult {
                 id,
                 message: "⚠ Cannot access compaction manager (lock held)".to_string(),
                 success: false,
@@ -969,3 +968,4 @@ pub(super) async fn handle_agent_task(
         }
     }
 }
+

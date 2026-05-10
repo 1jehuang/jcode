@@ -1,0 +1,40 @@
+[package]
+name = "jcode-context-management"
+version.workspace = true
+edition.workspace = true
+description = "上下文管理与缓存系统 - 移植自 Claude Code: Prompt Caching/Token预算/AutoCompact/SnipCompact"
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+# Async
+tokio = { workspace = true, features ["full"] }
+async-trait = "0.1"
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# Hash (for cache break detection)
+sha2 = "0.10"
+twox-hash = "1"  # xxHash for fast hashing
+
+# Collections
+indexmap = { version = "2", features = ["serde"] }  # preserve insertion order
+
+# Error handling
+thiserror = { workspace = true }
+
+# Concurrency
+parking_lot = "0.12"
+
+# Logging
+tracing = { workspace = true }
+
+# Internal crates
+jcode-types = { path = "../jcode-types" }
+jcode-provider-core = { path = "../jcode-provider-core" }
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = "1"

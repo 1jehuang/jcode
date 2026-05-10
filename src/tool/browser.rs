@@ -732,7 +732,7 @@ fn build_press_script(key: Option<&str>, selector: Option<&str>) -> Result<Strin
 async fn firefox_run_bridge_command(
     action: &str,
     params: Value,
-    ctx: &ToolContext,
+    _ctx: &ToolContext,
 ) -> Result<Value> {
     let bin = crate::browser::browser_binary_path();
     if !bin.exists() {

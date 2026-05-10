@@ -1,0 +1,31 @@
+[package]
+name = "jcode-mcp-advanced"
+version.workspace = true
+edition.workspace = true
+description = "高级 MCP 客户端 - 移植自 Claude Code: 采样/流式调用/权限协商/自动重连"
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+async-stream = { workspace = true }
+pin-project-lite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+url = { workspace = true }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+rand = "0.9.3"
+
+[dev-dependencies]
+tokio-test = "0.4"
+wiremock = "0.6"

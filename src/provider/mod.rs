@@ -11,6 +11,7 @@ mod failover;
 pub mod gemini;
 pub mod jcode;
 pub mod models;
+pub mod models_registry;
 mod multi_provider;
 pub mod openai;
 pub(crate) mod openai_request;

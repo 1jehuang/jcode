@@ -424,6 +424,34 @@ impl Config {
             }
         }
 
+        // gRPC
+        if let Ok(v) = std::env::var("JCODE_GRPC_PORT")
+            && let Ok(parsed) = v.trim().parse::<u16>()
+        {
+            self.grpc.port = parsed;
+        }
+        if let Ok(v) = std::env::var("JCODE_GRPC_API_TOKEN") {
+            let trimmed = v.trim().to_string();
+            if !trimmed.is_empty() {
+                self.grpc.api_token = trimmed;
+                self.grpc.token_auth_enabled = true;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_GRPC_TLS_CERT") {
+            self.grpc.tls_cert_path = v.trim().to_string();
+        }
+        if let Ok(v) = std::env::var("JCODE_GRPC_TLS_KEY") {
+            self.grpc.tls_key_path = v.trim().to_string();
+        }
+        if let Ok(v) = std::env::var("JCODE_GRPC_TLS_CA_CERT") {
+            self.grpc.tls_ca_cert_path = v.trim().to_string();
+        }
+        if let Ok(v) = std::env::var("JCODE_GRPC_MTLS_ENABLED") {
+            if let Some(enabled) = parse_env_bool(&v) {
+                self.grpc.mtls_enabled = enabled;
+            }
+        }
+
         // Copilot premium mode: env var overrides config
         // If set in config but not in env, propagate config -> env
         if let Ok(v) = std::env::var("JCODE_COPILOT_PREMIUM") {

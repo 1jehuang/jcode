@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 impl App {
     pub(super) fn ensure_provider_messages_hydrated(&mut self) {
@@ -209,7 +209,7 @@ impl App {
             return;
         }
         let compaction = self.registry.compaction();
-        if let Ok(mut manager) = compaction.try_write() {
+        if let Some(mut manager) = compaction.try_write() {
             manager.notify_message_added_with(&message);
         };
     }
@@ -244,7 +244,7 @@ impl App {
         }
         let provider_messages = self.materialized_provider_messages();
         let compaction = self.registry.compaction();
-        if let Ok(mut manager) = compaction.try_write() {
+        if let Some(mut manager) = compaction.try_write() {
             manager.reset();
             manager.set_budget(self.context_limit as usize);
             if let Some(state) = self.session.compaction.as_ref() {
@@ -308,7 +308,7 @@ impl App {
         self.session.compaction = Some(state.clone());
         let provider_messages = self.materialized_provider_messages();
         let compaction = self.registry.compaction();
-        if let Ok(mut manager) = compaction.try_write() {
+        if let Some(mut manager) = compaction.try_write() {
             manager.set_budget(self.context_limit as usize);
             manager.restore_persisted_state_with(&state, &provider_messages);
         }
@@ -331,8 +331,7 @@ impl App {
             return (base_messages, None);
         }
         let compaction = self.registry.compaction();
-        match compaction.try_write() {
-            Ok(mut manager) => {
+        match compaction.try_write() { Some(mut manager) => {
                 let discarded_oversized_native =
                     manager.discard_oversized_openai_native_compaction();
                 if self.provider.uses_jcode_compaction() {
@@ -359,7 +358,7 @@ impl App {
                 }
                 (messages, event)
             }
-            Err(_) => (base_messages, None),
+            None => (base_messages, None),
         }
     }
 
@@ -369,7 +368,7 @@ impl App {
         }
         let provider_messages = self.materialized_provider_messages();
         let compaction = self.registry.compaction();
-        if let Ok(mut manager) = compaction.try_write()
+        if let Some(mut manager) = compaction.try_write()
             && let Some(event) = manager.poll_compaction_event_with(&provider_messages)
         {
             self.sync_session_compaction_state_from_manager(&manager);
@@ -834,3 +833,4 @@ mod tests {
         assert_eq!(App::experimental_feature_key_for_tool(&tool), None);
     }
 }
+

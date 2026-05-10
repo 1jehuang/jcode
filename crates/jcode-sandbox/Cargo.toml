@@ -1,0 +1,29 @@
+[package]
+name = "jcode-sandbox"
+version.workspace = true
+edition.workspace = true
+description = "安全沙箱与权限系统 - 移植自 Claude Code: YOLO分类器/命令沙箱/路径控制/自动审批规则"
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+glob = "0.3"
+regex = { workspace = true }
+wildmatch = { workspace = true }
+path-clean = "1"
+dirs = "5"
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+default = []
+ai-classifier = []
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = { workspace = true }

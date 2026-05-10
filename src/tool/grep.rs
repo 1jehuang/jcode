@@ -45,6 +45,8 @@ impl Tool for GrepTool {
         "Search files with a simple regex. Prefer agentgrep for code search unless you need this lightweight grep fallback."
     }
 
+    fn is_read_only(&self) -> bool { true }
+
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",

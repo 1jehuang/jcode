@@ -1,4 +1,4 @@
-pub(super) use super::commands_improve::{
+﻿pub(super) use super::commands_improve::{
     build_improve_prompt, build_improve_resume_prompt, build_refactor_prompt,
     build_refactor_resume_prompt, format_improve_status, format_refactor_status,
     handle_improve_command_local, handle_refactor_command_local, improve_launch_notice,
@@ -1924,7 +1924,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
         };
 
         match app.registry.compaction().try_write() {
-            Ok(mut manager) => {
+            Some(mut manager) => {
                 manager.set_mode(mode.clone());
                 let label = mode.as_str();
                 app.push_display_message(DisplayMessage::system(format!(
@@ -1933,7 +1933,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                 )));
                 app.set_status_notice(format!("Compaction: {}", label));
             }
-            Err(_) => {
+            None => {
                 app.push_display_message(DisplayMessage::error(
                     "Cannot access compaction manager (lock held)".to_string(),
                 ));
@@ -1950,8 +1950,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
             return true;
         }
         let compaction = app.registry.compaction();
-        match compaction.try_write() {
-            Ok(mut manager) => {
+        match compaction.try_write() { Some(mut manager) => {
                 let provider_messages = app.materialized_provider_messages();
                 let stats = manager.stats_with(&provider_messages);
                 let status_msg = format!(
@@ -2010,7 +2009,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                     }
                 }
             }
-            Err(_) => {
+            None => {
                 app.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content: "⚠ Cannot access compaction manager (lock held)".to_string(),
@@ -2184,3 +2183,4 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
 #[cfg(test)]
 #[path = "commands_tests.rs"]
 mod tests;
+

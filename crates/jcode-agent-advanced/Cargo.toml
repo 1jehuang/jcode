@@ -1,0 +1,43 @@
+[package]
+name = "jcode-agent-advanced"
+version.workspace = true
+edition.workspace = true
+description = "高级 Agent 循环引擎 - 移植自 Claude Code: 并行工具调用/流式中断/错误恢复/模型降级"
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true, features ["full"] }
+tokio-util = { version = "0.7", features ["codec"] }
+futures = "0.3"
+async-stream = "0.3"
+pin-project-lite = "0.2"
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = anyway }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+humantime = "2"
+
+# Internal crates
+jcode-types = { path = "../jcode-types" }
+jcode-provider-core = { path = "../jcode-provider-core" }
+jcode-config-types = { path = "../jcode-config-types" }
+
+[dev-dependencies]
+tokio-test = "0.4"
+criterion = "0.5"
+
+[[bench]]
+name = "agent_loop_bench"
+harness = false

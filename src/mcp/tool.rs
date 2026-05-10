@@ -41,6 +41,14 @@ impl Tool for McpTool {
         self.tool_def.description.as_deref().unwrap_or("MCP tool")
     }
 
+    fn is_read_only(&self) -> bool { false }
+
+    fn is_destructive(&self) -> bool { false }
+
+    fn mcp_source_info(&self) -> Option<&str> {
+        Some(&self.server_name)
+    }
+
     fn parameters_schema(&self) -> Value {
         self.tool_def.input_schema.clone()
     }

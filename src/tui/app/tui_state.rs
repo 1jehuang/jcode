@@ -545,7 +545,7 @@ impl crate::tui::TuiState for App {
     fn status_notice(&self) -> Option<String> {
         if !self.is_remote
             && self.provider.uses_jcode_compaction()
-            && let Ok(manager) = self.registry.compaction().try_read()
+            && let Some(manager) = self.registry.compaction().try_read()
             && manager.is_compacting()
         {
             return Some(Self::format_compaction_progress_notice(
@@ -670,7 +670,6 @@ impl crate::tui::TuiState for App {
                 let compaction = self.registry.compaction();
                 let result = compaction
                     .try_read()
-                    .ok()
                     .map(|manager| (manager.compacted_count(), manager.summary_chars()));
                 if let Some((cc, sc)) = result {
                     if cc > 0 && sc > 0 {
@@ -812,7 +811,7 @@ impl crate::tui::TuiState for App {
                 .map(|item| crate::todo::TodoItem {
                     content: item.content.clone(),
                     status: item.status.clone(),
-                    priority: item.priority.clone(),
+                    priority: item.priority.map(|p| p.to_string()).unwrap_or_default(),
                     id: item.id.clone(),
                     blocked_by: item.blocked_by.clone(),
                     assigned_to: item.assigned_to.clone(),

@@ -1,6 +1,6 @@
 use std::time::Duration;
 use tokio::process::Command;
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NetworkWaitPlan {

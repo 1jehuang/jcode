@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 impl App {
     fn format_failover_count(value: usize) -> String {
@@ -261,7 +261,7 @@ impl App {
         // Also update compaction manager's budget
         {
             let compaction = self.registry.compaction();
-            if let Ok(mut manager) = compaction.try_write() {
+            if let Some(mut manager) = compaction.try_write() {
                 manager.set_budget(limit);
             };
         }
@@ -320,7 +320,7 @@ impl App {
             return;
         };
         let compaction = self.registry.compaction();
-        if let Ok(mut manager) = compaction.try_write() {
+        if let Some(mut manager) = compaction.try_write() {
             manager.update_observed_input_tokens(tokens);
         };
     }
@@ -361,7 +361,7 @@ impl App {
             return None;
         }
         let compaction = self.registry.compaction();
-        let mut manager = compaction.try_write().ok()?;
+        let mut manager = compaction.try_write()?;
         let mut provider_messages = self.materialized_provider_messages();
 
         let usage = manager.context_usage_with(&provider_messages);
@@ -460,8 +460,7 @@ impl App {
 
         // Force the compaction manager to think we're at the limit
         let compaction = self.registry.compaction();
-        let compact_started = match compaction.try_write() {
-            Ok(mut manager) => {
+        let compact_started = match compaction.try_write() { Some(mut manager) => {
                 let mut provider_messages = self.materialized_provider_messages();
                 manager.update_observed_input_tokens(self.context_limit);
                 let usage = manager.context_usage_with(&provider_messages);
@@ -596,7 +595,7 @@ impl App {
                     }
                 }
             }
-            Err(_) => false,
+            None => false,
         };
 
         if !compact_started {
@@ -620,7 +619,7 @@ impl App {
             let _ = terminal.draw(|frame| crate::tui::ui::draw(frame, self));
 
             let compaction = self.registry.compaction();
-            let done = if let Ok(mut manager) = compaction.try_write() {
+            let done = if let Some(mut manager) = compaction.try_write() {
                 let provider_messages = self.materialized_provider_messages();
                 if let Some(event) = manager.poll_compaction_event_with(&provider_messages) {
                     self.sync_session_compaction_state_from_manager(&manager);
@@ -904,8 +903,7 @@ impl App {
                 .current_stream_context_tokens()
                 .or_else(|| context_error.then_some(self.context_limit));
             let compaction = self.registry.compaction();
-            match compaction.try_write() {
-                Ok(mut manager) => {
+            match compaction.try_write() { Some(mut manager) => {
                     let mut provider_messages = self.materialized_provider_messages();
                     if let Some(tokens) = observed_tokens {
                         manager.update_observed_input_tokens(tokens);
@@ -960,7 +958,7 @@ impl App {
                         }
                     }
                 }
-                Err(_) => notes.push("Could not access compaction manager (busy).".to_string()),
+                None => notes.push("Could not access compaction manager (busy).".to_string()),
             };
         } else {
             notes.push("Compaction is unavailable for this provider.".to_string());
@@ -1430,3 +1428,4 @@ pub(super) fn unavailable_model_route_message(
 
     lines.join("\n")
 }
+

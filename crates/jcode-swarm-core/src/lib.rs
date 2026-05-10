@@ -396,7 +396,7 @@ pub fn summarize_plan_items(items: &[PlanItem], max_items: usize) -> String {
     }
     let mut parts: Vec<String> = Vec::new();
     for item in items.iter().take(max_items.max(1)) {
-        parts.push(item.content.clone());
+        parts.push(item.title.clone());
     }
     let mut summary = parts.join("; ");
     if items.len() > max_items.max(1) {

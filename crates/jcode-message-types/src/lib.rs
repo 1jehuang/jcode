@@ -19,10 +19,20 @@ pub struct ToolDefinition {
     /// ToolDefinition::description_token_estimate() when reviewing tool bloat.
     pub description: String,
     pub input_schema: serde_json::Value,
+    /// Whether this tool is read-only (safe to parallelize).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub read_only: bool,
+    /// Whether this tool is destructive (requires confirmation).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub destructive: bool,
 }
+
+#[inline]
+fn is_false(b: &bool) -> bool { !b }
 
 impl ToolDefinition {
     /// Serialized size of the full tool definition payload sent to providers.
+    #[inline]
     pub fn prompt_chars(&self) -> usize {
         serde_json::json!({
             "name": self.name,
@@ -37,11 +47,13 @@ impl ToolDefinition {
     ///
     /// This uses jcode's standard chars/4 heuristic, matching other token
     /// budget estimates in the codebase.
+    #[inline]
     pub fn description_token_estimate(&self) -> usize {
         estimate_tokens(&self.description)
     }
 
     /// Approximate prompt-token cost of the full tool definition payload.
+    #[inline]
     pub fn prompt_token_estimate(&self) -> usize {
         estimate_tokens(
             &serde_json::json!({
@@ -84,6 +96,17 @@ pub struct Message {
     pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_duration_ms: Option<u64>,
+}
+
+impl Default for Message {
+    fn default() -> Self {
+        Self {
+            role: Role::User,
+            content: Vec::new(),
+            timestamp: None,
+            tool_duration_ms: None,
+        }
+    }
 }
 
 /// Cache control metadata for prompt caching

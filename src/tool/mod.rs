@@ -37,6 +37,7 @@ use crate::compaction::CompactionManager;
 use crate::provider::Provider;
 use crate::skill::SkillRegistry;
 use anyhow::Result;
+use jcode_lock_manager::Shared;
 use jcode_message_types::ToolDefinition;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -47,14 +48,14 @@ pub(crate) use jcode_tool_core::intent_schema_property;
 pub use jcode_tool_core::{StdinInputRequest, Tool, ToolContext, ToolExecutionMode};
 pub use jcode_tool_types::{ToolImage, ToolOutput};
 
-/// Registry of available tools (Arc-wrapped for sharing)
+/// Registry of available tools (Shared-wrapped for lock monitoring)
 ///
 /// Clone creates a fresh CompactionManager so each subagent gets independent
-/// message history tracking. Tools and skills are shared via Arc.
+/// message history tracking. Tools and skills are shared via Shared/Arc.
 pub struct Registry {
-    tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
+    tools: Shared<HashMap<String, Arc<dyn Tool>>>,
     skills: Arc<RwLock<SkillRegistry>>,
-    compaction: Arc<RwLock<CompactionManager>>,
+    compaction: Shared<CompactionManager>,
 }
 
 impl Clone for Registry {
@@ -64,7 +65,7 @@ impl Clone for Registry {
             skills: self.skills.clone(),
             // Each clone gets a fresh CompactionManager to prevent parallel
             // subagents from corrupting each other's message history
-            compaction: Arc::new(RwLock::new(CompactionManager::new())),
+            compaction: Shared::with_name(CompactionManager::new(), "compaction"),
         }
     }
 }
@@ -98,9 +99,9 @@ impl Registry {
     /// Used by remote-mode clients that don't execute tools locally.
     pub fn empty() -> Self {
         Self {
-            tools: Arc::new(RwLock::new(HashMap::new())),
+            tools: Shared::with_name(HashMap::new(), "tool_registry"),
             skills: Arc::new(RwLock::new(SkillRegistry::default())),
-            compaction: Arc::new(RwLock::new(CompactionManager::new())),
+            compaction: Shared::with_name(CompactionManager::new(), "compaction"),
         }
     }
 
@@ -215,11 +216,11 @@ impl Registry {
         let skills = Self::shared_skills_registry();
         let skills_ms = skills_start.elapsed().as_millis();
         let compaction_start = std::time::Instant::now();
-        let compaction = Arc::new(RwLock::new(CompactionManager::new()));
+        let compaction = Shared::with_name(CompactionManager::new(), "compaction");
         let compaction_ms = compaction_start.elapsed().as_millis();
         let registry_struct_start = std::time::Instant::now();
         let registry = Self {
-            tools: Arc::new(RwLock::new(HashMap::new())),
+            tools: Shared::with_name(HashMap::new(), "tool_registry"),
             skills: skills.clone(),
             compaction: compaction.clone(),
         };
@@ -246,6 +247,20 @@ impl Registry {
             "conversation_search",
             conversation_search::ConversationSearchTool::new(compaction),
         );
+
+        // Build and test tools (workspace-aware, require workspace manager)
+        if let Some(ws) = crate::workspace_manager::global_workspace() {
+            Self::insert_tool(
+                &mut tools_map,
+                "build",
+                crate::build_module::BuildTool::new(ws.clone()),
+            );
+            Self::insert_tool(
+                &mut tools_map,
+                "run_tests",
+                crate::build_module::TestTool::new(ws.clone()),
+            );
+        }
         let session_tools_ms = session_tools_start.elapsed().as_millis();
 
         let write_start = std::time::Instant::now();
@@ -616,10 +631,11 @@ impl Registry {
     /// Unregister all tools matching a prefix
     pub async fn unregister_prefix(&self, prefix: &str) -> Vec<String> {
         let mut tools = self.tools.write().await;
+        // Drain-filter pattern avoids allocating a separate key vec
         let to_remove: Vec<String> = tools
             .keys()
             .filter(|k| k.starts_with(prefix))
-            .cloned()
+            .map(|k| k.clone())
             .collect();
         for name in &to_remove {
             tools.remove(name);
@@ -633,7 +649,7 @@ impl Registry {
     }
 
     /// Get shared access to the compaction manager
-    pub fn compaction(&self) -> Arc<RwLock<CompactionManager>> {
+    pub fn compaction(&self) -> Shared<CompactionManager> {
         self.compaction.clone()
     }
 }

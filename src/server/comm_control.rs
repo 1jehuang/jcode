@@ -194,7 +194,7 @@ async fn resolve_assignment_target_session(
 async fn task_id_for_target_session(
     swarm_id: &str,
     target_session: &str,
-    action: TaskControlAction,
+    action: &TaskControlAction,
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
 ) -> Result<String, String> {
     let plans = swarm_plans.read().await;
@@ -202,6 +202,7 @@ async fn task_id_for_target_session(
         return Err("No swarm plan exists for this swarm.".to_string());
     };
     task_control_target_item_id(&plan.items, target_session, action)
+        .ok_or_else(|| "No matching item found.".to_string())
 }
 
 async fn next_unassigned_runnable_task_id(
@@ -246,24 +247,28 @@ async fn resolve_assignment_target_for_task(
     candidates.sort_by(|left, right| {
         let left_carry = affinities
             .dependency_carryover
-            .get(&left.session_id)
-            .copied()
-            .unwrap_or(0);
+            .iter()
+            .find(|(id, _)| *id == left.session_id)
+            .map(|(_, v)| *v)
+            .unwrap_or(0.0);
         let right_carry = affinities
             .dependency_carryover
-            .get(&right.session_id)
-            .copied()
-            .unwrap_or(0);
+            .iter()
+            .find(|(id, _)| *id == right.session_id)
+            .map(|(_, v)| *v)
+            .unwrap_or(0.0);
         let left_meta = affinities
             .metadata_carryover
-            .get(&left.session_id)
-            .copied()
-            .unwrap_or(0);
+            .iter()
+            .find(|(id, _)| *id == left.session_id)
+            .map(|(_, v)| *v)
+            .unwrap_or(0.0);
         let right_meta = affinities
             .metadata_carryover
-            .get(&right.session_id)
-            .copied()
-            .unwrap_or(0);
+            .iter()
+            .find(|(id, _)| *id == right.session_id)
+            .map(|(_, v)| *v)
+            .unwrap_or(0.0);
         let left_load = affinities.loads.get(&left.session_id).copied().unwrap_or(0);
         let right_load = affinities
             .loads
@@ -273,8 +278,9 @@ async fn resolve_assignment_target_for_task(
         let left_rank = if left.status == "ready" { 0 } else { 1 };
         let right_rank = if right.status == "ready" { 0 } else { 1 };
         right_carry
-            .cmp(&left_carry)
-            .then_with(|| right_meta.cmp(&left_meta))
+            .partial_cmp(&left_carry)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right_meta.partial_cmp(&left_meta).unwrap_or(std::cmp::Ordering::Equal))
             .then_with(|| left_load.cmp(&right_load))
             .then_with(|| left_rank.cmp(&right_rank))
             .then_with(|| left.session_id.cmp(&right.session_id))
@@ -326,8 +332,8 @@ fn spawn_assigned_task_run(
                 progress.checkpoint_summary = Some("task started".to_string());
                 progress.completed_at_unix_ms = None;
                 progress.stale_since_unix_ms = None;
-                progress.heartbeat_count = Some(progress.heartbeat_count.unwrap_or(0) + 1);
-                progress.checkpoint_count = Some(progress.checkpoint_count.unwrap_or(0) + 1);
+                progress.heartbeat_count += 1;
+                progress.checkpoint_count += 1;
                 plan.version += 1;
             }
         }
@@ -462,8 +468,7 @@ fn spawn_assigned_task_run(
                         progress.checkpoint_summary = Some("task completed".to_string());
                         progress.completed_at_unix_ms = Some(now_ms);
                         progress.stale_since_unix_ms = None;
-                        progress.checkpoint_count =
-                            Some(progress.checkpoint_count.unwrap_or(0) + 1);
+                        progress.checkpoint_count += 1;
                         plan.version += 1;
                     }
                 }
@@ -511,8 +516,7 @@ fn spawn_assigned_task_run(
                             Some(truncate_detail(&format!("task failed: {}", error), 120));
                         progress.completed_at_unix_ms = Some(now_ms);
                         progress.stale_since_unix_ms = None;
-                        progress.checkpoint_count =
-                            Some(progress.checkpoint_count.unwrap_or(0) + 1);
+                        progress.checkpoint_count += 1;
                         plan.version += 1;
                     }
                 }
@@ -1380,7 +1384,7 @@ pub(super) async fn handle_comm_task_control(
             });
             return;
         };
-        match task_id_for_target_session(&swarm_id, target_session, action, swarm_plans).await {
+        match task_id_for_target_session(&swarm_id, target_session, &action, swarm_plans).await {
             Ok(task_id) => task_id,
             Err(message) => {
                 let _ = client_event_tx.send(ServerEvent::Error {
@@ -1404,10 +1408,10 @@ pub(super) async fn handle_comm_task_control(
         return;
     };
 
-    if !task_control_action_allows_status(action, &snapshot.status) {
+    if !task_control_action_allows_status(&action, &snapshot.status) {
         let _ = client_event_tx.send(ServerEvent::Error {
             id,
-            message: task_control_status_error(action, &snapshot.status, &task_id),
+            message: task_control_status_error(&action, &snapshot.status, &task_id),
             retry_after_secs: None,
         });
         return;
@@ -1464,7 +1468,7 @@ pub(super) async fn handle_comm_task_control(
             }
 
             let assignment_text =
-                build_control_assignment_text(action, &snapshot.content, message.as_deref());
+                build_control_assignment_text(&snapshot.content, message.as_deref());
             if snapshot.status != "queued"
                 && requeue_existing_assignment(
                     &swarm_id,

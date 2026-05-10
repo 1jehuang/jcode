@@ -1,0 +1,238 @@
+﻿cargo :     Blocking waiting for file lock on package cache
+所在位置 行:1 字符: 207
++ ... argo/opensource/jcode; cargo check -p jcode-mcp-advanced 2>&1 | Out-F ...
++                            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Blocking wa...n package cache:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Checking jcode-mcp-advanced v0.12.0 (D:\studying\Codecargo\opensource\jcode\crates\jcode-mcp-advanced)
+warning: unused import: `ClientCapabilities`
+  --> crates\jcode-mcp-advanced\src\transport.rs:11:99
+   |
+11 | use crate::types::{JsonRpcRequest, JsonRpcResponse, JsonRpcSuccessResponse, JsonRpcErrorResponse, ClientCapabiliti
+es};
+   |                                                                                                   ^^^^^^^^^^^^^^^^
+^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `error`
+  --> crates\jcode-mcp-advanced\src\client.rs:20:22
+   |
+20 | use tracing::{debug, error, info, warn};
+   |                      ^^^^^
+
+warning: unused import: `SamplingMessage`
+  --> crates\jcode-mcp-advanced\src\sampling.rs:11:77
+   |
+11 | use crate::types::{CreateMessageRequest, CreateMessageResult, ContentBlock, SamplingMessage};
+   |                                                                             ^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `rand::thread_rng`: Renamed to `rng`
+  --> crates\jcode-mcp-advanced\src\connection_manager.rs:50:33
+   |
+50 |             let mut rng = rand::thread_rng();
+   |                                 ^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: unreachable call
+  --> crates\jcode-mcp-advanced\src\transport.rs:92:32
+   |
+92 |             write_tx: Arc::new(tokio::sync::Mutex::new(
+   |                                ^^^^^^^^^^^^^^^^^^^^^^^ unreachable call
+93 |                 // placeholder, replaced on connect
+94 |                 unimplemented!()
+   |                 ---------------- any code following this expression is unreachable
+   |
+   = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable call
+  --> crates\jcode-mcp-advanced\src\transport.rs:96:31
+   |
+96 |             read_rx: Arc::new(tokio::sync::Mutex::new(unimplemented!())),
+   |                               ^^^^^^^^^^^^^^^^^^^^^^^ ---------------- any code following this expression is unrea
+chable
+   |                               |
+   |                               unreachable call
+
+warning: use of deprecated method `rand::Rng::gen_range`: Renamed to `random_range`
+  --> crates\jcode-mcp-advanced\src\connection_manager.rs:51:30
+   |
+51 |             let j: i64 = rng.gen_range(-jitter_range..=jitter_range);
+   |                              ^^^^^^^^^
+
+warning: unused import: `AsyncReadExt`
+  --> crates\jcode-mcp-advanced\src\transport.rs:14:17
+   |
+14 | use tokio::io::{AsyncReadExt, AsyncWriteExt};
+   |                 ^^^^^^^^^^^^
+
+warning: unused import: `McpTransport`
+  --> crates\jcode-mcp-advanced\src\client.rs:16:24
+   |
+16 | use crate::transport::{McpTransport, TransportError, TransportEnum};
+   |                        ^^^^^^^^^^^^
+
+warning: unused variable: `stdin`
+   --> crates\jcode-mcp-advanced\src\transport.rs:124:13
+    |
+124 |         let stdin = child.stdin.take()
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_stdin`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `stdout`
+   --> crates\jcode-mcp-advanced\src\transport.rs:126:13
+    |
+126 |         let stdout = child.stdout.take()
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_stdout`
+
+warning: unused variable: `body`
+   --> crates\jcode-mcp-advanced\src\transport.rs:335:13
+    |
+335 |         let body = response.text().await?;
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_body`
+
+warning: unused variable: `request`
+  --> crates\jcode-mcp-advanced\src\sampling.rs:53:32
+   |
+53 |     pub async fn sample(&self, request: CreateMessageRequest) -> Result<CreateResult, String> {
+   |                                ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request`
+
+warning: unused variable: `cb`
+  --> crates\jcode-mcp-advanced\src\sampling.rs:58:13
+   |
+58 |         let cb = self.callback.as_ref().unwrap();
+   |             ^^ help: if this is intentional, prefix it with an underscore: `_cb`
+
+warning: type `CreateResult` is more private than the item `SamplingHandler::sample`
+  --> crates\jcode-mcp-advanced\src\sampling.rs:53:5
+   |
+53 |     pub async fn sample(&self, request: CreateMessageRequest) -> Result<CreateResult, String> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `SamplingHand
+ler::sample` is reachable at visibility `pub`
+   |
+note: but type `CreateResult` is only usable at visibility `pub(self)`
+  --> crates\jcode-mcp-advanced\src\sampling.rs:85:1
+   |
+85 | struct CreateResult {
+   | ^^^^^^^^^^^^^^^^^^^
+   = note: `#[warn(private_interfaces)]` on by default
+
+warning: field `read_rx` is never read
+  --> crates\jcode-mcp-advanced\src\transport.rs:83:5
+   |
+79 | pub struct StdioTransport {
+   |            -------------- field in this struct
+...
+83 |     read_rx: Arc<tokio::sync::Mutex<Option<tokio::io::BufReader<tokio::process::ChildStdout>>>>,
+   |     ^^^^^^^
+   |
+   = note: `StdioTransport` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead cod
+e analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `is_connected` is never used
+   --> crates\jcode-mcp-advanced\src\transport.rs:290:8
+    |
+257 | impl TransportEnum {
+    | ------------------ method in this implementation
+...
+290 |     fn is_connected(&self) -> bool {
+    |        ^^^^^^^^^^^^
+
+warning: field `session_id` is never read
+   --> crates\jcode-mcp-advanced\src\transport.rs:414:5
+    |
+411 | pub struct HttpTransport {
+    |            ------------- field in this struct
+...
+414 |     session_id: Arc<tokio::sync::RwLock<Option<String>>>,
+    |     ^^^^^^^^^^
+    |
+    = note: `HttpTransport` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored d
+uring dead code analysis
+
+warning: field `sampling_handler` is never read
+  --> crates\jcode-mcp-advanced\src\client.rs:57:5
+   |
+44 | pub struct MCPClient {
+   |            --------- field in this struct
+...
+57 |     sampling_handler: Arc<RwLock<Option<SamplingHandler>>>,
+   |     ^^^^^^^^^^^^^^^^
+
+warning: fields `role`, `content`, `model`, and `stop_reason` are never read
+  --> crates\jcode-mcp-advanced\src\sampling.rs:86:5
+   |
+85 | struct CreateResult {
+   |        ------------ fields in this struct
+86 |     role: String,
+   |     ^^^^
+87 |     content: ContentBlock,
+   |     ^^^^^^^
+88 |     model: Option<String>,
+   |     ^^^^^
+89 |     stop_reason: Option<String>,
+   |     ^^^^^^^^^^^
+
+warning: unused implementer of `std::future::Future` that must be used
+  --> crates\jcode-mcp-advanced\src\client.rs:98:9
+   |
+98 |         self.conn_manager.set_state(ConnectionState::Connecting);
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: futures do nothing unless you `.await` or poll them
+   = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused implementer of `std::future::Future` that must be used
+   --> crates\jcode-mcp-advanced\src\client.rs:111:17
+    |
+111 | /                 self.conn_manager.set_state(ConnectionState::Failed {
+112 | |                     error: e.to_string(),
+113 | |                     retryable: matches!(e, TransportError::Io(_)),
+114 | |                 });
+    | |__________________^
+    |
+    = note: futures do nothing unless you `.await` or poll them
+
+warning: unused `Result` that must be used
+   --> crates\jcode-mcp-advanced\src\client.rs:123:9
+    |
+123 |         self.send_initialized_notification().await;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+123 |         let _ = self.send_initialized_notification().await;
+    |         +++++++
+
+warning: unused implementer of `std::future::Future` that must be used
+   --> crates\jcode-mcp-advanced\src\client.rs:132:9
+    |
+132 | /         self.conn_manager.set_state(ConnectionState::Connected {
+133 | |             capabilities: init_result.capabilities,
+134 | |             server_info: Some(init_result.server_info),
+135 | |         });
+    | |__________^
+    |
+    = note: futures do nothing unless you `.await` or poll them
+
+warning: unused implementer of `std::future::Future` that must be used
+   --> crates\jcode-mcp-advanced\src\client.rs:204:9
+    |
+204 | /         self.conn_manager.set_state(ConnectionState::Disconnected {
+205 | |             reason: "Client initiated disconnect".into(),
+206 | |         });
+    | |__________^
+    |
+    = note: futures do nothing unless you `.await` or poll them
+
+warning: `jcode-mcp-advanced` (lib) generated 25 warnings (run `cargo fix --lib -p jcode-mcp-advanced` to apply 8 sugge
+stions)
+    Finished `dev` profile [unoptimized] target(s) in 24.85s

@@ -7,3 +7,5 @@ publish = false
 [dependencies]
 jcode-message-types = { path = "../jcode-message-types" }
 serde_json = "1"
+chrono = { workspace = true }
+tracing = { workspace = true }

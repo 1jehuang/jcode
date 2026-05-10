@@ -10,8 +10,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 #[derive(Debug, Deserialize)]
 struct SearchInput {
@@ -35,11 +33,11 @@ struct TurnRange {
 }
 
 pub struct ConversationSearchTool {
-    compaction: Arc<RwLock<CompactionManager>>,
+    compaction: jcode_lock_manager::Shared<CompactionManager>,
 }
 
 impl ConversationSearchTool {
-    pub fn new(compaction: Arc<RwLock<CompactionManager>>) -> Self {
+    pub fn new(compaction: jcode_lock_manager::Shared<CompactionManager>) -> Self {
         Self { compaction }
     }
 }
