@@ -5,7 +5,7 @@
 //!
 //! Automatically selects the best available backend:
 //! - OpenAI (gpt-5.3-codex-spark) if Codex credentials are available
-//! - Claude (claude-haiku-4-5-20241022) if Claude credentials are available
+//! - Claude (claude-haiku-4-5-20251001) if Claude credentials are available
 
 use crate::auth;
 use anyhow::{Context, Result};
@@ -18,7 +18,7 @@ const SIDECAR_OPENAI_OAUTH_FALLBACK_MODEL: &str = "gpt-5.4";
 const SIDECAR_OPENAI_OAUTH_FALLBACK_REASONING: &str = "low";
 
 /// Fast/cheap Claude model used when only Claude credentials are available.
-const SIDECAR_CLAUDE_MODEL: &str = "claude-haiku-4-5-20241022";
+const SIDECAR_CLAUDE_MODEL: &str = "claude-haiku-4-5-20251001";
 
 /// OpenAI Responses API
 const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
