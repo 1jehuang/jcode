@@ -336,7 +336,7 @@ impl Registry {
     /// First tries primary names, then checks each tool's `aliases()` for matches.
     /// This approach lets each tool declare its own aliases (Claude Code pattern),
     /// while maintaining backward compatibility with the hardcoded OAuth mappings.
-    fn resolve_tool_name<'a>(tools: &'a HashMap<String, Arc<dyn Tool>>, name: &str) -> Option<&'a str> {
+    fn resolve_tool_name<'a>(tools: &'a HashMap<String, Arc<dyn Tool>>, name: &'a str) -> Option<&'a str> {
         // Quick check: direct match
         if tools.contains_key(name) {
             return Some(name);

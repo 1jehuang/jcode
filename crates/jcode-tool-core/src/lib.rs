@@ -193,7 +193,6 @@ impl From<&dyn Tool> for AnnotatedToolDefinition {
 }
 
 // Re-exports from submodules
-pub use macros::{define_tool, tool_defaults, build_tool_adapter, tool_matcher};
 pub use streaming_executor::{
     StreamingToolExecutor, ExecutorConfig, ToolCallRequest, ExecutionProgress,
     OrderedToolResult,
