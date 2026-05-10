@@ -45,7 +45,14 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub(crate) use jcode_tool_core::intent_schema_property;
-pub use jcode_tool_core::{StdinInputRequest, Tool, ToolContext, ToolExecutionMode};
+pub use jcode_tool_core::permissions::{
+    PermissionBehavior, PermissionMode, PermissionResult, ToolFilterContext,
+    ToolPermissionContext, ToolSafetyContext,
+};
+pub use jcode_tool_core::{
+    define_tool, tool_defaults, build_tool_adapter, tool_matcher,
+    StdinInputRequest, Tool, ToolContext, ToolExecutionMode,
+};
 pub use jcode_tool_types::{ToolImage, ToolOutput};
 
 /// Registry of available tools (Shared-wrapped for lock monitoring)
@@ -326,13 +333,17 @@ impl Registry {
 
     /// Resolve tool name aliases.
     ///
-    /// When using OAuth, the API presents tools with Claude Code names
-    /// (e.g. `file_grep`, `shell_exec`). The model uses those names in
-    /// sub-tool calls (e.g. inside `batch`), but our registry uses internal
-    /// names (`grep`, `bash`). This mapping ensures both forms resolve
-    /// correctly.
-    fn resolve_tool_name(name: &str) -> &str {
-        match name {
+    /// First tries primary names, then checks each tool's `aliases()` for matches.
+    /// This approach lets each tool declare its own aliases (Claude Code pattern),
+    /// while maintaining backward compatibility with the hardcoded OAuth mappings.
+    fn resolve_tool_name<'a>(tools: &'a HashMap<String, Arc<dyn Tool>>, name: &str) -> Option<&'a str> {
+        // Quick check: direct match
+        if tools.contains_key(name) {
+            return Some(name);
+        }
+
+        // Check hardcoded OAuth aliases (backward compat)
+        let legacy_alias = match name {
             "communicate" => "swarm",
             "task" | "task_runner" => "subagent",
             "launch" => "open",
@@ -343,8 +354,20 @@ impl Registry {
             "file_glob" => "glob",
             "file_grep" => "grep",
             "todoread" | "todowrite" | "todo_read" | "todo_write" => "todo",
-            other => other,
+            _ => return None,
+        };
+        if tools.contains_key(legacy_alias) {
+            return Some(legacy_alias);
         }
+
+        // Check per-tool aliases() — inspired by Claude Code's toolMatchesName()
+        for (primary_name, tool) in tools.iter() {
+            if tool.aliases().contains(&name) {
+                return Some(primary_name);
+            }
+        }
+
+        None
     }
 
     /// Estimate token count for a string (chars / 4, matching compaction heuristic)
@@ -363,9 +386,12 @@ impl Registry {
     /// Execute a tool by name
     pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let tools = self.tools.read().await;
-        let resolved_name = Self::resolve_tool_name(name);
+        let resolved_name = match Self::resolve_tool_name(&tools, name) {
+            Some(n) => n.to_string(),
+            None => return Err(anyhow::anyhow!("Unknown tool: {}", name)),
+        };
         let tool = tools
-            .get(resolved_name)
+            .get(&resolved_name)
             .ok_or_else(|| anyhow::anyhow!("Unknown tool: {}", name))?
             .clone();
 
@@ -376,12 +402,12 @@ impl Registry {
         let result = tool.execute(input.clone(), ctx).await;
         let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
-        crate::telemetry::record_tool_execution(resolved_name, &input, result.is_ok(), latency_ms);
+        crate::telemetry::record_tool_execution(&resolved_name, &input, result.is_ok(), latency_ms);
 
         let mut output = result?;
 
         // Context overflow guard: check if this output would push us over the limit
-        output = self.guard_context_overflow(name, output).await;
+        output = self.guard_context_overflow(&resolved_name, output).await;
 
         Ok(output)
     }
@@ -651,6 +677,69 @@ impl Registry {
     /// Get shared access to the compaction manager
     pub fn compaction(&self) -> Shared<CompactionManager> {
         self.compaction.clone()
+    }
+
+    /// Get all tools (names + Arc references) — 源自 Claude Code 的 `getAllBaseTools()` 模式
+    pub async fn get_all_tools(&self) -> Vec<(String, Arc<dyn Tool>)> {
+        let tools = self.tools.read().await;
+        tools.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
+    /// Filter tools by filter context — 源自 Claude Code 的 `getTools(permissionContext)` + `filterToolsByDenyRules()`
+    pub async fn filter_tools(&self, filter: &ToolFilterContext) -> Vec<(String, Arc<dyn Tool>)> {
+        let tools = self.tools.read().await;
+        tools
+            .iter()
+            .filter(|(name, tool)| {
+                // Check deny list
+                if filter.denied_tool_names.contains(*name) {
+                    return false;
+                }
+                // Check allow list
+                if let Some(ref allowed) = filter.allowed_tool_names {
+                    if !allowed.contains(*name) {
+                        return false;
+                    }
+                }
+                // Check enabled
+                if !tool.is_enabled() {
+                    return false;
+                }
+                true
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Assemble tool pool — 源自 Claude Code 的 `assembleToolPool()`
+    /// 将内置工具与外部工具（如 MCP 工具）合并，去重，排序
+    pub async fn assemble_tool_pool(
+        &self,
+        filter: &ToolFilterContext,
+        external_tools: Vec<(String, Arc<dyn Tool>)>,
+    ) -> Vec<ToolDefinition> {
+        let mut definitions = Vec::new();
+
+        // 1. 获取内置工具定义
+        let builtin = self.definitions(filter.allowed_tool_names.as_ref()).await;
+        definitions.extend(builtin);
+
+        // 2. 添加外部工具（去重：内置优先）
+        let builtin_names: std::collections::HashSet<String> =
+            definitions.iter().map(|d| d.name.clone()).collect();
+        for (name, tool) in external_tools {
+            if !builtin_names.contains(&name) && tool.is_enabled() {
+                let mut def = tool.to_definition();
+                if def.name != name {
+                    def.name = name;
+                }
+                definitions.push(def);
+            }
+        }
+
+        // 3. 按名称排序 — 提示缓存稳定性的关键（源自 Claude Code）
+        definitions.sort_by(|a, b| a.name.cmp(&b.name));
+        definitions
     }
 }
 

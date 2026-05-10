@@ -1,6 +1,8 @@
 mod streaming_executor;
 mod sub_agent;
 mod tool_discovery;
+mod macros;
+pub mod permissions;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -89,10 +91,23 @@ impl ToolContext {
 }
 
 /// A tool that can be executed by the agent.
+///
+/// ## 增强说明
+/// - 新增 `aliases()` 支持工具别名查找（源自 Claude Code 的 Tool.aliases[]）
+/// - 新增 `is_concurrency_safe()` 支持并发安全标记（源自 Claude Code 的 isConcurrencySafe()）
+/// - 新增 `is_enabled()` 支持条件启用/禁用（源自 Claude Code 的 isEnabled()）
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// Tool name (must match what's sent to the API).
     fn name(&self) -> &str;
+
+    /// Optional aliases for backwards compatibility.
+    /// A tool can be looked up by any of these names in addition to its primary name.
+    /// Default: `&[]` (no aliases).
+    /// 源自 Claude Code 的 `aliases?: string[]`.
+    fn aliases(&self) -> &[&str] {
+        &[]
+    }
 
     /// Human-readable description.
     fn description(&self) -> &str;
@@ -115,6 +130,19 @@ pub trait Tool: Send + Sync {
     /// Default: `false` (assume safe).
     fn is_destructive(&self) -> bool {
         false
+    }
+
+    /// Whether this tool is concurrency-safe.
+    /// True = can run in parallel with other tools.
+    /// 源自 Claude Code 的 `isConcurrencySafe(input)`.
+    fn is_concurrency_safe(&self) -> bool {
+        self.is_read_only() // 默认与 is_read_only 一致
+    }
+
+    /// Whether this tool is enabled in the current environment.
+    /// 源自 Claude Code 的 `isEnabled()`.
+    fn is_enabled(&self) -> bool {
+        true
     }
 
     /// Maximum number of characters in the tool's output.
@@ -165,6 +193,7 @@ impl From<&dyn Tool> for AnnotatedToolDefinition {
 }
 
 // Re-exports from submodules
+pub use macros::{define_tool, tool_defaults, build_tool_adapter, tool_matcher};
 pub use streaming_executor::{
     StreamingToolExecutor, ExecutorConfig, ToolCallRequest, ExecutionProgress,
     OrderedToolResult,

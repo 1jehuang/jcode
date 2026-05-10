@@ -4442,6 +4442,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "futures",
  "jcode-ci-generator",
  "jcode-project-builder",
  "parking_lot",
@@ -4450,6 +4451,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "tracing",
 ]
 

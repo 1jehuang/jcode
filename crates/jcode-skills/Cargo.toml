@@ -5,7 +5,8 @@ edition = "2021"
 description = "Skills mode & chain calling — encapsulate dev workflows: TAPD→code→test→deploy"
 
 [dependencies]
-tokio = { workspace = true, features = ["fs", "process", "sync", "rt", "macros"] }
+tokio = { workspace = true, features = ["fs", "process", "sync", "rt", "macros", "net"] }
+tokio-stream = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -15,5 +16,6 @@ parking_lot = "0.12"
 async-trait = "0.1"
 chrono = { workspace = true }
 reqwest = { workspace = true }
+futures = { workspace = true }
 jcode-ci-generator = { path = "../jcode-ci-generator" }
 jcode-project-builder = { path = "../jcode-project-builder" }
