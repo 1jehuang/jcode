@@ -8,6 +8,7 @@ pub mod file_history;
 pub mod debug_log;
 pub mod error_types;
 pub mod settings_priority;
+pub mod remote_session;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -227,4 +228,8 @@ pub use error_types::{
 pub use settings_priority::{
     SettingsPriorityResolver, SettingSource, SettingValue,
     source_display_name, parse_setting_sources_flag,
+};
+pub use remote_session::{
+    RemoteSessionManager, RemoteSessionFactory, RemoteSessionConfig,
+    RemoteSessionStatus, RemoteTransportVersion, RemoteSessionId, SessionStats,
 };

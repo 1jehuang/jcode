@@ -1,4 +1,4 @@
-﻿#![cfg_attr(test, allow(clippy::items_after_test_module))]
+﻿﻿#![cfg_attr(test, allow(clippy::items_after_test_module))]
 
 use super::client_lifecycle::process_message_streaming_mpsc;
 use super::{

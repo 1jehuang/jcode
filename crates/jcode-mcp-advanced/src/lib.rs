@@ -25,6 +25,7 @@ mod connection_manager;
 mod tool_registry;
 mod sampling;
 mod permissions;
+pub mod auth;
 
 pub use types::*;
 pub use transport::*;

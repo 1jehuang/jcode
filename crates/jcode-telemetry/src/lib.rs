@@ -28,6 +28,7 @@ mod cost_tracker;
 mod resource_monitor;
 mod health_check;
 mod slow_operation_detector;
+pub mod commit_attribution;
 
 pub use types::*;
 pub use metrics::{MetricsCollector, MetricKey, MetricValue};
@@ -40,6 +41,10 @@ pub use tracer::{
 pub use cost_tracker::CostTracker;
 pub use resource_monitor::ResourceMonitor;
 pub use health_check::HealthChecker;
+pub use commit_attribution::{
+    CommitAttributionTracker, CommitAttribution, FileAttribution,
+    FileChangeKind, AttributionSnapshot,
+};
 
 /// 默认指标收集间隔 (ms)
 pub const DEFAULT_METRICS_INTERVAL_MS: u64 = 60_000;  // 1 min

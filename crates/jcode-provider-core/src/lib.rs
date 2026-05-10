@@ -1,10 +1,12 @@
 pub mod anthropic;
 pub mod catalog_refresh;
 pub mod failover;
+pub mod feature_flags;
 pub mod models;
 pub mod openai_schema;
 pub mod pricing;
 pub mod selection;
+pub mod thinking;
 
 pub use anthropic::{
     ANTHROPIC_OAUTH_BETA_HEADERS, ANTHROPIC_OAUTH_BETA_HEADERS_1M, anthropic_effectively_1m,
@@ -17,6 +19,10 @@ pub use failover::{
     FailoverDecision, ProviderFailoverPrompt, classify_failover_error_message,
     parse_failover_prompt_message,
 };
+pub use feature_flags::{
+    FeatureFlag, FlagClient, FlagValue, FlagEvaluator,
+    FEATURE_FLAGS,
+};
 pub use models::{
     ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, DEFAULT_CONTEXT_LIMIT, ModelCapabilities,
     context_limit_for_model, context_limit_for_model_with_provider,
@@ -28,6 +34,11 @@ pub use selection::{
     ActiveProvider, ProviderAvailability, auto_default_provider, dedupe_model_routes,
     explicit_model_provider_prefix, fallback_sequence, model_name_for_provider,
     parse_provider_hint, provider_from_model_key, provider_key, provider_label,
+};
+pub use thinking::{
+    ThinkingConfig, model_supports_thinking, model_supports_adaptive_thinking,
+    should_enable_thinking_by_default, thinking_beta_header, build_thinking_param,
+    DEFAULT_THINKING_BUDGET_TOKENS, MAX_THINKING_BUDGET_TOKENS,
 };
 
 use anyhow::Result;

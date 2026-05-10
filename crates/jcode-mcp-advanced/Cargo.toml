@@ -13,7 +13,7 @@ tokio-util = { workspace = true }
 futures = { workspace = true }
 async-stream = { workspace = true }
 pin-project-lite = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
 url = { workspace = true }
@@ -21,10 +21,12 @@ tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-chrono = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
 async-trait = { workspace = true }
 uuid = { workspace = true }
 rand = "0.9.3"
+sha2 = "0.10"
+base64 = "0.22"
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -1,4 +1,4 @@
-﻿//! Memory system for cross-session learning
+﻿﻿//! Memory system for cross-session learning
 //!
 //! Provides persistent memory that survives across sessions, organized by:
 //! - Project (per working directory)
