@@ -149,6 +149,56 @@ fn customization_append_outcome_persists_history() {
 }
 
 #[test]
+fn customization_patch_with_untracked_keeps_tracked_diff() {
+    let repo = create_git_repo_fixture();
+    std::fs::write(
+        repo.path().join("Cargo.toml"),
+        "[package]\nname = \"jcode\"\nversion = \"0.0.1\"\n",
+    )
+    .expect("modify tracked file");
+
+    let patch = current_git_patch_with_untracked(repo.path()).expect("patch");
+
+    assert!(patch.contains("diff --git a/Cargo.toml b/Cargo.toml"));
+    assert!(patch.contains("-version = \"0.0.0\""));
+    assert!(patch.contains("+version = \"0.0.1\""));
+}
+
+#[test]
+fn customization_patch_with_untracked_includes_new_file() {
+    let repo = create_git_repo_fixture();
+    std::fs::write(repo.path().join("new_tool.rs"), "pub fn new_tool() {}\n")
+        .expect("write untracked file");
+
+    let patch = current_git_patch_with_untracked(repo.path()).expect("patch");
+
+    assert!(patch.contains("new_tool.rs"));
+    assert!(patch.contains("+pub fn new_tool() {}"));
+}
+
+#[test]
+fn customization_record_patch_file_includes_untracked_file() {
+    with_temp_jcode_home(|| {
+        let repo = create_git_repo_fixture();
+        std::fs::write(repo.path().join("new_tool.rs"), "pub fn new_tool() {}\n")
+            .expect("write untracked file");
+        let patch = current_git_patch_with_untracked(repo.path()).expect("patch");
+        let record = SelfDevCustomizationRecord::new(
+            "custom-untracked",
+            "Capture new file",
+            "Patch provenance includes untracked files",
+        );
+
+        let stored = create_customization_record(record, Some(&patch)).expect("create record");
+        let patch_path = stored.provenance.patch_path.expect("patch path");
+        let patch_text = std::fs::read_to_string(patch_path).expect("read patch");
+
+        assert!(patch_text.contains("new_tool.rs"));
+        assert!(patch_text.contains("+pub fn new_tool() {}"));
+    });
+}
+
+#[test]
 fn test_build_manifest_default() {
     let manifest = BuildManifest::default();
     assert!(manifest.stable.is_none());

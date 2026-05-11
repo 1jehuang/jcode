@@ -149,6 +149,78 @@ async fn record_customization_creates_record_and_list_output() {
     assert!(list.output.contains("custom-test"));
 }
 
+#[tokio::test]
+async fn disable_customization_removes_compact_memory_and_active_status() {
+    let _storage_guard = crate::storage::lock_test_env();
+    let _lock = lock_env();
+    let temp_home = tempfile::TempDir::new().expect("temp home");
+    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+    let _test_session_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let repo = create_repo_fixture();
+    let ctx = create_test_context("session-customization", Some(repo.path().to_path_buf()));
+    let tool = SelfDevTool::new();
+
+    tool.do_record_customization(
+        SelfDevInput {
+            action: "record-customization".to_string(),
+            prompt: None,
+            context: None,
+            reason: None,
+            target: None,
+            command: None,
+            notify: None,
+            wake: None,
+            request_id: None,
+            task_id: None,
+            id: Some("custom/disable".to_string()),
+            goal: Some("Remove compact memory when disabled".to_string()),
+            expected_behavior: Some("Disabled customizations are not active memory".to_string()),
+            customization_intent: None,
+            rationale: None,
+            update_hints: None,
+            validation_commands: None,
+            touched_paths: Some(vec!["src/tool/selfdev/mod.rs".to_string()]),
+        },
+        &ctx,
+    )
+    .await
+    .expect("record customization");
+
+    let manager = crate::memory::MemoryManager::new().with_project_dir(repo.path());
+    assert!(
+        manager
+            .list_all()
+            .expect("list memories")
+            .iter()
+            .any(|entry| entry.id == "selfdev-customization-custom-disable")
+    );
+
+    let output = tool
+        .do_disable_customization(
+            Some("custom-disable".to_string()),
+            Some("obsolete".to_string()),
+            &ctx,
+        )
+        .await
+        .expect("disable customization");
+
+    assert!(output.output.contains("Removed compact memory entry"));
+    assert!(
+        !manager
+            .list_all()
+            .expect("list memories")
+            .iter()
+            .any(|entry| entry.id == "selfdev-customization-custom-disable")
+    );
+
+    let status = selfdev_status_output().expect("status");
+    assert!(!status.output.contains("Active Customizations"));
+    let record = build::load_customization_record("custom-disable")
+        .expect("load record")
+        .expect("record exists");
+    assert!(!record.is_active());
+}
+
 #[test]
 fn test_reload_context_serialization() {
     // Create test context with task info

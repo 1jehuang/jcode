@@ -509,7 +509,7 @@ impl Tool for SelfDevTool {
             "list-customizations" => self.do_list_customizations().await,
             "inspect-customization" => self.do_inspect_customization(params.id).await,
             "disable-customization" => {
-                self.do_disable_customization(params.id, params.reason)
+                self.do_disable_customization(params.id, params.reason, &ctx)
                     .await
             }
             "socket-info" => {

@@ -27,7 +27,7 @@ impl SelfDevTool {
         let diff = if Self::is_test_session() {
             String::new()
         } else {
-            build::current_git_diff(&repo_dir).unwrap_or_default()
+            build::current_git_patch_with_untracked(&repo_dir).unwrap_or_default()
         };
         let diff_stat = if Self::is_test_session() {
             None
@@ -133,6 +133,9 @@ impl SelfDevTool {
                 record.validation.commands.join("`, `")
             ));
         }
+        if let Some(status) = record.validation.last_status.as_ref() {
+            output.push_str(&format!("**Last validation:** {:?}\n", status));
+        }
         if !record.provenance.touched_paths.is_empty() {
             output.push_str(&format!(
                 "\n**Touched paths:** {}\n",
@@ -171,14 +174,25 @@ impl SelfDevTool {
         &self,
         id: Option<String>,
         reason: Option<String>,
+        ctx: &ToolContext,
     ) -> Result<ToolOutput> {
         let id = non_empty(id, "id")?;
         let record = build::disable_customization_record(&id, reason)?;
+        let memory_removed = forget_customization_memory(&record, ctx).unwrap_or(false);
         Ok(ToolOutput::new(format!(
-            "Disabled self-dev customization `{}`.",
-            record.id
+            "Disabled self-dev customization `{}`.{}",
+            record.id,
+            if memory_removed {
+                " Removed compact memory entry."
+            } else {
+                ""
+            }
         )))
     }
+}
+
+fn customization_memory_id(record_id: &str) -> String {
+    format!("selfdev-customization-{}", record_id)
 }
 
 fn write_customization_memory(
@@ -206,13 +220,28 @@ fn write_customization_memory(
     )
     .with_source(session_id.to_string())
     .with_tags(memory_tags(record));
-    entry.id = format!("selfdev-customization-{}", record.id);
+    entry.id = customization_memory_id(&record.id);
     entry.trust = TrustLevel::High;
     entry.refresh_search_text();
 
     MemoryManager::new()
         .with_project_dir(repo_dir)
         .upsert_project_memory(entry)
+}
+
+fn forget_customization_memory(
+    record: &build::SelfDevCustomizationRecord,
+    ctx: &ToolContext,
+) -> Result<bool> {
+    let manager = record
+        .provenance
+        .repo_dir
+        .as_ref()
+        .cloned()
+        .or_else(|| SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref()))
+        .map(|dir| MemoryManager::new().with_project_dir(dir))
+        .unwrap_or_else(MemoryManager::new);
+    manager.forget(&customization_memory_id(&record.id))
 }
 
 fn memory_tags(record: &build::SelfDevCustomizationRecord) -> Vec<String> {

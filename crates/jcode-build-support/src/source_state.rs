@@ -191,6 +191,55 @@ pub fn current_git_diff(repo_dir: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+pub fn current_git_patch_with_untracked(repo_dir: &Path) -> Result<String> {
+    let mut patch = current_git_diff(repo_dir)?;
+    let untracked = git_output_bytes(
+        repo_dir,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    )?;
+
+    for path in untracked
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        let relative = String::from_utf8_lossy(path);
+        let path = relative.as_ref();
+        let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
+        let output = Command::new("git")
+            .args(["diff", "--binary", "--no-index", "--", null_device, path])
+            .current_dir(repo_dir)
+            .output()?;
+
+        match output.status.code() {
+            Some(0) | Some(1) => {}
+            code => {
+                anyhow::bail!(
+                    "git diff --no-index for untracked file {} failed with status {:?}",
+                    path,
+                    code
+                );
+            }
+        }
+
+        if !patch.is_empty() && !patch.ends_with('\n') {
+            patch.push('\n');
+        }
+        patch.push_str(&String::from_utf8_lossy(&output.stdout));
+        if !output.stderr.is_empty() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.trim().is_empty() {
+                anyhow::bail!(
+                    "git diff --no-index for untracked file {} wrote stderr: {}",
+                    path,
+                    stderr.trim()
+                );
+            }
+        }
+    }
+
+    Ok(patch)
+}
+
 /// Check if working tree is dirty
 pub fn is_working_tree_dirty(repo_dir: &Path) -> Result<bool> {
     let output = Command::new("git")

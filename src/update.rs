@@ -21,6 +21,7 @@ const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(60); // minimum gap 
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const DOWNLOAD_PROGRESS_UPDATE_STEP: u64 = 1_048_576;
+const CUSTOMIZATION_VALIDATION_OUTPUT_LIMIT: usize = 4000;
 
 pub fn print_centered(msg: &str) {
     let width = crossterm::terminal::size()
@@ -910,21 +911,147 @@ fn record_customization_update_reports(version: &str) {
     }
 
     for record in active {
-        let outcome = build::SelfDevCustomizationOutcome {
-            status: build::SelfDevCustomizationOutcomeStatus::NeedsReview,
-            timestamp: chrono::Utc::now(),
-            detail: Some(format!(
-                "Update to {} installed; active customization should be reviewed before relying on it.",
-                version
-            )),
-            validation_commands: record.validation.commands.clone(),
+        let record_id = record.id.clone();
+        let result = if record.validation.commands.is_empty() {
+            let outcome = build::SelfDevCustomizationOutcome {
+                status: build::SelfDevCustomizationOutcomeStatus::NeedsReview,
+                timestamp: chrono::Utc::now(),
+                detail: Some(format!(
+                    "Update to {} installed; active customization should be reviewed before relying on it.",
+                    version
+                )),
+                validation_commands: Vec::new(),
+            };
+            build::append_customization_outcome(&record.id, outcome).map(|_| ())
+        } else {
+            record_customization_validation_outcome(record, version)
         };
-        if let Err(error) = build::append_customization_outcome(&record.id, outcome) {
+
+        if let Err(error) = result {
             crate::logging::warn(&format!(
                 "Failed to append customization update report for {}: {}",
-                record.id, error
+                record_id, error
             ));
         }
+    }
+}
+
+fn record_customization_validation_outcome(
+    mut record: build::SelfDevCustomizationRecord,
+    version: &str,
+) -> Result<()> {
+    let commands = record.validation.commands.clone();
+    let now = chrono::Utc::now();
+    let (status, detail) = match record.provenance.repo_dir.as_ref() {
+        Some(repo_dir) if repo_dir.is_dir() => {
+            run_customization_validation_commands(repo_dir, &commands)
+        }
+        Some(repo_dir) => (
+            build::SelfDevCustomizationOutcomeStatus::ValidationFailed,
+            format!(
+                "Validation failed for update {version}: repo dir unavailable ({})",
+                repo_dir.display()
+            ),
+        ),
+        None => (
+            build::SelfDevCustomizationOutcomeStatus::ValidationFailed,
+            format!("Validation failed for update {version}: repo dir unavailable"),
+        ),
+    };
+
+    record.validation.last_status = Some(status);
+    record.validation.last_output = Some(detail.clone());
+    record.validation.last_validated_at = Some(now);
+    record.updated_at = now;
+    record.outcomes.push(build::SelfDevCustomizationOutcome {
+        status,
+        timestamp: now,
+        detail: Some(detail),
+        validation_commands: commands,
+    });
+    build::save_customization_record(&record)?;
+    Ok(())
+}
+
+fn run_customization_validation_commands(
+    repo_dir: &Path,
+    commands: &[String],
+) -> (build::SelfDevCustomizationOutcomeStatus, String) {
+    let mut combined = String::new();
+    for command in commands {
+        let output = if cfg!(windows) {
+            std::process::Command::new("cmd")
+                .args(["/C", command])
+                .current_dir(repo_dir)
+                .output()
+        } else {
+            std::process::Command::new("sh")
+                .args(["-c", command])
+                .current_dir(repo_dir)
+                .output()
+        };
+
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => {
+                return (
+                    build::SelfDevCustomizationOutcomeStatus::ValidationFailed,
+                    truncate_chars(
+                        &format!("Validation command `{command}` failed to start: {error}"),
+                        CUSTOMIZATION_VALIDATION_OUTPUT_LIMIT,
+                    ),
+                );
+            }
+        };
+
+        append_validation_output(&mut combined, command, &output);
+        if !output.status.success() {
+            return (
+                build::SelfDevCustomizationOutcomeStatus::ValidationFailed,
+                truncate_chars(&combined, CUSTOMIZATION_VALIDATION_OUTPUT_LIMIT),
+            );
+        }
+    }
+
+    (
+        build::SelfDevCustomizationOutcomeStatus::ValidationPassed,
+        truncate_chars(&combined, CUSTOMIZATION_VALIDATION_OUTPUT_LIMIT),
+    )
+}
+
+fn append_validation_output(combined: &mut String, command: &str, output: &std::process::Output) {
+    if !combined.is_empty() {
+        combined.push_str("\n\n");
+    }
+    combined.push_str(&format!(
+        "Command: `{}`\nStatus: {}\n",
+        command,
+        output.status.code().map_or_else(
+            || "terminated by signal".to_string(),
+            |code| code.to_string()
+        )
+    ));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.trim().is_empty() {
+        combined.push_str("Stdout:\n");
+        combined.push_str(stdout.trim());
+        combined.push('\n');
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.trim().is_empty() {
+        combined.push_str("Stderr:\n");
+        combined.push_str(stderr.trim());
+        combined.push('\n');
+    }
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        value.to_string()
+    } else {
+        let mut truncated: String = value.chars().take(max_chars).collect();
+        truncated.push_str("\n...");
+        truncated
     }
 }
 
@@ -1151,7 +1278,7 @@ mod tests {
     }
 
     #[test]
-    fn test_record_customization_update_reports_marks_active_records_for_review() {
+    fn test_record_customization_update_reports_without_commands_marks_needs_review() {
         let _storage_guard = storage::lock_test_env();
         static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         let _env_guard = ENV_LOCK
@@ -1172,15 +1299,11 @@ mod tests {
         let _restore = EnvRestore(std::env::var_os("JCODE_HOME"));
         jcode_core::env::set_var("JCODE_HOME", temp_home.path());
 
-        let mut record = build::SelfDevCustomizationRecord::new(
+        let record = build::SelfDevCustomizationRecord::new(
             "custom-update",
             "Keep local self-dev behavior",
             "Update reports make review visible",
         );
-        record
-            .validation
-            .commands
-            .push("cargo check -p jcode".to_string());
         build::create_customization_record(record, None).expect("create customization");
 
         record_customization_update_reports("v9.9.9");
@@ -1193,9 +1316,119 @@ mod tests {
             loaded.outcomes[0].status,
             build::SelfDevCustomizationOutcomeStatus::NeedsReview
         );
-        assert_eq!(
-            loaded.outcomes[0].validation_commands,
-            vec!["cargo check -p jcode".to_string()]
+        assert_eq!(loaded.outcomes[0].validation_commands, Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_record_customization_update_reports_validation_pass() {
+        let _storage_guard = storage::lock_test_env();
+        static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let _env_guard = ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let repo = tempfile::tempdir().expect("repo dir");
+        struct EnvRestore(Option<std::ffi::OsString>);
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                if let Some(previous) = self.0.as_ref() {
+                    jcode_core::env::set_var("JCODE_HOME", previous);
+                } else {
+                    jcode_core::env::remove_var("JCODE_HOME");
+                }
+            }
+        }
+        let _restore = EnvRestore(std::env::var_os("JCODE_HOME"));
+        jcode_core::env::set_var("JCODE_HOME", temp_home.path());
+
+        let mut record = build::SelfDevCustomizationRecord::new(
+            "custom-validation-pass",
+            "Validate customization",
+            "Passing validation is recorded",
         );
+        record.provenance.repo_dir = Some(repo.path().to_path_buf());
+        record
+            .validation
+            .commands
+            .push("echo validation-ok".to_string());
+        build::create_customization_record(record, None).expect("create customization");
+
+        record_customization_update_reports("v9.9.9");
+
+        let loaded = build::load_customization_record("custom-validation-pass")
+            .expect("load customization")
+            .expect("record exists");
+        assert_eq!(loaded.outcomes.len(), 1);
+        assert_eq!(
+            loaded.outcomes[0].status,
+            build::SelfDevCustomizationOutcomeStatus::ValidationPassed
+        );
+        assert_eq!(
+            loaded.validation.last_status,
+            Some(build::SelfDevCustomizationOutcomeStatus::ValidationPassed)
+        );
+        assert!(
+            loaded
+                .validation
+                .last_output
+                .as_deref()
+                .unwrap_or_default()
+                .contains("validation-ok")
+        );
+    }
+
+    #[test]
+    fn test_record_customization_update_reports_validation_failure_is_report_only() {
+        let _storage_guard = storage::lock_test_env();
+        static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let _env_guard = ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let repo = tempfile::tempdir().expect("repo dir");
+        struct EnvRestore(Option<std::ffi::OsString>);
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                if let Some(previous) = self.0.as_ref() {
+                    jcode_core::env::set_var("JCODE_HOME", previous);
+                } else {
+                    jcode_core::env::remove_var("JCODE_HOME");
+                }
+            }
+        }
+        let _restore = EnvRestore(std::env::var_os("JCODE_HOME"));
+        jcode_core::env::set_var("JCODE_HOME", temp_home.path());
+
+        let mut record = build::SelfDevCustomizationRecord::new(
+            "custom-validation-fail",
+            "Validate customization",
+            "Failing validation is recorded",
+        );
+        record.provenance.repo_dir = Some(repo.path().to_path_buf());
+        record
+            .validation
+            .commands
+            .push("echo validation-failed && exit 7".to_string());
+        build::create_customization_record(record, None).expect("create customization");
+
+        record_customization_update_reports("v9.9.9");
+
+        let loaded = build::load_customization_record("custom-validation-fail")
+            .expect("load customization")
+            .expect("record exists");
+        assert_eq!(loaded.outcomes.len(), 1);
+        assert_eq!(
+            loaded.outcomes[0].status,
+            build::SelfDevCustomizationOutcomeStatus::ValidationFailed
+        );
+        assert_eq!(
+            loaded.validation.last_status,
+            Some(build::SelfDevCustomizationOutcomeStatus::ValidationFailed)
+        );
+        let output = loaded.validation.last_output.as_deref().unwrap_or_default();
+        assert!(output.contains("validation-failed"));
+        assert!(output.contains("Status: 7"));
     }
 }

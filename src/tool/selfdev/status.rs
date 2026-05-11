@@ -106,6 +106,9 @@ pub fn selfdev_status_output() -> Result<ToolOutput> {
                     record.validation.commands.join("`, `")
                 ));
             }
+            if let Some(validation_status) = record.validation.last_status.as_ref() {
+                status.push_str(&format!("  Last validation: {:?}\n", validation_status));
+            }
         }
     }
 
