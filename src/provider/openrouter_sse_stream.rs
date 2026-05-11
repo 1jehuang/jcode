@@ -363,12 +363,12 @@ impl OpenRouterStream {
                         .and_then(|c| c.as_str())
                         && !reasoning_content.is_empty()
                     {
-                        let reasoning_delta = if reasoning_content.starts_with(&self.reasoning_buffer)
-                        {
-                            &reasoning_content[self.reasoning_buffer.len()..]
-                        } else {
-                            reasoning_content
-                        };
+                        let reasoning_delta =
+                            if reasoning_content.starts_with(&self.reasoning_buffer) {
+                                &reasoning_content[self.reasoning_buffer.len()..]
+                            } else {
+                                reasoning_content
+                            };
                         self.reasoning_buffer = reasoning_content.to_string();
                         if !reasoning_delta.is_empty() {
                             self.pending

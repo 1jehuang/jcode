@@ -1346,7 +1346,10 @@ mod tests {
         assert_eq!(OLLAMA_PROFILE.default_model, None);
         assert!(!OLLAMA_PROFILE.requires_api_key);
 
-        assert_eq!(OLLAMA_LOGIN_PROVIDER.auth_kind, LoginProviderAuthKind::Local);
+        assert_eq!(
+            OLLAMA_LOGIN_PROVIDER.auth_kind,
+            LoginProviderAuthKind::Local
+        );
         assert_eq!(OLLAMA_LOGIN_PROVIDER.auth_status_method, "local endpoint");
         assert!(matches!(
             OLLAMA_LOGIN_PROVIDER.target,

@@ -259,6 +259,12 @@ impl CompactionManager {
         self.semantic_embed_cache.clear();
         self.semantic_embed_cache_counter = 0;
         self.total_turns = total_messages;
+        if state.compacted_count > total_messages {
+            crate::logging::warn(&format!(
+                "[compaction] restore: stale compacted_count={} exceeds messages.len()={}; clamping",
+                state.compacted_count, total_messages
+            ));
+        }
         self.compacted_count = state.compacted_count.min(total_messages);
         self.active_message_chars = 0;
         self.active_message_chars_dirty = total_messages > self.compacted_count;
@@ -285,6 +291,29 @@ impl CompactionManager {
             .map(message_char_count)
             .sum();
         self.active_message_chars_dirty = false;
+    }
+
+    fn clamp_stale_compacted_count(&mut self, all_messages: &[Message], caller: &str) -> bool {
+        if all_messages.is_empty() {
+            return false;
+        }
+
+        if self.compacted_count <= all_messages.len() {
+            return false;
+        }
+
+        crate::logging::warn(&format!(
+            "[compaction] {}: stale compacted_count={} exceeds messages.len()={}; clamping",
+            caller,
+            self.compacted_count,
+            all_messages.len()
+        ));
+        self.compacted_count = all_messages.len();
+        self.total_turns = all_messages.len();
+        self.active_message_chars = 0;
+        self.active_message_chars_dirty = false;
+        self.observed_input_tokens = None;
+        true
     }
 
     pub fn restore_persisted_stored_state_with(
@@ -603,22 +632,17 @@ impl CompactionManager {
     /// Get the active (uncompacted) messages from a full message list.
     /// Skips the first `compacted_count` messages.
     fn active_messages<'a>(&self, all_messages: &'a [Message]) -> &'a [Message] {
-        if self.compacted_count <= all_messages.len() {
-            &all_messages[self.compacted_count..]
-        } else {
-            // Edge case: messages were cleared/replaced with fewer items
-            all_messages
-        }
+        let start = self.compacted_count.min(all_messages.len());
+        &all_messages[start..]
     }
 
     fn active_message_chars_with(&self, all_messages: &[Message]) -> usize {
+        let active = self.active_messages(all_messages);
         if self.active_message_chars_dirty
-            || self.active_messages_count() != self.active_messages(all_messages).len()
+            || self.active_messages_count() != active.len()
+            || self.compacted_count > all_messages.len()
         {
-            self.active_messages(all_messages)
-                .iter()
-                .map(message_char_count)
-                .sum()
+            active.iter().map(message_char_count).sum()
         } else {
             self.active_message_chars
         }
@@ -901,6 +925,8 @@ impl CompactionManager {
     /// Check if background compaction is done and apply it, updating rolling
     /// token-estimate state from the provided full message list.
     pub fn check_and_apply_compaction_with(&mut self, all_messages: &[Message]) {
+        self.clamp_stale_compacted_count(all_messages, "check_and_apply_compaction_with");
+
         let task = match self.pending_task.take() {
             Some(task) => task,
             None => return,
@@ -931,7 +957,10 @@ impl CompactionManager {
                 };
 
                 // Advance the compacted count — these messages are now summarized
-                self.compacted_count += self.pending_cutoff;
+                self.compacted_count = self.compacted_count.saturating_add(self.pending_cutoff);
+                if !all_messages.is_empty() {
+                    self.compacted_count = self.compacted_count.min(all_messages.len());
+                }
                 self.active_message_chars = self
                     .active_message_chars_with(all_messages)
                     .saturating_sub(compacted_chars);
@@ -1010,7 +1039,9 @@ impl CompactionManager {
     /// Get messages for API call (with summary if compacted).
     /// Takes the full message list from the caller.
     pub fn messages_for_api_with(&mut self, all_messages: &[Message]) -> Vec<Message> {
+        self.clamp_stale_compacted_count(all_messages, "messages_for_api_with");
         self.check_and_apply_compaction_with(all_messages);
+        self.clamp_stale_compacted_count(all_messages, "messages_for_api_with");
         self.discard_oversized_openai_native_compaction();
 
         let active = self.active_messages(all_messages);
@@ -1196,6 +1227,7 @@ impl CompactionManager {
     /// exceed the token budget, progressively keeps fewer turns down to
     /// `MIN_TURNS_TO_KEEP`.
     pub fn hard_compact_with(&mut self, all_messages: &[Message]) -> Result<usize, String> {
+        self.clamp_stale_compacted_count(all_messages, "hard_compact_with");
         let active = self.active_messages(all_messages);
 
         if active.len() <= MIN_TURNS_TO_KEEP {
@@ -1257,7 +1289,10 @@ impl CompactionManager {
             original_turn_count: cutoff,
         };
 
-        self.compacted_count += cutoff;
+        self.compacted_count = self
+            .compacted_count
+            .saturating_add(cutoff)
+            .min(all_messages.len());
         self.active_message_chars = remaining_suffix_chars[cutoff];
         self.active_message_chars_dirty = false;
         self.active_summary = Some(summary);

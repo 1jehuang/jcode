@@ -375,6 +375,130 @@ fn test_hard_compact_preserves_recent_turns() {
     );
 }
 
+#[test]
+fn test_bug_175_messages_for_api_self_heals_stale_compacted_count() {
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    let mut messages = Vec::new();
+    for i in 0..30 {
+        messages.push(make_text_message(
+            Role::User,
+            &format!("turn {} {}", i, "x".repeat(120)),
+        ));
+        manager.notify_message_added();
+    }
+
+    manager.compacted_count = 100;
+    manager.total_turns = 100;
+    manager.active_message_chars = messages.iter().map(message_char_count).sum();
+    manager.active_message_chars_dirty = false;
+    manager.active_summary = Some(jcode_compaction_core::Summary {
+        text: "# Existing summary".to_string(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 100,
+        original_turn_count: 100,
+    });
+
+    let api_messages = manager.messages_for_api_with(&messages);
+
+    assert_eq!(
+        manager.compacted_count(),
+        messages.len(),
+        "stale compacted_count should be clamped to the caller's full message list"
+    );
+    assert_eq!(
+        api_messages.len(),
+        1,
+        "stale compacted_count must not replay the full transcript after the summary"
+    );
+    assert_eq!(manager.stats_with(&messages).active_messages, 0);
+}
+
+#[test]
+fn test_bug_175_active_messages_clamps_stale_compacted_count() {
+    let mut manager = CompactionManager::new();
+    let messages = vec![
+        make_text_message(Role::User, "first"),
+        make_text_message(Role::Assistant, "second"),
+        make_text_message(Role::User, "third"),
+    ];
+
+    manager.compacted_count = 10;
+    manager.total_turns = 10;
+
+    assert!(
+        manager.active_messages(&messages).is_empty(),
+        "a stale compacted_count must produce an empty active tail, not replay all messages"
+    );
+}
+
+#[test]
+fn test_bug_175_token_estimate_ignores_stale_cached_active_chars() {
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    let mut messages = Vec::new();
+    for i in 0..3 {
+        messages.push(make_text_message(
+            Role::User,
+            &format!("turn {} {}", i, "x".repeat(10_000)),
+        ));
+        manager.notify_message_added();
+    }
+
+    manager.compacted_count = 10;
+    manager.total_turns = 10;
+    manager.active_message_chars = 1_000_000;
+    manager.active_message_chars_dirty = false;
+
+    assert_eq!(
+        manager.token_estimate_with(&messages),
+        0,
+        "stale cached active_message_chars should not keep emergency compaction above threshold"
+    );
+}
+
+#[test]
+fn test_bug_175_hard_compact_does_not_inflate_stale_compacted_count() {
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    let mut messages = Vec::new();
+    for i in 0..30 {
+        messages.push(make_text_message(
+            Role::User,
+            &format!("turn {} {}", i, "z".repeat(200)),
+        ));
+        manager.notify_message_added();
+    }
+
+    manager.compacted_count = 100;
+    manager.total_turns = 100;
+    manager.active_message_chars_dirty = true;
+    manager.active_summary = Some(jcode_compaction_core::Summary {
+        text: "# Existing summary".to_string(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 100,
+        original_turn_count: 100,
+    });
+
+    let result = manager.hard_compact_with(&messages);
+
+    assert!(
+        result.is_err(),
+        "there are no active messages left after clamping stale compacted_count"
+    );
+    assert_eq!(
+        manager.compacted_count(),
+        messages.len(),
+        "hard compact should never push compacted_count past messages.len()"
+    );
+    let markers = manager
+        .active_summary
+        .as_ref()
+        .map(|summary| summary.text.matches("[Emergency compaction]").count())
+        .unwrap_or(0);
+    assert_eq!(
+        markers, 0,
+        "stale compacted state should not append another emergency summary block"
+    );
+}
+
 // ── safe_compaction_cutoff: tool call/result pair integrity ─────────
 
 #[test]
