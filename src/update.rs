@@ -25,7 +25,12 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const DOWNLOAD_PROGRESS_UPDATE_STEP: u64 = 1_048_576;
 const CUSTOMIZATION_VALIDATION_OUTPUT_LIMIT: usize = 4000;
 const CUSTOMIZATION_VALIDATION_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+const CUSTOMIZATION_VALIDATION_TERMINATION_GRACE: Duration = Duration::from_secs(2);
 const CUSTOMIZATION_VALIDATION_STREAM_LIMIT: usize = CUSTOMIZATION_VALIDATION_OUTPUT_LIMIT;
+
+#[cfg(test)]
+static CUSTOMIZATION_VALIDATION_TIMEOUT_OVERRIDE_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 pub fn print_centered(msg: &str) {
     let width = crossterm::terminal::size()
@@ -994,7 +999,7 @@ fn run_customization_validation_commands(
             Err(error) => {
                 return (
                     build::SelfDevCustomizationOutcomeStatus::ValidationFailed,
-                    truncate_chars(
+                    truncate_with_tail(
                         &format!("Validation command `{command}` failed to start: {error}"),
                         CUSTOMIZATION_VALIDATION_OUTPUT_LIMIT,
                     ),
@@ -1002,19 +1007,23 @@ fn run_customization_validation_commands(
             }
         };
 
-        append_validation_output(&mut combined, command, &output);
-        truncate_in_place(&mut combined, CUSTOMIZATION_VALIDATION_OUTPUT_LIMIT);
+        let command_detail = validation_output_detail(command, &output);
+        append_validation_output(&mut combined, &command_detail);
         if !output.status.success() {
             return (
                 build::SelfDevCustomizationOutcomeStatus::ValidationFailed,
-                truncate_chars(&combined, CUSTOMIZATION_VALIDATION_OUTPUT_LIMIT),
+                truncate_failure_detail(
+                    &combined,
+                    &command_detail,
+                    CUSTOMIZATION_VALIDATION_OUTPUT_LIMIT,
+                ),
             );
         }
     }
 
     (
         build::SelfDevCustomizationOutcomeStatus::ValidationPassed,
-        truncate_chars(&combined, CUSTOMIZATION_VALIDATION_OUTPUT_LIMIT),
+        truncate_with_tail(&combined, CUSTOMIZATION_VALIDATION_OUTPUT_LIMIT),
     )
 }
 
@@ -1026,21 +1035,7 @@ struct ValidationCommandOutput {
 }
 
 fn run_validation_command(repo_dir: &Path, command: &str) -> Result<ValidationCommandOutput> {
-    let mut process = if cfg!(windows) {
-        std::process::Command::new("cmd")
-            .args(["/C", command])
-            .current_dir(repo_dir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-    } else {
-        std::process::Command::new("sh")
-            .args(["-c", command])
-            .current_dir(repo_dir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-    }?;
+    let mut process = spawn_validation_command(repo_dir, command)?;
 
     let stdout = process.stdout.take().context("missing validation stdout")?;
     let stderr = process.stderr.take().context("missing validation stderr")?;
@@ -1051,17 +1046,18 @@ fn run_validation_command(repo_dir: &Path, command: &str) -> Result<ValidationCo
 
     let started = Instant::now();
     let mut timed_out = false;
+    let timeout = validation_command_timeout();
     let status = loop {
         if let Some(status) = process.try_wait()? {
             break status;
         }
-        if started.elapsed() >= CUSTOMIZATION_VALIDATION_COMMAND_TIMEOUT {
+        if started.elapsed() >= timeout {
             timed_out = true;
-            let _ = process.kill();
-            break process.wait()?;
+            break terminate_validation_process_tree(&mut process)?;
         }
         thread::sleep(Duration::from_millis(100));
     };
+    cleanup_validation_process_job(process.id());
 
     let stdout = stdout_reader
         .join()
@@ -1076,6 +1072,224 @@ fn run_validation_command(repo_dir: &Path, command: &str) -> Result<ValidationCo
         stderr,
         timed_out,
     })
+}
+
+fn spawn_validation_command(repo_dir: &Path, command: &str) -> Result<std::process::Child> {
+    if cfg!(windows) {
+        spawn_windows_validation_command(repo_dir, command)
+    } else {
+        spawn_unix_validation_command(repo_dir, command)
+    }
+}
+
+#[cfg(unix)]
+fn spawn_unix_validation_command(repo_dir: &Path, command: &str) -> Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+
+    let mut shell = std::process::Command::new("sh");
+    shell
+        .args(["-c", command])
+        .current_dir(repo_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    unsafe {
+        shell.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(shell.spawn()?)
+}
+
+#[cfg(not(unix))]
+fn spawn_unix_validation_command(_repo_dir: &Path, _command: &str) -> Result<std::process::Child> {
+    anyhow::bail!("Unix validation command spawning is unavailable on this platform")
+}
+
+#[cfg(windows)]
+fn spawn_windows_validation_command(repo_dir: &Path, command: &str) -> Result<std::process::Child> {
+    use std::os::windows::io::AsRawHandle;
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+    use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
+
+    let mut process = std::process::Command::new("cmd")
+        .args(["/C", command])
+        .current_dir(repo_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_NEW_PROCESS_GROUP)
+        .spawn()?;
+
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            let _ = process.kill();
+            anyhow::bail!(
+                "CreateJobObjectW failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let set_ok = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        let assign_ok = AssignProcessToJobObject(job, process.as_raw_handle() as HANDLE);
+        if set_ok == 0 || assign_ok == 0 {
+            let error = std::io::Error::last_os_error();
+            let _ = process.kill();
+            let _ = CloseHandle(job);
+            anyhow::bail!("failed to attach validation command to job object: {error}");
+        }
+        WINDOWS_VALIDATION_JOBS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push((process.id(), job as isize));
+    }
+
+    Ok(process)
+}
+
+#[cfg(not(windows))]
+fn spawn_windows_validation_command(
+    _repo_dir: &Path,
+    _command: &str,
+) -> Result<std::process::Child> {
+    anyhow::bail!("Windows validation command spawning is unavailable on this platform")
+}
+
+#[cfg(windows)]
+static WINDOWS_VALIDATION_JOBS: std::sync::Mutex<Vec<(u32, isize)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn terminate_validation_process_tree(process: &mut std::process::Child) -> Result<ExitStatus> {
+    terminate_validation_process_tree_inner(process)?;
+    Ok(process.wait()?)
+}
+
+#[cfg(windows)]
+fn cleanup_validation_process_job(pid: u32) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+
+    let job = {
+        let mut jobs = WINDOWS_VALIDATION_JOBS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        jobs.iter()
+            .position(|(job_pid, _)| *job_pid == pid)
+            .map(|index| jobs.remove(index).1)
+    };
+    if let Some(job) = job {
+        unsafe {
+            let _ = CloseHandle(job as windows_sys::Win32::Foundation::HANDLE);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn cleanup_validation_process_job(pid: u32) {
+    let _ = signal_validation_process_group(pid, libc::SIGTERM);
+    let _ = signal_validation_process_group(pid, libc::SIGKILL);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn cleanup_validation_process_job(_pid: u32) {}
+
+#[cfg(unix)]
+fn terminate_validation_process_tree_inner(process: &mut std::process::Child) -> Result<()> {
+    signal_validation_process_group(process.id(), libc::SIGTERM)?;
+    if wait_for_validation_exit(process, CUSTOMIZATION_VALIDATION_TERMINATION_GRACE)?.is_some() {
+        return Ok(());
+    }
+    signal_validation_process_group(process.id(), libc::SIGKILL)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn terminate_validation_process_tree_inner(process: &mut std::process::Child) -> Result<()> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+
+    let job = WINDOWS_VALIDATION_JOBS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .find_map(|(pid, job)| (*pid == process.id()).then_some(*job));
+    if let Some(job) = job {
+        unsafe {
+            let job = job as windows_sys::Win32::Foundation::HANDLE;
+            let _ = TerminateJobObject(job, 1);
+            let _ = CloseHandle(job);
+        }
+        WINDOWS_VALIDATION_JOBS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|(pid, _)| *pid != process.id());
+        Ok(())
+    } else {
+        let _ = process.kill();
+        Ok(())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_validation_process_tree_inner(process: &mut std::process::Child) -> Result<()> {
+    let _ = process.kill();
+    Ok(())
+}
+
+#[cfg(unix)]
+fn signal_validation_process_group(pid: u32, signal: i32) -> Result<()> {
+    let rc = unsafe { libc::kill(-(pid as i32), signal) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error.into())
+    }
+}
+
+fn wait_for_validation_exit(
+    process: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<Option<ExitStatus>> {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = process.try_wait()? {
+            return Ok(Some(status));
+        }
+        if started.elapsed() >= timeout {
+            return Ok(None);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn validation_command_timeout() -> Duration {
+    #[cfg(test)]
+    {
+        let override_ms =
+            CUSTOMIZATION_VALIDATION_TIMEOUT_OVERRIDE_MS.load(std::sync::atomic::Ordering::SeqCst);
+        if override_ms > 0 {
+            return Duration::from_millis(override_ms);
+        }
+    }
+    CUSTOMIZATION_VALIDATION_COMMAND_TIMEOUT
 }
 
 fn read_limited<R: Read>(reader: R, limit: usize) -> Vec<u8> {
@@ -1107,55 +1321,84 @@ fn read_limited<R: Read>(reader: R, limit: usize) -> Vec<u8> {
     output
 }
 
-fn append_validation_output(
-    combined: &mut String,
-    command: &str,
-    output: &ValidationCommandOutput,
-) {
-    if !combined.is_empty() {
-        combined.push_str("\n\n");
-    }
-    combined.push_str(&format!(
+fn validation_output_detail(command: &str, output: &ValidationCommandOutput) -> String {
+    let mut detail = format!(
         "Command: `{}`\nStatus: {}\n",
         command,
         output.status.code().map_or_else(
             || "terminated by signal".to_string(),
             |code| code.to_string()
         )
-    ));
+    );
     if output.timed_out {
-        combined.push_str(&format!(
-            "Timed out after {} seconds\n",
-            CUSTOMIZATION_VALIDATION_COMMAND_TIMEOUT.as_secs()
+        detail.push_str(&format!(
+            "Timed out after {}\n",
+            format_validation_timeout(validation_command_timeout())
         ));
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !stdout.trim().is_empty() {
-        combined.push_str("Stdout:\n");
-        combined.push_str(stdout.trim());
-        combined.push('\n');
+        detail.push_str("Stdout:\n");
+        detail.push_str(stdout.trim());
+        detail.push('\n');
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !stderr.trim().is_empty() {
-        combined.push_str("Stderr:\n");
-        combined.push_str(stderr.trim());
-        combined.push('\n');
+        detail.push_str("Stderr:\n");
+        detail.push_str(stderr.trim());
+        detail.push('\n');
+    }
+    detail
+}
+
+fn append_validation_output(combined: &mut String, detail: &str) {
+    if !combined.is_empty() {
+        combined.push_str("\n\n");
+    }
+    combined.push_str(detail);
+}
+
+fn truncate_failure_detail(history: &str, failing_detail: &str, max_chars: usize) -> String {
+    if history.chars().count() <= max_chars {
+        return history.to_string();
+    }
+
+    let marker = "\n... truncated earlier validation output ...\n\n";
+    let marker_chars = marker.chars().count();
+    let failing_chars = failing_detail.chars().count();
+    if failing_chars + marker_chars < max_chars {
+        let head_chars = max_chars - failing_chars - marker_chars;
+        let head: String = history.chars().take(head_chars).collect();
+        format!("{head}{marker}{failing_detail}")
+    } else {
+        truncate_with_tail(failing_detail, max_chars)
     }
 }
 
-fn truncate_in_place(value: &mut String, max_chars: usize) {
-    if value.chars().count() > max_chars {
-        *value = truncate_chars(value, max_chars);
-    }
-}
-
-fn truncate_chars(value: &str, max_chars: usize) -> String {
+fn truncate_with_tail(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         value.to_string()
     } else {
-        let mut truncated: String = value.chars().take(max_chars).collect();
-        truncated.push_str("\n...");
-        truncated
+        let marker = "\n... truncated validation output ...\n";
+        let marker_chars = marker.chars().count();
+        if max_chars <= marker_chars + 2 {
+            return value.chars().take(max_chars).collect();
+        }
+        let remaining = max_chars - marker_chars;
+        let head_chars = remaining / 2;
+        let tail_chars = remaining - head_chars;
+        let head: String = value.chars().take(head_chars).collect();
+        let tail_start = value.chars().count().saturating_sub(tail_chars);
+        let tail: String = value.chars().skip(tail_start).collect();
+        format!("{head}{marker}{tail}")
+    }
+}
+
+fn format_validation_timeout(timeout: Duration) -> String {
+    if timeout.as_secs() > 0 {
+        format!("{} seconds", timeout.as_secs())
+    } else {
+        format!("{} ms", timeout.as_millis())
     }
 }
 
@@ -1534,5 +1777,130 @@ mod tests {
         let output = loaded.validation.last_output.as_deref().unwrap_or_default();
         assert!(output.contains("validation-failed"));
         assert!(output.contains("Status: 7"));
+    }
+
+    #[test]
+    fn test_record_customization_update_reports_preserves_failing_command_when_truncated() {
+        let _storage_guard = storage::lock_test_env();
+        static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let _env_guard = ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let repo = tempfile::tempdir().expect("repo dir");
+        struct EnvRestore(Option<std::ffi::OsString>);
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                if let Some(previous) = self.0.as_ref() {
+                    jcode_core::env::set_var("JCODE_HOME", previous);
+                } else {
+                    jcode_core::env::remove_var("JCODE_HOME");
+                }
+            }
+        }
+        let _restore = EnvRestore(std::env::var_os("JCODE_HOME"));
+        jcode_core::env::set_var("JCODE_HOME", temp_home.path());
+
+        let noisy_command = if cfg!(windows) {
+            "for /L %i in (1,1,5000) do @echo noisy"
+        } else {
+            "yes noisy | head -c 8000"
+        };
+        let failing_command = if cfg!(windows) {
+            "echo final-validation-failure && exit /B 7"
+        } else {
+            "echo final-validation-failure && exit 7"
+        };
+        let mut record = build::SelfDevCustomizationRecord::new(
+            "custom-validation-truncated-fail",
+            "Validate customization",
+            "Failing validation remains visible after truncation",
+        );
+        record.provenance.repo_dir = Some(repo.path().to_path_buf());
+        record.validation.commands.push(noisy_command.to_string());
+        record.validation.commands.push(failing_command.to_string());
+        build::create_customization_record(record, None).expect("create customization");
+
+        record_customization_update_reports("v9.9.9");
+
+        let loaded = build::load_customization_record("custom-validation-truncated-fail")
+            .expect("load customization")
+            .expect("record exists");
+        assert_eq!(
+            loaded.validation.last_status,
+            Some(build::SelfDevCustomizationOutcomeStatus::ValidationFailed)
+        );
+        let output = loaded.validation.last_output.as_deref().unwrap_or_default();
+        assert!(output.contains("truncated earlier validation output"));
+        assert!(output.contains("final-validation-failure"));
+        assert!(output.contains("Status: 7"));
+        assert!(output.chars().count() <= CUSTOMIZATION_VALIDATION_OUTPUT_LIMIT);
+    }
+
+    #[test]
+    fn test_customization_validation_timeout_kills_child_process_tree() {
+        let _timeout_guard = ValidationTimeoutOverride::set(200);
+        let repo = tempfile::tempdir().expect("repo dir");
+        let command = if cfg!(windows) {
+            "cmd /C \"ping -n 10 127.0.0.1 > nul\""
+        } else {
+            "sh -c 'sleep 10'"
+        };
+
+        let started = Instant::now();
+        let (status, detail) =
+            run_customization_validation_commands(repo.path(), &[command.to_string()]);
+
+        assert_eq!(
+            status,
+            build::SelfDevCustomizationOutcomeStatus::ValidationFailed
+        );
+        assert!(detail.contains("Timed out after"));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "timeout should terminate the child process tree promptly"
+        );
+    }
+
+    #[test]
+    fn test_customization_validation_cleans_background_children_after_success() {
+        let repo = tempfile::tempdir().expect("repo dir");
+        let command = if cfg!(windows) {
+            "start /B cmd /C \"ping -n 10 127.0.0.1 > nul\" && echo background-ok"
+        } else {
+            "sleep 10 & echo background-ok"
+        };
+
+        let started = Instant::now();
+        let (status, detail) =
+            run_customization_validation_commands(repo.path(), &[command.to_string()]);
+
+        assert_eq!(
+            status,
+            build::SelfDevCustomizationOutcomeStatus::ValidationPassed
+        );
+        assert!(detail.contains("background-ok"));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "background child pipe handles should not delay validation completion"
+        );
+    }
+
+    struct ValidationTimeoutOverride;
+
+    impl ValidationTimeoutOverride {
+        fn set(timeout_ms: u64) -> Self {
+            CUSTOMIZATION_VALIDATION_TIMEOUT_OVERRIDE_MS
+                .store(timeout_ms, std::sync::atomic::Ordering::SeqCst);
+            Self
+        }
+    }
+
+    impl Drop for ValidationTimeoutOverride {
+        fn drop(&mut self) {
+            CUSTOMIZATION_VALIDATION_TIMEOUT_OVERRIDE_MS
+                .store(0, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 }
