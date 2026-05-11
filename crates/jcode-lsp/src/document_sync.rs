@@ -19,7 +19,8 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
+use crate::{LspError, LspResult};
 
 /// 文档同步策略
 #[derive(Debug, Clone, Copy)]
@@ -184,7 +185,7 @@ impl DocumentSyncManager {
                 _ => None,
             })
             .map_or(false, |change| {
-                matches!(change, TextDocumentSyncKind::INCREMENTAL)
+                matches!(change, Some(TextDocumentSyncKind::INCREMENTAL))
             });
 
         // 决定使用哪种同步策略
@@ -287,7 +288,7 @@ impl DocumentSyncManager {
     pub async fn list_open_documents(&self) -> Vec<(String, i32)> {
         let docs = self.documents.read().await;
         docs.iter()
-            .map((uri, state)| (uri.to_string(), state.version))
+            .map(|(uri_ref, state_ref)| (uri_ref.to_string(), state_ref.version))
             .collect()
     }
 

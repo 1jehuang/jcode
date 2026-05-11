@@ -203,10 +203,10 @@ impl CompletionManager {
         variables: &HashMap<String, String>,
     ) -> String {
         // 记录使用频率
-        if let Some(label) = &item.item.label {
-            let mut stats = self.usage_stats.write().await;
-            *stats.entry(label.clone()).or_insert(0) += 1;
-        }
+        let label = &item.item.label;
+        let mut stats = self.usage_stats.write().await;
+        *stats.entry(label.clone()).or_insert(0) += 1;
+        drop(stats);
 
         // 如果有展开后的 snippet，直接使用
         if let Some(snippet) = &item.expanded_snippet {
@@ -227,10 +227,11 @@ impl CompletionManager {
 
     /// 报告补全项被接受（用于学习用户偏好）
     pub async fn report_completion_accepted(&self, item: &EnhancedCompletionItem) {
-        if let Some(label) = &item.item.label {
-            let mut stats = self.usage_stats.write().await;
-            *stats.entry(label.clone()).or_insert(0) += 2; // 额外奖励
-        }
+        // 记录使用频率（额外奖励）
+        let label = &item.item.label;
+        let mut stats = self.usage_stats.write().await;
+        *stats.entry(label.clone()).or_insert(0) += 2; // 额外奖励
+        drop(stats);
 
         debug!(
             label = ?item.item.label,
@@ -251,7 +252,7 @@ impl CompletionManager {
             // TODO: 尝试 resolve 获取详细信息 (需要 LspClient 支持 completionItem/resolve)
             // 目前直接使用 insert_text
             item.insert_text.clone()
-                .or_else(|| item.label.clone())
+                .or_else(|| Some(item.label.clone()))
         } else {
             None
         };
@@ -330,10 +331,8 @@ impl CompletionManager {
 
         // 替换变量引用 ${VAR:default}
         for (var_name, default_value) in variables {
-            result = result.replace(
-                &format!("${{{{}:{}}}", var_name, default_value),
-                default_value,
-            );
+            let pattern = format!("${{{}:{}}}", var_name, default_value);
+            result = result.replace(&pattern, &default_value.to_string());
         }
 
         // 替换简单变量 ${VAR}

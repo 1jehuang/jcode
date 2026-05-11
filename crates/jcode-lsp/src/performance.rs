@@ -422,8 +422,8 @@ impl PerformanceMonitor {
         if !durations.is_empty() {
             let sum: u64 = durations.iter().sum();
             stats.avg_duration_ms = sum as f64 / durations.len() as f64;
-            stats.max_duration_ms = *durations.iter().max().unwrap_or(0);
-            stats.min_duration_ms = *durations.iter().min().unwrap_or(0);
+            stats.max_duration_ms = *durations.iter().max().unwrap_or(&0);
+            stats.min_duration_ms = *durations.iter().min().unwrap_or(&0);
 
             // 计算百分位数
             let mut sorted = durations.clone();
@@ -516,7 +516,9 @@ impl PerformanceMonitor {
         
         // 只保留最近的数据
         if ops.len() > self.config.stats_window_size {
-            ops.drain(..ops.len() - self.config.stats_window_size);
+            let current_len = ops.len();
+            let len_to_keep = self.config.stats_window_size;
+            ops.drain(..(current_len - len_to_keep));
         }
     }
 

@@ -361,8 +361,8 @@ impl DiagnosticsManager {
     pub async fn get_files_with_errors(&self) -> Vec<(String, usize)> {
         let states = self.file_states.read().await;
         states.iter()
-            .filter(|(_uri, state)| state.error_count > 0)
-            .map((uri, state)| (uri.to_string(), state.error_count))
+            .filter(|(_uri_ref, state_ref)| state_ref.error_count > 0)
+            .map(|(uri_ref, state_ref)| (uri_ref.to_string(), state_ref.error_count))
             .collect()
     }
 
@@ -377,7 +377,22 @@ impl DiagnosticsManager {
         diag.range.hash(&mut hasher);
         diag.code.as_ref().hash(&mut hasher);
         diag.message.hash(&mut hasher);
-        diag.severity.hash(&mut hasher);
+        
+        // 手动计算 severity 的 hash（因为 DiagnosticSeverity 没有实现 Hash）
+        if let Some(severity) = &diag.severity {
+            // 使用 match 来获取内部值（避免访问私有字段）
+            let severity_value = match *severity {
+                lsp_types::DiagnosticSeverity::ERROR => 1,
+                lsp_types::DiagnosticSeverity::WARNING => 2,
+                lsp_types::DiagnosticSeverity::INFORMATION => 3,
+                lsp_types::DiagnosticSeverity::HINT => 4,
+                _ => 0, // 其他值
+            };
+            (severity_value as i64).hash(&mut hasher);
+        } else {
+            (-1i64).hash(&mut hasher); // None 的情况
+        }
+        
         hasher.finish()
     }
 
