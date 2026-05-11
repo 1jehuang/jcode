@@ -49,7 +49,7 @@ impl From<lsp_types::DiagnosticSeverity> for DiagnosticSeverity {
 
 /// 增强的诊断信息
 #[derive(Debug, Clone)]
-struct EnhancedDiagnostic {
+pub struct EnhancedDiagnostic {
     /// 原始诊断
     diagnostic: Diagnostic,
     

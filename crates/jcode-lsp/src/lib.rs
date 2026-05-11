@@ -60,6 +60,7 @@ mod diagnostics;
 mod completion;
 mod performance;
 mod ast_operations;
+mod multi_workspace;
 
 pub use transport::{build_request, build_notification, parse_response, JsonRpcError};
 pub use client::{LspClient, LspError, LspResult};
@@ -90,6 +91,13 @@ pub use ast_operations::{
     InlineFunctionParams,
     RenameSymbolParams,
     EncapsulateFieldParams,
+};
+pub use multi_workspace::{
+    MultiWorkspaceManager,
+    MultiWorkspaceConfig,
+    WorkspaceId,
+    WorkspaceInstance,
+    MultiWorkspaceStats,
 };
 
 /// 便捷的 LSP 操作 trait — 统一的高层 API
