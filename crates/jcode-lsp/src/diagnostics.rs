@@ -1,4 +1,4 @@
-//! Diagnostics Manager — 智能诊断推送系统
+//! Diagnostics Manager — 智能诊断推送 + QuickFix 自动修复系统
 //!
 //! ## 核心能力 (对标 Cursor/Claude Code)
 //! - **实时推送**: Server → Client 的错误/警告/信息推送
@@ -6,6 +6,7 @@
 //! - **优先级排序**: Error > Warning > Hint > Information
 //! - **文件关联**: 自动关联诊断到对应文件
 //! - **变更触发**: 文档保存/修改时自动刷新
+//! - **QuickFix**: 自动修复编译错误和 lint 警告
 //!
 //! ## 诊断流程
 //! ```text
@@ -17,14 +18,19 @@
 //!                                    │           │
 //!                                    ▼           ▼
 //!                               缓存存储   推送通知
+//!                                          │
+//!                                    ┌─────▼─────┐
+//!                                    │  QuickFix  │ ← 自动修复引擎
+//!                                    │  Engine    │
+//!                                    └───────────┘
 //! ```
 
 use lsp_types::*;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// 诊断严重级别（用于排序）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -441,6 +447,325 @@ pub struct FileDiagnosticSummary {
     pub last_updated: std::time::Instant,
 }
 
+// ════════════════════════════════════════════════════════════════
+// QuickFix Engine — 自动修复编译错误和 lint 警告
+// ════════════════════════════════════════════════════════════════
+
+/// QuickFix 结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuickFixResult {
+    /// 是否有可用的修复
+    pub has_fixes: bool,
+    /// 修复建议列表
+    pub fixes: Vec<FixSuggestion>,
+    /// 应用的修复数量
+    pub applied_count: usize,
+    /// 是否全部成功
+    pub all_success: bool,
+}
+
+/// 单个修复建议
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FixSuggestion {
+    /// 修复类型
+    pub fix_type: FixCategory,
+    /// 问题描述
+    pub title: String,
+    /// 详细描述
+    pub description: String,
+    /// 文件路径
+    pub file_path: String,
+    /// 行号（可选）
+    pub line: Option<u32>,
+    /// 列号（可选）
+    pub character: Option<u32>,
+    /// 原始代码（可选）
+    pub original_code: Option<String>,
+    /// 修复后的代码
+    pub fixed_code: String,
+    /// 置信度 (0.0 - 1.0)
+    pub confidence: f64,
+    /// 是否自动应用
+    pub auto_applicable: bool,
+}
+
+/// 修复类别
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum FixCategory {
+    CompilationError,
+    LintWarning,
+    SecurityVulnerability,
+    PerformanceIssue,
+    StyleViolation,
+    BestPractice,
+}
+
+impl std::fmt::Display for FixCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FixCategory::CompilationError => write!(f, "🔴 Compilation Error"),
+            FixCategory::LintWarning => write!(f, "⚠️ Lint Warning"),
+            FixCategory::SecurityVulnerability => write!(f, "🔒 Security Vulnerability"),
+            FixCategory::PerformanceIssue => write!(f, "⚡ Performance Issue"),
+            FixCategory::StyleViolation => write!(f, "🎨 Style Violation"),
+            FixCategory::BestPractice => write!(f, "💡 Best Practice"),
+        }
+    }
+}
+
+/// QuickFix 引擎配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuickFixConfig {
+    /// 是否启用自动修复
+    pub auto_apply: bool,
+    /// 最大修复数量
+    pub max_fixes_per_file: usize,
+    /// 最低置信度阈值
+    pub min_confidence: f64,
+    /// 支持的语言列表
+    pub supported_languages: Vec<String>,
+}
+
+impl Default for QuickFixConfig {
+    fn default() -> Self {
+        Self {
+            auto_apply: false,
+            max_fixes_per_file: 10,
+            min_confidence: 0.7,
+            supported_languages: vec![
+                "rust".to_string(),
+                "python".to_string(),
+                "javascript".to_string(),
+                "typescript".to_string(),
+                "go".to_string(),
+                "java".to_string(),
+            ],
+        }
+    }
+}
+
+/// 修复模式（内部使用）
+struct FixPattern {
+    category: FixCategory,
+    pattern: regex::Regex,
+    fix_template: String,
+    confidence: f64,
+    description: String,
+}
+
+/// QuickFix 引擎 — 与 DiagnosticsManager 紧密集成
+pub struct QuickFixEngine {
+    config: QuickFixConfig,
+    fix_patterns: Arc<RwLock<Vec<FixPattern>>>,
+}
+
+impl QuickFixEngine {
+    /// 创建新的 QuickFix 引擎
+    pub fn new() -> Self {
+        Self::with_config(QuickFixConfig::default())
+    }
+
+    /// 使用配置创建
+    pub fn with_config(config: QuickFixConfig) -> Self {
+        let mut engine = Self {
+            config,
+            fix_patterns: Arc::new(RwLock::new(Vec::new())),
+        };
+        
+        engine.register_builtin_patterns();
+        engine
+    }
+
+    /// 注册内置的修复模式
+    async fn register_builtin_patterns(&mut self) {
+        let patterns = vec![
+            // Rust 未使用变量
+            FixPattern {
+                category: FixCategory::LintWarning,
+                pattern: regex::Regex::new(r"warning:\[unused_variables\]\s*:\s*(\w+)").unwrap(),
+                fix_template: "${var}_unused".to_string(),
+                confidence: 0.95,
+                description: "Add underscore prefix to unused variable".to_string(),
+            },
+            // Rust 缺少分号
+            FixPattern {
+                category: FixCategory::CompilationError,
+                pattern: regex::Regex::new(r"error\[E0425\].*expected one of").unwrap(),
+                fix_template: ";".to_string(),
+                confidence: 0.9,
+                description: "Add semicolon at end of statement".to_string(),
+            },
+            // Rust 类型不匹配
+            FixPattern {
+                category: FixCategory::CompilationError,
+                pattern: regex::Regex::new(r"error\[E0308\].*mismatched types").unwrap(),
+                fix_template: "".to_string(),
+                confidence: 0.6,
+                description: "Type mismatch - requires manual review".to_string(),
+            },
+            // Python IndentationError
+            FixPattern {
+                category: FixCategory::StyleViolation,
+                pattern: regex::Regex::new(r"IndentationError.*expected an indented block").unwrap(),
+                fix_template: "    ".to_string(),
+                confidence: 0.85,
+                description: "Add indentation to block".to_string(),
+            },
+            // Python UndefinedVariable
+            FixPattern {
+                category: FixCategory::CompilationError,
+                pattern: regex::Regex::new(r"NameError.*name '(\w+)' is not defined").unwrap(),
+                fix_template: "# TODO: Define ${var}".to_string(),
+                confidence: 0.75,
+                description: "Define the undefined variable".to_string(),
+            },
+        ];
+        
+        *self.fix_patterns.write().await = patterns;
+    }
+
+    /// 分析并生成修复建议
+    pub async fn analyze_and_suggest(
+        &self,
+        error_output: &str,
+        file_path: &str,
+        _language: &str,
+    ) -> QuickFixResult {
+        debug!("Analyzing errors for quick fix suggestions...");
+        
+        let mut fixes = Vec::new();
+        let patterns = self.fix_patterns.read().await;
+        
+        for pattern in patterns.iter() {
+            if let Some(caps) = pattern.pattern.captures(error_output) {
+                let var_name = caps.get(1)
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default();
+                
+                let fixed_code = pattern.fix_template
+                    .replace("${var}", &var_name);
+                
+                let line = self.extract_line_number(error_output);
+                
+                fixes.push(FixSuggestion {
+                    fix_type: pattern.category,
+                    title: format!("{}: {}", pattern.description, var_name),
+                    description: format!(
+                        "Auto-fix suggestion for {} in {}",
+                        pattern.description, file_path
+                    ),
+                    file_path: file_path.to_string(),
+                    line,
+                    character: None,
+                    original_code: None,
+                    fixed_code,
+                    confidence: pattern.confidence,
+                    auto_applicable: pattern.confidence >= self.config.min_confidence,
+                });
+            }
+        }
+        
+        // 按置信度和类别排序
+        fixes.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.fix_type.cmp(&b.fix_type))
+        });
+        
+        // 限制数量
+        if fixes.len() > self.config.max_fixes_per_file {
+            fixes.truncate(self.config.max_fixes_per_file);
+        }
+        
+        QuickFixResult {
+            has_fixes: !fixes.is_empty(),
+            fixes,
+            applied_count: 0,
+            all_success: false,
+        }
+    }
+
+    /// 应用单个修复
+    pub fn apply_fix(
+        &self,
+        content: &str,
+        fix: &FixSuggestion,
+    ) -> Result<String, String> {
+        if !fix.auto_applicable {
+            return Err("Fix not auto-applicable (confidence too low)".to_string());
+        }
+        
+        if let Some(line_num) = fix.line {
+            let lines: Vec<&str> = content.lines().collect();
+            
+            if line_num > 0 && (line_num as usize) <= lines.len() {
+                let target_line_idx = (line_num - 1) as usize;
+                let original_line = lines[target_line_idx];
+                
+                let new_line = match fix.fix_type {
+                    FixCategory::CompilationError => {
+                        if !fix.fixed_code.is_empty() {
+                            fix.fixed_code.clone()
+                        } else {
+                            original_line.to_string()
+                        }
+                    }
+                    FixCategory::LintWarning => original_line.to_string(),
+                    _ => original_line.to_string(),
+                };
+                
+                let mut result = lines[..target_line_idx].join("\n");
+                result.push_str("\n");
+                result.push_str(&new_line);
+                result.push_str("\n");
+                result.push_str(&lines[(target_line_idx + 1)..].join("\n"));
+                
+                return Ok(result);
+            }
+        }
+        
+        Err("Cannot apply fix: invalid line number or content".to_string())
+    }
+
+    /// 批量应用所有修复
+    pub async fn apply_all_fixes(
+        &self,
+        content: &str,
+        fixes: &[FixSuggestion],
+    ) -> Result<(String, Vec<usize>), String> {
+        let mut current_content = content.to_string();
+        let mut applied_indices = Vec::new();
+        
+        for (idx, fix) in fixes.iter().enumerate() {
+            match self.apply_fix(&current_content, fix) {
+                Ok(new_content) => {
+                    current_content = new_content;
+                    applied_indices.push(idx);
+                }
+                Err(e) => {
+                    warn!("Failed to apply fix {}: {}", idx, e);
+                }
+            }
+        }
+        
+        if applied_indices.is_empty() {
+            Err("No fixes could be applied".to_string())
+        } else {
+            Ok((current_content, applied_indices))
+        }
+    }
+
+    /// 从错误输出中提取行号
+    fn extract_line_number(&self, output: &str) -> Option<u32> {
+        let line_re = regex::Regex::new(r"-->\s*.+?:(\d+):\d+").unwrap();
+        
+        line_re.captures(output)
+            .and_then(|caps| caps.get(1))
+            .and_then(|m| m.as_str().parse::<u32>().ok())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,14 +777,24 @@ mod tests {
         let params = PublishDiagnosticsParams {
             uri: Url::parse("file:///test.rs").unwrap(),
             diagnostics: vec![
-                Diagnostic::new_simple("Missing semicolon", Range::new(
-                    Position::new(10, 5),
-                    Position::new(10, 20),
-                ), Some(DiagnosticSeverity::ERROR), None),
-                Diagnostic::new_simple("Unused variable", Range::new(
-                    Position::new(15, 0),
-                    Position::new(15, 8),
-                ), Some(DiagnosticSeverity::WARNING), None),
+                lsp_types::Diagnostic {
+                    range: Range::new(
+                        Position::new(10, 5),
+                        Position::new(10, 20),
+                    ),
+                    severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+                    message: "Missing semicolon".to_string(),
+                    ..Default::default()
+                },
+                lsp_types::Diagnostic {
+                    range: Range::new(
+                        Position::new(15, 0),
+                        Position::new(15, 8),
+                    ),
+                    severity: Some(lsp_types::DiagnosticSeverity::WARNING),
+                    message: "Unused variable".to_string(),
+                    ..Default::default()
+                },
             ],
             version: None,
         };
@@ -481,10 +816,15 @@ mod tests {
         let params = PublishDiagnosticsParams {
             uri: Url::parse("file:///test.rs").unwrap(),
             diagnostics: vec![
-                Diagnostic::new_simple("Error", Range::new(
-                    Position::new(0, 0),
-                    Position::new(0, 5),
-                ), Some(DiagnosticSeverity::ERROR), None),
+                lsp_types::Diagnostic {
+                    range: Range::new(
+                        Position::new(0, 0),
+                        Position::new(0, 5),
+                    ),
+                    severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+                    message: "Error".to_string(),
+                    ..Default::default()
+                },
             ],
             version: None,
         };
@@ -510,10 +850,15 @@ mod tests {
         let params = PublishDiagnosticsParams {
             uri: Url::parse("file:///test.rs").unwrap(),
             diagnostics: vec![
-                Diagnostic::new_simple("Test", Range::new(
-                    Position::new(0, 0),
-                    Position::new(0, 4),
-                ), Some(DiagnosticSeverity::ERROR), None),
+                lsp_types::Diagnostic {
+                    range: Range::new(
+                        Position::new(0, 0),
+                        Position::new(0, 4),
+                    ),
+                    severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+                    message: "Test".to_string(),
+                    ..Default::default()
+                },
             ],
             version: None,
         };

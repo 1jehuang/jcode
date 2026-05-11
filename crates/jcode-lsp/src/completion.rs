@@ -20,11 +20,10 @@
 //! - 懒加载文档详情
 
 use lsp_types::*;
-use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::debug;
 
 /// 补全项的增强信息
 #[derive(Debug, Clone)]
@@ -243,7 +242,7 @@ impl CompletionManager {
 
     async fn enhance_completion_item(
         &self,
-        client: &crate::LspClient,
+        _client: &crate::LspClient,
         item: CompletionItem,
     ) -> crate::LspResult<EnhancedCompletionItem> {
         let has_snippet = item.insert_text_format == Some(InsertTextFormat::SNIPPET);
@@ -356,7 +355,7 @@ impl CompletionManager {
         self.get_usage_frequency_sync(label)
     }
 
-    fn get_usage_frequency_sync(&self, label: &str) -> u64 {
+    fn get_usage_frequency_sync(&self, _label: &str) -> u64 {
         // 同步版本（仅读取，不需要 await）
         // 注意：这在异步上下文中调用时可能不是最新的值
         // 生产环境应该使用 async 版本
@@ -373,7 +372,7 @@ pub fn expand_simple_snippet(snippet: &str) -> Option<(String, Vec<usize>)> {
     // 返回 (展开后的文本, tab stop 位置列表)
     let mut text = snippet.to_string();
     let mut tab_stops = vec![];
-    let mut current_pos = 0;
+    let current_pos = 0;
 
     // 找到所有 $N 形式的 tab stop
     let re = regex::Regex::new(r"\$([0-9]+)").ok()?;
@@ -424,13 +423,13 @@ mod tests {
 
         let item = EnhancedCompletionItem {
             item: CompletionItem {
-                label: Some("function".into()),
-                insert_text: Some("fn ${1:name}() { $0 }".into()),
+                label: "function".to_string(),
+                insert_text: Some("fn ${1:name}() { $0 }".to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             },
             has_snippet: true,
-            expanded_snippet: Some("fn ${1:name}() { $0 }".into()),
+            expanded_snippet: Some("fn ${1:name}() { $0 }".to_string()),
             required_imports: vec![],
             score: 95.0,
         };

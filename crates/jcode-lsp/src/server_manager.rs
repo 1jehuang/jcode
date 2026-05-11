@@ -17,7 +17,6 @@
 use crate::client::{LspClient, LspError, LspResult};
 use lsp_types::*;
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -378,7 +377,7 @@ impl LspServerManager {
         
         // 启动进程并建立连接（需要 write lock）
         {
-            let mut c = client_arc.write().await;
+            let c = client_arc.write().await;
             c.start(
                 &config.command,
                 &config.args,
@@ -406,7 +405,7 @@ impl LspServerManager {
     pub async fn shutdown_all(&self) {
         let servers = self.servers.read().await;
         for (_lang, client) in servers.iter() {
-            let mut c = client.write().await;
+            let c = client.write().await;
             if let Err(e) = c.shutdown().await {
                 warn!("Error shutting down LSP server: {}", e);
             }

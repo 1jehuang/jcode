@@ -636,3 +636,288 @@ mod tests {
         assert_eq!(stats.success_count, 1);
     }
 }
+
+// ════════════════════════════════════════════════════════════════
+// 性能优化工具集
+// ════════════════════════════════════════════════════════════════
+
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// LRU 缓存 - 用于缓存 LSP 响应结果
+pub struct LruCache<K, V> where K: Eq + std::hash::Hash + Clone, V: Clone {
+    capacity: usize,
+    map: HashMap<K, (V, Instant)>,
+    order: VecDeque<K>,
+    ttl: Duration,
+    hits: AtomicU64,
+    misses: AtomicU64,
+}
+
+impl<K, V> LruCache<K, V>
+where K: Eq + std::hash::Hash + Clone,
+      V: Clone,
+{
+    pub fn new(capacity: usize, ttl: Duration) -> Self {
+        Self {
+            capacity,
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            ttl,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+        }
+    }
+
+    pub fn get(&self, key: &K) -> Option<V> {
+        if let Some((value, timestamp)) = self.map.get(key) {
+            if timestamp.elapsed() < self.ttl {
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                return Some(value.clone());
+            } else {
+                // 过期，移除（延迟清理）
+                self.misses.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+        }
+        
+        self.misses.fetch_add(1, Ordering::Relaxed);
+        None
+    }
+
+    pub fn put(&mut self, key: K, value: V) {
+        if self.map.contains_key(&key) {
+            self.order.retain(|k| k != &key);
+        }
+        
+        if self.order.len() >= self.capacity {
+            if let Some(lru_key) = self.order.pop_front() {
+                self.map.remove(&lru_key);
+            }
+        }
+        
+        self.map.insert(key.clone(), (value, Instant::now()));
+        self.order.push_back(key);
+    }
+
+    pub fn clear_expired(&mut self) -> usize {
+        let before = self.map.len();
+        self.map.retain(|_, (_, ts)| ts.elapsed() < self.ttl);
+        before - self.map.len()
+    }
+
+    pub fn hit_rate(&self) -> f64 {
+        let hits = self.hits.load(Ordering::Relaxed);
+        let misses = self.misses.load(Ordering::Relaxed);
+        let total = hits + misses;
+        
+        if total == 0 { 0.0 } else { hits as f64 / total as f64 * 100.0 }
+    }
+
+    pub fn len(&self) -> usize { self.map.len() }
+    
+    pub fn is_empty(&self) -> bool { self.map.is_empty() }
+}
+
+/// 请求批处理器 - 将多个小请求合并为批量请求
+pub struct RequestBatcher<T> {
+    batch_size: usize,
+    batch_timeout: Duration,
+    pending: Vec<T>,
+    last_batch_time: Instant,
+}
+
+impl<T> RequestBatcher<T> {
+    pub fn new(batch_size: usize, batch_timeout: Duration) -> Self {
+        Self {
+            batch_size,
+            batch_timeout,
+            pending: Vec::new(),
+            last_batch_time: Instant::now(),
+        }
+    }
+
+    /// 添加请求到批次中，如果批次已满或超时则返回待处理的批次
+    pub fn add_request(&mut self, request: T) -> Option<Vec<T>> {
+        self.pending.push(request);
+        
+        if self.pending.len() >= self.batch_size {
+            return self.flush();
+        }
+        
+        if self.last_batch_time.elapsed() > self.batch_timeout {
+            return self.flush();
+        }
+        
+        None
+    }
+
+    /// 手动刷新当前批次
+    pub fn flush(&mut self) -> Option<Vec<T>> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        
+        let batch = std::mem::take(&mut self.pending);
+        self.last_batch_time = Instant::now();
+        Some(batch)
+    }
+
+    pub fn pending_count(&self) -> usize { self.pending.len() }
+}
+
+/// 轻量级内存池 - 复用缓冲区减少分配
+pub struct BufferPool<T> {
+    pool: Vec<Vec<T>>,
+    default_capacity: usize,
+    max_pool_size: usize,
+}
+
+impl<T: Default + Clone> BufferPool<T> {
+    pub fn new(default_capacity: usize, max_pool_size: usize) -> Self {
+        Self {
+            pool: Vec::new(),
+            default_capacity,
+            max_pool_size,
+        }
+    }
+
+    /// 从池中获取一个缓冲区
+    pub fn acquire(&mut self) -> Vec<T> {
+        self.pool.pop().unwrap_or_else(|| Vec::with_capacity(self.default_capacity))
+    }
+
+    /// 归还缓冲区到池中
+    pub fn release(&mut self, mut buffer: Vec<T>) {
+        buffer.clear();
+        
+        if self.pool.len() < self.max_pool_size {
+            self.pool.push(buffer);
+        }
+    }
+
+    /// 当前池中的可用缓冲区数量
+    pub fn available(&self) -> usize { self.pool.len() }
+}
+
+/// 并发限制器 - 控制最大并发数
+pub struct ConcurrencyLimiter {
+    max_concurrent: usize,
+    current: Arc<tokio::sync::Semaphore>,
+}
+
+impl ConcurrencyLimiter {
+    pub fn new(max_concurrent: usize) -> Self {
+        Self {
+            max_concurrent,
+            current: Arc::new(tokio::sync::Semaphore::new(max_concurrent)),
+        }
+    }
+
+    /// 获取执行许可（异步等待）
+    pub async fn acquire_permit(&self) -> tokio::sync::SemaphorePermit<'_> {
+        self.current.acquire().await.unwrap_or_else(|_| unreachable!())
+    }
+
+    /// 尝试获取执行许可（非阻塞）
+    pub fn try_acquire_permit(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
+        self.current.try_acquire().ok()
+    }
+
+    /// 当前可用的许可数
+    pub fn available_permits(&self) -> usize {
+        self.current.available_permits()
+    }
+}
+
+#[cfg(test)]
+mod performance_optimization_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_lru_cache_basic_operations() {
+        let mut cache: LruCache<String, String> = LruCache::new(3, Duration::from_secs(60));
+        
+        cache.put("key1".to_string(), "value1".to_string());
+        cache.put("key2".to_string(), "value2".to_string());
+        cache.put("key3".to_string(), "value3".to_string());
+        
+        assert_eq!(cache.get(&"key1".to_string()), Some("value1".to_string()));
+        assert_eq!(cache.len(), 3);
+        
+        // 添加第4个元素应该淘汰最久未使用的
+        cache.put("key4".to_string(), "value4".to_string());
+        assert_eq!(cache.len(), 3); // 容量限制
+        assert!(cache.get(&"key1".to_string()).is_none()); // 应该被淘汰
+    }
+
+    #[test]
+    fn test_lru_cache_ttl_expiration() {
+        let mut cache: LruCache<i32, i32> = LruCache::new(10, Duration::from_millis(10));
+        
+        cache.put(1, 100);
+        assert_eq!(cache.get(&1), Some(100));
+        
+        std::thread::sleep(Duration::from_millis(20));
+        
+        assert!(cache.get(&1).is_none()); // 已过期
+    }
+
+    #[test]
+    fn test_lru_cache_hit_rate() {
+        let mut cache: LruCache<String, String> = LruCache::new(5, Duration::from_secs(10));
+        
+        cache.put("a".to_string(), "1".to_string());
+        cache.get(&"a".to_string()); // hit
+        cache.get(&"b".to_string()); // miss
+        
+        let rate = cache.hit_rate();
+        assert!((rate - 50.0).abs() < 0.1); // 1 hit / 2 total = 50%
+    }
+
+    #[test]
+    fn test_request_batcher() {
+        let mut batcher: RequestBatcher<i32> = RequestBatcher::new(3, Duration::from_secs(5));
+        
+        assert!(batcher.add_request(1).is_none());
+        assert!(batcher.add_request(2).is_none());
+        
+        // 第3个请求触发批次满
+        let batch = batcher.add_request(3).expect("Batch should be ready");
+        assert_eq!(batch, vec![1, 2, 3]);
+        assert_eq!(batcher.pending_count(), 0);
+    }
+
+    #[test]
+    fn test_buffer_pool() {
+        let mut pool: BufferPool<u8> = BufferPool::new(1024, 5);
+        
+        let mut buf1 = pool.acquire();
+        buf1.extend_from_slice(b"hello");
+        
+        pool.release(buf1);
+        assert_eq!(pool.available(), 1);
+        
+        let buf2 = pool.acquire(); // 应该复用之前的缓冲区
+        assert!(buf2.is_empty()); // release 时已清空
+    }
+
+    #[tokio::test]
+    async fn test_concurrency_limiter() {
+        let limiter = ConcurrencyLimiter::new(2);
+        
+        assert_eq!(limiter.available_permits(), 2);
+        
+        let permit1 = limiter.acquire_permit().await;
+        assert_eq!(limiter.available_permits(), 1);
+        
+        let _permit2 = limiter.acquire_permit().await;
+        assert_eq!(limiter.available_permits(), 0);
+        
+        // 第3个尝试获取会失败（非阻塞）
+        assert!(limiter.try_acquire_permit().is_none());
+        
+        drop(permit1);
+        assert_eq!(limiter.available_permits(), 1); // 许可被归还
+    }
+}

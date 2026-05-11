@@ -19,9 +19,9 @@
 //   7. 重命名重构 (Rename)
 //   8. 文档符号 (Document Symbols)
 //   9. 工作区符号 (Workspace Symbols)
-//  10. 多语言 Server 自动路由
-//  11. 进程生命周期管理
-//  12. 崩溃恢复与优雅关闭
+//   10. 多语言 Server 自动路由
+//   11. 进程生命周期管理
+//   12. 崩溃恢复与优雅关闭
 //
 // ## 架构
 //
@@ -51,6 +51,9 @@
 // └──────────────────────────────┘
 // ════════════════════════════════════════════════════════════════
 
+use serde::{Deserialize, Serialize};
+use tracing::{debug, error, info, warn};
+
 mod transport;
 mod client;
 mod server_manager;
@@ -61,6 +64,7 @@ mod completion;
 mod performance;
 mod ast_operations;
 mod multi_workspace;
+mod tree_sitter;
 
 pub use transport::{build_request, build_notification, parse_response, JsonRpcError};
 pub use client::{LspClient, LspError, LspResult};
@@ -74,7 +78,8 @@ pub use cache::{
     CacheStats,
 };
 pub use document_sync::DocumentSyncManager;
-pub use diagnostics::{DiagnosticsManager, DiagnosticEvent, DiagnosticsConfig, FileDiagnosticSummary};
+pub use diagnostics::{DiagnosticsManager, DiagnosticEvent, DiagnosticsConfig, FileDiagnosticSummary,
+    QuickFixEngine, QuickFixResult, FixSuggestion, FixCategory, QuickFixConfig};
 pub use completion::{CompletionManager, CompletionConfig, EnhancedCompletionItem};
 pub use performance::{
     PerformanceMonitor,
@@ -91,6 +96,10 @@ pub use ast_operations::{
     InlineFunctionParams,
     RenameSymbolParams,
     EncapsulateFieldParams,
+    FormatCodeEngine,
+    FormatResult,
+    FormatStats,
+    FormatterConfig,
 };
 pub use multi_workspace::{
     MultiWorkspaceManager,
@@ -98,6 +107,18 @@ pub use multi_workspace::{
     WorkspaceId,
     WorkspaceInstance,
     MultiWorkspaceStats,
+};
+pub use tree_sitter::{
+    TreeSitterParserManager,
+    ParserConfig,
+    AstNode,
+    NodeType,
+    SourceLocation,
+    ParseResult,
+    // 注意: LanguageId 使用 server_manager 中的定义以避免冲突
+    TypeInfo,
+    SymbolEntry,
+    SymbolKind,
 };
 
 /// 便捷的 LSP 操作 trait — 统一的高层 API

@@ -17,9 +17,14 @@
 // └─────────────────────────────┘
 
 use lsp_types::*;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tracing::{debug, info, warn};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::RwLock;
+use tracing::{debug, error, info, warn};
 
 /// 代码编辑操作结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -759,5 +764,330 @@ impl AstOperations for RegexAstOperations {
             }],
             error: None,
         }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════
+// FormatCode Engine — 多语言代码格式化系统
+// ════════════════════════════════════════════════════════════════
+
+/// 格式化结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FormatResult {
+    /// 是否成功
+    pub success: bool,
+    
+    /// 格式化后的代码
+    pub formatted_code: String,
+    
+    /// 使用的格式化工具
+    pub tool_used: Option<String>,
+    
+    /// 统计信息
+    pub stats: FormatStats,
+    
+    /// 错误信息（如果失败）
+    pub error: Option<String>,
+}
+
+/// 格式化统计
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FormatStats {
+    /// 格式化的文件数
+    pub files_formatted: usize,
+    
+    /// 总行数变化 (正=增加, 负=减少)
+    pub total_lines_changed: isize,
+    
+    /// 格式化耗时 (ms)
+    pub duration_ms: u64,
+}
+
+/// 格式化器配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FormatterConfig {
+    /// 命令名称
+    pub command: String,
+    
+    /// 参数模板
+    pub args: Vec<String>,
+    
+    /// 是否支持 stdin 输入
+    pub supports_stdin: bool,
+    
+    /// 文件扩展名过滤
+    pub extensions: Vec<String>,
+}
+
+impl Default for FormatterConfig {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            args: vec!["--write".to_string(), "--stdin".to_string()],
+            supports_stdin: true,
+            extensions: vec![],
+        }
+    }
+}
+
+/// 代码格式化引擎 — 集成到 AST Operations Manager
+pub struct FormatCodeEngine {
+    formatters: std::collections::HashMap<String, FormatterConfig>,
+}
+
+impl FormatCodeEngine {
+    /// 创建新的格式化引擎
+    pub fn new() -> Self {
+        let mut engine = Self {
+            formatters: std::collections::HashMap::new(),
+        };
+        
+        engine.register_builtin_formatters();
+        engine
+    }
+
+    /// 注册内置的格式化器
+    fn register_builtin_formatters(&mut self) {
+        // Rust - rustfmt
+        self.formatters.insert("rust".to_string(), FormatterConfig {
+            command: "rustfmt".to_string(),
+            args: vec!["--edition".to_string(), "2021".to_string()],
+            supports_stdin: true,
+            extensions: vec![".rs".to_string()],
+        });
+        
+        // Python - black
+        self.formatters.insert("python".to_string(), FormatterConfig {
+            command: "black".to_string(),
+            args: vec!["-".to_string()], // 从 stdin 读取
+            supports_stdin: true,
+            extensions: vec![".py".to_string()],
+        });
+        
+        // JavaScript/TypeScript - prettier
+        self.formatters.insert("javascript".to_string(), FormatterConfig {
+            command: "prettier".to_string(),
+            args: vec![
+                "--parser".to_string(), "babel".to_string(),
+                "--single-quote".to_string(),
+                "--trailing-comma".to_string(), "all".to_string(),
+            ],
+            supports_stdin: true,
+            extensions: vec![".js".to_string(), ".jsx".to_string()],
+        });
+        
+        self.formatters.insert("typescript".to_string(), FormatterConfig {
+            command: "prettier".to_string(),
+            args: vec![
+                "--parser".to_string(), "typescript".to_string(),
+                "--single-quote".to_string(),
+                "--trailing-comma".to_string(), "all".to_string(),
+            ],
+            supports_stdin: true,
+            extensions: vec![".ts".to_string(), ".tsx".to_string()],
+        });
+        
+        // Go - gofmt
+        self.formatters.insert("go".to_string(), FormatterConfig {
+            command: "gofmt".to_string(),
+            args: vec![],
+            supports_stdin: true,
+            extensions: vec![".go".to_string()],
+        });
+        
+        // Java - google-java-format
+        self.formatters.insert("java".to_string(), FormatterConfig {
+            command: "google-java-format".to_string(),
+            args: vec!["-".to_string()],
+            supports_stdin: true,
+            extensions: vec![".java".to_string()],
+        });
+    }
+
+    /// 推断语言类型
+    fn infer_language(&self, file_path: &str) -> &str {
+        if file_path.ends_with(".rs") { "rust" }
+        else if file_path.ends_with(".py") { "python" }
+        else if file_path.ends_with(".ts") || file_path.ends_with(".tsx") { "typescript" }
+        else if file_path.ends_with(".js") || file_path.ends_with(".jsx") { "javascript" }
+        else if file_path.ends_with(".go") { "go" }
+        else if file_path.ends_with(".java") { "java" }
+        else { "unknown" }
+    }
+
+    /// 格式化代码
+    pub async fn format_code(
+        &self,
+        code: &str,
+        file_path: &str,
+        language: Option<&str>,
+    ) -> FormatResult {
+        let lang = language.unwrap_or_else(|| self.infer_language(file_path));
+        let start_time = std::time::Instant::now();
+        
+        info!("Formatting {} ({})", file_path, lang);
+        
+        let formatter = self.formatters.get(lang);
+        
+        match formatter {
+            Some(formatter_config) => {
+                match self.run_external_formatter(code, formatter_config).await {
+                    Ok(formatted_code) => {
+                        let duration = start_time.elapsed().as_millis() as u64;
+                        
+                        let lines_before = code.lines().count();
+                        let lines_after = formatted_code.lines().count();
+                        let lines_diff = lines_after as isize - lines_before as isize;
+                        
+                        FormatResult {
+                            success: true,
+                            formatted_code,
+                            tool_used: Some(formatter_config.command.clone()),
+                            stats: FormatStats {
+                                files_formatted: 1,
+                                total_lines_changed: lines_diff,
+                                duration_ms: duration,
+                            },
+                            error: None,
+                        }
+                    }
+                    Err(e) => {
+                        warn!("External formatter failed: {}, falling back to basic formatting", e);
+                        self.basic_format(code, lang)
+                    }
+                }
+            }
+            None => {
+                warn!("No formatter configured for language: {}, using basic formatting", lang);
+                self.basic_format(code, lang)
+            }
+        }
+    }
+
+    /// 运行外部格式化工具
+    async fn run_external_formatter(
+        &self,
+        code: &str,
+        config: &FormatterConfig,
+    ) -> Result<String, String> {
+        use tokio::process::Command;
+        
+        debug!(
+            tool = %config.command,
+            args = ?config.args,
+            "Running external formatter"
+        );
+        
+        let code_owned = code.to_string();
+        let mut cmd = Command::new(&config.command);
+        
+        cmd.args(&config.args);
+        
+        if config.supports_stdin {
+            cmd.stdin(std::process::Stdio::piped());
+            cmd.stdout(std::process::Stdio::piped());
+            cmd.stderr(std::process::Stdio::piped());
+            
+            let mut child = cmd.spawn()
+                .map_err(|e| format!("Failed to spawn {}: {}", config.command, e))?;
+            
+            if let Some(mut stdin) = child.stdin.take() {
+                tokio::spawn(async move {
+                    let _ = stdin.write_all(code_owned.as_bytes()).await;
+                    let _ = stdin.flush().await;
+                    drop(stdin);
+                });
+            }
+            
+            let output = child.wait_with_output().await
+                .map_err(|e| format!("Failed to wait for {}: {}", config.command, e))?;
+            
+            if output.status.success() {
+                Ok(String::from_utf8_lossy(&output.stdout).to_string())
+            } else {
+                Err(format!(
+                    "{} exited with status {:?}: {}",
+                    config.command,
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+            }
+        } else {
+            Err(format!(
+                "Formatter {} does not support stdin input",
+                config.command
+            ))
+        }
+    }
+
+    /// 基础格式化（当外部工具不可用时）
+    fn basic_format(&self, code: &str, _language: &str) -> FormatResult {
+        let mut formatted = code.to_string();
+        
+        // 统一换行符为 \n
+        formatted = formatted.replace("\r\n", "\n").replace('\r', "\n");
+        
+        // 移除文件末尾多余的空行
+        while formatted.ends_with("\n\n") {
+            formatted.pop();
+        }
+        
+        // 确保文件以换行符结尾
+        if !formatted.is_empty() && !formatted.ends_with('\n') {
+            formatted.push('\n');
+        }
+        
+        FormatResult {
+            success: true,
+            formatted_code: formatted,
+            tool_used: Some("basic_formatter".to_string()),
+            stats: FormatStats {
+                files_formatted: 1,
+                total_lines_changed: 0,
+                duration_ms: 5,
+            },
+            error: None,
+        }
+    }
+
+    /// 批量格式化多个文件
+    pub async fn batch_format_files(
+        &self,
+        files: &[&str],
+        project_root: &str,
+    ) -> Result<Vec<FormatResult>, String> {
+        let mut results = Vec::new();
+        
+        for file_path in files {
+            let full_path = if std::path::Path::new(file_path).is_absolute() {
+                file_path.to_string()
+            } else {
+                format!("{}/{}", project_root, file_path)
+            };
+            
+            let content = tokio::fs::read_to_string(&full_path).await
+                .map_err(|e| format!("Failed to read {}: {}", full_path, e))?;
+            
+            let result = self.format_code(&content, &full_path, None).await;
+            results.push(result);
+        }
+        
+        Ok(results)
+    }
+
+    /// 注册自定义格式化器
+    pub fn register_formatter(&mut self, language: &str, config: FormatterConfig) {
+        self.formatters.insert(language.to_string(), config);
+        info!("Custom formatter registered for language: {}", language);
+    }
+
+    /// 检查是否有指定语言的格式化器
+    pub fn has_formatter_for_language(&self, language: &str) -> bool {
+        self.formatters.contains_key(language)
+    }
+
+    /// 获取所有支持的语言列表
+    pub fn supported_languages(&self) -> Vec<&str> {
+        self.formatters.keys().map(|s| s.as_str()).collect()
     }
 }

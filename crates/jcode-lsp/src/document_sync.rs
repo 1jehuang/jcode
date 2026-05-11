@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
-use crate::{LspError, LspResult};
+use crate::LspResult;
 
 /// 文档同步策略
 #[derive(Debug, Clone, Copy)]
@@ -402,7 +402,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_large_file_uses_incremental() {
-        let manager = DocumentSyncManager::with_incremental_threshold(50);
+        let manager = DocumentSyncManager::new().with_incremental_threshold(50);
 
         // 创建大文件 (> 100 行)
         let large_content: String = (0..200)
