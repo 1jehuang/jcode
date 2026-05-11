@@ -107,7 +107,10 @@ pub fn selfdev_status_output() -> Result<ToolOutput> {
                 ));
             }
             if let Some(validation_status) = record.validation.last_status.as_ref() {
-                status.push_str(&format!("  Last validation: {:?}\n", validation_status));
+                status.push_str(&format!(
+                    "  Last validation: {}\n",
+                    validation_status_label(validation_status)
+                ));
             }
         }
     }
@@ -233,6 +236,17 @@ pub fn selfdev_status_output() -> Result<ToolOutput> {
     }
 
     Ok(ToolOutput::new(status))
+}
+
+fn validation_status_label(status: &build::SelfDevCustomizationOutcomeStatus) -> &'static str {
+    match status {
+        build::SelfDevCustomizationOutcomeStatus::AppliedCleanly => "applied_cleanly",
+        build::SelfDevCustomizationOutcomeStatus::RepairedAutomatically => "repaired_automatically",
+        build::SelfDevCustomizationOutcomeStatus::NeedsReview => "needs_review",
+        build::SelfDevCustomizationOutcomeStatus::Disabled => "disabled",
+        build::SelfDevCustomizationOutcomeStatus::ValidationPassed => "validation_passed",
+        build::SelfDevCustomizationOutcomeStatus::ValidationFailed => "validation_failed",
+    }
 }
 
 impl SelfDevTool {

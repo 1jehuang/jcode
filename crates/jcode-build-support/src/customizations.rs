@@ -37,7 +37,7 @@ pub fn sanitize_record_id(id: &str) -> String {
     let mut clean = String::with_capacity(id.len());
     for ch in id.chars() {
         if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
-            clean.push(ch);
+            clean.push(ch.to_ascii_lowercase());
         } else {
             clean.push('-');
         }
@@ -61,18 +61,26 @@ pub fn create_customization_record(
         record.created_at = now;
     }
 
+    let record_path = customization_record_path(&record.id)?;
+    if record_path.exists() {
+        anyhow::bail!("customization record `{}` already exists", record.id);
+    }
+
     if let Some(patch) = patch.filter(|patch| !patch.trim().is_empty()) {
         let patch_path = customization_patch_path(&record.id)?;
+        if patch_path.exists() {
+            anyhow::bail!("customization patch `{}` already exists", record.id);
+        }
         storage::write_text_secret(&patch_path, patch)?;
         record.provenance.patch_path = Some(patch_path);
     }
 
-    save_customization_record(&record)?;
+    storage::write_json_secret(&record_path, &record)?;
     Ok(record)
 }
 
 pub fn save_customization_record(record: &SelfDevCustomizationRecord) -> Result<()> {
-    storage::write_json(&customization_record_path(&record.id)?, record)
+    storage::write_json_secret(&customization_record_path(&record.id)?, record)
 }
 
 pub fn load_customization_record(id: &str) -> Result<Option<SelfDevCustomizationRecord>> {

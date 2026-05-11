@@ -11,7 +11,7 @@ use crate::server;
 use crate::session;
 use crate::storage;
 use crate::tool::{Tool, ToolContext, ToolExecutionMode, ToolOutput};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};

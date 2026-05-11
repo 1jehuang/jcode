@@ -27,7 +27,8 @@ impl SelfDevTool {
         let diff = if Self::is_test_session() {
             String::new()
         } else {
-            build::current_git_patch_with_untracked(&repo_dir).unwrap_or_default()
+            build::current_git_patch_with_untracked(&repo_dir)
+                .context("Failed to capture customization patch")?
         };
         let diff_stat = if Self::is_test_session() {
             None

@@ -184,7 +184,7 @@ pub fn current_git_hash_full(repo_dir: &Path) -> Result<String> {
 /// Get the git diff for uncommitted changes
 pub fn current_git_diff(repo_dir: &Path) -> Result<String> {
     let output = Command::new("git")
-        .args(["diff", "HEAD"])
+        .args(["diff", "--binary", "HEAD"])
         .current_dir(repo_dir)
         .output()?;
 

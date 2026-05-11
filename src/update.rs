@@ -12,8 +12,10 @@ pub use jcode_update_core::{
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::process::{ExitStatus, Stdio};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 const GITHUB_REPO: &str = "1jehuang/jcode";
@@ -22,6 +24,8 @@ const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const DOWNLOAD_PROGRESS_UPDATE_STEP: u64 = 1_048_576;
 const CUSTOMIZATION_VALIDATION_OUTPUT_LIMIT: usize = 4000;
+const CUSTOMIZATION_VALIDATION_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+const CUSTOMIZATION_VALIDATION_STREAM_LIMIT: usize = CUSTOMIZATION_VALIDATION_OUTPUT_LIMIT;
 
 pub fn print_centered(msg: &str) {
     let width = crossterm::terminal::size()
@@ -903,8 +907,14 @@ pub fn download_and_install_blocking_with_progress(
 }
 
 fn record_customization_update_reports(version: &str) {
-    let Ok(active) = build::list_active_customization_records() else {
-        return;
+    let active = match build::list_active_customization_records() {
+        Ok(active) => active,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Failed to load active self-dev customization records for update reporting: {error}"
+            ));
+            return;
+        }
     };
     if active.is_empty() {
         return;
@@ -979,19 +989,7 @@ fn run_customization_validation_commands(
 ) -> (build::SelfDevCustomizationOutcomeStatus, String) {
     let mut combined = String::new();
     for command in commands {
-        let output = if cfg!(windows) {
-            std::process::Command::new("cmd")
-                .args(["/C", command])
-                .current_dir(repo_dir)
-                .output()
-        } else {
-            std::process::Command::new("sh")
-                .args(["-c", command])
-                .current_dir(repo_dir)
-                .output()
-        };
-
-        let output = match output {
+        let output = match run_validation_command(repo_dir, command) {
             Ok(output) => output,
             Err(error) => {
                 return (
@@ -1005,6 +1003,7 @@ fn run_customization_validation_commands(
         };
 
         append_validation_output(&mut combined, command, &output);
+        truncate_in_place(&mut combined, CUSTOMIZATION_VALIDATION_OUTPUT_LIMIT);
         if !output.status.success() {
             return (
                 build::SelfDevCustomizationOutcomeStatus::ValidationFailed,
@@ -1019,7 +1018,100 @@ fn run_customization_validation_commands(
     )
 }
 
-fn append_validation_output(combined: &mut String, command: &str, output: &std::process::Output) {
+struct ValidationCommandOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    timed_out: bool,
+}
+
+fn run_validation_command(repo_dir: &Path, command: &str) -> Result<ValidationCommandOutput> {
+    let mut process = if cfg!(windows) {
+        std::process::Command::new("cmd")
+            .args(["/C", command])
+            .current_dir(repo_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    } else {
+        std::process::Command::new("sh")
+            .args(["-c", command])
+            .current_dir(repo_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    }?;
+
+    let stdout = process.stdout.take().context("missing validation stdout")?;
+    let stderr = process.stderr.take().context("missing validation stderr")?;
+    let stdout_reader =
+        thread::spawn(move || read_limited(stdout, CUSTOMIZATION_VALIDATION_STREAM_LIMIT));
+    let stderr_reader =
+        thread::spawn(move || read_limited(stderr, CUSTOMIZATION_VALIDATION_STREAM_LIMIT));
+
+    let started = Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = process.try_wait()? {
+            break status;
+        }
+        if started.elapsed() >= CUSTOMIZATION_VALIDATION_COMMAND_TIMEOUT {
+            timed_out = true;
+            let _ = process.kill();
+            break process.wait()?;
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+
+    let stdout = stdout_reader
+        .join()
+        .unwrap_or_else(|_| b"<stdout reader panicked>".to_vec());
+    let stderr = stderr_reader
+        .join()
+        .unwrap_or_else(|_| b"<stderr reader panicked>".to_vec());
+
+    Ok(ValidationCommandOutput {
+        status,
+        stdout,
+        stderr,
+        timed_out,
+    })
+}
+
+fn read_limited<R: Read>(reader: R, limit: usize) -> Vec<u8> {
+    let mut reader = BufReader::new(reader);
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    let mut truncated = false;
+
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(_) => break,
+        };
+        if output.len() < limit {
+            let remaining = limit - output.len();
+            output.extend_from_slice(&buffer[..read.min(remaining)]);
+            if read > remaining {
+                truncated = true;
+            }
+        } else {
+            truncated = true;
+        }
+    }
+
+    if truncated {
+        output.extend_from_slice(b"\n...");
+    }
+    output
+}
+
+fn append_validation_output(
+    combined: &mut String,
+    command: &str,
+    output: &ValidationCommandOutput,
+) {
     if !combined.is_empty() {
         combined.push_str("\n\n");
     }
@@ -1031,6 +1123,12 @@ fn append_validation_output(combined: &mut String, command: &str, output: &std::
             |code| code.to_string()
         )
     ));
+    if output.timed_out {
+        combined.push_str(&format!(
+            "Timed out after {} seconds\n",
+            CUSTOMIZATION_VALIDATION_COMMAND_TIMEOUT.as_secs()
+        ));
+    }
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !stdout.trim().is_empty() {
         combined.push_str("Stdout:\n");
@@ -1042,6 +1140,12 @@ fn append_validation_output(combined: &mut String, command: &str, output: &std::
         combined.push_str("Stderr:\n");
         combined.push_str(stderr.trim());
         combined.push('\n');
+    }
+}
+
+fn truncate_in_place(value: &mut String, max_chars: usize) {
+    if value.chars().count() > max_chars {
+        *value = truncate_chars(value, max_chars);
     }
 }
 
