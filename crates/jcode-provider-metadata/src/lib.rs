@@ -385,7 +385,7 @@ pub const MINIMAX_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "minimax",
     display_name: "MiniMax",
     api_base: "https://api.minimaxi.com/v1",
-    api_key_env: "OPENAI_API_KEY",
+    api_key_env: "MINIMAX_API_KEY",
     env_file: "minimax.env",
     setup_url: "https://platform.minimaxi.com/docs/guides/text-generation",
     default_model: Some("MiniMax-M2.7"),
@@ -1330,7 +1330,7 @@ mod tests {
     #[test]
     fn minimax_profile_uses_official_openai_compatible_configuration() {
         assert_eq!(MINIMAX_PROFILE.api_base, "https://api.minimaxi.com/v1");
-        assert_eq!(MINIMAX_PROFILE.api_key_env, "OPENAI_API_KEY");
+        assert_eq!(MINIMAX_PROFILE.api_key_env, "MINIMAX_API_KEY");
     }
 
     #[test]
