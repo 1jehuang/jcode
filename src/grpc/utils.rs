@@ -186,7 +186,7 @@ fn extract_symbols(content: &str, line: i32, character: i32) -> Vec<SymbolInfo> 
     }
 }
 
-fn find_symbol_definition(symbol_name: &str, file_path: &str) -> Option<proto::Location> {
+pub fn find_symbol_definition(symbol_name: &str, file_path: &str) -> Option<proto::Location> {
     let content = match std::fs::read_to_string(file_path) {
         Ok(c) => c,
         Err(_) => return None,
@@ -214,7 +214,7 @@ fn find_symbol_definition(symbol_name: &str, file_path: &str) -> Option<proto::L
     None
 }
 
-fn find_symbol_references(symbol_name: &str, file_path: &str) -> Vec<proto::Location> {
+pub fn find_symbol_references(symbol_name: &str, file_path: &str) -> Vec<proto::Location> {
     let content = match std::fs::read_to_string(file_path) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
@@ -238,7 +238,7 @@ fn find_symbol_references(symbol_name: &str, file_path: &str) -> Vec<proto::Loca
     references
 }
 
-fn parse_all_symbols(content: &str, file_path: &str) -> Vec<proto::SymbolInformation> {
+pub fn parse_all_symbols(content: &str, file_path: &str) -> Vec<proto::SymbolInformation> {
     let mut symbols = Vec::new();
     
     let fn_regex = regex::Regex::new(r"(pub\s+)?fn\s+(\w+)").unwrap();
@@ -866,7 +866,7 @@ fn format_code(code: &str, language: &str, style: &str) -> String {
     formatted_lines.join("\n")
 }
 
-fn find_workspace_symbols(query: &str, file_paths: &[String]) -> Vec<proto::WorkspaceSymbol> {
+pub fn find_workspace_symbols(query: &str, file_paths: &[String]) -> Vec<proto::WorkspaceSymbol> {
     let mut symbols = Vec::new();
     
     for (idx, file_path) in file_paths.iter().enumerate().take(10) {
@@ -2014,7 +2014,7 @@ fn detect_errors(code: &str, language: &str) -> (Vec<proto::ErrorDetection>, i32
     (errors, error_count, warning_count, info_count)
 }
 
-fn go_to_type_definition(file_path: &str, code: &str, line: i32, character: i32) -> Vec<proto::Location> {
+pub fn go_to_type_definition(file_path: &str, code: &str, line: i32, character: i32) -> Vec<proto::Location> {
     let mut locations = Vec::new();
     let lines: Vec<&str> = code.lines().collect();
     
@@ -2045,7 +2045,7 @@ fn go_to_type_definition(file_path: &str, code: &str, line: i32, character: i32)
     locations
 }
 
-fn go_to_implementation(file_path: &str, code: &str, line: i32, character: i32) -> Vec<proto::Location> {
+pub fn go_to_implementation(file_path: &str, code: &str, line: i32, character: i32) -> Vec<proto::Location> {
     let mut locations = Vec::new();
     let lines: Vec<&str> = code.lines().collect();
     
@@ -2073,7 +2073,7 @@ fn go_to_implementation(file_path: &str, code: &str, line: i32, character: i32) 
     locations
 }
 
-fn find_implementations(file_path: &str, code: &str, symbol_name: &str) -> Vec<proto::ImplementationInfo> {
+pub fn find_implementations(file_path: &str, code: &str, symbol_name: &str) -> Vec<proto::ImplementationInfo> {
     let mut implementations = Vec::new();
     let lines: Vec<&str> = code.lines().collect();
     

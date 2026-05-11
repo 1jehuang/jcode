@@ -59,6 +59,7 @@ mod document_sync;
 mod diagnostics;
 mod completion;
 mod performance;
+mod ast_operations;
 
 pub use transport::{build_request, build_notification, parse_response, JsonRpcError};
 pub use client::{LspClient, LspError, LspResult};
@@ -80,6 +81,15 @@ pub use performance::{
     PerformanceStats,
     ServerHealthInfo,
     AdaptiveConfig,
+};
+pub use ast_operations::{
+    AstOperations,
+    RegexAstOperations,
+    CodeEditResult,
+    ExtractMethodParams,
+    InlineFunctionParams,
+    RenameSymbolParams,
+    EncapsulateFieldParams,
 };
 
 /// 便捷的 LSP 操作 trait — 统一的高层 API

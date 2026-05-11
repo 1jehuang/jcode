@@ -469,11 +469,135 @@ impl OpenCodeService for OpenCodeServiceImpl {
             .map(|t| tonic::Response::new(proto::RefactorCodeResponse { refactored_code: t, diff: String::new(), operations: vec![], error: String::new() }))
             .map_err(|e| tonic::Status::internal(e.to_string()))
     }
-    async fn extract_method(self, _: tonic::Request<proto::ExtractMethodRequest>) -> Result<tonic::Response<proto::ExtractMethodResponse>, tonic::Status> { Ok(tonic::Response::new(proto::ExtractMethodResponse::default())) }
-    async fn inline_function(self, _: tonic::Request<proto::InlineFunctionRequest>) -> Result<tonic::Response<proto::InlineFunctionResponse>, tonic::Status> { Ok(tonic::Response::new(proto::InlineFunctionResponse::default())) }
-    async fn rename_symbol(self, req: tonic::Request<proto::RenameSymbolRequest>) -> Result<tonic::Response<proto::RenameSymbolResponse>, tonic::Status> { let r = req.into_inner(); Ok(tonic::Response::new(proto::RenameSymbolResponse { updated_code: r.new_name, renamed_count: 0, locations: vec![], success: true, error: String::new() })) }
-    async fn move_symbol(self, _: tonic::Request<proto::MoveSymbolRequest>) -> Result<tonic::Response<proto::MoveSymbolResponse>, tonic::Status> { Ok(tonic::Response::new(proto::MoveSymbolResponse::default())) }
-    async fn encapsulate_field(self, _: tonic::Request<proto::EncapsulateFieldRequest>) -> Result<tonic::Response<proto::EncapsulateFieldResponse>, tonic::Status> { Ok(tonic::Response::new(proto::EncapsulateFieldResponse::default())) }
+    
+    // ════════════════════════════════════════════════════════════════
+    // AST 级智能重构操作 (维度 2 - 代码编辑)
+    // ════════════════════════════════════════════════════════════════
+    
+    async fn extract_method(self, req: tonic::Request<proto::ExtractMethodRequest>) -> Result<tonic::Response<proto::ExtractMethodResponse>, tonic::Status> {
+        let r = req.into_inner();
+        let ast_ops = jcode_lsp::RegexAstOperations::new();
+        
+        let params = jcode_lsp::ExtractMethodParams {
+            file_path: r.file_path.clone(),
+            start_line: r.start_line,
+            end_line: r.end_line,
+            method_name: r.method_name,
+            is_static: r.is_static,
+        };
+        
+        match ast_ops.extract_method(params).await {
+            result if result.success => {
+                Ok(tonic::Response::new(proto::ExtractMethodResponse {
+                    updated_code: result.new_content,
+                    success: true,
+                    error: String::new(),
+                }))
+            }
+            result => {
+                Err(tonic::Status::internal(result.error.unwrap_or_else(|| "Extraction failed".to_string())))
+            }
+        }
+    }
+    
+    async fn inline_function(self, req: tonic::Request<proto::InlineFunctionRequest>) -> Result<tonic::Response<proto::InlineFunctionResponse>, tonic::Status> {
+        let r = req.into_inner();
+        let ast_ops = jcode_lsp::RegexAstOperations::new();
+        
+        let params = jcode_lsp::InlineFunctionParams {
+            file_path: r.file_path.clone(),
+            function_name: r.function_name,
+            call_site_line: r.call_site_line,
+            call_site_character: r.call_site_character,
+        };
+        
+        match ast_ops.inline_function(params).await {
+            result if result.success => {
+                Ok(tonic::Response::new(proto::InlineFunctionResponse {
+                    updated_code: result.new_content,
+                    success: true,
+                    error: String::new(),
+                }))
+            }
+            result => {
+                Err(tonic::Status::internal(result.error.unwrap_or_else(|| "Inlining failed".to_string())))
+            }
+        }
+    }
+    
+    async fn rename_symbol(self, req: tonic::Request<proto::RenameSymbolRequest>) -> Result<tonic::Response<proto::RenameSymbolResponse>, tonic::Status> {
+        let r = req.into_inner();
+        let ast_ops = jcode_lsp::RegexAstOperations::new();
+        
+        let params = jcode_lsp::RenameSymbolParams {
+            file_path: r.file_path.clone(),
+            line: r.line,
+            character: r.character,
+            new_name: r.new_name.clone(),
+        };
+        
+        match ast_ops.rename_symbol(params).await {
+            result if result.success => {
+                Ok(tonic::Response::new(proto::RenameSymbolResponse {
+                    updated_code: result.new_content,
+                    renamed_count: result.edits.len() as i32,
+                    locations: vec![],
+                    success: true,
+                    error: String::new(),
+                }))
+            }
+            result => {
+                Err(tonic::Status::internal(result.error.unwrap_or_else(|| "Rename failed".to_string())))
+            }
+        }
+    }
+    
+    async fn move_symbol(self, req: tonic::Request<proto::MoveSymbolRequest>) -> Result<tonic::Response<proto::MoveSymbolResponse>, tonic::Status> {
+        let r = req.into_inner();
+        let ast_ops = jcode_lsp::RegexAstOperations::new();
+        
+        match ast_ops.move_symbol(&r.source_file, &r.symbol_name, &r.target_file).await {
+            result if result.success => {
+                Ok(tonic::Response::new(proto::MoveSymbolResponse {
+                    target_file_content: Some(result.new_content),
+                    source_file_content: None, // 需要单独调用获取
+                    success: true,
+                    error: String::new(),
+                }))
+            }
+            result => {
+                Err(tonic::Status::internal(result.error.unwrap_or_else(|| "Move failed".to_string())))
+            }
+        }
+    }
+    
+    async fn encapsulate_field(self, req: tonic::Request<proto::EncapsulateFieldRequest>) -> Result<tonic::Response<proto::EncapsulateFieldResponse>, tonic::Status> {
+        let r = req.into_inner();
+        let ast_ops = jcode_lsp::RegexAstOperations::new();
+        
+        let params = jcode_lsp::EncapsulateFieldParams {
+            file_path: r.file_path.clone(),
+            field_name: r.field_name,
+            field_type: r.field_type,
+            generate_getter: true,
+            generate_setter: true,
+        };
+        
+        match ast_ops.encapsulate_field(params).await {
+            result if result.success => {
+                Ok(tonic::Response::new(proto::EncapsulateFieldResponse {
+                    updated_code: result.new_content,
+                    getter_name: Some(format!("get_{}", r.field_name)),
+                    setter_name: Some(format!("set_{}", r.field_name)),
+                    success: true,
+                    error: String::new(),
+                }))
+            }
+            result => {
+                Err(tonic::Status::internal(result.error.unwrap_or_else(|| "Encapsulation failed".to_string())))
+            }
+        }
+    }
     async fn plan_project(self, req: tonic::Request<proto::PlanProjectRequest>) -> Result<tonic::Response<proto::PlanProjectResponse>, tonic::Status> {
         let r = req.into_inner();
         self.provider.complete_simple(&format!("Plan: {}", r.project_description), "").await
