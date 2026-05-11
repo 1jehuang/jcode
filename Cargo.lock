@@ -3767,6 +3767,7 @@ dependencies = [
  "jcode-gateway-types",
  "jcode-import-core",
  "jcode-lock-manager",
+ "jcode-lsp",
  "jcode-memory-types",
  "jcode-message-types",
  "jcode-micro-ci",
