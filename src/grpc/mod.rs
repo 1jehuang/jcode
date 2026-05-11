@@ -334,7 +334,7 @@ impl AgentService for AgentServiceImpl {
             None => Err(tonic::Status::not_found("agent not found")),
         }
     }
-    async fn list_agents(self, _req: tonic::Request<proto::ListAgentsRequest>) -> Result<tonic::Response<proto::ListAgentsResponse>, tonic::Status> {
+    async fn list_agents(&self, _req: tonic::Request<proto::ListAgentsRequest>) -> Result<tonic::Response<proto::ListAgentsResponse>, tonic::Status> {
         let agents: Vec<proto::Agent> = self.agents.read().values().cloned().collect();
         Ok(tonic::Response::new(proto::ListAgentsResponse { agents }))
     }
@@ -359,7 +359,7 @@ impl ToolService for ToolServiceImpl {
             Err(e) => Err(tonic::Status::internal(format!("tool error: {}", e)))
         }
     }
-    async fn list_tools(self, _req: tonic::Request<proto::ListToolsRequest>) -> Result<tonic::Response<proto::ListToolsResponse>, tonic::Status> {
+    async fn list_tools(&self, _req: tonic::Request<proto::ListToolsRequest>) -> Result<tonic::Response<proto::ListToolsResponse>, tonic::Status> {
         let registry = crate::tool::Registry::new(Arc::clone(&self.provider)).await;
         let names = registry.tool_names().await;
         let tools = names.into_iter().map(|name| proto::ToolInfo { name, description: String::new(), input_schema: None }).collect();
@@ -377,21 +377,21 @@ impl TenantServiceImpl { fn new() -> Self { Self { tenants: Arc::new(RwLock::new
 
 #[tonic::async_trait]
 impl TenantService for TenantServiceImpl {
-    async fn create_tenant(self, req: tonic::Request<proto::CreateTenantRequest>) -> Result<tonic::Response<proto::CreateTenantResponse>, tonic::Status> {
+    async fn create_tenant(&self, req: tonic::Request<proto::CreateTenantRequest>) -> Result<tonic::Response<proto::CreateTenantResponse>, tonic::Status> {
         let r = req.into_inner();
         let id = uuid::Uuid::new_v4().to_string();
         let t = proto::Tenant { id, name: r.name, domain: r.domain, limits: r.limits, created_at: chrono::Utc::now().to_rfc3339() };
         self.tenants.write().insert(t.id.clone(), t.clone());
         Ok(tonic::Response::new(proto::CreateTenantResponse { tenant: Some(t) }))
     }
-    async fn get_tenant(self, req: tonic::Request<proto::GetTenantRequest>) -> Result<tonic::Response<proto::GetTenantResponse>, tonic::Status> {
+    async fn get_tenant(&self, req: tonic::Request<proto::GetTenantRequest>) -> Result<tonic::Response<proto::GetTenantResponse>, tonic::Status> {
         match self.tenants.read().get(&req.into_inner().tenant_id).cloned() { Some(t) => Ok(tonic::Response::new(proto::GetTenantResponse { tenant: Some(t) })), None => Err(tonic::Status::not_found("tenant not found")) }
     }
-    async fn update_tenant(self, req: tonic::Request<proto::UpdateTenantRequest>) -> Result<tonic::Response<proto::UpdateTenantResponse>, tonic::Status> {
+    async fn update_tenant(&self, req: tonic::Request<proto::UpdateTenantRequest>) -> Result<tonic::Response<proto::UpdateTenantResponse>, tonic::Status> {
         let r = req.into_inner();
         match self.tenants.write().get_mut(&r.tenant_id) { Some(t) => { t.name = r.name; t.limits = r.limits; Ok(tonic::Response::new(proto::UpdateTenantResponse { tenant: Some(t.clone()) })) }, None => Err(tonic::Status::not_found("tenant not found")) }
     }
-    async fn delete_tenant(self, req: tonic::Request<proto::DeleteTenantRequest>) -> Result<tonic::Response<proto::DeleteTenantResponse>, tonic::Status> {
+    async fn delete_tenant(&self, req: tonic::Request<proto::DeleteTenantRequest>) -> Result<tonic::Response<proto::DeleteTenantResponse>, tonic::Status> {
         Ok(tonic::Response::new(proto::DeleteTenantResponse { success: self.tenants.write().remove(&req.into_inner().tenant_id).is_some() }))
     }
 }
@@ -406,21 +406,21 @@ impl JoyCodeServiceImpl { fn new() -> Self { Self { patches: Arc::new(RwLock::ne
 
 #[tonic::async_trait]
 impl JoyCodeService for JoyCodeServiceImpl {
-    async fn generate_patch(self, req: tonic::Request<proto::GeneratePatchRequest>) -> Result<tonic::Response<proto::GeneratePatchResponse>, tonic::Status> {
+    async fn generate_patch(&self, req: tonic::Request<proto::GeneratePatchRequest>) -> Result<tonic::Response<proto::GeneratePatchResponse>, tonic::Status> {
         if req.into_inner().session_id.is_empty() { return Err(tonic::Status::invalid_argument("session_id required")); }
         let p = proto::Patch { id: uuid::Uuid::new_v4().to_string(), diff: String::new(), description: "auto-generated patch".into(), confidence: 0.8, changes: vec![] };
         self.patches.write().insert(p.id.clone(), p.clone());
         Ok(tonic::Response::new(proto::GeneratePatchResponse { patch_id: p.id.clone(), candidates: vec![p], summary: "patch generated".into() }))
     }
-    async fn review_code(self, req: tonic::Request<proto::ReviewCodeRequest>) -> Result<tonic::Response<proto::ReviewCodeResponse>, tonic::Status> {
+    async fn review_code(&self, req: tonic::Request<proto::ReviewCodeRequest>) -> Result<tonic::Response<proto::ReviewCodeResponse>, tonic::Status> {
         let fs: Vec<proto::CodeReview> = req.into_inner().files.into_iter().map(|f| proto::CodeReview { file_path: f, issues: vec![], score: 80 }).collect();
         Ok(tonic::Response::new(proto::ReviewCodeResponse { review_id: uuid::Uuid::new_v4().to_string(), reviews: fs, overall_feedback: "review complete".into() }))
     }
-    async fn generate_tests(self, req: tonic::Request<proto::GenerateTestsRequest>) -> Result<tonic::Response<proto::GenerateTestsResponse>, tonic::Status> {
+    async fn generate_tests(&self, req: tonic::Request<proto::GenerateTestsRequest>) -> Result<tonic::Response<proto::GenerateTestsResponse>, tonic::Status> {
         if req.into_inner().target_file.is_empty() { return Err(tonic::Status::invalid_argument("target_file required")); }
         Ok(tonic::Response::new(proto::GenerateTestsResponse { test_id: uuid::Uuid::new_v4().to_string(), tests: vec![], coverage_info: "N/A".into() }))
     }
-    async fn apply_patch(self, req: tonic::Request<proto::ApplyPatchRequest>) -> Result<tonic::Response<proto::ApplyPatchResponse>, tonic::Status> {
+    async fn apply_patch(&self, req: tonic::Request<proto::ApplyPatchRequest>) -> Result<tonic::Response<proto::ApplyPatchResponse>, tonic::Status> {
         let r = req.into_inner();
         if self.patches.read().get(&r.patch_id).is_none() { return Err(tonic::Status::not_found("patch not found")); }
         Ok(tonic::Response::new(proto::ApplyPatchResponse { success: true, message: if r.dry_run { "dry run".into() } else { "applied".into() }, applied_files: vec![] }))
@@ -458,12 +458,12 @@ impl OpenCodeService for OpenCodeServiceImpl {
             Err(e) => Err(tonic::Status::internal(e.to_string()))
         }
     }
-    async fn generate_code(self, req: tonic::Request<proto::GenerateCodeRequest>) -> Result<tonic::Response<proto::GenerateCodeResponse>, tonic::Status> {
+    async fn generate_code(&self, req: tonic::Request<proto::GenerateCodeRequest>) -> Result<tonic::Response<proto::GenerateCodeResponse>, tonic::Status> {
         self.provider.complete_simple(&req.into_inner().prompt, "").await
             .map(|t| tonic::Response::new(proto::GenerateCodeResponse { generated_code: t, explanation: String::new(), files: vec![], error: String::new() }))
             .map_err(|e| tonic::Status::internal(e.to_string()))
     }
-    async fn refactor_code(self, req: tonic::Request<proto::RefactorCodeRequest>) -> Result<tonic::Response<proto::RefactorCodeResponse>, tonic::Status> {
+    async fn refactor_code(&self, req: tonic::Request<proto::RefactorCodeRequest>) -> Result<tonic::Response<proto::RefactorCodeResponse>, tonic::Status> {
         let r = req.into_inner();
         self.provider.complete_simple(&format!("Refactor ({}): {}", r.refactor_type, r.code), "").await
             .map(|t| tonic::Response::new(proto::RefactorCodeResponse { refactored_code: t, diff: String::new(), operations: vec![], error: String::new() }))
@@ -474,7 +474,7 @@ impl OpenCodeService for OpenCodeServiceImpl {
     // AST 级智能重构操作 (维度 2 - 代码编辑)
     // ════════════════════════════════════════════════════════════════
     
-    async fn extract_method(self, req: tonic::Request<proto::ExtractMethodRequest>) -> Result<tonic::Response<proto::ExtractMethodResponse>, tonic::Status> {
+    async fn extract_method(&self, req: tonic::Request<proto::ExtractMethodRequest>) -> Result<tonic::Response<proto::ExtractMethodResponse>, tonic::Status> {
         let r = req.into_inner();
         let ast_ops = jcode_lsp::RegexAstOperations::new();
         
@@ -500,7 +500,7 @@ impl OpenCodeService for OpenCodeServiceImpl {
         }
     }
     
-    async fn inline_function(self, req: tonic::Request<proto::InlineFunctionRequest>) -> Result<tonic::Response<proto::InlineFunctionResponse>, tonic::Status> {
+    async fn inline_function(&self, req: tonic::Request<proto::InlineFunctionRequest>) -> Result<tonic::Response<proto::InlineFunctionResponse>, tonic::Status> {
         let r = req.into_inner();
         let ast_ops = jcode_lsp::RegexAstOperations::new();
         
@@ -525,7 +525,7 @@ impl OpenCodeService for OpenCodeServiceImpl {
         }
     }
     
-    async fn rename_symbol(self, req: tonic::Request<proto::RenameSymbolRequest>) -> Result<tonic::Response<proto::RenameSymbolResponse>, tonic::Status> {
+    async fn rename_symbol(&self, req: tonic::Request<proto::RenameSymbolRequest>) -> Result<tonic::Response<proto::RenameSymbolResponse>, tonic::Status> {
         let r = req.into_inner();
         let ast_ops = jcode_lsp::RegexAstOperations::new();
         
@@ -552,7 +552,7 @@ impl OpenCodeService for OpenCodeServiceImpl {
         }
     }
     
-    async fn move_symbol(self, req: tonic::Request<proto::MoveSymbolRequest>) -> Result<tonic::Response<proto::MoveSymbolResponse>, tonic::Status> {
+    async fn move_symbol(&self, req: tonic::Request<proto::MoveSymbolRequest>) -> Result<tonic::Response<proto::MoveSymbolResponse>, tonic::Status> {
         let r = req.into_inner();
         let ast_ops = jcode_lsp::RegexAstOperations::new();
         
@@ -571,7 +571,7 @@ impl OpenCodeService for OpenCodeServiceImpl {
         }
     }
     
-    async fn encapsulate_field(self, req: tonic::Request<proto::EncapsulateFieldRequest>) -> Result<tonic::Response<proto::EncapsulateFieldResponse>, tonic::Status> {
+    async fn encapsulate_field(&self, req: tonic::Request<proto::EncapsulateFieldRequest>) -> Result<tonic::Response<proto::EncapsulateFieldResponse>, tonic::Status> {
         let r = req.into_inner();
         let ast_ops = jcode_lsp::RegexAstOperations::new();
         
@@ -598,7 +598,7 @@ impl OpenCodeService for OpenCodeServiceImpl {
             }
         }
     }
-    async fn plan_project(self, req: tonic::Request<proto::PlanProjectRequest>) -> Result<tonic::Response<proto::PlanProjectResponse>, tonic::Status> {
+    async fn plan_project(&self, req: tonic::Request<proto::PlanProjectRequest>) -> Result<tonic::Response<proto::PlanProjectResponse>, tonic::Status> {
         let r = req.into_inner();
         self.provider.complete_simple(&format!("Plan: {}", r.project_description), "").await
             .map(|t| tonic::Response::new(proto::PlanProjectResponse { plan_id: uuid::Uuid::new_v4().to_string(), architecture: t, modules: vec![], timeline: String::new(), error: String::new() }))
@@ -728,7 +728,7 @@ impl OpenCodeService for OpenCodeServiceImpl {
         }
     }
 
-    async fn document_symbols(self, req: tonic::Request<proto::DocumentSymbolsRequest>) -> Result<tonic::Response<proto::DocumentSymbolsResponse>, tonic::Status> {
+    async fn document_symbols(&self, req: tonic::Request<proto::DocumentSymbolsRequest>) -> Result<tonic::Response<proto::DocumentSymbolsResponse>, tonic::Status> {
         let r = req.into_inner();
         let file_path = r.file_path.clone();
 
@@ -771,7 +771,7 @@ impl OpenCodeService for OpenCodeServiceImpl {
         }
     }
 
-    async fn workspace_symbols(self, req: tonic::Request<proto::WorkspaceSymbolsRequest>) -> Result<tonic::Response<proto::WorkspaceSymbolsResponse>, tonic::Status> {
+    async fn workspace_symbols(&self, req: tonic::Request<proto::WorkspaceSymbolsRequest>) -> Result<tonic::Response<proto::WorkspaceSymbolsResponse>, tonic::Status> {
         let r = req.into_inner();
         let query = r.query;
 
@@ -810,7 +810,7 @@ impl OpenCodeService for OpenCodeServiceImpl {
         }
     }
 
-    async fn go_to_type_definition(self, req: tonic::Request<proto::GoToTypeDefinitionRequest>) -> Result<tonic::Response<proto::GoToTypeDefinitionResponse>, tonic::Status> {
+    async fn go_to_type_definition(&self, req: tonic::Request<proto::GoToTypeDefinitionRequest>) -> Result<tonic::Response<proto::GoToTypeDefinitionResponse>, tonic::Status> {
         let r = req.into_inner();
         let file_path = r.file_path.clone();
         let line = r.line.saturating_sub(1) as u32;
@@ -850,7 +850,7 @@ impl OpenCodeService for OpenCodeServiceImpl {
         }
     }
 
-    async fn go_to_implementation(self, req: tonic::Request<proto::GoToImplementationRequest>) -> Result<tonic::Response<proto::GoToImplementationResponse>, tonic::Status> {
+    async fn go_to_implementation(&self, req: tonic::Request<proto::GoToImplementationRequest>) -> Result<tonic::Response<proto::GoToImplementationResponse>, tonic::Status> {
         let r = req.into_inner();
         let file_path = r.file_path.clone();
         let line = r.line.saturating_sub(1) as u32;
@@ -890,7 +890,7 @@ impl OpenCodeService for OpenCodeServiceImpl {
         }
     }
 
-    async fn find_implementations(self, req: tonic::Request<proto::FindImplementationsRequest>) -> Result<tonic::Response<proto::FindImplementationsResponse>, tonic::Status> {
+    async fn find_implementations(&self, req: tonic::Request<proto::FindImplementationsRequest>) -> Result<tonic::Response<proto::FindImplementationsResponse>, tonic::Status> {
         let r = req.into_inner();
         let file_path = r.file_path.clone();
         let symbol_name = r.symbol_name;
@@ -935,13 +935,13 @@ impl OpenCodeService for OpenCodeServiceImpl {
             }
         }
     }
-    async fn log_error(self, _: tonic::Request<proto::LogErrorRequest>) -> Result<tonic::Response<proto::LogErrorResponse>, tonic::Status> { Ok(tonic::Response::new(proto::LogErrorResponse::default())) }
-    async fn get_logs(self, _: tonic::Request<proto::GetLogsRequest>) -> Result<tonic::Response<proto::GetLogsResponse>, tonic::Status> { Ok(tonic::Response::new(proto::GetLogsResponse::default())) }
-    async fn set_log_level(self, _: tonic::Request<proto::SetLogLevelRequest>) -> Result<tonic::Response<proto::SetLogLevelResponse>, tonic::Status> { Ok(tonic::Response::new(proto::SetLogLevelResponse::default())) }
-    async fn detect_design_patterns(self, _: tonic::Request<proto::DetectDesignPatternsRequest>) -> Result<tonic::Response<proto::DetectDesignPatternsResponse>, tonic::Status> { Ok(tonic::Response::new(proto::DetectDesignPatternsResponse::default())) }
-    async fn analyze_anti_patterns(self, _: tonic::Request<proto::AnalyzeAntiPatternsRequest>) -> Result<tonic::Response<proto::AnalyzeAntiPatternsResponse>, tonic::Status> { Ok(tonic::Response::new(proto::AnalyzeAntiPatternsResponse::default())) }
-    async fn cross_file_refactor(self, _: tonic::Request<proto::CrossFileRefactorRequest>) -> Result<tonic::Response<proto::CrossFileRefactorResponse>, tonic::Status> { Ok(tonic::Response::new(proto::CrossFileRefactorResponse::default())) }
-    async fn detect_code_smells(self, _: tonic::Request<proto::DetectCodeSmellsRequest>) -> Result<tonic::Response<proto::DetectCodeSmellsResponse>, tonic::Status> { Ok(tonic::Response::new(proto::DetectCodeSmellsResponse::default())) }
+    async fn log_error(&self, req: tonic::Request<proto::LogErrorRequest>) -> Result<tonic::Response<proto::LogErrorResponse>, tonic::Status> { Ok(tonic::Response::new(proto::LogErrorResponse::default())) }
+    async fn get_logs(&self, _: tonic::Request<proto::GetLogsRequest>) -> Result<tonic::Response<proto::GetLogsResponse>, tonic::Status> { Ok(tonic::Response::new(proto::GetLogsResponse::default())) }
+    async fn set_log_level(&self, _: tonic::Request<proto::SetLogLevelRequest>) -> Result<tonic::Response<proto::SetLogLevelResponse>, tonic::Status> { Ok(tonic::Response::new(proto::SetLogLevelResponse::default())) }
+    async fn detect_design_patterns(&self, _: tonic::Request<proto::DetectDesignPatternsRequest>) -> Result<tonic::Response<proto::DetectDesignPatternsResponse>, tonic::Status> { Ok(tonic::Response::new(proto::DetectDesignPatternsResponse::default())) }
+    async fn analyze_anti_patterns(&self, _: tonic::Request<proto::AnalyzeAntiPatternsRequest>) -> Result<tonic::Response<proto::AnalyzeAntiPatternsResponse>, tonic::Status> { Ok(tonic::Response::new(proto::AnalyzeAntiPatternsResponse::default())) }
+    async fn cross_file_refactor(&self, _: tonic::Request<proto::CrossFileRefactorRequest>) -> Result<tonic::Response<proto::CrossFileRefactorResponse>, tonic::Status> { Ok(tonic::Response::new(proto::CrossFileRefactorResponse::default())) }
+    async fn detect_code_smells(&self, _: tonic::Request<proto::DetectCodeSmellsRequest>) -> Result<tonic::Response<proto::DetectCodeSmellsResponse>, tonic::Status> { Ok(tonic::Response::new(proto::DetectCodeSmellsResponse::default())) }
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -1031,7 +1031,7 @@ impl PluginServiceImpl { fn new() -> Self { Self { plugins: Arc::new(RwLock::new
 
 #[tonic::async_trait]
 impl PluginService for PluginServiceImpl {
-    async fn load_plugin(self, req: tonic::Request<proto::LoadPluginRequest>) -> Result<tonic::Response<proto::LoadPluginResponse>, tonic::Status> {
+    async fn load_plugin(&self, req: tonic::Request<proto::LoadPluginRequest>) -> Result<tonic::Response<proto::LoadPluginResponse>, tonic::Status> {
         let r = req.into_inner();
         let id = uuid::Uuid::new_v4().to_string();
         let name = r.plugin_path.rsplit('/').next().unwrap_or("unknown").to_string();
@@ -1039,15 +1039,15 @@ impl PluginService for PluginServiceImpl {
         self.plugins.write().insert(id.clone(), info);
         Ok(tonic::Response::new(proto::LoadPluginResponse { plugin_id: id, name, version: "1.0".into(), success: true, error: String::new() }))
     }
-    async fn unload_plugin(self, req: tonic::Request<proto::UnloadPluginRequest>) -> Result<tonic::Response<proto::UnloadPluginResponse>, tonic::Status> {
+    async fn unload_plugin(&self, req: tonic::Request<proto::UnloadPluginRequest>) -> Result<tonic::Response<proto::UnloadPluginResponse>, tonic::Status> {
         let r = self.plugins.write().remove(&req.into_inner().plugin_id).is_some();
         Ok(tonic::Response::new(proto::UnloadPluginResponse { success: r, error: if r { String::new() } else { "not found".into() } }))
     }
-    async fn list_plugins(self, _req: tonic::Request<proto::ListPluginsRequest>) -> Result<tonic::Response<proto::ListPluginsResponse>, tonic::Status> {
+    async fn list_plugins(&self, _req: tonic::Request<proto::ListPluginsRequest>) -> Result<tonic::Response<proto::ListPluginsResponse>, tonic::Status> {
         let plugins = self.plugins.read().iter().map(|(_, p)| proto::PluginInfo { plugin_id: p.id.clone(), name: p.name.clone(), version: p.version.clone(), description: p.description.clone(), enabled: p.enabled, capabilities: p.capabilities.clone() }).collect();
         Ok(tonic::Response::new(proto::ListPluginsResponse { plugins, error: String::new() }))
     }
-    async fn execute_plugin(self, req: tonic::Request<proto::ExecutePluginRequest>) -> Result<tonic::Response<proto::ExecutePluginResponse>, tonic::Status> {
+    async fn execute_plugin(&self, req: tonic::Request<proto::ExecutePluginRequest>) -> Result<tonic::Response<proto::ExecutePluginResponse>, tonic::Status> {
         let r = req.into_inner();
         if self.plugins.read().get(&r.plugin_id).is_none() { return Err(tonic::Status::not_found("plugin not found")); }
         Ok(tonic::Response::new(proto::ExecutePluginResponse { success: true, result: format!("executed: {}", r.command), error: String::new() }))
