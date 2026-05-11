@@ -91,7 +91,7 @@ fn auth_issue_profile_metadata_matches_direct_provider_endpoints() {
     assert_eq!(DEEPSEEK_PROFILE.api_base, "https://api.deepseek.com");
     assert_eq!(DEEPSEEK_PROFILE.default_model, Some("deepseek-v4-flash"));
     assert_eq!(DEEPSEEK_PROFILE.setup_url, "https://api-docs.deepseek.com/");
-    assert_eq!(MINIMAX_PROFILE.api_base, "https://api.minimax.io/v1");
+    assert_eq!(MINIMAX_PROFILE.api_base, "https://api.minimaxi.com/v1");
     assert_eq!(MINIMAX_PROFILE.api_key_env, "OPENAI_API_KEY");
     assert_eq!(
         ALIBABA_CODING_PLAN_PROFILE.api_base,
