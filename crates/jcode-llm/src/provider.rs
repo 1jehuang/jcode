@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use futures::Stream;
-use futures::stream::{self, StreamExt};
+use futures::stream::StreamExt;
 use reqwest::{Client, Response};
 use std::pin::Pin;
 use std::sync::Arc;

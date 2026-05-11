@@ -31,5 +31,10 @@ uuid = { workspace = true, features = ["v4"] }
 futures = { workspace = true }
 tokio-stream = { version = "0.1", features = ["sync", "io-util"] }
 
+# HTTP server (for REST API - OpenAI compatible)
+axum = { version = "0.8", features = ["ws", "macros", "json"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+serde_with = "3"
+
 [dev-dependencies]
 tracing-subscriber = "0.3"

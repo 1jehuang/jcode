@@ -36,6 +36,7 @@ pub mod provider;
 pub mod types;
 pub mod config;
 pub mod error;
+pub mod rest_api;
 
 // Re-exports for convenience
 pub use types::*;

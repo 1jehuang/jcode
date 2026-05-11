@@ -1866,3 +1866,145 @@ message ExecutePluginResponse {
   string result = 2;
   string error = 3;
 }
+
+// ==================== LLM Service (for Deepseek, vLLM, llama.cpp integration) ====================
+
+service LlmService {
+  // Chat completion with full control
+  rpc LlmChat(LlmChatRequest) returns (LlmChatResponse);
+  
+  // Streaming chat completion (server-streaming)
+  rpc LlmChatStream(LlmChatRequest) returns (stream LlmChatStreamChunk);
+  
+  // Generate embeddings for text(s)
+  rpc GenerateEmbeddings(EmbeddingsRequest) returns (EmbeddingsResponse);
+  
+  // Count tokens in text
+  rpc CountTokens(TokenCountRequest) returns (TokenCountResponse);
+  
+  // List available models
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+  
+  // Health check for a specific model/provider
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message LlmChatRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string provider_type = 3;       // "deepseek", "vllm", "llamacpp", "openai-compatible"
+  string model = 4;              // e.g., "deepseek-chat", "Qwen2.5-72B-Instruct"
+  repeated ChatMessage messages = 5;
+  float temperature = 6;
+  int32 max_tokens = 7;
+  float top_p = 8;
+  repeated ToolDefinition tools = 9;
+  bool stream = 10;               // If true, use streaming RPC instead
+  string stop_sequence = 11;      // Custom stop sequence
+}
+
+message LlmChatResponse {
+  string id = 1;                  // Unique response ID
+  string model = 2;               // Model used
+  repeated ChatMessage choices = 3;  // Response messages (usually 1)
+  Usage usage = 4;              // Token usage statistics
+  string finish_reason = 5;      // "stop", "length", "tool_calls"
+  double latency_ms = 6;         // Response time in milliseconds
+  repeated ToolCall tool_calls = 7; // Function calls if any
+}
+
+message LlmChatStreamChunk {
+  string id = 1;
+  string model = 2;
+  StreamDelta delta = 3;
+  string finish_reason = 4;
+  Usage usage = 5;
+  bool done = 6;
+}
+
+message StreamDelta {
+  string role = 1;                // Usually "assistant"
+  string content = 2;            // Text content chunk
+  repeated StreamToolCall tool_calls = 3;
+}
+
+message StreamToolCall {
+  int32 index = 1;
+  string id = 2;
+  string name = 3;
+  string arguments = 4;          // JSON string of arguments
+}
+
+message EmbeddingsRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string provider_type = 3;
+  string model = 4;
+  repeated string input = 5;      // Texts to embed
+  string encoding_format = 6;     // "float" or "base64"
+}
+
+message EmbeddingsResponse {
+  string id = 1;
+  string model = 2;
+  repeated EmbeddingData data = 3;
+  EmbeddingUsage usage = 4;
+}
+
+message EmbeddingData {
+  string object = 1;             // "embedding"
+  int32 index = 2;
+  repeated float embedding = 3;   // Vector of floats (usually 1536 dims)
+}
+
+message EmbeddingUsage {
+  int32 prompt_tokens = 1;
+  int32 total_tokens = 2;
+}
+
+message TokenCountRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string provider_type = 3;
+  string model = 4;
+  string input = 5;               // Text to count tokens for
+}
+
+message TokenCountResponse {
+  int32 tokens = 1;               // Estimated token count
+}
+
+message ListModelsRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string provider_type = 3;        // Optional: filter by provider type
+}
+
+message ListModelsResponse {
+  repeated ModelInfo models = 1;
+  int32 total_count = 2;
+}
+
+message ModelInfo {
+  string id = 1;                  // Model ID/name
+  string owned_by = 2;           // Provider type
+  int32 max_context = 3;         // Max context window size
+  bool supports_function_calling = 4;
+  bool supports_streaming = 5;
+  bool supports_embeddings = 6;
+  map<string, string> metadata = 7; // Additional metadata
+}
+
+message HealthCheckRequest {
+  string provider_type = 1;       // Provider to check
+  string model = 2;               // Optional: specific model to check
+}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string provider_type = 2;
+  string model = 3;
+  double latency_ms = 4;          // Response time
+  string version = 5;             // Provider/model version info
+  map<string, string> capabilities = 6; // Supported capabilities
+}
