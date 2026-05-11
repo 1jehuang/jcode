@@ -69,6 +69,188 @@ pub struct SourceState {
     pub changed_paths: usize,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfDevCustomizationStatus {
+    #[default]
+    Active,
+    Disabled,
+    Superseded,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfDevCustomizationOutcomeStatus {
+    AppliedCleanly,
+    NeedsReview,
+    Disabled,
+    RepairedAutomatically,
+    ValidationPassed,
+    ValidationFailed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SelfDevCustomizationBuildMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_command: Option<SelfDevBuildCommand>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SelfDevCustomizationProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceState>,
+    #[serde(default)]
+    pub touched_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_stat: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SelfDevCustomizationValidation {
+    #[serde(default)]
+    pub commands: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_status: Option<SelfDevCustomizationOutcomeStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_validated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelfDevCustomizationOutcome {
+    pub status: SelfDevCustomizationOutcomeStatus,
+    pub timestamp: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub validation_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelfDevCustomizationRecord {
+    pub id: String,
+    #[serde(default)]
+    pub status: SelfDevCustomizationStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_at: Option<DateTime<Utc>>,
+    pub goal: String,
+    pub expected_behavior: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
+    #[serde(default)]
+    pub update_hints: Vec<String>,
+    #[serde(default)]
+    pub provenance: SelfDevCustomizationProvenance,
+    #[serde(default)]
+    pub validation: SelfDevCustomizationValidation,
+    #[serde(default)]
+    pub build: SelfDevCustomizationBuildMetadata,
+    #[serde(default)]
+    pub outcomes: Vec<SelfDevCustomizationOutcome>,
+}
+
+impl SelfDevCustomizationRecord {
+    pub fn new(
+        id: impl Into<String>,
+        goal: impl Into<String>,
+        expected_behavior: impl Into<String>,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            id: id.into(),
+            status: SelfDevCustomizationStatus::Active,
+            created_at: now,
+            updated_at: now,
+            disabled_at: None,
+            goal: goal.into(),
+            expected_behavior: expected_behavior.into(),
+            intent: None,
+            rationale: None,
+            update_hints: Vec::new(),
+            provenance: SelfDevCustomizationProvenance::default(),
+            validation: SelfDevCustomizationValidation::default(),
+            build: SelfDevCustomizationBuildMetadata::default(),
+            outcomes: Vec::new(),
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.status == SelfDevCustomizationStatus::Active
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn customization_record_minimal_json_defaults() {
+        let json = r#"{
+            "id": "custom-1",
+            "created_at": "2026-05-10T00:00:00Z",
+            "updated_at": "2026-05-10T00:00:00Z",
+            "goal": "Keep self-dev behavior",
+            "expected_behavior": "Reload keeps the customization visible"
+        }"#;
+
+        let record: SelfDevCustomizationRecord = serde_json::from_str(json).unwrap();
+
+        assert_eq!(record.status, SelfDevCustomizationStatus::Active);
+        assert!(record.is_active());
+        assert!(record.provenance.touched_paths.is_empty());
+        assert!(record.validation.commands.is_empty());
+        assert!(record.outcomes.is_empty());
+    }
+
+    #[test]
+    fn customization_record_full_json_round_trips() {
+        let mut record = SelfDevCustomizationRecord::new(
+            "custom-2",
+            "Remember local customization",
+            "Status reports active records",
+        );
+        record.intent = Some("self-dev memory".to_string());
+        record.rationale = Some("Agents need persistent context".to_string());
+        record.update_hints.push("Review after update".to_string());
+        record
+            .provenance
+            .touched_paths
+            .push("src/tool/selfdev/mod.rs".to_string());
+        record
+            .validation
+            .commands
+            .push("cargo check -p jcode".to_string());
+        record.outcomes.push(SelfDevCustomizationOutcome {
+            status: SelfDevCustomizationOutcomeStatus::NeedsReview,
+            timestamp: Utc::now(),
+            detail: Some("active during update".to_string()),
+            validation_commands: record.validation.commands.clone(),
+        });
+
+        let json = serde_json::to_string(&record).unwrap();
+        let loaded: SelfDevCustomizationRecord = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(loaded, record);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PublishedBuild {
     pub version: String,

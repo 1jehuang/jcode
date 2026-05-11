@@ -93,6 +93,62 @@ async fn wait_for_task_completion(task_id: &str) -> background::TaskStatusFile {
     }
 }
 
+#[tokio::test]
+async fn record_customization_creates_record_and_list_output() {
+    let _storage_guard = crate::storage::lock_test_env();
+    let _lock = lock_env();
+    let temp_home = tempfile::TempDir::new().expect("temp home");
+    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+    let _test_session_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let repo = create_repo_fixture();
+    let ctx = create_test_context("session-customization", Some(repo.path().to_path_buf()));
+    let tool = SelfDevTool::new();
+
+    let output = tool
+        .do_record_customization(
+            SelfDevInput {
+                action: "record-customization".to_string(),
+                prompt: None,
+                context: None,
+                reason: None,
+                target: None,
+                command: None,
+                notify: None,
+                wake: None,
+                request_id: None,
+                task_id: None,
+                id: Some("custom/test".to_string()),
+                goal: Some("Preserve local self-dev behavior".to_string()),
+                expected_behavior: Some("The customization is visible in status".to_string()),
+                customization_intent: Some("status-memory".to_string()),
+                rationale: Some("Agents need durable context".to_string()),
+                update_hints: Some(vec!["Review after source update".to_string()]),
+                validation_commands: Some(vec!["cargo check -p jcode".to_string()]),
+                touched_paths: Some(vec!["src/tool/selfdev/mod.rs".to_string()]),
+            },
+            &ctx,
+        )
+        .await
+        .expect("record customization");
+
+    assert!(output.output.contains("custom-test"));
+
+    let loaded = build::load_customization_record("custom-test")
+        .expect("load customization")
+        .expect("record exists");
+    assert_eq!(loaded.goal, "Preserve local self-dev behavior");
+    assert_eq!(
+        loaded.provenance.touched_paths,
+        vec!["src/tool/selfdev/mod.rs".to_string()]
+    );
+
+    let list = tool
+        .do_list_customizations()
+        .await
+        .expect("list customizations");
+    assert!(list.output.contains("custom-test"));
+}
+
 #[test]
 fn test_reload_context_serialization() {
     // Create test context with task info

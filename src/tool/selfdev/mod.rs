@@ -21,6 +21,7 @@ use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 mod build_queue;
+mod customization;
 mod launch;
 mod reload;
 mod status;
@@ -61,6 +62,30 @@ struct SelfDevInput {
     /// Background task id for actions like cancel-build.
     #[serde(default)]
     task_id: Option<String>,
+    /// Customization record id for inspect/disable.
+    #[serde(default)]
+    id: Option<String>,
+    /// Human-readable customization goal for record-customization.
+    #[serde(default)]
+    goal: Option<String>,
+    /// Expected behavior for record-customization.
+    #[serde(default)]
+    expected_behavior: Option<String>,
+    /// Optional customization intent label.
+    #[serde(default)]
+    customization_intent: Option<String>,
+    /// Optional rationale for keeping the customization.
+    #[serde(default)]
+    rationale: Option<String>,
+    /// Optional update hints to review during update/install flows.
+    #[serde(default)]
+    update_hints: Option<Vec<String>>,
+    /// Optional validation commands for update/repair flows.
+    #[serde(default)]
+    validation_commands: Option<Vec<String>>,
+    /// Optional touched paths if auto-detection is incomplete.
+    #[serde(default)]
+    touched_paths: Option<Vec<String>>,
 }
 
 /// Context saved before reload, restored after restart
@@ -390,6 +415,10 @@ impl Tool for SelfDevTool {
                         "cancel-build",
                         "reload",
                         "status",
+                        "record-customization",
+                        "list-customizations",
+                        "inspect-customization",
+                        "disable-customization",
                         "socket-info",
                         "socket-help"
                     ],
@@ -408,7 +437,21 @@ impl Tool for SelfDevTool {
                     "description": "Shell command for action=test. Runs under the selfdev worktree compile lock."
                 },
                 "request_id": { "type": "string" },
-                "task_id": { "type": "string" }
+                "task_id": { "type": "string" },
+                "id": { "type": "string" },
+                "goal": {
+                    "type": "string",
+                    "description": "Human-readable goal for action=record-customization."
+                },
+                "expected_behavior": {
+                    "type": "string",
+                    "description": "Expected behavior for action=record-customization."
+                },
+                "customization_intent": { "type": "string" },
+                "rationale": { "type": "string" },
+                "update_hints": { "type": "array", "items": { "type": "string" } },
+                "validation_commands": { "type": "array", "items": { "type": "string" } },
+                "touched_paths": { "type": "array", "items": { "type": "string" } }
             },
             "required": ["action"]
         })
@@ -462,6 +505,13 @@ impl Tool for SelfDevTool {
                 }
             }
             "status" => self.do_status().await,
+            "record-customization" => self.do_record_customization(params, &ctx).await,
+            "list-customizations" => self.do_list_customizations().await,
+            "inspect-customization" => self.do_inspect_customization(params.id).await,
+            "disable-customization" => {
+                self.do_disable_customization(params.id, params.reason)
+                    .await
+            }
             "socket-info" => {
                 if !SelfDevTool::session_is_selfdev(&ctx.session_id) {
                     Ok(ToolOutput::new(
@@ -481,7 +531,7 @@ impl Tool for SelfDevTool {
                 }
             }
             _ => Ok(ToolOutput::new(format!(
-                "Unknown action: {}. Use 'enter', 'build', 'test', 'cancel-build', 'reload', 'status', 'socket-info', or 'socket-help'.",
+                "Unknown action: {}. Use 'enter', 'build', 'test', 'cancel-build', 'reload', 'status', 'record-customization', 'list-customizations', 'inspect-customization', 'disable-customization', 'socket-info', or 'socket-help'.",
                 action
             ))),
         };

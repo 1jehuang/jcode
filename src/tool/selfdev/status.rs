@@ -86,6 +86,29 @@ pub fn selfdev_status_output() -> Result<ToolOutput> {
         }
     }
 
+    let customizations = build::list_active_customization_records()?;
+    if !customizations.is_empty() {
+        status.push_str("\n## Active Customizations\n\n");
+        for record in &customizations {
+            status.push_str(&format!(
+                "- `{}` — {}\n  Expected: {}\n",
+                record.id, record.goal, record.expected_behavior
+            ));
+            if !record.provenance.touched_paths.is_empty() {
+                status.push_str(&format!(
+                    "  Paths: {}\n",
+                    record.provenance.touched_paths.join(", ")
+                ));
+            }
+            if !record.validation.commands.is_empty() {
+                status.push_str(&format!(
+                    "  Validation: `{}`\n",
+                    record.validation.commands.join("`, `")
+                ));
+            }
+        }
+    }
+
     status.push_str("\n## Debug Socket\n\n");
     status.push_str(&format!(
         "**Path:** {}\n",

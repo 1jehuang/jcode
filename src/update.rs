@@ -318,6 +318,7 @@ fn install_main_source_update_blocking(latest_sha: &str) -> Result<PathBuf> {
     metadata.installed_from = Some("source".to_string());
     metadata.last_check = SystemTime::now();
     metadata.save()?;
+    record_customization_update_reports(&channel_version);
 
     Ok(path)
 }
@@ -895,8 +896,36 @@ pub fn download_and_install_blocking_with_progress(
     metadata.last_check = SystemTime::now();
     metadata.save()?;
     record_release_update_duration(started.elapsed());
+    record_customization_update_reports(&release.tag_name);
 
     Ok(versioned_path)
+}
+
+fn record_customization_update_reports(version: &str) {
+    let Ok(active) = build::list_active_customization_records() else {
+        return;
+    };
+    if active.is_empty() {
+        return;
+    }
+
+    for record in active {
+        let outcome = build::SelfDevCustomizationOutcome {
+            status: build::SelfDevCustomizationOutcomeStatus::NeedsReview,
+            timestamp: chrono::Utc::now(),
+            detail: Some(format!(
+                "Update to {} installed; active customization should be reviewed before relying on it.",
+                version
+            )),
+            validation_commands: record.validation.commands.clone(),
+        };
+        if let Err(error) = build::append_customization_outcome(&record.id, outcome) {
+            crate::logging::warn(&format!(
+                "Failed to append customization update report for {}: {}",
+                record.id, error
+            ));
+        }
+    }
 }
 
 pub fn check_and_maybe_update(auto_install: bool) -> UpdateCheckResult {
@@ -1118,6 +1147,55 @@ mod tests {
         assert_eq!(
             estimate_source_update_duration(true, true, Some(123.4)),
             Duration::from_secs(123)
+        );
+    }
+
+    #[test]
+    fn test_record_customization_update_reports_marks_active_records_for_review() {
+        let _storage_guard = storage::lock_test_env();
+        static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let _env_guard = ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp home");
+        struct EnvRestore(Option<std::ffi::OsString>);
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                if let Some(previous) = self.0.as_ref() {
+                    jcode_core::env::set_var("JCODE_HOME", previous);
+                } else {
+                    jcode_core::env::remove_var("JCODE_HOME");
+                }
+            }
+        }
+        let _restore = EnvRestore(std::env::var_os("JCODE_HOME"));
+        jcode_core::env::set_var("JCODE_HOME", temp_home.path());
+
+        let mut record = build::SelfDevCustomizationRecord::new(
+            "custom-update",
+            "Keep local self-dev behavior",
+            "Update reports make review visible",
+        );
+        record
+            .validation
+            .commands
+            .push("cargo check -p jcode".to_string());
+        build::create_customization_record(record, None).expect("create customization");
+
+        record_customization_update_reports("v9.9.9");
+
+        let loaded = build::load_customization_record("custom-update")
+            .expect("load customization")
+            .expect("record exists");
+        assert_eq!(loaded.outcomes.len(), 1);
+        assert_eq!(
+            loaded.outcomes[0].status,
+            build::SelfDevCustomizationOutcomeStatus::NeedsReview
+        );
+        assert_eq!(
+            loaded.outcomes[0].validation_commands,
+            vec!["cargo check -p jcode".to_string()]
         );
     }
 }

@@ -1,8 +1,16 @@
+mod customizations;
 mod paths;
 mod platform_support;
 mod source_state;
 mod storage_helpers;
 
+pub use customizations::{
+    append_customization_outcome, create_customization_record, customization_patch_path,
+    customization_patches_dir, customization_record_path, customization_records_dir,
+    disable_customization_record, list_active_customization_records, list_customization_records,
+    load_customization_record, sanitize_record_id, save_customization_record,
+    summarize_customization_update_state,
+};
 pub use paths::{
     SELFDEV_CARGO_PROFILE, binary_name, binary_stem, client_update_candidate,
     current_binary_build_time_string, current_binary_built_at, find_dev_binary,
@@ -37,7 +45,9 @@ use std::time::{Duration, Instant};
 pub use jcode_selfdev_types::{
     BinaryChoice, BinaryVersionReport, BuildInfo, CanaryStatus, CrashInfo, DevBinarySourceMetadata,
     MigrationContext, PendingActivation, PublishedBuild, SelfDevBuildCommand, SelfDevBuildTarget,
-    SourceState,
+    SelfDevCustomizationBuildMetadata, SelfDevCustomizationOutcome,
+    SelfDevCustomizationOutcomeStatus, SelfDevCustomizationProvenance, SelfDevCustomizationRecord,
+    SelfDevCustomizationStatus, SelfDevCustomizationValidation, SourceState,
 };
 
 /// Manifest tracking build versions and their status

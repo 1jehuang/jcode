@@ -72,6 +72,83 @@ fn source_state_fixture(short_hash: &str, fingerprint: &str) -> SourceState {
 }
 
 #[test]
+fn customization_storage_round_trip_and_active_filter() {
+    with_temp_jcode_home(|| {
+        let mut record = SelfDevCustomizationRecord::new(
+            "custom/one",
+            "Keep a local self-dev customization",
+            "Agents can inspect the customization later",
+        );
+        record
+            .validation
+            .commands
+            .push("cargo check -p jcode".to_string());
+
+        let stored =
+            create_customization_record(record, Some("diff --git a/src/main.rs b/src/main.rs\n"))
+                .expect("create customization");
+
+        assert_eq!(stored.id, "custom-one");
+        assert!(
+            stored
+                .provenance
+                .patch_path
+                .as_ref()
+                .is_some_and(|p| p.exists())
+        );
+
+        let loaded = load_customization_record("custom-one")
+            .expect("load customization")
+            .expect("record exists");
+        assert_eq!(loaded.goal, "Keep a local self-dev customization");
+
+        let active = list_active_customization_records().expect("list active");
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, "custom-one");
+
+        disable_customization_record("custom-one", Some("no longer needed".to_string()))
+            .expect("disable customization");
+        assert!(
+            list_active_customization_records()
+                .expect("list active after disable")
+                .is_empty()
+        );
+    });
+}
+
+#[test]
+fn customization_append_outcome_persists_history() {
+    with_temp_jcode_home(|| {
+        let record = SelfDevCustomizationRecord::new(
+            "custom-two",
+            "Track update review",
+            "Update flow records review outcomes",
+        );
+        create_customization_record(record, None).expect("create customization");
+
+        append_customization_outcome(
+            "custom-two",
+            SelfDevCustomizationOutcome {
+                status: SelfDevCustomizationOutcomeStatus::NeedsReview,
+                timestamp: chrono::Utc::now(),
+                detail: Some("review this after pull".to_string()),
+                validation_commands: vec!["cargo test -p jcode".to_string()],
+            },
+        )
+        .expect("append outcome");
+
+        let loaded = load_customization_record("custom-two")
+            .expect("load customization")
+            .expect("record exists");
+        assert_eq!(loaded.outcomes.len(), 1);
+        assert_eq!(
+            loaded.outcomes[0].status,
+            SelfDevCustomizationOutcomeStatus::NeedsReview
+        );
+    });
+}
+
+#[test]
 fn test_build_manifest_default() {
     let manifest = BuildManifest::default();
     assert!(manifest.stable.is_none());
