@@ -16,12 +16,13 @@
 use axum::{
     extract::State,
     http::StatusCode,
-    response::{IntoResponse, Json},
+    response::{IntoResponse, Json, sse::Sse},
     routing::{get, post},
     Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use futures::StreamExt;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::provider::LlmProvider;
@@ -165,17 +166,80 @@ async fn chat_completions(
 
     // Handle streaming vs non-streaming
     if request.stream.unwrap_or(false) {
-        // TODO: Implement proper SSE streaming (requires axum sse feature configuration)
-        // For now, return a message indicating streaming is not yet implemented
-        (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(serde_json::json!({
-                "error": {
-                    "message": "Streaming is not yet fully implemented. Use stream=false for now.",
-                    "type": "not_implemented"
-                }
-            })),
-        ).into_response()
+        // Implement SSE streaming
+        let mut stream_request = internal_request.clone();
+        stream_request.stream = Some(true);
+        
+        match state.provider.chat_completion_stream(stream_request).await {
+            Ok(stream) => {
+                tracing::info!("Starting SSE stream");
+                
+                // Convert our stream to SSE format
+                let sse_stream = stream.map(move |result| -> Result<axum::response::sse::Event, std::convert::Infallible> {
+                    match result {
+                        Ok(chunk) => {
+                            let event_data = serde_json::json!({
+                                "id": chunk.id,
+                                "object": "chat.completion.chunk",
+                                "created": chrono::Utc::now().timestamp(),
+                                "model": chunk.model.clone(),
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {
+                                        "role": "assistant",
+                                        "content": chunk.choices.first()
+                                            .and_then(|c| c.delta.content.clone())
+                                            .unwrap_or_default(),
+                                    },
+                                    "finish_reason": None::<String>,
+                                }],
+                            });
+                            
+                            Ok(axum::response::sse::Event::default()
+                                .data(event_data.to_string()))
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "Stream error");
+                            
+                            let error_data = serde_json::json!({
+                                "error": {
+                                    "message": e.to_string(),
+                                    "type": "stream_error"
+                                }
+                            });
+                            
+                            Ok(axum::response::sse::Event::default()
+                                .data(error_data.to_string()))
+                        }
+                    }
+                });
+                
+                (
+                    StatusCode::OK,
+                    [
+                        ("Cache-Control", "no-cache"),
+                        ("Connection", "keep-alive"),
+                        ("Content-Type", "text/event-stream"),
+                    ],
+                    Sse::new(sse_stream).keep_alive(
+                        axum::response::sse::KeepAlive::default()
+                    ),
+                ).into_response()
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to initialize stream");
+                
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": format!("Failed to start streaming: {}", e),
+                            "type": "stream_init_error"
+                        }
+                    })),
+                ).into_response()
+            }
+        }
     } else {
         // Return normal response
         match state.provider.chat_completion(internal_request).await {

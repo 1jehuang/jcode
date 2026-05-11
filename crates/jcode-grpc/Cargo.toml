@@ -8,6 +8,7 @@ description = "gRPC Server for LLM Service - Deepseek, vLLM, llama.cpp integrati
 # gRPC framework
 tonic = { version = "0.12", features = ["tls", "transport"] }
 prost = "0.13"
+prost-types = "0.13"
 
 # Async runtime
 tokio = { workspace = true, features = ["full"] }

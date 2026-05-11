@@ -1894,11 +1894,11 @@ message LlmChatRequest {
   string tenant_id = 2;
   string provider_type = 3;       // "deepseek", "vllm", "llamacpp", "openai-compatible"
   string model = 4;              // e.g., "deepseek-chat", "Qwen2.5-72B-Instruct"
-  repeated ChatMessage messages = 5;
+  repeated Message messages = 5;
   float temperature = 6;
   int32 max_tokens = 7;
   float top_p = 8;
-  repeated ToolDefinition tools = 9;
+  repeated Tool tools = 9;
   bool stream = 10;               // If true, use streaming RPC instead
   string stop_sequence = 11;      // Custom stop sequence
 }
@@ -1906,7 +1906,7 @@ message LlmChatRequest {
 message LlmChatResponse {
   string id = 1;                  // Unique response ID
   string model = 2;               // Model used
-  repeated ChatMessage choices = 3;  // Response messages (usually 1)
+  repeated Message choices = 3;  // Response messages (usually 1)
   Usage usage = 4;              // Token usage statistics
   string finish_reason = 5;      // "stop", "length", "tool_calls"
   double latency_ms = 6;         // Response time in milliseconds

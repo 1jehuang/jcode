@@ -28,4 +28,4 @@
 pub mod server;
 pub mod streaming;
 
-pub use server::LlmServer;
+pub use server::LlmServiceImpl;
