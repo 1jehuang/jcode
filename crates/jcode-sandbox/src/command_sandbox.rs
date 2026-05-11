@@ -11,6 +11,8 @@
 
 use crate::types::{CommandSeverity, SandboxResult};
 use regex::Regex;
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::LazyLock;
 
 /// 安全命令模式列表: (正则, 描述)

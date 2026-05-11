@@ -78,7 +78,7 @@ impl StackDetector {
         let build_tool = self.detect_build_tool(&files, &language);
 
         Ok(TechStack {
-            language,
+            language: language.clone(),
             framework,
             build_tool,
             test_framework: self.detect_test_framework(&files, &language),
@@ -186,23 +186,23 @@ impl StackDetector {
 
     fn detect_test_framework(&self, _files: &[String], lang: &Language) -> String {
         match lang {
-            Language::Rust => "cargo test",
-            Language::TypeScript | Language::JavaScript => "jest",
-            Language::Python => "pytest",
-            Language::Java | Language::Kotlin => "junit",
-            Language::Go => "go test",
-            Language::Ruby => "rspec",
+            Language::Rust => "cargo test".to_string(),
+            Language::TypeScript | Language::JavaScript => "jest".to_string(),
+            Language::Python => "pytest".to_string(),
+            Language::Java | Language::Kotlin => "junit".to_string(),
+            Language::Go => "go test".to_string(),
+            Language::Ruby => "rspec".to_string(),
             _ => "unknown".into(),
         }
     }
 
     fn detect_linter(&self, _files: &[String], lang: &Language) -> String {
         match lang {
-            Language::Rust => "clippy",
-            Language::TypeScript | Language::JavaScript => "eslint",
-            Language::Python => "ruff",
-            Language::Java => "checkstyle",
-            Language::Go => "golangci-lint",
+            Language::Rust => "clippy".to_string(),
+            Language::TypeScript | Language::JavaScript => "eslint".to_string(),
+            Language::Python => "ruff".to_string(),
+            Language::Java => "checkstyle".to_string(),
+            Language::Go => "golangci-lint".to_string(),
             _ => "unknown".into(),
         }
     }

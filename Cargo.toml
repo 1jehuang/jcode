@@ -92,6 +92,8 @@ members = [
     "crates/vendor-agentgrep",
     # RAG 工具链闭环系统
     "crates/jcode-rag",
+    # LLM Provider 集成 (Deepseek + vLLM + llama.cpp)
+    "crates/jcode-llm",
 ]
 
 # Workspace 包元数据 (供成员 crate 继承)

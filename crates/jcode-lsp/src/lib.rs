@@ -121,6 +121,21 @@ pub use tree_sitter::{
     SymbolKind,
 };
 
+/// 增强版 Tree-sitter (带 CFG 支持)
+pub mod enhanced_tree_sitter;
+
+pub use enhanced_tree_sitter::{
+    EnhancedTreeSitterParser,
+    ControlFlowGraph,
+    BasicBlock,
+    CFGEdge,
+    EdgeType,
+    DominatorTree,
+    LoopInfo,
+    LoopType,
+    ComplexityMetrics,
+};
+
 /// 便捷的 LSP 操作 trait — 统一的高层 API
 #[async_trait::async_trait]
 pub trait LspOperations: Send + Sync {

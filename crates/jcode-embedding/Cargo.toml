@@ -8,8 +8,25 @@ name = "jcode_embedding"
 path = "src/lib.rs"
 
 [dependencies]
+# 异步运行时
+tokio = { version = "1", features = ["full"] }
+# 错误处理
 anyhow = "1"
-reqwest = { version = "0.12", features = ["blocking"] }
-tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
-tract-hir = "0.21"
-tract-onnx = "0.21"
+thiserror = "1"
+# 序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 日志
+tracing = "0.1"
+# 数据结构
+parking_lot = "0.12"
+# LRU 缓存
+lru = "0.12"
+# 随机数生成 (用于 mock embedding)
+rand = "0.8"
+# 时间处理
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"

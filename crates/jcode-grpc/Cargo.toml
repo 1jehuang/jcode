@@ -1,0 +1,46 @@
+[package]
+name = "jcode-grpc"
+version = "0.1.0"
+edition = "2024"
+description = "gRPC Server for LLM Service - Deepseek, vLLM, llama.cpp integration"
+
+[dependencies]
+# gRPC framework
+tonic = { version = "0.12", features = ["tls", "transport"] }
+prost = "0.13"
+
+# Async runtime
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync", "net"] }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# UUID
+uuid = { workspace = true, features = ["v4"] }
+
+# Concurrency
+parking_lot = "0.12"
+
+# Internal dependencies
+jcode-llm = { path = "../jcode-llm" }
+jcode-rag = { path = "../jcode-rag" }
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[dev-dependencies]
+tracing-subscriber = "0.3"
