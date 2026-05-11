@@ -17,6 +17,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }
 lsp-types = { workspace = true }
+regex = "1"
 
 [dev-dependencies]
 tokio-test = "0.4"

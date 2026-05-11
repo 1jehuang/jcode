@@ -55,6 +55,10 @@ mod transport;
 mod client;
 mod server_manager;
 mod cache;
+mod document_sync;
+mod diagnostics;
+mod completion;
+mod performance;
 
 pub use transport::{build_request, build_notification, parse_response, JsonRpcError};
 pub use client::{LspClient, LspError, LspResult};
@@ -66,6 +70,16 @@ pub use server_manager::{
 pub use cache::{
     LspResultCache,
     CacheStats,
+};
+pub use document_sync::DocumentSyncManager;
+pub use diagnostics::{DiagnosticsManager, DiagnosticEvent, DiagnosticsConfig, FileDiagnosticSummary};
+pub use completion::{CompletionManager, CompletionConfig, EnhancedCompletionItem};
+pub use performance::{
+    PerformanceMonitor,
+    OperationMetrics,
+    PerformanceStats,
+    ServerHealthInfo,
+    AdaptiveConfig,
 };
 
 /// 便捷的 LSP 操作 trait — 统一的高层 API

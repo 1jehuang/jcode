@@ -4121,6 +4121,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "lsp-types",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
