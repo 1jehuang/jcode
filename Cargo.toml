@@ -90,6 +90,8 @@ members = [
     # Vendor: agentgrep (git 依赖本地化，消除供应链风险)
     # 运行 scripts/vendor_agentgrep.sh 填充此目录
     "crates/vendor-agentgrep",
+    # RAG 工具链闭环系统
+    "crates/jcode-rag",
 ]
 
 # Workspace 包元数据 (供成员 crate 继承)

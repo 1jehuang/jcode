@@ -1,0 +1,43 @@
+[package]
+name = "jcode-rag"
+version = "0.1.0"
+edition = "2024"
+description = "RAG Toolchain Closed-Loop System - 检索增强生成 + 工具链闭环"
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+# Data structures
+parking_lot = "0.12"
+regex = { workspace = true }
+
+# Diff library
+similar = "2"
+
+# Crypto (for backup hash)
+sha2 = "0.10"
+
+# Text processing
+lru = "0.12"  # LRU cache
+
+[dev-dependencies]
+tracing-subscriber = "0.3"
+tokio-test = "0.4"
