@@ -1,12 +1,11 @@
 //! IDE integration adapters
 
 use crate::error::{CarpAiError, Result};
-use crate::types::*;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 /// IDE types supported by the SDK
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum IdeType {
     VSCode,
     JetBrains,
@@ -36,7 +35,7 @@ impl IdeType {
     pub fn detect() -> Option<Self> {
         // Check for VS Code
         if std::env::var("VSCODE_PID").is_ok()
-            || std::env::var("TERM_PROGRAM").map_or(false, |t| t.contains("vscode"))
+            || std::env::var("TERM_PROGRAM").is_ok_and(|t| t.contains("vscode"))
         {
             return Some(Self::VSCode);
         }
@@ -144,7 +143,7 @@ pub trait IdeAdapter: Send + Sync {
     async fn execute_command(&self, command: &str) -> Result<String>;
 
     /// Show progress indicator
-    async fn show_progress(&self, title: &str, message: Option<&str>) -> Result<ProgressHandle>;
+    async fn show_progress(&self, title: &str, message: Option<&str>) -> Result<Box<dyn ProgressHandle>>;
 }
 
 /// Notification level
@@ -204,10 +203,10 @@ pub trait ProgressHandle: Send + Sync {
     fn report_progress(&self, percent: f64);
 
     /// Complete the progress (success)
-    fn complete(self: Box<Self>, message: Option<&str>);
+    fn complete(&self, message: Option<&str>);
 
     /// Fail the progress (error)
-    fn fail(self: Box<Self>, error: &str);
+    fn fail(&self, error: &str);
 }
 
 /// Generic/No-op IDE adapter for testing or headless mode
@@ -289,6 +288,6 @@ struct NoOpProgressHandle;
 impl ProgressHandle for NoOpProgressHandle {
     fn update_message(&self, _message: &str) {}
     fn report_progress(&self, _percent: f64) {}
-    fn complete(self: Box<Self>, _message: Option<&str>) {}
-    fn fail(self: Box<Self>, _error: &str) {}
+    fn complete(&self, _message: Option<&str>) {}
+    fn fail(&self, _error: &str) {}
 }

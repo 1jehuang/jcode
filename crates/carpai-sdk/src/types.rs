@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Request ID wrapper
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RequestId(pub String);
 
 impl RequestId {
@@ -220,7 +220,7 @@ pub struct StreamChunk {
 }
 
 /// Code action type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CodeActionType {
     Explain,
     Refactor,

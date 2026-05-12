@@ -10,6 +10,7 @@ license = "MIT OR Apache-2.0"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
+async-trait = "0.1"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -42,15 +43,14 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 # Futures
 futures = "0.3"
+async-stream = "0.3"
+pin-project-lite = "0.2"
 
 # Configuration
 config = "0.14"
 
 # Retry logic
 backoff = "0.4"
-
-# Rate limiting
-governor = "0.7"
 
 [dev-dependencies]
 tokio-test = "0.4"

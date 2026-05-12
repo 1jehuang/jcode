@@ -3,9 +3,7 @@
 use crate::error::Result;
 use crate::types::{StreamChunk, TokenUsage};
 use futures::Stream;
-use pin_project_lite::pin_project;
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use futures::StreamExt;
 
 /// Stream event emitted during streaming
 #[derive(Debug, Clone)]
@@ -95,79 +93,15 @@ impl Default for StreamHandler {
     }
 }
 
-/// A wrapper around a stream that provides additional functionality
-pin_project! {
-    pub struct EnhancedStream<S> {
-        #[pin]
-        inner: S,
-        handler: StreamHandler,
-    }
-}
-
-impl<S> EnhancedStream<S>
-where
-    S: Stream<Item = Result<StreamChunk>>,
-{
-    pub fn new(stream: S) -> Self {
-        Self {
-            inner: stream,
-            handler: StreamHandler::new(),
-        }
-    }
-
-    /// Get the current handler state
-    pub fn handler(&self) -> &StreamHandler {
-        &self.handler
-    }
-}
-
-impl<S> Stream for EnhancedStream<S>
-where
-    S: Stream<Item = Result<StreamChunk>>,
-{
-    type Item = Result<StreamEvent>;
-
-    fn poll_next(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
-        let this = self.project();
-
-        match this.inner.poll_next(cx) {
-            Poll::Ready(Some(Ok(chunk))) => {
-                let event = this.handler.process_chunk(chunk);
-                Poll::Ready(Some(Ok(event)))
-            }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
-            Poll::Ready(None) => {
-                if !this.handler.is_complete() {
-                    // Stream ended without final chunk - emit done event anyway
-                    let event = StreamEvent::Done {
-                        text: this.handler.get_text().to_string(),
-                        usage: None,
-                        finish_reason: None,
-                    };
-                    Poll::Ready(Some(Ok(event)))
-                } else {
-                    Poll::Ready(None)
-                }
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
 /// Collect all events from a stream into a single result
 pub async fn collect_stream<S>(stream: S) -> Result<(String, Option<TokenUsage>, Option<String>)>
 where
-    S: Stream<Item = Result<StreamChunk>>,
+    S: Stream<Item = Result<StreamChunk>> + Unpin,
 {
-    use futures::StreamExt;
-
     let mut handler = StreamHandler::new();
-    pin_utils::pin_mut!(stream);
 
-    while let Some(result) = stream.next().await {
+    let mut pinned = Box::pin(stream);
+    while let Some(result) = pinned.next().await {
         match result {
             Ok(chunk) => {
                 handler.process_chunk(chunk);

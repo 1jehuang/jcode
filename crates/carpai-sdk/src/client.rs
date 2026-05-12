@@ -3,21 +3,20 @@
 use crate::cache::CacheManager;
 use crate::config::CarpAiConfig;
 use crate::error::{CarpAiError, Result};
-use crate::ide::{IdeAdapter, IdeType};
+use crate::ide::IdeAdapter;
 use crate::protocol::{ProtocolAdapter, RestAdapter};
-use crate::streaming::{collect_stream, EnhancedStream, StreamHandler};
 use crate::types::*;
 use futures::Stream;
-use governor::{Quota, RateLimiter};
+use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use tracing::instrument;
 
 /// Main CarpAI client
 pub struct CarpAiClient {
     config: CarpAiConfig,
     protocol: Arc<dyn ProtocolAdapter>,
     cache: CacheManager,
-    rate_limiter: Arc<RateLimiter<governor::clock::DefaultClock>>,
+    rate_limiter: Arc<tokio::sync::Semaphore>,
     ide_adapter: Option<Arc<dyn IdeAdapter>>,
     is_online: Arc<std::sync::atomic::AtomicBool>,
     request_queue: Arc<tokio::sync::Mutex<Vec<QueuedRequest>>>,
@@ -50,9 +49,8 @@ impl ClientBuilder {
         self
     }
 
-    pub fn with_ide_adapter(mut self, adapter: Arc<dyn IdeAdapter>) -> Self {
-        // Store adapter (will be set during build)
-        drop(adapter);
+    pub fn with_ide_adapter(self, _adapter: Arc<dyn IdeAdapter>) -> Self {
+        // Note: IDE adapter should be set via CarpAiClient::with_ide_adapter after creation
         self
     }
 
@@ -78,11 +76,13 @@ impl Default for ClientBuilder {
 }
 
 /// Queued request for offline mode
+#[allow(dead_code)]
 struct QueuedRequest {
     request_type: RequestType,
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[allow(dead_code)]
 enum RequestType {
     Completion(CompletionRequest),
     ChatCompletion(ChatCompletionRequest),
@@ -112,12 +112,9 @@ impl CarpAiClient {
             config.server.timeout_secs,
         ));
 
-        // Create rate limiter
-        let quota = Quota::per_second(
-            std::num::NonZeroU32::new(config.performance.rate_limit_per_second as u32)
-                .unwrap_or(std::num::NonZeroU32::new(100).unwrap()),
-        );
-        let rate_limiter = Arc::new(RateLimiter::direct(quota));
+        // Create rate limiter (semaphore-based)
+        let permits = config.performance.rate_limit_per_second as usize;
+        let rate_limiter = Arc::new(tokio::sync::Semaphore::new(if permits > 0 { permits } else { 100 }));
 
         Ok(Self {
             config,
@@ -149,7 +146,7 @@ impl CarpAiClient {
         }
 
         // Check rate limit
-        self.rate_limiter.until_ready().await;
+        let _permit = self.rate_limiter.acquire().await;
 
         // Check cache first
         if self.config.performance.enable_cache {
@@ -204,15 +201,16 @@ impl CarpAiClient {
             });
         }
 
-        self.rate_limiter.until_ready().await;
+        let _permit = self.rate_limiter.acquire().await;
         self.protocol.chat_complete(request).await
     }
 
     /// Stream a completion response
+    #[allow(clippy::result_large_err)]
     pub fn stream_complete(
         &self,
         request: CompletionRequest,
-    ) -> Result<EnhancedStream<impl Stream<Item = Result<StreamChunk>>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send + 'static>>> {
         if !self.is_online() && self.config.offline.enabled {
             return Err(CarpAiError::Offline {
                 message: "Streaming not available offline".to_string(),
@@ -221,8 +219,7 @@ impl CarpAiClient {
             });
         }
 
-        let stream = self.protocol.stream_complete(request)?;
-        Ok(EnhancedStream::new(stream))
+        self.protocol.stream_complete(request)
     }
 
     /// Execute a code action
@@ -235,7 +232,7 @@ impl CarpAiClient {
             });
         }
 
-        self.rate_limiter.until_ready().await;
+        let _permit = self.rate_limiter.acquire().await;
         self.protocol.code_action(request).await
     }
 

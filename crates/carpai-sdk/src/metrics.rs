@@ -2,9 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
-use std::time::Instant;
 
 /// Metrics collector for tracking SDK performance
+#[allow(dead_code)]
 pub struct MetricsCollector {
     /// Total number of requests
     total_requests: AtomicU64,
@@ -31,6 +31,7 @@ pub struct MetricsCollector {
     enabled: AtomicBool,
 }
 
+#[allow(dead_code)]
 impl MetricsCollector {
     pub fn new() -> Self {
         Self {
@@ -124,6 +125,7 @@ impl Default for MetricsCollector {
 }
 
 /// Snapshot of current metrics
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricsSnapshot {
     pub total_requests: u64,

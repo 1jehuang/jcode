@@ -1,0 +1,20 @@
+﻿  process didn't exit successfully: `C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-ms
+vc\bin\rustc.exe --crate-name jcode_protocol --edition=2024 crates\jcode-protocol\src\lib.rs --erro
+r-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep
+-info,metadata -C embed-bitcode=no --check-cfg cfg(docsrs,test) --check-cfg "cfg(feature, values())
+" -C metadata=37372ae1f6bd0d81 -C extra-filename=-b43967b58a546c4b --out-dir D:\studying\Codecargo\
+opensource\jcode\target\debug\deps -C incremental=D:\studying\Codecargo\opensource\jcode\target\deb
+ug\incremental -C strip=debuginfo -L dependency=D:\studying\Codecargo\opensource\jcode\target\debug
+\deps --extern jcode_batch_types=D:\studying\Codecargo\opensource\jcode\target\debug\deps\libjcode_
+batch_types-b35321039fe7703f.rmeta --extern jcode_config_types=D:\studying\Codecargo\opensource\jco
+de\target\debug\deps\libjcode_config_types-2522cc0453a809d9.rmeta --extern jcode_message_types=D:\s
+tudying\Codecargo\opensource\jcode\target\debug\deps\libjcode_message_types-e96d4bc1c9497367.rmeta 
+--extern jcode_plan=D:\studying\Codecargo\opensource\jcode\target\debug\deps\libjcode_plan-da9a8c1e
+c45af248.rmeta --extern jcode_provider_core=D:\studying\Codecargo\opensource\jcode\target\debug\dep
+s\libjcode_provider_core-b1648638b5c0bfbe.rmeta --extern jcode_selfdev_types=D:\studying\Codecargo\
+opensource\jcode\target\debug\deps\libjcode_selfdev_types-169d436c95fadc8c.rmeta --extern jcode_ses
+sion_types=D:\studying\Codecargo\opensource\jcode\target\debug\deps\libjcode_session_types-ddf04d0f
+4eaf6ab5.rmeta --extern jcode_side_panel_types=D:\studying\Codecargo\opensource\jcode\target\debug\
+deps\libjcode_side_panel_types-dad27ac8468e00d6.rmeta --extern serde=D:\studying\Codecargo\opensour
+ce\jcode\target\debug\deps\libserde-fca4c905a4145c15.rmeta --extern serde_json=D:\studying\Codecarg
+o\opensource\jcode\target\debug\deps\libserde_json-7275eee6e609d503.rmeta` (exit code: 101)

@@ -45,7 +45,7 @@ pub use error::{CarpAiError, Result};
 pub use ide::{IdeAdapter, IdeType};
 pub use protocol::{GrpcAdapter, RestAdapter, ProtocolAdapter};
 pub use streaming::{StreamEvent, StreamHandler};
-pub types::*;
+pub use types::*;
 
 /// SDK version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

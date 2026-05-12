@@ -16,6 +16,7 @@ pub trait ProtocolAdapter: Send + Sync {
     async fn chat_complete(&self, request: ChatCompletionRequest) -> Result<ChatCompletionResponse>;
 
     /// Stream a completion response
+    #[allow(clippy::result_large_err)]
     fn stream_complete(
         &self,
         request: CompletionRequest,
@@ -36,6 +37,7 @@ pub struct RestAdapter {
     client: reqwest::Client,
     base_url: String,
     api_key: Option<String>,
+    #[allow(dead_code)]
     timeout: std::time::Duration,
 }
 
@@ -182,7 +184,7 @@ impl ProtocolAdapter for RestAdapter {
             use futures::StreamExt;
 
             let mut buffer = String::new();
-            pin_utils::pin_mut!(byte_stream);
+            let mut byte_stream = Box::pin(byte_stream);
 
             while let Some(chunk_result) = byte_stream.next().await {
                 match chunk_result {
@@ -194,8 +196,7 @@ impl ProtocolAdapter for RestAdapter {
                             let line = buffer[..newline_pos].to_string();
                             buffer = buffer[newline_pos + 1..].to_string();
 
-                            if line.starts_with("data: ") {
-                                let data = &line[6..];
+                            if let Some(data) = line.strip_prefix("data: ") {
                                 if data == "[DONE]" {
                                     return;
                                 }

@@ -1,7 +1,7 @@
 //! Cache management for CarpAI SDK
 
 use crate::error::{CarpAiError, Result};
-use crate::types::{CompletionRequest, CompletionResponse, RequestId, TokenUsage};
+use crate::types::{CompletionRequest, CompletionResponse, RequestId};
 use dashmap::DashMap;
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
@@ -49,7 +49,8 @@ impl Default for CacheConfig {
 }
 
 /// Cached response with metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct CachedResponse {
     /// The cached response data
     response: CompletionResponse,
@@ -76,6 +77,7 @@ pub struct CacheManager {
 
 impl CacheManager {
     /// Create a new cache manager with the given configuration
+    #[allow(clippy::result_large_err)]
     pub fn new(config: CacheConfig) -> Result<Self> {
         if !config.enabled {
             return Ok(Self {
@@ -111,8 +113,13 @@ impl CacheManager {
         if let Some(ref model) = request.model {
             model.hash(&mut hasher);
         }
-        request.temperature.hash(&mut hasher);
-        request.max_tokens.hash(&mut hasher);
+        // f64 doesn't implement Hash, so we convert to bits
+        if let Some(temp) = request.temperature {
+            temp.to_bits().hash(&mut hasher);
+        }
+        if let Some(tokens) = request.max_tokens {
+            tokens.hash(&mut hasher);
+        }
 
         RequestId(format!("{:x}", hasher.finish()))
     }
@@ -149,6 +156,7 @@ impl CacheManager {
     }
 
     /// Store a response in the cache
+    #[allow(clippy::result_large_err)]
     pub fn put(&self, request: &CompletionRequest, response: CompletionResponse) -> Result<()> {
         if !self.config.enabled {
             return Ok(());
@@ -170,7 +178,7 @@ impl CacheManager {
             self.evict_oldest();
         }
 
-        self.cache.insert(key, cached);
+        self.cache.insert(key.clone(), cached);
 
         // Update LRU index
         if let Ok(mut lru) = self.lru_index.lock() {

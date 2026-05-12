@@ -1,11 +1,11 @@
 //! Configuration for CarpAI SDK
 
+use super::cache::CacheConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::time::Duration;
 
 /// Main configuration for CarpAI client
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CarpAiConfig {
     /// Server connection settings
     pub server: ServerConfig,
@@ -14,7 +14,7 @@ pub struct CarpAiConfig {
     pub auth: AuthConfig,
 
     /// Cache settings
-    pub cache: cache::CacheConfig,
+    pub cache: CacheConfig,
 
     /// Performance tuning
     pub performance: PerformanceConfig,
@@ -27,20 +27,6 @@ pub struct CarpAiConfig {
 
     /// Feature flags
     pub features: FeatureFlags,
-}
-
-impl Default for CarpAiConfig {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            auth: AuthConfig::default(),
-            cache: cache::CacheConfig::default(),
-            performance: PerformanceConfig::default(),
-            offline: OfflineConfig::default(),
-            ide: IdeConfig::default(),
-            features: FeatureFlags::default(),
-        }
-    }
 }
 
 impl CarpAiConfig {
