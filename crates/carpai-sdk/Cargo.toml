@@ -1,0 +1,70 @@
+[package]
+name = "carpai-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "CarpAI Unified Client SDK - Provides a consistent API for interacting with CarpAI services across different IDEs and platforms"
+authors = ["CarpAI Team"]
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json", "stream", "rustls-tls"], default-features = false }
+
+# gRPC client
+tonic = "0.12"
+prost = "0.13"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Caching
+lru = "0.12"
+dashmap = "6"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Futures
+futures = "0.3"
+
+# Configuration
+config = "0.14"
+
+# Retry logic
+backoff = "0.4"
+
+# Rate limiting
+governor = "0.7"
+
+[dev-dependencies]
+tokio-test = "0.4"
+wiremock = "0.6"
+tempfile = "3"
+
+[[example]]
+name = "basic_usage"
+path = "examples/basic_usage.rs"
+
+[[example]]
+name = "ide_integration"
+path = "examples/ide_integration.rs"
+
+[[example]]
+name = "offline_mode"
+path = "examples/offline_mode.rs"

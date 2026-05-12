@@ -96,6 +96,8 @@ members = [
     "crates/jcode-llm",
     # gRPC Server (LlmService implementation)
     "crates/jcode-grpc",
+    # CarpAI Unified Client SDK
+    "crates/carpai-sdk",
 ]
 
 # Workspace 包元数据 (供成员 crate 继承)
