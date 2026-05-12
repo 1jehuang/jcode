@@ -27,5 +27,9 @@
 
 pub mod server;
 pub mod streaming;
+pub mod rag_integration;
+pub mod error_handling;
 
 pub use server::LlmServiceImpl;
+pub use rag_integration::{RagLlmService, RagChatContext};
+pub use error_handling::{LlmErrorCode, ErrorMetadata};

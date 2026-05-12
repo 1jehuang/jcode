@@ -94,6 +94,8 @@ members = [
     "crates/jcode-rag",
     # LLM Provider 集成 (Deepseek + vLLM + llama.cpp)
     "crates/jcode-llm",
+    # gRPC Server (LlmService implementation)
+    "crates/jcode-grpc",
 ]
 
 # Workspace 包元数据 (供成员 crate 继承)

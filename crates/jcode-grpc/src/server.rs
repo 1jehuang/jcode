@@ -20,18 +20,19 @@ pub mod proto {
 use proto::llm_service_server::{LlmService, LlmServiceServer};
 use proto::{
     LlmChatRequest, LlmChatResponse, LlmChatStreamChunk,
-    StreamDelta,
+    StreamDelta, StreamToolCall,
     EmbeddingsRequest, EmbeddingsResponse, EmbeddingData, EmbeddingUsage,
     TokenCountRequest, TokenCountResponse,
     ListModelsRequest, ListModelsResponse, ModelInfo,
     HealthCheckRequest, HealthCheckResponse,
-    Message, Usage,
+    Message, Usage, Tool, ToolCall,
 };
 
 use jcode_llm::{
     LlmProvider, 
     types::*,
 };
+use crate::error_handling::{LlmErrorCode, ErrorMetadata, errors};
 
 /// LLM Server state
 #[derive(Clone)]
@@ -97,8 +98,73 @@ impl LlmServiceImpl {
         }
     }
     
+    /// Convert proto Tool to internal ToolDefinition
+    fn convert_tool(tool: &Tool) -> Option<ToolDefinition> {
+        // For now, use empty parameters as default
+        // TODO: Implement proper Struct -> JSON conversion when needed
+        Some(ToolDefinition {
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        })
+    }
+    
+    /// Convert proto ToolCall to internal format (for response)
+    fn convert_tool_call_response(tc: &jcode_llm::types::ToolCall) -> ToolCall {
+        // Convert JSON string arguments to prost Struct
+        let arguments = if !tc.arguments.is_empty() {
+            // Parse JSON string and convert to prost Struct manually
+            let mut struct_val = prost_types::Struct::default();
+            
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&tc.arguments) {
+                if let serde_json::Value::Object(map) = json {
+                    for (key, value) in map {
+                        let prost_value = match value {
+                            serde_json::Value::String(s) => 
+                                Some(prost_types::Value { kind: Some(prost_types::value::Kind::StringValue(s)) }),
+                            serde_json::Value::Number(n) => 
+                                if n.is_i64() {
+                                    Some(prost_types::Value { kind: Some(prost_types::value::Kind::NumberValue(n.as_i64().unwrap_or(0) as f64)) })
+                                } else if n.is_f64() {
+                                    Some(prost_types::Value { kind: Some(prost_types::value::Kind::NumberValue(n.as_f64().unwrap_or(0.0))) })
+                                } else {
+                                    None
+                                },
+                            serde_json::Value::Bool(b) => 
+                                Some(prost_types::Value { kind: Some(prost_types::value::Kind::BoolValue(b)) }),
+                            _ => None,
+                        };
+                        
+                        if let Some(v) = prost_value {
+                            struct_val.fields.insert(key, v);
+                        }
+                    }
+                }
+            }
+            
+            Some(struct_val)
+        } else {
+            None
+        };
+        
+        ToolCall {
+            tool_name: tc.name.clone(),
+            arguments,
+        }
+    }
+    
     /// Convert internal response to proto response
     fn convert_response(response: ChatCompletionResponse) -> LlmChatResponse {
+        // Extract tool calls first before moving choices
+        let tool_calls: Vec<ToolCall> = response.choices.iter()
+            .flat_map(|c| c.message.tool_calls.as_ref())
+            .flatten()
+            .map(|tc| Self::convert_tool_call_response(tc))
+            .collect();
+        
         let choices: Vec<Message> = response.choices.into_iter().map(|c| {
             Message {
                 role: c.message.role.to_string(),
@@ -116,9 +182,9 @@ impl LlmServiceImpl {
                 completion_tokens: response.usage.completion_tokens as i32,
                 total_tokens: response.usage.total_tokens as i32,
             }),
-            finish_reason: "stop".to_string(),
+            finish_reason: if tool_calls.is_empty() { "stop".to_string() } else { "tool_calls".to_string() },
             latency_ms: 0.0,
-            tool_calls: vec![],
+            tool_calls,
         }
     }
     
@@ -175,7 +241,7 @@ impl LlmService for LlmServiceImpl {
             temperature: Some(req.temperature as f64),
             max_tokens: Some(req.max_tokens as u32),
             top_p: Some(req.top_p as f64),
-            tools: None, // TODO: Implement proper tool conversion from proto Tool to jcode_llm ToolDefinition
+            tools: Some(req.tools.iter().filter_map(|t| Self::convert_tool(t)).collect()),
             stream: Some(false),
             stop: if req.stop_sequence.is_empty() { None } else { Some(vec![req.stop_sequence]) },
         };
@@ -199,15 +265,29 @@ impl LlmService for LlmServiceImpl {
             Err(e) => {
                 error!(error = %e, "Chat completion failed");
                 
-                Err(match &e {
+                let error_status = match &e {
                     jcode_llm::error::LlmError::AuthenticationFailed => {
-                        Status::unauthenticated(e.to_string())
+                        errors::authentication_error(
+                            e.to_string(),
+                            provider.provider_type().to_string()
+                        )
                     }
-                    jcode_llm::error::LlmError::RateLimited { .. } => {
-                        Status::resource_exhausted(e.to_string())
+                    jcode_llm::error::LlmError::RateLimited { retry_after_seconds } => {
+                        errors::rate_limited_error(
+                            e.to_string(),
+                            *retry_after_seconds,
+                            provider.provider_type().to_string()
+                        )
                     }
-                    _ => Status::internal(e.to_string())
-                })
+                    _ => {
+                        errors::internal_error(
+                            e.to_string(),
+                            Some(format!("Provider: {}", provider.provider_type()))
+                        )
+                    }
+                };
+                
+                Err(error_status)
             }
         }
     }
@@ -240,7 +320,7 @@ impl LlmService for LlmServiceImpl {
             temperature: Some(req.temperature as f64),
             max_tokens: Some(req.max_tokens as u32),
             top_p: Some(req.top_p as f64),
-            tools: None, // TODO: Implement proper tool conversion
+            tools: Some(req.tools.iter().filter_map(|t| Self::convert_tool(t)).collect()),
             stream: Some(true),
             stop: if req.stop_sequence.is_empty() { None } else { Some(vec![req.stop_sequence]) },
         };
