@@ -131,6 +131,47 @@ pub fn active_openai_compatible_display_name() -> Option<String> {
     None
 }
 
+/// Return the active openai-compatible profile id (e.g. `opencode-go`,
+/// `ollama-cloud`, `deepseek`, ...) when the openrouter-style multi-profile
+/// provider is in use. The profile id is the canonical key under which
+/// users keep `[providers.<id>]` blocks in `config.toml` and also the key
+/// expected by the `[provider.model_allowlist]` map for non-OAuth profiles.
+pub fn active_openai_compatible_profile_id() -> Option<String> {
+    if let Ok(profile_name) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE") {
+        let trimmed = profile_name.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_ascii_lowercase());
+        }
+    }
+
+    if let Ok(namespace) = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE") {
+        let trimmed = namespace.trim();
+        if !trimmed.is_empty()
+            && openai_compatible_profiles()
+                .iter()
+                .any(|profile| profile.id == trimmed)
+        {
+            return Some(trimmed.to_ascii_lowercase());
+        }
+    }
+
+    let api_base = std::env::var("JCODE_OPENROUTER_API_BASE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| env_override("JCODE_OPENAI_COMPAT_API_BASE"));
+
+    let api_base = api_base.and_then(|value| normalize_api_base(&value))?;
+
+    for profile in openai_compatible_profiles().iter().copied() {
+        if normalize_api_base(profile.api_base).as_deref() == Some(api_base.as_str()) {
+            return Some(profile.id.to_string());
+        }
+    }
+
+    None
+}
+
 pub fn runtime_provider_display_name(provider_name: &str) -> String {
     if provider_name.eq_ignore_ascii_case("openrouter") {
         if let Ok(runtime_provider) = std::env::var("JCODE_RUNTIME_PROVIDER")
@@ -165,6 +206,15 @@ pub fn provider_model_allowlist_patterns(provider_name: &str) -> Option<Vec<Stri
         keys.push("claude".to_string());
     } else if canonical == "claude" {
         keys.push("anthropic".to_string());
+    }
+    // The openrouter provider impl backs every openai-compatible profile
+    // (opencode-go, ollama-cloud, deepseek, etc.). Also accept the active
+    // profile id as a lookup key so the user can write
+    // `[provider.model_allowlist] opencode-go = [...]`.
+    if canonical == "openrouter" {
+        if let Some(profile_id) = active_openai_compatible_profile_id() {
+            keys.push(profile_id);
+        }
     }
 
     for key in &keys {
