@@ -18,6 +18,7 @@ pub mod bus;
 pub mod cache_tracker;
 pub mod catchup;
 pub mod channel;
+pub mod ci;
 pub mod cli;
 pub mod compaction;
 pub mod config;
@@ -67,6 +68,7 @@ pub mod setup_hints;
 pub mod side_panel;
 pub mod sidecar;
 pub mod skill;
+pub mod skills;
 pub mod soft_interrupt_store;
 pub mod startup_profile;
 pub mod stdin_detect;
@@ -129,17 +131,10 @@ pub mod atomic_edit_coordinator;
 pub mod skill_system;
 pub mod plan_verifier;
 pub mod streaming_diff_preview;
-
-// ═══════════════════════════════════════════════════════════
-// 🎯 OUR NEW ENHANCED MODULES (Temporarily disabled for testing)
-// These will be re-enabled after fixing base errors
-// ═══════════════════════════════════════════════════════════
-// pub mod performance;      // Performance monitoring system
-// pub mod monitoring;       // Alerting and metrics  
-// pub mod resilience;       // Error recovery patterns
-// pub mod transports;       // Multi-protocol support
-// pub mod plugins;          // Plugin architecture
-// pub mod ai_enhanced;      // AI intelligence engine
+pub mod workflow;
+pub mod codereview;
+pub mod git;
+pub mod task_planner;
 
 use anyhow::Result;
 use std::sync::Mutex;
