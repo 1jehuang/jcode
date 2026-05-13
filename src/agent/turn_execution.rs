@@ -282,12 +282,48 @@ impl Agent {
         // Return locked tools if available (prevents cache invalidation from
         // MCP tools arriving asynchronously after the first API request)
         if let Some(ref locked) = self.locked_tools {
-            return locked.clone();
+            // Even when the base list is locked, append any tools the agent
+            // unlocked via ToolSearch since the lock was taken. Without this,
+            // tools unlocked mid-session would never reach the API.
+            let unlocked =
+                crate::tool::tool_search::unlocked_for_session(&self.session.id);
+            if unlocked.is_empty() {
+                return locked.clone();
+            }
+            let already: std::collections::HashSet<&str> =
+                locked.iter().map(|t| t.name.as_str()).collect();
+            let mut tools = locked.clone();
+            let extra = self
+                .registry
+                .definitions_for_names(&unlocked)
+                .await;
+            for def in extra {
+                if !already.contains(def.name.as_str()) {
+                    tools.push(def);
+                }
+            }
+            return tools;
         }
 
         let mut tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
         if !self.session.is_canary {
             tools.retain(|tool| tool.name != "selfdev");
+        }
+
+        // Append any tools unlocked via ToolSearch that aren't already in the
+        // base list. For non-OAuth providers this is a no-op since everything
+        // is already advertised; for OAuth this is what makes deferred tools
+        // reachable after a ToolSearch call.
+        let unlocked = crate::tool::tool_search::unlocked_for_session(&self.session.id);
+        if !unlocked.is_empty() {
+            let already: std::collections::HashSet<String> =
+                tools.iter().map(|t| t.name.clone()).collect();
+            let extra = self.registry.definitions_for_names(&unlocked).await;
+            for def in extra {
+                if !already.contains(&def.name) {
+                    tools.push(def);
+                }
+            }
         }
 
         // Lock the tool list on first call to prevent cache invalidation

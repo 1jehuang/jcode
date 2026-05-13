@@ -771,7 +771,7 @@ impl AnthropicProvider {
     /// Adds cache_control to the last tool for prompt caching
     fn format_tools(&self, tools: &[ToolDefinition], is_oauth: bool) -> Vec<ApiTool> {
         if is_oauth {
-            return vec![
+            let mut hardcoded = vec![
                 ApiTool {
                     name: "Agent".to_string(),
                     description: "Launch a new agent to handle complex, multi-step tasks."
@@ -834,9 +834,34 @@ impl AnthropicProvider {
                     name: "Write".to_string(),
                     description: "Writes a file to the local filesystem.".to_string(),
                     input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}},"required":["file_path","content"],"additionalProperties":false}),
-                    cache_control: Some(CacheControlParam::ephemeral()),
+                    cache_control: None,
                 },
             ];
+
+            // Append any deferred tools the agent has unlocked via ToolSearch.
+            // The agent passes them through `tools` (in addition to the hardcoded
+            // OAuth surface) and we forward only the ones not already advertised.
+            let hardcoded_names: std::collections::HashSet<String> =
+                hardcoded.iter().map(|t| t.name.clone()).collect();
+            for tool in tools {
+                if hardcoded_names.contains(&tool.name) {
+                    continue;
+                }
+                hardcoded.push(ApiTool {
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    input_schema: tool.input_schema.clone(),
+                    cache_control: None,
+                });
+            }
+
+            // Move ephemeral cache_control to the actual last tool so caching
+            // still works across the dynamic suffix.
+            if let Some(last) = hardcoded.last_mut() {
+                last.cache_control = Some(CacheControlParam::ephemeral());
+            }
+
+            return hardcoded;
         }
 
         let len = tools.len();

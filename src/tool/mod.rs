@@ -30,6 +30,7 @@ mod side_panel;
 mod skill;
 mod task;
 mod todo;
+pub mod tool_search;
 mod webfetch;
 mod websearch;
 mod write;
@@ -133,6 +134,12 @@ impl Registry {
                 &mut timings,
                 "askUserQuestion",
                 ask_user_question::AskUserQuestionTool::new,
+            );
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "ToolSearch",
+                tool_search::ToolSearchTool::new,
             );
             Self::insert_tool_timed(&mut m, &mut timings, "edit", edit::EditTool::new);
             Self::insert_tool_timed(
@@ -300,6 +307,29 @@ impl Registry {
     pub async fn tool_names(&self) -> Vec<String> {
         let tools = self.tools.read().await;
         tools.keys().cloned().collect()
+    }
+
+    /// Resolve a specific subset of tools by registry key. Unknown names are
+    /// silently skipped. Used by ToolSearch to surface deferred tools.
+    pub async fn definitions_for_names(
+        &self,
+        names: &HashSet<String>,
+    ) -> Vec<ToolDefinition> {
+        let tools = self.tools.read().await;
+        let mut defs: Vec<ToolDefinition> = names
+            .iter()
+            .filter_map(|name| {
+                tools.get(name).map(|tool| {
+                    let mut def = tool.to_definition();
+                    if def.name != *name {
+                        def.name = name.clone();
+                    }
+                    def
+                })
+            })
+            .collect();
+        defs.sort_by(|a, b| a.name.cmp(&b.name));
+        defs
     }
 
     /// Enable test mode for memory tools (isolated storage)
