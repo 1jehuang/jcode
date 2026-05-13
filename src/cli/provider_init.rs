@@ -16,8 +16,7 @@ use super::login::run_login_provider;
 use super::output;
 
 mod external_auth;
-use external_auth::*;
-pub(crate) use external_auth::maybe_run_external_auth_auto_import_flow;
+pub(crate) use external_auth::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
 pub enum ProviderChoice {

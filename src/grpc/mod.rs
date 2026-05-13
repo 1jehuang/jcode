@@ -691,7 +691,6 @@ impl OpenCodeService for OpenCodeServiceImpl {
                 }).collect();
                 Ok(tonic::Response::new(proto::WorkspaceSymbolsResponse {
                     symbols: proto_symbols,
-                    total_count: proto_symbols.len() as i32,
                     error: String::new(),
                 }))
             }
@@ -701,8 +700,7 @@ impl OpenCodeService for OpenCodeServiceImpl {
                 let symbols = utils::find_workspace_symbols(&query, &files);
                 Ok(tonic::Response::new(proto::WorkspaceSymbolsResponse {
                     symbols,
-                    total_count: symbols.len() as i32,
-                    error: format!("LSP unavailable, used regex fallback ({} symbols). Original error: {}", symbols.len(), e),
+                    error: format!("LSP unavailable, used regex fallback ({} results). Original error: {}", symbols.len(), e),
                 }))
             }
         }
@@ -810,7 +808,7 @@ impl OpenCodeService for OpenCodeServiceImpl {
                 }).collect();
                 Ok(tonic::Response::new(proto::FindImplementationsResponse {
                     implementations: proto_implementations,
-                    total_count: proto_implementations.len() as i32,
+                    count: proto_implementations.len() as i32,
                     error: String::new(),
                 }))
             }
@@ -820,13 +818,13 @@ impl OpenCodeService for OpenCodeServiceImpl {
                     let implementations = utils::find_implementations(&file_path, &content, &symbol_name);
                     Ok(tonic::Response::new(proto::FindImplementationsResponse {
                         implementations,
-                        total_count: implementations.len() as i32,
+                        count: implementations.len() as i32,
                         error: format!("LSP unavailable, used regex fallback ({} results). Original error: {}", implementations.len(), e),
                     }))
                 } else {
                     Ok(tonic::Response::new(proto::FindImplementationsResponse {
                         implementations: vec![],
-                        total_count: 0,
+                        count: 0,
                         error: e.to_string(),
                     }))
                 }

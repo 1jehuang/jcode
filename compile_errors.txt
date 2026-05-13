@@ -1,2 +1,0 @@
-﻿error: could not compile `jcode` (lib) due to 244 previous errors; 48 warnings 
-emitted
