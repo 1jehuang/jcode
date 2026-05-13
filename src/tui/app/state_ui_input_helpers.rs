@@ -327,7 +327,11 @@ impl App {
             }
         } else {
             push_unique(&mut seen, &mut models, self.provider.model());
-            for model in self.provider.available_models_display() {
+            let display = crate::provider_catalog::filter_models_by_allowlist(
+                self.provider.name(),
+                self.provider.available_models_display(),
+            );
+            for model in display {
                 push_unique(&mut seen, &mut models, model);
             }
         }

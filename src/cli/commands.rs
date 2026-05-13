@@ -1215,9 +1215,14 @@ pub async fn run_model_command(
     }
 
     let routes = provider.model_routes();
+    let routes = crate::provider_catalog::filter_model_routes_by_allowlist(provider.name(), routes);
     let filtered_routes = filter_cli_model_routes_for_choice(choice, &routes);
     let models = if filtered_routes.len() == routes.len() {
-        collect_cli_model_names(&routes, provider.available_models_display())
+        let display = crate::provider_catalog::filter_models_by_allowlist(
+            provider.name(),
+            provider.available_models_display(),
+        );
+        collect_cli_model_names(&routes, display)
     } else {
         collect_cli_model_names(&filtered_routes, Vec::new())
     };

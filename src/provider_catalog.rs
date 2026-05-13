@@ -145,6 +145,96 @@ pub fn runtime_provider_display_name(provider_name: &str) -> String {
     }
 }
 
+/// Look up the per-provider model allowlist from `[provider.model_allowlist]`.
+///
+/// Returns `Some(patterns)` only when the provider has at least one configured
+/// pattern. An empty list (or missing entry) means "no restriction".
+///
+/// The lookup is keyed by the raw built-in provider key returned from
+/// `Provider::name()` (e.g. `anthropic`, `openai`, `gemini`, `antigravity`)
+/// but is also accepted under common aliases such as `claude`.
+pub fn provider_model_allowlist_patterns(provider_name: &str) -> Option<Vec<String>> {
+    let cfg = crate::config::config();
+    if cfg.provider.model_allowlist.is_empty() {
+        return None;
+    }
+
+    let canonical = canonical_allowlist_key(provider_name);
+    let mut keys: Vec<String> = vec![canonical.clone()];
+    if canonical == "anthropic" {
+        keys.push("claude".to_string());
+    } else if canonical == "claude" {
+        keys.push("anthropic".to_string());
+    }
+
+    for key in &keys {
+        if let Some(patterns) = cfg.provider.model_allowlist.get(key) {
+            let cleaned: Vec<String> = patterns
+                .iter()
+                .map(|pattern| pattern.trim().to_string())
+                .filter(|pattern| !pattern.is_empty())
+                .collect();
+            if !cleaned.is_empty() {
+                return Some(cleaned);
+            }
+        }
+    }
+    None
+}
+
+fn canonical_allowlist_key(provider_name: &str) -> String {
+    let trimmed = provider_name.trim().to_ascii_lowercase();
+    match trimmed.as_str() {
+        "claude" => "anthropic".to_string(),
+        _ => trimmed,
+    }
+}
+
+/// Filter a list of model names against the configured allowlist for `provider_name`.
+///
+/// Matching is case-insensitive and accepts either an exact match or a
+/// substring match against any configured pattern. When no allowlist is
+/// configured for the provider, the input is returned unchanged.
+pub fn filter_models_by_allowlist(provider_name: &str, models: Vec<String>) -> Vec<String> {
+    let Some(patterns) = provider_model_allowlist_patterns(provider_name) else {
+        return models;
+    };
+    let lower_patterns: Vec<String> = patterns
+        .iter()
+        .map(|p| p.to_ascii_lowercase())
+        .collect();
+    models
+        .into_iter()
+        .filter(|model| model_matches_any(&model.to_ascii_lowercase(), &lower_patterns))
+        .collect()
+}
+
+/// Filter `ModelRoute`s against the configured allowlist for `provider_name`.
+///
+/// Returns the original list when no allowlist is configured.
+pub fn filter_model_routes_by_allowlist(
+    provider_name: &str,
+    routes: Vec<crate::provider::ModelRoute>,
+) -> Vec<crate::provider::ModelRoute> {
+    let Some(patterns) = provider_model_allowlist_patterns(provider_name) else {
+        return routes;
+    };
+    let lower_patterns: Vec<String> = patterns
+        .iter()
+        .map(|p| p.to_ascii_lowercase())
+        .collect();
+    routes
+        .into_iter()
+        .filter(|route| model_matches_any(&route.model.to_ascii_lowercase(), &lower_patterns))
+        .collect()
+}
+
+fn model_matches_any(model_lower: &str, lower_patterns: &[String]) -> bool {
+    lower_patterns
+        .iter()
+        .any(|pattern| model_lower == pattern || model_lower.contains(pattern))
+}
+
 pub fn openai_compatible_profile_by_id(id: &str) -> Option<OpenAiCompatibleProfile> {
     let normalized = id.trim().to_ascii_lowercase();
     openai_compatible_profiles()

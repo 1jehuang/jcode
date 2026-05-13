@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Compaction mode
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -611,6 +612,14 @@ pub struct ProviderConfig {
     /// Copilot premium request mode: "normal", "one", or "zero"
     /// "zero" means all requests are free (no premium requests consumed)
     pub copilot_premium: Option<String>,
+    /// Per-provider model allowlist. Maps the built-in provider key
+    /// (e.g. "anthropic", "openai", "gemini", "antigravity") to a list of
+    /// allowed model identifiers. When a provider has a non-empty entry,
+    /// the model picker and `/model` command only expose the listed models
+    /// (substring match, case-insensitive). Providers absent from this map
+    /// or with an empty list are unrestricted.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_allowlist: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for ProviderConfig {
@@ -626,6 +635,7 @@ impl Default for ProviderConfig {
             cross_provider_failover: CrossProviderFailoverMode::Countdown,
             same_provider_account_failover: true,
             copilot_premium: None,
+            model_allowlist: BTreeMap::new(),
         }
     }
 }
@@ -771,5 +781,46 @@ impl Default for GatewayConfig {
             port: 7643,
             bind_addr: "0.0.0.0".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_model_allowlist_round_trips_through_toml() {
+        let mut allow = BTreeMap::new();
+        allow.insert(
+            "anthropic".to_string(),
+            vec!["claude-opus-4-7".to_string(), "claude-sonnet-4-6".to_string()],
+        );
+        allow.insert("openai".to_string(), vec!["gpt-5.5".to_string()]);
+
+        let cfg = ProviderConfig {
+            model_allowlist: allow,
+            ..ProviderConfig::default()
+        };
+
+        let serialized = toml::to_string(&cfg).expect("serialize ProviderConfig");
+        assert!(
+            serialized.contains("model_allowlist"),
+            "expected model_allowlist in serialized output, got: {serialized}"
+        );
+
+        let parsed: ProviderConfig =
+            toml::from_str(&serialized).expect("deserialize ProviderConfig");
+        assert_eq!(parsed.model_allowlist.get("anthropic").unwrap().len(), 2);
+        assert_eq!(parsed.model_allowlist.get("openai").unwrap()[0], "gpt-5.5");
+    }
+
+    #[test]
+    fn provider_model_allowlist_default_skipped_when_empty() {
+        let cfg = ProviderConfig::default();
+        let serialized = toml::to_string(&cfg).expect("serialize ProviderConfig");
+        assert!(
+            !serialized.contains("model_allowlist"),
+            "empty allowlist should be omitted from TOML output, got: {serialized}"
+        );
     }
 }

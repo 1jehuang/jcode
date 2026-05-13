@@ -132,7 +132,11 @@ impl App {
         let auth = crate::auth::AuthStatus::check_fast();
         let mut routes = Vec::new();
 
-        for model in self.provider.available_models_display() {
+        let display = crate::provider_catalog::filter_models_by_allowlist(
+            self.provider.name(),
+            self.provider.available_models_display(),
+        );
+        for model in display {
             if !model.contains('/') && crate::provider::provider_for_model(&model) == Some("openai")
             {
                 if auth.openai_has_oauth {
@@ -384,6 +388,10 @@ impl App {
         let build = move || {
             let routes_started = std::time::Instant::now();
             let routes = provider.model_routes();
+            let routes = crate::provider_catalog::filter_model_routes_by_allowlist(
+                provider.name(),
+                routes,
+            );
             let routes_ms = routes_started.elapsed().as_millis();
             let _ = tx.send(Ok(ModelPickerRoutesResult { routes, routes_ms }));
         };

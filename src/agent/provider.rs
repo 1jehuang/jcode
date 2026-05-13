@@ -22,15 +22,18 @@ impl Agent {
     }
 
     pub fn available_models_for_switching(&self) -> Vec<String> {
-        self.provider.available_models_for_switching()
+        let models = self.provider.available_models_for_switching();
+        crate::provider_catalog::filter_models_by_allowlist(self.provider.name(), models)
     }
 
     pub fn available_models_display(&self) -> Vec<String> {
-        self.provider.available_models_display()
+        let models = self.provider.available_models_display();
+        crate::provider_catalog::filter_models_by_allowlist(self.provider.name(), models)
     }
 
     pub fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
-        self.provider.model_routes()
+        let routes = self.provider.model_routes();
+        crate::provider_catalog::filter_model_routes_by_allowlist(self.provider.name(), routes)
     }
 
     pub fn registry(&self) -> Registry {
