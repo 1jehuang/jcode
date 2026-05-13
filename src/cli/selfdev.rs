@@ -66,7 +66,7 @@ pub async fn run_self_dev(should_build: bool, resume_session: Option<String>) ->
         let build = build::selfdev_build_command(&repo_dir);
         output::stderr_info(format!("Building with {}...", build.display));
 
-        build::run_selfdev_build(&repo_dir)?;
+        build::run_selfdev_build_sync(&repo_dir).map_err(|e| anyhow::anyhow!(e))?;
         build::ensure_source_state_matches(&repo_dir, &source)?;
 
         build::publish_local_current_build_for_source(&repo_dir, &source)?;

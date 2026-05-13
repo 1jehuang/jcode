@@ -308,8 +308,28 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             manual,
             no_verify,
             max_retries,
+            release,
+            clean,
+            target,
+            all_projects,
+            test,
+            parallel,
+            jobs,
         }) => {
-            commands::run_build_command(&message, manual, no_verify, max_retries).await?;
+            commands::run_build_command(
+                message.as_deref().unwrap_or("Build project"),
+                manual,
+                no_verify,
+                max_retries,
+                release,
+                clean,
+                target.as_deref(),
+                all_projects,
+                test,
+                parallel,
+                jobs,
+            )
+            .await?;
         }
         Some(Command::CodeValue {
             input,
@@ -327,6 +347,12 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             RestartCommand::Status => commands::run_restart_status_command()?,
             RestartCommand::Clear => commands::run_restart_clear_command()?,
         },
+        Some(Command::Mcp(cmd)) => commands::run_mcp_command(cmd).await?,
+        Some(Command::Doctor { json }) => commands::run_doctor_command(json).await?,
+        Some(Command::Init {
+            project_type,
+            scaffold,
+        }) => commands::run_init_command(project_type.as_deref(), scaffold).await?,
         None => run_default_command(args).await?,
     }
 
@@ -747,7 +773,7 @@ pub(crate) async fn spawn_server(
     output::stderr_info("Starting server...");
     let client_requested_selfdev = selfdev::client_selfdev_requested();
     let exe = build::shared_server_update_candidate(client_requested_selfdev)
-        .map(|(path, _)| path)
+        .map(|path| std::path::PathBuf::from(path))
         .or_else(|| std::env::current_exe().ok())
         .ok_or_else(|| anyhow::anyhow!("Could not determine executable path for server spawn"))?;
     let mut cmd = ProcessCommand::new(&exe);

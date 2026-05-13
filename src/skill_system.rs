@@ -221,7 +221,7 @@ impl Skill for LoopSkill {
         true
     }
 
-    async fn estimate_cost(&self, _ctx: &SkillContext) -> SkillCostEstimate {
+    async fn estimate_cost(&self, ctx: &SkillContext) -> SkillCostEstimate {
         SkillCostEstimate {
             estimated_time_ms: ctx.constraints.max_iterations as u64 * 1000,
             token_usage_estimate: ctx.constraints.max_iterations * 500,

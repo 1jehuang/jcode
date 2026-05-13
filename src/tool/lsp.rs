@@ -237,11 +237,11 @@ impl Tool for LspTool {
 
             "incomingCalls" | "outgoingCalls" => {
                 // These require a CallHierarchyItem from prepareCallHierarchy first
-                Ok(ToolOutput::new(
+                Ok(ToolOutput::new(format!(
                     "LSP operation '{}' requires a CallHierarchyItem from 'prepareCallHierarchy' first.\n\
                      Please call 'prepareCallHierarchy' to get the root item, then use the item for this operation.",
                     params.operation
-                ))
+                )))
             }
 
             other => {
@@ -285,9 +285,11 @@ fn format_hover(hover: &lsp_types::Hover) -> String {
     use lsp_types::HoverContents::*;
     
     match &hover.contents {
-        Scalar(markup) => {
-            markup.value.clone()
-        }
+        Scalar(markup) => match markup {
+            lsp_types::MarkedString::String(s) => s.clone(),
+            lsp_types::MarkedString::LanguageString(ls) => ls.value.clone(),
+        },
+        Markup(content) => content.value.clone(),
         Array(contents) => {
             contents.iter()
                 .map(|c| {
@@ -318,9 +320,13 @@ fn format_hover(hover: &lsp_types::Hover) -> String {
 fn format_document_symbols(symbols: &[lsp_types::DocumentSymbol]) -> String {
     let mut output = String::new();
     output.push_str("Document Symbols:\n");
-    
+    format_symbols_recursive(symbols, &mut output, 0);
+    output
+}
+
+fn format_symbols_recursive(symbols: &[lsp_types::DocumentSymbol], output: &mut String, depth: usize) {
     for sym in symbols {
-        let indent = "  ".repeat(sym.depth() as usize);
+        let indent = "  ".repeat(depth);
         let kind = format_symbol_kind(&sym.kind);
         output.push_str(&format!(
             "{}{} [{}] {}:{}-{}:{}\n",
@@ -332,16 +338,13 @@ fn format_document_symbols(symbols: &[lsp_types::DocumentSymbol]) -> String {
             sym.range.end.line + 1,
             sym.range.end.character + 1,
         ));
-        
-        // Recursively format children
+
         if let Some(children) = &sym.children {
             if !children.is_empty() {
-                output.push_str(&format_document_symbols(children));
+                format_symbols_recursive(children, output, depth + 1);
             }
         }
     }
-    
-    output
 }
 
 /// Format Workspace Symbols

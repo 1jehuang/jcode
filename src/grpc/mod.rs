@@ -575,9 +575,10 @@ impl OpenCodeService for OpenCodeServiceImpl {
                         role: String::new(),
                     }
                 }).collect();
+                let refs_len = refs.len();
                 Ok(tonic::Response::new(proto::FindReferencesResponse {
                     references: refs,
-                    error: format!("LSP unavailable, used regex fallback ({} results). Original error: {}", refs.len(), e),
+                    error: format!("LSP unavailable, used regex fallback ({} results). Original error: {}", refs_len, e),
                 }))
             }
         }
@@ -655,9 +656,10 @@ impl OpenCodeService for OpenCodeServiceImpl {
                 tracing::warn!("LSP document_symbols failed, using regex fallback: {}", e);
                 if let Ok(content) = std::fs::read_to_string(&file_path) {
                     let symbols = utils::parse_all_symbols(&content, &file_path);
+                    let symbols_len = symbols.len();
                     Ok(tonic::Response::new(proto::DocumentSymbolsResponse {
                         symbols,
-                        error: format!("LSP unavailable, used regex fallback ({} symbols). Original error: {}", symbols.len(), e),
+                        error: format!("LSP unavailable, used regex fallback ({} symbols). Original error: {}", symbols_len, e),
                     }))
                 } else {
                     Ok(tonic::Response::new(proto::DocumentSymbolsResponse {
@@ -686,7 +688,7 @@ impl OpenCodeService for OpenCodeServiceImpl {
                             end_line: sym.location.range.end.line as i32 + 1,
                             end_character: sym.location.range.end.character as i32 + 1,
                         }),
-                        container_name: sym.container_name.unwrap_or_default(),
+                        container_name: sym.container_name.clone().unwrap_or_default(),
                     }
                 }).collect();
                 Ok(tonic::Response::new(proto::WorkspaceSymbolsResponse {
@@ -698,9 +700,10 @@ impl OpenCodeService for OpenCodeServiceImpl {
                 tracing::warn!("LSP workspace_symbols failed, using regex fallback: {}", e);
                 let files = collect_source_files(".");
                 let symbols = utils::find_workspace_symbols(&query, &files);
+                let symbols_len = symbols.len();
                 Ok(tonic::Response::new(proto::WorkspaceSymbolsResponse {
                     symbols,
-                    error: format!("LSP unavailable, used regex fallback ({} results). Original error: {}", symbols.len(), e),
+                    error: format!("LSP unavailable, used regex fallback ({} results). Original error: {}", symbols_len, e),
                 }))
             }
         }
@@ -709,39 +712,21 @@ impl OpenCodeService for OpenCodeServiceImpl {
     async fn go_to_type_definition(&self, req: tonic::Request<proto::GoToTypeDefinitionRequest>) -> Result<tonic::Response<proto::GoToTypeDefinitionResponse>, tonic::Status> {
         let r = req.into_inner();
         let file_path = r.file_path.clone();
-        let line = r.line.saturating_sub(1) as u32;
-        let character = r.character.saturating_sub(1) as u32;
 
-        match self.lsp_manager.goto_type_definition(&file_path, line, character).await {
-            Ok(locations) => {
-                let proto_locations: Vec<proto::Location> = locations.iter().map(|loc| {
-                    proto::Location {
-                        file_path: loc.uri.to_string(),
-                        line: loc.range.start.line as i32 + 1,
-                        character: loc.range.start.character as i32 + 1,
-                        end_line: loc.range.end.line as i32 + 1,
-                        end_character: loc.range.end.character as i32 + 1,
-                    }
-                }).collect();
+        match std::fs::read_to_string(&file_path) {
+            Ok(content) => {
+                let locations = utils::go_to_type_definition(&file_path, &content, r.line, r.character);
+                let locations_len = locations.len();
                 Ok(tonic::Response::new(proto::GoToTypeDefinitionResponse {
-                    locations: proto_locations,
-                    error: String::new(),
+                    locations,
+                    error: format!("Used regex fallback ({} results)", locations_len),
                 }))
             }
             Err(e) => {
-                tracing::warn!("LSP go_to_type_definition failed, using regex fallback: {}", e);
-                if let Ok(content) = std::fs::read_to_string(&file_path) {
-                    let locations = utils::go_to_type_definition(&file_path, &content, r.line, r.character);
-                    Ok(tonic::Response::new(proto::GoToTypeDefinitionResponse {
-                        locations,
-                        error: format!("LSP unavailable, used regex fallback ({} results). Original error: {}", locations.len(), e),
-                    }))
-                } else {
-                    Ok(tonic::Response::new(proto::GoToTypeDefinitionResponse {
-                        locations: vec![],
-                        error: e.to_string(),
-                    }))
-                }
+                Ok(tonic::Response::new(proto::GoToTypeDefinitionResponse {
+                    locations: vec![],
+                    error: e.to_string(),
+                }))
             }
         }
     }
@@ -772,9 +757,10 @@ impl OpenCodeService for OpenCodeServiceImpl {
                 tracing::warn!("LSP go_to_implementation failed, using regex fallback: {}", e);
                 if let Ok(content) = std::fs::read_to_string(&file_path) {
                     let locations = utils::go_to_implementation(&file_path, &content, r.line, r.character);
+                    let locations_len = locations.len();
                     Ok(tonic::Response::new(proto::GoToImplementationResponse {
                         locations,
-                        error: format!("LSP unavailable, used regex fallback ({} results). Original error: {}", locations.len(), e),
+                        error: format!("LSP unavailable, used regex fallback ({} results). Original error: {}", locations_len, e),
                     }))
                 } else {
                     Ok(tonic::Response::new(proto::GoToImplementationResponse {
@@ -791,43 +777,22 @@ impl OpenCodeService for OpenCodeServiceImpl {
         let file_path = r.file_path.clone();
         let symbol_name = r.symbol_name;
 
-        match self.lsp_manager.find_implementations(&file_path, &symbol_name).await {
-            Ok(implementations) => {
-                let proto_implementations: Vec<proto::ImplementationInfo> = implementations.iter().map(|impl_| {
-                    proto::ImplementationInfo {
-                        location: Some(proto::Location {
-                            file_path: impl_.uri.to_string(),
-                            line: impl_.range.start.line as i32 + 1,
-                            character: impl_.range.start.character as i32 + 1,
-                            end_line: impl_.range.end.line as i32 + 1,
-                            end_character: impl_.range.end.character as i32 + 1,
-                        }),
-                        kind: "impl".to_string(),
-                        signature: impl_.name.clone(),
-                    }
-                }).collect();
+        match std::fs::read_to_string(&file_path) {
+            Ok(content) => {
+                let implementations = utils::find_implementations(&file_path, &content, &symbol_name);
+                let count = implementations.len() as i32;
                 Ok(tonic::Response::new(proto::FindImplementationsResponse {
-                    implementations: proto_implementations,
-                    count: proto_implementations.len() as i32,
-                    error: String::new(),
+                    implementations,
+                    count,
+                    error: format!("Used regex fallback ({} results)", count),
                 }))
             }
             Err(e) => {
-                tracing::warn!("LSP find_implementations failed, using regex fallback: {}", e);
-                if let Ok(content) = std::fs::read_to_string(&file_path) {
-                    let implementations = utils::find_implementations(&file_path, &content, &symbol_name);
-                    Ok(tonic::Response::new(proto::FindImplementationsResponse {
-                        implementations,
-                        count: implementations.len() as i32,
-                        error: format!("LSP unavailable, used regex fallback ({} results). Original error: {}", implementations.len(), e),
-                    }))
-                } else {
-                    Ok(tonic::Response::new(proto::FindImplementationsResponse {
-                        implementations: vec![],
-                        count: 0,
-                        error: e.to_string(),
-                    }))
-                }
+                Ok(tonic::Response::new(proto::FindImplementationsResponse {
+                    implementations: vec![],
+                    count: 0,
+                    error: e.to_string(),
+                }))
             }
         }
     }
@@ -838,6 +803,39 @@ impl OpenCodeService for OpenCodeServiceImpl {
     async fn analyze_anti_patterns(&self, _: tonic::Request<proto::AnalyzeAntiPatternsRequest>) -> Result<tonic::Response<proto::AnalyzeAntiPatternsResponse>, tonic::Status> { Ok(tonic::Response::new(proto::AnalyzeAntiPatternsResponse::default())) }
     async fn cross_file_refactor(&self, _: tonic::Request<proto::CrossFileRefactorRequest>) -> Result<tonic::Response<proto::CrossFileRefactorResponse>, tonic::Status> { Ok(tonic::Response::new(proto::CrossFileRefactorResponse::default())) }
     async fn detect_code_smells(&self, _: tonic::Request<proto::DetectCodeSmellsRequest>) -> Result<tonic::Response<proto::DetectCodeSmellsResponse>, tonic::Status> { Ok(tonic::Response::new(proto::DetectCodeSmellsResponse::default())) }
+    async fn analyze_project(&self, _: tonic::Request<proto::AnalyzeProjectRequest>) -> Result<tonic::Response<proto::AnalyzeProjectResponse>, tonic::Status> { Err(tonic::Status::unimplemented("analyze_project")) }
+    async fn quick_fix(&self, _: tonic::Request<proto::QuickFixRequest>) -> Result<tonic::Response<proto::QuickFixResponse>, tonic::Status> { Err(tonic::Status::unimplemented("quick_fix")) }
+    async fn generate_documentation(&self, _: tonic::Request<proto::GenerateDocumentationRequest>) -> Result<tonic::Response<proto::GenerateDocumentationResponse>, tonic::Status> { Err(tonic::Status::unimplemented("generate_documentation")) }
+    async fn generate_image(&self, _: tonic::Request<proto::GenerateImageRequest>) -> Result<tonic::Response<proto::GenerateImageResponse>, tonic::Status> { Err(tonic::Status::unimplemented("generate_image")) }
+    async fn analyze_image(&self, _: tonic::Request<proto::AnalyzeImageRequest>) -> Result<tonic::Response<proto::AnalyzeImageResponse>, tonic::Status> { Err(tonic::Status::unimplemented("analyze_image")) }
+    async fn analyze_chart(&self, _: tonic::Request<proto::AnalyzeChartRequest>) -> Result<tonic::Response<proto::AnalyzeChartResponse>, tonic::Status> { Err(tonic::Status::unimplemented("analyze_chart")) }
+    async fn analyze_document(&self, _: tonic::Request<proto::AnalyzeDocumentRequest>) -> Result<tonic::Response<proto::AnalyzeDocumentResponse>, tonic::Status> { Err(tonic::Status::unimplemented("analyze_document")) }
+    async fn cache_analysis(&self, _: tonic::Request<proto::CacheAnalysisRequest>) -> Result<tonic::Response<proto::CacheAnalysisResponse>, tonic::Status> { Err(tonic::Status::unimplemented("cache_analysis")) }
+    async fn invalidate_cache(&self, _: tonic::Request<proto::InvalidateCacheRequest>) -> Result<tonic::Response<proto::InvalidateCacheResponse>, tonic::Status> { Err(tonic::Status::unimplemented("invalidate_cache")) }
+    async fn format_code(&self, _: tonic::Request<proto::FormatCodeRequest>) -> Result<tonic::Response<proto::FormatCodeResponse>, tonic::Status> { Err(tonic::Status::unimplemented("format_code")) }
+    async fn code_lens(&self, _: tonic::Request<proto::CodeLensRequest>) -> Result<tonic::Response<proto::CodeLensResponse>, tonic::Status> { Err(tonic::Status::unimplemented("code_lens")) }
+    async fn semantic_tokens(&self, _: tonic::Request<proto::SemanticTokensRequest>) -> Result<tonic::Response<proto::SemanticTokensResponse>, tonic::Status> { Err(tonic::Status::unimplemented("semantic_tokens")) }
+    async fn analyze_code_semantics(&self, _: tonic::Request<proto::AnalyzeCodeSemanticsRequest>) -> Result<tonic::Response<proto::AnalyzeCodeSemanticsResponse>, tonic::Status> { Err(tonic::Status::unimplemented("analyze_code_semantics")) }
+    async fn optimize_code(&self, _: tonic::Request<proto::OptimizeCodeRequest>) -> Result<tonic::Response<proto::OptimizeCodeResponse>, tonic::Status> { Err(tonic::Status::unimplemented("optimize_code")) }
+    async fn review_code_quality(&self, _: tonic::Request<proto::ReviewCodeQualityRequest>) -> Result<tonic::Response<proto::ReviewCodeQualityResponse>, tonic::Status> { Err(tonic::Status::unimplemented("review_code_quality")) }
+    async fn collaborative_edit(&self, _: tonic::Request<proto::CollaborativeEditRequest>) -> Result<tonic::Response<proto::CollaborativeEditResponse>, tonic::Status> { Err(tonic::Status::unimplemented("collaborative_edit")) }
+    async fn batch_refactor(&self, _: tonic::Request<proto::BatchRefactorRequest>) -> Result<tonic::Response<proto::BatchRefactorResponse>, tonic::Status> { Err(tonic::Status::unimplemented("batch_refactor")) }
+    async fn incremental_analyze(&self, _: tonic::Request<proto::IncrementalAnalyzeRequest>) -> Result<tonic::Response<proto::IncrementalAnalyzeResponse>, tonic::Status> { Err(tonic::Status::unimplemented("incremental_analyze")) }
+    async fn warmup_cache(&self, _: tonic::Request<proto::WarmupCacheRequest>) -> Result<tonic::Response<proto::WarmupCacheResponse>, tonic::Status> { Err(tonic::Status::unimplemented("warmup_cache")) }
+    async fn get_performance_stats(&self, _: tonic::Request<proto::GetPerformanceStatsRequest>) -> Result<tonic::Response<proto::GetPerformanceStatsResponse>, tonic::Status> { Err(tonic::Status::unimplemented("get_performance_stats")) }
+    async fn subscribe_to_changes(&self, _: tonic::Request<proto::SubscribeToChangesRequest>) -> Result<tonic::Response<Self::SubscribeToChangesStream>, tonic::Status> {
+        let (_tx, rx) = tokio::sync::mpsc::channel(4);
+        Ok(tonic::Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
+    async fn get_active_users(&self, _: tonic::Request<proto::GetActiveUsersRequest>) -> Result<tonic::Response<proto::GetActiveUsersResponse>, tonic::Status> { Err(tonic::Status::unimplemented("get_active_users")) }
+    async fn lock_file(&self, _: tonic::Request<proto::LockFileRequest>) -> Result<tonic::Response<proto::LockFileResponse>, tonic::Status> { Err(tonic::Status::unimplemented("lock_file")) }
+    async fn parse_ast(&self, _: tonic::Request<proto::ParseAstRequest>) -> Result<tonic::Response<proto::ParseAstResponse>, tonic::Status> { Err(tonic::Status::unimplemented("parse_ast")) }
+    async fn infer_types(&self, _: tonic::Request<proto::InferTypesRequest>) -> Result<tonic::Response<proto::InferTypesResponse>, tonic::Status> { Err(tonic::Status::unimplemented("infer_types")) }
+    async fn resolve_symbols(&self, _: tonic::Request<proto::ResolveSymbolsRequest>) -> Result<tonic::Response<proto::ResolveSymbolsResponse>, tonic::Status> { Err(tonic::Status::unimplemented("resolve_symbols")) }
+    async fn validate_code(&self, _: tonic::Request<proto::ValidateCodeRequest>) -> Result<tonic::Response<proto::ValidateCodeResponse>, tonic::Status> { Err(tonic::Status::unimplemented("validate_code")) }
+    async fn enforce_style(&self, _: tonic::Request<proto::EnforceStyleRequest>) -> Result<tonic::Response<proto::EnforceStyleResponse>, tonic::Status> { Err(tonic::Status::unimplemented("enforce_style")) }
+    async fn detect_errors(&self, _: tonic::Request<proto::DetectErrorsRequest>) -> Result<tonic::Response<proto::DetectErrorsResponse>, tonic::Status> { Err(tonic::Status::unimplemented("detect_errors")) }
+    async fn find_derived_classes(&self, _: tonic::Request<proto::FindDerivedClassesRequest>) -> Result<tonic::Response<proto::FindDerivedClassesResponse>, tonic::Status> { Err(tonic::Status::unimplemented("find_derived_classes")) }
 }
 
 // ══════════════════════════════════════════════════════════════════

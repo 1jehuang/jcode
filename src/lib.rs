@@ -105,6 +105,7 @@ pub mod cache_break_detector;
 pub mod allowlist;
 pub mod workspace_manager;
 pub mod build_module;
+pub mod slash_command;
 pub mod sandbox;
 pub mod browser_bridge;
 pub mod ide_integration;

@@ -257,10 +257,9 @@ impl EnhancedMcpHandle {
                     return Ok(response);
                 }
                 Err(e) => {
-                    let mcp_err = if let Some(mcp_err) = e.downcast_ref::<McpError>() {
-                        mcp_err.clone()
-                    } else {
-                        &McpError::Connection(e.to_string())
+                    let mcp_err = match e.downcast_ref::<McpError>() {
+                        Some(mcp_err_ref) => McpError::Connection(mcp_err_ref.to_string()),
+                        None => McpError::Connection(e.to_string()),
                     };
 
                     if mcp_err.is_session_expired() || mcp_err.is_auth_error() {
@@ -328,7 +327,7 @@ impl EnhancedMcpHandle {
 
             if err.code == -32600 || err.code == -32601 || err.code == -32602 || err.code == -32603 {
                 return Err(McpError::Request {
-                    code: err.code,
+                    code: err.code as i32,
                     message: err.message.clone(),
                 }.into());
             }
@@ -428,12 +427,11 @@ impl EnhancedMcpHandle {
         self.connection_state.read().await.clone()
     }
 
-    pub fn server_info(&self) -> Option<ServerInfo> {
+    pub async fn server_info(&self) -> Option<ServerInfo> {
         self.server_info
             .read()
             .await
             .clone()
-            .flatten()
     }
 
     pub fn tools(&self) -> Vec<McpToolDef> {
@@ -550,7 +548,7 @@ impl EnhancedMcpClient {
 
         let mut state = ConnectionState::Connecting;
 
-        let child = match config.transport_type {
+        let mut child = match config.transport_type {
             TransportType::StdIO => {
                 Self::connect_stdio(config).await?
             }
@@ -580,7 +578,9 @@ impl EnhancedMcpClient {
             connection_state: Arc::new(RwLock::new(state)),
         };
 
-        let stdin = child.stdin.take().context("No stdin")?;
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            McpError::Configuration("Failed to open stdin for child process".to_string())
+        })?;
         let stdout = child.stdout.take().context("No stdout")?;
         let stderr = child.stderr.take().context("No stderr")?;
 
@@ -641,7 +641,7 @@ impl EnhancedMcpClient {
 
         if let Some(result) = init_response.result {
             let init_result: InitializeResult = serde_json::from_value(result)?;
-            *handle.server_info.write().await = Some(init_result.server_info);
+            *handle.server_info.write().await = init_result.server_info;
             *handle.capabilities.write().await = Some(init_result.capabilities);
         }
 

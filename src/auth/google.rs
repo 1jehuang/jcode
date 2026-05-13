@@ -158,7 +158,7 @@ pub async fn login(tier: GmailAccessTier, no_browser: bool) -> Result<GoogleToke
     let listener = super::oauth::bind_callback_listener(0).ok();
     let redirect_uri = listener
         .as_ref()
-        .and_then(|listener: &std::net::TcpListener| listener.local_addr().ok())
+        .and_then(|l| l.local_addr().ok())
         .map(|addr| format!("http://127.0.0.1:{}", addr.port()))
         .unwrap_or_else(|| format!("http://127.0.0.1:{}", DEFAULT_PORT));
 

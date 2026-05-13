@@ -22,7 +22,7 @@ pub mod tool;
 pub use client::{McpClient, McpHandle};
 pub use enhanced_client::{
     ConnectionState, EnhancedMcpClient, EnhancedMcpConfig, EnhancedMcpHandle,
-    HealthStatus, McpError, OauthConfig, ProgressStage, ToolCallProgress, TransportType,
+    HealthStatus, McpError, ProgressStage, ToolCallProgress, TransportType,
 };
 pub use manager::McpManager;
 pub use pool::{SharedMcpPool, get_shared_pool, init_shared_pool};

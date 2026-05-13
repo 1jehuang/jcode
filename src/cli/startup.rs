@@ -34,6 +34,10 @@ pub async fn run() -> Result<()> {
     telemetry::record_upgrade_if_needed();
     startup_profile::mark("telemetry_check");
 
+    // Initialize slash commands (/build, /plan, /review, /help)
+    crate::slash_command::init().await;
+    startup_profile::mark("slash_command_init");
+
     let args = parse_and_prepare_args()?;
     spawn_background_update_check(&args);
 

@@ -117,7 +117,7 @@ pub async fn handle_create(
         session_id: terminal_id.clone(),
         shell_type: shell_type.to_string(),
         size: TerminalSize { rows, cols },
-        working_dir: working_dir.unwrap_or_else(|| "."),
+        working_dir: working_dir.unwrap_or(".").to_string(),
         pid,
     };
 

@@ -140,6 +140,7 @@ impl WebIdeWebSocketServer {
             let session_manager = self.session_manager.clone();
             let broadcast_tx = self.broadcast_tx.clone();
             let active_connections = self.active_connections.clone();
+            let active_connections_for_handle = active_connections.clone();
             let config = self.config.clone();
 
             tokio::spawn(async move {
@@ -148,7 +149,7 @@ impl WebIdeWebSocketServer {
                     peer_addr,
                     session_manager,
                     broadcast_tx,
-                    active_connections,
+                    active_connections_for_handle,
                     config,
                 ).await {
                     error!(addr = %peer_addr, error = %e, "Connection error");

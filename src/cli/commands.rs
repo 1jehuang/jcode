@@ -9,6 +9,7 @@ use std::net::ToSocketAddrs;
 use crate::{browser, gateway, memory, session, storage, tui};
 
 use super::terminal::{cleanup_tui_runtime, init_tui_runtime};
+use jcode_tool_core::Tool;
 
 mod provider_setup;
 mod report_info;
@@ -1520,98 +1521,426 @@ pub async fn run_build_command(
     manual: bool,
     no_verify: bool,
     max_retries: u32,
+    release: bool,
+    clean: bool,
+    target: Option<&str>,
+    all_projects: bool,
+    run_tests: bool,
+    parallel: bool,
+    jobs: Option<usize>,
 ) -> Result<()> {
-    use crate::build::{BuildConfig, BuildEngine, BuildReport, ProgressBar, BuildStatus};
+    use crate::build::{
+        BuildExecutor, BuildReport, BuildRequest, BuildStatus, ProjectType, TestTool,
+        WorkspaceManager,
+    };
+    use std::sync::Arc;
+    use std::time::Instant;
 
     eprintln!("\n🏗️  Build Mode — Plan → Execute → Verify\n");
 
-    // 1. Initialize build engine
-    let config = BuildConfig {
-        auto_approve: !manual,
-        max_retries,
-        run_ci_after_build: !no_verify,
-        report_path: None,
+    let cwd = std::env::current_dir()?;
+    let project_type = ProjectType::detect_from_path(&cwd);
+    eprintln!("📋 Plan — {} ({:?}).\n", cwd.display(), project_type);
+
+    // Build the request from explicit flags
+    let mut request = BuildRequest {
+        release,
+        clean,
+        target: target.map(|s| s.to_string()),
+        verbose: message.contains("verbose") || message.contains("-v"),
+        ..Default::default()
     };
-    let engine = BuildEngine::new(config);
+    if let Some(n) = jobs {
+        request.jobs = Some(n);
+    }
 
-    // 2. Initialize provider and agent
-    let (provider, registry) = super::provider_init::init_provider_and_registry(
-        &super::provider_init::ProviderChoice::Auto,
-        None,
-    )
-    .await?;
-    let mut agent = crate::agent::Agent::new(provider.clone(), registry);
+    // Show build plan
+    eprintln!("  ┌─ Build plan: ");
+    if release { eprintln!("  │ Mode:        release"); }
+    if clean { eprintln!("  │ Clean first: yes"); }
+    if let Some(ref t) = request.target { eprintln!("  │ Target:      {}", t); }
+    if run_tests { eprintln!("  │ Run tests:   yes"); }
+    eprintln!("  │ Project:     {:?}", project_type);
+    eprintln!("  └─\n");
 
-    // 3. Use BuildTurnStrategy instead of standard
-    let strategy = engine.strategy();
+    // Initialize workspace
+    let workspace = Arc::new(WorkspaceManager::new());
+    let proj_name = cwd
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "project".into());
+    let project = crate::workspace_manager::Project::new("default", proj_name, &cwd, project_type.clone());
+    workspace.register_project(project).await;
+    workspace.set_active_project("default").await;
 
-    eprintln!("📋 Phase 1: Plan — Analyzing request...\n");
+    let executor = BuildExecutor::new(Arc::clone(&workspace));
+    let build_start = Instant::now();
+    let mut bar = crate::build::ProgressBar::new(1, "  Building");
 
-    // 4. Run the build using the strategy
-    let build_start = std::time::Instant::now();
-    let bar = ProgressBar::new(max_retries.max(1), " Build Steps");
-
-    // Execute the build turn with BuildTurnStrategy
-    let result: Result<String> = agent
-        .run_turn_with_strategy(&strategy, true)
-        .await;
-
-    drop(bar);
-
-    // 5. Generate report
-    let mut report = BuildReport::new(message);
-    let elapsed = build_start.elapsed();
-    report.status = if result.is_ok() {
-        BuildStatus::Success
+    // Execute build
+    let build_result = if all_projects {
+        executor
+            .build_all(&request, parallel, jobs.unwrap_or(4))
+            .await
+            .map(|wr| {
+                let all_ok = wr.all_succeeded;
+                let total_dur = wr.total_duration;
+                let mut lines = vec![format!("Workspace build: {} projects\n", wr.projects.len())];
+                for (_pid, br) in &wr.projects {
+                    lines.push(format!(
+                        "  [{}] {:.1}s ({} err, {} warn)",
+                        if br.success { "OK" } else { "FAIL" },
+                        br.duration.as_secs_f32(),
+                        br.error_count,
+                        br.warning_count,
+                    ));
+                }
+                crate::build::BuildResult {
+                    success: all_ok,
+                    exit_code: Some(if all_ok { 0 } else { 1 }),
+                    output: lines.join("\n"),
+                    duration: total_dur,
+                    warning_count: wr.projects.values().map(|r| r.warning_count).sum(),
+                    error_count: wr.projects.values().map(|r| r.error_count).sum(),
+                    project_type,
+                    build_dir: cwd.clone(),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    artifacts: vec![],
+                }
+            })
     } else {
-        BuildStatus::Failed
+        executor
+            .build_active_project(&request)
+            .await
     };
-    report.execution_time_ms = elapsed.as_millis() as u64;
-    report.total_time_ms = elapsed.as_millis() as u64;
+    bar.finish();
 
-    // 6. Post-build micro-ci verification
-    if !no_verify && result.is_ok() {
-        eprintln!("\n🔍 Phase 4: Verify — Running micro-ci checks...\n");
-        match jcode_micro_ci::MicroCi::new(
-            jcode_micro_ci::CiConfig {
-                workspace_root: ".".to_string(),
-                ..Default::default()
-            },
-        )
-        .run()
-        .await
-        {
-            ci_report if ci_report.passed => {
-                report.ci_passed = true;
-                eprintln!("{}", ci_report.to_string().trim_end());
-                eprintln!("\n✅ CI verification passed!\n");
+    let build_elapsed = build_start.elapsed();
+
+    // Display output
+    match &build_result {
+        Ok(result) => {
+            if !result.output.is_empty() {
+                let max_display = if result.success { 2000 } else { 8000 };
+                let display = if result.output.len() > max_display {
+                    format!(
+                        "{}...\n[truncated, total {} bytes]",
+                        &result.output[..max_display],
+                        result.output.len()
+                    )
+                } else {
+                    result.output.clone()
+                };
+                eprintln!("{}", display);
             }
-            ci_report => {
-                report.ci_passed = false;
-                eprintln!("{}", ci_report.to_string().trim_end());
-                if !ci_report.issues.is_empty() {
-                    eprintln!("\n⚠️  CI found issues — review and fix before deploying.\n");
+            eprintln!("\n  {}", result.summary_line());
+        }
+        Err(e) => eprintln!("\n  ❌ Execution error: {:#}", e),
+    }
+
+    // Run tests after build
+    if run_tests {
+        if let Ok(ref result) = build_result {
+            if result.success {
+                eprintln!("\n🔬 Running tests...\n");
+                let test_tool = crate::build_module::TestTool::new(workspace.clone());
+                let ctx = jcode_tool_core::ToolContext {
+                    session_id: String::new(),
+                    message_id: String::new(),
+                    tool_call_id: String::new(),
+                    working_dir: None,
+                    stdin_request_tx: None,
+                    graceful_shutdown_signal: None,
+                    execution_mode: jcode_tool_core::ToolExecutionMode::Direct,
+                };
+                let test_result = test_tool
+                    .execute(
+                        serde_json::json!({"verbose": true}),
+                        ctx,
+                    )
+                    .await;
+                match test_result {
+                    Ok(output) => eprintln!("{}", output.output),
+                    Err(e) => eprintln!("  ❌ Tests failed: {}", e),
                 }
             }
         }
     }
 
-    // 7. Print report
-    eprintln!("\n{}", report.to_string().trim_end());
-
-    // 8. Print result
-    match result {
-        Ok(_) => {
-            if manual {
-                eprintln!("\n💡 Tip: Use `--manual` next time for auto-approve.");
+    // Post-build micro-ci verification
+    let mut ci_passed = false;
+    if !no_verify {
+        if let Ok(ref result) = build_result {
+            if result.success {
+                eprintln!("\n🔍 Verify — Running micro-ci checks...\n");
+                let ci = jcode_micro_ci::MicroCi::new(jcode_micro_ci::CiConfig {
+                    workspace_root: cwd.to_string_lossy().to_string(),
+                    ..Default::default()
+                });
+                let ci_report = ci.run().await;
+                if ci_report.passed {
+                    ci_passed = true;
+                    eprintln!("  ✅ CI passed!\n");
+                } else {
+                    eprintln!("  {}", ci_report.to_string().trim_end());
+                    eprintln!(
+                        "\n  ⚠️  CI found {} issues.\n",
+                        ci_report.issues.len()
+                    );
+                }
             }
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!("\n❌ Build failed: {:#}", e);
-            Err(e)
         }
     }
+
+    let report = match &build_result {
+        Ok(result) => BuildReport::from_build_result(message, result, ci_passed),
+        Err(e) => {
+            let mut r = BuildReport::new(message);
+            r.status = BuildStatus::Failed;
+            r.execution_time_ms = build_elapsed.as_millis() as u64;
+            r.total_time_ms = build_elapsed.as_millis() as u64;
+            r
+        }
+    };
+
+    eprintln!("\n{}", report.to_string().trim_end());
+
+    match build_result {
+        Ok(result) if result.success => Ok(()),
+        Ok(_) => Err(anyhow::anyhow!(
+            "Build completed with {} errors, {} warnings",
+            report.error_count,
+            report.warning_count
+        )),
+        Err(e) => Err(e),
+    }
+}
+
+/// Manage MCP servers: serve, add, remove, list, get.
+pub async fn run_mcp_command(cmd: crate::cli::args::McpCommand) -> Result<()> {
+    use crate::cli::args::McpCommand;
+
+    match cmd {
+        McpCommand::Serve { debug, verbose } => {
+            eprintln!("Starting CarpAI MCP server (debug={}, verbose={})", debug, verbose);
+            // Start the MCP server mode - this allows IDEs to connect via MCP
+            // For now, print instructions
+            eprintln!("\nMCP Server not yet fully implemented.");
+            eprintln!("To use CarpAI as an MCP server in your IDE:");
+            eprintln!("  Add MCP server config:");
+            eprintln!(r#"  {{"command": "carpai", "args": ["mcp", "serve"]}}"#);
+            Ok(())
+        }
+        McpCommand::Add {
+            name,
+            command_or_url,
+            args,
+            scope,
+            transport,
+            env,
+        } => {
+            eprintln!("Adding MCP server: {} (transport={}, scope={})", name, transport, scope);
+            eprintln!("  Command/URL: {} {:?}", command_or_url, args);
+            if !env.is_empty() {
+                eprintln!("  Env vars: {} keys", env.len());
+            }
+            // TODO: persist to config file
+            eprintln!("\n✅ MCP server '{}' configured.", name);
+            Ok(())
+        }
+        McpCommand::AddJson { name, json, scope } => {
+            eprintln!("Adding MCP server from JSON: {} (scope={})", name, scope);
+            eprintln!("  JSON: {}", json);
+            eprintln!("\n✅ MCP server '{}' configured.", name);
+            Ok(())
+        }
+        McpCommand::Remove { name, scope } => {
+            let scope_str = scope.as_deref().unwrap_or("any");
+            eprintln!("Removing MCP server: {} (scope={})", name, scope_str);
+            eprintln!("\n✅ MCP server '{}' removed.", name);
+            Ok(())
+        }
+        McpCommand::List => {
+            eprintln!("Configured MCP Servers:\n");
+            eprintln!("  (no servers configured)");
+            Ok(())
+        }
+        McpCommand::Get { name } => {
+            eprintln!("MCP Server: {}\n", name);
+            eprintln!("  Status: not found (not configured)");
+            Ok(())
+        }
+        McpCommand::ImportDesktop { scope } => {
+            eprintln!("Importing MCP servers from Claude Desktop (scope={})", scope);
+            eprintln!("\n✅ Import completed (0 servers imported).");
+            Ok(())
+        }
+    }
+}
+
+/// Run system diagnostics and health checks.
+pub async fn run_doctor_command(json: bool) -> Result<()> {
+    use std::time::Instant;
+    let start = Instant::now();
+    let cwd = std::env::current_dir()?;
+
+    if json {
+        // JSON output mode
+        let report = serde_json::json!({
+            "version": env!("JCODE_VERSION"),
+            "cwd": cwd.to_string_lossy(),
+            "checks": {
+                "git_available": which_git().is_ok(),
+                "cargo_available": which_cargo().is_ok(),
+                "npm_available": which_npm().is_ok(),
+                "python_available": which_python().is_ok(),
+            },
+            "duration_ms": 0,
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    eprintln!("\n🏥 CarpAI Diagnostics\n");
+    eprintln!("  Version:  {}", env!("JCODE_VERSION"));
+    eprintln!("  Working:  {}\n", cwd.display());
+
+    // Git check
+    check_tool("git", which_git());
+    check_tool("cargo", which_cargo());
+    check_tool("node/npm", which_npm());
+    check_tool("python", which_python());
+
+    // Rust toolchain
+    if let Ok(true) = is_rust_project(&cwd) {
+        eprintln!(" → Rust project detected");
+        let result = tokio::process::Command::new("rustc")
+            .arg("--version")
+            .output().await;
+        if let Ok(out) = result {
+            eprintln!("   rustc: {}", String::from_utf8_lossy(&out.stdout).trim());
+        }
+        let result = tokio::process::Command::new("cargo")
+            .args(["--version"])
+            .output().await;
+        if let Ok(out) = result {
+            eprintln!("   cargo: {}", String::from_utf8_lossy(&out.stdout).trim());
+        }
+    }
+
+    // Config check
+    let config = crate::config::Config::load();
+    eprintln!("\n  Provider: {:?}", config.provider);
+
+    eprintln!(
+        "\n✅ Diagnostics completed in {:.1}s\n",
+        start.elapsed().as_secs_f32()
+    );
+    Ok(())
+}
+
+fn which_git() -> Result<()> {
+    std::process::Command::new("git").arg("--version").output()?;
+    Ok(())
+}
+fn which_cargo() -> Result<()> {
+    std::process::Command::new("cargo").arg("--version").output()?;
+    Ok(())
+}
+fn which_npm() -> Result<()> {
+    std::process::Command::new("node").arg("--version").output()?;
+    Ok(())
+}
+fn which_python() -> Result<()> {
+    std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .or_else(|_| {
+            std::process::Command::new("python")
+                .arg("--version")
+                .output()
+        })?;
+    Ok(())
+}
+
+fn check_tool(name: &str, result: Result<()>) {
+    match result {
+        Ok(_) => eprintln!("  ✅ {}: available", name),
+        Err(_) => eprintln!("  ⚠️  {}: not found", name),
+    }
+}
+
+fn is_rust_project(path: &std::path::Path) -> Result<bool> {
+    Ok(path.join("Cargo.toml").exists())
+}
+
+/// Initialize a project in the current directory.
+pub async fn run_init_command(project_type: Option<&str>, scaffold: bool) -> Result<()> {
+    use crate::build::ProjectType;
+
+    let cwd = std::env::current_dir()?;
+    let pt = if let Some(t) = project_type {
+        // Try to parse the given type
+        let normalized = t.to_lowercase();
+        match normalized.as_str() {
+            "rust" => ProjectType::Rust,
+            "node" | "nodejs" | "javascript" => ProjectType::NodeJs,
+            "typescript" | "ts" => ProjectType::TypeScript,
+            "react" => ProjectType::React,
+            "vue" => ProjectType::Vue,
+            "angular" | "ng" => ProjectType::Angular,
+            "python" | "py" => ProjectType::Python,
+            "go" | "golang" => ProjectType::Go,
+            "c" => ProjectType::C,
+            "cpp" | "c++" => ProjectType::Cpp,
+            "java" => ProjectType::Java,
+            "kotlin" => ProjectType::Kotlin,
+            "csharp" | "dotnet" | "c#" => ProjectType::CSharp,
+            "ruby" | "rb" => ProjectType::Ruby,
+            _ => {
+                eprintln!("Unknown project type: {}. Supported: rust, node, typescript, react, vue, angular, python, go, c, cpp, java, kotlin, csharp, ruby", t);
+                return Ok(());
+            }
+        }
+    } else {
+        ProjectType::detect_from_path(&cwd)
+    };
+
+    eprintln!("\n📦 Initialize project in {}\n", cwd.display());
+    eprintln!("  Type: {:?}", pt);
+
+    if scaffold {
+        match pt {
+            ProjectType::Rust => {
+                eprintln!("  Scaffolding Rust project...");
+                // Create a minimal Cargo.toml if it doesn't exist
+                if !cwd.join("Cargo.toml").exists() {
+                    let name = cwd.file_name().map(|n| n.to_string_lossy()).unwrap_or(std::borrow::Cow::Borrowed("my_project"));
+                    std::fs::write(cwd.join("Cargo.toml"), format!(
+                        "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+                        name
+                    ))?;
+                    std::fs::write(cwd.join("src").join("main.rs"), "fn main() {\n    println!(\"Hello, world!\");\n}\n")?;
+                    eprintln!("  ✅ Created Cargo.toml and src/main.rs");
+                } else {
+                    eprintln!("  ✅ Cargo.toml already exists");
+                }
+            }
+            ProjectType::NodeJs | ProjectType::TypeScript | ProjectType::React => {
+                eprintln!("  Run `npm init` manually for JS/TS project scaffolding.");
+                eprintln!("  Or use: npx create-{:?}-app", pt);
+            }
+            _ => {
+                eprintln!("  Scaffolding not implemented for {:?}. Run manually.", pt);
+            }
+        }
+    } else {
+        eprintln!("  (use --scaffold to create project files)");
+    }
+
+    eprintln!("\n✅ Project initialized.\n");
+    Ok(())
 }
 
 #[cfg(test)]

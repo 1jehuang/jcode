@@ -33,6 +33,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 #[cfg(test)]
 use jcode_provider_core::FailoverDecision;
+pub use jcode_provider_core::{ProviderFailoverPrompt, parse_failover_prompt_message};
 use std::sync::{Arc, RwLock};
 
 pub use jcode_provider_core::{

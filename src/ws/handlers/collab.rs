@@ -24,9 +24,10 @@ pub async fn handle_join(
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Missing 'file_path' parameter"))?;
     
+    let default_name = format!("User_{}", &session_id[..8]);
     let display_name = request.params.get("display_name")
         .and_then(|v| v.as_str())
-        .unwrap_or(&format!("User_{}", &session_id[..8]));
+        .unwrap_or(&default_name);
     
     // 为用户分配一个颜色
     let color = assign_user_color(session_id);

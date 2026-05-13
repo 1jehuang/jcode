@@ -529,7 +529,7 @@ impl SelfDevTool {
     }
 
     fn build_command(repo_dir: &Path, target: build::SelfDevBuildTarget) -> SelfDevBuildCommand {
-        build::selfdev_build_command_for_target(repo_dir, target)
+        build::selfdev_build_command_for_target(repo_dir, &target)
     }
 
     fn build_lock_path(worktree_scope: &str) -> Result<PathBuf> {

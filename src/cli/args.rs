@@ -27,9 +27,9 @@ pub(crate) enum ProviderAuthArg {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "jcode")]
+#[command(name = "carpai")]
 #[command(version = env!("JCODE_VERSION"))]
-#[command(about = "J-Code: A coding agent using Claude Max or ChatGPT Pro subscriptions")]
+#[command(about = "CarpAI: A coding agent powered by AI")]
 pub(crate) struct Args {
     /// Provider to use (jcode, claude, openai, openai-api, openrouter, azure, opencode, opencode-go, zai, 302ai, baseten, cortecs, comtegra, deepseek, firmware, huggingface, moonshotai, nebius, scaleway, stackit, groq, mistral, perplexity, togetherai, deepinfra, xai, lmstudio, ollama, chutes, cerebras, alibaba-coding-plan, openai-compatible, cursor, copilot, gemini, antigravity, google, or auto-detect)
     #[arg(short, long, default_value = "auto", global = true)]
@@ -380,7 +380,7 @@ pub(crate) enum Command {
     /// Build mode: plan + execute + verify pipeline
     Build {
         /// The build request / goal description
-        message: String,
+        message: Option<String>,
 
         /// Disable auto-approve (ask for each step)
         #[arg(long)]
@@ -393,6 +393,56 @@ pub(crate) enum Command {
         /// Max retries per failed step
         #[arg(long, default_value = "3")]
         max_retries: u32,
+
+        /// Build in release/optimized mode
+        #[arg(long)]
+        release: bool,
+
+        /// Clean build artifacts before building
+        #[arg(long)]
+        clean: bool,
+
+        /// Build only the specified target (e.g. binary name, package)
+        #[arg(long)]
+        target: Option<String>,
+
+        /// Build all projects in the workspace
+        #[arg(long)]
+        all_projects: bool,
+
+        /// Run tests after building
+        #[arg(long)]
+        test: bool,
+
+        /// Build projects in parallel (only with --all-projects)
+        #[arg(long)]
+        parallel: bool,
+
+        /// Number of parallel jobs (for supported build systems)
+        #[arg(long)]
+        jobs: Option<usize>,
+    },
+
+    /// Manage MCP servers (add, remove, list, serve, etc.)
+    #[command(subcommand)]
+    Mcp(McpCommand),
+
+    /// Run system diagnostics and health checks
+    Doctor {
+        /// Emit JSON report
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Initialize a project in the current directory
+    Init {
+        /// Project type (auto-detect if omitted)
+        #[arg(long)]
+        project_type: Option<String>,
+
+        /// Create a minimal project structure
+        #[arg(long)]
+        scaffold: bool,
     },
 
     /// Save or restore the current set of open jcode windows across a system reboot
@@ -554,6 +604,84 @@ pub(crate) enum ProviderCommand {
         /// Emit JSON instead of human-readable setup output
         #[arg(long)]
         json: bool,
+    },
+}
+
+/// MCP server management commands.
+#[derive(Subcommand, Debug)]
+pub(crate) enum McpCommand {
+    /// Start CarpAI as an MCP server (for IDE integration)
+    Serve {
+        /// Enable debug output
+        #[arg(short, long)]
+        debug: bool,
+
+        /// Override verbose mode setting
+        #[arg(long)]
+        verbose: bool,
+    },
+
+    /// Add an MCP server configuration
+    Add {
+        /// Server name
+        name: String,
+
+        /// Server command (for stdio) or URL (for SSE/HTTP)
+        command_or_url: String,
+
+        /// Additional arguments to the command
+        args: Vec<String>,
+
+        /// Configuration scope (local, user, or project)
+        #[arg(short, long, default_value = "local")]
+        scope: String,
+
+        /// Transport type: stdio, sse, streamable-http
+        #[arg(short, long, default_value = "stdio")]
+        transport: String,
+
+        /// Environment variables (KEY=VALUE)
+        #[arg(short = 'e', long)]
+        env: Vec<String>,
+    },
+
+    /// Add an MCP server from a JSON config string
+    AddJson {
+        /// Server name
+        name: String,
+
+        /// JSON configuration string
+        json: String,
+
+        /// Configuration scope (local, user, or project)
+        #[arg(short, long, default_value = "local")]
+        scope: String,
+    },
+
+    /// Remove an MCP server
+    Remove {
+        /// Server name to remove
+        name: String,
+
+        /// Configuration scope (local, user, or project)
+        #[arg(short, long)]
+        scope: Option<String>,
+    },
+
+    /// List configured MCP servers
+    List,
+
+    /// Get details about an MCP server
+    Get {
+        /// Server name
+        name: String,
+    },
+
+    /// Import MCP servers from Claude Desktop config
+    ImportDesktop {
+        /// Configuration scope (local, user, or project)
+        #[arg(short, long, default_value = "local")]
+        scope: String,
     },
 }
 

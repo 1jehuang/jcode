@@ -156,6 +156,9 @@ pub(crate) fn initial_title(args: &Args) -> String {
         Some(Command::AuthTest { .. }) => "jcode auth-test".to_string(),
         Some(Command::Restart { .. }) => "jcode restart".to_string(),
         Some(Command::CodeValue { .. }) => "jcode code-value".to_string(),
+        Some(Command::Mcp(_)) => "jcode mcp".to_string(),
+        Some(Command::Doctor { .. }) => "jcode doctor".to_string(),
+        Some(Command::Init { .. }) => "jcode init".to_string(),
         Some(Command::SetupLauncher) => "jcode setup-launcher".to_string(),
         None => {
             if let Some(resume) = args.resume.as_deref().filter(|resume| !resume.is_empty()) {
@@ -171,6 +174,7 @@ pub(crate) fn initial_title(args: &Args) -> String {
                 "jcode:client".to_string()
             }
         }
+        _ => "jcode".to_string(),
     }
 }
 

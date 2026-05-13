@@ -9,7 +9,7 @@ use crate::ws::protocol::{WsRequest, WsResponse, MessageType};
 use crate::ws::session::SessionManager;
 use anyhow::Result;
 use tokio::process::Command;
-use tracing::{info};
+use tracing::{info, warn};
 
 /// 处理项目构建请求
 pub async fn handle_build(
@@ -245,7 +245,7 @@ pub async fn handle_run(
         "stdout": stdout,
         "stderr": stderr,
         "command": run_command,
-        "pid": None, // 如果使用 spawn，这里会有 PID
+        "pid": Option::<u32>::None, // 如果使用 spawn，这里会有 PID
         "started_at": chrono::Utc::now().to_rfc3339()
     })))
 }

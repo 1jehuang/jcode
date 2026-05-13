@@ -11,6 +11,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
@@ -73,7 +74,7 @@ impl BtwCommand {
     where
         F: Fn(&str) -> Vec<String> + Send + Sync + 'static,
     {
-        let gen = Arc::new(generator) as Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>;
+        let gen_fn = Arc::new(generator) as Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>;
         // In production, you'd properly store this
     }
 
@@ -330,7 +331,7 @@ impl RewindCommand {
             description,
             message_count,
             tool_calls,
-            data_hash: format!("{:x}", md5::compute(format!("{}", chrono::Utc::now()))),
+            data_hash: format!("{:x}", Sha256::digest(format!("{}", chrono::Utc::now()))),
         };
 
         let id = snapshot.id.clone();
