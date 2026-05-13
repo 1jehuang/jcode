@@ -32,7 +32,7 @@ use jcode_lsp::{LspServerManager, LspOperations};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;
-use tracing::{debug, error, info};
+use tracing::info;
 
 const OPERATIONS: &[&str] = &[
     "goToDefinition",
@@ -391,7 +391,7 @@ fn format_call_hierarchy_items(items: &[lsp_types::CallHierarchyItem]) -> String
 
 /// Convert SymbolKind to readable string
 fn format_symbol_kind(kind: &lsp_types::SymbolKind) -> &'static str {
-    match kind {
+    match *kind {
         lsp_types::SymbolKind::FILE => "📄 File",
         lsp_types::SymbolKind::MODULE => "📦 Module",
         lsp_types::SymbolKind::NAMESPACE => "🏷️ Namespace",

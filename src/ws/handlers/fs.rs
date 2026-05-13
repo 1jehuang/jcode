@@ -5,7 +5,7 @@
 use crate::ws::protocol::{WsRequest, WsResponse, MessageType};
 use crate::ws::session::SessionManager;
 use anyhow::Result;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tracing::{info};
 
 /// 处理文件列表请求

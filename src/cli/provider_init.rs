@@ -17,11 +17,7 @@ use super::output;
 
 mod external_auth;
 use external_auth::*;
-pub(crate) use external_auth::{
-    ExternalAuthReviewCandidate, format_external_auth_review_candidates_markdown,
-    maybe_run_external_auth_auto_import_flow, parse_external_auth_review_selection,
-    pending_external_auth_review_candidates, run_external_auth_auto_import_candidates,
-};
+pub(crate) use external_auth::maybe_run_external_auth_auto_import_flow;
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
 pub enum ProviderChoice {

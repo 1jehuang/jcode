@@ -42,8 +42,8 @@ impl IndentStyle {
     pub fn indent_string(&self) -> String {
         match self {
             Self::Spaces(n) => " ".repeat(*n),
-            SelfTabs => "\t".to_string(),
-            SelfMixed => "  ".to_string(),
+            _SelfTabs => "\t".to_string(),
+            _SelfMixed => "  ".to_string(),
         }
     }
 

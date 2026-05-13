@@ -11,7 +11,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use super::precise_edit::{EditOperation, EditResult, PreciseEditEngine};

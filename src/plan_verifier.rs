@@ -169,7 +169,7 @@ impl PlanVerifier {
             }
             PlanAction::DeleteFile => {
                 for path in &step.target_files {
-                    let full_path = self.workspace_root.join(path);
+                    let _full_path = self.workspace_root.join(path);
                     let is_important = path.to_str().unwrap_or("")
                         .ends_with(".env") || path.to_str().unwrap_or("").contains("/etc/");
                     if is_important {

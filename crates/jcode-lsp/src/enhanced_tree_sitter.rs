@@ -8,9 +8,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
 use parking_lot::RwLock;
-use tracing::{debug, info, warn};
+use serde::{Deserialize, Serialize};
 
 // 重新导出原有类型
 pub use crate::tree_sitter::{
@@ -94,7 +93,7 @@ pub struct CFGEdge {
 }
 
 /// 边类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EdgeType {
     /// 无条件跳转 (fall-through, goto)
     Unconditional,
@@ -263,15 +262,15 @@ impl DominatorTree {
         if a == b {
             return true;
         }
-        
-        let mut current = b;
-        while let Some(dom) = self.idom.get(&current).copied() {
+
+        let mut current = Some(b);
+        while let Some(dom) = current.and_then(|id| self.idom.get(&id).copied()).flatten() {
             if dom == a {
                 return true;
             }
-            current = dom;
+            current = Some(dom);
         }
-        
+
         false
     }
 }
@@ -501,7 +500,7 @@ impl EnhancedTreeSitterParser {
                 // 继续从合并点构建
             }
             
-            NodeType::ReturnStatement | NodeType::BreakStatement => {
+            NodeType::ReturnStatement => {
                 // 返回或 break: 连接到出口
                 let exit = cfg.create_block();
                 cfg.mark_exit(exit);
@@ -530,11 +529,15 @@ impl EnhancedTreeSitterParser {
         // 出口块特征:
         // 1. 没有后继的块
         // 2. 以 return/break 结尾的块
-        
-        for (id, block) in &cfg.blocks {
-            if block.successors.is_empty() && !block.is_entry {
-                cfg.mark_exit(*id);
-            }
+
+        let exit_blocks: Vec<BlockId> = cfg.blocks
+            .iter()
+            .filter(|(_, block)| block.successors.is_empty() && !block.is_entry)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for id in exit_blocks {
+            cfg.mark_exit(id);
         }
     }
 
@@ -545,7 +548,7 @@ impl EnhancedTreeSitterParser {
         // 找出所有回边 (目标块 ID < 源块 ID 的边通常表示回边)
         for edge in &cfg.edges {
             if edge.edge_type == EdgeType::LoopBack {
-                let loop_body = cfg.reachable_blocks(edge.to);
+                let mut loop_body = cfg.reachable_blocks(edge.to);
                 loop_body.remove(&edge.from); // 移除 header 本身
                 
                 loops.push(LoopInfo {

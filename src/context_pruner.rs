@@ -9,7 +9,6 @@
 //! - **Token 预估**：基于启发式的 token 计数（无需调用 tokenizer）
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
 
 const DEFAULT_TARGET_RATIO: f64 = 0.85;
 const ANCHOR_USER_MESSAGES: usize = 3;
@@ -83,7 +82,7 @@ impl ContextPruner {
         messages.iter().map(|m| m.token_estimate).sum()
     }
 
-    pub fn prune(&self, mut messages: Vec<ContextMessage>) -> PruneResult {
+    pub fn prune(&self, messages: Vec<ContextMessage>) -> PruneResult {
         let original_count = messages.len();
         let original_tokens = Self::total_tokens(&messages);
         let target = (self.max_window_tokens as f64 * self.target_ratio) as usize;

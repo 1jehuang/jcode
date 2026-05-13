@@ -7,7 +7,6 @@
 use crate::ws::protocol::{WsRequest, WsResponse, MessageType};
 use crate::ws::session::SessionManager;
 use anyhow::Result;
-use tracing::{info};
 
 /// 处理心跳请求
 pub async fn handle_ping(

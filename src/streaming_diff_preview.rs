@@ -255,7 +255,7 @@ impl StreamingDiffPreview {
                         _ => &cfg.color_context,
                     };
 
-                    let ln = if cfg.show_line_numbers {
+                    let _ln = if cfg.show_line_numbers {
                         match (line.line_number_old, line.line_number_new) {
                             (Some(o), Some(n)) => format!("{:>4}(o{:>4},n{:>4})", "", o, n),
                             (Some(o), None) => format!("{:>4}{:>4}     ", "", o),

@@ -137,11 +137,11 @@ pub async fn handle_explain(
 /// 生成模拟的 AI 响应（用于开发/测试）
 fn generate_mock_response(prompt: &str, context: Option<&str>) -> String {
     let base_response = if prompt.contains("hello") || prompt.contains("hi") || prompt.contains("你好") {
-        "Hello! I'm JCode AI assistant. How can I help you today? 你好！我是 JCode AI 助手。有什么可以帮助你的吗？"
+        "Hello! I'm JCode AI assistant. How can I help you today? 你好！我是 JCode AI 助手。有什么可以帮助你的吗？".to_string()
     } else if prompt.contains("help") || prompt.contains("帮助") {
-        "I can help you with:\n- Code writing and editing\n- Debugging and troubleshooting\n- Code review and optimization\n- Git operations\n- Project management\n\n我可以帮助你：\n- 编写和编辑代码\n- 调试和故障排除\n- 代码审查和优化\n- Git 操作\n- 项目管理"
+        "I can help you with:\n- Code writing and editing\n- Debugging and troubleshooting\n- Code review and optimization\n- Git operations\n- Project management\n\n我可以帮助你：\n- 编写和编辑代码\n- 调试和故障排除\n- 代码审查和优化\n- Git 操作\n- 项目管理".to_string()
     } else if prompt.contains("rust") {
-        "Rust is a systems programming language focused on safety, speed, and concurrency.\n\nKey features:\n- Memory safety without garbage collector\n- Zero-cost abstractions\n- Pattern matching\n- Trait system\n- Fearless concurrency\n\nRust 是一门专注于安全性、速度和并发的系统编程语言。\n\n主要特性：\n- 无需垃圾回收器的内存安全\n- 零成本抽象\n- 模式匹配\n- Trait 系统\n- 无畏并发"
+        "Rust is a systems programming language focused on safety, speed, and concurrency.\n\nKey features:\n- Memory safety without garbage collector\n- Zero-cost abstractions\n- Pattern matching\n- Trait system\n- Fearless concurrency\n\nRust 是一门专注于安全性、速度和并发的系统编程语言。\n\n主要特性：\n- 无需垃圾回收器的内存安全\n- 零成本抽象\n- 模式匹配\n- Trait 系统\n- 无畏并发".to_string()
     } else {
         format!(
             "I understand you're asking about: \"{}\"\n\nThis is a mock response. In production, this would be connected to an actual AI service that can provide intelligent assistance with coding tasks, debugging, explanations, and more.\n\n我理解你在询问关于：\"{}\"\n\n这是一个模拟响应。在生产环境中，这将连接到实际的 AI 服务，能够提供智能辅助编程、调试、解释等功能。",

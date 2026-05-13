@@ -128,7 +128,8 @@ impl SessionManager {
 
     /// 根据地址获取会话
     pub fn get_session_by_addr(&self, addr: &SocketAddr) -> Option<Arc<ClientSession>> {
-        let session_id = self.addr_to_session.read().get(addr)?;
+        let binding = self.addr_to_session.read();
+        let session_id = binding.get(addr)?;
         self.get_session(session_id)
     }
 

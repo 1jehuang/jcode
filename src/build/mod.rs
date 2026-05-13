@@ -24,12 +24,11 @@
 //! - **构建摘要**: 每个 Build 生成结构化 JSON 报告
 
 // Re-export from jcode_build_support (replaces old src/build.rs)
-pub use jcode_build_support::*;
 
 use std::time::Instant;
 
 // Re-export plan types
-pub use jcode_plan::{Plan, PlanMode, PlanStep, StepStatus, PlanStats};
+pub use jcode_plan::Plan;
 
 mod turn_strategy;
 pub use turn_strategy::BuildTurnStrategy;

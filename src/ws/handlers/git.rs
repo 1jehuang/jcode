@@ -5,7 +5,7 @@
 //! - Diff 对比
 //! - 提交操作
 /// - 分支管理
-//! - 日志查看
+/// - 日志查看
 
 use crate::ws::protocol::{WsRequest, WsResponse, GitStatusInfo, GitFileStatus, MessageType};
 use crate::ws::session::SessionManager;

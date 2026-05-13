@@ -14,13 +14,11 @@ use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use super::protocol::{WsMessage, WsRequest, WsResponse, MessageType};
-use super::session::{SessionManager, ClientSession};
-use std::collections::HashMap;
+use super::session::SessionManager;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
-use tracing::{error, info, warn};
 use tracing::{error, info, warn};
 
 /// WebSocket 服务器配置
@@ -169,7 +167,7 @@ impl WebIdeWebSocketServer {
         peer_addr: std::net::SocketAddr,
         session_manager: Arc<SessionManager>,
         broadcast_tx: broadcast::Sender<WsMessage>,
-        active_connections: Arc<RwLock<usize>>,
+        _active_connections: Arc<RwLock<usize>>,
         config: WebSocketConfig,
     ) -> Result<()> {
         info!(addr = %peer_addr, "New WebSocket connection");

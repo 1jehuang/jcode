@@ -134,7 +134,7 @@ pub async fn handle_edit(
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Missing 'file_path' parameter"))?;
     
-    let operation = request.params.get("operation")
+    let _operation = request.params.get("operation")
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("Missing 'operation' parameter"))?;
 
@@ -167,7 +167,7 @@ fn assign_user_color(session_id: &str) -> String {
     let hash = hasher.finish();
 
     // 预定义的颜色列表
-    const COLORS: &[&str] = [
+    const COLORS: &[&str] = &[
         "#FF6B6B", // Red
         "#4ECDC4", // Teal
         "#45B7D1", // Blue

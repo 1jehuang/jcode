@@ -1,5 +1,5 @@
 [package]
-name = "jcode"
+name = "carpai"
 version = "0.12.0"
 description = "Possibly the greatest coding agent ever built — blazing-fast TUI, multi-model, swarm coordination, 30+ tools"
 edition = "2024"

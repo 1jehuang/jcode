@@ -12,7 +12,7 @@ use std::process::Stdio;
 use tokio::process::{Child, Command};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// 活跃的终端进程
 struct ActiveTerminal {
@@ -117,7 +117,7 @@ pub async fn handle_create(
         session_id: terminal_id.clone(),
         shell_type: shell_type.to_string(),
         size: TerminalSize { rows, cols },
-        working_dir: working_dir.unwrap_or_else(|| ".".to_string()),
+        working_dir: working_dir.unwrap_or_else(|| "."),
         pid,
     };
 

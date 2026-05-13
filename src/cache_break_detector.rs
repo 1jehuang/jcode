@@ -464,7 +464,7 @@ mod tests {
         // 2000 tokens is exactly at threshold, so depends on >= comparison
         // The key point: very small token counts shouldn't trigger
         assert!(
-            ev.is_none() || ev.unwrap().token_drop < MIN_CACHE_MISS_TOKENS || ev.unwrap().expected,
+            ev.is_none() || ev.as_ref().map(|e| e.token_drop < MIN_CACHE_MISS_TOKENS || e.expected).unwrap_or(false),
             "Very small token drops below threshold should be ignored"
         );
     }
