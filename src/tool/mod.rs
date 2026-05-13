@@ -1,6 +1,7 @@
 mod agentgrep;
 pub mod ambient;
 mod apply_patch;
+mod ask_user_question;
 mod bash;
 mod batch;
 mod bg;
@@ -126,6 +127,12 @@ impl Registry {
                 &mut timings,
                 "side_panel",
                 side_panel::SidePanelTool::new,
+            );
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "askUserQuestion",
+                ask_user_question::AskUserQuestionTool::new,
             );
             Self::insert_tool_timed(&mut m, &mut timings, "edit", edit::EditTool::new);
             Self::insert_tool_timed(
