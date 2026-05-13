@@ -218,6 +218,12 @@ impl Tool for AskUserQuestionTool {
                 .map(ToOwned::to_owned),
         };
 
+        crate::logging::warn(&format!(
+            "[ask_user] publishing AskUserQuestionOpened request_id={} session_id={} options={}",
+            request_id,
+            ctx.session_id,
+            question.options.len()
+        ));
         Bus::global().publish(BusEvent::AskUserQuestionOpened(question));
 
         let answer = match tokio::time::timeout(ASK_USER_TIMEOUT, receiver).await {

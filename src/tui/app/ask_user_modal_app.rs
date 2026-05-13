@@ -16,10 +16,12 @@ impl App {
         if let Some(existing) = self.ask_user_overlay.take() {
             let prev_request_id = existing.borrow().request_id().to_string();
             if prev_request_id != question.request_id {
-                submit_answer(AskUserAnswer {
+                let cancel = AskUserAnswer {
                     request_id: prev_request_id,
                     kind: AskUserAnswerKind::Canceled,
-                });
+                };
+                self.pending_ask_user_answers.push(cancel.clone());
+                submit_answer(cancel);
             }
         }
         let modal = AskUserModal::from_question(question);
@@ -46,8 +48,11 @@ impl App {
             AskUserModalOutcome::Continue => {}
             AskUserModalOutcome::Done(answer) => {
                 self.ask_user_overlay = None;
-                // Submit even if the channel was already closed; submit_answer
-                // tolerates unknown ids.
+                // In remote-client mode the actual pending registry lives in
+                // the server process; queue the answer for the next tick to
+                // forward via Request::SubmitAskUserAnswer. We also call the
+                // local submit so in-process / test contexts work uniformly.
+                self.pending_ask_user_answers.push(answer.clone());
                 submit_answer(answer);
                 self.clear_status_notice();
             }
@@ -68,11 +73,20 @@ impl App {
     pub(crate) fn cancel_ask_user_modal(&mut self) {
         if let Some(cell) = self.ask_user_overlay.take() {
             let request_id = cell.borrow().request_id().to_string();
-            submit_answer(AskUserAnswer {
+            let cancel = AskUserAnswer {
                 request_id,
                 kind: AskUserAnswerKind::Canceled,
-            });
+            };
+            self.pending_ask_user_answers.push(cancel.clone());
+            submit_answer(cancel);
         }
+    }
+
+    /// Drain queued answers that need to be forwarded to the server.
+    pub(crate) fn drain_pending_ask_user_answers(
+        &mut self,
+    ) -> Vec<jcode_protocol::AskUserAnswerPayload> {
+        std::mem::take(&mut self.pending_ask_user_answers)
     }
 
     pub(crate) fn ask_user_modal_visible(&self) -> bool {

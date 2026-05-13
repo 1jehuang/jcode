@@ -878,6 +878,14 @@ pub(in crate::tui::app) fn handle_server_event(
             app.set_side_panel_snapshot(snapshot);
             false
         }
+        ServerEvent::AskUserQuestionOpened { question } => {
+            crate::logging::warn(&format!(
+                "[ask_user] client received ServerEvent request_id={} session_id={}; opening modal",
+                question.request_id, question.session_id
+            ));
+            app.open_ask_user_modal(question);
+            true
+        }
         ServerEvent::SwarmStatus { members } => {
             if app.swarm_enabled {
                 app.remote_swarm_members = members;

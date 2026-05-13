@@ -235,6 +235,16 @@ async fn handle_remote_key_internal(
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
+    // Ask-user modal is a blocking overlay: capture every key so the user
+    // can navigate / type / cancel before anything else interferes.
+    if app.ask_user_modal_visible() {
+        app.handle_ask_user_modal_key(code, modifiers);
+        for answer in app.drain_pending_ask_user_answers() {
+            remote.submit_ask_user_answer(answer);
+        }
+        return Ok(());
+    }
+
     if app.changelog_scroll.is_some() {
         return app.handle_changelog_key(code);
     }

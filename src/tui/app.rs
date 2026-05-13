@@ -983,6 +983,9 @@ pub struct App {
     usage_overlay: Option<RefCell<super::usage_overlay::UsageOverlay>>,
     /// `askUserQuestion` modal overlay (None = not visible)
     ask_user_overlay: Option<RefCell<super::ask_user_modal::AskUserModal>>,
+    /// Outbound queue of ask-user answers to forward to the server on the
+    /// next remote tick. Populated synchronously from the modal key handler.
+    pending_ask_user_answers: Vec<jcode_protocol::AskUserAnswerPayload>,
     /// Whether a usage refresh request is currently in flight.
     usage_report_refreshing: bool,
     /// Last time the passive overnight progress card polled its run files.

@@ -65,6 +65,13 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     app.maybe_capture_runtime_memory_heartbeat();
     app.progress_mouse_scroll_animation();
     needs_redraw |= dispatch_compacted_history_load(app, remote).await;
+
+    // Forward any queued ask-user-modal answers to the server. The modal's
+    // synchronous key handler enqueues these so we don't need to await inside
+    // the input loop.
+    for answer in app.drain_pending_ask_user_answers() {
+        remote.submit_ask_user_answer(answer);
+    }
     if let Some(chunk) = app.stream_buffer.flush() {
         app.append_streaming_text(&chunk);
         needs_redraw = true;

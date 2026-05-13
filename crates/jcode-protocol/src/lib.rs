@@ -155,6 +155,68 @@ impl AuthChanged {
 
 pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 
+// --- askUserQuestion wire payloads ---------------------------------------
+// These mirror crate::ask_user::{AskUserOption,AskUserQuestion,AskUserAnswer,
+// AskUserAnswerKind} so the binary can re-export the wire types directly and
+// keep one source of truth. Keeping them in `jcode-protocol` lets the server
+// and remote client share serde shapes without pulling the whole jcode crate.
+
+/// A single option offered to the user inside an `askUserQuestion` modal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskUserOptionPayload {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recommended: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommendation_reason: Option<String>,
+}
+
+/// The full question payload pushed from the server to the client for
+/// rendering in the modal overlay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskUserQuestionPayload {
+    pub request_id: String,
+    pub session_id: String,
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    pub options: Vec<AskUserOptionPayload>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_multiple: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+/// The user's response to an `askUserQuestion` modal, sent client to server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskUserAnswerPayload {
+    pub request_id: String,
+    pub kind: AskUserAnswerKindPayload,
+}
+
+/// Discriminated kinds of answer payloads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AskUserAnswerKindPayload {
+    /// Option(s) selected.
+    Options {
+        ids: Vec<String>,
+        labels: Vec<String>,
+        values: Vec<Option<String>>,
+    },
+    /// Free-form text answer.
+    Custom { text: String },
+    /// User dismissed without answering.
+    Canceled,
+}
+
 /// Client request to server
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -203,6 +265,12 @@ pub enum Request {
     /// Undo the most recent rewind, if one is available.
     #[serde(rename = "rewind_undo")]
     RewindUndo { id: u64 },
+
+    /// Submit the user's answer to an outstanding `askUserQuestion` modal.
+    /// The `request_id` must match the value the server included in the
+    /// preceding `ServerEvent::AskUserQuestionOpened` event.
+    #[serde(rename = "submit_ask_user_answer")]
+    SubmitAskUserAnswer { id: u64, answer: AskUserAnswerPayload },
 
     /// Health check
     #[serde(rename = "ping")]
@@ -1085,6 +1153,13 @@ pub enum ServerEvent {
     /// Side panel state changed for the active session
     #[serde(rename = "side_panel_state")]
     SidePanelState { snapshot: SidePanelSnapshot },
+
+    /// `askUserQuestion` tool wants the user to answer a question via the
+    /// TUI modal overlay. The client is expected to render the modal, capture
+    /// the user's response, and submit it back via
+    /// `Request::SubmitAskUserAnswer` carrying the same `request_id`.
+    #[serde(rename = "ask_user_question_opened")]
+    AskUserQuestionOpened { question: AskUserQuestionPayload },
 
     /// Server is reloading (clients should reconnect)
     #[serde(rename = "reloading")]
@@ -2048,6 +2123,7 @@ impl Request {
             Request::CommSubscribeChannel { id, .. } => *id,
             Request::CommUnsubscribeChannel { id, .. } => *id,
             Request::CommAwaitMembers { id, .. } => *id,
+            Request::SubmitAskUserAnswer { id, .. } => *id,
         }
     }
 
@@ -2079,6 +2155,7 @@ impl Request {
                 | Request::CommSubscribeChannel { .. }
                 | Request::CommUnsubscribeChannel { .. }
                 | Request::CommAwaitMembers { .. }
+                | Request::SubmitAskUserAnswer { .. }
         )
     }
 }

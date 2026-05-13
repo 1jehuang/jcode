@@ -543,6 +543,7 @@ impl App {
             account_picker_overlay: None,
             usage_overlay: None,
             ask_user_overlay: None,
+            pending_ask_user_answers: Vec::new(),
             usage_report_refreshing: false,
             last_overnight_card_refresh: None,
         };
@@ -909,6 +910,7 @@ impl App {
             account_picker_overlay: None,
             usage_overlay: None,
             ask_user_overlay: None,
+            pending_ask_user_answers: Vec::new(),
             usage_report_refreshing: false,
             last_overnight_card_refresh: None,
         };

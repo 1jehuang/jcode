@@ -1198,6 +1198,17 @@ pub(super) async fn handle_client(
                             });
                         }
                     }
+                    Ok(BusEvent::AskUserQuestionOpened(question)) => {
+                        crate::logging::warn(&format!(
+                            "[ask_user] server saw bus event request_id={} question_session={} client_session={}",
+                            question.request_id, question.session_id, client_session_id
+                        ));
+                        if question.session_id == client_session_id {
+                            let _ = client_event_tx.send(
+                                ServerEvent::AskUserQuestionOpened { question },
+                            );
+                        }
+                    }
                     Ok(BusEvent::CompactionFinished) => {
                         let agent = Arc::clone(&agent);
                         let tx = client_event_tx.clone();
@@ -1481,6 +1492,15 @@ pub(super) async fn handle_client(
                         });
                     }
                 }
+            }
+
+            Request::SubmitAskUserAnswer { id, answer } => {
+                // Submit the user's answer to the pending registry. The tool
+                // task awaiting on the oneshot will wake and continue. Ack
+                // immediately; if no matching pending request exists we still
+                // ack (the tool may have timed out or been cancelled).
+                let _ = id;
+                crate::ask_user::submit_answer(answer);
             }
 
             Request::Ping { id } => {

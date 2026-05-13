@@ -698,6 +698,22 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Submit the user's answer to an outstanding `askUserQuestion` modal.
+    /// Fire-and-forget: the server applies it to its pending registry which
+    /// in turn wakes the tool task. We use the detached path so the modal
+    /// dispatch from the synchronous key handler does not need an .await.
+    pub fn submit_ask_user_answer(
+        &mut self,
+        answer: jcode_protocol::AskUserAnswerPayload,
+    ) {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request_detached(
+            Request::SubmitAskUserAnswer { id, answer },
+            "submit_ask_user_answer",
+        );
+    }
+
     /// Split the current session — ask server to clone conversation into a new session
     pub async fn split(&mut self) -> Result<u64> {
         let id = self.next_request_id;
