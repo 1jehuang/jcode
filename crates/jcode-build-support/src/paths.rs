@@ -79,6 +79,10 @@ pub fn selfdev_binary_path(repo_dir: &Path) -> PathBuf {
     profile_binary_path(repo_dir, SELFDEV_CARGO_PROFILE)
 }
 
+pub fn debug_binary_path(repo_dir: &Path) -> PathBuf {
+    profile_binary_path(repo_dir, "debug")
+}
+
 fn binary_mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path)
         .ok()
@@ -237,13 +241,30 @@ pub fn current_binary_build_time_string() -> Option<String> {
 }
 
 /// Find the best development binary in the repo.
-/// Prefers the newest local self-dev or release binary.
+/// Prefers the newest local self-dev, release, or debug binary.
 pub fn find_dev_binary(repo_dir: &Path) -> Option<PathBuf> {
     newest_existing_binary(vec![
         (selfdev_binary_path(repo_dir), "repo-selfdev"),
         (release_binary_path(repo_dir), "repo-release"),
+        (debug_binary_path(repo_dir), "repo-debug"),
     ])
     .map(|(path, _)| path)
+}
+
+fn current_exe_is_repo_binary() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let name = exe.file_name()?.to_str()?;
+    if name != binary_name() {
+        return None;
+    }
+
+    let profile = exe.parent()?.file_name()?.to_str()?;
+    if !matches!(profile, "debug" | "release" | SELFDEV_CARGO_PROFILE) {
+        return None;
+    }
+
+    let repo = exe.parent()?.parent()?.parent()?;
+    if is_jcode_repo(repo) { Some(exe) } else { None }
 }
 
 fn home_dir() -> Result<PathBuf> {
@@ -374,6 +395,10 @@ pub fn client_update_candidate(is_selfdev_session: bool) -> Option<(PathBuf, &'s
 pub fn shared_server_update_candidate(
     _is_selfdev_session: bool,
 ) -> Option<(PathBuf, &'static str)> {
+    if let Some(repo_exe) = current_exe_is_repo_binary() {
+        return Some((repo_exe, "repo-current"));
+    }
+
     if let Some(shared_server) = existing_binary(shared_server_binary_path(), "shared-server") {
         return Some(shared_server);
     }

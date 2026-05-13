@@ -204,6 +204,7 @@ pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
     let client = reqwest::blocking::Client::builder()
         .timeout(UPDATE_CHECK_TIMEOUT)
         .user_agent("jcode-updater")
+        .no_proxy()
         .build()?;
 
     let response = client
@@ -229,6 +230,7 @@ fn latest_main_sha_blocking() -> Result<String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(UPDATE_CHECK_TIMEOUT)
         .user_agent("jcode-updater")
+        .no_proxy()
         .build()?;
 
     let response = client
@@ -764,6 +766,7 @@ pub fn download_and_install_blocking_with_progress(
     let client = reqwest::blocking::Client::builder()
         .timeout(DOWNLOAD_TIMEOUT)
         .user_agent("jcode-updater")
+        .no_proxy()
         .build()?;
 
     let mut response = client

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::panic;
 
 use crate::{id, session, telemetry, tui};
@@ -170,13 +170,15 @@ pub fn cleanup_tui_runtime_for_run_result(
 
 pub fn print_session_resume_hint(session_id: &str) {
     let session_name = id::extract_session_name(session_id).unwrap_or(session_id);
-    eprintln!();
-    eprintln!(
+    let mut stderr = io::stderr().lock();
+    let _ = writeln!(stderr);
+    let _ = writeln!(
+        stderr,
         "\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m",
         session_name
     );
-    eprintln!("  jcode --resume {}", session_id);
-    eprintln!();
+    let _ = writeln!(stderr, "  jcode --resume {}", session_id);
+    let _ = writeln!(stderr);
 }
 
 fn init_tui_terminal_resume() -> Result<ratatui::DefaultTerminal> {
@@ -230,17 +232,26 @@ fn signal_crash_reason(sig: i32) -> String {
 }
 
 #[cfg(unix)]
+fn signal_should_print_resume_hint(sig: i32) -> bool {
+    !matches!(sig, libc::SIGHUP) && (io::stderr().is_terminal() || io::stdout().is_terminal())
+}
+
+#[cfg(unix)]
 fn handle_termination_signal(sig: i32) -> ! {
-    mark_current_session_crashed(signal_crash_reason(sig));
+    if matches!(sig, libc::SIGQUIT) {
+        mark_current_session_crashed(signal_crash_reason(sig));
+    }
 
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = crossterm::execute!(
-        std::io::stderr(),
+        std::io::stdout(),
         crossterm::terminal::LeaveAlternateScreen,
         crossterm::cursor::Show
     );
 
-    if let Some(session_id) = get_current_session() {
+    if signal_should_print_resume_hint(sig)
+        && let Some(session_id) = get_current_session()
+    {
         print_session_resume_hint(&session_id);
     }
 
@@ -309,5 +320,11 @@ mod tests {
         } else {
             panic!("Session ID should be set");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_sighup_does_not_print_resume_hint() {
+        assert!(!signal_should_print_resume_hint(libc::SIGHUP));
     }
 }

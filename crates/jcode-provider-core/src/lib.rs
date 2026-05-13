@@ -388,6 +388,7 @@ pub fn shared_http_client() -> reqwest::Client {
         .get_or_init(|| {
             reqwest::Client::builder()
                 .user_agent(JCODE_USER_AGENT)
+                .no_proxy()
                 .connect_timeout(Duration::from_secs(15))
                 .tcp_keepalive(Some(Duration::from_secs(30)))
                 .pool_idle_timeout(Duration::from_secs(90))
@@ -397,6 +398,7 @@ pub fn shared_http_client() -> reqwest::Client {
                     eprintln!("jcode: failed to build shared provider HTTP client: {err}");
                     reqwest::Client::builder()
                         .user_agent(JCODE_USER_AGENT)
+                        .no_proxy()
                         .build()
                         .expect("fallback Jcode HTTP client should build")
                 })

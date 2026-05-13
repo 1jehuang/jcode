@@ -81,7 +81,7 @@ use crate::runtime_memory_log::{
 };
 use crate::tool::selfdev::ReloadContext;
 use crate::transport::Listener;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource};
 use jcode_swarm_core::{
     append_swarm_completion_report_instructions, format_structured_completion_report,
@@ -1695,11 +1695,13 @@ impl Server {
     pub async fn run(&self) -> Result<()> {
         // Ensure socket directory exists (for named sockets like /run/user/1000/jcode/)
         if let Some(parent) = self.socket_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create socket directory {}", parent.display())
+            })?;
         }
 
         #[cfg(unix)]
-        let _daemon_lock = acquire_daemon_lock()?;
+        let _daemon_lock = acquire_daemon_lock().context("failed to acquire daemon lock")?;
 
         if socket_has_live_listener(&self.socket_path).await {
             anyhow::bail!(
@@ -1712,8 +1714,15 @@ impl Server {
         crate::transport::remove_socket(&self.socket_path);
         crate::transport::remove_socket(&self.debug_socket_path);
 
-        let main_listener = Listener::bind(&self.socket_path)?;
-        let debug_listener = Listener::bind(&self.debug_socket_path)?;
+        let main_listener = Listener::bind(&self.socket_path).with_context(|| {
+            format!("failed to bind main socket {}", self.socket_path.display())
+        })?;
+        let debug_listener = Listener::bind(&self.debug_socket_path).with_context(|| {
+            format!(
+                "failed to bind debug socket {}",
+                self.debug_socket_path.display()
+            )
+        })?;
 
         #[cfg(unix)]
         {
