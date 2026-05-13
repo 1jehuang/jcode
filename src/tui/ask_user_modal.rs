@@ -36,8 +36,11 @@ const MUTED_DARK: Color = Color::Rgb(100, 106, 122);
 const OPTION_FG: Color = Color::Rgb(220, 225, 240);
 const CUSTOM_HINT_FG: Color = Color::Rgb(190, 170, 240);
 
-const OVERLAY_PERCENT_X: u16 = 78;
+const OVERLAY_PERCENT_X: u16 = 70;
+const OVERLAY_MAX_WIDTH: u16 = 84;
+const OVERLAY_MIN_WIDTH: u16 = 44;
 const OVERLAY_MIN_HEIGHT: u16 = 14;
+const CONTENT_PAD_X: u16 = 2;
 
 /// What the modal wants the host App to do after handling a key.
 pub enum AskUserModalOutcome {
@@ -281,17 +284,76 @@ impl AskUserModal {
     }
 
     pub fn render(&self, frame: &mut Frame) {
-        let area = centered_rect(OVERLAY_PERCENT_X, frame.area());
+        let area = centered_rect(frame.area());
+        self.render_into(frame, area, true);
+    }
 
-        // Clear underlying widgets so the modal is fully opaque.
-        frame.render_widget(Clear, area);
+    /// Render the modal into a host-supplied rect without centering. The host
+    /// is responsible for laying out the area (typically the chat input slot)
+    /// so the modal can replace it inline, Claude-Code style.
+    pub fn render_inline(&self, frame: &mut Frame, area: Rect) {
+        self.render_into(frame, area, false);
+    }
 
-        let title = Line::from(vec![
-            Span::styled(
-                format!(" {} ", self.title),
-                Style::default().fg(Color::White).bold(),
-            ),
-        ]);
+    /// Conservative estimate of the rows the modal wants. The host can use
+    /// this to reserve an input chunk tall enough to fit question + context +
+    /// divider + options (+ descriptions / recommendation reasons) + footer
+    /// hint + typing pane.
+    pub fn desired_height(&self) -> u16 {
+        // We don't know the exact width here; use OVERLAY_MAX_WIDTH minus
+        // padding/borders as a reasonable upper bound for wrap math. The host
+        // gets a slightly generous answer when terminals are narrow, which is
+        // fine since options/typing pane already have minimum heights.
+        let content_width = OVERLAY_MAX_WIDTH
+            .saturating_sub(2 + CONTENT_PAD_X * 2) // 2 borders + L/R padding
+            .max(1) as usize;
+
+        let question_h = wrapped_height(&self.question, content_width).clamp(1, 4);
+        let context_h = self
+            .context
+            .as_deref()
+            .map(|s| wrapped_height(s, content_width).min(4))
+            .unwrap_or(0);
+        // Options list: each option uses 1 row + optional description + optional
+        // recommendation reason + 1 blank spacer. Plus the synthetic "Other"
+        // row. Plus an optional footer hint with leading blank.
+        let mut options_h: usize = 0;
+        for opt in &self.options {
+            options_h += 1;
+            if opt.description.is_some() {
+                options_h += 1;
+            }
+            if opt.recommended && opt.recommendation_reason.is_some() {
+                options_h += 1;
+            }
+            options_h += 1; // visual spacer
+        }
+        options_h += 1; // Other row
+        if self.reply_instructions.is_some() {
+            options_h += 2; // blank + hint
+        }
+        let options_h = options_h.max(3) as u16;
+        let typing_h: u16 = if matches!(self.mode, Mode::Typing) { 5 } else { 0 };
+
+        // 2 border rows + 1 top inset pad + 1 divider + 1 blank above options.
+        let mut total: u16 = 2 + 1 + question_h + 1 + 1 + options_h + typing_h;
+        if context_h > 0 {
+            total = total.saturating_add(context_h + 1); // blank + context
+        }
+        total
+    }
+
+    fn render_into(&self, frame: &mut Frame, area: Rect, clear_under: bool) {
+        if clear_under {
+            // Clear underlying widgets so the modal is fully opaque (only when
+            // the modal is drawn as a floating overlay).
+            frame.render_widget(Clear, area);
+        }
+
+        let title = Line::from(Span::styled(
+            format!(" {} ", self.title),
+            Style::default().fg(Color::White).bold(),
+        ));
         let footer = self.footer_line();
         let outer = Block::default()
             .title(title)
@@ -300,111 +362,145 @@ impl AskUserModal {
             .border_style(Style::default().fg(PANEL_BORDER))
             .style(Style::default().bg(PANEL_BG));
         frame.render_widget(&outer, area);
-        let inner = outer.inner(area);
+        let outer_inner = outer.inner(area);
 
+        // Inset content from the border so text doesn't hug the edges.
+        let inner = Rect {
+            x: outer_inner.x + CONTENT_PAD_X,
+            y: outer_inner.y + 1,
+            width: outer_inner.width.saturating_sub(CONTENT_PAD_X * 2),
+            height: outer_inner.height.saturating_sub(1),
+        };
+
+        let content_width = inner.width.max(1) as usize;
+        let question_h = wrapped_height(&self.question, content_width).clamp(1, 4);
         let context_h = self
             .context
             .as_deref()
-            .map(|s| ((s.len() as u16 / inner.width.max(1)) + 1).min(4))
+            .map(|s| wrapped_height(s, content_width).min(4))
             .unwrap_or(0);
-        let question_h = ((self.question.len() as u16 / inner.width.max(1)) + 1).min(4);
-
-        // Top-down layout: question, optional context divider, options list,
-        // bottom typing pane (only when active).
         let typing_h = if matches!(self.mode, Mode::Typing) {
             5
         } else {
             0
         };
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(question_h.max(1)),
-                Constraint::Length(context_h),
-                Constraint::Length(1), // divider
-                Constraint::Min(3),
-                Constraint::Length(typing_h),
-            ])
-            .split(inner);
 
-        // Question text.
-        let question_p = Paragraph::new(Line::from(Span::styled(
-            self.question.clone(),
-            Style::default().fg(Color::White).bold(),
-        )))
-        .wrap(Wrap { trim: false });
-        frame.render_widget(question_p, chunks[0]);
-
-        // Optional context.
-        if let Some(ctx) = &self.context {
-            let context_p = Paragraph::new(Line::from(Span::styled(
-                ctx.clone(),
-                Style::default().fg(MUTED),
-            )))
-            .wrap(Wrap { trim: false });
-            frame.render_widget(context_p, chunks[1]);
+        // Vertical layout:
+        //   question
+        //   blank (only when context present)
+        //   context (only when context present)
+        //   divider
+        //   blank
+        //   options (fills)
+        //   typing pane (only when active)
+        let mut constraints: Vec<Constraint> = Vec::with_capacity(7);
+        constraints.push(Constraint::Length(question_h));
+        if context_h > 0 {
+            constraints.push(Constraint::Length(1)); // blank
+            constraints.push(Constraint::Length(context_h));
+        }
+        constraints.push(Constraint::Length(1)); // divider
+        constraints.push(Constraint::Length(1)); // blank above options
+        constraints.push(Constraint::Min(3)); // options list
+        if typing_h > 0 {
+            constraints.push(Constraint::Length(typing_h));
         }
 
-        // Divider.
-        let div = Paragraph::new(Line::from(Span::styled(
-            "─".repeat(inner.width as usize),
-            Style::default().fg(SECTION_BORDER),
-        )));
-        frame.render_widget(div, chunks[2]);
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(inner);
 
-        self.render_options(frame, chunks[3]);
+        let mut slot = 0usize;
 
-        if matches!(self.mode, Mode::Typing) {
-            self.render_typing(frame, chunks[4]);
+        // Question.
+        let question_para = Paragraph::new(self.question.clone())
+            .style(Style::default().fg(Color::White).bold())
+            .wrap(Wrap { trim: false });
+        frame.render_widget(question_para, chunks[slot]);
+        slot += 1;
+
+        if context_h > 0 {
+            slot += 1; // skip blank
+            let context_para =
+                Paragraph::new(self.context.as_deref().unwrap_or("").to_string())
+                    .style(Style::default().fg(MUTED))
+                    .wrap(Wrap { trim: false });
+            frame.render_widget(context_para, chunks[slot]);
+            slot += 1;
+        }
+
+        // Divider that respects the content padding.
+        let divider_line = "─".repeat(inner.width as usize);
+        let divider = Paragraph::new(divider_line)
+            .style(Style::default().fg(SECTION_BORDER));
+        frame.render_widget(divider, chunks[slot]);
+        slot += 1;
+        slot += 1; // blank above options
+
+        let options_area = chunks[slot];
+        slot += 1;
+        self.render_options(frame, options_area);
+
+        if typing_h > 0 {
+            self.render_typing(frame, chunks[slot]);
         }
     }
 
     fn render_options(&self, frame: &mut Frame, area: Rect) {
-        let mut lines: Vec<Line<'static>> = Vec::with_capacity(self.rows());
+        let content_width = area.width as usize;
+        let mut lines: Vec<Line<'static>> = Vec::with_capacity(self.rows() * 3);
+
         for (idx, opt) in self.options.iter().enumerate() {
-            lines.push(self.render_option_row(idx, opt));
+            lines.push(self.render_option_row(idx, opt, content_width));
             if let Some(desc) = opt.description.as_deref() {
-                lines.push(Line::from(Span::styled(
-                    format!("    {}", desc),
-                    Style::default().fg(MUTED),
-                )));
+                lines.push(padded_secondary_line(desc, content_width, MUTED, false));
             }
             if opt.recommended {
                 if let Some(reason) = opt.recommendation_reason.as_deref() {
-                    lines.push(Line::from(Span::styled(
-                        format!("    why: {}", reason),
-                        Style::default().fg(MUTED_DARK).italic(),
-                    )));
+                    lines.push(padded_secondary_line(
+                        &format!("recommended: {}", reason),
+                        content_width,
+                        MUTED_DARK,
+                        true,
+                    ));
                 }
             }
+            // Visual breathing room between options.
+            lines.push(Line::from(""));
         }
-        lines.push(self.render_other_row());
+        lines.push(self.render_other_row(content_width));
 
-        // Optional reply hint just below the rows.
         if let Some(hint) = self.reply_instructions.as_deref() {
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                format!("hint: {}", hint),
-                Style::default().fg(MUTED_DARK).italic(),
-            )));
+            lines.push(padded_secondary_line(
+                &format!("hint: {}", hint),
+                content_width,
+                MUTED_DARK,
+                true,
+            ));
         }
 
         let para = Paragraph::new(lines).wrap(Wrap { trim: false });
         frame.render_widget(para, area);
     }
 
-    fn render_option_row(&self, idx: usize, opt: &AskUserOption) -> Line<'static> {
+    fn render_option_row(
+        &self,
+        idx: usize,
+        opt: &AskUserOption,
+        content_width: usize,
+    ) -> Line<'static> {
         let selected = self.cursor == idx;
         let picked = self.allow_multiple && self.picked.get(idx).copied().unwrap_or(false);
 
-        let arrow = if selected { "❯ " } else { "  " };
+        let arrow = if selected { "▌ " } else { "  " };
         let check = if self.allow_multiple {
             if picked { "[x] " } else { "[ ] " }
         } else {
             ""
         };
-        let id_span = format!("{}.", opt.id);
-        let recommended_tag = if opt.recommended { " (recommended)" } else { "" };
+        let recommended_tag = if opt.recommended { "  ★" } else { "" };
 
         let row_bg = if selected {
             if opt.recommended {
@@ -422,39 +518,67 @@ impl AskUserModal {
             OPTION_FG
         };
 
-        Line::from(vec![
+        let mut spans = vec![
+            Span::styled(arrow.to_string(), Style::default().fg(row_fg).bg(row_bg)),
             Span::styled(
-                format!("{arrow}{check}"),
+                check.to_string(),
                 Style::default().fg(row_fg).bg(row_bg),
             ),
             Span::styled(
-                format!("{id_span} "),
+                format!("[{}]  ", opt.id),
                 Style::default().fg(row_fg).bg(row_bg).bold(),
             ),
             Span::styled(opt.label.clone(), Style::default().fg(row_fg).bg(row_bg)),
-            Span::styled(
-                recommended_tag,
-                Style::default().fg(RECOMMENDED_FG).bg(row_bg).italic(),
-            ),
-        ])
+        ];
+        if !recommended_tag.is_empty() {
+            spans.push(Span::styled(
+                recommended_tag.to_string(),
+                Style::default().fg(RECOMMENDED_FG).bg(row_bg),
+            ));
+        }
+
+        // Pad to full content width so the background highlight extends to the
+        // right edge of the modal body.
+        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        if used < content_width {
+            spans.push(Span::styled(
+                " ".repeat(content_width - used),
+                Style::default().bg(row_bg),
+            ));
+        }
+
+        Line::from(spans)
     }
 
-    fn render_other_row(&self) -> Line<'static> {
+    fn render_other_row(&self, content_width: usize) -> Line<'static> {
         let selected = self.cursor == self.other_row();
-        let arrow = if selected { "❯ " } else { "  " };
-        let check = if self.allow_multiple { "    " } else { "" };
+        let arrow = if selected { "▌ " } else { "  " };
+        let check_pad = if self.allow_multiple { "    " } else { "" };
         let bg = if selected { SELECTED_BG } else { PANEL_BG };
 
-        Line::from(vec![
+        let mut spans = vec![
+            Span::styled(arrow.to_string(), Style::default().fg(CUSTOM_HINT_FG).bg(bg)),
             Span::styled(
-                format!("{arrow}{check}"),
+                check_pad.to_string(),
                 Style::default().fg(CUSTOM_HINT_FG).bg(bg),
             ),
             Span::styled(
-                "Other (type custom answer)",
+                "Other".to_string(),
+                Style::default().fg(CUSTOM_HINT_FG).bg(bg).bold(),
+            ),
+            Span::styled(
+                "  type a custom answer".to_string(),
                 Style::default().fg(CUSTOM_HINT_FG).bg(bg).italic(),
             ),
-        ])
+        ];
+        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        if used < content_width {
+            spans.push(Span::styled(
+                " ".repeat(content_width - used),
+                Style::default().bg(bg),
+            ));
+        }
+        Line::from(spans)
     }
 
     fn render_typing(&self, frame: &mut Frame, area: Rect) {
@@ -519,15 +643,58 @@ fn hotkey(label: &str) -> Span<'static> {
     )
 }
 
-fn centered_rect(percent_x: u16, area: Rect) -> Rect {
-    let width = (area.width as u32 * percent_x as u32 / 100) as u16;
-    let width = width.clamp(40, area.width.saturating_sub(2).max(40));
-    // Modal height grows with content but bounded to half the screen.
+/// Number of visual rows `text` will occupy when wrapped to `width` columns.
+/// Handles ASCII naively (good enough for the question + context strings the
+/// agent is expected to emit; we cap the result in the caller).
+fn wrapped_height(text: &str, width: usize) -> u16 {
+    if width == 0 {
+        return 1;
+    }
+    let len = text.chars().count();
+    if len == 0 {
+        return 1;
+    }
+    let rows = len.div_ceil(width);
+    rows.max(1) as u16
+}
+
+/// Build a left-indented secondary line with a uniform style and pad it to
+/// `content_width` so the modal feels grid-aligned (no ragged right edge).
+fn padded_secondary_line(
+    text: &str,
+    content_width: usize,
+    fg: Color,
+    italic: bool,
+) -> Line<'static> {
+    let body = format!("    {}", text);
+    let style = if italic {
+        Style::default().fg(fg).italic()
+    } else {
+        Style::default().fg(fg)
+    };
+    let body_len = body.chars().count();
+    let pad = content_width.saturating_sub(body_len);
+    Line::from(vec![
+        Span::styled(body, style),
+        Span::styled(" ".repeat(pad), Style::default()),
+    ])
+}
+
+fn centered_rect(area: Rect) -> Rect {
+    // Width: percent of screen, clamped to [MIN, MAX], and never wider than the
+    // available area.
+    let width_pct = (area.width as u32 * OVERLAY_PERCENT_X as u32 / 100) as u16;
+    let width = width_pct
+        .clamp(OVERLAY_MIN_WIDTH, OVERLAY_MAX_WIDTH)
+        .min(area.width.saturating_sub(2).max(OVERLAY_MIN_WIDTH));
+    // Height: grows with the screen but never less than the minimum and never
+    // more than two-thirds of the screen so the chat stays visible behind it.
+    let two_thirds = (area.height as u32 * 2 / 3) as u16;
     let height = OVERLAY_MIN_HEIGHT
-        .max(area.height / 2)
+        .max(two_thirds)
         .min(area.height.saturating_sub(2));
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
     Rect {
         x,
         y,

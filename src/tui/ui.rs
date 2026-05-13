@@ -1831,9 +1831,21 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         input_ui::wrapped_input_line_count(app, chat_area.width, next_prompt).min(10) as u16;
     // Add 1 line for command suggestions, shell mode hints, or the Ctrl+Enter hint.
     let hint_line_height = input_ui::input_hint_line_height(app);
-    let inline_block_height: u16 = inline_ui_height(app);
-    let inline_ui_gap_height: u16 = if inline_block_height > 0 { 1 } else { 0 };
-    let input_height = base_input_height + hint_line_height;
+    let mut inline_block_height: u16 = inline_ui_height(app);
+    let mut inline_ui_gap_height: u16 = if inline_block_height > 0 { 1 } else { 0 };
+    let mut input_height = base_input_height + hint_line_height;
+
+    // When the askUserQuestion modal is visible, take over the input chunk
+    // entirely (Claude-Code style): hide the regular input, inline UI, etc.
+    let ask_user_height: u16 = app
+        .ask_user_overlay()
+        .map(|c| c.borrow().desired_height())
+        .unwrap_or(0);
+    if ask_user_height > 0 {
+        input_height = ask_user_height;
+        inline_block_height = 0;
+        inline_ui_gap_height = 0;
+    }
 
     if let Some(ref mut capture) = debug_capture {
         capture.render_order.push("prepare_messages".to_string());
@@ -1847,8 +1859,14 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         prepare::prepare_messages(app, wide_prepare_width, chat_area.height)
     });
     let show_donut = super::idle_donut_active(app);
-    let donut_height: u16 = if show_donut { 14 } else { 0 };
-    let notification_height: u16 = if app.has_notification() { 1 } else { 0 };
+    let mut donut_height: u16 = if show_donut { 14 } else { 0 };
+    let mut notification_height: u16 = if app.has_notification() { 1 } else { 0 };
+    if ask_user_height > 0 {
+        // The modal absorbs the input slot; suppress sibling chunks so the
+        // chat above stays visible and stable.
+        notification_height = 0;
+        donut_height = 0;
+    }
     let fixed_height = 1
         + queued_height
         + notification_height
@@ -2118,16 +2136,24 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         draw_inline_ui(frame, app, chunks[4]);
     }
 
-    input_ui::draw_input(
-        frame,
-        app,
-        chunks[6],
-        user_count + pending_count + 1,
-        &mut debug_capture,
-    );
+    if ask_user_height > 0 {
+        // The modal owns the input chunk: render it there and skip the
+        // regular input box / idle animation entirely.
+        if let Some(modal_cell) = app.ask_user_overlay() {
+            modal_cell.borrow().render_inline(frame, chunks[6]);
+        }
+    } else {
+        input_ui::draw_input(
+            frame,
+            app,
+            chunks[6],
+            user_count + pending_count + 1,
+            &mut debug_capture,
+        );
 
-    if donut_height > 0 {
-        animations::draw_idle_animation(frame, app, chunks[7]);
+        if donut_height > 0 {
+            animations::draw_idle_animation(frame, app, chunks[7]);
+        }
     }
 
     // Draw info widget overlays (skip during idle animation - they look out of place)
@@ -2220,12 +2246,9 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         visual_debug::record_frame(capture.build());
     }
 
-    // Top-most overlay: askUserQuestion modal. Draw last so it sits on top
-    // of everything else (chat, side panel, status line). The modal uses
-    // ratatui's `Clear` internally to ensure full opacity.
-    if let Some(modal_cell) = app.ask_user_overlay() {
-        modal_cell.borrow().render(frame);
-    }
+    // Note: The askUserQuestion modal is rendered inline above as part of the
+    // input chunk (chunks[6]) so it cleanly replaces the input box and
+    // communicates that the agent is blocked on the user.
 
     finalize_frame_metrics(
         app,
