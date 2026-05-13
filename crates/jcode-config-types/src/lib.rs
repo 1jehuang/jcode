@@ -598,7 +598,7 @@ pub struct ProviderConfig {
     pub openai_reasoning_effort: Option<String>,
     /// OpenAI transport mode (auto|websocket|https)
     pub openai_transport: Option<String>,
-    /// OpenAI service tier override (priority|flex)
+    /// OpenAI service tier override (priority|flex|off)
     pub openai_service_tier: Option<String>,
     /// OpenAI native compaction mode: "auto", "explicit", or "off".
     pub openai_native_compaction_mode: String,
@@ -636,7 +636,7 @@ impl Default for ProviderConfig {
             default_provider: None,
             openai_reasoning_effort: Some("low".to_string()),
             openai_transport: None,
-            openai_service_tier: Some("priority".to_string()),
+            openai_service_tier: Some("off".to_string()),
             openai_native_compaction_mode: "auto".to_string(),
             openai_native_compaction_threshold_tokens: 200_000,
             cross_provider_failover: CrossProviderFailoverMode::Countdown,

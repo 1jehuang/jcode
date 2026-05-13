@@ -159,10 +159,10 @@ update_channel = "stable"
 openai_reasoning_effort = "low"
 # OpenAI transport mode (auto|websocket|https)
 # openai_transport = "auto"
-# OpenAI service tier override (priority|flex)
-# Defaults to `priority` to match Codex /fast behavior for OpenAI OAuth
-# (higher speed, higher usage). Set to "off" to disable.
-openai_service_tier = "priority"
+# OpenAI service tier override (priority|flex|off)
+# Defaults to `off` so OpenAI Priority/Fast is never used unless explicitly enabled.
+# Set to "priority" or use `/fast on` only when you intentionally want the higher-cost tier.
+openai_service_tier = "off"
 # Cross-provider failover when the same prompt would be resent elsewhere.
 # countdown = 3-second countdown before retrying on another provider; press Esc to cancel (default)
 # manual = show a notice and let you switch yourself
