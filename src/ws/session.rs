@@ -179,7 +179,9 @@ impl SessionManager {
         user_id: &str,
         username: &str,
     ) -> Result<(), String> {
-        if let Some(session) = self.get_session(session_id) {
+        let mut sessions = self.sessions.write();
+        if let Some(session) = sessions.get_mut(session_id) {
+            let session = Arc::<ClientSession>::get_mut(session).ok_or_else(|| "Session has multiple references".to_string())?;
             session.user_id = Some(user_id.to_string());
             session.username = Some(username.to_string());
             Ok(())
@@ -190,7 +192,9 @@ impl SessionManager {
 
     /// 设置工作目录
     pub async fn set_working_directory(&self, session_id: &str, dir: &str) -> Result<(), String> {
-        if let Some(session) = self.get_session(session_id) {
+        let mut sessions = self.sessions.write();
+        if let Some(session) = sessions.get_mut(session_id) {
+            let session = Arc::<ClientSession>::get_mut(session).ok_or_else(|| "Session has multiple references".to_string())?;
             session.working_directory = Some(dir.to_string());
             Ok(())
         } else {

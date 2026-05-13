@@ -15,6 +15,7 @@ use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use super::protocol::{WsMessage, WsRequest, WsResponse, MessageType};
 use super::session::SessionManager;
+use super::handlers;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
@@ -399,7 +400,7 @@ impl WebIdeWebSocketServer {
 
     /// 心跳任务：定期向所有客户端发送心跳
     async fn heartbeat_task(tx: broadcast::Sender<WsMessage>, interval_secs: u64) {
-        let mut interval = tokio::time::interval(tokio::Duration::from_secs(interval_secs));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         
         loop {
             interval.tick().await;

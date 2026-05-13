@@ -592,13 +592,13 @@ impl App {
     ) -> Result<String, String> {
         let port = crate::auth::oauth::openai::DEFAULT_PORT;
         let redirect_uri = crate::auth::oauth::openai::redirect_uri(port);
-        let code = tokio::time::timeout(
+        let code: String = tokio::time::timeout(
             std::time::Duration::from_secs(300),
             crate::auth::oauth::wait_for_callback_async_on_listener(listener, &expected_state),
         )
         .await
-        .map_err(|_| "Login timed out after 5 minutes. Please try again.".to_string())?
-        .map_err(|e| format!("Callback failed: {}", e))?;
+        .map_err(|_| "Login timed out after 5 minutes. Please try again.".to_string())
+        .and_then(|result| result.map_err(|e| format!("Callback failed: {}", e)))?;
 
         Self::openai_token_exchange(verifier, code, label, None, &redirect_uri).await
     }

@@ -22,8 +22,7 @@ pub mod cli;
 pub mod compaction;
 pub mod config;
 pub mod copilot_usage;
-// #[cfg(feature = "dictation")]
-// pub mod dictation;
+pub mod dictation;
 #[cfg(feature = "embeddings")]
 pub mod embedding;
 #[cfg(not(feature = "embeddings"))]
@@ -32,8 +31,7 @@ pub mod embedding_stub;
 pub use embedding_stub as embedding;
 pub mod env;
 pub mod gateway;
-// #[cfg(feature = "gmail")]
-// pub mod gmail;
+pub mod gmail;
 pub mod goal;
 pub mod id;
 pub mod import;
@@ -80,19 +78,16 @@ pub mod terminal_launch;
 pub mod todo;
 pub mod tool;
 pub mod transport;
-// #[cfg(feature = "tui")]
-// pub mod tui;
+pub mod tui;
 pub mod update;
 pub mod usage;
 pub mod util;
 pub mod video_export;
-// #[cfg(feature = "grpc")]
-// pub mod grpc;
+pub mod grpc;
 pub mod scheduler;
 pub mod external;
+pub mod ws;
 pub mod rest;
-// #[cfg(feature = "websocket")]
-// pub mod ws;
 pub mod auto_mode;
 pub mod security;
 pub mod debugger;
@@ -110,12 +105,9 @@ pub mod cache_break_detector;
 pub mod allowlist;
 pub mod workspace_manager;
 pub mod build_module;
-pub mod browser;
-// #[cfg(feature = "browser-bridge")]
-// pub mod browser_bridge;
-// #[cfg(feature = "ide-integration")]
-// pub mod ide_integration;
-pub mod build;
+pub mod sandbox;
+pub mod browser_bridge;
+pub mod ide_integration;
 pub mod checkpoint;
 pub mod sub_agents;
 pub mod hooks_system;
@@ -136,8 +128,17 @@ pub mod atomic_edit_coordinator;
 pub mod skill_system;
 pub mod plan_verifier;
 pub mod streaming_diff_preview;
-pub mod app_state;
-pub mod lsp_enhanced;
+
+// ═══════════════════════════════════════════════════════════
+// 🎯 OUR NEW ENHANCED MODULES (Temporarily disabled for testing)
+// These will be re-enabled after fixing base errors
+// ═══════════════════════════════════════════════════════════
+// pub mod performance;      // Performance monitoring system
+// pub mod monitoring;       // Alerting and metrics  
+// pub mod resilience;       // Error recovery patterns
+// pub mod transports;       // Multi-protocol support
+// pub mod plugins;          // Plugin architecture
+// pub mod ai_enhanced;      // AI intelligence engine
 
 use anyhow::Result;
 use std::sync::Mutex;

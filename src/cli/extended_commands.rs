@@ -525,7 +525,7 @@ pub async fn init_extended_commands() -> ExtendedCommandRegistry {
 
     registry.register(Arc::new(BtwCommand::new())).await;
     registry.register(Arc::new(FastCommand::new())).await;
-    registry.register(Arc::new(RewindCommand::new())).await;
+    registry.register(Arc::new(RewindCommand::new(10))).await;
 
     info!("Extended commands system initialized");
 

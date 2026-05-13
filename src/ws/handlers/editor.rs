@@ -2,7 +2,7 @@
 //!
 //! 处理文档打开、关闭、保存和编辑操作
 
-use crate::ws::protocol::{WsRequest, WsResponse, DocumentState, TextEditOperation, CursorPosition, MessageType};
+use crate::ws::protocol::{WsRequest, WsResponse, DocumentState, TextEditOperation, CursorPosition, MessageType, EditOperationType};
 use crate::ws::session::SessionManager;
 use anyhow::Result;
 use tracing::{info};
@@ -191,10 +191,8 @@ pub async fn handle_save(
 
 /// 应用单个文本编辑操作到内容上
 fn apply_operation(content: &str, operation: &TextEditOperation) -> Result<String> {
-    use EditOperationType::*;
-
     match operation.op_type {
-        Insert => {
+        EditOperationType::Insert => {
             let pos = position_to_offset(content, &operation.start);
             let mut new_content = String::with_capacity(content.len() + operation.text.as_ref().unwrap_or(&String::new()).len());
             
@@ -209,7 +207,7 @@ fn apply_operation(content: &str, operation: &TextEditOperation) -> Result<Strin
             Ok(new_content)
         },
         
-        Delete => {
+        EditOperationType::Delete => {
             let start_pos = position_to_offset(content, &operation.start)
                 .ok_or_else(|| anyhow::anyhow!("Invalid delete start position"))?;
             let end_pos = position_to_offset(content, operation.end.as_ref().unwrap_or(&operation.start))
@@ -226,17 +224,17 @@ fn apply_operation(content: &str, operation: &TextEditOperation) -> Result<Strin
             Ok(new_content)
         },
         
-        Replace => {
+        EditOperationType::Replace => {
             // 先删除，再插入
             let without_deleted = apply_operation(content, &TextEditOperation {
-                op_type: Delete,
+                op_type: EditOperationType::Delete,
                 start: operation.start.clone(),
                 end: operation.end.clone(),
                 text: None,
             })?;
-            
+
             apply_operation(&without_deleted, &TextEditOperation {
-                op_type: Insert,
+                op_type: EditOperationType::Insert,
                 start: operation.start.clone(),
                 end: None,
                 text: operation.text.clone(),

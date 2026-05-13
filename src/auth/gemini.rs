@@ -290,7 +290,7 @@ pub async fn login(no_browser: bool) -> Result<GeminiTokens> {
     if !crate::auth::browser_suppressed(no_browser)
         && let Ok(listener) = super::oauth::bind_callback_listener(0)
     {
-        let port = listener.local_addr()?.port();
+        let port: u16 = listener.local_addr()?.port();
         let redirect_uri = format!("http://127.0.0.1:{port}/oauth2callback");
         let auth_url = build_web_auth_url(&redirect_uri, &challenge, &state)?;
 
@@ -320,6 +320,7 @@ pub async fn login(no_browser: bool) -> Result<GeminiTokens> {
             .await
             {
                 Ok(Ok(code)) => {
+                    let code: String = code;
                     let tokens = exchange_authorization_code(&code, Some(&verifier), &redirect_uri)
                         .await
                         .context("Gemini token exchange failed")?;

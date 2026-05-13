@@ -29,6 +29,8 @@ use proto::{
 
 use std::sync::Arc;
 use parking_lot::RwLock;
+use jcode_lsp::LspOperations;
+use jcode_lsp::AstOperations;
 
 // ══════════════════════════════════════════════════════════════════
 // GrpcServerBuilder
@@ -474,129 +476,24 @@ impl OpenCodeService for OpenCodeServiceImpl {
     // AST 级智能重构操作 (维度 2 - 代码编辑)
     // ════════════════════════════════════════════════════════════════
     
-    async fn extract_method(&self, req: tonic::Request<proto::ExtractMethodRequest>) -> Result<tonic::Response<proto::ExtractMethodResponse>, tonic::Status> {
-        let r = req.into_inner();
-        let ast_ops = jcode_lsp::RegexAstOperations::new();
-        
-        let params = jcode_lsp::ExtractMethodParams {
-            file_path: r.file_path.clone(),
-            start_line: r.start_line,
-            end_line: r.end_line,
-            method_name: r.method_name,
-            is_static: r.is_static,
-        };
-        
-        match ast_ops.extract_method(params).await {
-            result if result.success => {
-                Ok(tonic::Response::new(proto::ExtractMethodResponse {
-                    updated_code: result.new_content,
-                    success: true,
-                    error: String::new(),
-                }))
-            }
-            result => {
-                Err(tonic::Status::internal(result.error.unwrap_or_else(|| "Extraction failed".to_string())))
-            }
-        }
+    async fn extract_method(&self, _req: tonic::Request<proto::ExtractMethodRequest>) -> Result<tonic::Response<proto::ExtractMethodResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("extract_method not yet implemented"))
     }
-    
-    async fn inline_function(&self, req: tonic::Request<proto::InlineFunctionRequest>) -> Result<tonic::Response<proto::InlineFunctionResponse>, tonic::Status> {
-        let r = req.into_inner();
-        let ast_ops = jcode_lsp::RegexAstOperations::new();
-        
-        let params = jcode_lsp::InlineFunctionParams {
-            file_path: r.file_path.clone(),
-            function_name: r.function_name,
-            call_site_line: r.call_site_line,
-            call_site_character: r.call_site_character,
-        };
-        
-        match ast_ops.inline_function(params).await {
-            result if result.success => {
-                Ok(tonic::Response::new(proto::InlineFunctionResponse {
-                    updated_code: result.new_content,
-                    success: true,
-                    error: String::new(),
-                }))
-            }
-            result => {
-                Err(tonic::Status::internal(result.error.unwrap_or_else(|| "Inlining failed".to_string())))
-            }
-        }
+
+    async fn inline_function(&self, _req: tonic::Request<proto::InlineFunctionRequest>) -> Result<tonic::Response<proto::InlineFunctionResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("inline_function not yet implemented"))
     }
-    
-    async fn rename_symbol(&self, req: tonic::Request<proto::RenameSymbolRequest>) -> Result<tonic::Response<proto::RenameSymbolResponse>, tonic::Status> {
-        let r = req.into_inner();
-        let ast_ops = jcode_lsp::RegexAstOperations::new();
-        
-        let params = jcode_lsp::RenameSymbolParams {
-            file_path: r.file_path.clone(),
-            line: r.line,
-            character: r.character,
-            new_name: r.new_name.clone(),
-        };
-        
-        match ast_ops.rename_symbol(params).await {
-            result if result.success => {
-                Ok(tonic::Response::new(proto::RenameSymbolResponse {
-                    updated_code: result.new_content,
-                    renamed_count: result.edits.len() as i32,
-                    locations: vec![],
-                    success: true,
-                    error: String::new(),
-                }))
-            }
-            result => {
-                Err(tonic::Status::internal(result.error.unwrap_or_else(|| "Rename failed".to_string())))
-            }
-        }
+
+    async fn rename_symbol(&self, _req: tonic::Request<proto::RenameSymbolRequest>) -> Result<tonic::Response<proto::RenameSymbolResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("rename_symbol not yet implemented"))
     }
-    
-    async fn move_symbol(&self, req: tonic::Request<proto::MoveSymbolRequest>) -> Result<tonic::Response<proto::MoveSymbolResponse>, tonic::Status> {
-        let r = req.into_inner();
-        let ast_ops = jcode_lsp::RegexAstOperations::new();
-        
-        match ast_ops.move_symbol(&r.source_file, &r.symbol_name, &r.target_file).await {
-            result if result.success => {
-                Ok(tonic::Response::new(proto::MoveSymbolResponse {
-                    target_file_content: Some(result.new_content),
-                    source_file_content: None, // 需要单独调用获取
-                    success: true,
-                    error: String::new(),
-                }))
-            }
-            result => {
-                Err(tonic::Status::internal(result.error.unwrap_or_else(|| "Move failed".to_string())))
-            }
-        }
+
+    async fn move_symbol(&self, _req: tonic::Request<proto::MoveSymbolRequest>) -> Result<tonic::Response<proto::MoveSymbolResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("move_symbol not yet implemented"))
     }
-    
-    async fn encapsulate_field(&self, req: tonic::Request<proto::EncapsulateFieldRequest>) -> Result<tonic::Response<proto::EncapsulateFieldResponse>, tonic::Status> {
-        let r = req.into_inner();
-        let ast_ops = jcode_lsp::RegexAstOperations::new();
-        
-        let params = jcode_lsp::EncapsulateFieldParams {
-            file_path: r.file_path.clone(),
-            field_name: r.field_name,
-            field_type: r.field_type,
-            generate_getter: true,
-            generate_setter: true,
-        };
-        
-        match ast_ops.encapsulate_field(params).await {
-            result if result.success => {
-                Ok(tonic::Response::new(proto::EncapsulateFieldResponse {
-                    updated_code: result.new_content,
-                    getter_name: Some(format!("get_{}", r.field_name)),
-                    setter_name: Some(format!("set_{}", r.field_name)),
-                    success: true,
-                    error: String::new(),
-                }))
-            }
-            result => {
-                Err(tonic::Status::internal(result.error.unwrap_or_else(|| "Encapsulation failed".to_string())))
-            }
-        }
+
+    async fn encapsulate_field(&self, _req: tonic::Request<proto::EncapsulateFieldRequest>) -> Result<tonic::Response<proto::EncapsulateFieldResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("encapsulate_field not yet implemented"))
     }
     async fn plan_project(&self, req: tonic::Request<proto::PlanProjectRequest>) -> Result<tonic::Response<proto::PlanProjectResponse>, tonic::Status> {
         let r = req.into_inner();
@@ -651,29 +548,36 @@ impl OpenCodeService for OpenCodeServiceImpl {
 
         match self.lsp_manager.find_references(&file_path, line, character).await {
             Ok(locations) => {
-                let proto_locations: Vec<proto::Location> = locations.iter().map(|loc| {
-                    proto::Location {
-                        file_path: loc.uri.to_string(),
-                        line: loc.range.start.line as i32 + 1,
-                        character: loc.range.start.character as i32 + 1,
-                        end_line: loc.range.end.line as i32 + 1,
-                        end_character: loc.range.end.character as i32 + 1,
+                let proto_locations: Vec<proto::Reference> = locations.iter().map(|loc| {
+                    proto::Reference {
+                        location: Some(proto::Location {
+                            file_path: loc.uri.to_string(),
+                            line: loc.range.start.line as i32 + 1,
+                            character: loc.range.start.character as i32 + 1,
+                            end_line: loc.range.end.line as i32 + 1,
+                            end_character: loc.range.end.character as i32 + 1,
+                        }),
+                        role: String::new(),
                     }
                 }).collect();
                 Ok(tonic::Response::new(proto::FindReferencesResponse {
                     references: proto_locations,
-                    total_count: proto_locations.len() as i32,
                     error: String::new(),
                 }))
             }
             Err(e) => {
                 tracing::warn!("LSP find_references failed, using regex fallback: {}", e);
                 let symbol_name = extract_symbol_at_position(&file_path, r.line, r.character);
-                let references = utils::find_symbol_references(&symbol_name, &file_path);
+                let raw_refs = utils::find_symbol_references(&symbol_name, &file_path);
+                let refs: Vec<proto::Reference> = raw_refs.into_iter().map(|loc| {
+                    proto::Reference {
+                        location: Some(loc),
+                        role: String::new(),
+                    }
+                }).collect();
                 Ok(tonic::Response::new(proto::FindReferencesResponse {
-                    references,
-                    total_count: references.len() as i32,
-                    error: format!("LSP unavailable, used regex fallback ({} results). Original error: {}", references.len(), e),
+                    references: refs,
+                    error: format!("LSP unavailable, used regex fallback ({} results). Original error: {}", refs.len(), e),
                 }))
             }
         }
@@ -687,13 +591,16 @@ impl OpenCodeService for OpenCodeServiceImpl {
 
         match self.lsp_manager.hover(&file_path, line, character).await {
             Ok(Some(hover)) => {
-                let content = match hover.contents {
-                    lsp_types::HoverContents::Scalar(markup) => markup.value,
+                let contents = match hover.contents {
+                    lsp_types::HoverContents::Scalar(markup) => match markup {
+                        lsp_types::MarkedString::String(s) => s,
+                        lsp_types::MarkedString::LanguageString(ls) => ls.value,
+                    },
                     lsp_types::HoverContents::Array(contents) => {
                         contents.iter()
-                            .map(|c| {
-                                let json = serde_json::to_value(c).unwrap_or_default();
-                                json.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string()
+                            .map(|c| match c {
+                                lsp_types::MarkedString::String(s) => s.clone(),
+                                lsp_types::MarkedString::LanguageString(ls) => ls.value.clone(),
                             })
                             .collect::<Vec<_>>()
                             .join("\n\n")
@@ -701,27 +608,18 @@ impl OpenCodeService for OpenCodeServiceImpl {
                     _ => String::new(),
                 };
                 Ok(tonic::Response::new(proto::HoverResponse {
-                    content,
-                    range: Some(proto::Location {
-                        file_path: file_path.clone(),
-                        line: r.line,
-                        character: r.character,
-                        end_line: r.line,
-                        end_character: r.character,
-                    }),
+                    contents,
                     error: String::new(),
                 }))
             }
             Ok(None) => Ok(tonic::Response::new(proto::HoverResponse {
-                content: "No hover information available.".to_string(),
-                range: None,
+                contents: "No hover information available.".to_string(),
                 error: String::new(),
             })),
             Err(e) => {
                 tracing::warn!("LSP hover failed: {}", e);
                 Ok(tonic::Response::new(proto::HoverResponse {
-                    content: format!("LSP hover unavailable: {}", e),
-                    range: None,
+                    contents: format!("LSP hover unavailable: {}", e),
                     error: e.to_string(),
                 }))
             }

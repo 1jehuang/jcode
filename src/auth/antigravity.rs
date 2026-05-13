@@ -262,6 +262,7 @@ pub async fn login(no_browser: bool) -> Result<AntigravityTokens> {
             .await
             {
                 Ok(Ok(code)) => {
+                    let code: String = code;
                     return exchange_callback_code(&code, &verifier, &redirect_uri).await;
                 }
                 Ok(Err(err)) => {

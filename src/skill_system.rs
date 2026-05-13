@@ -135,7 +135,7 @@ impl LoopSkill {
 
     fn calculate_quality_score(&self, result: &str) -> f64 {
         // Simple heuristic-based scoring
-        let mut score = 0.5;
+        let mut score: f64 = 0.5;
 
         if result.len() > 10 {
             score += 0.1;
