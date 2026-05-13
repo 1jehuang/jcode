@@ -261,22 +261,64 @@ pub fn filter_models_by_allowlist(provider_name: &str, models: Vec<String>) -> V
 
 /// Filter `ModelRoute`s against the configured allowlist for `provider_name`.
 ///
-/// Returns the original list when no allowlist is configured.
+/// When the supplied list contains routes from multiple back-end providers
+/// (as is the case for the aggregated `MultiProvider::model_routes()`), each
+/// route is evaluated against the allowlist that matches its own
+/// `route.provider` / `route.api_method` rather than the surrounding
+/// `provider_name`. This keeps cross-provider model pickers honest: a
+/// configured allowlist for `anthropic`, `openai`, `opencode-go`, ... only
+/// hides models for the providers the user has explicitly restricted, and
+/// leaves the others unrestricted.
 pub fn filter_model_routes_by_allowlist(
     provider_name: &str,
     routes: Vec<crate::provider::ModelRoute>,
 ) -> Vec<crate::provider::ModelRoute> {
-    let Some(patterns) = provider_model_allowlist_patterns(provider_name) else {
+    let cfg = crate::config::config();
+    if cfg.provider.model_allowlist.is_empty() {
         return routes;
-    };
-    let lower_patterns: Vec<String> = patterns
-        .iter()
-        .map(|p| p.to_ascii_lowercase())
-        .collect();
+    }
+
     routes
         .into_iter()
-        .filter(|route| model_matches_any(&route.model.to_ascii_lowercase(), &lower_patterns))
+        .filter(|route| {
+            // Resolve which allowlist key applies to this specific route.
+            let route_key = allowlist_key_for_route(route).unwrap_or_else(|| {
+                canonical_allowlist_key(provider_name)
+            });
+            match provider_model_allowlist_patterns(&route_key) {
+                Some(patterns) => {
+                    let lower_patterns: Vec<String> =
+                        patterns.iter().map(|p| p.to_ascii_lowercase()).collect();
+                    model_matches_any(&route.model.to_ascii_lowercase(), &lower_patterns)
+                }
+                None => true,
+            }
+        })
         .collect()
+}
+
+/// Map a route's `(provider, api_method)` to the canonical allowlist key
+/// used in `[provider.model_allowlist]`. Returns `None` when the route does
+/// not map to a well-known key, in which case the caller falls back to the
+/// surrounding provider context.
+fn allowlist_key_for_route(route: &crate::provider::ModelRoute) -> Option<String> {
+    let api_method = route.api_method.to_ascii_lowercase();
+    let provider_display = route.provider.to_ascii_lowercase();
+
+    // openai-compatible profile routes embed their profile id in api_method.
+    if let Some(profile_id) = api_method.strip_prefix("openai-compatible:") {
+        return Some(profile_id.to_string());
+    }
+
+    match (provider_display.as_str(), api_method.as_str()) {
+        ("anthropic", _) => Some("anthropic".to_string()),
+        ("openai", _) => Some("openai".to_string()),
+        ("gemini", _) => Some("gemini".to_string()),
+        ("antigravity", _) => Some("antigravity".to_string()),
+        ("copilot", _) => Some("copilot".to_string()),
+        ("cursor", _) => Some("cursor".to_string()),
+        _ => None,
+    }
 }
 
 fn model_matches_any(model_lower: &str, lower_patterns: &[String]) -> bool {
