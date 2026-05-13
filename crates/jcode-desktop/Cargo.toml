@@ -9,14 +9,14 @@ anyhow = "1"
 arboard = "3"
 base64 = "0.22"
 bytemuck = { version = "1", features = ["derive"] }
-glyphon = "0.5"
+glyphon = "0.6"
 image = { version = "0.25", default-features = false, features = ["png"] }
 libc = "0.2"
 pollster = "0.3"
 pulldown-cmark = "0.12"
 serde_json = "1"
-wgpu = "0.19"
-winit = "0.29"
+wgpu = "22"
+winit = "0.30"
 
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
 whoami = "1"

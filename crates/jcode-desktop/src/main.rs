@@ -13,8 +13,8 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use bytemuck::{Pod, Zeroable};
 use glyphon::{
-    Attrs, Buffer, Color as TextColor, Family, FontSystem, Metrics, Resolution, Shaping,
-    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Wrap,
+    Attrs, Buffer, Cache, Color as TextColor, Family, FontSystem, Metrics, Resolution, Shaping,
+    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Wrap,
 };
 use image::RgbaImage;
 use render_helpers::*;
@@ -26,11 +26,12 @@ use single_session::{
 };
 use single_session_render::*;
 use wgpu::{CompositeAlphaMode, PresentMode, SurfaceError, TextureUsages};
+use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{Fullscreen, Window, WindowBuilder};
+use winit::window::{Fullscreen, Window, WindowId};
 use workspace::{InputMode, KeyInput, KeyOutcome, PanelSizePreset, Workspace};
 
 use std::collections::hash_map::DefaultHasher;
@@ -226,30 +227,17 @@ async fn run() -> Result<()> {
             "pid": std::process::id(),
         }),
     );
-    let event_loop = EventLoopBuilder::<DesktopUserEvent>::with_user_event()
+    let event_loop = EventLoop::<DesktopUserEvent>::with_user_event()
         .build()
         .context("failed to create event loop")?;
     let event_loop_proxy = event_loop.create_proxy();
     startup_trace.mark("event loop created");
-    let mut window_builder = WindowBuilder::new()
-        .with_title("Jcode Desktop")
-        .with_inner_size(LogicalSize::new(
-            DEFAULT_WINDOW_WIDTH,
-            DEFAULT_WINDOW_HEIGHT,
-        ));
 
-    if fullscreen {
-        window_builder = window_builder.with_fullscreen(Some(Fullscreen::Borderless(None)));
-    }
+    let preferences_save_tx = spawn_desktop_preferences_saver();
+    let (session_event_tx, session_event_rx) = mpsc::channel();
+    spawn_session_event_forwarder(session_event_rx, event_loop_proxy.clone());
 
-    let window: &'static Window = Box::leak(Box::new(
-        window_builder
-            .build(&event_loop)
-            .context("failed to create desktop window")?,
-    ));
-    startup_trace.mark("window created");
-
-    let mut app = if desktop_mode == DesktopMode::WorkspacePrototype {
+    let initial_app = if desktop_mode == DesktopMode::WorkspacePrototype {
         let session_cards = load_session_cards_for_desktop();
         let mut workspace = Workspace::from_session_cards(session_cards);
         if let Some(preferences) = load_desktop_preferences() {
@@ -260,38 +248,137 @@ async fn run() -> Result<()> {
         initial_single_session_app(resume_session_id.as_deref())
     };
     startup_trace.mark("app state initialized");
-    window.set_title(&app.status_title());
-    let mut canvas = Canvas::new(window, startup_trace).await?;
-    startup_trace.mark("canvas ready");
-    let mut modifiers = ModifiersState::empty();
-    let mut cursor_position = winit::dpi::PhysicalPosition::new(0.0, 0.0);
-    let mut selecting_body = false;
-    let mut selecting_draft = false;
-    let mut scroll_accumulator = ScrollLineAccumulator::default();
-    let mut scroll_metrics_cache = SingleSessionScrollMetricsCache::default();
-    let mut hot_reloader = DesktopHotReloader::new();
-    let preferences_save_tx = spawn_desktop_preferences_saver();
-    let mut power_inhibitor = power_inhibit::PowerInhibitor::new();
-    let (session_event_tx, session_event_rx) = mpsc::channel();
-    spawn_session_event_forwarder(session_event_rx, event_loop_proxy.clone());
-    let mut recovery_scan_pending = app.is_single_session();
-    let mut first_frame_presented = false;
-    let mut interaction_latency = DesktopInteractionLatencyProfiler::new();
-    let mut no_paint_watchdog = DesktopNoPaintWatchdog::new();
-    let mut last_backend_redraw_request: Option<Instant> = None;
-    let mut pending_backend_redraw_since: Option<Instant> = None;
+    let recovery_scan_pending = initial_app.is_single_session();
 
-    event_loop.run(move |event, target| {
+    let mut handler = DesktopHandler {
+        app: initial_app,
+        window: None,
+        canvas: None,
+        startup_trace,
+        startup_benchmark,
+        fullscreen,
+        modifiers: ModifiersState::empty(),
+        cursor_position: winit::dpi::PhysicalPosition::new(0.0, 0.0),
+        selecting_body: false,
+        selecting_draft: false,
+        scroll_accumulator: ScrollLineAccumulator::default(),
+        scroll_metrics_cache: SingleSessionScrollMetricsCache::default(),
+        hot_reloader: DesktopHotReloader::new(),
+        preferences_save_tx,
+        power_inhibitor: power_inhibit::PowerInhibitor::new(),
+        session_event_tx,
+        event_loop_proxy,
+        recovery_scan_pending,
+        first_frame_presented: false,
+        interaction_latency: DesktopInteractionLatencyProfiler::new(),
+        no_paint_watchdog: DesktopNoPaintWatchdog::new(),
+        last_backend_redraw_request: None,
+        pending_backend_redraw_since: None,
+        exit_requested: false,
+    };
+
+    event_loop
+        .run_app(&mut handler)
+        .context("event loop terminated with error")?;
+
+    Ok(())
+}
+
+struct DesktopHandler {
+    app: DesktopApp,
+    window: Option<&'static Window>,
+    canvas: Option<Canvas<'static>>,
+    startup_trace: DesktopStartupTrace,
+    startup_benchmark: bool,
+    fullscreen: bool,
+    modifiers: ModifiersState,
+    cursor_position: winit::dpi::PhysicalPosition<f64>,
+    selecting_body: bool,
+    selecting_draft: bool,
+    scroll_accumulator: ScrollLineAccumulator,
+    scroll_metrics_cache: SingleSessionScrollMetricsCache,
+    hot_reloader: DesktopHotReloader,
+    preferences_save_tx: Option<mpsc::Sender<workspace::DesktopPreferences>>,
+    power_inhibitor: power_inhibit::PowerInhibitor,
+    session_event_tx: mpsc::Sender<session_launch::DesktopSessionEvent>,
+    event_loop_proxy: EventLoopProxy<DesktopUserEvent>,
+    recovery_scan_pending: bool,
+    first_frame_presented: bool,
+    interaction_latency: DesktopInteractionLatencyProfiler,
+    no_paint_watchdog: DesktopNoPaintWatchdog,
+    last_backend_redraw_request: Option<Instant>,
+    pending_backend_redraw_since: Option<Instant>,
+    exit_requested: bool,
+}
+
+impl DesktopHandler {
+    fn ensure_window_and_canvas(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+        let mut attrs = Window::default_attributes()
+            .with_title("Jcode Desktop")
+            .with_inner_size(LogicalSize::new(
+                DEFAULT_WINDOW_WIDTH,
+                DEFAULT_WINDOW_HEIGHT,
+            ));
+        if self.fullscreen {
+            attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(None)));
+        }
+        let window = match event_loop.create_window(attrs) {
+            Ok(window) => window,
+            Err(error) => {
+                eprintln!("jcode-desktop: failed to create desktop window: {error:#}");
+                event_loop.exit();
+                return;
+            }
+        };
+        let window: &'static Window = Box::leak(Box::new(window));
+        self.startup_trace.mark("window created");
+        window.set_title(&self.app.status_title());
+        let canvas = match pollster::block_on(Canvas::new(window, self.startup_trace)) {
+            Ok(canvas) => canvas,
+            Err(error) => {
+                eprintln!("jcode-desktop: failed to create canvas: {error:#}");
+                event_loop.exit();
+                return;
+            }
+        };
+        self.startup_trace.mark("canvas ready");
+        self.window = Some(window);
+        self.canvas = Some(canvas);
+        window.request_redraw();
+    }
+
+    fn maybe_exit(&mut self, event_loop: &ActiveEventLoop) {
+        if self.exit_requested {
+            event_loop.exit();
+        }
+    }
+}
+
+impl ApplicationHandler<DesktopUserEvent> for DesktopHandler {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.ensure_window_and_canvas(event_loop);
+    }
+
+    fn new_events(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _cause: winit::event::StartCause,
+    ) {
+        let Some(window) = self.window else { return; };
         let event_loop_now = Instant::now();
-        let has_background_work = app.has_background_work();
-        power_inhibitor.set_active(has_background_work);
-        let default_wake = if has_background_work || app.has_frame_animation() {
+        let has_background_work = self.app.has_background_work();
+        self.power_inhibitor.set_active(has_background_work);
+        let default_wake = if has_background_work || self.app.has_frame_animation() {
             Some(event_loop_now + BACKGROUND_POLL_INTERVAL)
         } else {
             None
         };
-        let backend_wake = pending_backend_redraw_since
-            .and_then(|_| last_backend_redraw_request)
+        let backend_wake = self
+            .pending_backend_redraw_since
+            .and_then(|_| self.last_backend_redraw_request)
             .map(|last| last + BACKEND_REDRAW_FRAME_INTERVAL);
         let wake = match (default_wake, backend_wake) {
             (Some(default_wake), Some(backend_wake)) => Some(default_wake.min(backend_wake)),
@@ -299,24 +386,24 @@ async fn run() -> Result<()> {
             (None, None) => None,
         };
         if let Some(wake) = wake {
-            target.set_control_flow(ControlFlow::WaitUntil(wake));
+            event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
         } else {
-            target.set_control_flow(ControlFlow::Wait);
+            event_loop.set_control_flow(ControlFlow::Wait);
         }
 
-        let pending_interaction_kind = interaction_latency.pending_kind();
-        let frame_animation_active = app.has_frame_animation();
-        let pending_backend_redraw = pending_backend_redraw_since.is_some();
-        let no_paint_active = !first_frame_presented
+        let pending_interaction_kind = self.interaction_latency.pending_kind();
+        let frame_animation_active = self.app.has_frame_animation();
+        let pending_backend_redraw = self.pending_backend_redraw_since.is_some();
+        let no_paint_active = !self.first_frame_presented
             || has_background_work
             || frame_animation_active
             || pending_backend_redraw
             || pending_interaction_kind.is_some();
-        if no_paint_watchdog.observe_active_tick(
+        if self.no_paint_watchdog.observe_active_tick(
             event_loop_now,
             NoPaintWatchdogContext {
                 active: no_paint_active,
-                mode: app.mode(),
+                mode: self.app.mode(),
                 has_background_work,
                 frame_animation_active,
                 pending_backend_redraw,
@@ -325,427 +412,451 @@ async fn run() -> Result<()> {
         ) {
             window.request_redraw();
         }
+    }
 
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let Some(window) = self.window else { return; };
+        if window_id != window.id() {
+            return;
+        }
+        let Some(canvas) = self.canvas.as_mut() else { return; };
         match event {
-            Event::WindowEvent { event, window_id } if window_id == window.id() => match event {
-                WindowEvent::CloseRequested => target.exit(),
-                WindowEvent::Resized(size) => {
-                    canvas.resize(size);
-                    scroll_metrics_cache.clear();
+            WindowEvent::CloseRequested => {
+                event_loop.exit();
+            }
+            WindowEvent::Resized(size) => {
+                canvas.resize(size);
+                self.scroll_metrics_cache.clear();
+                window.request_redraw();
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                canvas.resize(window.inner_size());
+                self.scroll_metrics_cache.clear();
+                window.request_redraw();
+            }
+            WindowEvent::ModifiersChanged(new_modifiers) => {
+                self.modifiers = new_modifiers.state();
+            }
+            WindowEvent::MouseWheel { delta, phase, .. } => {
+                let size = window.inner_size();
+                let now = Instant::now();
+                let previous_smooth_scroll = self.app.single_session_smooth_scroll_lines(
+                    self.scroll_accumulator.pending_lines(),
+                    size,
+                    &mut self.scroll_metrics_cache,
+                );
+                let mut should_redraw = false;
+                if !self.app.is_single_session() {
+                    self.scroll_accumulator.reset();
+                    self.scroll_metrics_cache.clear();
+                } else if let Some(lines) = self.scroll_accumulator.scroll_lines(delta, now) {
+                    should_redraw |= self
+                        .app
+                        .scroll_single_session_body(lines, size, &mut self.scroll_metrics_cache);
+                }
+                if matches!(phase, TouchPhase::Cancelled) {
+                    self.scroll_accumulator.reset();
+                }
+                let next_smooth_scroll = self.app.single_session_smooth_scroll_lines(
+                    self.scroll_accumulator.pending_lines(),
+                    size,
+                    &mut self.scroll_metrics_cache,
+                );
+                should_redraw |= (next_smooth_scroll - previous_smooth_scroll).abs()
+                    >= SCROLL_FRACTIONAL_EPSILON;
+                if should_redraw {
+                    self.interaction_latency.mark("mouse_wheel", now);
                     window.request_redraw();
                 }
-                WindowEvent::ScaleFactorChanged { .. } => {
-                    canvas.resize(window.inner_size());
-                    scroll_metrics_cache.clear();
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let cursor_started = Instant::now();
+                self.cursor_position = position;
+                if self.selecting_draft
+                    && self.app.update_single_session_draft_selection_at(
+                        self.cursor_position.x as f32,
+                        self.cursor_position.y as f32,
+                        window.inner_size(),
+                    )
+                {
+                    self.interaction_latency
+                        .mark("draft_selection_drag", cursor_started);
+                    window.request_redraw();
+                } else if self.selecting_body
+                    && self.app.update_single_session_selection_at(
+                        self.cursor_position.x as f32,
+                        self.cursor_position.y as f32,
+                        window.inner_size(),
+                    )
+                {
+                    self.interaction_latency
+                        .mark("body_selection_drag", cursor_started);
                     window.request_redraw();
                 }
-                WindowEvent::ModifiersChanged(new_modifiers) => {
-                    modifiers = new_modifiers.state();
-                }
-                WindowEvent::MouseWheel { delta, phase, .. } => {
-                    let size = window.inner_size();
-                    let now = Instant::now();
-                    let previous_smooth_scroll = app.single_session_smooth_scroll_lines(
-                        scroll_accumulator.pending_lines(),
-                        size,
-                        &mut scroll_metrics_cache,
-                    );
-                    let mut should_redraw = false;
-                    if !app.is_single_session() {
-                        scroll_accumulator.reset();
-                        scroll_metrics_cache.clear();
-                    } else if let Some(lines) = scroll_accumulator.scroll_lines(delta, now) {
-                        should_redraw |=
-                            app.scroll_single_session_body(lines, size, &mut scroll_metrics_cache);
-                    }
-                    if matches!(phase, TouchPhase::Cancelled) {
-                        scroll_accumulator.reset();
-                    }
-                    let next_smooth_scroll = app.single_session_smooth_scroll_lines(
-                        scroll_accumulator.pending_lines(),
-                        size,
-                        &mut scroll_metrics_cache,
-                    );
-                    should_redraw |= (next_smooth_scroll - previous_smooth_scroll).abs()
-                        >= SCROLL_FRACTIONAL_EPSILON;
-                    if should_redraw {
-                        interaction_latency.mark("mouse_wheel", now);
-                        window.request_redraw();
-                    }
-                }
-                WindowEvent::CursorMoved { position, .. } => {
-                    let cursor_started = Instant::now();
-                    cursor_position = position;
-                    if selecting_draft
-                        && app.update_single_session_draft_selection_at(
-                            cursor_position.x as f32,
-                            cursor_position.y as f32,
-                            window.inner_size(),
-                        )
-                    {
-                        interaction_latency.mark("draft_selection_drag", cursor_started);
-                        window.request_redraw();
-                    } else if selecting_body
-                        && app.update_single_session_selection_at(
-                            cursor_position.x as f32,
-                            cursor_position.y as f32,
-                            window.inner_size(),
-                        )
-                    {
-                        interaction_latency.mark("body_selection_drag", cursor_started);
-                        window.request_redraw();
-                    }
-                }
-                WindowEvent::MouseInput {
-                    state,
-                    button: MouseButton::Left,
-                    ..
-                } => {
-                    let mouse_started = Instant::now();
-                    match state {
-                        ElementState::Pressed => {
-                        if app.begin_single_session_draft_selection_at(
-                            cursor_position.x as f32,
-                            cursor_position.y as f32,
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
+                let mouse_started = Instant::now();
+                match state {
+                    ElementState::Pressed => {
+                        if self.app.begin_single_session_draft_selection_at(
+                            self.cursor_position.x as f32,
+                            self.cursor_position.y as f32,
                             window.inner_size(),
                         ) {
-                            selecting_body = false;
-                            selecting_draft = true;
-                            window.set_title(&app.status_title());
-                            interaction_latency.mark("mouse_press", mouse_started);
+                            self.selecting_body = false;
+                            self.selecting_draft = true;
+                            window.set_title(&self.app.status_title());
+                            self.interaction_latency.mark("mouse_press", mouse_started);
                             window.request_redraw();
                             return;
                         }
 
-                        selecting_draft = false;
-                        selecting_body = app.begin_single_session_selection_at(
-                            cursor_position.x as f32,
-                            cursor_position.y as f32,
+                        self.selecting_draft = false;
+                        self.selecting_body = self.app.begin_single_session_selection_at(
+                            self.cursor_position.x as f32,
+                            self.cursor_position.y as f32,
                             window.inner_size(),
                         );
-                        if selecting_body {
-                            interaction_latency.mark("mouse_press", mouse_started);
+                        if self.selecting_body {
+                            self.interaction_latency.mark("mouse_press", mouse_started);
                             window.request_redraw();
                         }
                     }
                     ElementState::Released => {
-                        if selecting_draft {
-                            app.update_single_session_draft_selection_at(
-                                cursor_position.x as f32,
-                                cursor_position.y as f32,
+                        if self.selecting_draft {
+                            self.app.update_single_session_draft_selection_at(
+                                self.cursor_position.x as f32,
+                                self.cursor_position.y as f32,
                                 window.inner_size(),
                             );
-                            selecting_draft = false;
-                            let selected = app.selected_single_session_draft_text();
+                            self.selecting_draft = false;
+                            let selected = self.app.selected_single_session_draft_text();
                             if let Some(text) = selected {
-                                copy_text_to_clipboard(&text, "copied input selection", &mut app);
+                                copy_text_to_clipboard(
+                                    &text,
+                                    "copied input selection",
+                                    &mut self.app,
+                                );
                             }
-                            window.set_title(&app.status_title());
-                            interaction_latency.mark("mouse_release", mouse_started);
+                            window.set_title(&self.app.status_title());
+                            self.interaction_latency
+                                .mark("mouse_release", mouse_started);
                             window.request_redraw();
-                        } else if selecting_body {
-                            app.update_single_session_selection_at(
-                                cursor_position.x as f32,
-                                cursor_position.y as f32,
+                        } else if self.selecting_body {
+                            self.app.update_single_session_selection_at(
+                                self.cursor_position.x as f32,
+                                self.cursor_position.y as f32,
                                 window.inner_size(),
                             );
-                            selecting_body = false;
-                            let selected = app.selected_single_session_text(window.inner_size());
+                            self.selecting_body = false;
+                            let selected = self
+                                .app
+                                .selected_single_session_text(window.inner_size());
                             if let Some(text) = selected {
-                                copy_text_to_clipboard(&text, "copied selection", &mut app);
+                                copy_text_to_clipboard(&text, "copied selection", &mut self.app);
                             }
-                            window.set_title(&app.status_title());
-                            interaction_latency.mark("mouse_release", mouse_started);
+                            window.set_title(&self.app.status_title());
+                            self.interaction_latency
+                                .mark("mouse_release", mouse_started);
                             window.request_redraw();
                         }
-                    }
                     }
                 }
-                WindowEvent::KeyboardInput { event, .. }
-                    if event.state == ElementState::Pressed =>
-                {
-                    let keyboard_started = Instant::now();
-                    let size = window.inner_size();
-                    let had_smooth_scroll = app
-                        .single_session_smooth_scroll_lines(
-                            scroll_accumulator.pending_lines(),
-                            size,
-                            &mut scroll_metrics_cache,
-                        )
-                        .abs()
-                        >= SCROLL_FRACTIONAL_EPSILON;
-                    scroll_accumulator.reset();
-                    if had_smooth_scroll {
-                        window.request_redraw();
-                    }
-                    let key_input = to_key_input(&event.logical_key, modifiers);
-                    let key_debug = format!("{key_input:?}");
-                    interaction_latency.mark("keyboard_input", keyboard_started);
-                    if key_input == KeyInput::RefreshSessions && app.is_workspace() {
-                        spawn_session_cards_load(
-                            DesktopSessionCardsPurpose::WorkspaceRefresh,
-                            event_loop_proxy.clone(),
-                            Duration::ZERO,
-                        );
-                        window.request_redraw();
-                        return;
-                    }
+            }
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed =>
+            {
+                let keyboard_started = Instant::now();
+                let size = window.inner_size();
+                let had_smooth_scroll = self
+                    .app
+                    .single_session_smooth_scroll_lines(
+                        self.scroll_accumulator.pending_lines(),
+                        size,
+                        &mut self.scroll_metrics_cache,
+                    )
+                    .abs()
+                    >= SCROLL_FRACTIONAL_EPSILON;
+                self.scroll_accumulator.reset();
+                if had_smooth_scroll {
+                    window.request_redraw();
+                }
+                let key_input = to_key_input(&event.logical_key, self.modifiers);
+                let key_debug = format!("{key_input:?}");
+                self.interaction_latency.mark("keyboard_input", keyboard_started);
+                if key_input == KeyInput::RefreshSessions && self.app.is_workspace() {
+                    spawn_session_cards_load(
+                        DesktopSessionCardsPurpose::WorkspaceRefresh,
+                        self.event_loop_proxy.clone(),
+                        Duration::ZERO,
+                    );
+                    window.request_redraw();
+                    return;
+                }
 
-                    match app.handle_key(key_input) {
-                        KeyOutcome::Exit => target.exit(),
-                        KeyOutcome::Redraw => {
-                            if let DesktopApp::Workspace(workspace) = &app {
-                                queue_desktop_preferences_save(workspace, &preferences_save_tx);
-                            }
-                            window.set_title(&app.status_title());
+                match self.app.handle_key(key_input) {
+                    KeyOutcome::Exit => event_loop.exit(),
+                    KeyOutcome::Redraw => {
+                        if let DesktopApp::Workspace(workspace) = &self.app {
+                            queue_desktop_preferences_save(workspace, &self.preferences_save_tx);
+                        }
+                        window.set_title(&self.app.status_title());
+                        window.request_redraw();
+                    }
+                    KeyOutcome::OpenSession { session_id, title } => {
+                        if let DesktopApp::Workspace(workspace) = &self.app {
+                            queue_desktop_preferences_save(workspace, &self.preferences_save_tx);
+                        }
+                        if let Err(error) =
+                            session_launch::launch_validated_resume_session(&session_id, &title)
+                        {
+                            eprintln!(
+                                "jcode-desktop: failed to open session {session_id}: {error:#}"
+                            );
+                        }
+                    }
+                    KeyOutcome::SpawnSession => {
+                        if let DesktopApp::SingleSession(single_session_app) = &mut self.app {
+                            single_session_app.reset_fresh_session();
+                            window.set_title(&self.app.status_title());
+                            window.request_redraw();
+                            return;
+                        }
+
+                        if let Err(error) = session_launch::launch_new_session() {
+                            eprintln!("jcode-desktop: failed to spawn session: {error:#}");
+                        } else {
+                            spawn_session_cards_load(
+                                DesktopSessionCardsPurpose::WorkspaceRefresh,
+                                self.event_loop_proxy.clone(),
+                                SESSION_SPAWN_REFRESH_DELAY,
+                            );
                             window.request_redraw();
                         }
-                        KeyOutcome::OpenSession { session_id, title } => {
-                            if let DesktopApp::Workspace(workspace) = &app {
-                                queue_desktop_preferences_save(workspace, &preferences_save_tx);
-                            }
-                            if let Err(error) =
-                                session_launch::launch_validated_resume_session(&session_id, &title)
-                            {
-                                eprintln!(
-                                    "jcode-desktop: failed to open session {session_id}: {error:#}"
-                                );
-                            }
-                        }
-                        KeyOutcome::SpawnSession => {
-                            if let DesktopApp::SingleSession(app) = &mut app {
-                                app.reset_fresh_session();
-                                window.set_title(&app.status_title());
-                                window.request_redraw();
-                                return;
-                            }
-
-                            if let Err(error) = session_launch::launch_new_session() {
-                                eprintln!("jcode-desktop: failed to spawn session: {error:#}");
-                            } else {
-                                spawn_session_cards_load(
-                                    DesktopSessionCardsPurpose::WorkspaceRefresh,
-                                    event_loop_proxy.clone(),
-                                    SESSION_SPAWN_REFRESH_DELAY,
-                                );
-                                window.request_redraw();
-                            }
-                        }
-                        KeyOutcome::SendDraft {
-                            session_id,
-                            title,
-                            message,
-                            images,
-                        } => {
-                            if app.is_single_session() {
-                                match session_launch::spawn_message_to_session(
-                                    session_id.clone(),
-                                    message,
-                                    images,
-                                    session_event_tx.clone(),
-                                ) {
-                                    Ok(handle) => app.set_single_session_handle(handle),
-                                    Err(error) => apply_single_session_error(&mut app, error),
-                                }
-                                window.set_title(&app.status_title());
-                                window.request_redraw();
-                            } else if !images.is_empty() {
-                                match session_launch::spawn_message_to_session(
-                                    session_id.clone(),
-                                    message,
-                                    images,
-                                    session_event_tx.clone(),
-                                ) {
-                                    Ok(_handle) => {
-                                        spawn_session_cards_load(
-                                            DesktopSessionCardsPurpose::WorkspaceRefresh,
-                                            event_loop_proxy.clone(),
-                                            SESSION_SPAWN_REFRESH_DELAY,
-                                        );
-                                        window.request_redraw();
-                                    }
-                                    Err(error) => eprintln!(
-                                        "jcode-desktop: failed to send image draft to {session_id}: {error:#}"
-                                    ),
-                                }
-                            } else if let Err(error) = session_launch::send_message_to_session(
-                                &session_id,
-                                &title,
-                                &message,
-                            ) {
-                                eprintln!(
-                                    "jcode-desktop: failed to send draft to {session_id}: {error:#}"
-                                );
-                            } else {
-                                spawn_session_cards_load(
-                                    DesktopSessionCardsPurpose::WorkspaceRefresh,
-                                    event_loop_proxy.clone(),
-                                    SESSION_SPAWN_REFRESH_DELAY,
-                                );
-                                window.request_redraw();
-                            }
-                        }
-                        KeyOutcome::StartFreshSession { message, images } => {
-                            match session_launch::spawn_fresh_server_session(
+                    }
+                    KeyOutcome::SendDraft {
+                        session_id,
+                        title,
+                        message,
+                        images,
+                    } => {
+                        if self.app.is_single_session() {
+                            match session_launch::spawn_message_to_session(
+                                session_id.clone(),
                                 message,
                                 images,
-                                session_event_tx.clone(),
+                                self.session_event_tx.clone(),
                             ) {
-                                Ok(handle) => app.set_single_session_handle(handle),
-                                Err(error) => apply_single_session_error(&mut app, error),
+                                Ok(handle) => self.app.set_single_session_handle(handle),
+                                Err(error) => apply_single_session_error(&mut self.app, error),
                             }
-                            window.set_title(&app.status_title());
+                            window.set_title(&self.app.status_title());
                             window.request_redraw();
-                        }
-                        KeyOutcome::CancelGeneration => {
-                            app.cancel_single_session_generation();
-                            window.set_title(&app.status_title());
-                            window.request_redraw();
-                        }
-                        KeyOutcome::CopyLatestResponse(text) => {
-                            copy_text_to_clipboard(&text, "copied latest response", &mut app);
-                            window.set_title(&app.status_title());
-                            window.request_redraw();
-                        }
-                        KeyOutcome::CutDraftToClipboard(text) => {
-                            copy_text_to_clipboard(&text, "cut input line", &mut app);
-                            window.set_title(&app.status_title());
-                            window.request_redraw();
-                        }
-                        KeyOutcome::CycleModel(direction) => {
-                            if let Err(error) = session_launch::spawn_cycle_model(
-                                direction,
-                                app.single_session_live_id(),
-                                session_event_tx.clone(),
+                        } else if !images.is_empty() {
+                            match session_launch::spawn_message_to_session(
+                                session_id.clone(),
+                                message,
+                                images,
+                                self.session_event_tx.clone(),
                             ) {
-                                apply_single_session_error(&mut app, error);
-                            } else {
-                                app.apply_session_event(
-                                    session_launch::DesktopSessionEvent::Status(
-                                        "switching model".to_string(),
-                                    ),
-                                );
-                            }
-                            window.set_title(&app.status_title());
-                            window.request_redraw();
-                        }
-                        KeyOutcome::CycleReasoningEffort(direction) => {
-                            if let Err(error) = session_launch::spawn_cycle_reasoning_effort(
-                                direction,
-                                app.single_session_live_id(),
-                                session_event_tx.clone(),
-                            ) {
-                                apply_single_session_error(&mut app, error);
-                            } else {
-                                app.apply_session_event(
-                                    session_launch::DesktopSessionEvent::Status(
-                                        "switching reasoning effort".to_string(),
-                                    ),
-                                );
-                            }
-                            window.set_title(&app.status_title());
-                            window.request_redraw();
-                        }
-                        KeyOutcome::LoadModelCatalog => {
-                            if let Err(error) = session_launch::spawn_load_model_catalog(
-                                app.single_session_live_id(),
-                                session_event_tx.clone(),
-                            ) {
-                                apply_single_session_error(&mut app, error);
-                            }
-                            window.set_title(&app.status_title());
-                            window.request_redraw();
-                        }
-                        KeyOutcome::LoadSessionSwitcher => {
-                            spawn_session_cards_load(
-                                DesktopSessionCardsPurpose::SingleSessionSwitcher,
-                                event_loop_proxy.clone(),
-                                Duration::ZERO,
-                            );
-                            window.set_title(&app.status_title());
-                            window.request_redraw();
-                        }
-                        KeyOutcome::RestoreCrashedSessions => {
-                            spawn_restore_crashed_sessions(event_loop_proxy.clone());
-                            window.set_title(&app.status_title());
-                            window.request_redraw();
-                        }
-                        KeyOutcome::SetModel(model) => {
-                            if let Err(error) = session_launch::spawn_set_model(
-                                model,
-                                app.single_session_live_id(),
-                                session_event_tx.clone(),
-                            ) {
-                                apply_single_session_error(&mut app, error);
-                            } else {
-                                app.apply_session_event(
-                                    session_launch::DesktopSessionEvent::Status(
-                                        "switching model".to_string(),
-                                    ),
-                                );
-                            }
-                            window.set_title(&app.status_title());
-                            window.request_redraw();
-                        }
-                        KeyOutcome::SendStdinResponse { request_id, input } => {
-                            if let Err(error) = app.send_single_session_stdin_response(request_id, input)
-                            {
-                                apply_single_session_error(&mut app, error);
-                            }
-                            window.set_title(&app.status_title());
-                            window.request_redraw();
-                        }
-                        KeyOutcome::AttachClipboardImage => {
-                            match clipboard_image_png_base64() {
-                                Ok((media_type, base64_data)) => {
-                                    app.attach_clipboard_image(media_type, base64_data);
+                                Ok(_handle) => {
+                                    spawn_session_cards_load(
+                                        DesktopSessionCardsPurpose::WorkspaceRefresh,
+                                        self.event_loop_proxy.clone(),
+                                        SESSION_SPAWN_REFRESH_DELAY,
+                                    );
+                                    window.request_redraw();
                                 }
-                                Err(error) => apply_single_session_error(&mut app, error),
+                                Err(error) => eprintln!(
+                                    "jcode-desktop: failed to send image draft to {session_id}: {error:#}"
+                                ),
                             }
-                            window.set_title(&app.status_title());
+                        } else if let Err(error) =
+                            session_launch::send_message_to_session(&session_id, &title, &message)
+                        {
+                            eprintln!(
+                                "jcode-desktop: failed to send draft to {session_id}: {error:#}"
+                            );
+                        } else {
+                            spawn_session_cards_load(
+                                DesktopSessionCardsPurpose::WorkspaceRefresh,
+                                self.event_loop_proxy.clone(),
+                                SESSION_SPAWN_REFRESH_DELAY,
+                            );
                             window.request_redraw();
                         }
-                        KeyOutcome::PasteText => {
-                            if let Err(error) = paste_clipboard_into_app(&mut app) {
-                                apply_single_session_error(&mut app, error);
-                            }
-                            window.set_title(&app.status_title());
-                            window.request_redraw();
-                        }
-                        KeyOutcome::None => {}
                     }
-                    log_desktop_slow_interaction(
-                        "keyboard_input",
-                        keyboard_started.elapsed(),
-                        serde_json::json!({ "key": key_debug }),
-                    );
+                    KeyOutcome::StartFreshSession { message, images } => {
+                        match session_launch::spawn_fresh_server_session(
+                            message,
+                            images,
+                            self.session_event_tx.clone(),
+                        ) {
+                            Ok(handle) => self.app.set_single_session_handle(handle),
+                            Err(error) => apply_single_session_error(&mut self.app, error),
+                        }
+                        window.set_title(&self.app.status_title());
+                        window.request_redraw();
+                    }
+                    KeyOutcome::CancelGeneration => {
+                        self.app.cancel_single_session_generation();
+                        window.set_title(&self.app.status_title());
+                        window.request_redraw();
+                    }
+                    KeyOutcome::CopyLatestResponse(text) => {
+                        copy_text_to_clipboard(&text, "copied latest response", &mut self.app);
+                        window.set_title(&self.app.status_title());
+                        window.request_redraw();
+                    }
+                    KeyOutcome::CutDraftToClipboard(text) => {
+                        copy_text_to_clipboard(&text, "cut input line", &mut self.app);
+                        window.set_title(&self.app.status_title());
+                        window.request_redraw();
+                    }
+                    KeyOutcome::CycleModel(direction) => {
+                        if let Err(error) = session_launch::spawn_cycle_model(
+                            direction,
+                            self.app.single_session_live_id(),
+                            self.session_event_tx.clone(),
+                        ) {
+                            apply_single_session_error(&mut self.app, error);
+                        } else {
+                            self.app.apply_session_event(
+                                session_launch::DesktopSessionEvent::Status(
+                                    "switching model".to_string(),
+                                ),
+                            );
+                        }
+                        window.set_title(&self.app.status_title());
+                        window.request_redraw();
+                    }
+                    KeyOutcome::CycleReasoningEffort(direction) => {
+                        if let Err(error) = session_launch::spawn_cycle_reasoning_effort(
+                            direction,
+                            self.app.single_session_live_id(),
+                            self.session_event_tx.clone(),
+                        ) {
+                            apply_single_session_error(&mut self.app, error);
+                        } else {
+                            self.app.apply_session_event(
+                                session_launch::DesktopSessionEvent::Status(
+                                    "switching reasoning effort".to_string(),
+                                ),
+                            );
+                        }
+                        window.set_title(&self.app.status_title());
+                        window.request_redraw();
+                    }
+                    KeyOutcome::LoadModelCatalog => {
+                        if let Err(error) = session_launch::spawn_load_model_catalog(
+                            self.app.single_session_live_id(),
+                            self.session_event_tx.clone(),
+                        ) {
+                            apply_single_session_error(&mut self.app, error);
+                        }
+                        window.set_title(&self.app.status_title());
+                        window.request_redraw();
+                    }
+                    KeyOutcome::LoadSessionSwitcher => {
+                        spawn_session_cards_load(
+                            DesktopSessionCardsPurpose::SingleSessionSwitcher,
+                            self.event_loop_proxy.clone(),
+                            Duration::ZERO,
+                        );
+                        window.set_title(&self.app.status_title());
+                        window.request_redraw();
+                    }
+                    KeyOutcome::RestoreCrashedSessions => {
+                        spawn_restore_crashed_sessions(self.event_loop_proxy.clone());
+                        window.set_title(&self.app.status_title());
+                        window.request_redraw();
+                    }
+                    KeyOutcome::SetModel(model) => {
+                        if let Err(error) = session_launch::spawn_set_model(
+                            model,
+                            self.app.single_session_live_id(),
+                            self.session_event_tx.clone(),
+                        ) {
+                            apply_single_session_error(&mut self.app, error);
+                        } else {
+                            self.app.apply_session_event(
+                                session_launch::DesktopSessionEvent::Status(
+                                    "switching model".to_string(),
+                                ),
+                            );
+                        }
+                        window.set_title(&self.app.status_title());
+                        window.request_redraw();
+                    }
+                    KeyOutcome::SendStdinResponse { request_id, input } => {
+                        if let Err(error) =
+                            self.app.send_single_session_stdin_response(request_id, input)
+                        {
+                            apply_single_session_error(&mut self.app, error);
+                        }
+                        window.set_title(&self.app.status_title());
+                        window.request_redraw();
+                    }
+                    KeyOutcome::AttachClipboardImage => {
+                        match clipboard_image_png_base64() {
+                            Ok((media_type, base64_data)) => {
+                                self.app.attach_clipboard_image(media_type, base64_data);
+                            }
+                            Err(error) => apply_single_session_error(&mut self.app, error),
+                        }
+                        window.set_title(&self.app.status_title());
+                        window.request_redraw();
+                    }
+                    KeyOutcome::PasteText => {
+                        if let Err(error) = paste_clipboard_into_app(&mut self.app) {
+                            apply_single_session_error(&mut self.app, error);
+                        }
+                        window.set_title(&self.app.status_title());
+                        window.request_redraw();
+                    }
+                    KeyOutcome::None => {}
                 }
-                WindowEvent::RedrawRequested => {
-                    let smooth_scroll_lines = app.single_session_smooth_scroll_lines(
-                        scroll_accumulator.pending_lines(),
-                        window.inner_size(),
-                        &mut scroll_metrics_cache,
-                    );
-                    match canvas.render(
-                        &app,
-                        window.current_monitor().map(|monitor| monitor.size()),
-                        smooth_scroll_lines,
-                    ) {
+                log_desktop_slow_interaction(
+                    "keyboard_input",
+                    keyboard_started.elapsed(),
+                    serde_json::json!({ "key": key_debug }),
+                );
+            }
+            WindowEvent::RedrawRequested => {
+                let smooth_scroll_lines = self.app.single_session_smooth_scroll_lines(
+                    self.scroll_accumulator.pending_lines(),
+                    window.inner_size(),
+                    &mut self.scroll_metrics_cache,
+                );
+                match canvas.render(
+                    &self.app,
+                    window.current_monitor().map(|monitor| monitor.size()),
+                    smooth_scroll_lines,
+                ) {
                     Ok(frame) => {
-                        no_paint_watchdog.observe_presented(Instant::now(), &frame);
-                        interaction_latency.observe_presented(&frame);
-                        if !first_frame_presented {
-                            first_frame_presented = true;
-                            startup_trace.mark("first frame presented");
-                            if startup_benchmark {
-                                target.exit();
+                        self.no_paint_watchdog.observe_presented(Instant::now(), &frame);
+                        self.interaction_latency.observe_presented(&frame);
+                        if !self.first_frame_presented {
+                            self.first_frame_presented = true;
+                            self.startup_trace.mark("first frame presented");
+                            if self.startup_benchmark {
+                                event_loop.exit();
                                 return;
                             }
-                            if recovery_scan_pending {
-                                recovery_scan_pending = false;
+                            if self.recovery_scan_pending {
+                                self.recovery_scan_pending = false;
                                 spawn_recovery_session_count_scan(
-                                    event_loop_proxy.clone(),
-                                    startup_trace,
+                                    self.event_loop_proxy.clone(),
+                                    self.startup_trace,
                                 );
                             }
                         }
@@ -757,59 +868,65 @@ async fn run() -> Result<()> {
                         canvas.resize(window.inner_size());
                         window.request_redraw();
                     }
-                    Err(SurfaceError::OutOfMemory) => target.exit(),
+                    Err(SurfaceError::OutOfMemory) => event_loop.exit(),
                     Err(SurfaceError::Timeout) => {
                         window.request_redraw();
                     }
-                    }
                 }
-                _ => {}
-            },
-            Event::UserEvent(DesktopUserEvent::RecoveryCount(recovery_count)) => {
-                if let DesktopApp::SingleSession(single_session) = &mut app {
+            }
+            _ => {}
+        }
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: DesktopUserEvent) {
+        let Some(window) = self.window else { return; };
+        match event {
+            DesktopUserEvent::RecoveryCount(recovery_count) => {
+                if let DesktopApp::SingleSession(single_session) = &mut self.app {
                     single_session.set_recovery_session_count(recovery_count);
-                    window.set_title(&app.status_title());
-                    interaction_latency.mark("recovery_count", Instant::now());
+                    window.set_title(&self.app.status_title());
+                    self.interaction_latency.mark("recovery_count", Instant::now());
                     window.request_redraw();
                 }
             }
-            Event::UserEvent(DesktopUserEvent::SessionCardsLoaded {
+            DesktopUserEvent::SessionCardsLoaded {
                 purpose,
                 cards,
                 loaded_in,
-            }) => {
+            } => {
                 let card_count = cards.len();
                 let mut applied = false;
                 match purpose {
                     DesktopSessionCardsPurpose::WorkspaceRefresh => {
-                        if let DesktopApp::Workspace(workspace) = &mut app {
+                        if let DesktopApp::Workspace(workspace) = &mut self.app {
                             workspace.replace_session_cards(cards);
-                            queue_desktop_preferences_save(workspace, &preferences_save_tx);
+                            queue_desktop_preferences_save(workspace, &self.preferences_save_tx);
                             applied = true;
                         }
                     }
                     DesktopSessionCardsPurpose::SingleSessionSwitcher => {
-                        if app.is_single_session() {
-                            app.apply_single_session_switcher_cards(cards);
+                        if self.app.is_single_session() {
+                            self.app.apply_single_session_switcher_cards(cards);
                             applied = true;
                         }
                     }
                 }
                 log_desktop_session_cards_load_profile(purpose, loaded_in, card_count, applied);
                 if applied {
-                    window.set_title(&app.status_title());
-                    interaction_latency.mark("session_cards_load", Instant::now());
+                    window.set_title(&self.app.status_title());
+                    self.interaction_latency
+                        .mark("session_cards_load", Instant::now());
                     window.request_redraw();
                 }
             }
-            Event::UserEvent(DesktopUserEvent::SessionCardLoaded {
+            DesktopUserEvent::SessionCardLoaded {
                 session_id,
                 card,
                 loaded_in,
-            }) => {
+            } => {
                 let card_found = card.is_some();
                 let mut applied = false;
-                if let DesktopApp::SingleSession(single_session) = &mut app
+                if let DesktopApp::SingleSession(single_session) = &mut self.app
                     && single_session.live_session_id.as_deref() == Some(session_id.as_str())
                     && let Some(card) = card
                 {
@@ -823,16 +940,17 @@ async fn run() -> Result<()> {
                     applied,
                 );
                 if applied {
-                    window.set_title(&app.status_title());
-                    interaction_latency.mark("session_card_refresh", Instant::now());
+                    window.set_title(&self.app.status_title());
+                    self.interaction_latency
+                        .mark("session_card_refresh", Instant::now());
                     window.request_redraw();
                 }
             }
-            Event::UserEvent(DesktopUserEvent::CrashedSessionsRestoreFinished {
+            DesktopUserEvent::CrashedSessionsRestoreFinished {
                 restored,
                 errors,
                 elapsed,
-            }) => {
+            } => {
                 log_desktop_crashed_sessions_restore_profile(restored, errors.len(), elapsed);
                 if restored == 0 {
                     let message = if errors.is_empty() {
@@ -840,24 +958,28 @@ async fn run() -> Result<()> {
                     } else {
                         format!("failed to restore crashed sessions: {}", errors.join("; "))
                     };
-                    apply_single_session_error(&mut app, anyhow::anyhow!(message));
-                } else if let DesktopApp::SingleSession(single_session) = &mut app {
+                    apply_single_session_error(&mut self.app, anyhow::anyhow!(message));
+                } else if let DesktopApp::SingleSession(single_session) = &mut self.app {
                     single_session.set_recovery_session_count(0);
-                    single_session.apply_session_event(session_launch::DesktopSessionEvent::Status(
-                        format!("restored {restored} crashed session(s)"),
-                    ));
+                    single_session.apply_session_event(
+                        session_launch::DesktopSessionEvent::Status(format!(
+                            "restored {restored} crashed session(s)"
+                        )),
+                    );
                 }
-                window.set_title(&app.status_title());
-                interaction_latency.mark("restore_crashed_sessions", Instant::now());
+                window.set_title(&self.app.status_title());
+                self.interaction_latency
+                    .mark("restore_crashed_sessions", Instant::now());
                 window.request_redraw();
             }
-            Event::UserEvent(DesktopUserEvent::SessionEvents(batch)) => {
+            DesktopUserEvent::SessionEvents(batch) => {
                 let ui_received_at = Instant::now();
                 let accumulated_for = batch.accumulated_for();
                 let raw_event_count = batch.raw_event_count;
                 let raw_payload_bytes = batch.raw_payload_bytes;
                 let forwarded_at = batch.forwarded_at;
-                let apply_stats = apply_desktop_session_event_batch_with_stats(&mut app, batch.events);
+                let apply_stats =
+                    apply_desktop_session_event_batch_with_stats(&mut self.app, batch.events);
                 let ui_queue_delay = ui_received_at.saturating_duration_since(forwarded_at);
                 let mut redraw_requested = false;
                 let mut redraw_deferred = false;
@@ -865,43 +987,46 @@ async fn run() -> Result<()> {
                 if apply_stats.visible_changed {
                     let now = Instant::now();
                     if apply_stats.session_card_refresh_requested
-                        && let Some(session_id) = app.single_session_live_id()
+                        && let Some(session_id) = self.app.single_session_live_id()
                     {
-                        spawn_single_session_card_refresh(session_id, event_loop_proxy.clone());
+                        spawn_single_session_card_refresh(session_id, self.event_loop_proxy.clone());
                         session_card_refresh_spawned = true;
                     }
-                    if let Some((message, images)) = app.take_next_queued_single_session_draft() {
-                        let result = if let Some(session_id) = app.single_session_live_id() {
+                    if let Some((message, images)) =
+                        self.app.take_next_queued_single_session_draft()
+                    {
+                        let result = if let Some(session_id) = self.app.single_session_live_id() {
                             session_launch::spawn_message_to_session(
                                 session_id,
                                 message,
                                 images,
-                                session_event_tx.clone(),
+                                self.session_event_tx.clone(),
                             )
                         } else {
                             session_launch::spawn_fresh_server_session(
                                 message,
                                 images,
-                                session_event_tx.clone(),
+                                self.session_event_tx.clone(),
                             )
                         };
                         match result {
-                            Ok(handle) => app.set_single_session_handle(handle),
-                            Err(error) => apply_single_session_error(&mut app, error),
+                            Ok(handle) => self.app.set_single_session_handle(handle),
+                            Err(error) => apply_single_session_error(&mut self.app, error),
                         }
                     }
-                    window.set_title(&app.status_title());
-                    let redraw_due = last_backend_redraw_request.is_none_or(|last| {
+                    window.set_title(&self.app.status_title());
+                    let redraw_due = self.last_backend_redraw_request.is_none_or(|last| {
                         now.saturating_duration_since(last) >= BACKEND_REDRAW_FRAME_INTERVAL
                     });
                     if redraw_due {
-                        let first_pending = pending_backend_redraw_since.take().unwrap_or(now);
-                        interaction_latency.mark("backend_events", first_pending);
-                        last_backend_redraw_request = Some(now);
+                        let first_pending =
+                            self.pending_backend_redraw_since.take().unwrap_or(now);
+                        self.interaction_latency.mark("backend_events", first_pending);
+                        self.last_backend_redraw_request = Some(now);
                         window.request_redraw();
                         redraw_requested = true;
                     } else {
-                        pending_backend_redraw_since.get_or_insert(now);
+                        self.pending_backend_redraw_since.get_or_insert(now);
                         redraw_deferred = true;
                     }
                 }
@@ -916,69 +1041,74 @@ async fn run() -> Result<()> {
                     session_card_refresh_spawned,
                 );
             }
-            Event::AboutToWait => {
-                if app.is_single_session() {
-                    let about_to_wait_started = Instant::now();
-                    let size = window.inner_size();
-                    let previous_smooth_scroll = app.single_session_smooth_scroll_lines(
-                        scroll_accumulator.pending_lines(),
-                        size,
-                        &mut scroll_metrics_cache,
-                    );
-                    let frame = scroll_accumulator.frame(Instant::now());
-                    if let Some(lines) = frame.scroll_lines
-                        && !app.scroll_single_session_body(lines, size, &mut scroll_metrics_cache)
-                    {
-                        scroll_accumulator.stop();
-                    }
-                    let next_smooth_scroll = app.single_session_smooth_scroll_lines(
-                        scroll_accumulator.pending_lines(),
-                        size,
-                        &mut scroll_metrics_cache,
-                    );
-                    if frame.active
-                        || (next_smooth_scroll - previous_smooth_scroll).abs()
-                            >= SCROLL_FRACTIONAL_EPSILON
-                    {
-                        interaction_latency.mark("scroll_momentum", about_to_wait_started);
-                        window.request_redraw();
-                    }
-                } else if scroll_accumulator.is_active() {
-                    scroll_accumulator.reset();
-                    scroll_metrics_cache.clear();
-                }
-                if let Some(first_pending_backend_redraw) = pending_backend_redraw_since {
-                    let now = Instant::now();
-                    if last_backend_redraw_request.is_none_or(|last| {
-                        now.saturating_duration_since(last) >= BACKEND_REDRAW_FRAME_INTERVAL
-                    }) {
-                        pending_backend_redraw_since = None;
-                        interaction_latency.mark("backend_events", first_pending_backend_redraw);
-                        last_backend_redraw_request = Some(now);
-                        window.request_redraw();
-                    }
-                }
-                if let Some(relaunch) = hot_reloader.poll() {
-                    if let Err(error) = relaunch.spawn() {
-                        eprintln!("jcode-desktop: failed to hot reload desktop: {error:#}");
-                    } else {
-                        target.exit();
-                        return;
-                    }
-                }
-
-                if canvas.needs_initial_frame {
-                    canvas.needs_initial_frame = false;
-                    window.request_redraw();
-                } else if app.has_frame_animation() {
-                    window.request_redraw();
-                }
-            }
-            _ => {}
         }
-    })?;
+    }
 
-    Ok(())
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(window) = self.window else { return; };
+        if self.app.is_single_session() {
+            let about_to_wait_started = Instant::now();
+            let size = window.inner_size();
+            let previous_smooth_scroll = self.app.single_session_smooth_scroll_lines(
+                self.scroll_accumulator.pending_lines(),
+                size,
+                &mut self.scroll_metrics_cache,
+            );
+            let frame = self.scroll_accumulator.frame(Instant::now());
+            if let Some(lines) = frame.scroll_lines
+                && !self
+                    .app
+                    .scroll_single_session_body(lines, size, &mut self.scroll_metrics_cache)
+            {
+                self.scroll_accumulator.stop();
+            }
+            let next_smooth_scroll = self.app.single_session_smooth_scroll_lines(
+                self.scroll_accumulator.pending_lines(),
+                size,
+                &mut self.scroll_metrics_cache,
+            );
+            if frame.active
+                || (next_smooth_scroll - previous_smooth_scroll).abs() >= SCROLL_FRACTIONAL_EPSILON
+            {
+                self.interaction_latency
+                    .mark("scroll_momentum", about_to_wait_started);
+                window.request_redraw();
+            }
+        } else if self.scroll_accumulator.is_active() {
+            self.scroll_accumulator.reset();
+            self.scroll_metrics_cache.clear();
+        }
+        if let Some(first_pending_backend_redraw) = self.pending_backend_redraw_since {
+            let now = Instant::now();
+            if self.last_backend_redraw_request.is_none_or(|last| {
+                now.saturating_duration_since(last) >= BACKEND_REDRAW_FRAME_INTERVAL
+            }) {
+                self.pending_backend_redraw_since = None;
+                self.interaction_latency
+                    .mark("backend_events", first_pending_backend_redraw);
+                self.last_backend_redraw_request = Some(now);
+                window.request_redraw();
+            }
+        }
+        if let Some(relaunch) = self.hot_reloader.poll() {
+            if let Err(error) = relaunch.spawn() {
+                eprintln!("jcode-desktop: failed to hot reload desktop: {error:#}");
+            } else {
+                event_loop.exit();
+                return;
+            }
+        }
+
+        if let Some(canvas) = self.canvas.as_mut() {
+            if canvas.needs_initial_frame {
+                canvas.needs_initial_frame = false;
+                window.request_redraw();
+            } else if self.app.has_frame_animation() {
+                window.request_redraw();
+            }
+        }
+        self.maybe_exit(event_loop);
+    }
 }
 
 fn load_session_cards_for_desktop() -> Vec<workspace::SessionCard> {
@@ -1308,6 +1438,7 @@ async fn render_hero_frame_to_image(
                 label: Some("jcode-desktop-hero-capture-device"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default(),
+                memory_hints: wgpu::MemoryHints::default(),
             },
             None,
         )
@@ -1331,6 +1462,7 @@ async fn render_hero_frame_to_image(
             module: &shader,
             entry_point: "vs_main",
             buffers: &[Vertex::layout()],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
@@ -1340,6 +1472,7 @@ async fn render_hero_frame_to_image(
                 blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
         }),
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
@@ -1353,6 +1486,7 @@ async fn render_hero_frame_to_image(
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
+        cache: None,
     });
 
     let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -1373,7 +1507,9 @@ async fn render_hero_frame_to_image(
 
     let mut font_system = create_desktop_font_system();
     let mut swash_cache = SwashCache::new();
-    let mut text_atlas = TextAtlas::new(&device, &queue, format);
+    let glyphon_cache = Cache::new(&device);
+    let mut text_viewport = Viewport::new(&device, &glyphon_cache);
+    let mut text_atlas = TextAtlas::new(&device, &queue, &glyphon_cache, format);
     let mut text_renderer = TextRenderer::new(
         &mut text_atlas,
         &device,
@@ -1404,16 +1540,20 @@ async fn render_hero_frame_to_image(
         )
     };
     if !text_areas.is_empty() {
+        text_viewport.update(
+            &queue,
+            Resolution {
+                width: size.width,
+                height: size.height,
+            },
+        );
         text_renderer
             .prepare(
                 &device,
                 &queue,
                 &mut font_system,
                 &mut text_atlas,
-                Resolution {
-                    width: size.width,
-                    height: size.height,
-                },
+                &text_viewport,
                 text_areas,
                 &mut swash_cache,
             )
@@ -1500,7 +1640,7 @@ async fn render_hero_frame_to_image(
         render_pass.draw(0..vertices.len() as u32, 0..1);
         if !text_buffers.is_empty() {
             text_renderer
-                .render(&text_atlas, &mut render_pass)
+                .render(&text_atlas, &text_viewport, &mut render_pass)
                 .context("failed to render hero capture text")?;
         }
     }
@@ -2360,11 +2500,9 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
             visible_whole_line_app.text_scale(),
         );
         body_buffer.set_scroll(
-            initial_visible_viewport
+            glyphon::cosmic_text::Scroll { line: initial_visible_viewport
                 .start_line
-                .saturating_sub(visible_window_start)
-                .min(i32::MAX as usize) as i32,
-        );
+                .saturating_sub(visible_window_start), vertical: 0.0, horizontal: 0.0 });
     }
     let mut visible_viewport_ms = 0.0;
     let mut visible_window_ms = 0.0;
@@ -2407,11 +2545,9 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
             if viewport.start_line != visible_whole_line_start {
                 if let Some(body_buffer) = visible_whole_line_buffers.get_mut(1) {
                     body_buffer.set_scroll(
-                        viewport
+                        glyphon::cosmic_text::Scroll { line: viewport
                             .start_line
-                            .saturating_sub(visible_window_start)
-                            .min(i32::MAX as usize) as i32,
-                    );
+                            .saturating_sub(visible_window_start), vertical: 0.0, horizontal: 0.0 });
                 }
                 visible_whole_line_start = viewport.start_line;
             }
@@ -2613,11 +2749,9 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
             streaming_app.text_scale(),
         );
         body_buffer.set_scroll(
-            streaming_initial_viewport
+            glyphon::cosmic_text::Scroll { line: streaming_initial_viewport
                 .start_line
-                .saturating_sub(streaming_window_start)
-                .min(i32::MAX as usize) as i32,
-        );
+                .saturating_sub(streaming_window_start), vertical: 0.0, horizontal: 0.0 });
     }
     let mut streaming_previous_key = Some(streaming_initial_key);
     let mut streaming_tail_text_key = None;
@@ -2719,11 +2853,9 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
         );
         if let Some(body_buffer) = streaming_buffers.get_mut(1) {
             body_buffer.set_scroll(
-                viewport
+                glyphon::cosmic_text::Scroll { line: viewport
                     .start_line
-                    .saturating_sub(streaming_window_start)
-                    .min(i32::MAX as usize) as i32,
-            );
+                    .saturating_sub(streaming_window_start), vertical: 0.0, horizontal: 0.0 });
         }
         let streaming_start_line =
             streaming_base_len.saturating_add(usize::from(!streaming_app.messages.is_empty()));
@@ -2988,11 +3120,9 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
         );
         if let Some(body_buffer) = hero_buffers.get_mut(1) {
             body_buffer.set_scroll(
-                viewport
+                glyphon::cosmic_text::Scroll { line: viewport
                     .start_line
-                    .saturating_sub(hero_window_start)
-                    .min(i32::MAX as usize) as i32,
-            );
+                    .saturating_sub(hero_window_start), vertical: 0.0, horizontal: 0.0 });
         }
         let hero_visible = key.fresh_welcome_visible;
         hero_previous_key = Some(key);
@@ -3132,11 +3262,9 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
         );
         if let Some(body_buffer) = action_buffers.get_mut(1) {
             body_buffer.set_scroll(
-                viewport
+                glyphon::cosmic_text::Scroll { line: viewport
                     .start_line
-                    .saturating_sub(action_window_start)
-                    .min(i32::MAX as usize) as i32,
-            );
+                    .saturating_sub(action_window_start), vertical: 0.0, horizontal: 0.0 });
         }
         action_previous_key = Some(key);
         action_text_cache_ms += phase_started.elapsed().as_secs_f64() * 1000.0;
@@ -3564,6 +3692,7 @@ fn prewarm_desktop_text_renderer(
     swash_cache: &mut SwashCache,
     text_atlas: &mut TextAtlas,
     text_renderer: &mut TextRenderer,
+    text_viewport: &mut Viewport,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     size: PhysicalSize<u32>,
@@ -3575,15 +3704,19 @@ fn prewarm_desktop_text_renderer(
     if text_areas.is_empty() {
         return;
     }
+    text_viewport.update(
+        queue,
+        Resolution {
+            width: size.width,
+            height: size.height,
+        },
+    );
     if let Err(error) = text_renderer.prepare(
         device,
         queue,
         font_system,
         text_atlas,
-        Resolution {
-            width: size.width,
-            height: size.height,
-        },
+        text_viewport,
         text_areas,
         swash_cache,
     ) {
@@ -5526,6 +5659,8 @@ struct Canvas<'window> {
     render_pipeline: wgpu::RenderPipeline,
     font_system: Option<FontSystem>,
     swash_cache: SwashCache,
+    glyphon_cache: Cache,
+    text_viewport: Viewport,
     text_atlas: Option<TextAtlas>,
     text_renderer: Option<TextRenderer>,
     text_needs_prepare: bool,
@@ -5588,6 +5723,7 @@ impl<'window> Canvas<'window> {
                     label: Some("jcode-desktop-device"),
                     required_features: wgpu::Features::empty(),
                     required_limits: wgpu::Limits::default(),
+                    memory_hints: wgpu::MemoryHints::default(),
                 },
                 None,
             )
@@ -5643,6 +5779,7 @@ impl<'window> Canvas<'window> {
                 module: &shader,
                 entry_point: "vs_main",
                 buffers: &[Vertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -5652,6 +5789,7 @@ impl<'window> Canvas<'window> {
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -5665,13 +5803,16 @@ impl<'window> Canvas<'window> {
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
+            cache: None,
         });
         startup_trace.mark("primitive pipeline ready");
         let mut font_system = font_system_loader
             .take()
             .and_then(|loader| loader.join().ok())
             .unwrap_or_else(create_desktop_font_system);
-        let mut text_atlas = TextAtlas::new(&device, &queue, format);
+        let glyphon_cache = Cache::new(&device);
+        let mut text_viewport = Viewport::new(&device, &glyphon_cache);
+        let mut text_atlas = TextAtlas::new(&device, &queue, &glyphon_cache, format);
         let text_renderer = TextRenderer::new(
             &mut text_atlas,
             &device,
@@ -5686,6 +5827,7 @@ impl<'window> Canvas<'window> {
             &mut swash_cache,
             &mut text_atlas,
             &mut text_renderer,
+            &mut text_viewport,
             &device,
             &queue,
             size,
@@ -5699,6 +5841,8 @@ impl<'window> Canvas<'window> {
             render_pipeline,
             font_system: Some(font_system),
             swash_cache,
+            glyphon_cache,
+            text_viewport,
             text_atlas: Some(text_atlas),
             text_renderer: Some(text_renderer),
             text_needs_prepare: true,
@@ -5993,10 +6137,8 @@ impl<'window> Canvas<'window> {
         }
         if let Some(body_buffer) = self.single_session_text_buffers.get_mut(1) {
             body_buffer.set_scroll(
-                start_line
-                    .saturating_sub(window_start)
-                    .min(i32::MAX as usize) as i32,
-            );
+                glyphon::cosmic_text::Scroll { line: start_line
+                    .saturating_sub(window_start), vertical: 0.0, horizontal: 0.0 });
             self.single_session_body_text_scroll_start = Some(start_line);
             self.text_needs_prepare = true;
         }
@@ -6013,7 +6155,12 @@ impl<'window> Canvas<'window> {
         if self.text_renderer.is_some() {
             return;
         }
-        let mut text_atlas = TextAtlas::new(&self.device, &self.queue, self.config.format);
+        let mut text_atlas = TextAtlas::new(
+            &self.device,
+            &self.queue,
+            &self.glyphon_cache,
+            self.config.format,
+        );
         let text_renderer = TextRenderer::new(
             &mut text_atlas,
             &self.device,
@@ -6029,7 +6176,12 @@ impl<'window> Canvas<'window> {
         if self.streaming_text_renderer.is_some() {
             return;
         }
-        let mut text_atlas = TextAtlas::new(&self.device, &self.queue, self.config.format);
+        let mut text_atlas = TextAtlas::new(
+            &self.device,
+            &self.queue,
+            &self.glyphon_cache,
+            self.config.format,
+        );
         let text_renderer = TextRenderer::new(
             &mut text_atlas,
             &self.device,
@@ -6239,6 +6391,15 @@ impl<'window> Canvas<'window> {
         if welcome_hero_reveal_active {
             self.text_needs_prepare = true;
         }
+        if self.text_needs_prepare || self.streaming_text_needs_prepare {
+            self.text_viewport.update(
+                &self.queue,
+                Resolution {
+                    width: self.config.width,
+                    height: self.config.height,
+                },
+            );
+        }
         if self.text_needs_prepare {
             let text_areas = if let DesktopApp::SingleSession(single_session) = app {
                 single_session_text_areas_for_app_with_cached_body_viewport_and_reveal(
@@ -6277,10 +6438,7 @@ impl<'window> Canvas<'window> {
                     &self.queue,
                     font_system,
                     text_atlas,
-                    Resolution {
-                        width: self.config.width,
-                        height: self.config.height,
-                    },
+                    &self.text_viewport,
                     text_areas,
                     &mut self.swash_cache,
                 ) {
@@ -6337,10 +6495,7 @@ impl<'window> Canvas<'window> {
                     &self.queue,
                     font_system,
                     text_atlas,
-                    Resolution {
-                        width: self.config.width,
-                        height: self.config.height,
-                    },
+                    &self.text_viewport,
                     streaming_text_areas,
                     &mut self.swash_cache,
                 ) {
@@ -6453,7 +6608,8 @@ impl<'window> Canvas<'window> {
             if has_text_buffers
                 && let (Some(text_renderer), Some(text_atlas)) =
                     (self.text_renderer.as_mut(), self.text_atlas.as_ref())
-                && let Err(error) = text_renderer.render(text_atlas, &mut render_pass)
+                && let Err(error) =
+                    text_renderer.render(text_atlas, &self.text_viewport, &mut render_pass)
             {
                 eprintln!("jcode-desktop: failed to render text: {error:?}");
             }
@@ -6462,7 +6618,8 @@ impl<'window> Canvas<'window> {
                     self.streaming_text_renderer.as_mut(),
                     self.streaming_text_atlas.as_ref(),
                 )
-                && let Err(error) = text_renderer.render(text_atlas, &mut render_pass)
+                && let Err(error) =
+                    text_renderer.render(text_atlas, &self.text_viewport, &mut render_pass)
             {
                 eprintln!("jcode-desktop: failed to render streaming text: {error:?}");
             }

@@ -4696,7 +4696,7 @@ pub(crate) fn single_session_body_text_buffer_from_lines(
         content_width,
         (size.height as f32 - 150.0).max(1.0),
     );
-    buffer.shape_until(font_system, i32::MAX);
+    buffer.shape_until_scroll(font_system, false);
     buffer
 }
 
@@ -5083,7 +5083,7 @@ fn single_session_text_buffer_with_family(
     height: f32,
 ) -> Buffer {
     let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
-    buffer.set_size(font_system, width, height);
+    buffer.set_size(font_system, Some(width), Some(height));
     buffer.set_wrap(font_system, Wrap::Word);
     buffer.set_text(
         font_system,
@@ -5091,7 +5091,7 @@ fn single_session_text_buffer_with_family(
         Attrs::new().family(Family::Name(family)),
         desktop_text_shaping(text),
     );
-    buffer.shape_until_scroll(font_system);
+    buffer.shape_until_scroll(font_system, false);
     buffer
 }
 
@@ -5104,7 +5104,7 @@ fn single_session_styled_text_buffer(
     height: f32,
 ) -> Buffer {
     let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
-    buffer.set_size(font_system, width, height);
+    buffer.set_size(font_system, Some(width), Some(height));
     let segments = single_session_styled_text_segments(lines);
     let shaping = if segments
         .iter()
@@ -5114,8 +5114,13 @@ fn single_session_styled_text_buffer(
     } else {
         Shaping::Basic
     };
-    buffer.set_rich_text(font_system, segments.iter().copied(), shaping);
-    buffer.shape_until_scroll(font_system);
+    buffer.set_rich_text(
+        font_system,
+        segments.iter().copied(),
+        Attrs::new(),
+        shaping,
+    );
+    buffer.shape_until_scroll(font_system, false);
     buffer
 }
 
@@ -5470,6 +5475,7 @@ pub(crate) fn single_session_hero_font_target_text_areas<'a>(
             bottom: hero_max[1].ceil() as i32,
         },
         default_color: text_color(WELCOME_HANDWRITING_COLOR),
+        custom_glyphs: &[],
     }]
 }
 
@@ -5501,6 +5507,7 @@ pub(crate) fn single_session_streaming_text_area_for_cached_body_viewport<'a>(
                 as i32,
         },
         default_color: text_color(ASSISTANT_TEXT_COLOR),
+        custom_glyphs: &[],
     }
 }
 
@@ -5614,6 +5621,7 @@ pub(crate) fn single_session_text_areas_for_state(
                 bottom,
             },
             default_color: text_color(STATUS_TEXT_ACCENT_COLOR),
+            custom_glyphs: &[],
         });
     } else if !welcome_handoff_visible {
         areas.push(TextArea {
@@ -5628,6 +5636,7 @@ pub(crate) fn single_session_text_areas_for_state(
                 bottom,
             },
             default_color: text_color(PANEL_SECTION_COLOR),
+            custom_glyphs: &[],
         });
     }
 
@@ -5644,6 +5653,7 @@ pub(crate) fn single_session_text_areas_for_state(
                 bottom: draft_top as i32,
             },
             default_color: text_color(PANEL_SECTION_COLOR),
+            custom_glyphs: &[],
         });
     }
 
@@ -5659,6 +5669,7 @@ pub(crate) fn single_session_text_areas_for_state(
             bottom: 64,
         },
         default_color: text_color(PANEL_TITLE_COLOR),
+        custom_glyphs: &[],
     });
     areas.push(TextArea {
         buffer: &buffers[4],
@@ -5672,6 +5683,7 @@ pub(crate) fn single_session_text_areas_for_state(
             bottom: version_bounds_bottom,
         },
         default_color: text_color(META_TEXT_COLOR),
+        custom_glyphs: &[],
     });
     areas.push(TextArea {
         buffer: &buffers[1],
@@ -5685,6 +5697,7 @@ pub(crate) fn single_session_text_areas_for_state(
             bottom: body_bottom,
         },
         default_color: text_color(ASSISTANT_TEXT_COLOR),
+        custom_glyphs: &[],
     });
 
     if welcome_chrome_visible
@@ -5704,6 +5717,7 @@ pub(crate) fn single_session_text_areas_for_state(
                 bottom: (hero_max[1] + welcome_chrome_offset_pixels).ceil() as i32,
             },
             default_color: text_color(WELCOME_HANDWRITING_COLOR),
+            custom_glyphs: &[],
         });
     }
 
@@ -5725,6 +5739,7 @@ pub(crate) fn single_session_text_areas_for_state(
                 bottom: inline_bounds_bottom,
             },
             default_color: text_color(ASSISTANT_TEXT_COLOR),
+            custom_glyphs: &[],
         });
     }
 
