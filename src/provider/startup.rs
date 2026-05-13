@@ -236,6 +236,7 @@ impl MultiProvider {
             openrouter: openrouter.is_some(),
             copilot_premium_zero,
         };
+        let availability = Self::filter_availability_by_enabled_providers(availability);
         let mut active = Self::auto_default_provider(availability);
 
         if copilot_premium_zero && matches!(active, ActiveProvider::Copilot) {
@@ -431,6 +432,43 @@ impl MultiProvider {
 
     pub fn from_auth_status(auth_status: auth::AuthStatus) -> Self {
         Self::new_with_auth_status(auth_status)
+    }
+
+    fn filter_availability_by_enabled_providers(
+        availability: ProviderAvailability,
+    ) -> ProviderAvailability {
+        let cfg = crate::config::config();
+        if cfg.provider.enabled_providers.is_empty() {
+            return availability;
+        }
+
+        ProviderAvailability {
+            openai: availability.openai && crate::provider_catalog::provider_is_enabled("openai"),
+            claude: availability.claude
+                && crate::provider_catalog::provider_is_enabled("anthropic"),
+            copilot: availability.copilot
+                && crate::provider_catalog::provider_is_enabled("copilot"),
+            antigravity: availability.antigravity
+                && crate::provider_catalog::provider_is_enabled("antigravity"),
+            gemini: availability.gemini && crate::provider_catalog::provider_is_enabled("gemini"),
+            cursor: availability.cursor && crate::provider_catalog::provider_is_enabled("cursor"),
+            bedrock: availability.bedrock
+                && crate::provider_catalog::provider_is_enabled("bedrock"),
+            // OpenRouter backs both the raw OpenRouter provider and all
+            // OpenAI-compatible/named profiles. Keep it eligible when any
+            // enabled provider entry points at that shared transport; the route
+            // filter later hides non-enabled profiles/models.
+            openrouter: availability.openrouter
+                && (crate::provider_catalog::provider_is_enabled("openrouter")
+                    || cfg.provider.enabled_providers.iter().any(|provider| {
+                        crate::provider_catalog::resolve_openai_compatible_profile_selection(
+                            provider,
+                        )
+                        .is_some()
+                            || cfg.providers.contains_key(provider.trim())
+                    })),
+            copilot_premium_zero: availability.copilot_premium_zero,
+        }
     }
 
     /// Create with explicit initial provider preference

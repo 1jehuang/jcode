@@ -148,6 +148,70 @@ fn auth_issue_runtime_display_name_tracks_direct_compatible_profiles() {
 }
 
 #[test]
+fn provider_enabled_and_model_allowlists_filter_cross_provider_routes() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _guard = EnvGuard::save(&["JCODE_HOME"]);
+    crate::env::set_var("JCODE_HOME", temp.path());
+    std::fs::write(
+        temp.path().join("config.toml"),
+        r#"
+[provider]
+enabled_providers = ["openai", "ollama-cloud"]
+
+[provider.model_allowlist]
+openai = ["gpt-5.5"]
+ollama-cloud = ["deepseek-v4-pro"]
+"#,
+    )
+    .expect("write config");
+    crate::config::Config::invalidate_cache();
+
+    assert!(provider_is_enabled("openai"));
+    assert!(provider_is_enabled("ollama-cloud"));
+    assert!(!provider_is_enabled("anthropic"));
+
+    let routes = vec![
+        crate::provider::ModelRoute {
+            model: "claude-opus-4-7".to_string(),
+            provider: "Anthropic".to_string(),
+            api_method: "claude-oauth".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        },
+        crate::provider::ModelRoute {
+            model: "gpt-5.5".to_string(),
+            provider: "OpenAI".to_string(),
+            api_method: "openai-oauth".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        },
+        crate::provider::ModelRoute {
+            model: "gpt-5.4".to_string(),
+            provider: "OpenAI".to_string(),
+            api_method: "openai-oauth".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        },
+        crate::provider::ModelRoute {
+            model: "deepseek-v4-pro".to_string(),
+            provider: "ollama-cloud".to_string(),
+            api_method: "openai-compatible:ollama-cloud".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+        },
+    ];
+
+    let filtered = filter_model_routes_by_allowlist("Jcode", routes);
+    let models: Vec<_> = filtered.iter().map(|route| route.model.as_str()).collect();
+    assert_eq!(models, vec!["gpt-5.5", "deepseek-v4-pro"]);
+}
+
+#[test]
 fn auth_profile_env_application_flushes_stale_openrouter_catalog_state() {
     let _lock = crate::storage::lock_test_env();
     let _guard = EnvGuard::save(&[

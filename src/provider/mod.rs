@@ -332,6 +332,21 @@ impl MultiProvider {
         Some((profile, rest))
     }
 
+    fn named_openai_compatible_model_prefix(model: &str) -> Option<(String, &str)> {
+        let (prefix, rest) = model.split_once(':')?;
+        let prefix = prefix.trim();
+        let rest = rest.trim();
+        if prefix.is_empty() || rest.is_empty() {
+            return None;
+        }
+        let cfg = crate::config::config();
+        if cfg.providers.contains_key(prefix) {
+            Some((prefix.to_string(), rest))
+        } else {
+            None
+        }
+    }
+
     fn ensure_provider_lock_allows_model_target(
         &self,
         target: ActiveProvider,
@@ -485,6 +500,38 @@ impl MultiProvider {
 
         crate::provider_catalog::force_apply_openai_compatible_profile_env(Some(profile));
         let provider = Arc::new(openrouter::OpenRouterProvider::new()?);
+        provider.set_model(model)?;
+        *self
+            .openrouter
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(provider);
+        self.set_active_provider(ActiveProvider::OpenRouter);
+        Ok(())
+    }
+
+    fn set_model_on_named_openai_compatible_profile(
+        &self,
+        profile_name: &str,
+        model: &str,
+    ) -> Result<()> {
+        let model = model.trim();
+        if model.is_empty() {
+            anyhow::bail!("Model cannot be empty");
+        }
+
+        crate::provider_catalog::apply_named_provider_profile_env(profile_name)?;
+        let cfg = crate::config::config();
+        let profile = cfg.providers.get(profile_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unknown provider profile '{}'. Add [providers.{}] to config.toml.",
+                profile_name,
+                profile_name
+            )
+        })?;
+        let provider = Arc::new(openrouter::OpenRouterProvider::new_named_openai_compatible(
+            profile_name,
+            profile,
+        )?);
         provider.set_model(model)?;
         *self
             .openrouter
@@ -876,6 +923,13 @@ impl Provider for MultiProvider {
             return self.set_model_on_openai_compatible_profile(profile, target_model);
         }
 
+        if let Some((profile_name, target_model)) =
+            Self::named_openai_compatible_model_prefix(requested_model)
+        {
+            self.ensure_provider_lock_allows_openai_compatible_profile(requested_model)?;
+            return self.set_model_on_named_openai_compatible_profile(&profile_name, target_model);
+        }
+
         // Provider-prefixed model names are explicit routing directives. They
         // must never silently fall through to another provider when the target
         // is unavailable or when --provider locks a different backend.
@@ -1120,7 +1174,22 @@ impl Provider for MultiProvider {
             }
             let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
             let api_method = format!("openai-compatible:{}", resolved.id);
-            for model in crate::provider_catalog::openai_compatible_profile_static_models(profile) {
+            let mut profile_models =
+                crate::provider_catalog::openai_compatible_profile_static_models(profile);
+            if let Some(allowlist_models) = crate::config::config()
+                .provider
+                .model_allowlist
+                .get(&resolved.id)
+            {
+                for model in allowlist_models {
+                    let model = model.trim();
+                    if !model.is_empty() && !profile_models.iter().any(|existing| existing == model)
+                    {
+                        profile_models.push(model.to_string());
+                    }
+                }
+            }
+            for model in profile_models {
                 let already_present = routes.iter().any(|route| {
                     route.model == model
                         && route.provider == resolved.display_name
@@ -1137,6 +1206,79 @@ impl Provider for MultiProvider {
                     api_method: api_method.clone(),
                     available: true,
                     detail: resolved.api_base.clone(),
+                    cheapness: None,
+                });
+                added_direct_openai_compatible_routes = true;
+            }
+        }
+
+        let cfg = crate::config::config();
+        for (profile_name, profile) in &cfg.providers {
+            if !crate::provider_catalog::provider_is_enabled(profile_name) {
+                continue;
+            }
+            let api_method = format!("openai-compatible:{}", profile_name);
+            let mut named_models = Vec::new();
+            if let Some(default_model) = profile.default_model.as_deref().map(str::trim)
+                && !default_model.is_empty()
+            {
+                named_models.push(default_model.to_string());
+            }
+            for model in &profile.models {
+                let id = model.id.trim();
+                if !id.is_empty() && !named_models.iter().any(|existing| existing == id) {
+                    named_models.push(id.to_string());
+                }
+            }
+            if let Some(allowlist_models) = cfg.provider.model_allowlist.get(profile_name) {
+                for model in allowlist_models {
+                    let model = model.trim();
+                    if !model.is_empty() && !named_models.iter().any(|existing| existing == model) {
+                        named_models.push(model.to_string());
+                    }
+                }
+            }
+            let requires_key = profile.requires_api_key.unwrap_or_else(|| {
+                !crate::provider_catalog::api_base_uses_localhost(&profile.base_url)
+            });
+            let has_credentials = match profile.auth {
+                crate::config::NamedProviderAuth::None => true,
+                crate::config::NamedProviderAuth::Bearer
+                | crate::config::NamedProviderAuth::Header => {
+                    !requires_key
+                        || profile
+                            .api_key
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .is_some()
+                        || profile
+                            .api_key_env
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .and_then(|env_key| {
+                                if let Some(env_file) = profile.env_file.as_deref() {
+                                    crate::provider_catalog::load_env_value_from_env_or_config(
+                                        env_key, env_file,
+                                    )
+                                } else {
+                                    std::env::var(env_key)
+                                        .ok()
+                                        .map(|value| value.trim().to_string())
+                                        .filter(|value| !value.is_empty())
+                                }
+                            })
+                            .is_some()
+                }
+            };
+            for model in named_models {
+                routes.push(ModelRoute {
+                    model,
+                    provider: profile_name.clone(),
+                    api_method: api_method.clone(),
+                    available: has_credentials,
+                    detail: profile.base_url.clone(),
                     cheapness: None,
                 });
                 added_direct_openai_compatible_routes = true;

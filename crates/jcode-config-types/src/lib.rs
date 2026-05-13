@@ -612,6 +612,13 @@ pub struct ProviderConfig {
     /// Copilot premium request mode: "normal", "one", or "zero"
     /// "zero" means all requests are free (no premium requests consumed)
     pub copilot_premium: Option<String>,
+    /// Provider/profile allowlist for model pickers and auto-selection.
+    ///
+    /// Empty means every configured provider is eligible. Non-empty means only
+    /// these built-in provider keys, OpenAI-compatible profile ids, or named
+    /// provider profile names should be displayed and auto-selected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enabled_providers: Vec<String>,
     /// Per-provider model allowlist. Maps the built-in provider key
     /// (e.g. "anthropic", "openai", "gemini", "antigravity") to a list of
     /// allowed model identifiers. When a provider has a non-empty entry,
@@ -635,6 +642,7 @@ impl Default for ProviderConfig {
             cross_provider_failover: CrossProviderFailoverMode::Countdown,
             same_provider_account_failover: true,
             copilot_premium: None,
+            enabled_providers: Vec::new(),
             model_allowlist: BTreeMap::new(),
         }
     }
@@ -793,7 +801,10 @@ mod tests {
         let mut allow = BTreeMap::new();
         allow.insert(
             "anthropic".to_string(),
-            vec!["claude-opus-4-7".to_string(), "claude-sonnet-4-6".to_string()],
+            vec![
+                "claude-opus-4-7".to_string(),
+                "claude-sonnet-4-6".to_string(),
+            ],
         );
         allow.insert("openai".to_string(), vec!["gpt-5.5".to_string()]);
 
@@ -821,6 +832,38 @@ mod tests {
         assert!(
             !serialized.contains("model_allowlist"),
             "empty allowlist should be omitted from TOML output, got: {serialized}"
+        );
+    }
+
+    #[test]
+    fn provider_enabled_providers_round_trips_through_toml() {
+        let cfg = ProviderConfig {
+            enabled_providers: vec![
+                "openai".to_string(),
+                "ollama-cloud".to_string(),
+                "opencode-go".to_string(),
+            ],
+            ..ProviderConfig::default()
+        };
+
+        let serialized = toml::to_string(&cfg).expect("serialize ProviderConfig");
+        assert!(
+            serialized.contains("enabled_providers"),
+            "expected enabled_providers in serialized output, got: {serialized}"
+        );
+
+        let parsed: ProviderConfig =
+            toml::from_str(&serialized).expect("deserialize ProviderConfig");
+        assert_eq!(parsed.enabled_providers, cfg.enabled_providers);
+    }
+
+    #[test]
+    fn provider_enabled_providers_default_skipped_when_empty() {
+        let cfg = ProviderConfig::default();
+        let serialized = toml::to_string(&cfg).expect("serialize ProviderConfig");
+        assert!(
+            !serialized.contains("enabled_providers"),
+            "empty enabled providers should be omitted from TOML output, got: {serialized}"
         );
     }
 }

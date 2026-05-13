@@ -200,22 +200,7 @@ pub fn provider_model_allowlist_patterns(provider_name: &str) -> Option<Vec<Stri
         return None;
     }
 
-    let canonical = canonical_allowlist_key(provider_name);
-    let mut keys: Vec<String> = vec![canonical.clone()];
-    if canonical == "anthropic" {
-        keys.push("claude".to_string());
-    } else if canonical == "claude" {
-        keys.push("anthropic".to_string());
-    }
-    // The openrouter provider impl backs every openai-compatible profile
-    // (opencode-go, ollama-cloud, deepseek, etc.). Also accept the active
-    // profile id as a lookup key so the user can write
-    // `[provider.model_allowlist] opencode-go = [...]`.
-    if canonical == "openrouter" {
-        if let Some(profile_id) = active_openai_compatible_profile_id() {
-            keys.push(profile_id);
-        }
-    }
+    let keys = provider_config_candidate_keys(provider_name);
 
     for key in &keys {
         if let Some(patterns) = cfg.provider.model_allowlist.get(key) {
@@ -232,12 +217,74 @@ pub fn provider_model_allowlist_patterns(provider_name: &str) -> Option<Vec<Stri
     None
 }
 
-fn canonical_allowlist_key(provider_name: &str) -> String {
+fn canonical_provider_config_key(provider_name: &str) -> String {
     let trimmed = provider_name.trim().to_ascii_lowercase();
     match trimmed.as_str() {
         "claude" => "anthropic".to_string(),
+        "github copilot" => "copilot".to_string(),
+        "aws bedrock" | "aws-bedrock" | "aws_bedrock" => "bedrock".to_string(),
+        "google gemini" => "gemini".to_string(),
         _ => trimmed,
     }
+}
+
+fn push_unique(values: &mut Vec<String>, value: impl Into<String>) {
+    let value = value.into();
+    if !value.is_empty() && !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn provider_config_candidate_keys(provider_name: &str) -> Vec<String> {
+    let canonical = canonical_provider_config_key(provider_name);
+    let mut keys = Vec::new();
+    push_unique(&mut keys, canonical.clone());
+    if canonical == "anthropic" {
+        push_unique(&mut keys, "claude");
+    } else if canonical == "claude" {
+        push_unique(&mut keys, "anthropic");
+    }
+    // The openrouter provider impl backs every openai-compatible profile
+    // (opencode-go, ollama-cloud, deepseek, etc.). Also accept the active
+    // profile id as a lookup key so the user can write
+    // `[provider.model_allowlist] opencode-go = [...]`.
+    if canonical == "openrouter" {
+        if let Some(profile_id) = active_openai_compatible_profile_id() {
+            push_unique(&mut keys, profile_id);
+        }
+    }
+    if let Some(profile_id) = openai_compatible_profile_id_for_display_name(provider_name) {
+        push_unique(&mut keys, profile_id);
+    }
+    keys
+}
+
+/// Return whether a provider/profile should be visible and auto-selectable under
+/// `[provider].enabled_providers`. An empty list means every configured provider
+/// is enabled. Values may be built-in provider keys (`anthropic`, `openai`,
+/// `copilot`, ...), OpenAI-compatible profile ids (`opencode-go`, `deepseek`),
+/// display names, or named provider profile names.
+pub fn provider_is_enabled(provider_name: &str) -> bool {
+    let cfg = crate::config::config();
+    if cfg.provider.enabled_providers.is_empty() {
+        return true;
+    }
+
+    let candidate_keys = provider_config_candidate_keys(provider_name);
+    cfg.provider
+        .enabled_providers
+        .iter()
+        .map(|value| canonical_provider_config_key(value))
+        .any(|enabled| {
+            candidate_keys.iter().any(|candidate| candidate == &enabled)
+                || openai_compatible_profile_id_for_display_name(&enabled)
+                    .map(|profile_id| {
+                        candidate_keys
+                            .iter()
+                            .any(|candidate| candidate == profile_id)
+                    })
+                    .unwrap_or(false)
+        })
 }
 
 /// Filter a list of model names against the configured allowlist for `provider_name`.
@@ -246,13 +293,14 @@ fn canonical_allowlist_key(provider_name: &str) -> String {
 /// substring match against any configured pattern. When no allowlist is
 /// configured for the provider, the input is returned unchanged.
 pub fn filter_models_by_allowlist(provider_name: &str, models: Vec<String>) -> Vec<String> {
+    if !provider_is_enabled(provider_name) {
+        return Vec::new();
+    }
+
     let Some(patterns) = provider_model_allowlist_patterns(provider_name) else {
         return models;
     };
-    let lower_patterns: Vec<String> = patterns
-        .iter()
-        .map(|p| p.to_ascii_lowercase())
-        .collect();
+    let lower_patterns: Vec<String> = patterns.iter().map(|p| p.to_ascii_lowercase()).collect();
     models
         .into_iter()
         .filter(|model| model_matches_any(&model.to_ascii_lowercase(), &lower_patterns))
@@ -274,7 +322,7 @@ pub fn filter_model_routes_by_allowlist(
     routes: Vec<crate::provider::ModelRoute>,
 ) -> Vec<crate::provider::ModelRoute> {
     let cfg = crate::config::config();
-    if cfg.provider.model_allowlist.is_empty() {
+    if cfg.provider.model_allowlist.is_empty() && cfg.provider.enabled_providers.is_empty() {
         return routes;
     }
 
@@ -282,9 +330,11 @@ pub fn filter_model_routes_by_allowlist(
         .into_iter()
         .filter(|route| {
             // Resolve which allowlist key applies to this specific route.
-            let route_key = allowlist_key_for_route(route).unwrap_or_else(|| {
-                canonical_allowlist_key(provider_name)
-            });
+            let route_key = allowlist_key_for_route(route)
+                .unwrap_or_else(|| canonical_provider_config_key(provider_name));
+            if !provider_is_enabled(&route_key) {
+                return false;
+            }
             match provider_model_allowlist_patterns(&route_key) {
                 Some(patterns) => {
                     let lower_patterns: Vec<String> =
@@ -310,6 +360,10 @@ fn allowlist_key_for_route(route: &crate::provider::ModelRoute) -> Option<String
         return Some(profile_id.to_string());
     }
 
+    if api_method == "openrouter" {
+        return Some("openrouter".to_string());
+    }
+
     match (provider_display.as_str(), api_method.as_str()) {
         ("anthropic", _) => Some("anthropic".to_string()),
         ("openai", _) => Some("openai".to_string()),
@@ -317,6 +371,7 @@ fn allowlist_key_for_route(route: &crate::provider::ModelRoute) -> Option<String
         ("antigravity", _) => Some("antigravity".to_string()),
         ("copilot", _) => Some("copilot".to_string()),
         ("cursor", _) => Some("cursor".to_string()),
+        ("aws bedrock", _) => Some("bedrock".to_string()),
         _ => None,
     }
 }
