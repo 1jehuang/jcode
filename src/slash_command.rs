@@ -129,7 +129,7 @@ pub async fn execute(cmd: &str, args: &str) -> SlashResult {
 /// List all registered commands.
 pub async fn list() -> Vec<SlashCommandInfo> {
     let reg = REGISTRY.read().await;
-    let mut cmds: Vec<SlashCommandInfo> = reg.commands.values().map(|c| c.clone()).collect();
+    let mut cmds: Vec<SlashCommandInfo> = reg.commands.values().cloned().collect();
     cmds.sort_by_key(|c| c.name);
     cmds
 }

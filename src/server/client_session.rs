@@ -563,9 +563,8 @@ async fn subscribe_should_mark_ready(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> bool {
     let members = swarm_members.read().await;
-    !members
-        .get(client_session_id)
-        .is_some_and(|member| member.status == "running")
+    members
+        .get(client_session_id).is_none_or(|member| member.status != "running")
 }
 
 pub(super) async fn handle_reload(

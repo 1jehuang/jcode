@@ -358,7 +358,7 @@ impl ParallelTaskScheduler {
                 }
 
                 if !result.success {
-                    if last_error.as_ref().map_or(false, |e| e.starts_with("Timeout")) {
+                    if last_error.as_ref().is_some_and(|e| e.starts_with("Timeout")) {
                         task.status = SubAgentStatus::Timeout;
                         timed_out.fetch_add(1, Ordering::SeqCst);
                     } else {

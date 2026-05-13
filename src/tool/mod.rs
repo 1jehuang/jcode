@@ -660,8 +660,7 @@ impl Registry {
         // Drain-filter pattern avoids allocating a separate key vec
         let to_remove: Vec<String> = tools
             .keys()
-            .filter(|k| k.starts_with(prefix))
-            .map(|k| k.clone())
+            .filter(|k| k.starts_with(prefix)).cloned()
             .collect();
         for name in &to_remove {
             tools.remove(name);
@@ -696,11 +695,10 @@ impl Registry {
                     return false;
                 }
                 // Check allow list
-                if let Some(ref allowed) = filter.allowed_tool_names {
-                    if !allowed.contains(*name) {
+                if let Some(ref allowed) = filter.allowed_tool_names
+                    && !allowed.contains(*name) {
                         return false;
                     }
-                }
                 // Check enabled
                 if !tool.is_enabled() {
                     return false;

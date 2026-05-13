@@ -57,6 +57,12 @@ pub struct RuleReviewer {
     provider: Option<Arc<dyn Provider>>,
 }
 
+impl Default for RuleReviewer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RuleReviewer {
     pub fn new() -> Self {
         Self { provider: None }
@@ -88,12 +94,8 @@ impl RuleReviewer {
         
         let mut response = String::new();
         while let Some(event) = stream.next().await {
-            if let Ok(event) = event {
-                match event {
-                    StreamEvent::TextDelta(text) => response.push_str(&text),
-                    _ => {}
-                }
-            }
+            if let Ok(event) = event
+                && let StreamEvent::TextDelta(text) = event { response.push_str(&text) }
         }
         
         self.parse_llm_response(&response, rule).await
@@ -212,7 +214,7 @@ Provide your review in JSON format:
         } else if let Some(start) = trimmed.find('{') {
             &trimmed[start..]
         } else {
-            return Ok(self.review_static(rule).await?);
+            return self.review_static(rule).await;
         };
 
         match serde_json::from_str::<serde_json::Value>(json_str) {

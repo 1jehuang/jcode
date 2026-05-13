@@ -51,7 +51,7 @@ pub fn generate_patch(old_content: &str, new_content: &str, file_path: &str) -> 
             similar::ChangeTag::Delete => {
                 if current.is_none() {
                     let start = old_line.saturating_sub(ctx_before.len().min(3));
-                    current = Some(DiffHunk { old_start: start, old_lines: 0, new_start: new_line.saturating_sub(ctx_before.len().min(3)), new_lines: 0, lines: ctx_before.drain(..).collect() });
+                    current = Some(DiffHunk { old_start: start, old_lines: 0, new_start: new_line.saturating_sub(ctx_before.len().min(3)), new_lines: 0, lines: std::mem::take(&mut ctx_before) });
                 }
                 if let Some(ref mut h) = current { h.lines.push(format!("-{}", val.trim_end())); h.old_lines += 1; }
                 old_line += 1;
@@ -59,17 +59,16 @@ pub fn generate_patch(old_content: &str, new_content: &str, file_path: &str) -> 
             similar::ChangeTag::Insert => {
                 if current.is_none() {
                     let start = old_line.saturating_sub(ctx_before.len().min(3));
-                    current = Some(DiffHunk { old_start: start, old_lines: 0, new_start: new_line.saturating_sub(ctx_before.len().min(3)), new_lines: 0, lines: ctx_before.drain(..).collect() });
+                    current = Some(DiffHunk { old_start: start, old_lines: 0, new_start: new_line.saturating_sub(ctx_before.len().min(3)), new_lines: 0, lines: std::mem::take(&mut ctx_before) });
                 }
                 if let Some(ref mut h) = current { h.lines.push(format!("+{}", val.trim_end())); h.new_lines += 1; }
                 new_line += 1;
             }
         }
-        if let Some(h) = current.take() {
-            if h.old_lines > 0 || h.new_lines > 0 { hunks.push(h); }
-        }
+        if let Some(h) = current.take()
+            && (h.old_lines > 0 || h.new_lines > 0) { hunks.push(h); }
     }
-    if let Some(h) = current.take() { if h.old_lines > 0 || h.new_lines > 0 { hunks.push(h); } }
+    if let Some(h) = current.take() && (h.old_lines > 0 || h.new_lines > 0) { hunks.push(h); }
 
     StructuredPatch { hunks, old_path: file_path.to_string(), new_path: file_path.to_string() }
 }

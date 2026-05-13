@@ -52,6 +52,12 @@ pub struct ModelsRegistry {
     category_models: HashMap<ModelCategory, Vec<String>>,
 }
 
+impl Default for ModelsRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ModelsRegistry {
     pub fn new() -> Self {
         let mut registry = Self {

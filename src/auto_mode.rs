@@ -33,6 +33,12 @@ pub struct LoopDetector {
     action_type_counts: HashMap<ActionType, usize>,
 }
 
+impl Default for LoopDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LoopDetector {
     pub fn new() -> Self {
         Self {
@@ -60,11 +66,10 @@ impl LoopDetector {
             .and_modify(|count| *count += 1)
             .or_insert(1);
 
-        if self.recent_actions.len() >= self.max_history_size {
-            if let Some(old_action) = self.recent_actions.pop_front() {
+        if self.recent_actions.len() >= self.max_history_size
+            && let Some(old_action) = self.recent_actions.pop_front() {
                 *self.action_type_counts.entry(old_action.action_type).or_insert(0) -= 1;
             }
-        }
         self.recent_actions.push_back(action);
     }
 
@@ -256,6 +261,12 @@ pub struct AutoValidator {
     validation_rules: Vec<ValidationRule>,
 }
 
+impl Default for AutoValidator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AutoValidator {
     pub fn new() -> Self {
         Self {
@@ -391,8 +402,8 @@ fn code_syntax_validator(code: &str, language: &str) -> ValidationResult {
             }
         }
 
-        if language.to_lowercase() == "python" {
-            if line.contains("eval(") && !line.starts_with("#") {
+        if language.to_lowercase() == "python"
+            && line.contains("eval(") && !line.starts_with("#") {
                 errors.push(ValidationError {
                     code: "unsafe_eval".to_string(),
                     message: "Usage of eval() detected which can be unsafe".to_string(),
@@ -401,7 +412,6 @@ fn code_syntax_validator(code: &str, language: &str) -> ValidationResult {
                     column: None,
                 });
             }
-        }
 
         if line.trim().starts_with("print(") && language.to_lowercase() != "python" {
             warnings.push(format!("Line {}: print statement may not be valid in this language", line_num));
@@ -479,7 +489,7 @@ fn dependency_validator(code: &str, language: &str) -> ValidationResult {
         "python" => code.split_whitespace()
             .filter(|w| w.starts_with("import ") || w.starts_with("from "))
             .map(|w| {
-                let parts: Vec<&str> = w.split(|c| c == ' ' || c == '.').collect();
+                let parts: Vec<&str> = w.split([' ', '.']).collect();
                 if parts.len() >= 2 { parts[1].to_string() } else { "".to_string() }
             })
             .filter(|s| !s.is_empty())
@@ -550,6 +560,12 @@ pub struct AutoMode {
     validator: AutoValidator,
     enabled: bool,
     auto_approve_threshold: f64,
+}
+
+impl Default for AutoMode {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AutoMode {

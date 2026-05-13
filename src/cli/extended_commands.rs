@@ -74,7 +74,7 @@ impl BtwCommand {
     where
         F: Fn(&str) -> Vec<String> + Send + Sync + 'static,
     {
-        let gen_fn = Arc::new(generator) as Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>;
+        let _gen_fn = Arc::new(generator) as Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>;
         // In production, you'd properly store this
     }
 

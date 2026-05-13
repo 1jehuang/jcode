@@ -67,15 +67,12 @@ impl DenyLog {
         let mut entries = self.entries.write().await;
         let mut index = self.index_by_tool.write().await;
 
-        if entries.len() >= self.max_entries {
-            if let Some(removed) = entries.pop_front() {
-                if let Some(ids) = index.get_mut(&removed.tool_name) {
-                    if let Some(pos) = ids.iter().position(|id: &String| id == &removed.id) {
+        if entries.len() >= self.max_entries
+            && let Some(removed) = entries.pop_front()
+                && let Some(ids) = index.get_mut(&removed.tool_name)
+                    && let Some(pos) = ids.iter().position(|id: &String| id == &removed.id) {
                         ids.remove(pos);
                     }
-                }
-            }
-        }
 
         entries.push_back(entry.clone());
 
@@ -146,11 +143,10 @@ impl DenyLog {
             let tool_name = entry.tool_name.clone();
             entries.remove(pos);
 
-            if let Some(ids) = index.get_mut(&tool_name) {
-                if let Some(idx) = ids.iter().position(|i| i == id) {
+            if let Some(ids) = index.get_mut(&tool_name)
+                && let Some(idx) = ids.iter().position(|i| i == id) {
                     ids.remove(idx);
                 }
-            }
 
             true
         } else {

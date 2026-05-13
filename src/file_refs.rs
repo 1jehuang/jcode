@@ -49,7 +49,7 @@ impl PathCompleter {
         } else { (base_dir.to_path_buf(), prefix.to_string()) };
 
         // 检查缓存
-        if let Some((time, cached)) = self.cache.get(&dir.0) { if time.elapsed() < self.cache_ttl { return self.filter_cached(cached, &dir.1); } }
+        if let Some((time, cached)) = self.cache.get(&dir.0) && time.elapsed() < self.cache_ttl { return self.filter_cached(cached, &dir.1); }
 
         let mut results = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&dir.0) {

@@ -30,7 +30,6 @@ use proto::{
 use std::sync::Arc;
 use parking_lot::RwLock;
 use jcode_lsp::LspOperations;
-use jcode_lsp::AstOperations;
 
 // ══════════════════════════════════════════════════════════════════
 // GrpcServerBuilder
@@ -106,11 +105,10 @@ impl GrpcServerBuilder {
                 if grpc_cfg.mtls_enabled { Some(&grpc_cfg.tls_ca_cert_path) } else { None },
             ) {
                 Ok(tls_cfg) => {
-                    if grpc_cfg.mtls_enabled {
-                        if let Err(e) = tls::check_mtls_config(&tls_cfg) {
+                    if grpc_cfg.mtls_enabled
+                        && let Err(e) = tls::check_mtls_config(&tls_cfg) {
                             tracing::warn!("mTLS config incomplete: {}", e);
                         }
-                    }
                     match tls::build_server_tls_config(&tls_cfg, grpc_cfg.mtls_enabled) {
                         Ok(server_tls) => {
                             self.tls_config = Some(server_tls);
@@ -222,7 +220,7 @@ impl SessionService for SessionServiceImpl {
     async fn update_session(&self, req: tonic::Request<proto::UpdateSessionRequest>) -> Result<tonic::Response<proto::UpdateSessionResponse>, tonic::Status> {
         let r = req.into_inner();
         match self.sessions.write().get_mut(&r.session_id) {
-            Some(s) => { s.status = r.status as i32; s.last_active_at = chrono::Utc::now().to_rfc3339(); Ok(tonic::Response::new(proto::UpdateSessionResponse { session: Some(s.clone()) })) }
+            Some(s) => { s.status = r.status; s.last_active_at = chrono::Utc::now().to_rfc3339(); Ok(tonic::Response::new(proto::UpdateSessionResponse { session: Some(s.clone()) })) }
             None => Err(tonic::Status::not_found("session not found")),
         }
     }
@@ -796,7 +794,7 @@ impl OpenCodeService for OpenCodeServiceImpl {
             }
         }
     }
-    async fn log_error(&self, req: tonic::Request<proto::LogErrorRequest>) -> Result<tonic::Response<proto::LogErrorResponse>, tonic::Status> { Ok(tonic::Response::new(proto::LogErrorResponse::default())) }
+    async fn log_error(&self, _req: tonic::Request<proto::LogErrorRequest>) -> Result<tonic::Response<proto::LogErrorResponse>, tonic::Status> { Ok(tonic::Response::new(proto::LogErrorResponse::default())) }
     async fn get_logs(&self, _: tonic::Request<proto::GetLogsRequest>) -> Result<tonic::Response<proto::GetLogsResponse>, tonic::Status> { Ok(tonic::Response::new(proto::GetLogsResponse::default())) }
     async fn set_log_level(&self, _: tonic::Request<proto::SetLogLevelRequest>) -> Result<tonic::Response<proto::SetLogLevelResponse>, tonic::Status> { Ok(tonic::Response::new(proto::SetLogLevelResponse::default())) }
     async fn detect_design_patterns(&self, _: tonic::Request<proto::DetectDesignPatternsRequest>) -> Result<tonic::Response<proto::DetectDesignPatternsResponse>, tonic::Status> { Ok(tonic::Response::new(proto::DetectDesignPatternsResponse::default())) }
@@ -938,7 +936,7 @@ impl PluginService for PluginServiceImpl {
         Ok(tonic::Response::new(proto::UnloadPluginResponse { success: r, error: if r { String::new() } else { "not found".into() } }))
     }
     async fn list_plugins(&self, _req: tonic::Request<proto::ListPluginsRequest>) -> Result<tonic::Response<proto::ListPluginsResponse>, tonic::Status> {
-        let plugins = self.plugins.read().iter().map(|(_, p)| proto::PluginInfo { plugin_id: p.id.clone(), name: p.name.clone(), version: p.version.clone(), description: p.description.clone(), enabled: p.enabled, capabilities: p.capabilities.clone() }).collect();
+        let plugins = self.plugins.read().values().map(|p| proto::PluginInfo { plugin_id: p.id.clone(), name: p.name.clone(), version: p.version.clone(), description: p.description.clone(), enabled: p.enabled, capabilities: p.capabilities.clone() }).collect();
         Ok(tonic::Response::new(proto::ListPluginsResponse { plugins, error: String::new() }))
     }
     async fn execute_plugin(&self, req: tonic::Request<proto::ExecutePluginRequest>) -> Result<tonic::Response<proto::ExecutePluginResponse>, tonic::Status> {

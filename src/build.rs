@@ -165,7 +165,7 @@ pub struct ProgressBar {
 
 impl ProgressBar {
     pub fn new(total: u64, message: &str) -> Self {
-        eprint!("  {}\n", message);
+        eprintln!("  {}", message);
         Self {
             total,
             current: 0,

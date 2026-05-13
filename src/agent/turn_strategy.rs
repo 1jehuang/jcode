@@ -72,5 +72,11 @@ pub trait TurnStrategy: Send + Sync {
 
 /// Standard turn strategy — default behavior matching current Agent.
 pub struct StandardTurnStrategy;
+impl Default for StandardTurnStrategy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StandardTurnStrategy { pub const fn new() -> Self { Self } }
 impl TurnStrategy for StandardTurnStrategy {}

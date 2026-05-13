@@ -244,8 +244,7 @@ impl SessionCostTracker {
                 std::fs::write(&self.storage_path, content)?;
                 Ok(())
             }
-            Err(_) => Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(_) => Err(std::io::Error::other(
                 "Failed to lock cost state",
             )),
         }

@@ -49,6 +49,12 @@ pub struct Usage {
     pub total_tokens: u32,
 }
 
+impl Default for DeepSeekClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DeepSeekClient {
     pub fn new() -> Self {
         let api_key = env::var("DEEPSEEK_API_KEY").unwrap_or_else(|_| "".to_string());

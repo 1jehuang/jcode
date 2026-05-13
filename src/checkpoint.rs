@@ -32,6 +32,12 @@ pub struct FileHistoryState {
     pub sequence: u32,
 }
 
+impl Default for FileHistoryState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FileHistoryState {
     const MAX: usize = 100;
     pub fn new() -> Self {

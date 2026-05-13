@@ -202,11 +202,9 @@ impl StreamingDiffPreview {
                 }
             }
 
-            if let Some(ref hunk) = current_hunk {
-                if hunk.lines.len() > self.config.context_lines * 2 + 20 {
-                    if let Some(h) = current_hunk.take() { hunks.push(h); }
-                }
-            }
+            if let Some(ref hunk) = current_hunk
+                && hunk.lines.len() > self.config.context_lines * 2 + 20
+                    && let Some(h) = current_hunk.take() { hunks.push(h); }
         }
         if let Some(h) = current_hunk.take() { hunks.push(h); }
         hunks

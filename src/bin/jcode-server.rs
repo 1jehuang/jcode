@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use jcode::{
     grpc::GrpcServerBuilder,
-    ws::{WebSocketServer, WebIdeWebSocketServer, WebSocketConfig},
+    ws::{WebIdeWebSocketServer, WebSocketConfig},
     rest::RestServer,
 };
 

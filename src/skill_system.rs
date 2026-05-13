@@ -484,7 +484,7 @@ impl Skill for SimplifySkill {
             ((original.len() - simplified.len()) as f64 / original.len() as f64) * 100.0
         };
 
-        let mut output = format!("✨ **Simplification Results**\n\n");
+        let mut output = "✨ **Simplification Results**\n\n".to_string();
         output.push_str(&format!("**Original size:** {} characters\n", original.len()));
         output.push_str(&format!("**Simplified size:** {} characters\n", simplified.len()));
         output.push_str(&format!("**Reduction:** {:.1}%\n\n", reduction_percent));
@@ -568,19 +568,16 @@ impl SkillsRegistry {
 
         let result = skill.execute(ctx).await;
 
-        match &result {
-            Ok(result) => {
-                let record = SkillExecutionRecord {
-                    skill_name: name.to_string(),
-                    timestamp: chrono::Utc::now(),
-                    input: ctx.task_description.clone(),
-                    output: result.output.clone(),
-                    success: result.success,
-                    duration_ms: result.duration_ms,
-                };
-                self.execution_history.write().await.push(record);
-            }
-            Err(_) => {}
+        if let Ok(result) = &result {
+            let record = SkillExecutionRecord {
+                skill_name: name.to_string(),
+                timestamp: chrono::Utc::now(),
+                input: ctx.task_description.clone(),
+                output: result.output.clone(),
+                success: result.success,
+                duration_ms: result.duration_ms,
+            };
+            self.execution_history.write().await.push(record);
         }
 
         result

@@ -221,7 +221,7 @@ impl App {
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
             let store_reasoning_content = matches!(
-                self.provider.name().as_ref(),
+                self.provider.name(),
                 "openrouter" | "bedrock" | "gemini" | "claude"
             );
             let mut reasoning_content = String::new();
@@ -598,8 +598,8 @@ impl App {
                                             && current_tool.is_none()
                                             && self.streaming_text.is_empty()
                                             && !saw_message_end;
-                                        if no_partial_output {
-                                            if let Some(reason) = crate::network_retry::classify_message(&message) {
+                                        if no_partial_output
+                                            && let Some(reason) = crate::network_retry::classify_message(&message) {
                                                 let plan = crate::network_retry::wait_plan();
                                                 self.push_display_message(DisplayMessage::system(format!(
                                                     "Stream interrupted, likely because {reason}. Waiting to retry: {}.",
@@ -615,7 +615,6 @@ impl App {
                                                 ));
                                                 continue 'turn_loop;
                                             }
-                                        }
                                         return Err(anyhow::anyhow!("Stream error: {}", message));
                                     }
                                     StreamEvent::ThinkingStart => {
@@ -835,8 +834,8 @@ impl App {
                                     && current_tool.is_none()
                                     && self.streaming_text.is_empty()
                                     && !saw_message_end;
-                                if no_partial_output {
-                                    if let Some(reason) = crate::network_retry::classify_network_interruption(e.as_ref()) {
+                                if no_partial_output
+                                    && let Some(reason) = crate::network_retry::classify_network_interruption(e.as_ref()) {
                                         let plan = crate::network_retry::wait_plan();
                                         self.push_display_message(DisplayMessage::system(format!(
                                             "Stream interrupted, likely because {reason}. Waiting to retry: {}.",
@@ -852,7 +851,6 @@ impl App {
                                         ));
                                         continue 'turn_loop;
                                     }
-                                }
                                 return Err(e);
                             }
                             None => {

@@ -112,11 +112,10 @@ pub fn load_tls_config(
 ) -> anyhow::Result<TlsConfig> {
     let mut builder = TlsConfigBuilder::new()
         .with_server_cert(cert_path, key_path);
-    if let Some(ca) = ca_cert_path {
-        if !ca.is_empty() {
+    if let Some(ca) = ca_cert_path
+        && !ca.is_empty() {
             builder = builder.with_ca_cert(ca);
         }
-    }
     builder.build()
 }
 
@@ -205,11 +204,10 @@ pub fn check_cert_files(cert_path: &str, key_path: &str, ca_cert_path: Option<&s
             anyhow::bail!("{} not found: {}", label, path);
         }
     }
-    if let Some(ca) = ca_cert_path {
-        if !ca.is_empty() && !Path::new(ca).exists() {
+    if let Some(ca) = ca_cert_path
+        && !ca.is_empty() && !Path::new(ca).exists() {
             anyhow::bail!("CA certificate not found: {}", ca);
         }
-    }
     Ok(())
 }
 

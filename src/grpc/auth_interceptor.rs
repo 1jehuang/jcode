@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use parking_lot::RwLock;
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::service::Interceptor;
@@ -199,11 +199,10 @@ impl AuthService {
             .ok_or_else(|| Status::unauthenticated("Invalid authorization format, expected 'Bearer <token>'"))?;
 
         // 检查限流
-        if let Some(ref limiter) = self.rate_limiter {
-            if !limiter.try_consume() {
+        if let Some(ref limiter) = self.rate_limiter
+            && !limiter.try_consume() {
                 return Err(Status::unauthenticated("Rate limit exceeded"));
             }
-        }
 
         // 验证 Token
         let is_valid = if !tokens.is_empty() {

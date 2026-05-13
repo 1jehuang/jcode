@@ -47,14 +47,15 @@ pub struct PruneResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum PruneStrategy {
     PriorityBased,
     RecencyOnly,
     SemanticDedup,
+    #[default]
     Hybrid,
 }
 
-impl Default for PruneStrategy { fn default() -> Self { Self::Hybrid } }
 
 pub struct ContextPruner {
     target_ratio: f64,
@@ -148,11 +149,10 @@ impl ContextPruner {
             anchors.push(idx);
         }
 
-        if let Some(last_assistant) = messages.iter().rposition(|m| m.role == MessageRole::Assistant) {
-            if !anchors.contains(&last_assistant) {
+        if let Some(last_assistant) = messages.iter().rposition(|m| m.role == MessageRole::Assistant)
+            && !anchors.contains(&last_assistant) {
                 anchors.push(last_assistant);
             }
-        }
 
         for (i, m) in messages.iter().enumerate().rev() {
             if m.is_active_edit && !anchors.contains(&i) {

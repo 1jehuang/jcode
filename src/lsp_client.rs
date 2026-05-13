@@ -157,7 +157,7 @@ impl LspServerManager {
 
         // Read initialize response with timeout
         let mut buf = String::new();
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
             let _ = reader.read_line(&mut buf).await;
         }).await.map_err(|_| "LSP init timeout")?;
 

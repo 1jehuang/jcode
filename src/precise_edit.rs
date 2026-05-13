@@ -21,13 +21,14 @@ const MAX_CANDIDATES: usize = 10;
 const DEFAULT_CONTEXT_LINES: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum MatchStrategy {
     Exact,
+    #[default]
     Fuzzy,
     Semantic,
 }
 
-impl Default for MatchStrategy { fn default() -> Self { Self::Fuzzy } }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IndentStyle {
@@ -198,11 +199,10 @@ impl PreciseEditEngine {
         for op in ops {
             match self.execute(op) {
                 Ok(result) => {
-                    if result.success {
-                        if let Some(ref snap) = result.undo_snapshot {
+                    if result.success
+                        && let Some(ref snap) = result.undo_snapshot {
                             snapshots.push((op.file_path.clone(), snap.clone()));
                         }
-                    }
                     results.push(result);
                 }
                 Err(e) => {

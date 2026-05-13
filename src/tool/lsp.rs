@@ -265,7 +265,7 @@ fn format_locations(locations: &[lsp_types::Location]) -> String {
         let uri = loc.uri.to_string();
         
         if i == 0 {
-            output.push_str(&format!("Definition found at:\n"));
+            output.push_str("Definition found at:\n");
         }
         
         output.push_str(&format!(
@@ -339,11 +339,10 @@ fn format_symbols_recursive(symbols: &[lsp_types::DocumentSymbol], output: &mut 
             sym.range.end.character + 1,
         ));
 
-        if let Some(children) = &sym.children {
-            if !children.is_empty() {
+        if let Some(children) = &sym.children
+            && !children.is_empty() {
                 format_symbols_recursive(children, output, depth + 1);
             }
-        }
     }
 }
 
@@ -360,7 +359,7 @@ fn format_workspace_symbols(symbols: &[lsp_types::SymbolInformation]) -> String 
             i + 1,
             sym.name,
             kind,
-            extract_filename(&location.uri.to_string()),
+            extract_filename(location.uri.as_ref()),
             location.range.start.line + 1,
         ));
     }
@@ -380,7 +379,7 @@ fn format_call_hierarchy_items(items: &[lsp_types::CallHierarchyItem]) -> String
             i + 1,
             item.name,
             kind,
-            extract_filename(&item.uri.to_string()),
+            extract_filename(item.uri.as_ref()),
             item.range.start.line + 1,
         ));
         

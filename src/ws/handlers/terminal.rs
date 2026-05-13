@@ -32,7 +32,7 @@ pub async fn handle_create(
 ) -> Result<WsResponse> {
     let shell_type = request.params.get("shell")
         .and_then(|v| v.as_str())
-        .unwrap_or_else(|| {
+        .unwrap_or({
             // 根据操作系统选择默认 shell
             if cfg!(target_os = "windows") { "powershell" } else { "bash" }
         });
@@ -90,14 +90,14 @@ pub async fn handle_create(
         .ok_or_else(|| anyhow::anyhow!("Failed to get stdin handle"))?;
 
     // 创建 stdout 读取通道
-    let stdout = child.stdout.take()
+    let _stdout = child.stdout.take()
         .ok_or_else(|| anyhow::anyhow!("Failed to get stdout handle"))?;
 
-    let stderr = child.stderr.take()
+    let _stderr = child.stderr.take()
         .ok_or_else(|| anyhow::anyhow!("Failed to get stderr handle"))?;
 
     // 创建输入通道 (mpsc)
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(100);
+    let (_tx, mut rx) = mpsc::channel::<Vec<u8>>(100);
 
     // 启动输入写入任务
     let term_id_input = terminal_id.clone();

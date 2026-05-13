@@ -754,8 +754,8 @@ fn search_external_sessions(query: &QueryProfile, options: &SearchOptions) -> Se
     let mut report = SearchReport::default();
     let mut records = Vec::new();
 
-    if source_matches_filter("claude", options) {
-        if let Ok(sessions) =
+    if source_matches_filter("claude", options)
+        && let Ok(sessions) =
             crate::import::list_claude_code_sessions_lazy(options.max_scan_sessions)
         {
             report.external_sources.push("claude");
@@ -786,7 +786,6 @@ fn search_external_sessions(query: &QueryProfile, options: &SearchOptions) -> Se
                 });
             }
         }
-    }
 
     collect_external_jsonl_source(
         &mut records,

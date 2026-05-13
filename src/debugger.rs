@@ -382,13 +382,12 @@ impl DebugClient {
 
         let line = serde_json::to_string(&req)? + "\n";
 
-        if let Some(ref mut process) = self.process {
-            if let Some(ref mut stdin) = process.stdin {
+        if let Some(ref mut process) = self.process
+            && let Some(ref mut stdin) = process.stdin {
                 stdin.write_all(line.as_bytes())
                     .with_context(|| format!("DAP write failed for {}", command))?;
                 stdin.flush()?;
             }
-        }
 
         self.read_response(seq).await
     }
@@ -402,8 +401,8 @@ impl DebugClient {
                 anyhow::bail!("DAP timeout waiting for response to seq {}", seq);
             }
 
-            if let Some(ref mut process) = self.process {
-                if let Some(ref mut stdout) = process.stdout {
+            if let Some(ref mut process) = self.process
+                && let Some(ref mut stdout) = process.stdout {
                     let mut reader = BufReader::new(stdout);
                     let mut line = String::new();
                     let n = reader.read_line(&mut line)?;
@@ -426,7 +425,6 @@ impl DebugClient {
                     }
                     return Ok(serde_json::from_str(&line)?);
                 }
-            }
             anyhow::bail!("DAP process not started");
         }
     }
@@ -521,13 +519,11 @@ pub fn parse_crash_output(stderr: &str) -> CrashInfo {
             }
         }
 
-        if trimmed.contains("at address") || trimmed.contains("address:"){
-            if let Some(addr) = trimmed.split(|c: char| c == ':' || c == ' ').last() {
-                if addr.len() >= 8 && addr.chars().all(|c| c.is_ascii_hexdigit() || c == 'x' || c == '0') {
+        if (trimmed.contains("at address") || trimmed.contains("address:"))
+            && let Some(addr) = trimmed.split([':', ' ']).next_back()
+                && addr.len() >= 8 && addr.chars().all(|c| c.is_ascii_hexdigit() || c == 'x' || c == '0') {
                     address = Some(addr.to_string());
                 }
-            }
-        }
 
         if trimmed.starts_with('#') && trimmed.split_whitespace().count() >= 2 {
             backtrace.push(trimmed.to_string());

@@ -512,8 +512,7 @@ fn find_wezterm_gui_binary() -> Option<String> {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()
-        {
-            if output.status.success() {
+            && output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 if let Some(line) = stdout.lines().next() {
                     let trimmed = line.trim();
@@ -529,7 +528,6 @@ fn find_wezterm_gui_binary() -> Option<String> {
                     }
                 }
             }
-        }
     }
 
     None

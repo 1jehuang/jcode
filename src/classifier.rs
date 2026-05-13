@@ -65,6 +65,12 @@ pub struct LlmClassifier {
     cache_ttl_seconds: u64,
 }
 
+impl Default for LlmClassifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LlmClassifier {
     pub fn new() -> Self {
         Self {
@@ -179,7 +185,7 @@ impl LlmClassifier {
         enabled_rules.sort_by_key(|r| std::cmp::Reverse(r.priority));
 
         for rule in enabled_rules {
-            if self.matches_rule(&rule, request) {
+            if self.matches_rule(rule, request) {
                 let result = match rule.action {
                     RuleAction::Approve => ClassificationResult::Approved,
                     RuleAction::Deny => ClassificationResult::Denied,
@@ -224,12 +230,8 @@ impl LlmClassifier {
         
         let mut response = String::new();
         while let Some(event) = stream.next().await {
-            if let Ok(event) = event {
-                match event {
-                    StreamEvent::TextDelta(text) => response.push_str(&text),
-                    _ => {}
-                }
-            }
+            if let Ok(event) = event
+                && let StreamEvent::TextDelta(text) = event { response.push_str(&text) }
         }
 
         self.parse_llm_response(&response)

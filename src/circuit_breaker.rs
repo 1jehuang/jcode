@@ -182,12 +182,11 @@ impl CircuitBreaker {
         let mut state = self.state.write().await;
         let mut last_state_change = self.last_state_change.write().await;
 
-        if *state == CircuitState::Open {
-            if self.should_allow_test().await {
+        if *state == CircuitState::Open
+            && self.should_allow_test().await {
                 *state = CircuitState::HalfOpen;
                 *last_state_change = Instant::now();
             }
-        }
 
         state.clone()
     }

@@ -50,6 +50,12 @@ pub struct TaskScheduler {
     is_running: Arc<RwLock<bool>>,
 }
 
+impl Default for TaskScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TaskScheduler {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel(100);
@@ -230,7 +236,7 @@ impl TaskScheduler {
             task_id: task.id.clone(),
             timestamp,
             success: result.is_ok(),
-            result: result.as_ref().ok().map(|s| s.clone()),
+            result: result.as_ref().ok().cloned(),
             error: result.err().map(|e| e.to_string()),
         }
     }

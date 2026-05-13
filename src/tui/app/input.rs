@@ -1876,6 +1876,19 @@ impl App {
             return;
         }
 
+        // Route unmatched / commands to the global slash command registry
+        // (covers /build, /plan, /review, /model, /clear, /compact, /cost, /export, /resume)
+        if trimmed.starts_with('/')
+            && let Some((cmd, args)) = crate::slash_command::parse(trimmed) {
+                crate::telemetry::record_command_family(trimmed);
+                let cmd = cmd.to_string();
+                let args = args.to_string();
+                tokio::spawn(async move {
+                    crate::slash_command::execute(&cmd, &args).await;
+                });
+                return;
+            }
+
         if let Some(command) = extract_input_shell_command(&input) {
             self.push_display_message(DisplayMessage::user(raw_input));
 

@@ -116,8 +116,8 @@ impl PlanVerifier {
             issues.extend(self.verify_step(step));
         }
 
-        if let Some(budget) = self.token_budget {
-            if total_tokens > budget {
+        if let Some(budget) = self.token_budget
+            && total_tokens > budget {
                 issues.push(VerificationIssue {
                     step_id: "plan_total".into(),
                     severity: IssueSeverity::Warning,
@@ -126,7 +126,6 @@ impl PlanVerifier {
                     suggestion: Some("Consider reducing scope or increasing budget".into()),
                 });
             }
-        }
 
         let errors = issues.iter().filter(|i| matches!(i.severity, IssueSeverity::Error | IssueSeverity::Critical)).count();
         let warnings = issues.len() - errors;

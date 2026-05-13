@@ -1518,9 +1518,9 @@ fn filter_cli_model_routes_for_choice(
 /// Run the build mode: plan → execute → verify
 pub async fn run_build_command(
     message: &str,
-    manual: bool,
+    _manual: bool,
     no_verify: bool,
-    max_retries: u32,
+    _max_retries: u32,
     release: bool,
     clean: bool,
     target: Option<&str>,
@@ -1530,7 +1530,7 @@ pub async fn run_build_command(
     jobs: Option<usize>,
 ) -> Result<()> {
     use crate::build::{
-        BuildExecutor, BuildReport, BuildRequest, BuildStatus, ProjectType, TestTool,
+        BuildExecutor, BuildReport, BuildRequest, BuildStatus, ProjectType,
         WorkspaceManager,
     };
     use std::sync::Arc;
@@ -1586,7 +1586,7 @@ pub async fn run_build_command(
                 let all_ok = wr.all_succeeded;
                 let total_dur = wr.total_duration;
                 let mut lines = vec![format!("Workspace build: {} projects\n", wr.projects.len())];
-                for (_pid, br) in &wr.projects {
+                for br in wr.projects.values() {
                     lines.push(format!(
                         "  [{}] {:.1}s ({} err, {} warn)",
                         if br.success { "OK" } else { "FAIL" },
@@ -1640,9 +1640,9 @@ pub async fn run_build_command(
     }
 
     // Run tests after build
-    if run_tests {
-        if let Ok(ref result) = build_result {
-            if result.success {
+    if run_tests
+        && let Ok(ref result) = build_result
+            && result.success {
                 eprintln!("\n🔬 Running tests...\n");
                 let test_tool = crate::build_module::TestTool::new(workspace.clone());
                 let ctx = jcode_tool_core::ToolContext {
@@ -1665,14 +1665,12 @@ pub async fn run_build_command(
                     Err(e) => eprintln!("  ❌ Tests failed: {}", e),
                 }
             }
-        }
-    }
 
     // Post-build micro-ci verification
     let mut ci_passed = false;
-    if !no_verify {
-        if let Ok(ref result) = build_result {
-            if result.success {
+    if !no_verify
+        && let Ok(ref result) = build_result
+            && result.success {
                 eprintln!("\n🔍 Verify — Running micro-ci checks...\n");
                 let ci = jcode_micro_ci::MicroCi::new(jcode_micro_ci::CiConfig {
                     workspace_root: cwd.to_string_lossy().to_string(),
@@ -1690,12 +1688,10 @@ pub async fn run_build_command(
                     );
                 }
             }
-        }
-    }
 
     let report = match &build_result {
         Ok(result) => BuildReport::from_build_result(message, result, ci_passed),
-        Err(e) => {
+        Err(_e) => {
             let mut r = BuildReport::new(message);
             r.status = BuildStatus::Failed;
             r.execution_time_ms = build_elapsed.as_millis() as u64;

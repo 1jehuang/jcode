@@ -123,12 +123,11 @@ pub async fn handle_write(
     let path = Path::new(file_path);
 
     // 如果需要，创建父目录
-    if create_dirs {
-        if let Some(parent) = path.parent() {
+    if create_dirs
+        && let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await
                 .map_err(|e| anyhow::anyhow!("Failed to create directories: {}", e))?;
         }
-    }
 
     // 写入文件
     tokio::fs::write(file_path, content).await
@@ -225,11 +224,10 @@ fn list_directory(path: &Path, show_hidden: bool, recursive: bool) -> Result<Vec
             entries.push(entry_info);
 
             // 递归处理子目录
-            if recursive && is_dir {
-                if let Ok(sub_entries) = list_directory(&entry_path, show_hidden, true) {
+            if recursive && is_dir
+                && let Ok(sub_entries) = list_directory(&entry_path, show_hidden, true) {
                     entries.extend(sub_entries);
                 }
-            }
         }
     }
 

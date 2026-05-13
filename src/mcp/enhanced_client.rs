@@ -26,18 +26,15 @@ use super::protocol::*;
 
 /// Transport type for MCP connection
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Default)]
 pub enum TransportType {
+    #[default]
     StdIO,
     SSE,
     StreamableHTTP,
     WebSocket,
 }
 
-impl Default for TransportType {
-    fn default() -> Self {
-        TransportType::StdIO
-    }
-}
 
 impl std::fmt::Display for TransportType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -608,14 +605,13 @@ impl EnhancedMcpClient {
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
             while let Some(line) = reader.next_line().await.unwrap_or(None) {
-                if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&line) {
-                    if let Some(id) = response.id {
+                if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(&line)
+                    && let Some(id) = response.id {
                         let mut pending = handle_clone.pending.lock().await;
-                        if let Some(tx) = pending.remove(&(id as u64)) {
+                        if let Some(tx) = pending.remove(&{ id }) {
                             let _ = tx.send(response);
                         }
                     }
-                }
             }
             log::warn!("MCP: Server '{}' connection closed", sn2);
         });

@@ -177,7 +177,7 @@ impl Agent {
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
             let store_reasoning_content = matches!(
-                self.provider.name().as_ref(),
+                self.provider.name(),
                 "openrouter" | "bedrock" | "gemini" | "claude"
             );
             let mut reasoning_content = String::new();

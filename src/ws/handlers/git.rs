@@ -428,7 +428,7 @@ pub async fn handle_log(
         .map(|line| {
             let parts: Vec<&str> = line.splitn(5, '|').collect();
             serde_json::json!({
-                "hash": parts.get(0).unwrap_or(&""),
+                "hash": parts.first().unwrap_or(&""),
                 "author": {
                     "name": parts.get(1).unwrap_or(&""),
                     "email": parts.get(2).unwrap_or(&""),

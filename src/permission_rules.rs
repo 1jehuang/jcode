@@ -16,13 +16,14 @@ use std::collections::HashMap;
 use tracing::info;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum PermissionAction {
+    #[default]
     Allow,
     Deny,
     Ask,
 }
 
-impl Default for PermissionAction { fn default() -> Self { Self::Allow } }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PermissionRule {
@@ -105,9 +106,9 @@ impl PermissionRulesEngine {
         let start = std::time::Instant::now();
 
         for rule in &self.rules {
-            if !self.matches_tool(&rule, &req.tool_name) { continue; }
-            if !self.matches_file(&rule, &req.file_path) { continue; }
-            if !self.matches_params(&rule, &req.params) { continue; }
+            if !self.matches_tool(rule, &req.tool_name) { continue; }
+            if !self.matches_file(rule, &req.file_path) { continue; }
+            if !self.matches_params(rule, &req.params) { continue; }
 
             let decision = match rule.action {
                 PermissionAction::Allow => PermissionDecision {
@@ -263,7 +264,7 @@ fn glob_match(pattern: &str, text: &str) -> bool {
     let re_pattern: String = pattern.chars().flat_map(|c| match c {
         '*' => Some(".*".into()),
         '?' => Some(".".into()),
-        '.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$' => Some(format!("\\")),
+        '.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$' => Some("\\".to_string()),
         other => Some(other.to_string()),
     }).collect();
     if let Ok(re) = regex::Regex::new(&format!("^{}$", re_pattern)) {

@@ -51,6 +51,12 @@ pub struct ConversationCompressor {
     cache: HashMap<String, Vec<Message>>,
 }
 
+impl Default for ConversationCompressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConversationCompressor {
     pub fn new() -> Self {
         Self {

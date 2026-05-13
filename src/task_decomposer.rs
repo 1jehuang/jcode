@@ -232,16 +232,15 @@ impl TaskDecomposer {
             }
 
             let wave_ids: Vec<String> = current_wave.into_iter()
-                .map(|id| {
-                    if let Some(nexts) = self.adj_out.get(&id) {
+                .inspect(|id| {
+                    if let Some(nexts) = self.adj_out.get(id) {
                         for next in nexts {
                             if let Some(cnt) = in_degree.get_mut(next) {
                                 *cnt = cnt.saturating_sub(1);
                             }
                         }
                     }
-                    in_degree.remove(&id);
-                    id
+                    in_degree.remove(id);
                 })
                 .collect();
 

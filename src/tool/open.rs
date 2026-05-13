@@ -400,7 +400,7 @@ async fn reveal_target(path: &Path, kind: LocalTargetKind) -> Result<(String, bo
             cmd.arg(format!("/select,{}", path.display()));
         }
         spawn_with_grace(cmd, "explorer").await?;
-        return Ok(("explorer".to_string(), true));
+        Ok(("explorer".to_string(), true))
     }
 }
 

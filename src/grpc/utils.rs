@@ -1,12 +1,16 @@
 ﻿use std::sync::Arc;
-use parking_lot::RwLock;
 use tonic::{Request, Response, Status};
-use uuid::Uuid;
 use super::proto;
 use super::proto::plugin_service_server::PluginService;
 #[derive(Clone)]
 pub struct PluginServiceImpl {
     plugins: Arc<parking_lot::RwLock<std::collections::HashMap<String, PluginInfo>>>,
+}
+
+impl Default for PluginServiceImpl {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PluginServiceImpl {
@@ -30,7 +34,7 @@ impl PluginService for PluginServiceImpl {
         }
 
         let plugin_id = uuid::Uuid::new_v4().to_string();
-        let name = req.plugin_path.split('/').last().unwrap_or("unknown").to_string();
+        let name = req.plugin_path.split('/').next_back().unwrap_or("unknown").to_string();
         
         let plugin_info = PluginInfo {
             id: plugin_id.clone(),
@@ -353,8 +357,8 @@ fn analyze_project_directory(project_path: &str) -> (Vec<proto::FileInfo>, proto
             if path.is_file() {
                 if let Some(ext) = path.extension() {
                     let ext_str = ext.to_string_lossy();
-                    if ["rs", "py", "js", "ts", "go", "java", "cpp", "c"].contains(&ext_str.as_ref()) {
-                        if let Ok(content) = std::fs::read_to_string(&path) {
+                    if ["rs", "py", "js", "ts", "go", "java", "cpp", "c"].contains(&ext_str.as_ref())
+                        && let Ok(content) = std::fs::read_to_string(&path) {
                             let lines: Vec<&str> = content.lines().collect();
                             let file_line_count = lines.len() as i32;
                             line_count += file_line_count;
@@ -392,7 +396,6 @@ fn analyze_project_directory(project_path: &str) -> (Vec<proto::FileInfo>, proto
                                 imports,
                             });
                         }
-                    }
                 }
             } else if path.is_dir() {
                 let (sub_files, _, _) = analyze_project_directory(path.to_string_lossy().as_ref());
@@ -533,7 +536,7 @@ fn generate_quick_fixes(file_path: &str, code: &str, line: i32, character: i32, 
     fixes
 }
 
-fn generate_code_documentation(file_path: &str, code: &str, include_comments: bool, include_examples: bool) -> (String, Vec<proto::DocComment>) {
+fn generate_code_documentation(file_path: &str, code: &str, _include_comments: bool, include_examples: bool) -> (String, Vec<proto::DocComment>) {
     let mut comments = Vec::new();
     
     let fn_regex = regex::Regex::new(r"(pub\s+)?(async\s+)?fn\s+(\w+)\s*\(").unwrap();
@@ -622,11 +625,11 @@ fn generate_struct_doc(name: &str) -> String {
     doc
 }
 
-fn generate_images(prompt: &str, style: &str, size: &str, num_images: i32) -> Vec<proto::ImageResult> {
+fn generate_images(prompt: &str, style: &str, _size: &str, num_images: i32) -> Vec<proto::ImageResult> {
     let mut images = Vec::new();
     let count = std::cmp::max(1, std::cmp::min(num_images, 5));
     
-    for i in 0..count {
+    for _i in 0..count {
         images.push(proto::ImageResult {
             url: format!("https://api.example.com/images/{}", uuid::Uuid::new_v4()),
             base64_data: "".to_string(),
@@ -638,7 +641,7 @@ fn generate_images(prompt: &str, style: &str, size: &str, num_images: i32) -> Ve
     images
 }
 
-fn analyze_image(image_url: &str, image_data: &[u8], prompt: &str) -> (String, Vec<proto::ObjectDetection>, String) {
+fn analyze_image(image_url: &str, _image_data: &[u8], prompt: &str) -> (String, Vec<proto::ObjectDetection>, String) {
     let description = if !prompt.is_empty() {
         format!("Analyzed image with prompt: {}. This is an AI-generated description of the image content.", prompt)
     } else {
@@ -667,7 +670,7 @@ fn analyze_image(image_url: &str, image_data: &[u8], prompt: &str) -> (String, V
     (description, objects, text_content)
 }
 
-fn analyze_chart(chart_url: &str, chart_data: &[u8], chart_type: &str) -> (String, Vec<proto::DataPoint>, String, String) {
+fn analyze_chart(_chart_url: &str, _chart_data: &[u8], chart_type: &str) -> (String, Vec<proto::DataPoint>, String, String) {
     let chart_type_result = if !chart_type.is_empty() {
         chart_type.to_string()
     } else {
@@ -750,11 +753,10 @@ fn invalidate_cache(cache_key: &str, target_path: &str) -> (bool, i32) {
     let mut count = 0;
     
     ANALYSIS_CACHE.with(|cache| {
-        if !cache_key.is_empty() {
-            if cache.write().remove(cache_key).is_some() {
+        if !cache_key.is_empty()
+            && cache.write().remove(cache_key).is_some() {
                 count += 1;
             }
-        }
         
         if !target_path.is_empty() {
             let keys_to_remove: Vec<String> = cache.read()
@@ -841,7 +843,7 @@ fn analyze_document_content(document: &str, analysis_type: &str) -> (String, Vec
     (summary, sections, key_points)
 }
 
-fn format_code(code: &str, language: &str, style: &str) -> String {
+fn format_code(code: &str, _language: &str, style: &str) -> String {
     let lines: Vec<&str> = code.lines().collect();
     let mut formatted_lines = Vec::new();
     let indent_style = if style == "spaces" || style.is_empty() { "    " } else { "\t" };
@@ -869,7 +871,7 @@ fn format_code(code: &str, language: &str, style: &str) -> String {
 pub fn find_workspace_symbols(query: &str, file_paths: &[String]) -> Vec<proto::WorkspaceSymbol> {
     let mut symbols = Vec::new();
     
-    for (idx, file_path) in file_paths.iter().enumerate().take(10) {
+    for (_idx, file_path) in file_paths.iter().enumerate().take(10) {
         if let Ok(content) = std::fs::read_to_string(file_path) {
             let fn_regex = regex::Regex::new(r"(pub\s+)?fn\s+(\w+)").unwrap();
             let struct_regex = regex::Regex::new(r"(pub\s+)?struct\s+(\w+)").unwrap();
@@ -1005,7 +1007,7 @@ fn analyze_code_semantics(file_path: &str, code: &str, include_call_graph: bool,
     
     let fn_regex = regex::Regex::new(r"(pub\s+)?fn\s+(\w+)\s*\(([^)]*)\)\s*(->\s*[\w:]+)?").unwrap();
     let struct_regex = regex::Regex::new(r"(pub\s+)?struct\s+(\w+)").unwrap();
-    let impl_regex = regex::Regex::new(r"impl\s+(\w+)").unwrap();
+    let _impl_regex = regex::Regex::new(r"impl\s+(\w+)").unwrap();
     
     for (idx, line) in lines.iter().enumerate() {
         if let Some(cap) = fn_regex.captures(line) {
@@ -1094,8 +1096,8 @@ fn analyze_code_semantics(file_path: &str, code: &str, include_call_graph: bool,
         lines_of_code: loc,
         functions_count: func_count,
         structs_count: struct_count,
-        complexity: (func_count + struct_count) as i32,
-        cyclomatic_complexity: (func_count * 2) as i32,
+        complexity: (func_count + struct_count),
+        cyclomatic_complexity: (func_count * 2),
         maintainability_index: if loc > 0 { 100.0 - (func_count as f64 * 0.5) } else { 100.0 },
     };
     
@@ -1157,7 +1159,7 @@ fn optimize_code(code: &str, optimizations: &[String]) -> (String, Vec<proto::Op
 
 fn review_code_quality(file_path: &str, code: &str, rules: &[String]) -> (Vec<proto::CodeIssue>, i32, i32, i32, f64) {
     let mut issues = Vec::new();
-    let mut error_count = 0;
+    let error_count = 0;
     let mut warning_count = 0;
     let mut info_count = 0;
     
@@ -1230,14 +1232,14 @@ fn review_code_quality(file_path: &str, code: &str, rules: &[String]) -> (Vec<pr
     (issues, error_count, warning_count, info_count, quality_score.max(0.0).min(100.0))
 }
 
-fn handle_collaborative_edit(session_id: &str, file_path: &str, user_id: &str, edit_type: &str, content: &str, start_line: i32, end_line: i32) -> (bool, String, Vec<String>) {
+fn handle_collaborative_edit(_session_id: &str, _file_path: &str, user_id: &str, _edit_type: &str, _content: &str, _start_line: i32, _end_line: i32) -> (bool, String, Vec<String>) {
     let version = uuid::Uuid::new_v4().to_string();
     let active_users = vec!["user1".to_string(), user_id.to_string()];
     
     (true, version, active_users)
 }
 
-fn batch_refactor(file_paths: &[String], refactor_type: &str, old_value: &str, new_value: &str) -> (i32, i32, Vec<String>) {
+fn batch_refactor(file_paths: &[String], _refactor_type: &str, old_value: &str, new_value: &str) -> (i32, i32, Vec<String>) {
     let mut modified_files = Vec::new();
     let mut changes_count = 0;
     
@@ -1274,8 +1276,8 @@ fn incremental_analyze(file_path: &str, code: &str, previous_hash: &str, changed
     let mut symbols = Vec::new();
     for (idx, line) in lines.iter().enumerate() {
         let line_num = idx as i32 + 1;
-        if line_num >= changed_start_line && line_num <= changed_end_line {
-            if let Some(cap) = fn_regex.captures(line) {
+        if line_num >= changed_start_line && line_num <= changed_end_line
+            && let Some(cap) = fn_regex.captures(line) {
                 symbols.push(proto::SymbolDetails {
                     name: cap[2].to_string(),
                     kind: "function".to_string(),
@@ -1292,15 +1294,14 @@ fn incremental_analyze(file_path: &str, code: &str, previous_hash: &str, changed
                     return_type: "".to_string(),
                 });
             }
-        }
     }
     
     let metrics = proto::CodeMetrics {
         lines_of_code: loc,
         functions_count: func_count,
         structs_count: struct_count,
-        complexity: (func_count + struct_count) as i32,
-        cyclomatic_complexity: (func_count * 2) as i32,
+        complexity: (func_count + struct_count),
+        cyclomatic_complexity: (func_count * 2),
         maintainability_index: if loc > 0 { 100.0 - (func_count as f64 * 0.5) } else { 100.0 },
     };
     
@@ -1314,7 +1315,7 @@ fn warmup_cache(file_paths: &[String], preload_models: bool) -> (i32, i32, i32) 
     let mut files_cached = 0;
     
     for file_path in file_paths {
-        if let Ok(_) = std::fs::read_to_string(file_path) {
+        if std::fs::read_to_string(file_path).is_ok() {
             files_cached += 1;
         }
     }
@@ -1338,7 +1339,7 @@ fn get_performance_stats() -> proto::PerformanceStats {
     }
 }
 
-fn get_active_users(project_id: &str) -> Vec<proto::ActiveUser> {
+fn get_active_users(_project_id: &str) -> Vec<proto::ActiveUser> {
     vec![
         proto::ActiveUser {
             user_id: "user1".to_string(),
@@ -1391,7 +1392,7 @@ fn lock_file(file_path: &str, user_id: &str, lock: bool) -> (bool, bool, String)
     })
 }
 
-fn parse_ast(file_path: &str, code: &str, language: &str) -> (proto::AstNode, i32) {
+fn parse_ast(_file_path: &str, code: &str, _language: &str) -> (proto::AstNode, i32) {
     let lines: Vec<&str> = code.lines().collect();
     let mut node_count = 0;
     
@@ -1634,7 +1635,7 @@ fn resolve_symbols(file_path: &str, code: &str, include_definitions: bool, inclu
     symbols
 }
 
-fn validate_code(code: &str, language: &str, check_syntax: bool, check_types: bool, check_style: bool) -> (bool, Vec<proto::ValidationError>, i32, i32) {
+fn validate_code(code: &str, _language: &str, check_syntax: bool, check_types: bool, check_style: bool) -> (bool, Vec<proto::ValidationError>, i32, i32) {
     let mut errors = Vec::new();
     let mut error_count = 0;
     let mut warning_count = 0;
@@ -1702,7 +1703,7 @@ fn validate_code(code: &str, language: &str, check_syntax: bool, check_types: bo
     }
     
     if check_types {
-        let unused_var = regex::Regex::new(r"let\s+(mut\s+)?(\w+)\s*=").unwrap();
+        let _unused_var = regex::Regex::new(r"let\s+(mut\s+)?(\w+)\s*=").unwrap();
         let shadow_var = regex::Regex::new(r"(pub\s+)?(mut\s+)?let\s+(\w+)\s*=").unwrap();
         
         let mut var_names = std::collections::HashSet::new();
@@ -1779,7 +1780,7 @@ fn validate_code(code: &str, language: &str, check_syntax: bool, check_types: bo
     (error_count == 0, errors, error_count, warning_count)
 }
 
-fn enforce_style(code: &str, style_guide: &str, auto_fix: bool) -> (String, Vec<proto::StyleViolation>, i32, i32) {
+fn enforce_style(code: &str, _style_guide: &str, auto_fix: bool) -> (String, Vec<proto::StyleViolation>, i32, i32) {
     let mut violations = Vec::new();
     let mut violation_count = 0;
     let mut fixed_count = 0;
@@ -1787,7 +1788,7 @@ fn enforce_style(code: &str, style_guide: &str, auto_fix: bool) -> (String, Vec<
     let lines: Vec<&str> = code.lines().collect();
     
     let snake_case = regex::Regex::new(r"\b([a-z]+(_[a-z]+)*)\b").unwrap();
-    let camel_case = regex::Regex::new(r"\b([a-z][A-Za-z0-9]*)\b").unwrap();
+    let _camel_case = regex::Regex::new(r"\b([a-z][A-Za-z0-9]*)\b").unwrap();
     let pascal_case = regex::Regex::new(r"\b([A-Z][a-zA-Z0-9]*)\b").unwrap();
     
     for (idx, line) in lines.iter().enumerate() {
@@ -1915,9 +1916,9 @@ fn to_pascal_case(s: &str) -> String {
     }
 }
 
-fn detect_errors(code: &str, language: &str) -> (Vec<proto::ErrorDetection>, i32, i32, i32) {
+fn detect_errors(code: &str, _language: &str) -> (Vec<proto::ErrorDetection>, i32, i32, i32) {
     let mut errors = Vec::new();
-    let mut error_count = 0;
+    let error_count = 0;
     let mut warning_count = 0;
     let mut info_count = 0;
     let lines: Vec<&str> = code.lines().collect();
@@ -1937,7 +1938,7 @@ fn detect_errors(code: &str, language: &str) -> (Vec<proto::ErrorDetection>, i32
     for (idx, line) in lines.iter().enumerate() {
         let line_num = (idx + 1) as i32;
         
-        for (fn_name, _) in &fn_defs {
+        for fn_name in fn_defs.keys() {
             if line.contains(&format!("{}()", fn_name)) && !line.contains("fn") {
                 let call_count = line.matches(&format!("{}()", fn_name)).count();
                 if call_count > 3 {
@@ -2014,7 +2015,7 @@ fn detect_errors(code: &str, language: &str) -> (Vec<proto::ErrorDetection>, i32
     (errors, error_count, warning_count, info_count)
 }
 
-pub fn go_to_type_definition(file_path: &str, code: &str, line: i32, character: i32) -> Vec<proto::Location> {
+pub fn go_to_type_definition(file_path: &str, code: &str, line: i32, _character: i32) -> Vec<proto::Location> {
     let mut locations = Vec::new();
     let lines: Vec<&str> = code.lines().collect();
     
@@ -2045,7 +2046,7 @@ pub fn go_to_type_definition(file_path: &str, code: &str, line: i32, character: 
     locations
 }
 
-pub fn go_to_implementation(file_path: &str, code: &str, line: i32, character: i32) -> Vec<proto::Location> {
+pub fn go_to_implementation(file_path: &str, code: &str, line: i32, _character: i32) -> Vec<proto::Location> {
     let mut locations = Vec::new();
     let lines: Vec<&str> = code.lines().collect();
     
@@ -2129,7 +2130,7 @@ fn find_derived_classes(file_path: &str, code: &str, class_name: &str) -> Vec<pr
                 let struct_name = cap[2].to_string();
                 
                 let impl_start = idx + 1;
-                for (impl_idx, impl_line) in lines[impl_start..].iter().enumerate() {
+                for impl_line in lines[impl_start..].iter() {
                     if impl_line.contains(&format!("impl {} for {}", class_name, struct_name)) ||
                        impl_line.contains(&format!("impl {} for {}", struct_name, class_name)) {
                         derived_classes.push(proto::DerivedClassInfo {

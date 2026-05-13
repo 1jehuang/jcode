@@ -177,6 +177,12 @@ pub struct UnifiedScheduler {
     shutdown: RwLock<bool>,
 }
 
+impl Default for UnifiedScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UnifiedScheduler {
     pub fn new() -> Self {
         Self {
@@ -333,13 +339,12 @@ impl UnifiedScheduler {
 
     pub fn cancel_task(&self, task_id: TaskId) -> bool {
         let mut status = self.task_status.write();
-        if let Some(s) = status.get_mut(&task_id) {
-            if *s == TaskStatus::Pending || *s == TaskStatus::Queued {
+        if let Some(s) = status.get_mut(&task_id)
+            && (*s == TaskStatus::Pending || *s == TaskStatus::Queued) {
                 *s = TaskStatus::Cancelled;
                 self.mark_dependents_failed(task_id);
                 return true;
             }
-        }
         false
     }
 
@@ -381,6 +386,12 @@ pub struct SchedulerStats {
 }
 
 pub struct TaskAnalyzer;
+
+impl Default for TaskAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl TaskAnalyzer {
     pub fn new() -> Self {
@@ -448,6 +459,12 @@ impl TaskAnalyzer {
 pub struct ResourceManager {
     resources: RwLock<Vec<Resource>>,
     monitors: RwLock<HashMap<ResourceId, ResourceMonitor>>,
+}
+
+impl Default for ResourceManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ResourceManager {
@@ -554,6 +571,12 @@ pub enum SchedulingStrategy {
     BestFit,
     WorstFit,
     LoadBalanced,
+}
+
+impl Default for Optimizer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Optimizer {
@@ -666,6 +689,12 @@ impl Optimizer {
 }
 
 pub struct Executor;
+
+impl Default for Executor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Executor {
     pub fn new() -> Self {

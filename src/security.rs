@@ -54,6 +54,12 @@ pub struct SecurityScanner {
     min_confidence: f64,
 }
 
+impl Default for SecurityScanner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SecurityScanner {
     pub fn new() -> Self {
         Self {
@@ -238,13 +244,12 @@ impl SecurityScanner {
                 let path = entry.path();
                 if path.is_file() {
                     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                    if self.is_supported_file(ext) {
-                        if let Ok(content) = std::fs::read_to_string(&path) {
+                    if self.is_supported_file(ext)
+                        && let Ok(content) = std::fs::read_to_string(&path) {
                             let file_path = path.to_string_lossy().to_string();
                             let vulnerabilities = self.scan(&file_path, &content);
                             all_vulnerabilities.extend(vulnerabilities);
                         }
-                    }
                 } else if path.is_dir() {
                     let sub_vulnerabilities = self.scan_directory(path.to_string_lossy().as_ref());
                     all_vulnerabilities.extend(sub_vulnerabilities);

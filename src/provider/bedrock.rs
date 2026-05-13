@@ -66,6 +66,12 @@ pub struct BedrockProvider {
     legacy_models: Arc<RwLock<HashSet<String>>>,
 }
 
+impl Default for BedrockProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BedrockProvider {
     pub fn new() -> Self {
         let model =

@@ -773,7 +773,7 @@ pub(crate) async fn spawn_server(
     output::stderr_info("Starting server...");
     let client_requested_selfdev = selfdev::client_selfdev_requested();
     let exe = build::shared_server_update_candidate(client_requested_selfdev)
-        .map(|path| std::path::PathBuf::from(path))
+        .map(std::path::PathBuf::from)
         .or_else(|| std::env::current_exe().ok())
         .ok_or_else(|| anyhow::anyhow!("Could not determine executable path for server spawn"))?;
     let mut cmd = ProcessCommand::new(&exe);
@@ -806,15 +806,14 @@ pub(crate) async fn spawn_server(
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(5);
         while start.elapsed() < timeout {
-            if crate::transport::is_socket_path(&server::socket_path()) {
-                if crate::transport::Stream::connect(server::socket_path())
+            if crate::transport::is_socket_path(&server::socket_path())
+                && crate::transport::Stream::connect(server::socket_path())
                     .await
                     .is_ok()
                 {
                     startup_profile::mark("server_ready");
                     return Ok(());
                 }
-            }
 
             if let Some(status) = child.try_wait()? {
                 let mut stderr = String::new();

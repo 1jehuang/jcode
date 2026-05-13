@@ -273,19 +273,17 @@ impl CodeAnalyzer {
                     functions.push(current.build());
                 }
                 current_function = Some(func);
-            } else if let Some(mut current) = current_function.take() {
-                if line.trim() == "}" || (line.starts_with("fn ") || line.starts_with("pub fn ")) {
+            } else if let Some(mut current) = current_function.take()
+                && (line.trim() == "}" || (line.starts_with("fn ") || line.starts_with("pub fn "))) {
                     current.line_end = line_num - 1;
                     current.lines_of_code = current.line_end - current.line_start + 1;
                     functions.push(current.build());
                     
-                    if line.starts_with("fn ") || line.starts_with("pub fn ") {
-                        if let Some(func) = self.parse_function_definition(line, line_num) {
+                    if (line.starts_with("fn ") || line.starts_with("pub fn "))
+                        && let Some(func) = self.parse_function_definition(line, line_num) {
                             current_function = Some(func);
                         }
-                    }
                 }
-            }
         }
         
         if let Some(mut current) = current_function.take() {
@@ -300,8 +298,8 @@ impl CodeAnalyzer {
     fn parse_function_definition(&self, line: &str, line_num: usize) -> Option<FunctionBuilder> {
         let trimmed = line.trim();
         
-        if self.language.to_lowercase() == "rust" {
-            if trimmed.starts_with("fn ") || trimmed.starts_with("pub fn ") {
+        if self.language.to_lowercase() == "rust"
+            && (trimmed.starts_with("fn ") || trimmed.starts_with("pub fn ")) {
                 let func_name = trimmed
                     .split_whitespace()
                     .nth(if trimmed.starts_with("pub") { 2 } else { 1 })
@@ -309,7 +307,7 @@ impl CodeAnalyzer {
                     .unwrap_or("");
                 
                 let params = trimmed
-                    .split(|c| c == '(' || c == ')')
+                    .split(['(', ')'])
                     .nth(1)
                     .map(|p| p.split(',').filter(|s| !s.trim().is_empty()).count())
                     .unwrap_or(0);
@@ -326,7 +324,6 @@ impl CodeAnalyzer {
                     calls: Vec::new(),
                 });
             }
-        }
         
         None
     }
@@ -337,10 +334,9 @@ impl CodeAnalyzer {
         for (i, line) in lines.iter().enumerate() {
             let line_num = i + 1;
             
-            if self.language.to_lowercase() == "rust" {
-                if line.trim().starts_with("struct ") || line.trim().starts_with("pub struct ") {
+            if self.language.to_lowercase() == "rust"
+                && (line.trim().starts_with("struct ") || line.trim().starts_with("pub struct ")) {
                     let class_name = line
-                        .trim()
                         .split_whitespace()
                         .nth(if line.trim().starts_with("pub") { 2 } else { 1 })
                         .unwrap_or("")
@@ -356,7 +352,6 @@ impl CodeAnalyzer {
                         cyclomatic_complexity: 1,
                     });
                 }
-            }
         }
         
         classes
@@ -460,8 +455,8 @@ impl CodeAnalyzer {
                 let path = entry.path();
                 if path.is_file() {
                     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                    if self.is_supported_language(ext) {
-                        if let Ok(content) = std::fs::read_to_string(&path) {
+                    if self.is_supported_language(ext)
+                        && let Ok(content) = std::fs::read_to_string(&path) {
                             let file_path = path.to_string_lossy().to_string();
                             let metrics = self.analyze(&file_path, &content)?;
                             total_loc += metrics.lines_of_code;
@@ -469,7 +464,6 @@ impl CodeAnalyzer {
                             total_classes += metrics.classes.len();
                             all_metrics.push(metrics);
                         }
-                    }
                 } else if path.is_dir() {
                     let sub_dir_metrics = self.analyze_directory(path.to_string_lossy().as_ref())?;
                     total_loc += sub_dir_metrics.total_lines_of_code;

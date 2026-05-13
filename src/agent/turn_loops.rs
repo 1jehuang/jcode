@@ -134,7 +134,7 @@ impl Agent {
             let mut stop_reason: Option<String> = None;
             let mut _thinking_start: Option<Instant> = None;
             let store_reasoning_content = matches!(
-                self.provider.name().as_ref(),
+                self.provider.name(),
                 "openrouter" | "bedrock" | "gemini" | "claude"
             );
             let mut reasoning_content = String::new();

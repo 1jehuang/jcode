@@ -154,8 +154,8 @@ impl IdeDetector {
                 };
 
                 // 读取锁文件内容
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Ok(lock_info) = serde_json::from_str::<IdeLockInfo>(&content) {
+                if let Ok(content) = std::fs::read_to_string(&path)
+                    && let Ok(lock_info) = serde_json::from_str::<IdeLockInfo>(&content) {
                         found.push(IdeInfo {
                             ide_type: lock_info.ide_type,
                             port: Some(port),
@@ -166,7 +166,6 @@ impl IdeDetector {
                             extension_installed: false,
                         });
                     }
-                }
             }
         }
 
@@ -272,8 +271,8 @@ impl JetBrainsPluginDetector {
         for pattern in &ide_dirs {
             let plugin_dir = base.join(pattern).join("plugins");
             // 展开通配符（简化处理）
-            if plugin_dir.parent().map_or(false, |p| p.exists()) {
-                if let Ok(entries) = std::fs::read_dir(plugin_dir.parent().unwrap()) {
+            if plugin_dir.parent().is_some_and(|p| p.exists())
+                && let Ok(entries) = std::fs::read_dir(plugin_dir.parent().unwrap()) {
                     for entry in entries.flatten() {
                         let path = entry.path();
                         if path.is_dir() {
@@ -284,7 +283,6 @@ impl JetBrainsPluginDetector {
                         }
                     }
                 }
-            }
         }
 
         dirs
@@ -461,6 +459,12 @@ pub struct IdeIntegrationManager {
     rpc_client: RwLock<Option<IdeRpcClient>>,
 }
 
+impl Default for IdeIntegrationManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IdeIntegrationManager {
     pub fn new() -> Self {
         Self {
@@ -506,7 +510,7 @@ impl IdeIntegrationManager {
     pub async fn get_rpc_client(&self) -> Option<IdeRpcClient> {
         if self.rpc_client.read().await.is_some() {
             let ide = self.active_ide.read().await;
-            ide.as_ref().map(|info| IdeRpcClient::new(info))
+            ide.as_ref().map(IdeRpcClient::new)
         } else {
             None
         }

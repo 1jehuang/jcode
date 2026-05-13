@@ -775,7 +775,7 @@ pub fn download_and_install_blocking_with_progress(
         anyhow::bail!("Download failed: {}", response.status());
     }
 
-    let total = response.content_length().or_else(|| {
+    let total = response.content_length().or({
         if asset._size > 0 {
             Some(asset._size)
         } else {

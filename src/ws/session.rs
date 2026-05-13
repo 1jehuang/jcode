@@ -325,13 +325,11 @@ impl SessionManager {
         let mut collaborators = Vec::new();
         
         for session in self.sessions.read().values() {
-            if let Some(ref collab) = *session.collaboration.read() {
-                if collab.room_id == room_id {
-                    if let Some(cursor) = &collab.cursor {
+            if let Some(ref collab) = *session.collaboration.read()
+                && collab.room_id == room_id
+                    && let Some(cursor) = &collab.cursor {
                         collaborators.push(cursor.clone());
                     }
-                }
-            }
         }
         
         collaborators

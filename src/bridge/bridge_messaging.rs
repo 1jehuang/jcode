@@ -101,18 +101,15 @@ impl MessageType {
 
 /// 消息优先级
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum MessagePriority {
     Critical = 0,
     High = 1,
+    #[default]
     Normal = 2,
     Low = 3,
 }
 
-impl Default for MessagePriority {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
 
 /// 广播范围
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -436,7 +433,7 @@ impl MessageRouter {
         mut request: BridgeMessage,
         timeout_ms: u64,
     ) -> Result<BridgeMessage, anyhow::Error> {
-        let msg_id = request.id.clone().unwrap_or_else(MessageId::new);
+        let msg_id = request.id.clone().unwrap_or_default();
         request.id = Some(msg_id.clone());
         
         let (response_tx, mut response_rx) = mpsc::channel::<BridgeMessage>(1);

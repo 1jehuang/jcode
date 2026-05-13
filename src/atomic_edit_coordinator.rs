@@ -177,7 +177,7 @@ impl AtomicEditCoordinator {
         let before = self.transactions.len();
         self.transactions.retain(|tx| {
             tx.status == TransactionStatus::Pending ||
-            tx.completed_at.map_or(true, |c| c > cutoff)
+            tx.completed_at.is_none_or(|c| c > cutoff)
         });
         before - self.transactions.len()
     }

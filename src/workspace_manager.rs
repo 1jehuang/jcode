@@ -213,11 +213,10 @@ impl ProjectType {
 
         // Check for Rust workspace (Cargo.toml with [workspace])
         if path.join("Cargo.toml").exists() {
-            if let Ok(content) = std::fs::read_to_string(path.join("Cargo.toml")) {
-                if content.contains("[workspace]") || content.contains("[workspace.members]") {
+            if let Ok(content) = std::fs::read_to_string(path.join("Cargo.toml"))
+                && (content.contains("[workspace]") || content.contains("[workspace.members]")) {
                     return Self::RustWorkspace;
                 }
-            }
             return Self::Rust;
         }
 
@@ -601,11 +600,10 @@ impl WorkspaceManager {
 
         // Deactivate previous
         let prev_id = cfg.active_project_id.clone();
-        if let Some(ref pid) = prev_id {
-            if let Some(p) = cfg.projects.get_mut(pid) {
+        if let Some(ref pid) = prev_id
+            && let Some(p) = cfg.projects.get_mut(pid) {
                 p.active = false;
             }
-        }
 
         cfg.active_project_id = Some(project_id.to_string());
         if let Some(p) = cfg.projects.get_mut(project_id) {
@@ -704,7 +702,7 @@ impl WorkspaceManager {
             // Skip hidden directories
             if path.file_name()
                 .and_then(|n| n.to_str())
-                .map_or(false, |s| s.starts_with('.'))
+                .is_some_and(|s| s.starts_with('.'))
             {
                 continue;
             }
@@ -770,15 +768,14 @@ impl WorkspaceManager {
         let cfg = self.config.read().await;
         let mut env = cfg.global_env.clone();
 
-        if let Some(ref aid) = cfg.active_project_id {
-            if let Some(proj) = cfg.projects.get(aid) {
+        if let Some(ref aid) = cfg.active_project_id
+            && let Some(proj) = cfg.projects.get(aid) {
                 env.extend(proj.env_vars.clone());
                 // Add build env too
                 if let Some(ref bc) = proj.build_config {
                     env.extend(bc.build_env.clone());
                 }
             }
-        }
 
         env
     }

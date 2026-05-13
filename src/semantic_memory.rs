@@ -118,7 +118,7 @@ impl MemoryGraph {
             relation, weight,
             created_at_ms: Self::now_ms(),
         });
-        self.adjacency.entry(from.to_string()).or_insert_with(Vec::new)
+        self.adjacency.entry(from.to_string()).or_default()
             .push((to.to_string(), relation));
     }
 

@@ -67,11 +67,10 @@ async fn resolve_spawn_working_dir(
                 .ok()
                 .and_then(|agent_guard| agent_guard.working_dir().map(str::to_string))
         })
-    } {
-        if !agent_dir.trim().is_empty() {
+    }
+        && !agent_dir.trim().is_empty() {
             return Some(agent_dir);
         }
-    }
 
     swarm_members
         .read()
@@ -917,8 +916,8 @@ async fn require_coordinator_swarm(
         (swarm_id, is_coordinator, coordinator_is_stale)
     };
 
-    if !is_coordinator && coordinator_is_stale {
-        if let Some(ref swarm_id) = swarm_id {
+    if !is_coordinator && coordinator_is_stale
+        && let Some(ref swarm_id) = swarm_id {
             let mut coordinators = swarm_coordinators.write().await;
             coordinators.insert(swarm_id.clone(), req_session_id.to_string());
             drop(coordinators);
@@ -928,7 +927,6 @@ async fn require_coordinator_swarm(
             }
             return Some(swarm_id.clone());
         };
-    }
 
     if !is_coordinator {
         let _ = client_event_tx.send(ServerEvent::Error {

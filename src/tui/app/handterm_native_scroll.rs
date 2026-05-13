@@ -90,7 +90,6 @@ impl HandtermNativeScrollClient {
         #[cfg(not(unix))]
         {
             let _ = app;
-            return;
         }
 
         #[cfg(unix)]

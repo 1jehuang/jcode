@@ -224,8 +224,8 @@ impl BuildExecutor {
         }
 
         // Handle clean-first
-        if request.clean {
-            if let Some(clean_cmd) = self.resolve_clean_command(project_type, work_dir) {
+        if request.clean
+            && let Some(clean_cmd) = self.resolve_clean_command(project_type, work_dir) {
                 let (clean_prog, clean_args) =
                     self.parse_command_parts(&clean_cmd).unwrap_or_else(|| ("echo".into(), vec!["no clean".into()]));
                 let _ = tokio::process::Command::new(clean_prog)
@@ -234,7 +234,6 @@ impl BuildExecutor {
                     .output()
                     .await;
             }
-        }
 
         let output = cmd.output().await.with_context(|| {
             format!("Failed to execute build command: {} {}", program, args.join(" "))
@@ -302,7 +301,7 @@ impl BuildExecutor {
             let semaphore = Arc::new(tokio::sync::Semaphore::new(max_jobs));
             let mut stream = stream::iter(projects.into_iter().map(|proj| {
                 let sem = semaphore.clone();
-                let exec = &*self;
+                let exec = self;
                 let req = request.clone();
                 async move {
                     let _permit = sem.acquire().await;
@@ -357,13 +356,11 @@ impl BuildExecutor {
         }
 
         // 2. Check project's custom build config
-        if let Some(proj) = self.workspace.get_active_project().await {
-            if let Some(ref bc) = proj.build_config {
-                if let Some(ref cmd) = bc.build_command {
+        if let Some(proj) = self.workspace.get_active_project().await
+            && let Some(ref bc) = proj.build_config
+                && let Some(ref cmd) = bc.build_command {
                     return Ok(cmd.clone());
                 }
-            }
-        }
 
         // 3. Fall back to project type default
         let mut cmd = project_type.default_build_command().to_string();
@@ -423,8 +420,8 @@ impl BuildExecutor {
         }
 
         // Add parallel job flags
-        if let Some(jobs) = request.jobs {
-            if jobs > 1 {
+        if let Some(jobs) = request.jobs
+            && jobs > 1 {
                 match project_type {
                     ProjectType::Rust | ProjectType::RustWorkspace => {
                         parts.push(format!("-j{}", jobs));
@@ -435,7 +432,6 @@ impl BuildExecutor {
                     _ => {}
                 }
             }
-        }
 
         // Incremental flag handling
         if let Some(incr) = request.incremental {
@@ -766,7 +762,7 @@ Detects and reports errors/warnings with structured output."#
         }
 
         Ok(jcode_tool_types::ToolOutput {
-            output: output,
+            output,
             title: None,
             metadata: None,
             images: Vec::new(),
