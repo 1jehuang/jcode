@@ -1,5 +1,9 @@
 /// Available Claude models used by model lists and provider routing.
 pub const ALL_CLAUDE_MODELS: &[&str] = &[
+    "claude-opus-4-7",
+    "claude-opus-4-7[1m]",
+    "claude-sonnet-4-7",
+    "claude-sonnet-4-7[1m]",
     "claude-opus-4-6",
     "claude-opus-4-6[1m]",
     "claude-sonnet-4-6",
@@ -14,6 +18,7 @@ pub const ALL_CLAUDE_MODELS: &[&str] = &[
 pub const ALL_OPENAI_MODELS: &[&str] = &[
     "gpt-5.5",
     "gpt-5.4",
+    "gpt-5.4-mini",
     "gpt-5.4-pro",
     "gpt-5.3-codex",
     "gpt-5.3-codex-spark",
@@ -172,6 +177,14 @@ pub fn context_limit_for_model_with_provider_and_cache(
     // Most GPT-5.x codex/reasoning models: 272k per Codex backend API.
     if model.starts_with("gpt-5") {
         return Some(272_000);
+    }
+
+    if model.starts_with("claude-opus-4-7") || model.starts_with("claude-opus-4.7") {
+        return Some(if is_1m { 1_048_576 } else { 200_000 });
+    }
+
+    if model.starts_with("claude-sonnet-4-7") || model.starts_with("claude-sonnet-4.7") {
+        return Some(if is_1m { 1_048_576 } else { 200_000 });
     }
 
     if model.starts_with("claude-opus-4-6") || model.starts_with("claude-opus-4.6") {

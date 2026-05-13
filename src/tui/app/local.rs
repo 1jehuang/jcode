@@ -226,6 +226,14 @@ pub(super) fn handle_bus_event(
                 false
             }
         }
+        Ok(BusEvent::AskUserQuestionOpened(question)) => {
+            if question.session_id == app.session.id {
+                app.open_ask_user_modal(question);
+                true
+            } else {
+                false
+            }
+        }
         Ok(BusEvent::TodoUpdated(event)) => {
             if event.session_id == app.session.id {
                 app.refresh_todos_view_now()

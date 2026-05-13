@@ -542,6 +542,7 @@ impl App {
             login_picker_overlay: None,
             account_picker_overlay: None,
             usage_overlay: None,
+            ask_user_overlay: None,
             usage_report_refreshing: false,
             last_overnight_card_refresh: None,
         };
@@ -907,6 +908,7 @@ impl App {
             login_picker_overlay: None,
             account_picker_overlay: None,
             usage_overlay: None,
+            ask_user_overlay: None,
             usage_report_refreshing: false,
             last_overnight_card_refresh: None,
         };

@@ -1139,6 +1139,12 @@ impl TuiState for BenchState {
         None
     }
 
+    fn ask_user_overlay(
+        &self,
+    ) -> Option<&std::cell::RefCell<jcode::tui::ask_user_modal::AskUserModal>> {
+        None
+    }
+
     fn working_dir(&self) -> Option<String> {
         None
     }

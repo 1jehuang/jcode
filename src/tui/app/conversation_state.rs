@@ -401,6 +401,10 @@ impl App {
         self.status_notice = Some((text.into(), Instant::now()));
     }
 
+    pub fn clear_status_notice(&mut self) {
+        self.status_notice = None;
+    }
+
     pub(crate) fn set_remote_startup_phase(&mut self, phase: super::RemoteStartupPhase) {
         let changed = self.remote_startup_phase.as_ref() != Some(&phase);
         self.remote_startup_phase = Some(phase);

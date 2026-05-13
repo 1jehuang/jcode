@@ -91,6 +91,11 @@ name = "tui_bench"
 path = "src/bin/tui_bench.rs"
 required-features = ["dev-bins"]
 
+[[bin]]
+name = "publish_selfdev"
+path = "src/bin/publish_selfdev.rs"
+required-features = ["dev-bins"]
+
 [dependencies]
 # Memory allocator (reduces fragmentation for long-running server)
 tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"], optional = true }

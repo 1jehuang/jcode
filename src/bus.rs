@@ -378,6 +378,10 @@ pub enum BusEvent {
     SidePanelUpdated(SidePanelUpdated),
     /// Deferred Mermaid rendering completed and cached content may now be visible
     MermaidRenderCompleted,
+    /// `askUserQuestion` tool wants the TUI to open a modal for the user to
+    /// answer interactively. The tool then awaits the answer via
+    /// [`crate::ask_user::register_pending`] / `submit_answer`.
+    AskUserQuestionOpened(crate::ask_user::AskUserQuestion),
 }
 
 pub struct Bus {

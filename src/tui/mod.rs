@@ -1,5 +1,6 @@
 pub mod account_picker;
 mod app;
+pub mod ask_user_modal;
 pub mod backend;
 pub(crate) mod color_support;
 mod core;
@@ -286,6 +287,9 @@ pub trait TuiState {
     fn account_picker_overlay(&self) -> Option<&std::cell::RefCell<account_picker::AccountPicker>>;
     /// Usage overlay for /usage command
     fn usage_overlay(&self) -> Option<&std::cell::RefCell<usage_overlay::UsageOverlay>>;
+    /// `askUserQuestion` modal overlay (None = not visible).
+    fn ask_user_overlay(&self)
+    -> Option<&std::cell::RefCell<ask_user_modal::AskUserModal>>;
     /// Working directory for this session
     fn working_dir(&self) -> Option<String>;
     /// Monotonic clock for viewport animations

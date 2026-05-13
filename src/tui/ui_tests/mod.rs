@@ -403,6 +403,11 @@ impl crate::tui::TuiState for TestState {
     ) -> Option<&std::cell::RefCell<crate::tui::usage_overlay::UsageOverlay>> {
         None
     }
+    fn ask_user_overlay(
+        &self,
+    ) -> Option<&std::cell::RefCell<crate::tui::ask_user_modal::AskUserModal>> {
+        None
+    }
     fn working_dir(&self) -> Option<String> {
         None
     }

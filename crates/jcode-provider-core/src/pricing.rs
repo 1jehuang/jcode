@@ -126,7 +126,7 @@ pub fn anthropic_oauth_pricing(model: &str, subscription: Option<&str>) -> Route
 pub fn openai_api_pricing(model: &str) -> Option<RouteCheapnessEstimate> {
     let base = model.strip_suffix("[1m]").unwrap_or(model);
     match base {
-        "gpt-5.5" | "gpt-5.4" | "gpt-5.4-pro" => Some(RouteCheapnessEstimate::metered(
+        "gpt-5.5" | "gpt-5.4" | "gpt-5.4-pro" | "gpt-5.4-mini" => Some(RouteCheapnessEstimate::metered(
             RouteCostSource::PublicApiPricing,
             RouteCostConfidence::High,
             usd_to_micros(2.5),

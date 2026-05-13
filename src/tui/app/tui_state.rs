@@ -1260,6 +1260,12 @@ impl crate::tui::TuiState for App {
         self.usage_overlay.as_ref()
     }
 
+    fn ask_user_overlay(
+        &self,
+    ) -> Option<&RefCell<crate::tui::ask_user_modal::AskUserModal>> {
+        self.ask_user_overlay.as_ref()
+    }
+
     fn working_dir(&self) -> Option<String> {
         self.session.working_dir.clone()
     }

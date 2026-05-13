@@ -10,6 +10,7 @@ pub mod agent;
 pub mod ambient;
 pub mod ambient_runner;
 pub mod ambient_scheduler;
+pub mod ask_user;
 pub mod auth;
 pub mod background;
 pub mod browser;

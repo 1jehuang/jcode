@@ -2220,6 +2220,13 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         visual_debug::record_frame(capture.build());
     }
 
+    // Top-most overlay: askUserQuestion modal. Draw last so it sits on top
+    // of everything else (chat, side panel, status line). The modal uses
+    // ratatui's `Clear` internally to ensure full opacity.
+    if let Some(modal_cell) = app.ask_user_overlay() {
+        modal_cell.borrow().render(frame);
+    }
+
     finalize_frame_metrics(
         app,
         total_start,

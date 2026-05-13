@@ -51,6 +51,7 @@ pub enum AppRuntimeMode {
 
 mod auth;
 mod auth_account_picker_saved_accounts;
+mod ask_user_modal_app;
 mod catchup;
 mod commands;
 mod commands_improve;
@@ -980,6 +981,8 @@ pub struct App {
     account_picker_overlay: Option<RefCell<super::account_picker::AccountPicker>>,
     /// Usage overlay (None = not visible)
     usage_overlay: Option<RefCell<super::usage_overlay::UsageOverlay>>,
+    /// `askUserQuestion` modal overlay (None = not visible)
+    ask_user_overlay: Option<RefCell<super::ask_user_modal::AskUserModal>>,
     /// Whether a usage refresh request is currently in flight.
     usage_report_refreshing: bool,
     /// Last time the passive overnight progress card polled its run files.

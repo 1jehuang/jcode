@@ -1174,6 +1174,14 @@ pub(super) fn handle_modal_key(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> Result<bool> {
+    // The ask-user modal is a blocking overlay; capture all keys while it
+    // is visible so the user can navigate, type, or cancel without other
+    // shortcuts interfering.
+    if app.ask_user_modal_visible() {
+        app.handle_ask_user_modal_key(code, modifiers);
+        return Ok(true);
+    }
+
     if app.changelog_scroll.is_some() {
         app.handle_changelog_key(code)?;
         return Ok(true);
