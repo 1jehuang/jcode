@@ -25,6 +25,12 @@ pub fn set_plan_mode(enabled: bool) {
 /// Force the agent to create a plan before taking further action.
 pub struct EnterPlanModeTool;
 
+impl EnterPlanModeTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
 #[async_trait]
 impl Tool for EnterPlanModeTool {
     fn name(&self) -> &str {
@@ -100,6 +106,12 @@ Review the analysis above. When you're ready to proceed, I will break down each 
 
 /// Exit plan mode — return to normal tool-execution behavior.
 pub struct ExitPlanModeTool;
+
+impl ExitPlanModeTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
 
 #[async_trait]
 impl Tool for ExitPlanModeTool {

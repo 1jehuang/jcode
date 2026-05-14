@@ -181,6 +181,18 @@ impl Registry {
             Self::insert_tool_timed(
                 &mut m,
                 &mut timings,
+                "enter_plan_mode",
+                plan_mode::EnterPlanModeTool::new,
+            );
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "exit_plan_mode",
+                plan_mode::ExitPlanModeTool::new,
+            );
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
                 "swarm",
                 communicate::CommunicateTool::new,
             );
