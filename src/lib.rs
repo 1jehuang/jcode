@@ -167,6 +167,9 @@ pub mod reasoning;
 pub mod nlp;
 pub mod prototype;
 
+// Knowledge Base (Rust最佳实践)
+pub mod knowledge;
+
 // Enhanced Refactoring System (跨语言迁移 & 现代化)
 pub mod refactor;
 

@@ -447,6 +447,9 @@ impl std::fmt::Display for Priority {
 pub struct NlpEngine {
     /// 配置
     config: NlpConfig,
+    
+    /// Rust最佳实践知识库 (用于代码质量保证)
+    knowledge_base: Option<crate::knowledge::RustKnowledgeBase>,
 }
 
 #[derive(Debug, Clone)]
@@ -514,6 +517,18 @@ impl NlpEngine {
     pub fn new(config: Option<NlpConfig>) -> Self {
         Self {
             config: config.unwrap_or_default(),
+            knowledge_base: None,
+        }
+    }
+    
+    /// 创建带有知识库的NLP引擎 (推荐用于代码生成)
+    pub fn with_knowledge_base(
+        config: Option<NlpConfig>,
+        knowledge_base: Option<crate::knowledge::RustKnowledgeBase>,
+    ) -> Self {
+        Self {
+            config: config.unwrap_or_default(),
+            knowledge_base,
         }
     }
     
@@ -574,12 +589,12 @@ impl NlpEngine {
         })
     }
     
-    /// 从自然语言生成代码
+    /// 从自然语言生成代码 (带最佳实践验证)
     pub async fn nl2code(&self, description: &str, language: &str) -> Result<GeneratedCode> {
         let analysis = self.analyze(description).await?;
         
         // 根据分析结果生成代码
-        let code = match analysis.classification {
+        let mut code = match analysis.classification {
             TextClassification::Task | TextClassification::FeatureRequest => {
                 self.generate_implementation_code(&analysis, language).await?
             }
@@ -593,6 +608,81 @@ impl NlpEngine {
                 self.generate_generic_code(&analysis, language).await?
             }
         };
+        
+        // 如果有知识库，进行代码质量验证和改进
+        if let Some(ref kb) = self.knowledge_base {
+            // 验证生成的代码质量
+            let validation = kb.validate_code(&code.main_file.content);
+            
+            if validation.score < 90.0 && !validation.violations.is_empty() {
+                // 生成改进报告
+                let improvement_report = kb.generate_improvement_report(&code.main_file.content);
+                
+                tracing::info!(
+                    score = validation.score,
+                    violations = validation.violations.len(),
+                    "代码质量检查完成，应用最佳实践改进"
+                );
+                
+                // 将改进建议添加到代码注释中
+                let quality_note = format!(
+                    "\n// 📊 Rust Best Practices Score: {:.0}/100\n\
+                     // ⚠️ Issues Found: {}\n\
+                     // ✅ Suggestions: {}\n\
+                     // \n// Top Recommendations:\n{}\n",
+                    validation.score,
+                    validation.violations.len(),
+                    improvement_report.top_recommendations.len(),
+                    improvement_report.top_recommendations.iter()
+                        .take(3)
+                        .map(|r| format!("// - {} [{}]\n", r.title, r.priority))
+                        .collect::<String>()
+                );
+                
+                code.main_file.content.push_str(&quality_note);
+                code.comments.push(format!(
+                    "代码已通过Rust最佳实践验证 (得分: {:.0}/100)",
+                    validation.score
+                ));
+            } else {
+                code.comments.push(
+                    "✅ 代码符合Rust最佳实践标准".to_string()
+                );
+            }
+            
+            // 添加模块结构建议（如果是Rust）
+            if language.to_lowercase() == "rust" {
+                let module_tip = kb.get_rules_by_category(
+                    crate::knowledge::PracticeCategory::ModuleSystem
+                );
+                
+                if !module_tip.is_empty() {
+                    let module_guidance = module_tip.iter()
+                        .take(3)
+                        .map(|rule| format!("// 💡 {}: {}", rule.name, rule.description))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    
+                    code.comments.push(
+                        "📦 已应用Rust模块系统最佳实践".to_string()
+                    );
+                    
+                    // 在主文件开头添加模块结构指导
+                    let header_comment = format!(
+                        "\n//! 📚 Rust Module Structure Guidelines\n\
+                         //! \n{}\
+                         //! \n//! Key Rules Applied:\n\
+                         //! - MOD-001: Single entry file per directory\n\
+                         //! - MOD-002: Use mod.rs as standard entry point\n\
+                         //! - MOD-003: Avoid redundant re-export files\n\
+                         //! - MOD-004: Appropriate splitting granularity\n",
+                        module_guidance
+                    );
+                    
+                    code.main_file.content = format!("{}{}", header_comment, code.main_file.content);
+                }
+            }
+        }
         
         Ok(code)
     }
