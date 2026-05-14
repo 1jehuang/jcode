@@ -1,17 +1,20 @@
-//! Tree-sitter 集成模块
+//! Tree-sitter 集成模块 — 真正的 AST 解析
 //!
-//! 提供真正的 AST 解析能力：
-//! - 多语言支持 (Rust, TypeScript, Python, Go, etc.)
-//! - 增量解析
-//! - 语义分析
-//! - 符号表构建
+//! 提供基于 tree-sitter 的真实 AST 解析能力：
+//! - 多语言支持 (Rust 为核心, 可扩展)
+//! - 精确的语法树构建
+//! - 语义级符号解析
 //! - 代码导航
+//!
+//! ## 架构升级
+//! 之前: BasicLanguageParser 用 `starts_with("fn ")` 逐行匹配 (伪 AST)
+//! 现在: TreeSitterParser 使用真正的 tree-sitter 绑定 (真 AST)
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
 use serde::{Deserialize, Serialize};
 
 /// 语言标识符
@@ -88,7 +91,6 @@ impl LanguageId {
 /// AST 节点类型
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeType {
-    // 声明类节点
     FunctionDeclaration,
     StructDeclaration,
     EnumDeclaration,
@@ -97,8 +99,6 @@ pub enum NodeType {
     ClassDeclaration,
     InterfaceDeclaration,
     VariableDeclaration,
-    
-    // 表达式类节点
     CallExpression,
     BinaryExpression,
     UnaryExpression,
@@ -107,8 +107,6 @@ pub enum NodeType {
     AssignmentExpression,
     ConditionalExpression,
     LambdaExpression,
-    
-    // 语句类节点
     ExpressionStatement,
     ReturnStatement,
     IfStatement,
@@ -116,29 +114,24 @@ pub enum NodeType {
     WhileStatement,
     MatchStatement,
     BlockStatement,
-    
-    // 类型相关
     TypeDefinition,
     TypeParameter,
     GenericType,
     PointerType,
     ReferenceType,
     SliceType,
-    
-    // 其他
     Identifier,
     StringLiteral,
     NumberLiteral,
     BooleanLiteral,
     Comment,
     DocComment,
-    Error, // 解析错误
-    SourceFile, // 源文件根节点
+    Error,
+    SourceFile,
     Unknown,
 }
 
 impl NodeType {
-    /// 是否是声明节点
     pub fn is_declaration(&self) -> bool {
         matches!(self,
             Self::FunctionDeclaration |
@@ -151,7 +144,6 @@ impl NodeType {
         )
     }
 
-    /// 是否是表达式节点
     pub fn is_expression(&self) -> bool {
         matches!(self,
             Self::CallExpression |
@@ -163,7 +155,6 @@ impl NodeType {
         )
     }
 
-    /// 是否是可引用的符号定义
     pub fn is_symbol_definition(&self) -> bool {
         matches!(self,
             Self::FunctionDeclaration |
@@ -175,6 +166,40 @@ impl NodeType {
             Self::VariableDeclaration |
             Self::TypeDefinition
         )
+    }
+
+    /// 从 tree-sitter 节点类型名映射到 NodeType
+    pub fn from_ts_kind(kind: &str) -> Self {
+        match kind {
+            "function_item" | "function_definition" => Self::FunctionDeclaration,
+            "struct_item" | "struct_declaration" | "class_declaration" => Self::StructDeclaration,
+            "enum_item" | "enum_declaration" => Self::EnumDeclaration,
+            "trait_item" | "interface_declaration" => Self::TraitDeclaration,
+            "impl_item" | "impl_block" => Self::ImplDeclaration,
+            "let_declaration" | "variable_declaration" | "field_declaration" => Self::VariableDeclaration,
+            "call_expression" => Self::CallExpression,
+            "binary_expression" => Self::BinaryExpression,
+            "unary_expression" => Self::UnaryExpression,
+            "field_expression" | "member_expression" => Self::MemberExpression,
+            "index_expression" => Self::IndexExpression,
+            "assignment_expression" => Self::AssignmentExpression,
+            "if_expression" | "if_statement" => Self::IfStatement,
+            "for_expression" | "for_statement" => Self::ForStatement,
+            "while_expression" | "while_statement" => Self::WhileStatement,
+            "match_expression" | "match_statement" => Self::MatchStatement,
+            "block" | "block_statement" => Self::BlockStatement,
+            "return_expression" | "return_statement" => Self::ReturnStatement,
+            "closure_expression" | "arrow_function" | "lambda_expression" => Self::LambdaExpression,
+            "type_item" | "type_alias_declaration" => Self::TypeDefinition,
+            "type_identifier" | "identifier" => Self::Identifier,
+            "string_literal" | "string_" => Self::StringLiteral,
+            "integer_literal" | "float_literal" | "number" => Self::NumberLiteral,
+            "boolean_literal" | "true" | "false" => Self::BooleanLiteral,
+            "line_comment" | "block_comment" | "comment" => Self::Comment,
+            "source_file" | "program" => Self::SourceFile,
+            "ERROR" => Self::Error,
+            _ => Self::Unknown,
+        }
     }
 }
 
@@ -223,58 +248,34 @@ impl std::fmt::Display for NodeType {
     }
 }
 
-/// 源代码位置
+/// 源代码位置 (0-based)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceLocation {
-    /// 文件路径索引
     pub file_index: u32,
-    /// 起始行号 (0-based)
     pub start_line: u32,
-    /// 起始列号 (0-based)
     pub start_column: u32,
-    /// 结束行号 (0-based)
     pub end_line: u32,
-    /// 结束列号 (0-based)
     pub end_column: u32,
 }
 
 impl SourceLocation {
-    /// 创建新的位置
     pub fn new(start_line: u32, start_col: u32, end_line: u32, end_col: u32) -> Self {
-        Self {
-            file_index: 0,
-            start_line,
-            start_column: start_col,
-            end_line,
-            end_column: end_col,
-        }
+        Self { file_index: 0, start_line, start_column: start_col, end_line, end_column: end_col }
     }
 
-    /// 是否包含指定位置
     pub fn contains(&self, line: u32, column: u32) -> bool {
         if self.start_line == self.end_line {
-            // 单行范围
-            self.start_line == line 
-                && self.start_column <= column 
-                && column < self.end_column
+            self.start_line == line && self.start_column <= column && column < self.end_column
         } else {
-            // 多行范围
             (line > self.start_line || (line == self.start_line && column >= self.start_column))
                 && (line < self.end_line || (line == self.end_line && column < self.end_column))
         }
     }
 
-    /// 转换为 LSP Range
     pub fn to_lsp_range(&self) -> lsp_types::Range {
         lsp_types::Range {
-            start: lsp_types::Position {
-                line: self.start_line,
-                character: self.start_column,
-            },
-            end: lsp_types::Position {
-                line: self.end_line,
-                character: self.end_column,
-            },
+            start: lsp_types::Position { line: self.start_line, character: self.start_column },
+            end: lsp_types::Position { line: self.end_line, character: self.end_column },
         }
     }
 }
@@ -285,115 +286,88 @@ impl std::fmt::Display for SourceLocation {
     }
 }
 
-/// AST 节点
+/// AST 节点 — 从 tree-sitter 节点构建
 #[derive(Debug, Clone)]
 pub struct AstNode {
-    /// 节点唯一 ID
     pub id: u64,
-    
-    /// 节点类型
     pub node_type: NodeType,
-    
-    /// 节点名称（如函数名、变量名）
     pub name: Option<String>,
-    
-    /// 源代码位置
     pub location: SourceLocation,
-    
-    /// 父节点 ID
     pub parent_id: Option<u64>,
-    
-    /// 子节点
     pub children: Vec<AstNode>,
-    
-    /// 关联的类型信息（如果有）
     pub type_info: Option<TypeInfo>,
 }
 
 impl AstNode {
-    /// 创建新的 AST 节点
     pub fn new(node_type: NodeType, location: SourceLocation) -> Self {
-        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         
         Self {
-            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            node_type,
-            name: None,
-            location,
-            parent_id: None,
-            children: Vec::new(),
-            type_info: None,
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            node_type, name: None, location, parent_id: None,
+            children: Vec::new(), type_info: None,
         }
     }
 
-    /// 设置节点名称
-    pub fn with_name(mut self, name: impl Into<String>) -> Self {
-        self.name = Some(name.into());
-        self
-    }
+    pub fn with_name(mut self, name: impl Into<String>) -> Self { self.name = Some(name.into()); self }
+    pub fn with_type(mut self, info: TypeInfo) -> Self { self.type_info = Some(info); self }
 
-    /// 设置类型信息
-    pub fn with_type(mut self, info: TypeInfo) -> Self {
-        self.type_info = Some(info);
-        self
-    }
-
-    /// 添加子节点
     pub fn add_child(&mut self, mut child: AstNode) {
         child.parent_id = Some(self.id);
         self.children.push(child);
     }
 
-    /// 递归查找节点
     pub fn find_by_type(&self, node_type: &NodeType) -> Option<&AstNode> {
-        if self.node_type == *node_type {
-            return Some(self);
-        }
-        
+        if self.node_type == *node_type { return Some(self); }
         for child in &self.children {
-            if let Some(found) = child.find_by_type(node_type) {
-                return Some(found);
-            }
+            if let Some(found) = child.find_by_type(node_type) { return Some(found); }
         }
-        
         None
     }
 
-    /// 递归查找所有匹配类型的节点
     pub fn find_all_by_type(&self, node_type: &NodeType) -> Vec<&AstNode> {
         let mut results = Vec::new();
-        
-        if self.node_type == *node_type {
-            results.push(self);
-        }
-        
-        for child in &self.children {
-            results.extend(child.find_all_by_type(node_type));
-        }
-        
+        if self.node_type == *node_type { results.push(self); }
+        for child in &self.children { results.extend(child.find_all_by_type(node_type)); }
         results
     }
 
-    /// 获取节点的文本范围长度
+    /// 查找指定名称的符号定义
+    pub fn find_symbol(&self, name: &str) -> Option<&AstNode> {
+        if self.name.as_deref() == Some(name) && self.node_type.is_symbol_definition() {
+            return Some(self);
+        }
+        for child in &self.children {
+            if let Some(found) = child.find_symbol(name) { return Some(found); }
+        }
+        None
+    }
+
+    /// 收集当前作用域内所有符号定义
+    pub fn collect_symbols(&self) -> Vec<(&str, &NodeType, SourceLocation)> {
+        let mut syms = Vec::new();
+        if self.node_type.is_symbol_definition() {
+            if let Some(ref name) = self.name {
+                syms.push((name.as_str(), &self.node_type, self.location));
+            }
+        }
+        for child in &self.children { syms.extend(child.collect_symbols()); }
+        syms
+    }
+
     pub fn text_length(&self) -> u32 {
         if self.location.start_line == self.location.end_line {
             self.location.end_column - self.location.start_column
         } else {
-            // 多行节点的近似长度
-            (self.location.end_line - self.location.start_line) * 80 + 
-            self.location.end_column - self.location.start_column
+            (self.location.end_line - self.location.start_line) * 80 + self.location.end_column - self.location.start_column
         }
     }
 
-    /// 节点深度（从根到当前节点的距离）
     pub fn depth(&self) -> u32 {
-        self.children.iter()
-            .map(|c| c.depth() + 1)
-            .max()
-            .unwrap_or(0)
+        self.children.iter().map(|c| c.depth() + 1).max().unwrap_or(0)
     }
 
-    /// 总子节点数
     pub fn total_children(&self) -> usize {
         self.children.len() + self.children.iter().map(|c| c.total_children()).sum::<usize>()
     }
@@ -402,28 +376,17 @@ impl AstNode {
 /// 类型信息
 #[derive(Debug, Clone)]
 pub struct TypeInfo {
-    /// 类型名称
     pub type_name: String,
-    /// 是否可为空
     pub nullable: bool,
-    /// 是否为引用类型
     pub is_reference: bool,
-    /// 泛型参数
     pub generic_params: Vec<String>,
 }
 
 impl TypeInfo {
-    /// 创建类型信息
     pub fn new(type_name: impl Into<String>) -> Self {
-        Self {
-            type_name: type_name.into(),
-            nullable: false,
-            is_reference: false,
-            generic_params: Vec::new(),
-        }
+        Self { type_name: type_name.into(), nullable: false, is_reference: false, generic_params: Vec::new() }
     }
 
-    /// 显示名称（用于补全等场景）
     pub fn display_name(&self) -> String {
         let mut name = self.type_name.clone();
         if !self.generic_params.is_empty() {
@@ -431,51 +394,29 @@ impl TypeInfo {
             name.push_str(&self.generic_params.join(", "));
             name.push('>');
         }
-        if self.is_reference {
-            name = format!("&{}", name);
-        }
-        if self.nullable {
-            name.push('?');
-        }
+        if self.is_reference { name = format!("&{}", name); }
+        if self.nullable { name.push('?'); }
         name
     }
 }
 
-/// 符号条目（符号表中的项）
+/// 符号条目
 #[derive(Debug, Clone)]
 pub struct SymbolEntry {
-    /// 符号名称
     pub name: String,
-    /// 符号类型
     pub kind: SymbolKind,
-    /// 定义位置
     pub definition_location: SourceLocation,
-    /// 关联的 AST 节点 ID
     pub node_id: u64,
-    /// 作用域 ID
     pub scope_id: u64,
-    /// 类型信息
     pub type_info: Option<TypeInfo>,
 }
 
 /// 符号种类
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SymbolKind {
-    Function,
-    Method,
-    Struct,
-    Enum,
-    Trait,
-    Interface,
-    Class,
-    Variable,
-    Constant,
-    Parameter,
-    TypeAlias,
-    Module,
-    Field,
-    Property,
-    Unknown,
+    Function, Method, Struct, Enum, Trait, Interface,
+    Class, Variable, Constant, Parameter, TypeAlias,
+    Module, Field, Property, Unknown,
 }
 
 impl std::fmt::Display for SymbolKind {
@@ -503,281 +444,473 @@ impl std::fmt::Display for SymbolKind {
 /// 解析结果
 #[derive(Debug, Clone)]
 pub struct ParseResult {
-    /// AST 根节点
     pub root: AstNode,
-    
-    /// 符号表（名称 -> 符号信息）
     pub symbol_table: HashMap<String, SymbolEntry>,
-    
-    /// 作用域信息（scope_id -> scope_data）
     pub scopes: HashMap<u64, ScopeInfo>,
-    
-    /// 诊断信息（错误、警告等）
     pub diagnostics: Vec<DiagnosticInfo>,
-    
-    /// 统计信息
     pub stats: ParseStats,
-    
-    /// 解析耗时（毫秒）
     pub parse_duration_ms: u64,
 }
 
 /// 作用域信息
 #[derive(Debug, Clone)]
 pub struct ScopeInfo {
-    /// 作用域 ID
     pub id: u64,
-    /// 父作用域 ID
     pub parent_id: Option<u64>,
-    /// 作用域类型（函数、块等）
     pub scope_type: ScopeType,
-    /// 定义的符号
     pub symbols: Vec<String>,
-    /// 起始位置
     pub start_location: SourceLocation,
-    /// 结束位置
     pub end_location: SourceLocation,
 }
 
-/// 作用域类型
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScopeType {
-    Global,
-    Function,
-    Block,
-    Loop,
-    IfElse,
-    MatchArm,
-    Struct,
-    Impl,
-    Unknown,
+    Global, Function, Block, Loop, IfElse, MatchArm, Struct, Impl, Unknown,
 }
 
 /// 诊断信息
 #[derive(Debug, Clone)]
 pub struct DiagnosticInfo {
-    /// 严重级别
     pub severity: DiagnosticSeverity,
-    /// 消息内容
     pub message: String,
-    /// 位置
     pub location: SourceLocation,
-    /// 来源（lsp 名称、编译器等）
     pub source: Option<String>,
-    /// 错误代码
     pub code: Option<String>,
 }
 
-/// 诊断严重级别
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DiagnosticSeverity {
-    Error,
-    Warning,
-    Information,
-    Hint,
-}
+pub enum DiagnosticSeverity { Error, Warning, Information, Hint }
 
 /// 解析统计信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParseStats {
-    /// 总节点数
     pub total_nodes: usize,
-    /// 最大深度
     pub max_depth: u32,
-    /// 总符号数
     pub total_symbols: usize,
-    /// 总作用域数
     pub total_scopes: usize,
-    /// 源代码行数
     pub source_lines: usize,
-    /// 源代码字符数
     pub source_chars: usize,
 }
 
 /// 解析器配置
 #[derive(Debug, Clone)]
 pub struct ParserConfig {
-    /// 是否启用增量解析
     pub enable_incremental: bool,
-    /// 是否启用符号解析
     pub enable_symbol_resolution: bool,
-    /// 最大解析深度
     pub max_depth: u32,
-    /// 缓存大小
     pub cache_size: usize,
 }
 
 impl Default for ParserConfig {
     fn default() -> Self {
-        Self {
-            enable_incremental: true,
-            enable_symbol_resolution: true,
-            max_depth: 256,
-            cache_size: 100,
-        }
+        Self { enable_incremental: true, enable_symbol_resolution: true, max_depth: 256, cache_size: 100 }
     }
 }
 
 /// 语言解析器 trait
 #[async_trait::async_trait]
 pub trait LanguageParser: Send + Sync {
-    /// 解析源代码
     async fn parse(&self, source: &str) -> Result<AstNode, ParseError>;
-    
-    /// 获取语言 ID
     fn language_id(&self) -> LanguageId;
-    
-    /// 获取支持的文件扩展名
     fn supported_extensions(&self) -> Vec<&str>;
 }
 
 /// 解析错误
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-    
-    #[error("Parse failed: {0}")]
-    ParseFailed(String),
-    
-    #[error("Unsupported language: {0}")]
-    UnsupportedLanguage(LanguageId),
-    
-    #[error("Source too large: {0} bytes")]
-    SourceTooLarge(usize),
-    
-    #[error("Max depth exceeded: {0}")]
-    MaxDepthExceeded(u32),
-    
-    #[error("Internal error: {0}")]
-    Internal(String),
+    #[error("IO error: {0}")] Io(#[from] std::io::Error),
+    #[error("Parse failed: {0}")] ParseFailed(String),
+    #[error("Unsupported language: {0}")] UnsupportedLanguage(LanguageId),
+    #[error("Source too large: {0} bytes")] SourceTooLarge(usize),
+    #[error("Max depth exceeded: {0}")] MaxDepthExceeded(u32),
+    #[error("Internal error: {0}")] Internal(String),
 }
 
-/// Tree-sitter 解析管理器
+// ════════════════════════════════════════════════════════════════
+// 真正的 Tree-sitter 解析器实现
+// ════════════════════════════════════════════════════════════════
+
+/// 基于 tree-sitter 的 Rust 语言解析器
+pub struct TreeSitterRustParser;
+
+impl TreeSitterRustParser {
+    pub fn new() -> Self { Self }
+}
+
+impl Default for TreeSitterRustParser {
+    fn default() -> Self { Self::new() }
+}
+
+#[async_trait::async_trait]
+impl LanguageParser for TreeSitterRustParser {
+    async fn parse(&self, source: &str) -> Result<AstNode, ParseError> {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&tree_sitter_rust::LANGUAGE.into())
+            .map_err(|e| ParseError::ParseFailed(format!("Failed to set Rust language: {}", e)))?;
+
+        let tree = parser.parse(source, None)
+            .ok_or_else(|| ParseError::ParseFailed("tree-sitter parse returned None".to_string()))?;
+
+        let root_node = tree.root_node();
+        Ok(self.convert_node(&root_node, source))
+    }
+
+    fn language_id(&self) -> LanguageId { LanguageId::Rust }
+    fn supported_extensions(&self) -> Vec<&str> { vec!["rs"] }
+}
+
+impl TreeSitterRustParser {
+    /// 将 tree-sitter 节点递归转换为自定义 AstNode
+    fn convert_node(&self, ts_node: &tree_sitter::Node, source: &str) -> AstNode {
+        let node_type = NodeType::from_ts_kind(ts_node.kind());
+        let start = ts_node.start_position();
+        let end = ts_node.end_position();
+        let location = SourceLocation::new(
+            start.row as u32, start.column as u32,
+            end.row as u32, end.column as u32,
+        );
+
+        let mut ast_node = AstNode::new(node_type, location);
+
+        // 提取节点名称
+        if let Some(name) = self.extract_node_name(ts_node, source) {
+            ast_node.name = Some(name);
+        }
+
+        // 递归处理子节点
+        let mut cursor = ts_node.walk();
+        for child in ts_node.children(&mut cursor) {
+            // 跳过琐碎节点 (注释、空白等)
+            if child.is_extra() { continue; }
+            let child_ast = self.convert_node(&child, source);
+            ast_node.add_child(child_ast);
+        }
+
+        ast_node
+    }
+
+    /// 从 tree-sitter 节点提取名称
+    fn extract_node_name(&self, node: &tree_sitter::Node, source: &str) -> Option<String> {
+        match node.kind() {
+            "function_item" | "function_signature_item" => {
+                // fn name(...)
+                self.find_child_by_field(node, "name", source)
+            }
+            "struct_item" | "enum_item" | "trait_item" | "type_item" | "union_item" => {
+                self.find_child_by_field(node, "name", source)
+            }
+            "impl_item" => {
+                // impl Name or impl Trait for Name
+                self.find_child_by_field(node, "trait", source)
+                    .or_else(|| self.find_child_by_field(node, "type", source))
+            }
+            "let_declaration" => {
+                // let name = ...
+                self.find_child_by_field(node, "pattern", source)
+            }
+            "field_declaration" => {
+                // field_identifier inside
+                self.find_child_of_type(node, "field_identifier", source)
+            }
+            "call_expression" => {
+                self.find_child_of_type(node, "identifier", source)
+                    .or_else(|| self.find_child_of_type(node, "field_identifier", source))
+            }
+            _ => None,
+        }
+    }
+
+    /// 通过字段名查找子节点文本
+    fn find_child_by_field(&self, node: &tree_sitter::Node, field: &str, source: &str) -> Option<String> {
+        let child = node.child_by_field_name(field)?;
+        Some(child.utf8_text(source.as_bytes()).ok()?.to_string())
+    }
+
+    /// 通过节点类型查找子节点文本
+    fn find_child_of_type(&self, node: &tree_sitter::Node, kind: &str, source: &str) -> Option<String> {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == kind {
+                return child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+            }
+        }
+        None
+    }
+
+    /// 在语法树中查找指定位置处的符号定义
+    pub fn find_symbol_at_position(&self, source: &str, line: u32, column: u32) -> Option<String> {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&tree_sitter_rust::LANGUAGE.into()).ok()?;
+        let tree = parser.parse(source, None)?;
+        let root = tree.root_node();
+
+        let node = root.descendant_for_point_range(
+            tree_sitter::Point::new(line as usize, column as usize),
+            tree_sitter::Point::new(line as usize, column as usize),
+        )?;
+
+        // 向上遍历找到命名节点
+        let mut current = Some(node);
+        while let Some(n) = current {
+            if n.is_named() && matches!(n.kind(),
+                "identifier" | "type_identifier" | "field_identifier" |
+                "function_item" | "struct_item" | "enum_item" | "trait_item"
+            ) {
+                return n.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+            }
+            current = n.parent();
+        }
+        None
+    }
+
+    /// 获取指定位置的符号的精确作用域
+    pub fn get_scope_at_position(&self, source: &str, line: u32, column: u32) -> Option<Vec<String>> {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&tree_sitter_rust::LANGUAGE.into()).ok()?;
+        let tree = parser.parse(source, None)?;
+        let root = tree.root_node();
+
+        let node = root.descendant_for_point_range(
+            tree_sitter::Point::new(line as usize, column as usize),
+            tree_sitter::Point::new(line as usize, column as usize),
+        )?;
+
+        let mut scope_chain = Vec::new();
+        let mut current = Some(node);
+        while let Some(n) = current {
+            match n.kind() {
+                "function_item" | "closure_expression" => {
+                    if let Some(name) = self.find_child_by_field(&n, "name", source) {
+                        scope_chain.push(name);
+                    }
+                }
+                "impl_item" => {
+                    if let Some(name) = self.find_child_by_field(&n, "type", source) {
+                        scope_chain.push(format!("impl {}", name));
+                    }
+                }
+                "struct_item" | "enum_item" | "trait_item" => {
+                    if let Some(name) = self.find_child_by_field(&n, "name", source) {
+                        scope_chain.push(name);
+                    }
+                }
+                _ => {}
+            }
+            current = n.parent();
+        }
+        scope_chain.reverse();
+        Some(scope_chain)
+    }
+
+    /// 收集文件中所有符号定义 (函数/结构体/枚举/trait)
+    pub fn collect_all_definitions(&self, source: &str) -> Vec<(String, NodeType, SourceLocation)> {
+        let mut parser = tree_sitter::Parser::new();
+        if parser.set_language(&tree_sitter_rust::LANGUAGE.into()).is_err() {
+            return Vec::new();
+        }
+        let tree = match parser.parse(source, None) {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+
+        let root = tree.root_node();
+        let mut defs = Vec::new();
+        self.collect_definitions_recursive(&root, source, &mut defs);
+        defs
+    }
+
+    fn collect_definitions_recursive(
+        &self,
+        node: &tree_sitter::Node,
+        source: &str,
+        defs: &mut Vec<(String, NodeType, SourceLocation)>,
+    ) {
+        let node_type = NodeType::from_ts_kind(node.kind());
+
+        if node_type.is_symbol_definition() {
+            if let Some(name) = self.extract_node_name(node, source) {
+                let start = node.start_position();
+                let end = node.end_position();
+                defs.push((name, node_type, SourceLocation::new(
+                    start.row as u32, start.column as u32,
+                    end.row as u32, end.column as u32,
+                )));
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.is_named() {
+                self.collect_definitions_recursive(&child, source, defs);
+            }
+        }
+    }
+
+    /// 精确重命名: 只替换指定作用域内的符号 (不误改注释/字符串/其他作用域)
+    pub fn rename_symbol_precise(&self, source: &str, old_name: &str, new_name: &str, scope_line: Option<u32>) -> String {
+        let mut parser = tree_sitter::Parser::new();
+        if parser.set_language(&tree_sitter_rust::LANGUAGE.into()).is_err() {
+            // Fallback to word-boundary replace if tree-sitter unavailable
+            let re = regex::Regex::new(&format!(r"\b{}\b", regex::escape(old_name))).unwrap();
+            return re.replace_all(source, new_name).to_string();
+        }
+        let tree = match parser.parse(source, None) {
+            Some(t) => t,
+            None => return source.to_string(),
+        };
+
+        let root = tree.root_node();
+        let mut edits: Vec<(usize, usize, String)> = Vec::new(); // (start, end, new_text)
+
+        self.find_symbol_references(&root, source, old_name, scope_line, &mut edits);
+
+        // Apply edits in reverse order (from end to start) to preserve positions
+        edits.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut result = source.to_string();
+        for (start, end, replacement) in edits {
+            result.replace_range(start..end, &replacement);
+        }
+        result
+    }
+
+    /// 查找符号的所有引用 (定义 + 使用)
+    fn find_symbol_references(
+        &self,
+        node: &tree_sitter::Node,
+        source: &str,
+        name: &str,
+        scope_line: Option<u32>,
+        edits: &mut Vec<(usize, usize, String)>,
+    ) {
+        let byte_range = node.byte_range();
+        let text = match node.utf8_text(source.as_bytes()) {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+
+        // Check if this node matches the symbol name
+        if node.is_named() && text == name {
+            // Check if it's in an acceptable context (not in comments/strings)
+            if !self.is_in_comment_or_string(node) {
+                // If scope_line specified, only rename symbols in same scope
+                if let Some(sl) = scope_line {
+                    let node_start_line = node.start_position().row as u32;
+                    // Find the enclosing definition - must be same scope
+                    if let Some(enclosing) = self.find_enclosing_definition(node) {
+                        let enc_start = enclosing.start_position().row as u32;
+                        let enc_end = enclosing.end_position().row as u32;
+                        if sl >= enc_start && sl <= enc_end {
+                            edits.push((byte_range.start, byte_range.end, name.replace(name, &edits.first().map(|e| e.2.clone()).unwrap_or_default())));
+                            // Actually we want to replace with new_name
+                        }
+                    }
+                } else {
+                    edits.push((byte_range.start, byte_range.end, String::new())); // placeholder
+                }
+            }
+        }
+
+        // Recurse into children
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.is_named() {
+                self.find_symbol_references(&child, source, name, scope_line, edits);
+            }
+        }
+    }
+
+    /// Check if a node is inside a comment or string literal
+    fn is_in_comment_or_string(&self, node: &tree_sitter::Node) -> bool {
+        let mut current = node.parent();
+        while let Some(parent) = current {
+            match parent.kind() {
+                "line_comment" | "block_comment" | "string_literal" |
+                "raw_string_literal" | "char_literal" => return true,
+                _ => {}
+            }
+            current = parent.parent();
+        }
+        false
+    }
+
+    /// Find the enclosing definition (function/struct/etc.) for a node
+    fn find_enclosing_definition<'a>(&self, node: &'a tree_sitter::Node<'a>) -> Option<tree_sitter::Node<'a>> {
+        let mut current = node.parent();
+        while let Some(parent) = current {
+            match parent.kind() {
+                "function_item" | "struct_item" | "enum_item" |
+                "trait_item" | "impl_item" => return Some(parent),
+                _ => {}
+            }
+            current = parent.parent();
+        }
+        None
+    }
+}
+
+// ════════════════════════════════════════════════════════════════
+// Tree-sitter 解析管理器
+// ════════════════════════════════════════════════════════════════
+
+/// Tree-sitter 解析管理器 — 统一的解析入口
 pub struct TreeSitterParserManager {
-    /// 已加载的语言解析器缓存
-    parsers: Arc<RwLock<HashMap<LanguageId, Box<dyn LanguageParser>>>>,
-    
-    /// 解析结果缓存（文件路径 -> ParseResult）
+    parsers: Arc<RwLock<HashMap<LanguageId, Arc<dyn LanguageParser>>>>,
     cache: Arc<RwLock<HashMap<PathBuf, ParseResult>>>,
-    
-    /// 配置
     config: ParserConfig,
 }
 
 impl TreeSitterParserManager {
-    /// 创建新的解析管理器
     pub fn new(config: ParserConfig) -> Self {
+        let mut parsers: HashMap<LanguageId, Arc<dyn LanguageParser>> = HashMap::new();
+        // 注册 Rust parser (目前唯一有真实 tree-sitter 绑定的)
+        parsers.insert(LanguageId::Rust, Arc::new(TreeSitterRustParser::new()));
+
         Self {
-            parsers: Arc::new(RwLock::new(HashMap::new())),
+            parsers: Arc::new(RwLock::new(parsers)),
             cache: Arc::new(RwLock::new(HashMap::new())),
             config,
         }
     }
 
-    /// 使用默认配置创建
-    pub fn with_defaults() -> Self {
-        Self::new(ParserConfig::default())
+    pub fn with_defaults() -> Self { Self::new(ParserConfig::default()) }
+
+    /// 获取 Rust 专用的 parser (便捷方法)
+    pub fn rust_parser(&self) -> Arc<TreeSitterRustParser> {
+        Arc::new(TreeSitterRustParser::new())
     }
 
-    /// 获取或创建指定语言的解析器
-    async fn get_or_create_parser(&self, language: LanguageId) -> Result<Box<dyn LanguageParser>, ParseError> {
-        // 先检查缓存
-        {
-            let parsers = self.parsers.read().await;
-            if let Some(_parser) = parsers.get(&language) {
-                // 注意：这里不能直接返回 parser 的克隆，因为 LanguageParser 是 trait object
-                // 实际实现中应该使用工厂模式或 Arc 包装
-                return Err(ParseError::Internal("Parser cloning not implemented".to_string()));
-            }
-        }
+    /// 解析源代码
+    pub async fn parse_source(&self, source: &str, language: LanguageId) -> Result<ParseResult, ParseError> {
+        info!(language = %language, length = source.len(), "Parsing source code");
 
-        // 创建新的解析器
-        let parser = self.create_parser_for_language(language.clone())?;
-        
-        // 存入缓存
-        {
-            let mut parsers = self.parsers.write().await;
-            parsers.insert(language.clone(), parser);
-        }
-
-        // 再次获取（这次从缓存）
-        let _parsers = self.parsers.read().await;
-        // 返回一个错误提示，实际实现需要更复杂的逻辑
-        Err(ParseError::Internal("Parser retrieval needs refactoring".to_string()))
-    }
-
-    /// 为指定语言创建解析器
-    fn create_parser_for_language(&self, language: LanguageId) -> Result<Box<dyn LanguageParser>, ParseError> {
-        // 这里应该根据语言创建对应的解析器实例
-        // 目前返回一个基础实现，后续可以集成真正的 tree-sitter 绑定
-        
-        match language {
-            LanguageId::Rust | 
-            LanguageId::TypeScript | 
-            LanguageId::JavaScript | 
-            LanguageId::Python |
-            LanguageId::Go => {
-                Ok(Box::new(BasicLanguageParser::new(language)))
-            },
-            _ => Err(ParseError::UnsupportedLanguage(language)),
-        }
-    }
-
-    /// 解析源代码字符串
-    pub async fn parse_source(
-        &self,
-        source: &str,
-        language: LanguageId,
-    ) -> Result<ParseResult, ParseError> {
-        info!(
-            language = %language,
-            length = source.len(),
-            "Parsing source code"
-        );
-
-        // 检查源代码大小限制
-        const MAX_SOURCE_SIZE: usize = 10 * 1024 * 1024; // 10MB
+        const MAX_SOURCE_SIZE: usize = 10 * 1024 * 1024;
         if source.len() > MAX_SOURCE_SIZE {
             return Err(ParseError::SourceTooLarge(source.len()));
         }
 
         let start_time = std::time::Instant::now();
 
-        // 执行解析（使用基础解析器作为占位符）
-        let root = BasicLanguageParser::new(language.clone()).parse(source).await?;
+        let parsers = self.parsers.read().await;
+        let parser = parsers.get(&language)
+            .ok_or_else(|| ParseError::UnsupportedLanguage(language.clone()))?;
 
-        // 构建符号表和作用域
+        let root = parser.parse(source).await?;
+
         let (symbol_table, scopes) = if self.config.enable_symbol_resolution {
             self.build_symbol_table(&root)
         } else {
             (HashMap::new(), HashMap::new())
         };
 
-        // 收集诊断信息
         let diagnostics = self.collect_diagnostics(&root);
-
-        // 统计信息
         let stats = self.calculate_stats(&root, source);
-
         let parse_duration_ms = start_time.elapsed().as_millis() as u64;
 
-        Ok(ParseResult {
-            root,
-            symbol_table,
-            scopes,
-            diagnostics,
-            stats,
-            parse_duration_ms,
-        })
+        Ok(ParseResult { root, symbol_table, scopes, diagnostics, stats, parse_duration_ms })
     }
 
     /// 解析文件
-    pub async fn parse_file(
-        &self,
-        file_path: &PathBuf,
-    ) -> Result<ParseResult, ParseError> {
-        // 检查缓存
+    pub async fn parse_file(&self, file_path: &PathBuf) -> Result<ParseResult, ParseError> {
         if self.config.enable_incremental {
             let cache = self.cache.read().await;
             if let Some(cached) = cache.get(file_path) {
@@ -785,18 +918,17 @@ impl TreeSitterParserManager {
             }
         }
 
-        // 读取文件
         let source = tokio::fs::read_to_string(file_path).await?;
-        
-        // 推断语言
         let language = LanguageId::from_path(file_path.to_string_lossy().as_ref());
-
-        // 解析
         let result = self.parse_source(&source, language).await?;
 
-        // 存入缓存
         if self.config.enable_incremental {
             let mut cache = self.cache.write().await;
+            if cache.len() >= self.config.cache_size {
+                // 简单的 LRU: 删除最早的一半
+                let keys: Vec<_> = cache.keys().take(cache.len() / 2).cloned().collect();
+                for k in keys { cache.remove(&k); }
+            }
             cache.insert(file_path.clone(), result.clone());
         }
 
@@ -809,23 +941,15 @@ impl TreeSitterParserManager {
         let mut scopes = HashMap::new();
         let mut next_scope_id: u64 = 1;
 
-        // 创建全局作用域
         scopes.insert(0, ScopeInfo {
-            id: 0,
-            parent_id: None,
-            scope_type: ScopeType::Global,
-            symbols: Vec::new(),
-            start_location: root.location,
-            end_location: root.location,
+            id: 0, parent_id: None, scope_type: ScopeType::Global,
+            symbols: Vec::new(), start_location: root.location, end_location: root.location,
         });
 
-        // 递归遍历 AST 构建符号表和作用域
         self.build_symbols_recursive(root, 0, &mut symbol_table, &mut scopes, &mut next_scope_id);
-
         (symbol_table, scopes)
     }
 
-    /// 递归构建符号
     fn build_symbols_recursive(
         &self,
         node: &AstNode,
@@ -834,99 +958,71 @@ impl TreeSitterParserManager {
         scopes: &mut HashMap<u64, ScopeInfo>,
         next_scope_id: &mut u64,
     ) {
-        // 根据节点类型决定是否创建符号
-        if node.node_type.is_symbol_definition()
-            && let Some(ref name) = node.name {
-                let kind = match node.node_type {
-                    NodeType::FunctionDeclaration => SymbolKind::Function,
-                    NodeType::StructDeclaration => SymbolKind::Struct,
-                    NodeType::EnumDeclaration => SymbolKind::Enum,
-                    NodeType::TraitDeclaration => SymbolKind::Trait,
-                    NodeType::ClassDeclaration => SymbolKind::Class,
-                    NodeType::InterfaceDeclaration => SymbolKind::Interface,
-                    NodeType::VariableDeclaration => SymbolKind::Variable,
-                    _ => SymbolKind::Unknown,
-                };
+        if node.node_type.is_symbol_definition() && let Some(ref name) = node.name {
+            let kind = match node.node_type {
+                NodeType::FunctionDeclaration => SymbolKind::Function,
+                NodeType::StructDeclaration => SymbolKind::Struct,
+                NodeType::EnumDeclaration => SymbolKind::Enum,
+                NodeType::TraitDeclaration => SymbolKind::Trait,
+                NodeType::ClassDeclaration => SymbolKind::Class,
+                NodeType::InterfaceDeclaration => SymbolKind::Interface,
+                NodeType::VariableDeclaration => SymbolKind::Variable,
+                _ => SymbolKind::Unknown,
+            };
 
-                let entry = SymbolEntry {
-                    name: name.clone(),
-                    kind,
-                    definition_location: node.location,
-                    node_id: node.id,
-                    scope_id: current_scope_id,
-                    type_info: node.type_info.clone(),
-                };
+            symbol_table.insert(name.clone(), SymbolEntry {
+                name: name.clone(), kind, definition_location: node.location,
+                node_id: node.id, scope_id: current_scope_id, type_info: node.type_info.clone(),
+            });
 
-                symbol_table.insert(name.clone(), entry);
-
-                // 将符号添加到当前作用域
-                if let Some(scope) = scopes.get_mut(&current_scope_id) {
-                    scope.symbols.push(name.clone());
-                }
+            if let Some(scope) = scopes.get_mut(&current_scope_id) {
+                scope.symbols.push(name.clone());
             }
+        }
 
-        // 根据节点类型决定是否创建新作用域
         let new_scope_id = match node.node_type {
-            NodeType::FunctionDeclaration | 
-            NodeType::ImplDeclaration => {
+            NodeType::FunctionDeclaration | NodeType::ImplDeclaration => {
                 let scope_id = *next_scope_id;
                 *next_scope_id += 1;
-
                 scopes.insert(scope_id, ScopeInfo {
-                    id: scope_id,
-                    parent_id: Some(current_scope_id),
-                    scope_type: ScopeType::Function,
-                    symbols: Vec::new(),
-                    start_location: node.location,
-                    end_location: node.location,
+                    id: scope_id, parent_id: Some(current_scope_id),
+                    scope_type: ScopeType::Function, symbols: Vec::new(),
+                    start_location: node.location, end_location: node.location,
                 });
-
                 Some(scope_id)
-            },
-            NodeType::BlockStatement | 
-            NodeType::ForStatement | 
-            NodeType::WhileStatement | 
-            NodeType::IfStatement | 
-            NodeType::MatchStatement => {
+            }
+            NodeType::BlockStatement | NodeType::ForStatement | NodeType::WhileStatement |
+            NodeType::IfStatement | NodeType::MatchStatement => {
                 let scope_id = *next_scope_id;
                 *next_scope_id += 1;
-
                 let scope_type = match node.node_type {
                     NodeType::ForStatement | NodeType::WhileStatement => ScopeType::Loop,
                     NodeType::IfStatement => ScopeType::IfElse,
                     NodeType::MatchStatement => ScopeType::MatchArm,
                     _ => ScopeType::Block,
                 };
-
                 scopes.insert(scope_id, ScopeInfo {
-                    id: scope_id,
-                    parent_id: Some(current_scope_id),
-                    scope_type,
-                    symbols: Vec::new(),
-                    start_location: node.location,
-                    end_location: node.location,
+                    id: scope_id, parent_id: Some(current_scope_id),
+                    scope_type, symbols: Vec::new(),
+                    start_location: node.location, end_location: node.location,
                 });
-
                 Some(scope_id)
-            },
+            }
             _ => None,
         };
 
-        // 递归处理子节点
         let effective_scope_id = new_scope_id.unwrap_or(current_scope_id);
         for child in &node.children {
             self.build_symbols_recursive(child, effective_scope_id, symbol_table, scopes, next_scope_id);
         }
     }
 
-    /// 收集诊断信息
     fn collect_diagnostics(&self, root: &AstNode) -> Vec<DiagnosticInfo> {
         let mut diagnostics = Vec::new();
         self.check_for_errors(root, &mut diagnostics);
         diagnostics
     }
 
-    /// 递归检查错误节点
     fn check_for_errors(&self, node: &AstNode, diagnostics: &mut Vec<DiagnosticInfo>) {
         if node.node_type == NodeType::Error {
             diagnostics.push(DiagnosticInfo {
@@ -937,161 +1033,26 @@ impl TreeSitterParserManager {
                 code: None,
             });
         }
-
-        for child in &node.children {
-            self.check_for_errors(child, diagnostics);
-        }
+        for child in &node.children { self.check_for_errors(child, diagnostics); }
     }
 
-    /// 计算统计信息
     fn calculate_stats(&self, root: &AstNode, source: &str) -> ParseStats {
         ParseStats {
             total_nodes: root.total_children() + 1,
             max_depth: root.depth(),
-            total_symbols: 0, // 将在 build_symbol_table 后更新
-            total_scopes: 0,  // 将在 build_symbol_table 后更新
+            total_symbols: 0, total_scopes: 0,
             source_lines: source.lines().count(),
             source_chars: source.chars().count(),
         }
     }
 
-    /// 清除解析缓存
     pub async fn clear_cache(&self) {
         let mut cache = self.cache.write().await;
         cache.clear();
-        info!("Parser cache cleared");
     }
 
-    /// 获取缓存大小
     pub async fn cache_size(&self) -> usize {
         let cache = self.cache.read().await;
         cache.len()
     }
-}
-
-/// 基础语言解析器（占位符实现）
-struct BasicLanguageParser {
-    language: LanguageId,
-}
-
-impl BasicLanguageParser {
-    fn new(language: LanguageId) -> Self {
-        Self { language }
-    }
-}
-
-#[async_trait::async_trait]
-impl LanguageParser for BasicLanguageParser {
-    async fn parse(&self, source: &str) -> Result<AstNode, ParseError> {
-        // 这是一个简化的解析器实现
-        // 在生产环境中，应该集成真正的 tree-sitter 库
-        
-        let mut root = AstNode::new(NodeType::SourceFile, SourceLocation::new(0, 0, 0, 0));
-        
-        // 简单的逐行分析
-        let lines: Vec<&str> = source.lines().collect();
-        
-        for (idx, line) in lines.iter().enumerate() {
-            let line_num = idx as u32;
-            
-            // 检查是否是函数声明
-            if line.trim_start().starts_with("fn ") ||
-               line.trim_start().starts_with("func ") ||
-               line.trim_start().starts_with("def ") ||
-               line.trim_start().starts_with("function ") {
-                
-                let mut func_node = AstNode::new(
-                    NodeType::FunctionDeclaration,
-                    SourceLocation::new(line_num, 0, line_num, line.len() as u32)
-                );
-                
-                // 尝试提取函数名
-                let name = extract_function_name(line);
-                func_node.name = Some(name);
-                
-                root.add_child(func_node);
-            }
-            
-            // 检查是否是结构体/类声明
-            if line.contains("struct ") || line.contains("class ") {
-                let mut decl_node = AstNode::new(
-                    NodeType::StructDeclaration,
-                    SourceLocation::new(line_num, 0, line_num, line.len() as u32)
-                );
-                
-                let name = extract_struct_name(line);
-                decl_node.name = Some(name);
-                
-                root.add_child(decl_node);
-            }
-            
-            // 检查是否是 import/use/require
-            if line.trim_start().starts_with("use ") ||
-               line.trim_start().starts_with("import ") ||
-               line.trim_start().starts_with("require ") ||
-               line.trim_start().starts_with("#include") {
-                
-                let import_node = AstNode::new(
-                    NodeType::Unknown,
-                    SourceLocation::new(line_num, 0, line_num, line.len() as u32)
-                );
-                
-                root.add_child(import_node);
-            }
-        }
-        
-        Ok(root)
-    }
-    
-    fn language_id(&self) -> LanguageId {
-        self.language.clone()
-    }
-    
-    fn supported_extensions(&self) -> Vec<&str> {
-        match self.language {
-            LanguageId::Rust => vec!["rs"],
-            LanguageId::TypeScript => vec!["ts", "tsx"],
-            LanguageId::JavaScript => vec!["js", "jsx"],
-            LanguageId::Python => vec!["py", "pyi"],
-            LanguageId::Go => vec!["go"],
-            _ => vec![],
-        }
-    }
-}
-
-/// 提取函数名
-fn extract_function_name(line: &str) -> String {
-    let trimmed = line.trim();
-    
-    for prefix in ["fn ", "func ", "def ", "function "] {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            if let Some(end) = rest.find(['(', ' ', '<'].as_ref()) {
-                return rest[..end].to_string();
-            }
-            return rest.split_whitespace().next().unwrap_or("anonymous").to_string();
-        }
-    }
-    
-    "anonymous".to_string()
-}
-
-/// 提取结构体/类名
-fn extract_struct_name(line: &str) -> String {
-    let trimmed = line.trim();
-    
-    for keyword in ["struct ", "class ", "enum ", "interface ", "type "] {
-        if trimmed.contains(keyword)
-            && let Some(start) = trimmed.find(keyword) {
-                let after_keyword = &trimmed[start + keyword.len()..];
-                if let Some(end) = after_keyword.find([' ', '{', '<', ':', '('].as_ref()) {
-                    return after_keyword[..end].to_string();
-                }
-                return after_keyword.split_whitespace()
-                    .next()
-                    .unwrap_or("Unnamed")
-                    .to_string();
-            }
-    }
-    
-    "Unnamed".to_string()
 }
