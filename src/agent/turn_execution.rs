@@ -285,18 +285,14 @@ impl Agent {
             // Even when the base list is locked, append any tools the agent
             // unlocked via ToolSearch since the lock was taken. Without this,
             // tools unlocked mid-session would never reach the API.
-            let unlocked =
-                crate::tool::tool_search::unlocked_for_session(&self.session.id);
+            let unlocked = crate::tool::tool_search::unlocked_for_session(&self.session.id);
             if unlocked.is_empty() {
                 return locked.clone();
             }
             let already: std::collections::HashSet<&str> =
                 locked.iter().map(|t| t.name.as_str()).collect();
             let mut tools = locked.clone();
-            let extra = self
-                .registry
-                .definitions_for_names(&unlocked)
-                .await;
+            let extra = self.registry.definitions_for_names(&unlocked).await;
             for def in extra {
                 if !already.contains(def.name.as_str()) {
                     tools.push(def);

@@ -5114,12 +5114,7 @@ fn single_session_styled_text_buffer(
     } else {
         Shaping::Basic
     };
-    buffer.set_rich_text(
-        font_system,
-        segments.iter().copied(),
-        Attrs::new(),
-        shaping,
-    );
+    buffer.set_rich_text(font_system, segments.iter().copied(), Attrs::new(), shaping);
     buffer.shape_until_scroll(font_system, false);
     buffer
 }

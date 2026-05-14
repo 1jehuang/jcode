@@ -311,10 +311,7 @@ impl Registry {
 
     /// Resolve a specific subset of tools by registry key. Unknown names are
     /// silently skipped. Used by ToolSearch to surface deferred tools.
-    pub async fn definitions_for_names(
-        &self,
-        names: &HashSet<String>,
-    ) -> Vec<ToolDefinition> {
+    pub async fn definitions_for_names(&self, names: &HashSet<String>) -> Vec<ToolDefinition> {
         let tools = self.tools.read().await;
         let mut defs: Vec<ToolDefinition> = names
             .iter()

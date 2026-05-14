@@ -1159,7 +1159,8 @@ fn test_parse_next_event_emits_only_incremental_reasoning_content() {
     }
 
     stream.buffer =
-        "data:{\"choices\":[{\"delta\":{\"reasoning_content\":\"Thinking more\"}}]}\n\n".to_string();
+        "data:{\"choices\":[{\"delta\":{\"reasoning_content\":\"Thinking more\"}}]}\n\n"
+            .to_string();
     match stream.parse_next_event() {
         Some(StreamEvent::ThinkingDelta(text)) => assert_eq!(text, " more"),
         other => panic!("expected incremental ThinkingDelta, got {:?}", other),

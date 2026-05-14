@@ -702,10 +702,7 @@ impl RemoteConnection {
     /// Fire-and-forget: the server applies it to its pending registry which
     /// in turn wakes the tool task. We use the detached path so the modal
     /// dispatch from the synchronous key handler does not need an .await.
-    pub fn submit_ask_user_answer(
-        &mut self,
-        answer: jcode_protocol::AskUserAnswerPayload,
-    ) {
+    pub fn submit_ask_user_answer(&mut self, answer: jcode_protocol::AskUserAnswerPayload) {
         let id = self.next_request_id;
         self.next_request_id += 1;
         self.send_request_detached(

@@ -288,8 +288,7 @@ pub trait TuiState {
     /// Usage overlay for /usage command
     fn usage_overlay(&self) -> Option<&std::cell::RefCell<usage_overlay::UsageOverlay>>;
     /// `askUserQuestion` modal overlay (None = not visible).
-    fn ask_user_overlay(&self)
-    -> Option<&std::cell::RefCell<ask_user_modal::AskUserModal>>;
+    fn ask_user_overlay(&self) -> Option<&std::cell::RefCell<ask_user_modal::AskUserModal>>;
     /// Working directory for this session
     fn working_dir(&self) -> Option<String>;
     /// Monotonic clock for viewport animations

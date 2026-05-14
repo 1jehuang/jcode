@@ -1,7 +1,5 @@
 use super::{Tool, ToolContext, ToolOutput};
-use crate::ask_user::{
-    AskUserAnswerKind, AskUserOption, AskUserQuestion, register_pending,
-};
+use crate::ask_user::{AskUserAnswerKind, AskUserOption, AskUserQuestion, register_pending};
 use crate::bus::{Bus, BusEvent};
 use anyhow::{Result, bail};
 use async_trait::async_trait;

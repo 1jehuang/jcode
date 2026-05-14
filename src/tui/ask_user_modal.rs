@@ -333,7 +333,11 @@ impl AskUserModal {
             options_h += 2; // blank + hint
         }
         let options_h = options_h.max(3) as u16;
-        let typing_h: u16 = if matches!(self.mode, Mode::Typing) { 5 } else { 0 };
+        let typing_h: u16 = if matches!(self.mode, Mode::Typing) {
+            5
+        } else {
+            0
+        };
 
         // 2 border rows + 1 top inset pad + 1 divider + 1 blank above options.
         let mut total: u16 = 2 + 1 + question_h + 1 + 1 + options_h + typing_h;
@@ -422,18 +426,16 @@ impl AskUserModal {
 
         if context_h > 0 {
             slot += 1; // skip blank
-            let context_para =
-                Paragraph::new(self.context.as_deref().unwrap_or("").to_string())
-                    .style(Style::default().fg(MUTED))
-                    .wrap(Wrap { trim: false });
+            let context_para = Paragraph::new(self.context.as_deref().unwrap_or("").to_string())
+                .style(Style::default().fg(MUTED))
+                .wrap(Wrap { trim: false });
             frame.render_widget(context_para, chunks[slot]);
             slot += 1;
         }
 
         // Divider that respects the content padding.
         let divider_line = "─".repeat(inner.width as usize);
-        let divider = Paragraph::new(divider_line)
-            .style(Style::default().fg(SECTION_BORDER));
+        let divider = Paragraph::new(divider_line).style(Style::default().fg(SECTION_BORDER));
         frame.render_widget(divider, chunks[slot]);
         slot += 1;
         slot += 1; // blank above options
@@ -520,10 +522,7 @@ impl AskUserModal {
 
         let mut spans = vec![
             Span::styled(arrow.to_string(), Style::default().fg(row_fg).bg(row_bg)),
-            Span::styled(
-                check.to_string(),
-                Style::default().fg(row_fg).bg(row_bg),
-            ),
+            Span::styled(check.to_string(), Style::default().fg(row_fg).bg(row_bg)),
             Span::styled(
                 format!("[{}]  ", opt.id),
                 Style::default().fg(row_fg).bg(row_bg).bold(),
@@ -557,7 +556,10 @@ impl AskUserModal {
         let bg = if selected { SELECTED_BG } else { PANEL_BG };
 
         let mut spans = vec![
-            Span::styled(arrow.to_string(), Style::default().fg(CUSTOM_HINT_FG).bg(bg)),
+            Span::styled(
+                arrow.to_string(),
+                Style::default().fg(CUSTOM_HINT_FG).bg(bg),
+            ),
             Span::styled(
                 check_pad.to_string(),
                 Style::default().fg(CUSTOM_HINT_FG).bg(bg),
@@ -595,9 +597,11 @@ impl AskUserModal {
         // Display typed text plus a blinking-style caret.
         let mut text = self.typed.clone();
         text.push('▏');
-        let para =
-            Paragraph::new(Line::from(Span::styled(text, Style::default().fg(Color::White))))
-                .wrap(Wrap { trim: false });
+        let para = Paragraph::new(Line::from(Span::styled(
+            text,
+            Style::default().fg(Color::White),
+        )))
+        .wrap(Wrap { trim: false });
         frame.render_widget(para, inner);
     }
 

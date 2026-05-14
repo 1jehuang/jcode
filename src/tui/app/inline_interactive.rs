@@ -388,10 +388,8 @@ impl App {
         let build = move || {
             let routes_started = std::time::Instant::now();
             let routes = provider.model_routes();
-            let routes = crate::provider_catalog::filter_model_routes_by_allowlist(
-                provider.name(),
-                routes,
-            );
+            let routes =
+                crate::provider_catalog::filter_model_routes_by_allowlist(provider.name(), routes);
             let routes_ms = routes_started.elapsed().as_millis();
             let _ = tx.send(Ok(ModelPickerRoutesResult { routes, routes_ms }));
         };
