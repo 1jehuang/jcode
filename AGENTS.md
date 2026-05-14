@@ -9,6 +9,8 @@
 - **Rebuild when done** - When you are done making changes, build the source.
 - **Bump version for releases** - Update version in `Cargo.toml` when making releases. When cutting a new release, look at all the changes that happened since the last release and determine what the version bump should be ie patch or minor, etc. 
 - **Remote builds available** - Use `scripts/remote_build.sh` to offload heavy cargo work to another machine. If your build is terminated, likely is because there are not enough resources on this machine to build. use remote build in that case. Try checking the resource avaliablity on the machine before you run a build. 
+- **Delegate substantial independent work** - Prefer subagents/child sessions for parallelizable discovery, deep investigation, or long-running validation.
+- **Background means non-UI** - Run background work in non-interactive, non-focus-stealing jobs. Do not spawn headed terminals or steal window focus unless the user explicitly asks.
 
 ## Logs
 - Logs are written to `~/.jcode/logs/` (daily files like `jcode-YYYY-MM-DD.log`).
