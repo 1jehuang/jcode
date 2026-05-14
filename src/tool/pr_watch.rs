@@ -631,21 +631,7 @@ async fn collect_with_gh(root: &Path, repo: &str, pr: u64) -> GhCollection {
     GhCollection {
         metadata: run_gh(root, &["pr", "view", &pr.to_string(), "--repo", repo, "--json", "url,state,baseRefName,headRefName,headRefOid,mergeStateStatus,reviewDecision,isDraft"]).await
             .and_then(|stdout| parse_gh_pr_view(repo, pr, &stdout).map_err(|err| SurfaceError::transient("metadata", err.to_string()))),
-        checks: run_gh_allow_exit(
-            root,
-            &[
-                "pr",
-                "checks",
-                &pr.to_string(),
-                "--repo",
-                repo,
-                "--json",
-                "name,state,event,link,bucket,workflow,description,startedAt,completedAt",
-            ],
-            &[8],
-        )
-        .await
-        .and_then(|stdout| {
+        checks: run_gh_pr_checks(root, repo, pr).await.and_then(|stdout| {
             parse_gh_checks(&stdout).map_err(|err| SurfaceError::transient("checks", err.to_string()))
         }),
         review_comments: run_gh(root, &["api", &format!("repos/{repo}/pulls/{pr}/comments"), "--paginate"]).await
@@ -870,6 +856,49 @@ query($threadId:ID!) {{
 
 async fn run_gh(root: &Path, args: &[&str]) -> Result<String, SurfaceError> {
     run_gh_allow_exit(root, args, &[]).await
+}
+
+async fn run_gh_pr_checks(root: &Path, repo: &str, pr: u64) -> Result<String, SurfaceError> {
+    let pr_s = pr.to_string();
+    let args = [
+        "pr",
+        "checks",
+        &pr_s,
+        "--repo",
+        repo,
+        "--json",
+        "name,state,event,link,bucket,workflow,description,startedAt,completedAt",
+    ];
+    let output = Command::new("gh")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .await
+        .map_err(|err| SurfaceError::transient("gh", format!("failed to run gh: {err}")))?;
+    let code = output.status.code().unwrap_or(-1);
+    if output.status.success() || code == 8 {
+        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+    }
+    if gh_pr_checks_reported_no_checks(code, &output.stdout, &output.stderr) {
+        return Ok("[]".to_string());
+    }
+    Err(SurfaceError::transient(
+        "gh",
+        String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    ))
+}
+
+fn gh_pr_checks_reported_no_checks(code: i32, stdout: &[u8], stderr: &[u8]) -> bool {
+    if code != 1 {
+        return false;
+    }
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    )
+    .to_ascii_lowercase();
+    combined.contains("no checks reported")
 }
 
 async fn run_gh_allow_exit(
@@ -1615,6 +1644,39 @@ mod tests {
         assert!(is_failed_check(&failed));
         assert!(!is_pending_check(&passed));
         assert!(!is_failed_check(&passed));
+    }
+
+    #[test]
+    fn gh_pr_checks_no_checks_exit_one_is_not_transient_failure() {
+        assert!(gh_pr_checks_reported_no_checks(
+            1,
+            b"",
+            b"no checks reported on the 'feature' branch"
+        ));
+        assert!(gh_pr_checks_reported_no_checks(
+            1,
+            b"No checks reported on the 'feature' branch",
+            b""
+        ));
+    }
+
+    #[test]
+    fn gh_pr_checks_classifier_keeps_pending_and_real_failures_distinct() {
+        assert!(!gh_pr_checks_reported_no_checks(
+            8,
+            br#"[{"name":"ci","state":"IN_PROGRESS"}]"#,
+            b""
+        ));
+        assert!(!gh_pr_checks_reported_no_checks(
+            1,
+            b"",
+            b"HTTP 404: Not Found"
+        ));
+        assert!(!gh_pr_checks_reported_no_checks(
+            2,
+            b"",
+            b"no checks reported"
+        ));
     }
 
     #[test]

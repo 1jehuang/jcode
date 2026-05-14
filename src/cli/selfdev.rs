@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 use anyhow::Result;
+use std::path::{Path, PathBuf};
 
 use crate::{build, logging, session, startup_profile};
 
@@ -11,6 +12,42 @@ pub const CLIENT_SELFDEV_ENV: &str = "JCODE_CLIENT_SELFDEV_MODE";
 
 pub fn client_selfdev_requested() -> bool {
     std::env::var(CLIENT_SELFDEV_ENV).is_ok()
+}
+
+fn repo_from_session_working_dir(session_id: &str) -> Option<PathBuf> {
+    let session = session::Session::load(session_id).ok()?;
+    let working_dir = session.working_dir.as_deref()?;
+    build::find_repo_in_ancestors(Path::new(working_dir))
+}
+
+fn resolve_selfdev_cli_repo_dir_from(
+    primary: Option<PathBuf>,
+    resume_session: Option<&str>,
+) -> Option<PathBuf> {
+    resume_session
+        .and_then(repo_from_session_working_dir)
+        .or(primary)
+}
+
+fn resolve_selfdev_cli_repo_dir(resume_session: Option<&str>) -> Option<PathBuf> {
+    resolve_selfdev_cli_repo_dir_from(build::get_repo_dir(), resume_session)
+}
+
+fn selfdev_repo_discovery_error(resume_session: Option<&str>) -> anyhow::Error {
+    let session_working_dir = resume_session
+        .and_then(|id| session::Session::load(id).ok())
+        .and_then(|session| session.working_dir);
+    let cwd = std::env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|error| format!("<unavailable: {}>", error));
+
+    anyhow::anyhow!(
+        "Could not find jcode repository for self-dev. Tried resumed session working_dir={}, current_dir={}, and build/executable fallbacks. Run from the jcode repo or use `selfdev enter` to create a self-dev session with a valid repo working directory.",
+        session_working_dir
+            .as_deref()
+            .unwrap_or("<none>"),
+        cwd
+    )
 }
 
 async fn wait_for_reloading_server() -> bool {
@@ -39,8 +76,8 @@ pub async fn run_self_dev(should_build: bool, resume_session: Option<String>) ->
     startup_profile::mark("run_self_dev_enter");
     crate::env::set_var(CLIENT_SELFDEV_ENV, "1");
 
-    let repo_dir =
-        build::get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
+    let repo_dir = resolve_selfdev_cli_repo_dir(resume_session.as_deref())
+        .ok_or_else(|| selfdev_repo_discovery_error(resume_session.as_deref()))?;
 
     startup_profile::mark("selfdev_session_create");
     let is_resume = resume_session.is_some();

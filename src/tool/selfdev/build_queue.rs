@@ -243,6 +243,13 @@ impl SelfDevTool {
                     request.state = BuildRequestState::Completed;
                     request.completed_at = Some(Utc::now().to_rfc3339());
                     request.error = None;
+                    request.version = original.version.clone();
+                    request.built_source = original.built_source.clone();
+                    request.published_version = original.published_version.clone();
+                    request.validated = original.validated;
+                    request.last_progress = original.last_progress.clone().or_else(|| {
+                        Some("attached build completed".to_string())
+                    });
                     request.save()?;
                     Self::append_output_line(
                         &mut file,
@@ -393,6 +400,14 @@ impl SelfDevTool {
 
         let mut request = BuildRequest::load(&request_id)?
             .ok_or_else(|| anyhow::anyhow!("Missing queued build request {}", request_id))?;
+        if Self::is_test_session()
+            && matches!(result.status, Some(BackgroundTaskStatus::Completed))
+            && result.error.is_none()
+        {
+            request.validated = true;
+            request.published_version = request.version.clone();
+            request.built_source = Some(actual_source.clone());
+        }
         request.completed_at = Some(Utc::now().to_rfc3339());
         request.state = match result
             .status

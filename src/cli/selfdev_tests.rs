@@ -255,6 +255,72 @@ fn set_var<T: AsRef<OsStr>>(name: &str, value: T) {
     crate::env::set_var(name, value);
 }
 
+fn create_repo_fixture() -> tempfile::TempDir {
+    let temp = tempfile::TempDir::new().expect("temp repo");
+    std::fs::create_dir_all(temp.path().join(".git")).expect("git dir");
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"jcode\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("cargo toml");
+    temp
+}
+
+#[test]
+fn selfdev_cli_repo_resolver_prefers_resumed_session_working_dir() {
+    let _env = setup_test_env();
+    let repo = create_repo_fixture();
+    let other_repo = create_repo_fixture();
+    let nested = repo.path().join("src").join("tool");
+    std::fs::create_dir_all(&nested).expect("nested dir");
+
+    let mut session = session::Session::create(None, Some("Selfdev Resume".to_string()));
+    session.set_canary("self-dev");
+    session.working_dir = Some(nested.to_string_lossy().to_string());
+    let session_id = session.id.clone();
+    session.save().expect("save session");
+
+    let resolved = super::resolve_selfdev_cli_repo_dir_from(
+        Some(other_repo.path().to_path_buf()),
+        Some(&session_id),
+    );
+
+    assert_eq!(resolved.as_deref(), Some(repo.path()));
+}
+
+#[test]
+fn selfdev_cli_repo_resolver_falls_back_to_primary_without_resumed_repo() {
+    let _env = setup_test_env();
+    let repo = create_repo_fixture();
+
+    let mut session = session::Session::create(None, Some("Selfdev Resume".to_string()));
+    session.set_canary("self-dev");
+    session.working_dir = Some("/not/a/jcode/repo".to_string());
+    let session_id = session.id.clone();
+    session.save().expect("save session");
+
+    let resolved =
+        super::resolve_selfdev_cli_repo_dir_from(Some(repo.path().to_path_buf()), Some(&session_id));
+
+    assert_eq!(resolved.as_deref(), Some(repo.path()));
+}
+
+#[test]
+fn selfdev_repo_discovery_error_mentions_attempted_paths() {
+    let _env = setup_test_env();
+    let mut session = session::Session::create(None, Some("Selfdev Resume".to_string()));
+    session.set_canary("self-dev");
+    session.working_dir = Some("/not/a/jcode/repo".to_string());
+    let session_id = session.id.clone();
+    session.save().expect("save session");
+
+    let error = super::selfdev_repo_discovery_error(Some(&session_id)).to_string();
+
+    assert!(error.contains("/not/a/jcode/repo"));
+    assert!(error.contains("current_dir="));
+    assert!(error.contains("build/executable fallbacks"));
+}
+
 #[test]
 fn test_launcher_dir_uses_trimmed_install_dir_before_jcode_home() {
     let (_lock, _env, temp) = isolated_launcher_env();

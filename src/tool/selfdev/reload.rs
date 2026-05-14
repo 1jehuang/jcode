@@ -219,16 +219,73 @@ pub fn persisted_background_tasks_note(session_id: &str) -> String {
 }
 
 pub(super) fn resolve_selfdev_reload_repo_dir(
+    session_id: &str,
     working_dir: Option<&std::path::Path>,
 ) -> Option<std::path::PathBuf> {
-    resolve_selfdev_reload_repo_dir_from(build::get_repo_dir(), working_dir)
+    resolve_selfdev_reload_repo_dir_from(
+        build::get_repo_dir(),
+        working_dir,
+        latest_completed_build_repo_dir_for_session(session_id),
+    )
 }
 
 pub(super) fn resolve_selfdev_reload_repo_dir_from(
     primary: Option<std::path::PathBuf>,
     working_dir: Option<&std::path::Path>,
+    recent_build_repo_dir: Option<std::path::PathBuf>,
 ) -> Option<std::path::PathBuf> {
-    primary.or_else(|| working_dir.and_then(build::find_repo_in_ancestors))
+    working_dir
+        .and_then(build::find_repo_in_ancestors)
+        .or_else(|| {
+            recent_build_repo_dir
+                .as_deref()
+                .and_then(build::find_repo_in_ancestors)
+        })
+        .or(primary)
+}
+
+pub(super) fn latest_completed_build_repo_dir_for_session(
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
+    let requests = BuildRequest::load_all().ok()?;
+    requests
+        .into_iter()
+        .filter(|request| {
+            request.session_id == session_id
+                && request.state == BuildRequestState::Completed
+                && request.validated
+                && request.error.is_none()
+        })
+        .max_by(|a, b| {
+            a.completed_at
+                .cmp(&b.completed_at)
+                .then_with(|| a.requested_at.cmp(&b.requested_at))
+                .then_with(|| a.request_id.cmp(&b.request_id))
+        })
+        .map(|request| std::path::PathBuf::from(request.repo_dir))
+}
+
+fn selfdev_reload_repo_discovery_error(
+    session_id: &str,
+    working_dir: Option<&std::path::Path>,
+) -> anyhow::Error {
+    let recent_build_repo_dir = latest_completed_build_repo_dir_for_session(session_id)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<none>".to_string());
+    let working_dir = working_dir
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<none>".to_string());
+    let cwd = std::env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|error| format!("<unavailable: {}>", error));
+
+    anyhow::anyhow!(
+        "Could not find jcode repository directory for selfdev reload. Tried ToolContext working_dir={}, latest completed selfdev build repo_dir={} for session {}, and build/executable/current-dir fallbacks. Process current_dir={}. Run `selfdev build` from a jcode checkout or use `selfdev enter` to create a self-dev session with a valid repo working directory.",
+        working_dir,
+        recent_build_repo_dir,
+        session_id,
+        cwd
+    )
 }
 
 impl SelfDevTool {
@@ -239,8 +296,8 @@ impl SelfDevTool {
         execution_mode: ToolExecutionMode,
         working_dir: Option<&std::path::Path>,
     ) -> Result<ToolOutput> {
-        let repo_dir = resolve_selfdev_reload_repo_dir(working_dir)
-            .ok_or_else(|| anyhow::anyhow!("Could not find jcode repository directory"))?;
+        let repo_dir = resolve_selfdev_reload_repo_dir(session_id, working_dir)
+            .ok_or_else(|| selfdev_reload_repo_discovery_error(session_id, working_dir))?;
 
         let target_binary = build::find_dev_binary(&repo_dir)
             .unwrap_or_else(|| build::release_binary_path(&repo_dir));

@@ -340,8 +340,50 @@ fn reload_repo_resolver_uses_working_dir_when_primary_detection_fails() {
     let nested = repo.path().join("crates").join("jcode-build-support");
     std::fs::create_dir_all(&nested).expect("nested dir");
 
-    let resolved = reload::resolve_selfdev_reload_repo_dir_from(None, Some(&nested));
+    let resolved = reload::resolve_selfdev_reload_repo_dir_from(None, Some(&nested), None);
     assert_eq!(resolved.as_deref(), Some(repo.path()));
+}
+
+#[test]
+fn reload_repo_resolver_uses_recent_build_repo_when_other_detection_fails() {
+    let repo = create_repo_fixture();
+    let nested = repo.path().join("src").join("cli");
+    std::fs::create_dir_all(&nested).expect("nested dir");
+
+    let resolved = reload::resolve_selfdev_reload_repo_dir_from(None, None, Some(nested));
+    assert_eq!(resolved.as_deref(), Some(repo.path()));
+}
+
+#[test]
+fn reload_repo_resolver_prefers_working_dir_before_recent_build_repo() {
+    let repo = create_repo_fixture();
+    let recent_repo = create_repo_fixture();
+    let nested = repo.path().join("src").join("tool");
+    let recent_nested = recent_repo.path().join("src").join("cli");
+    std::fs::create_dir_all(&nested).expect("nested dir");
+    std::fs::create_dir_all(&recent_nested).expect("recent nested dir");
+
+    let resolved = reload::resolve_selfdev_reload_repo_dir_from(
+        None,
+        Some(&nested),
+        Some(recent_nested),
+    );
+    assert_eq!(resolved.as_deref(), Some(repo.path()));
+}
+
+#[test]
+fn reload_repo_resolver_prefers_recent_build_repo_before_primary_fallback() {
+    let primary_repo = create_repo_fixture();
+    let recent_repo = create_repo_fixture();
+    let recent_nested = recent_repo.path().join("src").join("tool");
+    std::fs::create_dir_all(&recent_nested).expect("recent nested dir");
+
+    let resolved = reload::resolve_selfdev_reload_repo_dir_from(
+        Some(primary_repo.path().to_path_buf()),
+        None,
+        Some(recent_nested),
+    );
+    assert_eq!(resolved.as_deref(), Some(recent_repo.path()));
 }
 
 #[tokio::test]
@@ -623,6 +665,11 @@ async fn build_dedupes_identical_reason_and_version_with_attached_watcher() {
     assert_eq!(first_status.status, BackgroundTaskStatus::Completed);
     assert_eq!(second_status.status, BackgroundTaskStatus::Completed);
 
+    let producer_request = BuildRequest::load(first_meta["request_id"].as_str().unwrap())
+        .expect("load producer request")
+        .expect("producer request exists");
+    assert!(producer_request.validated);
+
     let watcher_request = BuildRequest::load(second_meta["request_id"].as_str().unwrap())
         .expect("load watcher request")
         .expect("watcher request exists");
@@ -630,6 +677,19 @@ async fn build_dedupes_identical_reason_and_version_with_attached_watcher() {
     assert_eq!(
         watcher_request.attached_to_request_id.as_deref(),
         first_meta["request_id"].as_str()
+    );
+    assert!(
+        watcher_request.validated,
+        "attached watcher should inherit validated producer metadata for reload discovery"
+    );
+    assert_eq!(watcher_request.built_source, producer_request.built_source);
+    assert_eq!(
+        watcher_request.published_version,
+        producer_request.published_version
+    );
+    assert_eq!(
+        reload::latest_completed_build_repo_dir_for_session(&session_two.id).as_deref(),
+        Some(repo.path())
     );
 }
 
