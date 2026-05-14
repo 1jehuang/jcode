@@ -227,9 +227,17 @@ async fn run() -> Result<()> {
             "pid": std::process::id(),
         }),
     );
-    let event_loop = EventLoop::<DesktopUserEvent>::with_user_event()
-        .build()
-        .context("failed to create event loop")?;
+    #[cfg(target_os = "macos")]
+    use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+    let event_loop = {
+        let mut builder = EventLoop::<DesktopUserEvent>::with_user_event();
+        #[cfg(target_os = "macos")]
+        {
+            builder.with_activation_policy(ActivationPolicy::Regular);
+            builder.with_activate_ignoring_other_apps(true);
+        }
+        builder.build().context("failed to create event loop")?
+    };
     let event_loop_proxy = event_loop.create_proxy();
     startup_trace.mark("event loop created");
 
@@ -362,12 +370,10 @@ impl ApplicationHandler<DesktopUserEvent> for DesktopHandler {
         self.ensure_window_and_canvas(event_loop);
     }
 
-    fn new_events(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _cause: winit::event::StartCause,
-    ) {
-        let Some(window) = self.window else { return; };
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, _cause: winit::event::StartCause) {
+        let Some(window) = self.window else {
+            return;
+        };
         let event_loop_now = Instant::now();
         let has_background_work = self.app.has_background_work();
         self.power_inhibitor.set_active(has_background_work);
@@ -420,11 +426,15 @@ impl ApplicationHandler<DesktopUserEvent> for DesktopHandler {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(window) = self.window else { return; };
+        let Some(window) = self.window else {
+            return;
+        };
         if window_id != window.id() {
             return;
         }
-        let Some(canvas) = self.canvas.as_mut() else { return; };
+        let Some(canvas) = self.canvas.as_mut() else {
+            return;
+        };
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
@@ -455,9 +465,11 @@ impl ApplicationHandler<DesktopUserEvent> for DesktopHandler {
                     self.scroll_accumulator.reset();
                     self.scroll_metrics_cache.clear();
                 } else if let Some(lines) = self.scroll_accumulator.scroll_lines(delta, now) {
-                    should_redraw |= self
-                        .app
-                        .scroll_single_session_body(lines, size, &mut self.scroll_metrics_cache);
+                    should_redraw |= self.app.scroll_single_session_body(
+                        lines,
+                        size,
+                        &mut self.scroll_metrics_cache,
+                    );
                 }
                 if matches!(phase, TouchPhase::Cancelled) {
                     self.scroll_accumulator.reset();
@@ -558,9 +570,8 @@ impl ApplicationHandler<DesktopUserEvent> for DesktopHandler {
                                 window.inner_size(),
                             );
                             self.selecting_body = false;
-                            let selected = self
-                                .app
-                                .selected_single_session_text(window.inner_size());
+                            let selected =
+                                self.app.selected_single_session_text(window.inner_size());
                             if let Some(text) = selected {
                                 copy_text_to_clipboard(&text, "copied selection", &mut self.app);
                             }
@@ -572,9 +583,7 @@ impl ApplicationHandler<DesktopUserEvent> for DesktopHandler {
                     }
                 }
             }
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed =>
-            {
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let keyboard_started = Instant::now();
                 let size = window.inner_size();
                 let had_smooth_scroll = self
@@ -592,7 +601,8 @@ impl ApplicationHandler<DesktopUserEvent> for DesktopHandler {
                 }
                 let key_input = to_key_input(&event.logical_key, self.modifiers);
                 let key_debug = format!("{key_input:?}");
-                self.interaction_latency.mark("keyboard_input", keyboard_started);
+                self.interaction_latency
+                    .mark("keyboard_input", keyboard_started);
                 if key_input == KeyInput::RefreshSessions && self.app.is_workspace() {
                     spawn_session_cards_load(
                         DesktopSessionCardsPurpose::WorkspaceRefresh,
@@ -798,8 +808,9 @@ impl ApplicationHandler<DesktopUserEvent> for DesktopHandler {
                         window.request_redraw();
                     }
                     KeyOutcome::SendStdinResponse { request_id, input } => {
-                        if let Err(error) =
-                            self.app.send_single_session_stdin_response(request_id, input)
+                        if let Err(error) = self
+                            .app
+                            .send_single_session_stdin_response(request_id, input)
                         {
                             apply_single_session_error(&mut self.app, error);
                         }
@@ -843,7 +854,8 @@ impl ApplicationHandler<DesktopUserEvent> for DesktopHandler {
                     smooth_scroll_lines,
                 ) {
                     Ok(frame) => {
-                        self.no_paint_watchdog.observe_presented(Instant::now(), &frame);
+                        self.no_paint_watchdog
+                            .observe_presented(Instant::now(), &frame);
                         self.interaction_latency.observe_presented(&frame);
                         if !self.first_frame_presented {
                             self.first_frame_presented = true;
@@ -879,13 +891,16 @@ impl ApplicationHandler<DesktopUserEvent> for DesktopHandler {
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: DesktopUserEvent) {
-        let Some(window) = self.window else { return; };
+        let Some(window) = self.window else {
+            return;
+        };
         match event {
             DesktopUserEvent::RecoveryCount(recovery_count) => {
                 if let DesktopApp::SingleSession(single_session) = &mut self.app {
                     single_session.set_recovery_session_count(recovery_count);
                     window.set_title(&self.app.status_title());
-                    self.interaction_latency.mark("recovery_count", Instant::now());
+                    self.interaction_latency
+                        .mark("recovery_count", Instant::now());
                     window.request_redraw();
                 }
             }
@@ -989,7 +1004,10 @@ impl ApplicationHandler<DesktopUserEvent> for DesktopHandler {
                     if apply_stats.session_card_refresh_requested
                         && let Some(session_id) = self.app.single_session_live_id()
                     {
-                        spawn_single_session_card_refresh(session_id, self.event_loop_proxy.clone());
+                        spawn_single_session_card_refresh(
+                            session_id,
+                            self.event_loop_proxy.clone(),
+                        );
                         session_card_refresh_spawned = true;
                     }
                     if let Some((message, images)) =
@@ -1019,9 +1037,9 @@ impl ApplicationHandler<DesktopUserEvent> for DesktopHandler {
                         now.saturating_duration_since(last) >= BACKEND_REDRAW_FRAME_INTERVAL
                     });
                     if redraw_due {
-                        let first_pending =
-                            self.pending_backend_redraw_since.take().unwrap_or(now);
-                        self.interaction_latency.mark("backend_events", first_pending);
+                        let first_pending = self.pending_backend_redraw_since.take().unwrap_or(now);
+                        self.interaction_latency
+                            .mark("backend_events", first_pending);
                         self.last_backend_redraw_request = Some(now);
                         window.request_redraw();
                         redraw_requested = true;
@@ -1045,7 +1063,9 @@ impl ApplicationHandler<DesktopUserEvent> for DesktopHandler {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(window) = self.window else { return; };
+        let Some(window) = self.window else {
+            return;
+        };
         if self.app.is_single_session() {
             let about_to_wait_started = Instant::now();
             let size = window.inner_size();
@@ -2499,10 +2519,13 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
             size,
             visible_whole_line_app.text_scale(),
         );
-        body_buffer.set_scroll(
-            glyphon::cosmic_text::Scroll { line: initial_visible_viewport
+        body_buffer.set_scroll(glyphon::cosmic_text::Scroll {
+            line: initial_visible_viewport
                 .start_line
-                .saturating_sub(visible_window_start), vertical: 0.0, horizontal: 0.0 });
+                .saturating_sub(visible_window_start),
+            vertical: 0.0,
+            horizontal: 0.0,
+        });
     }
     let mut visible_viewport_ms = 0.0;
     let mut visible_window_ms = 0.0;
@@ -2544,10 +2567,11 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
             let phase_started = Instant::now();
             if viewport.start_line != visible_whole_line_start {
                 if let Some(body_buffer) = visible_whole_line_buffers.get_mut(1) {
-                    body_buffer.set_scroll(
-                        glyphon::cosmic_text::Scroll { line: viewport
-                            .start_line
-                            .saturating_sub(visible_window_start), vertical: 0.0, horizontal: 0.0 });
+                    body_buffer.set_scroll(glyphon::cosmic_text::Scroll {
+                        line: viewport.start_line.saturating_sub(visible_window_start),
+                        vertical: 0.0,
+                        horizontal: 0.0,
+                    });
                 }
                 visible_whole_line_start = viewport.start_line;
             }
@@ -2748,10 +2772,13 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
             size,
             streaming_app.text_scale(),
         );
-        body_buffer.set_scroll(
-            glyphon::cosmic_text::Scroll { line: streaming_initial_viewport
+        body_buffer.set_scroll(glyphon::cosmic_text::Scroll {
+            line: streaming_initial_viewport
                 .start_line
-                .saturating_sub(streaming_window_start), vertical: 0.0, horizontal: 0.0 });
+                .saturating_sub(streaming_window_start),
+            vertical: 0.0,
+            horizontal: 0.0,
+        });
     }
     let mut streaming_previous_key = Some(streaming_initial_key);
     let mut streaming_tail_text_key = None;
@@ -2852,10 +2879,11 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
             &mut streaming_font_system,
         );
         if let Some(body_buffer) = streaming_buffers.get_mut(1) {
-            body_buffer.set_scroll(
-                glyphon::cosmic_text::Scroll { line: viewport
-                    .start_line
-                    .saturating_sub(streaming_window_start), vertical: 0.0, horizontal: 0.0 });
+            body_buffer.set_scroll(glyphon::cosmic_text::Scroll {
+                line: viewport.start_line.saturating_sub(streaming_window_start),
+                vertical: 0.0,
+                horizontal: 0.0,
+            });
         }
         let streaming_start_line =
             streaming_base_len.saturating_add(usize::from(!streaming_app.messages.is_empty()));
@@ -3119,10 +3147,11 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
             &mut hero_font_system,
         );
         if let Some(body_buffer) = hero_buffers.get_mut(1) {
-            body_buffer.set_scroll(
-                glyphon::cosmic_text::Scroll { line: viewport
-                    .start_line
-                    .saturating_sub(hero_window_start), vertical: 0.0, horizontal: 0.0 });
+            body_buffer.set_scroll(glyphon::cosmic_text::Scroll {
+                line: viewport.start_line.saturating_sub(hero_window_start),
+                vertical: 0.0,
+                horizontal: 0.0,
+            });
         }
         let hero_visible = key.fresh_welcome_visible;
         hero_previous_key = Some(key);
@@ -3261,10 +3290,11 @@ fn run_scroll_render_benchmark(frames: usize) -> Result<()> {
             &mut action_font_system,
         );
         if let Some(body_buffer) = action_buffers.get_mut(1) {
-            body_buffer.set_scroll(
-                glyphon::cosmic_text::Scroll { line: viewport
-                    .start_line
-                    .saturating_sub(action_window_start), vertical: 0.0, horizontal: 0.0 });
+            body_buffer.set_scroll(glyphon::cosmic_text::Scroll {
+                line: viewport.start_line.saturating_sub(action_window_start),
+                vertical: 0.0,
+                horizontal: 0.0,
+            });
         }
         action_previous_key = Some(key);
         action_text_cache_ms += phase_started.elapsed().as_secs_f64() * 1000.0;
@@ -6136,9 +6166,11 @@ impl<'window> Canvas<'window> {
             return;
         }
         if let Some(body_buffer) = self.single_session_text_buffers.get_mut(1) {
-            body_buffer.set_scroll(
-                glyphon::cosmic_text::Scroll { line: start_line
-                    .saturating_sub(window_start), vertical: 0.0, horizontal: 0.0 });
+            body_buffer.set_scroll(glyphon::cosmic_text::Scroll {
+                line: start_line.saturating_sub(window_start),
+                vertical: 0.0,
+                horizontal: 0.0,
+            });
             self.single_session_body_text_scroll_start = Some(start_line);
             self.text_needs_prepare = true;
         }
