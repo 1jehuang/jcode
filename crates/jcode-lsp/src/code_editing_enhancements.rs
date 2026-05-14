@@ -206,7 +206,7 @@ impl QuickFixEngine {
             },
         ];
         
-        *self.fix_patterns.write().unwrap() = patterns;
+        *self.fix_patterns.blocking_write() = patterns;
     }
 
     /// 分析并生成修复建议
@@ -719,8 +719,8 @@ impl CodeReviewEngine {
             },
         ];
         
-        *self.security_rules.write().unwrap() = sec_rules;
-        *self.performance_rules.write().unwrap() = perf_rules;
+        *self.security_rules.blocking_write() = sec_rules;
+        *self.performance_rules.blocking_write() = perf_rules;
     }
 
     /// 执行完整的代码审查

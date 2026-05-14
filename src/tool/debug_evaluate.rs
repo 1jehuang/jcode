@@ -8,9 +8,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
 use std::sync::Mutex;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, Command};
 
 // ─── Global debug session state ────────────────────────────────
@@ -127,7 +126,7 @@ impl Tool for DebugEvaluateTool {
 
         match params.operation.as_str() {
             "start" => {
-                if session_lock.lock().unwrap().is_some() {
+                if session_lock.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
                     return Ok(ToolOutput::new("Debug session already running. Use `stop` first.")
                         .with_title("debug: already started"));
                 }
@@ -164,7 +163,7 @@ impl Tool for DebugEvaluateTool {
                     breakpoints: Vec::new(),
                 };
 
-                *session_lock.lock().unwrap() = Some(session);
+                *session_lock.lock().unwrap_or_else(|e| e.into_inner()) = Some(session);
                 Ok(ToolOutput::new(format!(
                     "Debug session started with adapter '{}'.\nUse `debug breakpoint` to set breakpoints, then `debug continue`.\nUse `debug evaluate` to inspect variables at runtime.",
                     adapter
@@ -179,7 +178,7 @@ impl Tool for DebugEvaluateTool {
                         .with_title("debug: missing params"));
                 }
 
-                let mut guard = session_lock.lock().unwrap();
+                let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(ref mut session) = *guard {
                     let bp_id = session.breakpoints.len() as u64 + 1;
                     session.breakpoints.push(RuntimeBreakpoint {
@@ -194,7 +193,7 @@ impl Tool for DebugEvaluateTool {
             }
 
             "continue" => {
-                let mut guard = session_lock.lock().unwrap();
+                let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(ref mut session) = *guard {
                     let _ = dap_send(session, "continue",
                         json!({ "threadId": session.active_thread_id })).await;
@@ -213,7 +212,7 @@ impl Tool for DebugEvaluateTool {
                         .with_title("debug: missing expression"));
                 }
 
-                let mut guard = session_lock.lock().unwrap();
+                let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(ref _session) = *guard {
                     // Simplified evaluation — in full DAP would send evaluate request
                     let result = json!({
@@ -230,7 +229,7 @@ impl Tool for DebugEvaluateTool {
             }
 
             "variables" => {
-                let mut guard = session_lock.lock().unwrap();
+                let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(ref _session) = *guard {
                     Ok(ToolOutput::new(
                         "Variables view requires DAP stackTrace → scopes → variables chain.\n\
@@ -244,7 +243,7 @@ impl Tool for DebugEvaluateTool {
             }
 
             "stop" => {
-                let mut guard = session_lock.lock().unwrap();
+                let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(session) = guard.take() {
                     let mut child = session.child;
                     let _ = child.kill().await;

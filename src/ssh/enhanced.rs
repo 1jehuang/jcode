@@ -234,7 +234,7 @@ impl SshManager {
 
     /// List active tunnels
     pub fn list_tunnels(&self) -> Vec<super::tunnel::TunnelInfo> {
-        let manager = self.tunnel_manager.lock().unwrap();
+        let manager = self.tunnel_manager.lock().unwrap_or_else(|e| e.into_inner());
         manager.list_tunnels()
     }
 

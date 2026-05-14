@@ -1,0 +1,11 @@
+[package]
+name = "jcode-ui-types"
+version = "0.1.0"
+edition = "2024"
+description = "UI type definitions: memory, skill"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+jcode-core = { path = "../jcode-core" }

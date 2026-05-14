@@ -77,6 +77,9 @@ pub struct SessionManager {
     
     /// 心跳超时时间（秒）
     heartbeat_timeout: u64,
+
+    /// LSP 服务器管理器（可选，按需初始化）
+    lsp_manager: Arc<tokio::sync::RwLock<Option<Arc<jcode_lsp::LspServerManager>>>>,
 }
 
 impl SessionManager {
@@ -86,7 +89,19 @@ impl SessionManager {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             addr_to_session: Arc::new(RwLock::new(HashMap::new())),
             heartbeat_timeout: 60,
+            lsp_manager: Arc::new(tokio::sync::RwLock::new(None)),
         }
+    }
+
+    /// 设置 LSP 服务器管理器
+    pub async fn set_lsp_manager(&self, manager: Arc<jcode_lsp::LspServerManager>) {
+        let mut guard = self.lsp_manager.write().await;
+        *guard = Some(manager);
+    }
+
+    /// 获取 LSP 服务器管理器
+    pub async fn lsp_manager(&self) -> Option<Arc<jcode_lsp::LspServerManager>> {
+        self.lsp_manager.read().await.clone()
     }
 
     /// 创建新的客户端会话

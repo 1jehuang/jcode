@@ -549,7 +549,7 @@ fn test_copy_selection_mouse_drag_auto_copies_and_exits_mode() {
             modifiers: KeyModifiers::empty(),
         },
         |text| {
-            *copied_for_closure.lock().unwrap() = text.to_string();
+            *copied_for_closure.lock().unwrap_or_else(|e| e.into_inner()) = text.to_string();
             true
         },
     );
@@ -557,7 +557,7 @@ fn test_copy_selection_mouse_drag_auto_copies_and_exits_mode() {
     assert!(!app.copy_selection_mode);
     assert!(app.copy_selection_anchor.is_none());
     assert!(app.copy_selection_cursor.is_none());
-    assert!(copied.lock().unwrap().contains("println!(\"hello\");"));
+    assert!(copied.lock().unwrap_or_else(|e| e.into_inner()).contains("println!(\"hello\");"));
     assert_eq!(app.status_notice(), Some("Copied selection".to_string()));
 }
 
@@ -656,11 +656,11 @@ fn test_side_panel_mouse_drag_extracts_expected_text() {
             modifiers: KeyModifiers::empty(),
         },
         |text| {
-            *copied_for_closure.lock().unwrap() = text.to_string();
+            *copied_for_closure.lock().unwrap_or_else(|e| e.into_inner()) = text.to_string();
             true
         },
     );
-    assert!(copied.lock().unwrap().contains("beta highlight target"));
+    assert!(copied.lock().unwrap_or_else(|e| e.into_inner()).contains("beta highlight target"));
     assert!(!app.copy_selection_mode);
 }
 
@@ -677,7 +677,7 @@ fn test_copy_selection_copy_action_uses_clipboard_hook_and_exits_mode() {
     assert!(app.select_all_in_copy_mode());
 
     let success = app.copy_current_selection_to_clipboard_with(|text| {
-        *copied_for_closure.lock().unwrap() = text.to_string();
+        *copied_for_closure.lock().unwrap_or_else(|e| e.into_inner()) = text.to_string();
         true
     });
 
@@ -685,7 +685,7 @@ fn test_copy_selection_copy_action_uses_clipboard_hook_and_exits_mode() {
     assert!(!app.copy_selection_mode);
     assert!(app.copy_selection_anchor.is_none());
     assert!(app.copy_selection_cursor.is_none());
-    assert!(copied.lock().unwrap().contains("println!(\"hello\");"));
+    assert!(copied.lock().unwrap_or_else(|e| e.into_inner()).contains("println!(\"hello\");"));
     assert_eq!(app.status_notice(), Some("Copied selection".to_string()));
 }
 
@@ -742,12 +742,12 @@ fn test_ctrl_a_copies_chat_viewport_with_context_when_input_empty() {
     );
 
     let success = app.copy_current_selection_to_clipboard_with(|text| {
-        *copied_for_closure.lock().unwrap() = text.to_string();
+        *copied_for_closure.lock().unwrap_or_else(|e| e.into_inner()) = text.to_string();
         true
     });
 
     assert!(success);
-    let copied_text = copied.lock().unwrap().clone();
+    let copied_text = copied.lock().unwrap_or_else(|e| e.into_inner()).clone();
     assert!(
         copied_text == preselected_text,
         "copied text should match selected viewport context: {copied_text:?}"

@@ -35,7 +35,7 @@ impl Provider for SetModelAuthRefreshMockProvider {
         if !self.refreshed.load(std::sync::atomic::Ordering::SeqCst) {
             anyhow::bail!("Claude credentials not available");
         }
-        *self.selected_model.lock().unwrap() = Some(model.to_string());
+        *self.selected_model.lock().unwrap_or_else(|e| e.into_inner()) = Some(model.to_string());
         Ok(())
     }
 
@@ -290,7 +290,7 @@ fn test_on_auth_changed_hot_initializes_openrouter_and_marks_routes_available() 
 
                 provider.on_auth_changed();
 
-                assert!(provider.openrouter.read().unwrap().is_some());
+                assert!(provider.openrouter.read().unwrap_or_else(|e| e.into_inner()).is_some());
                 assert!(
                     provider
                         .model_routes()
@@ -328,7 +328,7 @@ fn test_on_auth_changed_hot_initializes_copilot_and_marks_routes_available() {
 
             provider.on_auth_changed();
 
-            assert!(provider.copilot_api.read().unwrap().is_some());
+            assert!(provider.copilot_api.read().unwrap_or_else(|e| e.into_inner()).is_some());
             assert!(provider.model_routes().iter().any(|route| {
                 route.provider == "Copilot" && route.api_method == "copilot" && route.available
             }));
@@ -552,7 +552,7 @@ fn test_on_auth_changed_hot_initializes_cursor_and_marks_routes_available() {
 
             provider.on_auth_changed();
 
-            assert!(provider.cursor.read().unwrap().is_some());
+            assert!(provider.cursor.read().unwrap_or_else(|e| e.into_inner()).is_some());
             assert!(provider.model_routes().iter().any(|route| {
                 route.provider == "Cursor" && route.api_method == "cursor" && route.available
             }));

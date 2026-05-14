@@ -1,0 +1,11 @@
+[package]
+name = "jcode-runtime-types"
+version = "0.1.0"
+edition = "2024"
+description = "Runtime type definitions: message, session, tool, batch, background"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+jcode-core-types = { path = "../jcode-core-types" }

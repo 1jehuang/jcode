@@ -120,7 +120,7 @@ fn test_cursor_models_are_included_in_model_routes_when_configured() {
 fn test_set_model_switches_to_cursor_for_cursor_models() {
     with_clean_provider_test_env(|| {
         let provider = test_multi_provider_with_cursor();
-        *provider.active.write().unwrap() = ActiveProvider::Claude;
+        *provider.active.write().unwrap_or_else(|e| e.into_inner()) = ActiveProvider::Claude;
 
         provider
             .set_model("composer-2-fast")
@@ -135,7 +135,7 @@ fn test_set_model_switches_to_cursor_for_cursor_models() {
 fn test_set_model_supports_explicit_cursor_prefix() {
     with_clean_provider_test_env(|| {
         let provider = test_multi_provider_with_cursor();
-        *provider.active.write().unwrap() = ActiveProvider::OpenAI;
+        *provider.active.write().unwrap_or_else(|e| e.into_inner()) = ActiveProvider::OpenAI;
 
         provider
             .set_model("cursor:gpt-5")

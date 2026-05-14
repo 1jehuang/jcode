@@ -217,7 +217,7 @@ fn test_parse_openai_response_output_item_done_emits_native_compaction() {
 
 #[test]
 fn test_parse_openai_response_image_generation_saves_metadata_and_emits_event() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let original_dir = std::env::current_dir().expect("current dir");
     let temp = tempfile::Builder::new()
         .prefix("jcode-openai-image-test-")

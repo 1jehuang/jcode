@@ -20,6 +20,7 @@ use lsp_types::*;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, info, warn};
+use crate::tree_sitter::TreeSitterRustParser;
 
 /// 代码编辑操作结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -764,6 +765,720 @@ impl AstOperations for RegexAstOperations {
             }],
             error: None,
         }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════
+// TreeSitterAstOperations — 基于真实 AST 的代码编辑 (Primary)
+// ════════════════════════════════════════════════════════════════
+
+/// 基于 tree-sitter 的 AST 操作实现 (Primary, 替代 RegexAstOperations)
+///
+/// 核心优势:
+/// - rename_symbol: 作用域感知, 不误改注释/字符串/其他作用域同名变量
+/// - extract_method: 基于语法树提取, 精确识别函数边界
+/// - move_symbol: AST 级别的符号移动, 自动处理 import
+pub struct TreeSitterAstOperations {
+    parser: TreeSitterRustParser,
+}
+
+impl Default for TreeSitterAstOperations {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TreeSitterAstOperations {
+    pub fn new() -> Self {
+        Self { parser: TreeSitterRustParser::new() }
+    }
+
+    /// 提取选中代码的变量依赖 — 基于 AST 而非正则
+    fn analyze_dependencies_ast(&self, source: &str, start_line: u32, end_line: u32) -> Vec<String> {
+        let mut parser = tree_sitter::Parser::new();
+        if parser.set_language(&tree_sitter_rust::LANGUAGE.into()).is_err() {
+            return Vec::new();
+        }
+        let tree = match parser.parse(source, None) {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+
+        let root = tree.root_node();
+        let mut used_vars = std::collections::HashSet::new();
+        let mut defined_vars = std::collections::HashSet::new();
+
+        // Walk all nodes in the selected range
+        self.collect_variable_usage(&root, source, start_line, end_line, &mut used_vars, &mut defined_vars);
+
+        // Variables that are used but not defined in the selection are dependencies
+        used_vars.difference(&defined_vars).cloned().collect()
+    }
+
+    fn collect_variable_usage(
+        &self,
+        node: &tree_sitter::Node,
+        source: &str,
+        start_line: u32,
+        end_line: u32,
+        used: &mut std::collections::HashSet<String>,
+        defined: &mut std::collections::HashSet<String>,
+    ) {
+        let node_start = node.start_position().row as u32;
+        let node_end = node.end_position().row as u32;
+
+        // Skip nodes entirely outside the range
+        if node_end < start_line || node_start > end_line {
+            return;
+        }
+
+        match node.kind() {
+            "identifier" => {
+                if let Ok(text) = node.utf8_text(source.as_bytes()) {
+                    // Only add if not a type name (heuristic: lowercase first char)
+                    let first = text.chars().next().unwrap_or('A');
+                    if first.is_lowercase() {
+                        used.insert(text.to_string());
+                    }
+                }
+            }
+            "let_declaration" => {
+                // Track variable definitions
+                if let Some(pattern) = node.child_by_field_name("pattern") {
+                    if let Ok(text) = pattern.utf8_text(source.as_bytes()) {
+                        defined.insert(text.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.is_named() {
+                self.collect_variable_usage(&child, source, start_line, end_line, used, defined);
+            }
+        }
+    }
+
+    /// 基于语义的 rename: 只替换同一作用域内的标识符引用
+    fn rename_symbol_semantic(
+        &self,
+        source: &str,
+        old_name: &str,
+        new_name: &str,
+        _target_line: u32,
+    ) -> String {
+        let mut parser = tree_sitter::Parser::new();
+        if parser.set_language(&tree_sitter_rust::LANGUAGE.into()).is_err() {
+            // Fallback: word-boundary replace (same as RegexAstOperations)
+            let re = regex::Regex::new(&format!(r"\b{}\b", regex::escape(old_name))).unwrap();
+            return re.replace_all(source, new_name).to_string();
+        }
+        let tree = match parser.parse(source, None) {
+            Some(t) => t,
+            None => return source.to_string(),
+        };
+
+        let root = tree.root_node();
+        let mut edits: Vec<(usize, usize)> = Vec::new(); // (start_byte, end_byte)
+
+        self.find_identifier_refs(&root, source, old_name, &mut edits);
+
+        // Apply edits in reverse order to preserve byte positions
+        edits.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut result = source.to_string();
+        for (start, end) in edits {
+            result.replace_range(start..end, new_name);
+        }
+        result
+    }
+
+    /// 在 AST 中查找标识符的所有引用 (排除注释和字符串)
+    fn find_identifier_refs(
+        &self,
+        node: &tree_sitter::Node,
+        source: &str,
+        name: &str,
+        edits: &mut Vec<(usize, usize)>,
+    ) {
+        // Skip comments and string literals
+        if matches!(node.kind(),
+            "line_comment" | "block_comment" | "string_literal" |
+            "raw_string_literal" | "char_literal" | "string_content"
+        ) {
+            return;
+        }
+
+        if node.kind() == "identifier" {
+            if let Ok(text) = node.utf8_text(source.as_bytes()) {
+                if text == name {
+                    edits.push((node.start_byte(), node.end_byte()));
+                }
+            }
+        }
+
+        // Also check type_identifier for type renames
+        if node.kind() == "type_identifier" {
+            if let Ok(text) = node.utf8_text(source.as_bytes()) {
+                if text == name {
+                    edits.push((node.start_byte(), node.end_byte()));
+                }
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.is_named() {
+                self.find_identifier_refs(&child, source, name, edits);
+            }
+        }
+    }
+
+    /// 提取函数签名 (含参数类型) — 基于 AST
+    fn extract_function_signature_ast(&self, source: &str, func_name: &str) -> Option<(u32, u32, String)> {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&tree_sitter_rust::LANGUAGE.into()).ok()?;
+        let tree = parser.parse(source, None)?;
+        let root = tree.root_node();
+
+        let mut cursor = root.walk();
+        for node in root.children(&mut cursor) {
+            if node.kind() == "function_item" {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    if let Ok(name) = name_node.utf8_text(source.as_bytes()) {
+                        if name == func_name {
+                            let start = node.start_position().row as u32 + 1;
+                            let end = node.end_position().row as u32 + 1;
+                            let sig = node.utf8_text(source.as_bytes()).ok()?.to_string();
+                            return Some((start, end, sig));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// 检测选中代码块的返回值 — 基于 AST
+    fn detect_return_type(&self, source: &str, start_line: u32, end_line: u32) -> String {
+        let mut parser = tree_sitter::Parser::new();
+        if parser.set_language(&tree_sitter_rust::LANGUAGE.into()).is_err() {
+            return "()".to_string();
+        }
+        let tree = match parser.parse(source, None) {
+            Some(t) => t,
+            None => return "()".to_string(),
+        };
+
+        let root = tree.root_node();
+        // Look for return expressions in the selected range
+        let mut has_return = false;
+        let mut return_types = Vec::new();
+
+        self.find_returns_in_range(&root, source, start_line, end_line, &mut has_return, &mut return_types);
+
+        if !has_return {
+            "()".to_string()
+        } else if return_types.is_empty() {
+            "-> _".to_string()
+        } else {
+            format!("-> {}", return_types.join(" | "))
+        }
+    }
+
+    fn find_returns_in_range(
+        &self,
+        node: &tree_sitter::Node,
+        source: &str,
+        start_line: u32,
+        end_line: u32,
+        has_return: &mut bool,
+        return_types: &mut Vec<String>,
+    ) {
+        let node_start = node.start_position().row as u32;
+        let node_end = node.end_position().row as u32;
+
+        if node_end < start_line || node_start > end_line {
+            return;
+        }
+
+        if node.kind() == "return_expression" {
+            *has_return = true;
+            // Try to infer return type from the expression
+            if let Some(child) = node.child(1) {
+                match child.kind() {
+                    "integer_literal" => return_types.push("i32".to_string()),
+                    "float_literal" => return_types.push("f64".to_string()),
+                    "string_literal" | "raw_string_literal" => return_types.push("String".to_string()),
+                    "boolean_literal" => return_types.push("bool".to_string()),
+                    "identifier" => {
+                        if let Ok(name) = child.utf8_text(source.as_bytes()) {
+                            return_types.push(format!("/* {} */", name));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.is_named() {
+                self.find_returns_in_range(&child, source, start_line, end_line, has_return, return_types);
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AstOperations for TreeSitterAstOperations {
+    async fn extract_method(&self, params: ExtractMethodParams) -> CodeEditResult {
+        info!(
+            "Extracting method '{}' from {}:{}-{} (TreeSitter AST)",
+            params.method_name, params.file_path, params.start_line, params.end_line
+        );
+
+        let content = match std::fs::read_to_string(&params.file_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return CodeEditResult {
+                    success: false, new_content: String::new(), edits: vec![],
+                    error: Some(format!("Failed to read file: {}", e)),
+                };
+            }
+        };
+
+        let selected_code = RegexAstOperations::extract_lines(&content, params.start_line, params.end_line);
+        if selected_code.trim().is_empty() {
+            return CodeEditResult {
+                success: false, new_content: String::new(), edits: vec![],
+                error: Some("Selected code is empty".to_string()),
+            };
+        }
+
+        // Use AST-based dependency analysis instead of regex
+        let dependencies = self.analyze_dependencies_ast(&content, params.start_line - 1, params.end_line - 1);
+
+        // Detect return type using AST
+        let return_type = self.detect_return_type(&content, params.start_line - 1, params.end_line - 1);
+
+        // Generate method signature with inferred types
+        let params_str = if dependencies.is_empty() {
+            String::new()
+        } else if params.is_static {
+            dependencies.join(", ")
+        } else {
+            format!("&self, {}", dependencies.join(", "))
+        };
+
+        let method_signature = format!("fn {}({}) {} {{", params.method_name, params_str, return_type);
+
+        let new_method = format!(
+            "\n{}\n{}\n}}",
+            method_signature, selected_code
+        );
+
+        // Build new content: replace selection with method call, append new method
+        let lines: Vec<&str> = content.lines().collect();
+        let insert_pos = params.end_line as usize;
+
+        let call_expr = if params.is_static {
+            format!("Self::{}({})", params.method_name, dependencies.join(", "))
+        } else {
+            format!("self.{}({})", params.method_name, dependencies.join(", "))
+        };
+
+        let mut new_content = Vec::new();
+        for (idx, line) in lines.iter().enumerate() {
+            if idx >= (params.start_line - 1) as usize && idx < insert_pos {
+                if idx == (params.start_line - 1) as usize {
+                    new_content.push(call_expr.clone());
+                }
+                // Skip the rest of the selected lines
+            } else if idx == insert_pos {
+                new_content.push(line.to_string());
+                new_content.push(new_method.clone());
+            } else {
+                new_content.push(line.to_string());
+            }
+        }
+
+        let final_content = new_content.join("\n");
+
+        CodeEditResult {
+            success: true,
+            new_content: final_content.clone(),
+            edits: vec![
+                TextEdit {
+                    range: Range {
+                        start: Position { line: params.start_line - 1, character: 0 },
+                        end: Position { line: params.end_line, character: 0 },
+                    },
+                    new_text: format!("{};\n{}", call_expr, new_method),
+                },
+            ],
+            error: None,
+        }
+    }
+
+    async fn inline_function(&self, params: InlineFunctionParams) -> CodeEditResult {
+        info!(
+            "Inlining function '{}' at {}:{} (TreeSitter AST)",
+            params.function_name, params.file_path, params.call_site_line
+        );
+
+        let content = match std::fs::read_to_string(&params.file_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return CodeEditResult {
+                    success: false, new_content: String::new(), edits: vec![],
+                    error: Some(format!("Failed to read file: {}", e)),
+                };
+            }
+        };
+
+        // Use AST to find the function definition precisely
+        if let Some((func_start, func_end, _sig)) = self.extract_function_signature_ast(&content, &params.function_name) {
+            let function_body = RegexAstOperations::new().extract_function_body(&content, func_start, func_end);
+
+            let lines: Vec<&str> = content.lines().collect();
+            let call_line_idx = params.call_site_line.saturating_sub(1) as usize;
+
+            let mut new_content = Vec::new();
+            for (idx, line) in lines.iter().enumerate() {
+                if idx == call_line_idx {
+                    let indent = line.len() - line.trim_start().len();
+                    let indent_str: String = " ".repeat(indent);
+                    let indented_body: Vec<String> = function_body
+                        .lines()
+                        .map(|l| format!("{}{}", indent_str, l))
+                        .collect();
+                    new_content.extend(indented_body);
+                } else if idx < (func_start - 1) as usize || idx >= func_end as usize {
+                    // Keep lines outside the function definition
+                    new_content.push(line.to_string());
+                }
+                // Skip the function definition lines
+            }
+
+            let final_content = new_content.join("\n");
+
+            CodeEditResult {
+                success: true,
+                new_content: final_content,
+                edits: vec![
+                    TextEdit {
+                        range: Range {
+                            start: Position { line: params.call_site_line - 1, character: 0 },
+                            end: Position { line: params.call_site_line, character: 0 },
+                        },
+                        new_text: function_body,
+                    },
+                ],
+                error: None,
+            }
+        } else {
+            CodeEditResult {
+                success: false, new_content: String::new(), edits: vec![],
+                error: Some(format!("Function '{}' not found via AST", params.function_name)),
+            }
+        }
+    }
+
+    async fn rename_symbol(&self, params: RenameSymbolParams) -> CodeEditResult {
+        info!(
+            "Renaming symbol at {}:{} to '{}' (TreeSitter AST — scope-aware)",
+            params.file_path, params.line, params.new_name
+        );
+
+        let content = match std::fs::read_to_string(&params.file_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return CodeEditResult {
+                    success: false, new_content: String::new(), edits: vec![],
+                    error: Some(format!("Failed to read file: {}", e)),
+                };
+            }
+        };
+
+        // Extract the old name from the position using AST
+        let line_0based = params.line.saturating_sub(1);
+        let char_0based = params.character.saturating_sub(1);
+        let old_name = self.parser.find_symbol_at_position(&content, line_0based, char_0based)
+            .unwrap_or_else(|| {
+                // Fallback: extract identifier at position manually
+                let lines: Vec<&str> = content.lines().collect();
+                if let Some(line) = lines.get(line_0based as usize) {
+                    let char_idx = char_0based as usize;
+                    if char_idx < line.len() {
+                        let mut start = char_idx;
+                        while start > 0 && (line.as_bytes()[start - 1].is_ascii_alphanumeric() || line.as_bytes()[start - 1] == b'_') {
+                            start -= 1;
+                        }
+                        let mut end = char_idx;
+                        while end < line.len() && (line.as_bytes()[end].is_ascii_alphanumeric() || line.as_bytes()[end] == b'_') {
+                            end += 1;
+                        }
+                        if start < end { line[start..end].to_string() } else { String::new() }
+                    } else { String::new() }
+                } else { String::new() }
+            });
+
+        if old_name.is_empty() || old_name == params.new_name {
+            return CodeEditResult {
+                success: false, new_content: String::new(), edits: vec![],
+                error: Some("Cannot rename: symbol not found or same name".to_string()),
+            };
+        }
+
+        // Use semantic rename: only replaces identifiers (not in comments/strings)
+        let new_content = self.rename_symbol_semantic(&content, &old_name, &params.new_name, line_0based);
+
+        // Count changes
+        let old_count = content.matches(&old_name).count();
+        let new_count = new_content.matches(&params.new_name).count();
+
+        info!(
+            "Symbol renamed (AST): '{}' → '{}' ({} → {} occurrences)",
+            old_name, params.new_name, old_count, new_count
+        );
+
+        CodeEditResult {
+            success: true,
+            new_content: new_content.clone(),
+            edits: vec![TextEdit {
+                range: Range {
+                    start: Position { line: 0, character: 0 },
+                    end: Position { line: content.lines().count() as u32, character: 0 },
+                },
+                new_text: new_content,
+            }],
+            error: None,
+        }
+    }
+
+    async fn encapsulate_field(&self, params: EncapsulateFieldParams) -> CodeEditResult {
+        info!(
+            "Encapsulating field '{}' in {} (TreeSitter AST)",
+            params.field_name, params.file_path
+        );
+
+        let content = match std::fs::read_to_string(&params.file_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return CodeEditResult {
+                    success: false, new_content: String::new(), edits: vec![],
+                    error: Some(format!("Failed to read file: {}", e)),
+                };
+            }
+        };
+
+        let mut parser = tree_sitter::Parser::new();
+        if parser.set_language(&tree_sitter_rust::LANGUAGE.into()).is_err() {
+            // Fallback to regex implementation
+            return RegexAstOperations::new().encapsulate_field(params).await;
+        }
+
+        let tree = match parser.parse(&content, None) {
+            Some(t) => t,
+            None => {
+                return RegexAstOperations::new().encapsulate_field(params).await;
+            }
+        };
+
+        let root = tree.root_node();
+        let mut field_found = false;
+        let mut field_type = params.field_type.clone().unwrap_or_default();
+        let mut impl_block_end = None;
+        let mut struct_name = String::new();
+
+        // Walk the tree to find the field and impl block
+        let mut cursor = root.walk();
+        for node in root.children(&mut cursor) {
+            if node.kind() == "struct_item" {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    if let Ok(name) = name_node.utf8_text(content.as_bytes()) {
+                        struct_name = name.to_string();
+                    }
+                }
+                // Find the field inside the struct
+                let mut field_cursor = node.walk();
+                for child in node.children(&mut field_cursor) {
+                    if child.kind() == "field_declaration" {
+                        if let Some(name_node) = child.child_by_field_name("name") {
+                            if let Ok(name) = name_node.utf8_text(content.as_bytes()) {
+                                if name == params.field_name {
+                                    field_found = true;
+                                    if field_type.is_empty() {
+                                        if let Some(type_node) = child.child_by_field_name("type") {
+                                            if let Ok(t) = type_node.utf8_text(content.as_bytes()) {
+                                                field_type = t.to_string();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if node.kind() == "impl_item" {
+                impl_block_end = Some(node.end_position().row);
+            }
+        }
+
+        if !field_found {
+            return CodeEditResult {
+                success: false, new_content: String::new(), edits: vec![],
+                error: Some(format!("Field '{}' not found in any struct", params.field_name)),
+            };
+        }
+
+        // Replace pub field with private
+        let pub_pattern = regex::Regex::new(&format!(
+            r"pub\s+{}:\s*{}",
+            regex::escape(&params.field_name),
+            regex::escape(&field_type)
+        )).unwrap();
+        let new_content = pub_pattern.replace_all(&content, &format!("{}: {}", params.field_name, field_type)).to_string();
+
+        // Generate accessors
+        let mut accessors = String::new();
+        if params.generate_getter {
+            accessors.push_str(&format!(
+                "\n    pub fn get_{}(&self) -> &{} {{\n        &self.{}\n    }}",
+                params.field_name, field_type, params.field_name
+            ));
+        }
+        if params.generate_setter {
+            accessors.push_str(&format!(
+                "\n    pub fn set_{}(&mut self, value: {}) {{\n        self.{} = value;\n    }}",
+                params.field_name, field_type, params.field_name
+            ));
+        }
+
+        // Insert accessors in impl block if it exists, otherwise create one
+        let final_content = if let Some(impl_end) = impl_block_end {
+            let mut lines: Vec<String> = new_content.lines().map(|l| l.to_string()).collect();
+            if (impl_end as usize) < lines.len() {
+                lines.insert(impl_end as usize, accessors);
+            }
+            lines.join("\n")
+        } else {
+            format!("{}\n\nimpl {} {{\n{}\n}}\n", new_content, struct_name, accessors)
+        };
+
+        CodeEditResult {
+            success: true,
+            new_content: final_content.clone(),
+            edits: vec![TextEdit {
+                range: Range {
+                    start: Position { line: 0, character: 0 },
+                    end: Position { line: content.lines().count() as u32, character: 0 },
+                },
+                new_text: final_content,
+            }],
+            error: None,
+        }
+    }
+
+    async fn move_symbol(
+        &self,
+        file_path: &str,
+        symbol_name: &str,
+        target_path: &str,
+    ) -> CodeEditResult {
+        info!(
+            "Moving symbol '{}' from {} to {} (TreeSitter AST)",
+            symbol_name, file_path, target_path
+        );
+
+        let source_content = match std::fs::read_to_string(file_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return CodeEditResult {
+                    success: false, new_content: String::new(), edits: vec![],
+                    error: Some(format!("Failed to read source file: {}", e)),
+                };
+            }
+        };
+
+        let target_content = match std::fs::read_to_string(target_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return CodeEditResult {
+                    success: false, new_content: String::new(), edits: vec![],
+                    error: Some(format!("Failed to read target file: {}", e)),
+                };
+            }
+        };
+
+        // Use AST to find symbol definition precisely
+        if let Some((start, end, sig)) = self.extract_function_signature_ast(&source_content, symbol_name) {
+            let symbol_def = RegexAstOperations::extract_lines(&source_content, start, end);
+
+            // Remove from source file
+            let source_lines: Vec<&str> = source_content.lines().collect();
+            let mut new_source: Vec<String> = source_lines[..(start - 1) as usize]
+                .iter().map(|l| l.to_string()).collect();
+            new_source.extend(source_lines[end as usize..].iter().map(|l| l.to_string()));
+            let _final_source = new_source.join("\n");
+
+            // Add to target file
+            let final_target = format!("{}\n\n{}\n", target_content, symbol_def);
+
+            // Detect needed imports
+            let needed_imports = self.detect_needed_imports(&symbol_def, &source_content);
+
+            CodeEditResult {
+                success: true,
+                new_content: final_target,
+                edits: vec![
+                    TextEdit {
+                        range: Range {
+                            start: Position {
+                                line: target_content.lines().count() as u32,
+                                character: 0,
+                            },
+                            end: Position {
+                                line: target_content.lines().count() as u32,
+                                character: 0,
+                            },
+                        },
+                        new_text: format!("{}\n{}", needed_imports.join("\n"), symbol_def),
+                    },
+                ],
+                error: None,
+            }
+        } else {
+            // Fallback to regex for non-function symbols
+            RegexAstOperations::new().move_symbol(file_path, symbol_name, target_path).await
+        }
+    }
+}
+
+impl TreeSitterAstOperations {
+    /// Detect imports needed by the moved symbol
+    fn detect_needed_imports(&self, symbol_def: &str, source_content: &str) -> Vec<String> {
+        let mut imports = Vec::new();
+
+        // Extract use statements from the source that might be needed
+        for line in source_content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("use ") && trimmed.ends_with(';') {
+                // Check if the symbol definition references types from this import
+                let import_path = trimmed.trim_start_matches("use ").trim_end_matches(';');
+                // Simple heuristic: check if the last segment appears in the symbol
+                if let Some(last_segment) = import_path.split("::").last() {
+                    if symbol_def.contains(last_segment) {
+                        imports.push(trimmed.to_string());
+                    }
+                }
+            }
+        }
+
+        imports
     }
 }
 

@@ -5,7 +5,7 @@
 //! 3. 前后端字段不一致 — API 请求/响应字段与数据库模型不匹配
 //! 4. API 字段不一致  — 同一 API 的前后端字段名不同
 //! 5. 数据库字段缺失  — ORM 模型缺少数据库列
-//! 6. 语法错误      — 解析错误
+//! 6. 语法错误      — tree-sitter 解析错误
 //! 7. 路由错误      — URL 路径与处理器不匹配
 
 use regex::Regex;
@@ -18,39 +18,32 @@ use std::collections::{HashMap, HashSet};
 /// 七类基本错误的统一枚举
 #[derive(Debug, Clone, PartialEq)]
 pub enum CodeError {
-    /// 1. 类型错误: 函数参数/返回值类型不匹配
     TypeError {
         file: String, line: usize, symbol: String,
         expected: String, found: String, message: String,
     },
-    /// 2. 字段错误: 访问了不存在的字段
     FieldError {
         file: String, line: usize, field: String,
         struct_name: String, suggestion: Option<String>,
     },
-    /// 3. 前后端字段不一致: API字段 ≠ DB模型字段
     FieldMismatch {
         api_file: String, api_field: String,
         db_file: String, db_field: String,
         direction: MismatchDirection,
     },
-    /// 4. API 字段不一致: 同 API 的 req 和 resp 字段不同
     ApiFieldInconsistency {
         file: String, endpoint: String,
         request_field: String,
         response_field: String,
     },
-    /// 5. 数据库字段缺失: ORM 模型缺少数据库列
     MissingDbField {
         model_file: String, model_name: String,
         missing_column: String, table: String,
     },
-    /// 6. 语法错误
     SyntaxError {
         file: String, line: usize, column: usize,
         message: String,
     },
-    /// 7. 路由错误: URL 路径与处理器不匹配
     RouteError {
         file: String, route: String,
         handler: Option<String>,
@@ -61,9 +54,7 @@ pub enum CodeError {
 /// 不一致的方向
 #[derive(Debug, Clone, PartialEq)]
 pub enum MismatchDirection {
-    /// API 响应中有，但 DB 模型中无
     ApiHasFieldNotInDb,
-    /// DB 模型中有，但 API 响应中无
     DbHasFieldNotInApi,
 }
 
@@ -108,10 +99,8 @@ impl ErrorDetector {
         let mut all = Vec::new();
         if !std::path::Path::new(root).exists() { return all; }
 
-        // 收集所有文件
         let files = self.collect_files(root);
 
-        // 并行执行各类检查
         all.extend(self.detect_type_errors(&files));
         all.extend(self.detect_field_errors(&files));
         all.extend(self.detect_field_mismatches(&files));
@@ -125,14 +114,18 @@ impl ErrorDetector {
 
     fn collect_files(&self, root: &str) -> Vec<(String, String)> {
         let mut files = Vec::new();
+        self.collect_files_recursive(root, &mut files);
+        files
+    }
+
+    fn collect_files_recursive(&self, root: &str, files: &mut Vec<(String, String)>) {
         if let Ok(entries) = std::fs::read_dir(root) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    // 跳过 node_modules, target, .git
                     let name = path.file_name().unwrap_or_default().to_string_lossy();
                     if name != "node_modules" && name != "target" && name != ".git" && !name.starts_with('.') {
-                        files.extend(self.collect_files(&path.to_string_lossy()));
+                        self.collect_files_recursive(&path.to_string_lossy(), files);
                     }
                 } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                     if matches!(ext, "rs" | "ts" | "tsx" | "js" | "py" | "go" | "java" | "vue") {
@@ -143,20 +136,16 @@ impl ErrorDetector {
                 }
             }
         }
-        files
     }
 
     // ── 1. 类型错误检测 ──
 
     fn detect_type_errors(&self, files: &[(String, String)]) -> Vec<CodeError> {
         let mut errors = Vec::new();
-        let _fn_re = Regex::new(r"fn\s+(\w+)\s*\(([^)]*)\)\s*(->\s*([^{]+))?").unwrap();
-        let _call_re = Regex::new(r"(\w+)\s*\(([^)]*)\)").unwrap();
         let assign_re = Regex::new(r"let\s+(\w+)\s*:\s*(\w+)\s*=\s*(.+)").unwrap();
 
         for (file, content) in files {
             for (line, text) in content.lines().enumerate() {
-                // 检测函数调用类型不匹配 (简化版)
                 if let Some(cap) = assign_re.captures(text) {
                     let var_type = cap[2].to_string();
                     let value = cap[3].to_string();
@@ -182,7 +171,6 @@ impl ErrorDetector {
         let struct_def_re = Regex::new(r"struct\s+(\w+)\s*\{([^}]*)\}").unwrap();
 
         for (file, content) in files {
-            // 收集结构体定义
             let mut structs: HashMap<String, HashSet<String>> = HashMap::new();
             for cap in struct_def_re.captures_iter(content) {
                 let name = cap[1].to_string();
@@ -193,16 +181,13 @@ impl ErrorDetector {
                 structs.insert(name, fields);
             }
 
-            // 检查字段访问
             for (line, text) in content.lines().enumerate() {
                 for cap in field_access_re.captures_iter(text) {
                     let obj = cap[1].to_string();
                     let field = cap[2].to_string();
-                    // 跳过基本类型方法调用
                     if matches!(field.as_str(), "len" | "is_empty" | "clone" | "to_string" | "as_str") {
                         continue;
                     }
-                    // 简化检查: 如果 struct 已知且字段不存在
                     if let Some(fields) = structs.get(&obj) {
                         if !fields.contains(&field) {
                             errors.push(CodeError::FieldError {
@@ -225,7 +210,6 @@ impl ErrorDetector {
         let mut api_fields: HashMap<String, HashSet<String>> = HashMap::new();
         let mut db_fields: HashMap<String, HashSet<String>> = HashMap::new();
 
-        // API 响应结构体解析
         let api_struct_re = Regex::new(r"(Response|Request|Dto|VO|Form)").unwrap();
 
         for (file, content) in files {
@@ -249,7 +233,6 @@ impl ErrorDetector {
             }
         }
 
-        // 比较 API 字段和 DB 字段
         for (api_name, api_fs) in &api_fields {
             for (db_name, db_fs) in &db_fields {
                 let api_only: Vec<_> = api_fs.difference(db_fs).collect();
@@ -274,6 +257,199 @@ impl ErrorDetector {
         errors
     }
 
+    // ── 4. API 字段不一致检测 (实现版) ──
+
+    fn detect_api_inconsistencies(&self, files: &[(String, String)]) -> Vec<CodeError> {
+        let mut errors = Vec::new();
+        let request_re = Regex::new(r"(?:struct|class|interface)\s+(\w*Request\w*)\s*\{([^}]*)\}").unwrap();
+        let response_re = Regex::new(r"(?:struct|class|interface)\s+(\w*Response\w*)\s*\{([^}]*)\}").unwrap();
+
+        for (file, content) in files {
+            // Collect Request structs
+            let mut request_fields: HashMap<String, HashSet<String>> = HashMap::new();
+            for cap in request_re.captures_iter(content) {
+                let name = cap[1].to_string();
+                let fields: HashSet<String> = cap[2].split(',')
+                    .map(|f| f.trim().split(':').next().unwrap_or("").trim().to_string())
+                    .filter(|f| !f.is_empty())
+                    .collect();
+                request_fields.insert(name, fields);
+            }
+
+            // Collect Response structs
+            let mut response_fields: HashMap<String, HashSet<String>> = HashMap::new();
+            for cap in response_re.captures_iter(content) {
+                let name = cap[1].to_string();
+                let fields: HashSet<String> = cap[2].split(',')
+                    .map(|f| f.trim().split(':').next().unwrap_or("").trim().to_string())
+                    .filter(|f| !f.is_empty())
+                    .collect();
+                response_fields.insert(name, fields);
+            }
+
+            // Match Request/Response pairs by base name
+            for (req_name, req_fs) in &request_fields {
+                let base_name = req_name.replace("Request", "");
+                for (resp_name, resp_fs) in &response_fields {
+                    let resp_base = resp_name.replace("Response", "");
+                    if base_name == resp_base {
+                        // Find fields in request but not response
+                        for field in req_fs.difference(resp_fs) {
+                            errors.push(CodeError::ApiFieldInconsistency {
+                                file: file.clone(),
+                                endpoint: base_name.clone(),
+                                request_field: format!("{}.{}", req_name, field),
+                                response_field: format!("{}.{}", resp_name, field),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        errors
+    }
+
+    // ── 5. 数据库字段缺失检测 (实现版) ──
+
+    fn detect_missing_db_fields(&self, files: &[(String, String)]) -> Vec<CodeError> {
+        let mut errors = Vec::new();
+
+        // Look for ORM model definitions and migration/schema files
+        let model_re = Regex::new(r"(?:struct|class)\s+(\w+Model|\w+Entity|\w+Table)\s*\{([^}]*)\}").unwrap();
+        let schema_re = Regex::new(r#"table_name\s*=\s*["'](\w+)["']"#).unwrap();
+        let column_re = Regex::new(r#"column\s*\(\s*["'](\w+)["']"#).unwrap();
+
+        for (file, content) in files {
+            let is_model = file.contains("model") || file.contains("entity");
+            let is_schema = file.contains("schema") || file.contains("migration");
+
+            if is_model {
+                // Extract model fields
+                for cap in model_re.captures_iter(content) {
+                    let model_name = cap[1].to_string();
+                    let model_fields: HashSet<String> = cap[2].split(',')
+                        .map(|f| f.trim().split(':').next().unwrap_or("").trim().to_string())
+                        .filter(|f| !f.is_empty() && !f.starts_with("pub"))
+                        .collect();
+
+                    // Look for corresponding schema/migration
+                    let table_name = schema_re.captures(&content)
+                        .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
+                        .unwrap_or_else(|| model_name.replace("Model", "").replace("Entity", "").to_lowercase());
+
+                    // If this is also a schema file, check columns
+                    if is_schema {
+                        let schema_columns: HashSet<String> = column_re.captures_iter(&content)
+                            .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+                            .collect();
+
+                        for col in &schema_columns {
+                            if !model_fields.contains(col) {
+                                errors.push(CodeError::MissingDbField {
+                                    model_file: file.clone(),
+                                    model_name: model_name.clone(),
+                                    missing_column: col.clone(),
+                                    table: table_name.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        errors
+    }
+
+    // ── 6. 语法错误检测 (基于 tree-sitter，实现版) ──
+
+    fn detect_syntax_errors(&self, files: &[(String, String)]) -> Vec<CodeError> {
+        let mut errors = Vec::new();
+
+        for (file, content) in files {
+            if file.ends_with(".rs") {
+                // Use tree-sitter for Rust syntax errors
+                let mut parser = tree_sitter::Parser::new();
+                if parser.set_language(&tree_sitter_rust::LANGUAGE.into()).is_err() {
+                    continue;
+                }
+
+                if let Some(tree) = parser.parse(content, None) {
+                    let root = tree.root_node();
+                    self.collect_error_nodes(&root, content, file, &mut errors);
+                }
+            } else {
+                // For non-Rust: basic brace matching
+                let mut brace_depth = 0;
+                let mut in_string = false;
+                let mut escape = false;
+
+                for (line_idx, line) in content.lines().enumerate() {
+                    for ch in line.chars() {
+                        if escape { escape = false; continue; }
+                        if ch == '\\' && in_string { escape = true; continue; }
+                        if ch == '"' { in_string = !in_string; continue; }
+                        if in_string { continue; }
+
+                        match ch {
+                            '{' | '(' | '[' => brace_depth += 1,
+                            '}' | ')' | ']' => {
+                                if brace_depth > 0 { brace_depth -= 1; }
+                                else {
+                                    errors.push(CodeError::SyntaxError {
+                                        file: file.clone(),
+                                        line: line_idx + 1,
+                                        column: 0,
+                                        message: "Unmatched closing bracket".to_string(),
+                                    });
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                if brace_depth > 0 {
+                    errors.push(CodeError::SyntaxError {
+                        file: file.clone(),
+                        line: 0,
+                        column: 0,
+                        message: format!("Unclosed bracket(s): {} remaining", brace_depth),
+                    });
+                }
+            }
+        }
+        errors
+    }
+
+    /// Collect ERROR nodes from tree-sitter parse tree
+    fn collect_error_nodes(
+        &self,
+        node: &tree_sitter::Node,
+        _source: &str,
+        file: &str,
+        errors: &mut Vec<CodeError>,
+    ) {
+        if node.kind() == "ERROR" {
+            let start = node.start_position();
+            let end = node.end_position();
+            errors.push(CodeError::SyntaxError {
+                file: file.to_string(),
+                line: start.row + 1,
+                column: start.column + 1,
+                message: format!(
+                    "Syntax error at {}:{}-{}:{}",
+                    start.row + 1, start.column + 1,
+                    end.row + 1, end.column + 1
+                ),
+            });
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.collect_error_nodes(&child, _source, file, errors);
+        }
+    }
+
     // ── 7. 路由错误检测 ──
 
     fn detect_route_errors(&self, files: &[(String, String)]) -> Vec<CodeError> {
@@ -287,7 +463,6 @@ impl ErrorDetector {
                 let route = cap[2].to_string();
                 routes.push(route.clone());
 
-                // 检查路由后的下一行是否有处理器
                 let after_route = &content[cap.get(0).unwrap().end()..];
                 if !handler_re.is_match(after_route.split('\n').next().unwrap_or("")) {
                     if let Some(_line) = content.lines().position(|l| l.contains(&route)) {
@@ -302,10 +477,4 @@ impl ErrorDetector {
         }
         errors
     }
-
-    // ── 4/5/6 预留存根 ──
-
-    fn detect_api_inconsistencies(&self, _files: &[(String, String)]) -> Vec<CodeError> { Vec::new() }
-    fn detect_missing_db_fields(&self, _files: &[(String, String)]) -> Vec<CodeError> { Vec::new() }
-    fn detect_syntax_errors(&self, _files: &[(String, String)]) -> Vec<CodeError> { Vec::new() }
 }

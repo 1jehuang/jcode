@@ -41,7 +41,7 @@ impl MetadataManager {
             attributes: HashMap::new(),
         };
 
-        self.metadata.write().unwrap().insert(session_id.clone(), meta.clone());
+        self.metadata.write().unwrap_or_else(|e| e.into_inner()).insert(session_id.clone(), meta.clone());
         
         info!("Created metadata for session {}", session_id);
         meta
@@ -49,7 +49,7 @@ impl MetadataManager {
 
     /// 获取会话元数据
     pub fn get_metadata(&self, session_id: &SessionId) -> Option<SessionMetadata> {
-        self.metadata.read().unwrap().get(session_id).cloned()
+        self.metadata.read().unwrap_or_else(|e| e.into_inner()).get(session_id).cloned()
     }
 
     /// 设置属性
@@ -59,7 +59,7 @@ impl MetadataManager {
         key: &str,
         value: serde_json::Value,
     ) -> anyhow::Result<()> {
-        let mut meta = self.metadata.read().unwrap();
+        let mut meta = self.metadata.read().unwrap_or_else(|e| e.into_inner());
         
         if let Some(m) = meta.get_mut(session_id) {
             m.attributes.insert(key.to_string(), value);
@@ -95,7 +95,7 @@ impl MetadataManager {
         session_id: &SessionId,
         key: &str,
     ) -> anyhow::Result<()> {
-        let mut meta = self.metadata.read().unwrap();
+        let mut meta = self.metadata.read().unwrap_or_else(|e| e.into_inner());
         
         if let Some(m) = meta.get_mut(session_id) {
             m.attributes.remove(key);
@@ -124,7 +124,7 @@ impl MetadataManager {
 
     /// 删除会话元数据
     pub fn delete_metadata(&self, session_id: &SessionId) {
-        self.metadata.write().unwrap().remove(session_id);
+        self.metadata.write().unwrap_or_else(|e| e.into_inner()).remove(session_id);
         info!("Deleted metadata for session {}", session_id);
     }
 }

@@ -276,8 +276,8 @@ impl CodeReviewSkill {
             },
         ];
         
-        *self.security_rules.write().unwrap() = sec_rules;
-        *self.performance_rules.write().unwrap() = perf_rules;
+        *self.security_rules.blocking_write() = sec_rules;
+        *self.performance_rules.blocking_write() = perf_rules;
     }
 
     /// 执行完整的代码审查

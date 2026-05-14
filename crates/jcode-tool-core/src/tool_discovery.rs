@@ -174,8 +174,8 @@ impl ToolDiscoveryEngine {
     /// 注册一个已经实例化的工具
     pub fn register_tool(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
-        self.index.write().unwrap().register(tool.as_ref());
-        self.registry.write().unwrap().insert(name.clone(), tool);
+        self.index.write().unwrap_or_else(|e| e.into_inner()).register(tool.as_ref());
+        self.registry.write().unwrap_or_else(|e| e.into_inner()).insert(name.clone(), tool);
         tracing::info!(tool = %name, "Tool registered");
     }
 
@@ -184,7 +184,7 @@ impl ToolDiscoveryEngine {
     where
         F: Fn() -> Arc<dyn Tool> + Send + Sync + 'static,
     {
-        self.loaders.write().unwrap().insert(name.to_string(), Box::new(factory));
+        self.loaders.write().unwrap_or_else(|e| e.into_inner()).insert(name.to_string(), Box::new(factory));
         tracing::info!(tool = %name, "Lazy tool loader registered");
     }
 
@@ -192,7 +192,7 @@ impl ToolDiscoveryEngine {
     pub async fn get_tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
         // 先检查已注册的
         {
-            let registry = self.registry.read().unwrap();
+            let registry = self.registry.read().unwrap_or_else(|e| e.into_inner());
             if let Some(tool) = registry.get(name) {
                 return Some(tool.clone());
             }
@@ -200,13 +200,13 @@ impl ToolDiscoveryEngine {
 
         // 尝试懒加载
         let tool = {
-            let loaders = self.loaders.read().unwrap();
+            let loaders = self.loaders.read().unwrap_or_else(|e| e.into_inner());
             loaders.get(name).map(|factory| factory())
         };
 
         if let Some(tool) = tool {
-            self.index.write().unwrap().register(tool.as_ref());
-            self.registry.write().unwrap().insert(name.to_string(), tool.clone());
+            self.index.write().unwrap_or_else(|e| e.into_inner()).register(tool.as_ref());
+            self.registry.write().unwrap_or_else(|e| e.into_inner()).insert(name.to_string(), tool.clone());
             return Some(tool);
         }
 
@@ -215,7 +215,7 @@ impl ToolDiscoveryEngine {
 
     /// 搜索与查询最相关的工具
     pub fn search_tools(&self, query: &str, top_k: usize) -> Vec<ToolSearchResult> {
-        self.index.read().unwrap().search(query, top_k)
+        self.index.read().unwrap_or_else(|e| e.into_inner()).search(query, top_k)
     }
 
     /// 批量获取工具定义 (用于发送给 AI)
@@ -227,7 +227,7 @@ impl ToolDiscoveryEngine {
         max_tools: usize,
     ) -> Vec<super::ToolDefinition> {
         let results = self.search_tools(query, max_tools);
-        let registry = self.registry.read().unwrap();
+        let registry = self.registry.read().unwrap_or_else(|e| e.into_inner());
         results
             .into_iter()
             .filter_map(|r| registry.get(&r.tool_name).map(|t| t.to_definition()))
@@ -244,7 +244,7 @@ mod tests {
         let engine = ToolDiscoveryEngine::new();
 
         // Register mock tools via index directly
-        let mut index = engine.index.write().unwrap();
+        let mut index = engine.index.write().unwrap_or_else(|e| e.into_inner());
         // We can't create dyn Tool objects easily in tests without mocks,
         // but we can test the embedding/search logic
         assert!(index.registered_tools().is_empty());

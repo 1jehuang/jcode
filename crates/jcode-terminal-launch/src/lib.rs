@@ -358,7 +358,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn detected_resume_terminal_recognizes_ghostty_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::remove_var("HANDTERM_SESSION");
             std::env::remove_var("HANDTERM_PID");

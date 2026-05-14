@@ -3,7 +3,7 @@ use axum::{
     extract::{Json, Path, Query},
     http::StatusCode,
     routing::{delete, get, post},
-    Router, serve,
+    Router,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -97,7 +97,7 @@ impl RestServer {
         
         println!("RESTful server listening on http://{}", addr);
 
-        serve(listener, app).await?;
+        axum::serve(listener, app).await?;
 
         Ok(())
     }

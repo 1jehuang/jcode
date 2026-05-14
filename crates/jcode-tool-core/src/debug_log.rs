@@ -293,7 +293,7 @@ impl DebugLogManager {
 
         // 排空队列
         let queued = {
-            let mut queue = self.error_sink_queue.lock().unwrap();
+            let mut queue = self.error_sink_queue.lock().unwrap_or_else(|e| e.into_inner());
             let items: Vec<String> = queue.drain(..).collect();
             items
         };

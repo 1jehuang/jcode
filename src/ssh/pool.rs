@@ -263,7 +263,7 @@ impl SshConnectionPool {
 
     /// Close all connections and shut down pool
     pub fn shutdown(&self) -> Result<usize, String> {
-        *self.shutdown_flag.lock().unwrap() = true;
+        *self.shutdown_flag.lock().unwrap_or_else(|e| e.into_inner()) = true;
 
         let mut sessions = self.sessions.write().map_err(|e| e.to_string())?;
         let count = sessions.len();
@@ -406,7 +406,7 @@ impl SshConnectionPool {
     ) {
         loop {
             // Check shutdown flag
-            if *shutdown.lock().unwrap() {
+            if *shutdown.lock().unwrap_or_else(|e| e.into_inner()) {
                 break;
             }
 

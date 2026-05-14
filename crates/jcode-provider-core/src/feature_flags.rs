@@ -234,7 +234,7 @@ impl FlagClient {
     pub fn refresh(&self) {
         // 检查是否需要刷新
         {
-            let last = self.last_refresh.read().unwrap();
+            let last = self.last_refresh.read().unwrap_or_else(|e| e.into_inner());
             if last.elapsed() < self.cache_ttl {
                 return;
             }

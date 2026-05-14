@@ -269,7 +269,7 @@ impl RegexAstCheck {
 #[async_trait]
 impl AstCheck for RegexAstCheck {
     async fn check(&self, root: &str) -> anyhow::Result<Vec<crate::Issue>> {
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         Ok(scan_files(root, &mut Some(&mut cache), "ast", Self::check_file_ast))
     }
 }
@@ -450,7 +450,7 @@ impl RuleBasedAiCheck {
 impl AiLogicCheck for RuleBasedAiCheck {
     async fn check(&self, root: &str) -> anyhow::Result<Vec<crate::Issue>> {
         let patterns = Self::patterns_to_check();
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         // collect_checkable_files 已经按 is_checkable_ext 过滤，无需二次检查
         Ok(scan_files(root, &mut Some(&mut cache), "ai", |path, content| {
             let mut issues = Vec::new();

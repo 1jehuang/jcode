@@ -42,7 +42,7 @@ impl Provider for AuthChangeMockProvider {
     }
 
     fn model(&self) -> String {
-        if *self.state.logged_in.read().unwrap() {
+        if *self.state.logged_in.read().unwrap_or_else(|e| e.into_inner()) {
             "logged-in-model".to_string()
         } else {
             "logged-out-model".to_string()
@@ -50,7 +50,7 @@ impl Provider for AuthChangeMockProvider {
     }
 
     fn available_models_display(&self) -> Vec<String> {
-        if *self.state.logged_in.read().unwrap() {
+        if *self.state.logged_in.read().unwrap_or_else(|e| e.into_inner()) {
             vec!["logged-in-model".to_string(), "second-model".to_string()]
         } else {
             vec!["logged-out-model".to_string()]
@@ -72,7 +72,7 @@ impl Provider for AuthChangeMockProvider {
     }
 
     fn on_auth_changed(&self) {
-        *self.state.logged_in.write().unwrap() = true;
+        *self.state.logged_in.write().unwrap_or_else(|e| e.into_inner()) = true;
         crate::bus::Bus::global().publish_models_updated();
     }
 
@@ -190,7 +190,7 @@ async fn notify_auth_changed_defers_busy_session_refresh_until_idle() {
         "expected immediate Done ack before waiting for the busy session"
     );
     assert!(
-        !*busy_state.logged_in.read().unwrap(),
+        !*busy_state.logged_in.read().unwrap_or_else(|e| e.into_inner()),
         "busy session provider should not refresh until its agent lock is released"
     );
 
@@ -198,7 +198,7 @@ async fn notify_auth_changed_defers_busy_session_refresh_until_idle() {
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     while tokio::time::Instant::now() < deadline {
-        if *busy_state.logged_in.read().unwrap() {
+        if *busy_state.logged_in.read().unwrap_or_else(|e| e.into_inner()) {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;

@@ -69,7 +69,7 @@ impl SessionManager {
             message_count: 0,
         };
 
-        self.sessions.write().unwrap().insert(id.clone(), session);
+        self.sessions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), session);
         let _ = self.event_tx.send(SessionEvent::Created(id.clone()));
         
         info!("Session created: {}", id);
@@ -78,12 +78,12 @@ impl SessionManager {
 
     /// 获取会话信息
     pub fn get_session(&self, id: &SessionId) -> Option<SessionInfo> {
-        self.sessions.read().unwrap().get(id).cloned()
+        self.sessions.read().unwrap_or_else(|e| e.into_inner()).get(id).cloned()
     }
 
     /// 暂停会话
     pub fn suspend_session(&self, id: &SessionId) -> anyhow::Result<()> {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         
         if let Some(session) = sessions.get_mut(id) {
             session.state = SessionState::Suspended;
@@ -101,7 +101,7 @@ impl SessionManager {
 
     /// 恢复会话
     pub fn resume_session(&self, id: &SessionId) -> anyhow::Result<()> {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         
         if let Some(session) = sessions.get_mut(id) {
             session.state = SessionState::Active;
@@ -119,7 +119,7 @@ impl SessionManager {
 
     /// 完成会话
     pub fn complete_session(&self, id: &SessionId) -> anyhow::Result<()> {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         
         if let Some(session) = sessions.get_mut(id) {
             session.state = SessionState::Completed;
@@ -137,7 +137,7 @@ impl SessionManager {
 
     /// 获取所有活跃会话
     pub fn active_sessions(&self) -> Vec<SessionInfo> {
-        self.sessions.read().unwrap()
+        self.sessions.read().unwrap_or_else(|e| e.into_inner())
             .values()
             .filter(|s| s.state == SessionState::Active)
             .cloned()

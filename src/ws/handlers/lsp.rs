@@ -1,21 +1,23 @@
 //! LSP 语言服务处理器
 //!
-//! 通过 LSP 协议提供代码智能功能：
-//! - 代码补全
-//! - 定义跳转
-//! - 引用查找
-//! - 诊断信息
+//! 通过 jcode-lsp crate 提供代码智能功能：
+//! - 代码补全 (textDocument/completion)
+//! - 定义跳转 (textDocument/definition)
+//! - 引用查找 (textDocument/references)
+//! - 诊断信息 (textDocument/publishDiagnostics)
 
 use crate::ws::protocol::{WsRequest, WsResponse, CompletionItem, DiagnosticInfo, CursorPosition, MessageType};
 use crate::ws::session::SessionManager;
 use anyhow::Result;
-use tracing::{info};
+use jcode_lsp::LspServerManager;
+use std::sync::Arc;
+use tracing::{info, warn};
 
 /// 处理代码补全请求
 pub async fn handle_completion(
     request: &WsRequest,
     session_id: &str,
-    _session_manager: &SessionManager,
+    session_manager: &SessionManager,
 ) -> Result<WsResponse> {
     let file_path = request.params.get("file_path")
         .and_then(|v| v.as_str())
@@ -44,10 +46,30 @@ pub async fn handle_completion(
         "Completion requested"
     );
 
-    // TODO: 集成真正的 LSP 服务（通过 jcode-lsp crate）
-    // 目前返回模拟数据用于测试
-    
-    let completions = generate_mock_completions(prefix);
+    let completions = match get_lsp_manager(session_manager).await {
+        Some(manager) => {
+            match manager.get_completion(file_path, line, character).await {
+                Ok(items) => items.into_iter().map(|item| CompletionItem {
+                    label: item.label,
+                    detail: item.detail,
+                    documentation: item.documentation.map(|doc| match doc {
+                        lsp_types::Documentation::String(s) => s,
+                        lsp_types::Documentation::MarkupContent(mc) => mc.value,
+                    }),
+                    kind: item.kind.map(|k| format!("{:?}", k)),
+                    insert_text: item.insert_text.unwrap_or_default(),
+                    sort_priority: item.sort_text
+                        .and_then(|s| s.parse::<i32>().ok())
+                        .unwrap_or(0),
+                }).collect(),
+                Err(e) => {
+                    warn!(error = %e, "LSP completion failed, falling back to mock");
+                    generate_mock_completions(prefix)
+                }
+            }
+        }
+        None => generate_mock_completions(prefix),
+    };
 
     Ok(WsResponse::new(&request.id, MessageType::Response, serde_json::json!({
         "completions": completions,
@@ -63,7 +85,7 @@ pub async fn handle_completion(
 pub async fn handle_definition(
     request: &WsRequest,
     session_id: &str,
-    _session_manager: &SessionManager,
+    session_manager: &SessionManager,
 ) -> Result<WsResponse> {
     let file_path = request.params.get("file_path")
         .and_then(|v| v.as_str())
@@ -81,17 +103,32 @@ pub async fn handle_definition(
         "Definition requested"
     );
 
-    // TODO: 调用真正的 LSP gotoDefinition
-    // 返回模拟数据
+    let definitions = match get_lsp_manager(session_manager).await {
+        Some(manager) => {
+            match manager.goto_definition(file_path, position.line, position.character).await {
+                Ok(locations) => locations.into_iter().map(|loc| {
+                    let (uri, range) = match loc {
+                        lsp_types::Location { uri, range } => (uri, range),
+                    };
+                    serde_json::json!({
+                        "file_path": uri.to_string(),
+                        "range": {
+                            "start": { "line": range.start.line, "character": range.start.character },
+                            "end": { "line": range.end.line, "character": range.end.character }
+                        }
+                    })
+                }).collect::<Vec<_>>(),
+                Err(e) => {
+                    warn!(error = %e, "LSP goto_definition failed, returning empty");
+                    vec![]
+                }
+            }
+        }
+        None => vec![],
+    };
+
     Ok(WsResponse::new(&request.id, MessageType::Response, serde_json::json!({
-        "definitions": [{
-            "file_path": file_path,
-            "range": {
-                "start": { "line": position.line.saturating_sub(5), "character": 0 },
-                "end": { "line": position.line.saturating_sub(5), "character": 20 }
-            },
-            "symbol_name": "example_function"
-        }]
+        "definitions": definitions
     })))
 }
 
@@ -99,7 +136,7 @@ pub async fn handle_definition(
 pub async fn handle_references(
     request: &WsRequest,
     session_id: &str,
-    _session_manager: &SessionManager,
+    session_manager: &SessionManager,
 ) -> Result<WsResponse> {
     let file_path = request.params.get("file_path")
         .and_then(|v| v.as_str())
@@ -117,17 +154,32 @@ pub async fn handle_references(
         "References requested"
     );
 
-    // TODO: 调用真正的 LSP findReferences
-    Ok(WsResponse::new(&request.id, MessageType::Response, serde_json::json!({
-        "references": [
-            {
-                "file_path": file_path,
-                "range": {
-                    "start": { "line": position.line, "character": position.character },
-                    "end": { "line": position.line, "character": position.character + 10 }
+    let references = match get_lsp_manager(session_manager).await {
+        Some(manager) => {
+            match manager.find_references(file_path, position.line, position.character).await {
+                Ok(locations) => locations.into_iter().map(|loc| {
+                    let (uri, range) = match loc {
+                        lsp_types::Location { uri, range } => (uri, range),
+                    };
+                    serde_json::json!({
+                        "file_path": uri.to_string(),
+                        "range": {
+                            "start": { "line": range.start.line, "character": range.start.character },
+                            "end": { "line": range.end.line, "character": range.end.character }
+                        }
+                    })
+                }).collect::<Vec<_>>(),
+                Err(e) => {
+                    warn!(error = %e, "LSP find_references failed, returning empty");
+                    vec![]
                 }
             }
-        ]
+        }
+        None => vec![],
+    };
+
+    Ok(WsResponse::new(&request.id, MessageType::Response, serde_json::json!({
+        "references": references
     })))
 }
 
@@ -135,7 +187,7 @@ pub async fn handle_references(
 pub async fn handle_diagnostics(
     request: &WsRequest,
     session_id: &str,
-    _session_manager: &SessionManager,
+    session_manager: &SessionManager,
 ) -> Result<WsResponse> {
     let file_path = request.params.get("file_path")
         .and_then(|v| v.as_str())
@@ -147,18 +199,40 @@ pub async fn handle_diagnostics(
         "Diagnostics requested"
     );
 
-    // TODO: 从 LSP 服务器获取诊断信息或运行编译器检查
-    // 返回模拟诊断数据
-    let diagnostics = vec![
-        DiagnosticInfo {
-            severity: crate::ws::protocol::DiagnosticSeverity::Warning,
-            message: "Unused variable".to_string(),
-            start: CursorPosition { line: 10, character: 5 },
-            end: CursorPosition { line: 10, character: 15 },
-            source: Some("rust-analyzer".to_string()),
-            code: Some("unused_variables".to_string()),
-        },
-    ];
+    let diagnostics = match get_lsp_manager(session_manager).await {
+        Some(manager) => {
+            match manager.get_diagnostics(file_path).await {
+                Ok(diags) => diags.into_iter().map(|d| DiagnosticInfo {
+                    severity: match d.severity {
+                        Some(lsp_types::DiagnosticSeverity::ERROR) => crate::ws::protocol::DiagnosticSeverity::Error,
+                        Some(lsp_types::DiagnosticSeverity::WARNING) => crate::ws::protocol::DiagnosticSeverity::Warning,
+                        Some(lsp_types::DiagnosticSeverity::INFORMATION) => crate::ws::protocol::DiagnosticSeverity::Information,
+                        Some(lsp_types::DiagnosticSeverity::HINT) => crate::ws::protocol::DiagnosticSeverity::Hint,
+                        _ => crate::ws::protocol::DiagnosticSeverity::Information,
+                    },
+                    message: d.message,
+                    start: CursorPosition {
+                        line: d.range.start.line,
+                        character: d.range.start.character,
+                    },
+                    end: CursorPosition {
+                        line: d.range.end.line,
+                        character: d.range.end.character,
+                    },
+                    source: d.source,
+                    code: d.code.map(|c| match c {
+                        lsp_types::NumberOrString::Number(n) => n.to_string(),
+                        lsp_types::NumberOrString::String(s) => s,
+                    }),
+                }).collect(),
+                Err(e) => {
+                    warn!(error = %e, "LSP get_diagnostics failed, returning empty");
+                    vec![]
+                }
+            }
+        }
+        None => vec![],
+    };
 
     Ok(WsResponse::new(&request.id, MessageType::Response, serde_json::json!({
         "diagnostics": diagnostics,
@@ -166,10 +240,16 @@ pub async fn handle_diagnostics(
     })))
 }
 
-/// 生成模拟的补全项（用于开发/测试）
+/// 从 SessionManager 获取 LspServerManager 实例
+async fn get_lsp_manager(session_manager: &SessionManager) -> Option<Arc<LspServerManager>> {
+    session_manager.lsp_manager()
+        .await
+}
+
+/// 生成模拟的补全项（用于 LSP 不可用时的降级）
 fn generate_mock_completions(prefix: &str) -> Vec<CompletionItem> {
     let mut items = Vec::new();
-    
+
     if prefix.is_empty() || prefix.starts_with("fn") {
         items.push(CompletionItem {
             label: "function".to_string(),
@@ -225,7 +305,6 @@ fn generate_mock_completions(prefix: &str) -> Vec<CompletionItem> {
         });
     }
 
-    // 添加一些常见的 Rust 函数和宏
     let common_items = [
         ("println!", "Print to stdout", "Macro for printing with newline", "macro", "println!(\"{}\", );"),
         ("vec![]", "Create vector", "Macro to create a vector literal", "macro", "vec![];"),

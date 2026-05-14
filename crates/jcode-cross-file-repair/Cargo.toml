@@ -17,3 +17,10 @@ similar = "2"
 futures = "0.3"
 async-trait = "0.1"
 jcode-plan = { path = "../jcode-plan" }
+jcode-multi-file-edit = { path = "../jcode-multi-file-edit" }
+# Real tree-sitter for AST analysis
+tree-sitter = "0.24"
+tree-sitter-rust = "0.23"
+
+[dev-dependencies]
+tempfile = "3"

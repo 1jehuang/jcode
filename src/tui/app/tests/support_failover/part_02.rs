@@ -55,7 +55,7 @@ impl Provider for FastMockProvider {
     }
 
     fn service_tier(&self) -> Option<String> {
-        self.service_tier.lock().unwrap().clone()
+        self.service_tier.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn set_service_tier(&self, service_tier: &str) -> anyhow::Result<()> {
@@ -64,7 +64,7 @@ impl Provider for FastMockProvider {
             "off" | "default" | "auto" | "none" => None,
             other => anyhow::bail!("unsupported service tier {other}"),
         };
-        *self.service_tier.lock().unwrap() = normalized;
+        *self.service_tier.lock().unwrap_or_else(|e| e.into_inner()) = normalized;
         Ok(())
     }
 }
@@ -91,7 +91,7 @@ impl Provider for SwitchableMockProvider {
     }
 
     fn model(&self) -> String {
-        match self.active_provider.lock().unwrap().as_str() {
+        match self.active_provider.lock().unwrap_or_else(|e| e.into_inner()).as_str() {
             "openai" => "gpt-test".to_string(),
             _ => "claude-test".to_string(),
         }
@@ -102,7 +102,7 @@ impl Provider for SwitchableMockProvider {
     }
 
     fn switch_active_provider_to(&self, provider: &str) -> Result<()> {
-        *self.active_provider.lock().unwrap() = provider.to_string();
+        *self.active_provider.lock().unwrap_or_else(|e| e.into_inner()) = provider.to_string();
         Ok(())
     }
 }
@@ -146,7 +146,7 @@ impl Provider for AuthRefreshingMockProvider {
     }
 
     fn model(&self) -> String {
-        if *self.logged_in.lock().unwrap() {
+        if *self.logged_in.lock().unwrap_or_else(|e| e.into_inner()) {
             "claude-opus-4.6".to_string()
         } else {
             "gpt-5.4".to_string()
@@ -154,7 +154,7 @@ impl Provider for AuthRefreshingMockProvider {
     }
 
     fn available_models_display(&self) -> Vec<String> {
-        if *self.logged_in.lock().unwrap() {
+        if *self.logged_in.lock().unwrap_or_else(|e| e.into_inner()) {
             vec![
                 "claude-opus-4.6".to_string(),
                 "grok-code-fast-1".to_string(),
@@ -165,7 +165,7 @@ impl Provider for AuthRefreshingMockProvider {
     }
 
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
-        if *self.logged_in.lock().unwrap() {
+        if *self.logged_in.lock().unwrap_or_else(|e| e.into_inner()) {
             vec![
                 crate::provider::ModelRoute {
                     model: "claude-opus-4.6".to_string(),
@@ -197,7 +197,7 @@ impl Provider for AuthRefreshingMockProvider {
     }
 
     fn on_auth_changed(&self) {
-        *self.logged_in.lock().unwrap() = true;
+        *self.logged_in.lock().unwrap_or_else(|e| e.into_inner()) = true;
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
@@ -277,7 +277,7 @@ impl Provider for AntigravityMockProvider {
     }
 
     fn model(&self) -> String {
-        self.model.lock().unwrap().clone()
+        self.model.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
@@ -285,7 +285,7 @@ impl Provider for AntigravityMockProvider {
             .strip_prefix("antigravity:")
             .unwrap_or(model)
             .to_string();
-        *self.model.lock().unwrap() = resolved;
+        *self.model.lock().unwrap_or_else(|e| e.into_inner()) = resolved;
         Ok(())
     }
 

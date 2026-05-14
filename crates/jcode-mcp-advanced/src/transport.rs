@@ -89,11 +89,8 @@ impl StdioTransport {
         Self {
             config,
             child: Arc::new(tokio::sync::Mutex::new(None)),
-            write_tx: Arc::new(tokio::sync::Mutex::new(
-                // placeholder, replaced on connect
-                unimplemented!()
-            )),
-            read_rx: Arc::new(tokio::sync::Mutex::new(unimplemented!())),
+            write_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            read_rx: Arc::new(tokio::sync::Mutex::new(None)),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
@@ -126,8 +123,19 @@ impl StdioTransport {
         let stdout = child.stdout.take()
             .ok_or_else(|| TransportError::Protocol("Failed to capture stdout".into()))?;
 
-        // Replace the placeholder handles
-        // Note: In real code we'd use OnceCell or similar pattern
+        // Store the I/O handles
+        {
+            let mut write_guard = self.write_tx.lock().await;
+            *write_guard = Some(tokio::io::BufWriter::new(stdin));
+        }
+        {
+            let mut read_guard = self.read_rx.lock().await;
+            *read_guard = Some(tokio::io::BufReader::new(stdout));
+        }
+        {
+            let mut child_guard = self.child.lock().await;
+            *child_guard = Some(child);
+        }
 
         self.connected.store(true, std::sync::atomic::Ordering::SeqCst);
 
@@ -141,11 +149,41 @@ impl StdioTransport {
 
     /// 从 stdout 读取一行 JSON (以 \n 分隔的 JSON-RPC 消息)
     async fn read_response(&self) -> TransportResult<serde_json::Value> {
-        // TODO: 实现从 BufReader 读取一行 JSON
-        // 格式: Content-Length: ...\r\n\r\n{...json...}
-        
-        // Placeholder implementation:
-        Err(TransportError::ConnectionLost)
+        let mut reader_guard = self.read_rx.lock().await;
+        let reader = reader_guard
+            .as_mut()
+            .ok_or(TransportError::ConnectionLost)?;
+
+        // Read Content-Length header
+        let mut header_line = String::new();
+        loop {
+            let mut byte = [0u8; 1];
+            reader.read_exact(&mut byte).await?;
+            let ch = byte[0] as char;
+            header_line.push(ch);
+            if header_line.ends_with("\r\n\r\n") {
+                break;
+            }
+            if header_line.len() > 4096 {
+                return Err(TransportError::Protocol("Header too long".into()));
+            }
+        }
+
+        // Parse Content-Length
+        let content_length: usize = header_line
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("Content-Length: ")
+                    .and_then(|v| v.trim().parse().ok())
+            })
+            .ok_or_else(|| TransportError::Protocol("Missing Content-Length header".into()))?;
+
+        // Read JSON body
+        let mut body = vec![0u8; content_length];
+        reader.read_exact(&mut body).await?;
+
+        let value: serde_json::Value = serde_json::from_slice(&body)?;
+        Ok(value)
     }
 }
 

@@ -3487,7 +3487,7 @@ fn get_lsp_manager() -> &'static std::sync::Mutex<Option<std::sync::Arc<jcode_ls
 
 async fn ensure_lsp_manager() -> Result<std::sync::Arc<jcode_lsp::LspServerManager>> {
     let cell = get_lsp_manager();
-    let mut guard = cell.lock().unwrap();
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref mgr) = *guard {
         return Ok(mgr.clone());
     }
@@ -4466,7 +4466,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
                 }
             }
 
-            let mut session = session_lock.lock().unwrap();
+            let mut session = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             *session = Some(DebugSession {
                 process: Some(child),
                 stdin: Some(mut_stdin),
@@ -4515,7 +4515,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
                 .and_then(|s| s.parse().ok())
                 .ok_or_else(|| anyhow::anyhow!("Invalid line number in '{}'", location))?;
 
-            let mut guard = session_lock.lock().unwrap();
+            let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 let bp_id = session.next_bp_id;
                 session.next_bp_id += 1;
@@ -4554,7 +4554,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
 
         // ── continue ────────────────────────────────────────────
         DebugCommand::Continue => {
-            let mut guard = session_lock.lock().unwrap();
+            let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
                     let mut seq = session.request_seq;
@@ -4575,7 +4575,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
 
         // ── next ────────────────────────────────────────────────
         DebugCommand::Next => {
-            let mut guard = session_lock.lock().unwrap();
+            let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
                     let mut seq = session.request_seq;
@@ -4593,7 +4593,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
 
         // ── stepIn ──────────────────────────────────────────────
         DebugCommand::StepIn => {
-            let mut guard = session_lock.lock().unwrap();
+            let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
                     let mut seq = session.request_seq;
@@ -4611,7 +4611,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
 
         // ── stepOut ─────────────────────────────────────────────
         DebugCommand::StepOut => {
-            let mut guard = session_lock.lock().unwrap();
+            let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
                     let mut seq = session.request_seq;
@@ -4629,7 +4629,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
 
         // ── stack ───────────────────────────────────────────────
         DebugCommand::Stack => {
-            let mut guard = session_lock.lock().unwrap();
+            let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
                     let mut seq = session.request_seq;
@@ -4661,7 +4661,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
 
         // ── variables ───────────────────────────────────────────
         DebugCommand::Variables => {
-            let mut guard = session_lock.lock().unwrap();
+            let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
                     let mut seq = session.request_seq;
@@ -4713,7 +4713,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
 
         // ── evaluate ────────────────────────────────────────────
         DebugCommand::Evaluate { expression } => {
-            let mut guard = session_lock.lock().unwrap();
+            let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
                     let mut seq = session.request_seq;
@@ -4750,7 +4750,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
 
         // ── restart ─────────────────────────────────────────────
         DebugCommand::Restart => {
-            let mut guard = session_lock.lock().unwrap();
+            let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
                     let mut seq = session.request_seq;
@@ -4766,7 +4766,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
 
         // ── disconnect ──────────────────────────────────────────
         DebugCommand::Disconnect => {
-            let mut guard = session_lock.lock().unwrap();
+            let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
                     let mut seq = session.request_seq;
@@ -4787,7 +4787,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
 
         // ── modules ─────────────────────────────────────────────
         DebugCommand::Modules => {
-            let mut guard = session_lock.lock().unwrap();
+            let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
                     let mut seq = session.request_seq;
@@ -4811,7 +4811,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
 
         // ── threads ─────────────────────────────────────────────
         DebugCommand::Threads => {
-            let mut guard = session_lock.lock().unwrap();
+            let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
                     let mut seq = session.request_seq;
@@ -4836,7 +4836,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
 
         // ── thread <id> ─────────────────────────────────────────
         DebugCommand::Thread { id } => {
-            let mut guard = session_lock.lock().unwrap();
+            let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 session.active_thread_id = id;
                 eprintln!("\n🧵 Switched to thread #{}", id);
@@ -4845,7 +4845,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
 
         // ── breakpoints (list) ──────────────────────────────────
         DebugCommand::Breakpoints => {
-            let guard = session_lock.lock().unwrap();
+            let guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref session) = *guard {
                 eprintln!("\n🔴 Breakpoints ({})\n", session.breakpoints.len());
                 for bp in &session.breakpoints {
@@ -4862,7 +4862,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
 
         // ── delete-breakpoint <id> ──────────────────────────────
         DebugCommand::DeleteBreakpoint { id } => {
-            let mut guard = session_lock.lock().unwrap();
+            let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 let before = session.breakpoints.len();
                 session.breakpoints.retain(|bp| bp.id != id);
@@ -4877,7 +4877,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
 
         // ── exception-breakpoint ────────────────────────────────
         DebugCommand::ExceptionBreakpoint { filter } => {
-            let mut guard = session_lock.lock().unwrap();
+            let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
                     let mut seq = session.request_seq;
@@ -4914,7 +4914,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
 
         // ── stop ────────────────────────────────────────────────
         DebugCommand::Stop => {
-            let mut guard = session_lock.lock().unwrap();
+            let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(mut session) = guard.take() {
                 // Send disconnect request
                 if let Some(ref mut stdin) = session.stdin {

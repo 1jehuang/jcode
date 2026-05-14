@@ -2,7 +2,7 @@
 name = "jcode-lsp"
 version.workspace = true
 edition.workspace = true
-description = "LSP (Language Server Protocol) 集成 - 符号跳转/引用查找/诊断/补全"
+description = "LSP (Language Server Protocol) 集成 - 符号跳转/引用查找/诊断/补全/AST重构"
 authors.workspace = true
 license.workspace = true
 
@@ -19,6 +19,9 @@ async-trait = { workspace = true }
 lsp-types = { workspace = true }
 regex = "1"
 parking_lot = "0.12"
+# Real tree-sitter integration
+tree-sitter = "0.24"
+tree-sitter-rust = "0.23"
 
 [dev-dependencies]
 tokio-test = "0.4"

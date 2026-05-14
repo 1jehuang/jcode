@@ -1,7 +1,10 @@
-use actix_web::{App, HttpServer, web};
+use axum::Router;
+use axum::routing::get;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use super::routes::DashboardRoutes;
+use super::routes::StatsQuery;
 
 pub struct DashboardServer {
     port: u16,
@@ -24,17 +27,19 @@ impl DashboardServer {
     pub async fn run(&self) -> std::io::Result<()> {
         println!("🚀 CarpAI Dashboard starting on http://{}:{}", self.host, self.port);
 
-        HttpServer::new(|| {
-            App::new()
-                .route("/", web::get().to(DashboardRoutes::index))
-                .route("/api/metrics", web::get().to(DashboardRoutes::api_metrics))
-                .route("/api/config", web::get().to(DashboardRoutes::api_config))
-                .route("/api/health", web::get().to(DashboardRoutes::api_health))
-                .route("/api/stats", web::get().to(DashboardRoutes::api_stats))
-        })
-        .bind(format!("{}:{}", self.host, self.port))?
-        .run()
-        .await
+        let app = Router::new()
+            .route("/", get(DashboardRoutes::index))
+            .route("/api/metrics", get(DashboardRoutes::api_metrics))
+            .route("/api/config", get(DashboardRoutes::api_config))
+            .route("/api/health", get(DashboardRoutes::api_health))
+            .route("/api/stats", get(DashboardRoutes::api_stats));
+
+        let addr: SocketAddr = format!("{}:{}", self.host, self.port).parse()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        axum::serve(listener, app).await?;
+
+        Ok(())
     }
 
     pub fn url(&self) -> String {

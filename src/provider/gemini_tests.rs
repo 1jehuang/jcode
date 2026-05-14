@@ -97,7 +97,7 @@ fn extract_gemini_model_ids_discovers_nested_models() {
 fn available_models_display_prefers_discovered_models_and_current_model() {
     let provider = GeminiProvider::new();
     provider.set_model("gemini-4-pro-preview").unwrap();
-    *provider.fetched_models.write().unwrap() = vec![
+    *provider.fetched_models.write().unwrap_or_else(|e| e.into_inner()) = vec![
         "gemini-3-flash-preview".to_string(),
         "gemini-3-pro-preview".to_string(),
     ];

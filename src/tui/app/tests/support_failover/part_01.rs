@@ -135,7 +135,7 @@ impl Provider for OpenRouterSpecCaptureProvider {
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
-        self.set_model_calls.lock().unwrap().push(model.to_string());
+        self.set_model_calls.lock().unwrap_or_else(|e| e.into_inner()).push(model.to_string());
         Ok(())
     }
 
@@ -425,7 +425,7 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
 
         assert!(app.pending_provider_failover.is_none());
         assert!(app.pending_turn);
-        assert_eq!(active_provider.lock().unwrap().as_str(), "openai");
+        assert_eq!(active_provider.lock().unwrap_or_else(|e| e.into_inner()).as_str(), "openai");
         assert_eq!(app.session.model.as_deref(), Some("gpt-test"));
         let last = app.display_messages.last().expect("display message");
         assert!(

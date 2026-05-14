@@ -259,7 +259,7 @@ fn test_record_token_usage_aggregates_session_and_turn() {
     record_token_usage(50, 5, None, Some(2));
 
     {
-        let guard = SESSION_STATE.lock().unwrap();
+        let guard = SESSION_STATE.lock().unwrap_or_else(|e| e.into_inner());
         let state = guard.as_ref().expect("session telemetry state");
         assert_eq!(state.input_tokens, 150);
         assert_eq!(state.output_tokens, 30);
@@ -295,7 +295,7 @@ fn test_record_connection_type_buckets_transport() {
     record_connection_type("weird-transport");
 
     {
-        let guard = SESSION_STATE.lock().unwrap();
+        let guard = SESSION_STATE.lock().unwrap_or_else(|e| e.into_inner());
         let state = guard.as_ref().expect("session telemetry state");
         assert_eq!(state.transport_persistent_ws_fresh, 1);
         assert_eq!(state.transport_persistent_ws_reuse, 1);

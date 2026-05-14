@@ -1,4 +1,4 @@
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use std::any::type_name;
 use std::collections::HashMap;
 use std::fmt;
@@ -181,7 +181,7 @@ pub struct LockManager {
     next_id: AtomicUsize,
 }
 
-static LOCK_MANAGER: Lazy<LockManager> = Lazy::new(|| LockManager {
+static LOCK_MANAGER: LazyLock<LockManager> = LazyLock::new(|| LockManager {
     locks: RwLock::new(HashMap::new()),
     next_id: AtomicUsize::new(1),
 });

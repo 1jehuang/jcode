@@ -4,6 +4,7 @@ mod apply_patch;
 mod bash;
 mod batch;
 mod batch_edit;
+mod code_intel;
 pub mod debug_evaluate;
 mod bg;
 mod browser;
@@ -213,6 +214,7 @@ impl Registry {
             Self::insert_tool_timed(&mut m, &mut timings, "batch_edit", batch_edit::BatchEditTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "review", review::ReviewTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "debug", debug_evaluate::DebugEvaluateTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "code_intel", code_intel::CodeIntelTool::new);
             let nonzero: Vec<String> = timings
                 .iter()
                 .filter(|(_, ms)| *ms > 0)

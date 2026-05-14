@@ -1433,7 +1433,7 @@ mod tests {
     #[test]
     fn desktop_worker_roundtrips_message_with_fake_server() -> Result<()> {
         static ENV_LOCK: Mutex<()> = Mutex::new(());
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let socket_path = std::env::temp_dir().join(format!(
             "jcode-desktop-worker-smoke-{}-{}.sock",
             std::process::id(),

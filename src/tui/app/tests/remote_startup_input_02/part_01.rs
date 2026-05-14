@@ -760,12 +760,12 @@ fn test_ctrl_x_cuts_entire_input_line_to_clipboard() {
     let copied_for_closure = copied.clone();
 
     let cut = super::input::cut_input_line_to_clipboard_with(&mut app, |text| {
-        *copied_for_closure.lock().unwrap() = text.to_string();
+        *copied_for_closure.lock().unwrap_or_else(|e| e.into_inner()) = text.to_string();
         true
     });
 
     assert!(cut);
-    assert_eq!(&*copied.lock().unwrap(), "hello world");
+    assert_eq!(&*copied.lock().unwrap_or_else(|e| e.into_inner()), "hello world");
     assert!(app.input().is_empty());
     assert_eq!(app.cursor_pos(), 0);
     assert_eq!(app.status_notice(), Some("✂ Cut input line".to_string()));

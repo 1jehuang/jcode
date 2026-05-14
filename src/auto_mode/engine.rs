@@ -80,7 +80,7 @@ impl AutoModeEngine {
 
         // 1. 检查模式是否启用
         {
-            let cfg = self.config.read().unwrap();
+            let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
             if !cfg.enabled {
                 return AutoApprovalDecision::ManualReview;
             }
@@ -147,7 +147,7 @@ impl AutoModeEngine {
 
                 drop(model); // 释放锁
 
-                let cfg = self.config.read().unwrap();
+                let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
                 
                 if confidence >= cfg.approval_threshold {
                     // 自动批准
@@ -169,7 +169,7 @@ impl AutoModeEngine {
                     ));
                     
                     {
-                        let mut stats = self.stats.write().unwrap();
+                        let mut stats = self.stats.write().unwrap_or_else(|e| e.into_inner());
                         stats.learning_pattern_hits += 1;
                         stats.auto_approved += 1;
                         stats.total_decisions += 1;
@@ -201,7 +201,7 @@ impl AutoModeEngine {
                     };
 
                     {
-                        let mut stats = self.stats.write().unwrap();
+                        let mut stats = self.stats.write().unwrap_or_else(|e| e.into_inner());
                         stats.required_confirmation += 1;
                         stats.total_decisions += 1;
                     }
@@ -214,7 +214,7 @@ impl AutoModeEngine {
 
         // 5. 安全操作白名单检查
         {
-            let cfg = self.config.read().unwrap();
+            let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
             if cfg.auto_accept_safe && cfg.safe_action_types.contains(action_type) {
                 // 对于BashCommand，需要额外检查命令内容
                 if *action_type == ActionType::BashCommand {
@@ -226,7 +226,7 @@ impl AutoModeEngine {
                         );
 
                         {
-                            let mut stats = self.stats.write().unwrap();
+                            let mut stats = self.stats.write().unwrap_or_else(|e| e.into_inner());
                             stats.auto_approved += 1;
                             stats.total_decisions += 1;
                         }
@@ -242,7 +242,7 @@ impl AutoModeEngine {
                     );
 
                     {
-                        let mut stats = self.stats.write().unwrap();
+                        let mut stats = self.stats.write().unwrap_or_else(|e| e.into_inner());
                         stats.auto_approved += 1;
                         stats.total_decisions += 1;
                     }
@@ -257,7 +257,7 @@ impl AutoModeEngine {
         let decision = AutoApprovalDecision::ManualReview;
 
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write().unwrap_or_else(|e| e.into_inner());
             stats.manual_reviews += 1;
             stats.total_decisions += 1;
         }
@@ -271,7 +271,7 @@ impl AutoModeEngine {
         let cmd_lower = command.to_lowercase();
 
         // 检查自动批准模式
-        let cfg = self.config.read().unwrap();
+        let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
         for pattern in &cfg.auto_approve_patterns {
             if cmd_lower.contains(&pattern.to_lowercase()) {
                 return true;
@@ -294,19 +294,19 @@ impl AutoModeEngine {
 
     /// 增加自动操作计数
     fn increment_auto_actions(&self) {
-        let mut cfg = self.config.write().unwrap();
+        let mut cfg = self.config.write().unwrap_or_else(|e| e.into_inner());
         cfg.current_auto_actions += 1;
     }
 
     /// 重置自动操作计数（每次用户交互后调用）
     pub fn reset_auto_action_count(&self) {
-        let mut cfg = self.config.write().unwrap();
+        let mut cfg = self.config.write().unwrap_or_else(|e| e.into_inner());
         cfg.current_auto_actions = 0;
     }
 
     /// 记录统计信息
     fn record_stats(&self, decision: &AutoApprovalDecision) {
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write().unwrap_or_else(|e| e.into_inner());
         stats.total_decisions += 1;
 
         match decision {
@@ -332,7 +332,7 @@ impl AutoModeEngine {
     ) {
         #[cfg(feature = "audit")]
         {
-            let cfg = self.config.read().unwrap();
+            let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
             if cfg.enable_audit_log {
                 let entry = AuditEntry {
                     timestamp: chrono::Utc::now(),
@@ -353,12 +353,12 @@ impl AutoModeEngine {
 
     /// 获取统计信息
     pub fn get_statistics(&self) -> AutoModeStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// 获取配置
     pub fn get_config(&self) -> AutoModeConfig {
-        self.config.read().unwrap().clone()
+        self.config.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// 更新配置
@@ -366,7 +366,7 @@ impl AutoModeEngine {
     where
         F: FnOnce(&mut AutoModeConfig),
     {
-        let mut cfg = self.config.write().unwrap();
+        let mut cfg = self.config.write().unwrap_or_else(|e| e.into_inner());
         updater(&mut cfg);
         
         // 重新初始化安全护栏（如果配置变更）
@@ -390,7 +390,7 @@ impl AutoModeEngine {
 
         // 如果开启学习，更新置信度模型
         {
-            let cfg = self.config.read().unwrap();
+            let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
             if cfg.enable_learning {
                 let mut model = self.confidence_model.lock().await;
                 model.record_decision(

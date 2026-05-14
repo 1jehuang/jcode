@@ -50,7 +50,7 @@ impl MockProvider {
 
     /// Queue a response (sequence of StreamEvents) to be returned on next complete() call
     pub fn queue_response(&self, events: Vec<StreamEvent>) {
-        self.responses.lock().unwrap().push_back(events);
+        self.responses.lock().unwrap_or_else(|e| e.into_inner()).push_back(events);
     }
 }
 
@@ -72,7 +72,7 @@ impl Provider for MockProvider {
             .lock()
             .unwrap()
             .push(resume_session_id.map(|s| s.to_string()));
-        self.captured_models.lock().unwrap().push(self.model());
+        self.captured_models.lock().unwrap_or_else(|e| e.into_inner()).push(self.model());
 
         let events = self
             .responses
@@ -95,14 +95,14 @@ impl Provider for MockProvider {
     }
 
     fn model(&self) -> String {
-        self.current_model.lock().unwrap().clone()
+        self.current_model.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
         if !self.models.is_empty() && !self.models.contains(&model) {
             anyhow::bail!("Unknown model: {}", model);
         }
-        *self.current_model.lock().unwrap() = model.to_string();
+        *self.current_model.lock().unwrap_or_else(|e| e.into_inner()) = model.to_string();
         Ok(())
     }
 
@@ -111,7 +111,7 @@ impl Provider for MockProvider {
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
-        let current = self.current_model.lock().unwrap().clone();
+        let current = self.current_model.lock().unwrap_or_else(|e| e.into_inner()).clone();
         Arc::new(MockProvider {
             responses: self.responses.clone(),
             models: self.models.clone(),

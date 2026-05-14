@@ -1392,7 +1392,7 @@ mod tests {
             .write()
             .unwrap()
             .insert("amazon.nova-2-lite-v1:0".to_string());
-        p.inference_profile_routes.write().unwrap().insert(
+        p.inference_profile_routes.write().unwrap_or_else(|e| e.into_inner()).insert(
             "amazon.nova-2-lite-v1:0".to_string(),
             "us.amazon.nova-2-lite-v1:0".to_string(),
         );
@@ -1408,7 +1408,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
         let p = BedrockProvider::new();
-        *p.fetched_inference_profiles.write().unwrap() = vec![
+        *p.fetched_inference_profiles.write().unwrap_or_else(|e| e.into_inner()) = vec![
             "global.amazon.nova-2-lite-v1:0".to_string(),
             "us.amazon.nova-2-lite-v1:0".to_string(),
         ];
@@ -1424,14 +1424,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
         let p = BedrockProvider::new();
-        *p.fetched_models.write().unwrap() = vec!["amazon.nova-2-lite-v1:0".to_string()];
-        *p.fetched_inference_profiles.write().unwrap() =
+        *p.fetched_models.write().unwrap_or_else(|e| e.into_inner()) = vec!["amazon.nova-2-lite-v1:0".to_string()];
+        *p.fetched_inference_profiles.write().unwrap_or_else(|e| e.into_inner()) =
             vec!["us.amazon.nova-2-lite-v1:0".to_string()];
         p.profile_required_models
             .write()
             .unwrap()
             .insert("amazon.nova-2-lite-v1:0".to_string());
-        p.inference_profile_routes.write().unwrap().insert(
+        p.inference_profile_routes.write().unwrap_or_else(|e| e.into_inner()).insert(
             "amazon.nova-2-lite-v1:0".to_string(),
             "us.amazon.nova-2-lite-v1:0".to_string(),
         );
@@ -1456,10 +1456,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
         let p = BedrockProvider::new();
-        *p.fetched_models.write().unwrap() = vec!["amazon.nova-2-lite-v1:0".to_string()];
-        *p.fetched_inference_profiles.write().unwrap() =
+        *p.fetched_models.write().unwrap_or_else(|e| e.into_inner()) = vec!["amazon.nova-2-lite-v1:0".to_string()];
+        *p.fetched_inference_profiles.write().unwrap_or_else(|e| e.into_inner()) =
             vec!["us.amazon.nova-2-lite-v1:0".to_string()];
-        p.inference_profile_routes.write().unwrap().insert(
+        p.inference_profile_routes.write().unwrap_or_else(|e| e.into_inner()).insert(
             "amazon.nova-2-lite-v1:0".to_string(),
             "us.amazon.nova-2-lite-v1:0".to_string(),
         );
@@ -1559,7 +1559,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
         let p = BedrockProvider::new();
-        *p.fetched_models.write().unwrap() =
+        *p.fetched_models.write().unwrap_or_else(|e| e.into_inner()) =
             vec!["anthropic.claude-3-haiku-20240307-v1:0".to_string()];
         p.legacy_models
             .write()

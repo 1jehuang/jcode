@@ -20,7 +20,7 @@ mod tests {
         assert!(result.is_ok());
 
         {
-            let s = state.lock().unwrap();
+            let s = state.lock().unwrap_or_else(|e| e.into_inner());
             assert!(s.is_planning());
             assert_eq!(*s.get_mode(), PlanMode::Planning);
         }
@@ -29,7 +29,7 @@ mod tests {
         assert!(exit_result.is_ok());
 
         {
-            let s = state.lock().unwrap();
+            let s = state.lock().unwrap_or_else(|e| e.into_inner());
             assert!(!s.is_planning());
             assert_eq!(*s.get_mode(), PlanMode::Off);
         }
@@ -41,7 +41,7 @@ mod tests {
         EnterPlanModeTool::execute(state.clone()).ok();
 
         {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
             let id1 = s.add_step("Analyze requirements").unwrap();
             let id2 = s.add_step("Design solution").unwrap();
             let id3 = s.add_step("Implement code").unwrap();
@@ -53,7 +53,7 @@ mod tests {
         }
 
         {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
             s.approve_step(1).unwrap();
             s.reject_step(2).unwrap();
 
@@ -70,7 +70,7 @@ mod tests {
         EnterPlanModeTool::execute(state.clone()).ok();
 
         {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
             s.add_step("Test step").ok();
             s.approve_step(1).ok();
             s.complete_step(1).ok();
@@ -85,12 +85,12 @@ mod tests {
         EnterPlanModeTool::execute(state.clone()).ok();
 
         {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
             s.add_step("Step 1").ok();
             s.add_step("Step 2").ok();
         }
 
-        let summary = state.lock().unwrap().get_summary();
+        let summary = state.lock().unwrap_or_else(|e| e.into_inner()).get_summary();
         assert!(summary.contains("Plan Mode: Planning"));
         assert!(summary.contains("Steps: 2 total"));
         assert!(summary.contains("Pending"));
@@ -102,7 +102,7 @@ mod tests {
         EnterPlanModeTool::execute(state.clone()).ok();
 
         {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
             s.add_step("Unfinished step").ok();
         }
 
@@ -117,7 +117,7 @@ mod tests {
         EnterPlanModeTool::execute(state.clone()).ok();
 
         {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
             s.add_step("Unfinished step").ok();
         }
 
@@ -139,12 +139,12 @@ mod tests {
         EnterPlanModeTool::execute(state.clone()).ok();
 
         {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
             s.add_step("Step 1").ok();
             s.approve_step(1).ok();
         }
 
-        let history = state.lock().unwrap().get_history();
+        let history = state.lock().unwrap_or_else(|e| e.into_inner()).get_history();
         assert!(!history.is_empty());
         assert!(history.iter().any(|h| h.contains("Entered")));
         assert!(history.iter().any(|h| h.contains("Approved")));

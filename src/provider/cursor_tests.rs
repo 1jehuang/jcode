@@ -20,7 +20,7 @@ fn available_models_display_includes_custom_current_model() {
 #[test]
 fn available_models_display_prefers_fetched_cursor_models() {
     let provider = CursorCliProvider::new();
-    *provider.fetched_models.write().unwrap() = vec![
+    *provider.fetched_models.write().unwrap_or_else(|e| e.into_inner()) = vec![
         "claude-4-sonnet-thinking".to_string(),
         "gpt-5.2".to_string(),
     ];

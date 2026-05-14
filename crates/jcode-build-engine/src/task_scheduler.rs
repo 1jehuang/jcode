@@ -220,7 +220,7 @@ impl TaskScheduler {
     }
 
     pub fn cancel_build(&self, build_id: BuildId) -> bool {
-        if let Some(token) = self.running_builds.lock().unwrap().remove(&build_id) {
+        if let Some(token) = self.running_builds.lock().unwrap_or_else(|e| e.into_inner()).remove(&build_id) {
             token.cancel(); true
         } else { false }
     }

@@ -161,9 +161,9 @@ impl CommitAttributionTracker {
     /// 计算最终归因数据
     /// 源自 Claude Code 的 `calculateCommitAttribution()`
     pub fn calculate(&self, current_head: String) -> CommitAttribution {
-        let files = self.files.lock().unwrap();
+        let files = self.files.lock().unwrap_or_else(|e| e.into_inner());
         let total: Vec<FileAttribution> = files.values().cloned().collect();
-        let prompt_count = *self.prompt_count.lock().unwrap();
+        let prompt_count = *self.prompt_count.lock().unwrap_or_else(|e| e.into_inner());
 
         let total_files = total.len();
         let claude_files = total.len(); // 所有追踪的文件都是 Claude 贡献的
@@ -175,7 +175,7 @@ impl CommitAttributionTracker {
             0.0
         };
 
-        let start_head = self.start_head.lock().unwrap().clone();
+        let start_head = self.start_head.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
         CommitAttribution {
             start_head,
@@ -192,7 +192,7 @@ impl CommitAttributionTracker {
 
     /// 获取追踪的文件列表
     pub fn tracked_files(&self) -> Vec<PathBuf> {
-        self.files.lock().unwrap().keys().cloned().collect()
+        self.files.lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect()
     }
 
     /// 清除状态（新会话时调用）
@@ -212,9 +212,9 @@ impl CommitAttributionTracker {
     /// 序列化为快照消息
     /// 源自 Claude Code 的 `stateToSnapshotMessage()`
     pub fn to_snapshot(&self) -> AttributionSnapshot {
-        let files = self.files.lock().unwrap().values().cloned().collect();
-        let prompt_count = *self.prompt_count.lock().unwrap();
-        let start_head = self.start_head.lock().unwrap().clone();
+        let files = self.files.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
+        let prompt_count = *self.prompt_count.lock().unwrap_or_else(|e| e.into_inner());
+        let start_head = self.start_head.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
         AttributionSnapshot {
             files,

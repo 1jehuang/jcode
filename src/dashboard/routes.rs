@@ -1,4 +1,6 @@
-use actix_web::{web, HttpResponse, Result};
+use axum::extract::Query;
+use axum::http::{StatusCode, header};
+use axum::response::{Html, IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 use super::metrics::SystemMetrics;
@@ -23,32 +25,36 @@ impl Default for DashboardConfig {
 pub struct DashboardRoutes;
 
 impl DashboardRoutes {
-    pub async fn index() -> Result<HttpResponse> {
+    pub async fn index() -> Html<&'static str> {
         let html = include_str!("templates/index.html");
-        Ok(HttpResponse::Ok()
-            .content_type("text/html; charset=utf-8")
-            .body(html))
+        Html(html)
     }
 
-    pub async fn api_metrics() -> Result<HttpResponse> {
+    pub async fn api_metrics() -> Response {
         let metrics = SystemMetrics::new();
         let json = metrics.to_json().unwrap_or_else(|_| "{}".to_string());
 
-        Ok(HttpResponse::Ok()
-            .content_type("application/json")
-            .body(json))
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            json,
+        )
+            .into_response()
     }
 
-    pub async fn api_config() -> Result<HttpResponse> {
+    pub async fn api_config() -> Response {
         let config = DashboardConfig::default();
         let json = serde_json::to_string(&config).unwrap_or_else(|_| "{}".to_string());
 
-        Ok(HttpResponse::Ok()
-            .content_type("application/json")
-            .body(json))
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            json,
+        )
+            .into_response()
     }
 
-    pub async fn api_health() -> Result<HttpResponse> {
+    pub async fn api_health() -> Response {
         let health = serde_json::json!({
             "status": "healthy",
             "timestamp": chrono::Utc::now().to_rfc3339(),
@@ -59,14 +65,15 @@ impl DashboardRoutes {
                 .unwrap_or(0),
         });
 
-        Ok(HttpResponse::Ok()
-            .content_type("application/json")
-            .body(health.to_string()))
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            health.to_string(),
+        )
+            .into_response()
     }
 
-    pub async fn api_stats(
-        web::Query(query): web::Query<StatsQuery>,
-    ) -> Result<HttpResponse> {
+    pub async fn api_stats(Query(query): Query<StatsQuery>) -> Response {
         let range = query.range.unwrap_or(3600);
         let interval = query.interval.unwrap_or(60);
 
@@ -79,9 +86,12 @@ impl DashboardRoutes {
             "requests_history": vec![0u64; (range / interval) as usize],
         });
 
-        Ok(HttpResponse::Ok()
-            .content_type("application/json")
-            .body(stats.to_string()))
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            stats.to_string(),
+        )
+            .into_response()
     }
 }
 

@@ -24,7 +24,7 @@ struct StreamingMockProvider {
 
 impl StreamingMockProvider {
     fn queue_response(&self, events: Vec<StreamEvent>) {
-        self.responses.lock().unwrap().push_back(events);
+        self.responses.lock().unwrap_or_else(|e| e.into_inner()).push_back(events);
     }
 }
 
@@ -423,7 +423,7 @@ async fn notify_session_queues_soft_interrupt_when_live_session_is_busy() {
         other => panic!("expected notification event, got {other:?}"),
     }
 
-    let queued = queue.lock().unwrap();
+    let queued = queue.lock().unwrap_or_else(|e| e.into_inner());
     assert_eq!(
         queued.len(),
         1,

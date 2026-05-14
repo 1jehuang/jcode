@@ -150,7 +150,7 @@ impl CostTracker {
 
         // Update per-model stats
         {
-            let mut models = self.by_model.write().unwrap();
+            let mut models = self.by_model.write().unwrap_or_else(|e| e.into_inner());
             let entry = models.entry(usage.model.clone()).or_insert_with(|| ModelUsage {
                 model: usage.model.clone(),
                 ..Default::default()
@@ -176,7 +176,7 @@ impl CostTracker {
                 + self.total_output_tokens.load(Ordering::SeqCst),
             total_cost: self.total_cost.load(Ordering::SeqCst),
             duration_secs: duration.as_secs_f64(),
-            by_model: self.by_model.read().unwrap().values().cloned().collect(),
+            by_model: self.by_model.read().unwrap_or_else(|e| e.into_inner()).values().cloned().collect(),
             timestamp: chrono::Utc::now(),
         }
     }
@@ -213,7 +213,7 @@ impl CostTracker {
         self.total_output_tokens.store(0, Ordering::SeqCst);
         self.total_cost.store(0.0, Ordering::SeqCst);
         
-        let mut models = self.by_model.write().unwrap();
+        let mut models = self.by_model.write().unwrap_or_else(|e| e.into_inner());
         models.clear();
     }
 }

@@ -89,7 +89,7 @@ impl McpAuthManager {
     /// 获取 OAuth 令牌（含自动刷新检查）
     /// 源自 Claude Code 的 `ClaudeAuthProvider.tokens()`
     pub fn get_tokens(&self, server_name: &str) -> Option<McpOAuthTokens> {
-        let tokens = self.tokens.lock().unwrap();
+        let tokens = self.tokens.lock().unwrap_or_else(|e| e.into_inner());
         let token = tokens.get(server_name)?.clone();
 
         // 检查是否需要在到期前提前刷新
@@ -108,20 +108,20 @@ impl McpAuthManager {
     /// 保存令牌
     /// 源自 Claude Code 的 `saveTokens()`
     pub fn save_tokens(&self, server_name: &str, tokens: McpOAuthTokens) {
-        let mut store = self.tokens.lock().unwrap();
+        let mut store = self.tokens.lock().unwrap_or_else(|e| e.into_inner());
         store.insert(server_name.to_string(), tokens);
     }
 
     /// 保存客户端信息
     /// 源自 Claude Code 的 `saveClientInformation()`
     pub fn save_client_info(&self, server_name: &str, info: McpOAuthClientInfo) {
-        let mut clients = self.clients.lock().unwrap();
+        let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
         clients.insert(server_name.to_string(), info);
     }
 
     /// 获取客户端信息
     pub fn get_client_info(&self, server_name: &str) -> Option<McpOAuthClientInfo> {
-        self.clients.lock().unwrap().get(server_name).cloned()
+        self.clients.lock().unwrap_or_else(|e| e.into_inner()).get(server_name).cloned()
     }
 
     /// 启动 PKCE OAuth 流程
@@ -131,7 +131,7 @@ impl McpAuthManager {
         let code_challenge = sha256_base64_url(&code_verifier);
         let state = uuid::Uuid::new_v4().to_string();
 
-        let mut verifiers = self.verifiers.lock().unwrap();
+        let mut verifiers = self.verifiers.lock().unwrap_or_else(|e| e.into_inner());
         verifiers.insert(server_name.to_string(), PkceState {
             code_verifier,
             state: state.clone(),
@@ -155,7 +155,7 @@ impl McpAuthManager {
         auth_code: &str,
         received_state: &str,
     ) -> anyhow::Result<()> {
-        let mut verifiers = self.verifiers.lock().unwrap();
+        let mut verifiers = self.verifiers.lock().unwrap_or_else(|e| e.into_inner());
         let pkce = verifiers.remove(server_name)
             .ok_or_else(|| anyhow::anyhow!("No PKCE flow in progress for '{}'", server_name))?;
 
@@ -171,14 +171,14 @@ impl McpAuthManager {
     /// 使令牌失效
     /// 源自 Claude Code 的 `invalidateCredentials()`
     pub fn invalidate_tokens(&self, server_name: &str) {
-        let mut tokens = self.tokens.lock().unwrap();
+        let mut tokens = self.tokens.lock().unwrap_or_else(|e| e.into_inner());
         tokens.remove(server_name);
     }
 
     /// 撤销服务器令牌
     /// 源自 Claude Code 的 `revokeServerTokens()`
     pub fn revoke_tokens(&self, server_name: &str) {
-        let mut tokens = self.tokens.lock().unwrap();
+        let mut tokens = self.tokens.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(token) = tokens.remove(server_name) {
             // 实际撤销需要 HTTP 调用 revocation_endpoint
             tracing::info!("[MCP Auth] Revoked tokens for '{}'", server_name);
@@ -188,12 +188,12 @@ impl McpAuthManager {
 
     /// 获取 PKCE verifier（用于回调）
     pub fn get_pkce_verifier(&self, server_name: &str) -> Option<PkceState> {
-        self.verifiers.lock().unwrap().get(server_name).cloned()
+        self.verifiers.lock().unwrap_or_else(|e| e.into_inner()).get(server_name).cloned()
     }
 
     /// 清理过期的 PKCE verifier
     pub fn cleanup_expired_verifiers(&self) {
-        let mut verifiers = self.verifiers.lock().unwrap();
+        let mut verifiers = self.verifiers.lock().unwrap_or_else(|e| e.into_inner());
         verifiers.retain(|_, v| v.created_at.elapsed() < Duration::from_secs(600));
     }
 

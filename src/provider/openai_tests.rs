@@ -89,7 +89,7 @@ struct LiveOpenAITestEnv {
 
 impl LiveOpenAITestEnv {
     fn new() -> Result<Option<Self>> {
-        let lock = ENV_LOCK.lock().unwrap();
+        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(source_auth) = real_codex_auth_path() else {
             return Ok(None);
         };

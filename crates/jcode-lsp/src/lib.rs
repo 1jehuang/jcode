@@ -89,6 +89,7 @@ pub use performance::{
 pub use ast_operations::{
     AstOperations,
     RegexAstOperations,
+    TreeSitterAstOperations,
     CodeEditResult,
     ExtractMethodParams,
     InlineFunctionParams,
@@ -108,6 +109,7 @@ pub use multi_workspace::{
 };
 pub use tree_sitter::{
     TreeSitterParserManager,
+    TreeSitterRustParser,
     ParserConfig,
     AstNode,
     NodeType,

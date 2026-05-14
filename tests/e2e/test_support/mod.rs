@@ -861,7 +861,7 @@ impl PtyChild {
     }
 
     pub(crate) fn output_text(&self) -> String {
-        String::from_utf8_lossy(&self.output.lock().unwrap()).into_owned()
+        String::from_utf8_lossy(&self.output.lock().unwrap_or_else(|e| e.into_inner())).into_owned()
     }
 }
 
@@ -912,7 +912,7 @@ pub(crate) fn spawn_pty_child(mut cmd: Command) -> Result<PtyChild> {
         loop {
             match master.read(&mut buf) {
                 Ok(0) => break,
-                Ok(n) => output_clone.lock().unwrap().extend_from_slice(&buf[..n]),
+                Ok(n) => output_clone.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&buf[..n]),
                 Err(_) => break,
             }
         }

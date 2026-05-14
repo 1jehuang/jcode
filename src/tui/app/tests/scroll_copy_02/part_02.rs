@@ -89,13 +89,13 @@ fn test_try_open_link_at_opens_clicked_url_and_sets_notice() {
     let opened_for_closure = opened.clone();
 
     let handled = app.try_open_link_at_with(10, 0, |url| {
-        *opened_for_closure.lock().unwrap() = Some(url.to_string());
+        *opened_for_closure.lock().unwrap_or_else(|e| e.into_inner()) = Some(url.to_string());
         Ok::<(), &'static str>(())
     });
 
     assert!(handled);
     assert_eq!(
-        *opened.lock().unwrap(),
+        *opened.lock().unwrap_or_else(|e| e.into_inner()),
         Some("https://example.com/docs".to_string())
     );
     assert_eq!(

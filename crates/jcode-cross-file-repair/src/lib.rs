@@ -25,13 +25,15 @@ mod type_checker;
 mod self_correction;
 mod file_processor;
 mod error_detector;
+pub mod bridge;
 
-pub use ast::{AstAdapter, AstNode, LanguageKind, AstEdit};
-pub use dependency::{DependencyAnalyzer, DependencyGraph, DependencyEdge};
+pub use ast::{AstAdapter, AstNode, LanguageKind, AstEdit, AstEditOp, TreeSitterAstAdapter};
+pub use dependency::{DependencyAnalyzer, DependencyGraph, DependencyEdge, DepKind};
 pub use type_checker::TypeChecker;
-pub use self_correction::{SelfCorrectionLoop, CorrectionIteration};
+pub use self_correction::{SelfCorrectionLoop, CorrectionIteration, Fix, FixType, AiFixRequest};
 pub use file_processor::CrossFileProcessor;
 pub use error_detector::{ErrorDetector, CodeError, MismatchDirection};
+pub use bridge::EditBridge;
 
 use std::sync::Arc;
 

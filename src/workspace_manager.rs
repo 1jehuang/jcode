@@ -851,8 +851,8 @@ fn slugify(input: &str) -> String {
 }
 
 /// Shared global workspace manager instance (lazy-initialized).
-static GLOBAL_WORKSPACE: once_cell::sync::OnceCell<Arc<WorkspaceManager>> =
-    once_cell::sync::OnceCell::new();
+static GLOBAL_WORKSPACE: std::sync::OnceLock<Arc<WorkspaceManager>> =
+    std::sync::OnceLock::new();
 
 /// Initialize or get the global workspace manager.
 pub fn init_global_workspace(manager: WorkspaceManager) -> Arc<WorkspaceManager> {

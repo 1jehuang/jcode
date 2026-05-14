@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn test_session_recovery_tracking() {
-        let _guard = TEST_SESSION_LOCK.lock().unwrap();
+        let _guard = TEST_SESSION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_current_session("test_session_123");
 
         let stored = get_current_session();
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn test_session_recovery_message_format() {
-        let _guard = TEST_SESSION_LOCK.lock().unwrap();
+        let _guard = TEST_SESSION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let test_session = "session_format_test_12345";
         set_current_session(test_session);
 

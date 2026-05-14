@@ -42,7 +42,7 @@ struct StreamingTestProvider {
 
 impl StreamingTestProvider {
     fn queue_response(&self, events: Vec<StreamEvent>) {
-        self.responses.lock().unwrap().push_back(events);
+        self.responses.lock().unwrap_or_else(|e| e.into_inner()).push_back(events);
     }
 }
 

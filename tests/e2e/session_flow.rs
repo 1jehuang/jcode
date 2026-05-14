@@ -87,7 +87,7 @@ async fn resume_session_restores_persisted_compaction_for_provider_context() -> 
             }
         }
 
-        let captured = captured_messages.lock().unwrap();
+        let captured = captured_messages.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(
             captured.len(),
             1,

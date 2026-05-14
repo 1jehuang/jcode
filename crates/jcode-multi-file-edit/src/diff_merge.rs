@@ -9,6 +9,12 @@ pub struct UnifiedDiff {
     pub total_deletions: usize,
 }
 
+impl UnifiedDiff {
+    pub fn empty() -> Self {
+        Self { files: Vec::new(), total_additions: 0, total_deletions: 0 }
+    }
+}
+
 /// Diff for a single file within a unified result.
 #[derive(Debug, Clone)]
 pub struct UnifiedDiffFile {

@@ -111,7 +111,7 @@ fn openai_compatible_models_endpoint_allows_minimal_model_objects() {
 
 #[test]
 fn named_openai_compatible_provider_sets_catalog_cache_namespace() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
     let _key = EnvVarGuard::set("TEST_NAMED_COMPAT_KEY", "test-key");
 
@@ -134,7 +134,7 @@ fn named_openai_compatible_provider_sets_catalog_cache_namespace() {
 
 #[test]
 fn named_openai_compatible_provider_exposes_static_models_as_routes() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
     let _key = EnvVarGuard::set("TEST_NAMED_COMPAT_KEY", "test-key");
 
@@ -174,7 +174,7 @@ fn minimax_profile_exposes_static_models_before_catalog_refresh() {
 
 #[test]
 fn comtegra_profile_uses_endpoint_default_max_tokens() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _override = EnvVarGuard::remove("JCODE_OPENROUTER_MAX_TOKENS");
 
     assert_eq!(
@@ -189,7 +189,7 @@ fn comtegra_profile_uses_endpoint_default_max_tokens() {
 
 #[test]
 fn max_tokens_env_overrides_profile_default() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _override = EnvVarGuard::set("JCODE_OPENROUTER_MAX_TOKENS", "4096");
 
     assert_eq!(
@@ -200,7 +200,7 @@ fn max_tokens_env_overrides_profile_default() {
 
 #[test]
 fn test_configured_api_base_accepts_https() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let prev = std::env::var("JCODE_OPENROUTER_API_BASE").ok();
     crate::env::set_var(
         "JCODE_OPENROUTER_API_BASE",
@@ -216,7 +216,7 @@ fn test_configured_api_base_accepts_https() {
 
 #[test]
 fn test_configured_api_base_rejects_insecure_http_remote() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let prev = std::env::var("JCODE_OPENROUTER_API_BASE").ok();
     crate::env::set_var("JCODE_OPENROUTER_API_BASE", "http://example.com/v1");
     assert_eq!(configured_api_base(), DEFAULT_API_BASE);
@@ -229,7 +229,7 @@ fn test_configured_api_base_rejects_insecure_http_remote() {
 
 #[test]
 fn autodetects_single_saved_openai_compatible_profile() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
@@ -254,7 +254,7 @@ fn autodetects_single_saved_openai_compatible_profile() {
 
 #[test]
 fn autodetects_single_saved_local_openai_compatible_profile() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
@@ -284,7 +284,7 @@ fn autodetects_single_saved_local_openai_compatible_profile() {
 
 #[test]
 fn does_not_guess_when_multiple_saved_openai_compatible_profiles_exist() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
@@ -318,7 +318,7 @@ fn does_not_guess_when_multiple_saved_openai_compatible_profiles_exist() {
 
 #[test]
 fn autodetected_profile_seeds_default_model_and_cache_namespace() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
@@ -441,7 +441,7 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
 
 #[test]
 fn direct_deepseek_profile_uses_static_1m_context_when_catalog_is_absent() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _base = EnvVarGuard::set("JCODE_OPENROUTER_API_BASE", "https://api.deepseek.com");
     let _key_name = EnvVarGuard::set("JCODE_OPENROUTER_API_KEY_NAME", "DEEPSEEK_API_KEY");
     let _api_key = EnvVarGuard::set("DEEPSEEK_API_KEY", "test");
@@ -456,7 +456,7 @@ fn direct_deepseek_profile_uses_static_1m_context_when_catalog_is_absent() {
 
 #[test]
 fn named_openai_compatible_model_context_window_overrides_default() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
     let mut config = crate::config::NamedProviderConfig {
         base_url: "https://compat.example.test/v1".to_string(),
@@ -479,7 +479,7 @@ fn named_openai_compatible_model_context_window_overrides_default() {
 
 #[test]
 fn named_openai_compatible_loads_api_key_from_env_file() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());

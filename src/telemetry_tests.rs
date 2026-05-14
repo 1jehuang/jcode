@@ -262,7 +262,7 @@ fn test_record_connection_type_buckets_transport() {
     record_connection_type("weird-transport");
 
     {
-        let guard = SESSION_STATE.lock().unwrap();
+        let guard = SESSION_STATE.lock().unwrap_or_else(|e| e.into_inner());
         let state = guard.as_ref().expect("session telemetry state");
         assert_eq!(state.transport_persistent_ws_fresh, 1);
         assert_eq!(state.transport_persistent_ws_reuse, 1);
