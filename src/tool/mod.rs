@@ -7,6 +7,7 @@ mod bg;
 mod browser;
 mod codesearch;
 mod communicate;
+mod db_execute;
 mod conversation_search;
 mod debug_socket;
 mod edit;
@@ -186,6 +187,12 @@ impl Registry {
             Self::insert_tool_timed(&mut m, &mut timings, "gmail", gmail::GmailTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "schedule", ambient::ScheduleTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "selfdev", selfdev::SelfDevTool::new);
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "db-execute",
+                db_execute::DbExecuteTool::new,
+            );
             let nonzero: Vec<String> = timings
                 .iter()
                 .filter(|(_, ms)| *ms > 0)
