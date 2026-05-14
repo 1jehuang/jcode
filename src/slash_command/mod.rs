@@ -167,7 +167,7 @@ pub async fn init() {
     vcs::register_branch().await;
     vcs::register_merge().await;
     vcs::register_log().await;
-    vcs::register_redo().await;
+    utils::register_redo().await;
 
     // 30+ aliases
     let aliases = [

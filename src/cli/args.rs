@@ -547,6 +547,371 @@ pub(crate) enum Command {
         #[arg(short, long)]
         checkpoint: Option<String>,
     },
+
+    /// Generate shell completion scripts
+    Completion {
+        /// Shell type: bash, zsh, fish, powershell (auto-detect if omitted)
+        #[arg(value_name = "SHELL", default_value = "auto")]
+        shell: String,
+
+        /// Output to a file instead of stdout
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// Auto-install completion for the detected shell to the standard path
+        #[arg(long)]
+        install: bool,
+    },
+
+    /// Code navigation: goto-definition, find-references, hover, symbols
+    #[command(subcommand)]
+    CodeNav(CodeNavCommand),
+
+    /// Refactoring operations: rename, extract-method, format
+    #[command(subcommand)]
+    CodeRefactor(CodeRefactorCommand),
+
+    /// Debugger integration (DAP client)
+    #[command(subcommand)]
+    Debug(DebugCommand),
+
+    // ──────────────────────────────────────────────────────────
+    // Expanded commands matching Claude Code coverage (~106 total)
+    // ──────────────────────────────────────────────────────────
+
+    /// Clear conversation history or cached state
+    Clear {
+        /// Clear the entire conversation
+        #[arg(long)]
+        all: bool,
+
+        /// Clear cached LSP data
+        #[arg(long)]
+        cache: bool,
+    },
+
+    /// Show token cost and usage estimates
+    Cost {
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Export session context to a file
+    Export {
+        /// Output file path (default: session_export.md)
+        #[arg(short, long, default_value = "session_export.md")]
+        output: String,
+
+        /// Include full context
+        #[arg(long)]
+        full: bool,
+    },
+
+    /// Resume a previous session
+    Resume {
+        /// Session ID or name
+        id: String,
+    },
+
+    /// Manage environment variables
+    Env {
+        /// List all environment variables
+        #[arg(long)]
+        list: bool,
+
+        /// Get a specific variable
+        #[arg(short, long)]
+        get: Option<String>,
+
+        /// Set a variable
+        #[arg(short, long)]
+        set: Option<String>,
+
+        /// Value for --set
+        value: Option<String>,
+    },
+
+    /// Set the effort level for LLM reasoning
+    Effort {
+        /// Effort level: auto, conserve, high, max
+        level: Option<String>,
+    },
+
+    /// Toggle fast mode (skip non-essential tool calls)
+    Fast {
+        /// on, off, or toggle (default: toggle)
+        state: Option<String>,
+    },
+
+    /// Set number of auto-passes for iterative improvement
+    Passes {
+        /// Number of passes (1-10, default: 3)
+        count: Option<u32>,
+    },
+
+    /// Register or show rate limit options
+    RateLimit {
+        /// Show current rate limits
+        #[arg(long)]
+        show: bool,
+
+        /// Set requests per minute
+        #[arg(long)]
+        rpm: Option<u32>,
+
+        /// Set tokens per minute
+        #[arg(long)]
+        tpm: Option<u32>,
+    },
+
+    /// View or manage files in the workspace
+    #[command(subcommand)]
+    Files(FileCommand),
+
+    /// Add a directory to the project context
+    AddDir {
+        /// Directory path to add
+        path: String,
+
+        /// Add recursively
+        #[arg(short, long)]
+        recursive: bool,
+    },
+
+    /// Rename a file or directory
+    FileRename {
+        /// Current path
+        source: String,
+
+        /// New path
+        target: String,
+    },
+
+    /// Copy a file or directory
+    FileCopy {
+        /// Source path
+        source: String,
+
+        /// Destination path
+        target: String,
+    },
+
+    /// Tag the current session with key=value pairs
+    Tag {
+        /// Tags in format: key=value (can specify multiple)
+        tags: Vec<String>,
+
+        /// List all tags
+        #[arg(long)]
+        list: bool,
+
+        /// Remove a tag by key
+        #[arg(long)]
+        remove: Option<String>,
+    },
+
+    /// Show a summary of the current session
+    Summary {
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Include full token usage
+        #[arg(long)]
+        verbose: bool,
+    },
+
+    /// Session analytics and insights
+    Insights {
+        /// Session ID (defaults to current)
+        session: Option<String>,
+
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Show detailed tool usage breakdown
+        #[arg(long)]
+        tools: bool,
+
+        /// Show performance metrics
+        #[arg(long)]
+        performance: bool,
+    },
+
+    /// Upgrade CarpAI to the latest version
+    Upgrade {
+        /// Version to upgrade to (default: latest)
+        #[arg(short, long)]
+        version: Option<String>,
+
+        /// Pre-release channel
+        #[arg(long)]
+        prerelease: bool,
+
+        /// Force reinstall even if up-to-date
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Log out of the current provider
+    Logout {
+        /// Provider to log out from (defaults to current)
+        provider: Option<String>,
+
+        /// Log out from all providers
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Security review of code changes
+    SecurityReview {
+        /// Review staged changes only
+        #[arg(long)]
+        staged: bool,
+
+        /// Review against a git ref
+        #[arg(long)]
+        diff: Option<String>,
+
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Commit, push, and create a PR in one command
+    CommitPushPr {
+        /// Branch name for the PR (default: auto-generate)
+        #[arg(short, long)]
+        branch: Option<String>,
+
+        /// PR title
+        #[arg(short, long)]
+        title: Option<String>,
+
+        /// PR body/description
+        #[arg(short, long)]
+        body: Option<String>,
+
+        /// Skip opening in browser
+        #[arg(long)]
+        no_open: bool,
+
+        /// Make PR a draft
+        #[arg(long)]
+        draft: bool,
+    },
+
+    /// List and manage PR comments
+    PrComments {
+        /// PR number (defaults to current branch's PR)
+        pr: Option<String>,
+
+        /// Add a comment
+        #[arg(short, long)]
+        add: Option<String>,
+
+        /// Reply to a comment by ID
+        #[arg(short, long)]
+        reply: Option<String>,
+
+        /// Resolve a comment thread
+        #[arg(short, long)]
+        resolve: Option<String>,
+    },
+
+    /// Auto-fix PR review comments
+    AutoFixPr {
+        /// PR number
+        pr: Option<String>,
+
+        /// Apply fixes automatically (default: preview)
+        #[arg(long)]
+        apply: bool,
+    },
+
+    /// Install the CarpAI GitHub App
+    InstallGithubApp {
+        /// Repo scope (user/repo or org)
+        #[arg(short, long)]
+        scope: Option<String>,
+
+        /// Install globally for the user
+        #[arg(long)]
+        global: bool,
+    },
+
+    /// Pair programming mode with AI buddy
+    Buddy {
+        /// Enable, disable, or toggle
+        state: Option<String>,
+
+        /// Share current context with buddy
+        #[arg(long)]
+        share: bool,
+    },
+
+    /// Install claude-code compatible slack integration
+    InstallSlackApp {
+        /// Workspace to install to
+        #[arg(short, long)]
+        workspace: Option<String>,
+    },
+
+    /// Multi-file batch editing with diff preview
+    BatchEdit {
+        /// File(s) to edit (repeatable)
+        #[arg(required = true)]
+        files: Vec<String>,
+
+        /// Diff preview mode (default: preview, use --apply to apply)
+        #[arg(long)]
+        apply: bool,
+
+        /// Show diff preview then prompt for confirmation
+        #[arg(long)]
+        interactive: bool,
+
+        /// Pattern to search for (overall replacement across files)
+        #[arg(short, long)]
+        pattern: Option<String>,
+
+        /// Replacement text
+        #[arg(short, long)]
+        replace: Option<String>,
+    },
+
+    /// Async review CLI for LLM-powered diff analysis
+    Review {
+        /// Review staged changes
+        #[arg(long)]
+        staged: bool,
+
+        /// Review against git ref
+        #[arg(long)]
+        diff: Option<String>,
+
+        /// Run security-focused review
+        #[arg(long)]
+        security: bool,
+
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Code navigation: goto-definition, find-references, hover, symbols
+    #[command(subcommand)]
+    CodeNav(CodeNavCommand),
+
+    /// Refactoring operations: rename, extract-method, format
+    #[command(subcommand)]
+    CodeRefactor(CodeRefactorCommand),
+
+    /// Debugger integration (DAP client)
+    #[command(subcommand)]
+    Debug(DebugCommand),
 }
 
 #[derive(Subcommand, Debug)]
@@ -787,6 +1152,25 @@ pub(crate) enum McpCommand {
         #[arg(short, long, default_value = "local")]
         scope: String,
     },
+
+    /// Bidirectional MCP bridge: serve as MCP server + connect external MCP servers
+    Bridge {
+        /// Enable debug output
+        #[arg(short, long)]
+        debug: bool,
+
+        /// Expose workspace resources to MCP clients
+        #[arg(long)]
+        expose_resources: bool,
+
+        /// Enable auto-connection of configured MCP servers
+        #[arg(long, default_value = "true")]
+        auto_connect: bool,
+
+        /// Print bridge status after initialization
+        #[arg(long)]
+        status: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1000,6 +1384,240 @@ pub(crate) enum ConfigCommand {
         /// Emit JSON instead of plain text
         #[arg(long)]
         json: bool,
+    },
+}
+
+/// Code navigation subcommands
+#[derive(Subcommand, Debug)]
+pub(crate) enum CodeNavCommand {
+    /// Go to definition of symbol at position
+    GoToDef {
+        /// File path in format: <file>:<line>:<column>  (e.g. src/main.rs:42:5)
+        location: String,
+    },
+    /// Find all references to symbol at position
+    FindRefs {
+        /// File path in format: <file>:<line>:<column>
+        location: String,
+    },
+    /// Get hover info (type signature, docs) at position
+    Hover {
+        /// File path in format: <file>:<line>:<column>
+        location: String,
+    },
+    /// List symbols in a file (functions, classes, variables)
+    Symbols {
+        /// File path
+        file: String,
+    },
+    /// Search workspace for symbols matching query
+    Search {
+        /// Symbol name or pattern to search
+        query: String,
+    },
+    /// Go to implementation of interface/trait at position
+    GoToImpl {
+        /// File path in format: <file>:<line>:<column>
+        location: String,
+    },
+    /// Show call hierarchy for function at position
+    CallHierarchy {
+        /// File path in format: <file>:<line>:<column>
+        location: String,
+    },
+    /// List all running LSP servers
+    LspStatus,
+}
+
+/// Refactoring subcommands
+#[derive(Subcommand, Debug)]
+pub(crate) enum CodeRefactorCommand {
+    /// Rename a symbol across all files
+    Rename {
+        /// Current symbol name
+        old_name: String,
+        /// New symbol name
+        new_name: String,
+        /// Restrict rename to a single file
+        #[arg(short, long)]
+        file: Option<String>,
+        /// Dry-run: show what would change without applying
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Extract selected code into a new method/function
+    ExtractMethod {
+        /// File path
+        file: String,
+        /// Line range: <start>-<end>  (e.g. 42-67)
+        range: String,
+        /// Name for the extracted method
+        #[arg(short, long)]
+        name: String,
+        /// Dry-run preview
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Format code using language formatter
+    Format {
+        /// Files to format (defaults to all tracked files)
+        files: Vec<String>,
+        /// Check mode: report unformatted files without modifying
+        #[arg(long)]
+        check: bool,
+    },
+    /// Get diagnostics (errors/warnings) for a file
+    Diagnostics {
+        /// File path (defaults to current open file)
+        file: String,
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Debugger subcommands (DAP protocol)
+#[derive(Subcommand, Debug)]
+pub(crate) enum DebugCommand {
+    /// Start a debug session for the current project
+    Start {
+        /// Debug configuration name (as defined in .vscode/launch.json or similar)
+        #[arg(short, long)]
+        config: Option<String>,
+        /// Program arguments to pass
+        #[arg(short, long)]
+        args: Vec<String>,
+    },
+    /// Set a breakpoint at a location
+    Breakpoint {
+        /// File:line  (e.g. src/main.rs:42)
+        location: String,
+        /// Optional condition expression
+        #[arg(short, long)]
+        condition: Option<String>,
+    },
+    /// Continue execution (after breakpoint hit)
+    Continue,
+    /// Step over to next line
+    Next,
+    /// Step into function call
+    StepIn,
+    /// Step out of current function
+    StepOut,
+    /// Print current stack trace
+    Stack,
+    /// Print variables in current scope
+    Variables,
+    /// Evaluate an expression in the current context
+    Evaluate {
+        /// Expression to evaluate
+        expression: String,
+    },
+    /// Restart the debug session
+    Restart,
+    /// Disconnect from the debug target without ending the process
+    Disconnect,
+    /// Show information about loaded shared libraries/modules
+    Modules,
+    /// Show available threads
+    Threads,
+    /// Switch to a specific thread
+    Thread {
+        /// Thread ID
+        id: u64,
+    },
+    /// Show all breakpoints
+    Breakpoints,
+    /// Delete a breakpoint
+    DeleteBreakpoint {
+        /// Breakpoint ID (use `breakpoints` to list)
+        id: u64,
+    },
+    /// Enable/disable exception breakpoint
+    ExceptionBreakpoint {
+        /// Exception type: all, uncaught, none
+        #[arg(default_value = "uncaught")]
+        filter: String,
+    },
+    /// Set a logpoint (logs message instead of stopping)
+    Logpoint {
+        /// Location like file:line
+        location: String,
+        /// Log message template
+        message: String,
+    },
+    /// End the debug session
+    Stop,
+}
+
+/// File management subcommands
+#[derive(Subcommand, Debug)]
+pub(crate) enum FileCommand {
+    /// List files matching a pattern
+    List {
+        /// Glob pattern to filter (e.g. "*.rs")
+        pattern: Option<String>,
+
+        /// Show file sizes
+        #[arg(long)]
+        sizes: bool,
+
+        /// Show git status for each file
+        #[arg(long)]
+        git_status: bool,
+
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Recursive listing
+        #[arg(short, long, default_value = "true")]
+        recursive: bool,
+    },
+    /// Show detailed file info
+    Info {
+        /// File path
+        path: String,
+    },
+    /// Find files by content (grep)
+    Grep {
+        /// Search pattern
+        pattern: String,
+
+        /// File glob pattern
+        #[arg(short, long)]
+        glob: Option<String>,
+
+        /// Maximum results
+        #[arg(short, long, default_value = "50")]
+        max_results: usize,
+
+        /// Show context lines around matches
+        #[arg(short, long, default_value = "0")]
+        context: usize,
+
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Search files by name
+    Find {
+        /// File name pattern (glob)
+        name: String,
+
+        /// Maximum depth
+        #[arg(short, long, default_value = "10")]
+        max_depth: usize,
+
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show recent files
+    Recent {
+        /// Number of files
+        #[arg(short, long, default_value = "20")]
+        count: usize,
     },
 }
 

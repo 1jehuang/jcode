@@ -12,7 +12,7 @@
 //! - 自动从 AST 构建索引
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -212,21 +212,21 @@ impl SymbolIndex {
     /// 添加单个符号到索引
     pub fn add_symbol(&self, name: &str, location: SymbolLocation) {
         let name_lower = name.to_lowercase();
-        
+
         // 更新倒排索引
         {
             let mut index = self.inverted_index.write();
             index.entry(name_lower.clone())
                 .or_insert_with(Vec::new)
-                .push(location);
+                .push(location.clone());
         }
-        
+
         // 更新前缀索引 (Trie)
         {
             let mut trie = self.prefix_trie.write();
             self.insert_into_trie(&mut trie, &name_lower);
         }
-        
+
         // 更新类型索引
         {
             let mut type_idx = self.type_index.write();
@@ -234,7 +234,7 @@ impl SymbolIndex {
                 .or_insert_with(HashSet::new)
                 .insert(name_lower.clone());
         }
-        
+
         // 更新文件索引
         {
             let mut file_idx = self.file_index.write();
@@ -242,7 +242,7 @@ impl SymbolIndex {
                 .or_insert_with(HashSet::new)
                 .insert(name_lower);
         }
-        
+
         // 更新统计
         {
             let mut stats = self.stats.write();
@@ -251,17 +251,18 @@ impl SymbolIndex {
                 .entry(format!("{}", location.kind))
                 .or_insert(0) += 1;
         }
-        
+
         debug!(symbol = %name, kind = %location.kind, file = %location.file_path.display(), "Symbol added to index");
     }
 
     /// 批量添加符号
     pub fn add_symbols_batch(&self, symbols: Vec<(String, SymbolLocation)>) {
+        let count = symbols.len();
         for (name, location) in symbols {
             self.add_symbol(&name, location);
         }
-        
-        info!(count = symbols.len(), "Batch of symbols added");
+
+        info!(count = count, "Batch of symbols added");
     }
 
     /// 精确查找符号
@@ -300,7 +301,7 @@ impl SymbolIndex {
         
         // 去重并限制数量
         results.sort_by(|a, b| a.file_path.cmp(&b.file_path).then(a.line.cmp(&b.line)));
-        results.dedup_by(|loc| (&loc.file_path, loc.line));
+        results.dedup_by(|a, b| a.file_path == b.file_path && a.line == b.line);
         results.into_iter().take(limit).collect()
     }
 
@@ -309,30 +310,31 @@ impl SymbolIndex {
         if !self.config.enable_fuzzy_search {
             return Vec::new();
         }
-        
+
         let query_lower = query.to_lowercase();
         let max_dist = self.config.max_edit_distance;
-        
+
         let index = self.inverted_index.read();
-        let mut scored_results: Vec<(SymbolLocation, usize)> = index
+
+        let mut candidates: Vec<(String, SymbolLocation, usize)> = index
             .iter()
             .filter(|(name, _)| {
                 levenshtein_distance(name, &query_lower) <= max_dist
             })
             .flat_map(|(name, locations)| {
+                let name_clone = name.clone();
+                let dist = levenshtein_distance(name, &query_lower);
                 locations.iter().cloned().map(move |loc| {
-                    let dist = levenshtein_distance(name, &query_lower);
-                    (loc, dist)
+                    (name_clone.clone(), loc, dist)
                 })
             })
             .collect();
-        
-        // 按编辑距离排序 (越小越好)
-        scored_results.sort_by_key(|(_, dist)| *dist);
-        
-        scored_results
+
+        candidates.sort_by_key(|(_, _, dist)| *dist);
+
+        candidates
             .into_iter()
-            .map(|(loc, _)| loc)
+            .map(|(_, loc, _)| loc)
             .take(limit)
             .collect()
     }
@@ -408,7 +410,7 @@ impl SymbolIndex {
     fn insert_into_trie(&self, node: &mut TrieNode, s: &str) {
         let mut current = node;
         for ch in s.chars() {
-            current = current.children.entry(ch).or_insert_with(TrieNode::default());
+            current = current.children.entry(ch).or_insert_with(|| TrieNode::default());
         }
         current.is_end_of_word = true;
     }

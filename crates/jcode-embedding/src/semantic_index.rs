@@ -13,25 +13,22 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use parking_lot::RwLock;
+use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
+use anyhow::Result;
 
 /// 向量数据库 trait (抽象后端)
 pub trait VectorDatabase: Send + Sync {
     /// 插入向量
     fn insert(&mut self, id: &str, vector: Vec<f32>, metadata: HashMap<String, String>) -> Result<()>;
-    
+
     /// 搜索最相似的向量
     fn search(&self, query: &[f32], top_k: usize) -> Result<Vec<VectorSearchResult>>;
-    
-    /// 带过滤的搜索
-    fn search_filtering<F>(&self, query: &[f32], top_k: usize, filter: F) -> Result<Vec<VectorSearchResult>>
-    where F: Fn(&VectorMetadata) -> bool;
-    
+
     /// 删除向量
     fn delete(&mut self, id: &str) -> Result<bool>;
-    
+
     /// 获取向量数量
     fn len(&self) -> usize;
 }
@@ -113,40 +110,6 @@ impl VectorDatabase for InMemoryVectorDB {
             .collect();
         
         // 按分数降序排序
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        
-        Ok(results
-            .into_iter()
-            .take(top_k)
-            .map(|(id, score)| {
-                let (_, meta) = &self.vectors[&id];
-                VectorSearchResult {
-                    id,
-                    score,
-                    metadata: meta.clone(),
-                }
-            })
-            .collect())
-    }
-
-    fn search_filtering<F>(
-        &self,
-        query: &[f32],
-        top_k: usize,
-        filter: F,
-    ) -> Result<Vec<VectorSearchResult>>
-    where
-        F: Fn(&VectorMetadata) -> bool,
-    {
-        let mut results: Vec<(String, f64)> = self.vectors
-            .iter()
-            .filter(|(_, (_, meta))| filter(meta))
-            .map(|(id, (vec, _))| {
-                let score = cosine_similarity(query, vec);
-                (id.clone(), score)
-            })
-            .collect();
-        
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         
         Ok(results
@@ -277,13 +240,14 @@ impl SemanticIndex {
         &self,
         items: Vec<(String, Vec<f32>, HashMap<String, String>)>,
     ) -> Result<()> {
+        let count = items.len();
         let mut db = self.db.write().await;
-        
+
         for (id, embedding, metadata) in items {
             db.insert(&id, embedding, metadata)?;
         }
-        
-        info!(count = items.len(), "Batch indexed");
+
+        info!(count = count, "Batch indexed");
         Ok(())
     }
 
@@ -303,10 +267,10 @@ impl SemanticIndex {
         
         // 更新统计
         {
-            let mut stats = self.stats.write();
+            let mut stats = self.stats.write().await;
             stats.total_queries += 1;
-            stats.avg_query_latency_ms = 
-                (stats.avg_query_latency_ms * (stats.total_queries - 1) as f64 + duration_ms) 
+            stats.avg_query_latency_ms =
+                (stats.avg_query_latency_ms * (stats.total_queries - 1) as f64 + duration_ms)
                 / stats.total_queries as f64;
         }
         
@@ -335,14 +299,15 @@ impl SemanticIndex {
         limit: usize,
     ) -> Result<Vec<SimilarFunctionResult>> {
         let mut db = self.db.write().await;
-        let results = db.search_filtering(
-            function_embedding,
-            limit * 2, // 多取一些以便过滤
-            |meta| !exclude_files.contains(&meta.file_path),
-        )?;
+        let results = db.search(function_embedding, limit * 2)?;
+
+        let filtered_results: Vec<VectorSearchResult> = results
+            .into_iter()
+            .filter(|r| !exclude_files.contains(&r.metadata.file_path))
+            .collect();
         
         // 仅保留函数类型的匹配
-        let functions: Vec<SimilarFunctionResult> = results
+        let functions: Vec<SimilarFunctionResult> = filtered_results
             .into_iter()
             .filter(|r| r.metadata.kind.as_deref() == Some("function"))
             .map(|r| SimilarFunctionResult {
@@ -371,7 +336,7 @@ impl SemanticIndex {
 
     /// 获取统计信息
     pub async fn get_stats(&self) -> SemanticStats {
-        let stats = self.stats.read().clone();
+        let stats = self.stats.read().await.clone();
         let db_len = self.len().await;
         
         SemanticStats {

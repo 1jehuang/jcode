@@ -3,6 +3,8 @@ pub mod ambient;
 mod apply_patch;
 mod bash;
 mod batch;
+mod batch_edit;
+pub mod debug_evaluate;
 mod bg;
 mod browser;
 mod codesearch;
@@ -24,6 +26,7 @@ mod open;
 pub mod plan_mode;
 mod patch;
 mod read;
+mod review;
 pub mod selfdev;
 mod session_search;
 mod side_panel;
@@ -207,6 +210,9 @@ impl Registry {
             Self::insert_tool_timed(&mut m, &mut timings, "gmail", gmail::GmailTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "schedule", ambient::ScheduleTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "selfdev", selfdev::SelfDevTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "batch_edit", batch_edit::BatchEditTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "review", review::ReviewTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "debug", debug_evaluate::DebugEvaluateTool::new);
             let nonzero: Vec<String> = timings
                 .iter()
                 .filter(|(_, ms)| *ms > 0)

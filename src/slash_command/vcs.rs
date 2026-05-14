@@ -1,234 +1,140 @@
 use super::{register, SlashResult};
 
+fn s<F, Fut>(f: F) where F: FnOnce() -> Fut + Send + 'static, Fut: std::future::Future<Output = ()> + Send + 'static {
+    if let Ok(h) = tokio::runtime::Handle::try_current() { h.spawn(f()); }
+}
+
 pub(crate) async fn register_commit() {
-    register("commit", "Commit code with AI-generated message",
-        "/commit [message]",
-        std::sync::Arc::new(|args: &str| {
-            spawn_async(move || async move {
-                let msg = args.trim();
-                let cwd = match std::env::current_dir() { Ok(d) => d, Err(e) => { eprintln!("❌ {}", e); return; }};
-                // Stage all
-                let _ = tokio::process::Command::new("git").args(["add", "-A"]).current_dir(&cwd).output().await;
-                if msg.is_empty() {
-                    // Get diff for AI-generated message
-                    let diff = tokio::process::Command::new("git").args(["diff", "--cached"]).current_dir(&cwd).output().await;
-                    eprintln!("\n📝 AI Commit\n");
-                    match diff {
-                        Ok(o) if !o.stdout.is_empty() => {
-                            let d = String::from_utf8_lossy(&o.stdout);
-                            let files = d.lines().filter(|l| l.starts_with("+") && !l.starts_with("+++")).count();
-                            let lines = d.lines().filter(|l| l.starts_with("-") && !l.starts_with("---")).count();
-                            let auto_msg = format!("Update: {} files (+{}/-{})", d.len(), files, lines);
-                            eprintln!("  Message: {}", auto_msg);
-                            eprintln!("  (No message provided, use /commit <msg>)\n");
-                            eprintln!("  git add -A && git commit -m \"{}\"\n", auto_msg);
-                        }
-                        _ => eprintln!("  No changes to commit.\n"),
-                    }
-                } else {
-                    let r = tokio::process::Command::new("git").args(["commit", "-m", msg]).current_dir(&cwd).output().await;
-                    match r {
-                        Ok(o) if o.status.success() => eprintln!("✅ Committed: {}\n", msg),
-                        Ok(o) => eprintln!("❌ {}\n", String::from_utf8_lossy(&o.stderr).trim()),
-                        Err(e) => eprintln!("❌ Git error: {}\n", e),
-                    }
+    register("commit", "Commit code", "/commit [msg]",
+        std::sync::Arc::new(|args: &str| { let a=args.to_string(); s(move||async move{
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let _ = tokio::process::Command::new("git").args(["add","-A"]).current_dir(&cwd).output().await;
+            let msg = a.trim();
+            if msg.is_empty() {
+                if let Ok(o) = tokio::process::Command::new("git").args(["diff","--cached"]).current_dir(&cwd).output().await {
+                    let d = String::from_utf8_lossy(&o.stdout);
+                    let fc = d.lines().filter(|l|l.starts_with("diff --git")).count();
+                    let ad = d.lines().filter(|l|l.starts_with('+')&&!l.starts_with("+++")).count();
+                    let rm = d.lines().filter(|l|l.starts_with('-')&&!l.starts_with("---")).count();
+                    if fc>0 {
+                        let m = format!("Update {} files (+{}/-{})",fc,ad,rm);
+                        let r = tokio::process::Command::new("git").args(["commit","-m",&m]).current_dir(&cwd).output().await;
+                        if r.map(|o|o.status.success()).unwrap_or(false) { eprintln!("✅ {}\n",m); } else { eprintln!("❌\n"); }
+                    } else { eprintln!("  No changes.\n"); }
                 }
-            });
-            SlashResult::Ok("Commit command.".into())
-        }),
+            } else {
+                let r = tokio::process::Command::new("git").args(["commit","-m",msg]).current_dir(&cwd).output().await;
+                if r.map(|o|o.status.success()).unwrap_or(false) { eprintln!("✅ Committed\n"); } else { eprintln!("❌\n"); }
+            }
+        }); SlashResult::Ok("Commit.".into()) }),
     ).await;
 }
 
 pub(crate) async fn register_rethink() {
-    register("rethink", "Re-analyze context and suggest improvements",
-        "/rethink",
-        std::sync::Arc::new(|_args: &str| {
-            eprintln!("\n🔄 Rethinking context...\n  (Analyzing project structure...)\n");
-            if let Ok(cwd) = std::env::current_dir() {
-                let files = std::fs::read_dir(&cwd).ok().map(|e| e.filter_map(|e| e.ok()).count()).unwrap_or(0);
-                eprintln!("  Directory: {} ({} items)", cwd.display(), files);
-            }
-            eprintln!("  (Full rethink requires Agent API.)\n");
-            SlashResult::Ok("Rethink complete.".into())
-        }),
+    register("rethink", "Re-analyze context", "/rethink",
+        std::sync::Arc::new(|_| { s(move||async move{
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let total = std::fs::read_dir(&cwd).map(|e|e.filter_map(|e|e.ok()).count()).unwrap_or(0);
+            let rs = std::fs::read_dir(&cwd).map(|e|e.filter_map(|e|e.ok()).filter(|e|e.path().extension().map(|x|x=="rs").unwrap_or(false)).count()).unwrap_or(0);
+            eprintln!("\n🔄 Rethink\n  Dir: {} ({} items, {} .rs)", cwd.display(), total, rs);
+            if rs > 0 { eprintln!("  → /build to compile"); }
+        }); SlashResult::Ok("Rethink.".into()) }),
     ).await;
 }
 
 pub(crate) async fn register_diff() {
-    register("diff", "Show git diff for current changes",
-        "/diff [--staged] [path]",
-        std::sync::Arc::new(|args: &str| {
-            spawn_async(move || async move {
-                let cwd = match std::env::current_dir() { Ok(d) => d, Err(e) => { eprintln!("❌ {}", e); return; }};
-                let staged = args.contains("--staged");
-                let path = args.replace("--staged", "").trim().to_string();
-                let mut cmd = tokio::process::Command::new("git");
-                cmd.current_dir(&cwd);
-                if staged { cmd.arg("diff").arg("--cached"); }
-                else { cmd.arg("diff").arg("HEAD"); }
-                if !path.is_empty() { cmd.arg(&path); }
-                match cmd.output().await {
-                    Ok(o) if !o.stdout.is_empty() => {
-                        let d = String::from_utf8_lossy(&o.stdout);
-                        let lines: Vec<&str> = d.lines().collect();
-                        for l in lines.iter().take(60) { eprintln!("{}", l); }
-                        if lines.len() > 60 { eprintln!("... {} more lines", lines.len()-60); }
-                    }
-                    Ok(_) => eprintln!("  No changes found.\n"),
-                    Err(e) => eprintln!("❌ Git error: {}\n", e),
-                }
-            });
-            SlashResult::Ok("Showing diff...".into())
-        }),
+    register("diff", "Show git diff", "/diff [--staged]",
+        std::sync::Arc::new(|args: &str| { let a=args.to_string(); s(move||async move{
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let git = crate::git::operations::GitOperations::new(cwd);
+            let d = git.format_diff(a.contains("--staged"));
+            if d.is_empty() { eprintln!("  No changes.\n"); return; }
+            for l in d.lines().take(60) { eprintln!("{}",l); }
+            if d.lines().count()>60 { eprintln!("... {} more\n",d.lines().count()-60); }
+        }); SlashResult::Ok("Diff.".into()) }),
     ).await;
 }
 
 pub(crate) async fn register_status() {
-    register("status", "Show current git status",
-        "/status",
-        std::sync::Arc::new(|_args: &str| {
-            spawn_async(move || async move {
-                let cwd = match std::env::current_dir() { Ok(d) => d, Err(e) => { eprintln!("❌ {}", e); return; }};
-                match tokio::process::Command::new("git").args(["status", "--short"]).current_dir(&cwd).output().await {
-                    Ok(o) => {
-                        let out = String::from_utf8_lossy(&o.stdout);
-                        eprintln!("\n📋 Git Status\n");
-                        if out.trim().is_empty() { eprintln!("  Clean working tree.\n"); }
-                        else { eprintln!("{}", out); }
-                    }
-                    Err(e) => eprintln!("❌ Git error: {}\n", e),
-                }
-            });
-            SlashResult::Ok("Git status.".into())
-        }),
+    register("status", "Show git status", "/status",
+        std::sync::Arc::new(|_| { s(move||async move{
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let o = tokio::process::Command::new("git").args(["status","--short"]).current_dir(&cwd).output().await;
+            if let Ok(o) = o { let s = String::from_utf8_lossy(&o.stdout); eprintln!("\n📋 Status\n{}\n", if s.trim().is_empty(){ "  Clean.\n".to_string() }else{ s.to_string() }); }
+        }); SlashResult::Ok("Status.".into()) }),
     ).await;
 }
 
 pub(crate) async fn register_push() {
-    register("push", "Push to remote git repository",
-        "/push [remote] [branch]",
-        std::sync::Arc::new(|args: &str| {
-            spawn_async(move || async move {
-                let parts: Vec<&str> = args.trim().split_whitespace().collect();
-                let remote = parts.first().copied().unwrap_or("origin");
-                let branch = parts.get(1).copied().unwrap_or("main");
-                let cwd = match std::env::current_dir() { Ok(d) => d, Err(e) => { eprintln!("❌ {}\n", e); return; }};
-                eprintln!("\n📤 Pushing to {} {}\n", remote, branch);
-                let r = tokio::process::Command::new("git")
-                    .args(["push", remote, branch]).current_dir(&cwd).output().await;
-                match r {
-                    Ok(o) if o.status.success() => eprintln!("✅ Pushed to {}/{}\n", remote, branch),
-                    Ok(o) => eprintln!("❌ {}\n", String::from_utf8_lossy(&o.stderr).trim()),
-                    Err(e) => eprintln!("❌ Git error: {}\n", e),
-                }
-            });
-            SlashResult::Ok("Pushing...".into())
-        }),
+    register("push", "Push to remote", "/push [remote] [branch]",
+        std::sync::Arc::new(|args: &str| { let a=args.to_string(); s(move||async move{
+            let p: Vec<&str> = a.split_whitespace().collect();
+            let r = p.first().copied().unwrap_or("origin"); let b = p.get(1).copied().unwrap_or("main");
+            let cwd = std::env::current_dir().unwrap_or_default();
+            eprintln!("\n📤 Pushing {} {}\n",r,b);
+            let o = tokio::process::Command::new("git").args(["push",r,b]).current_dir(&cwd).output().await;
+            if o.map(|o|o.status.success()).unwrap_or(false) { eprintln!("✅\n"); } else { eprintln!("❌\n"); }
+        }); SlashResult::Ok("Push.".into()) }),
     ).await;
 }
 
 pub(crate) async fn register_pull() {
-    register("pull", "Pull from remote git repository",
-        "/pull [remote] [branch]",
-        std::sync::Arc::new(|args: &str| {
-            spawn_async(move || async move {
-                let parts: Vec<&str> = args.trim().split_whitespace().collect();
-                let remote = parts.first().copied().unwrap_or("origin");
-                let branch = parts.get(1).copied().unwrap_or("main");
-                let cwd = match std::env::current_dir() { Ok(d) => d, Err(e) => { eprintln!("❌ {}\n", e); return; }};
-                eprintln!("\n📥 Pulling from {} {}\n", remote, branch);
-                let r = tokio::process::Command::new("git")
-                    .args(["pull", remote, branch]).current_dir(&cwd).output().await;
-                match r {
-                    Ok(o) if o.status.success() => eprintln!("✅ Pulled from {}/{}\n", remote, branch),
-                    Ok(o) => eprintln!("❌ {}\n", String::from_utf8_lossy(&o.stderr).trim()),
-                    Err(e) => eprintln!("❌ Git error: {}\n", e),
-                }
-            });
-            SlashResult::Ok("Pulling...".into())
-        }),
+    register("pull", "Pull from remote", "/pull [remote] [branch]",
+        std::sync::Arc::new(|args: &str| { let a=args.to_string(); s(move||async move{
+            let p: Vec<&str> = a.split_whitespace().collect();
+            let r = p.first().copied().unwrap_or("origin"); let b = p.get(1).copied().unwrap_or("main");
+            let cwd = std::env::current_dir().unwrap_or_default();
+            eprintln!("\n📥 Pulling {} {}\n",r,b);
+            let o = tokio::process::Command::new("git").args(["pull",r,b]).current_dir(&cwd).output().await;
+            if o.map(|o|o.status.success()).unwrap_or(false) { eprintln!("✅\n"); } else { eprintln!("❌\n"); }
+        }); SlashResult::Ok("Pull.".into()) }),
     ).await;
 }
 
 pub(crate) async fn register_branch() {
-    register("branch", "Git branch operations",
-        "/branch [list|create <n>|delete <n>]",
-        std::sync::Arc::new(|args: &str| {
-            spawn_async(move || async move {
-                let parts: Vec<&str> = args.trim().splitn(2, ' ').collect();
-                let cwd = match std::env::current_dir() { Ok(d) => d, Err(e) => { eprintln!("❌ {}\n", e); return; }};
-                match parts.first().copied().unwrap_or("") {
-                    "list" | "ls" | "" => {
-                        let r = tokio::process::Command::new("git").args(["branch"]).current_dir(&cwd).output().await;
-                        eprintln!("\n📋 Git Branches\n");
-                        if let Ok(o) = r { eprintln!("{}", String::from_utf8_lossy(&o.stdout)); }
-                    }
-                    "create" if parts.len() >= 2 => {
-                        let r = tokio::process::Command::new("git")
-                            .args(["checkout", "-b", parts[1]]).current_dir(&cwd).output().await;
-                        match r { Ok(o) if o.status.success() => eprintln!("✅ Created branch: {}\n", parts[1]), _ => eprintln!("❌ Failed\n"), }
-                    }
-                    "delete" if parts.len() >= 2 => {
-                        let r = tokio::process::Command::new("git")
-                            .args(["branch", "-d", parts[1]]).current_dir(&cwd).output().await;
-                        match r { Ok(o) if o.status.success() => eprintln!("✅ Deleted branch: {}\n", parts[1]), _ => eprintln!("❌ Failed\n"), }
-                    }
-                    _ => eprintln!("Usage: /branch [list|create <n>|delete <n>]\n"),
+    register("branch", "Git branch ops", "/branch [list|create <n>|delete <n>]",
+        std::sync::Arc::new(|args: &str| { let a=args.to_string(); s(move||async move{
+            let p: Vec<&str> = a.trim().splitn(2,' ').collect();
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let git = crate::git::operations::GitOperations::new(cwd);
+            match p.first().copied().unwrap_or("") {
+                "list"|"ls"|"" => {
+                        let branches = git.list_branches();
+                        eprintln!("\n📋 Branches\n");
+                        for b in &branches { eprintln!("  {} {}", if b.current{"*"}else{" "}, b.name); }
+                    eprintln!();
                 }
-            });
-            SlashResult::Ok("Branch command.".into())
-        }),
+                "create" if p.len()>=2 => { let r = git.create_branch(p[1]); eprintln!("{}\n", r.unwrap_or_else(|e|format!("❌ {}",e))); }
+                "delete" if p.len()>=2 => { let r = git.delete_branch(p[1],false); eprintln!("{}\n", r.unwrap_or_else(|e|format!("❌ {}",e))); }
+                _ => eprintln!("Usage: /branch [list|create|delete]\n"),
+            }
+        }); SlashResult::Ok("Branch.".into()) }),
     ).await;
 }
 
 pub(crate) async fn register_merge() {
-    register("merge", "Merge a branch into current",
-        "/merge <branch>",
-        std::sync::Arc::new(|args: &str| {
-            spawn_async(move || async move {
-                let branch = args.trim();
-                if branch.is_empty() { eprintln!("Usage: /merge <branch>\n"); return; }
-                let cwd = match std::env::current_dir() { Ok(d) => d, Err(e) => { eprintln!("❌ {}\n", e); return; }};
-                eprintln!("\n🔀 Merging {} into current branch...\n", branch);
-                let r = tokio::process::Command::new("git")
-                    .args(["merge", branch]).current_dir(&cwd).output().await;
-                match r {
-                    Ok(o) if o.status.success() => eprintln!("✅ Merged {}\n", branch),
-                    Ok(o) => eprintln!("❌ {}\n", String::from_utf8_lossy(&o.stderr).trim()),
-                    Err(e) => eprintln!("❌ Git error: {}\n", e),
-                }
-            });
-            SlashResult::Ok("Merging...".into())
-        }),
+    register("merge", "Merge branch", "/merge <branch>",
+        std::sync::Arc::new(|args: &str| { let a=args.to_string(); s(move||async move{
+            if a.trim().is_empty() { eprintln!("Usage: /merge <branch>\n"); return; }
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let o = tokio::process::Command::new("git").args(["merge",a.trim()]).current_dir(&cwd).output().await;
+            if o.map(|o|o.status.success()).unwrap_or(false) { eprintln!("✅\n"); } else { eprintln!("❌\n"); }
+        }); SlashResult::Ok("Merge.".into()) }),
     ).await;
 }
 
 pub(crate) async fn register_log() {
-    register("log", "Show git commit log",
-        "/log [n]",
-        std::sync::Arc::new(|args: &str| {
-            spawn_async(move || async move {
-                let n = args.trim().parse::<usize>().unwrap_or(10);
-                let cwd = match std::env::current_dir() { Ok(d) => d, Err(e) => { eprintln!("❌ {}\n", e); return; }};
-                match tokio::process::Command::new("git")
-                    .args(["log", "--oneline", "-n", &n.to_string()]).current_dir(&cwd).output().await
-                {
-                    Ok(o) => { eprintln!("\n📋 Recent commits (last {})\n{}\n", n, String::from_utf8_lossy(&o.stdout)); }
-                    Err(e) => eprintln!("❌ Git error: {}\n", e),
-                }
-            });
-            SlashResult::Ok("Log.".into())
-        }),
+    register("log", "Show commit log", "/log [n]",
+        std::sync::Arc::new(|args: &str| { let a=args.to_string(); s(move||async move{
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let n = a.trim().parse::<usize>().unwrap_or(10);
+            let git = crate::git::operations::GitOperations::new(cwd);
+            for c in git.recent_commits(n) { eprintln!("  {}",c); }
+            eprintln!();
+        }); SlashResult::Ok("Log.".into()) }),
     ).await;
 }
 
-pub(crate) async fn register_redo() {
-    register("redo", "Redo the last undone action",
-        "/redo",
-        std::sync::Arc::new(|_| { eprintln!("\n↪️  Redo\n  (Redo requires Agent session undo stack.)\n"); SlashResult::Ok("Redo.".into()) }),
-    ).await;
-}
-
-fn spawn_async<F, Fut>(f: F) where F: FnOnce() -> Fut + Send + 'static, Fut: std::future::Future<Output = ()> + Send {
-    if let Ok(h) = tokio::runtime::Handle::try_current() { h.spawn(f()); }
+pub(crate) async fn register_undo_and_redo() {
+    // UNDO and REDO are now registered in utils.rs to share the UndoManager dependency
 }

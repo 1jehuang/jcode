@@ -1,54 +1,34 @@
 //! Plan Mode tools — allow the AI Agent to enter/exit "plan-first" mode.
 //!
-//! In plan mode the agent outputs a structured plan before executing tools.
-//! A global atomic flag tracks the current mode.
+//! When in plan mode:
+//! - The system prompt includes read-only instructions
+//! - The agent explores the codebase but does NOT write files
+//! - On exit, the agent presents a structured plan for review
 
 use super::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Global plan-mode flag. When `true` the agent should plan before executing.
-static PLAN_MODE: AtomicBool = AtomicBool::new(false);
-
-/// Check whether the agent is currently in plan mode.
-pub fn is_plan_mode() -> bool {
-    PLAN_MODE.load(Ordering::Relaxed)
-}
-
-/// Set plan mode on or off.
-pub fn set_plan_mode(enabled: bool) {
-    PLAN_MODE.store(enabled, Ordering::Relaxed);
-}
-
-/// Force the agent to create a plan before taking further action.
 pub struct EnterPlanModeTool;
 
 impl EnterPlanModeTool {
-    pub fn new() -> Self {
-        Self
-    }
+    pub fn new() -> Self { Self }
 }
 
 #[async_trait]
 impl Tool for EnterPlanModeTool {
-    fn name(&self) -> &str {
-        "enter_plan_mode"
-    }
+    fn name(&self) -> &str { "enter_plan_mode" }
 
     fn description(&self) -> &str {
         r#"Switch to plan-first mode. In this mode the agent will first produce a
-detailed plan describing every step before executing any tool. Use this for
-complex multi-step tasks where you want to review the approach first.
+detailed plan describing every step before executing any tool.
 
-Call this at the START of a complex task. The agent will respond with a plan
-and wait for your approval before proceeding.
-
-To leave plan mode call `exit_plan_mode`.
+The agent will explore the codebase thoroughly (read-only) and produce a plan.
+Call exit_plan_mode when ready to present the plan for approval.
 
 Parameters:
-- goal (optional): A description of what you want to accomplish, so the plan can be tailored."#
+- goal (optional): A description of what you want to accomplish."#
     }
 
     fn parameters_schema(&self) -> Value {
@@ -65,35 +45,29 @@ Parameters:
     }
 
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
-        let goal = input
-            .get("goal")
-            .and_then(|v| v.as_str())
-            .unwrap_or("(unspecified)");
+        let goal = input.get("goal").and_then(|v| v.as_str()).unwrap_or("(unspecified)");
 
-        set_plan_mode(true);
+        // Activate plan mode
+        crate::plan_mode::enter_plan_mode(None);
 
         let plan = format!(
             r#"## Plan Mode — Active
 
 **Goal:** {}
 
-I will now analyze the task and create a step-by-step plan before making any changes.
+I am now in **read-only plan mode**. I will explore the codebase, understand the
+architecture, and create a step-by-step plan before making any changes.
 
-### Analysis
+### My approach:
 
-1. Understanding requirements
-2. Identifying files to modify
-3. Determining dependencies
-4. Creating the implementation plan
+1. **Explore** — I'll read relevant files to understand the current code.
+2. **Analyze** — I'll identify what needs to change and how.
+3. **Design** — I'll create a structured implementation plan.
+4. **Present** — When ready, call `exit_plan_mode` to show my plan for approval.
 
-### Next Step
-
-Review the analysis above. When you're ready to proceed, I will break down each step.
-
+> **Note:** I will NOT write or edit any files while in plan mode.
 > Use `/review` after implementation, or call `exit_plan_mode` to leave plan mode.
-"#,
-            goal
-        );
+"#, goal);
 
         Ok(ToolOutput {
             output: plan,
@@ -104,42 +78,84 @@ Review the analysis above. When you're ready to proceed, I will break down each 
     }
 }
 
-/// Exit plan mode — return to normal tool-execution behavior.
 pub struct ExitPlanModeTool;
 
 impl ExitPlanModeTool {
-    pub fn new() -> Self {
-        Self
-    }
+    pub fn new() -> Self { Self }
 }
 
 #[async_trait]
 impl Tool for ExitPlanModeTool {
-    fn name(&self) -> &str {
-        "exit_plan_mode"
-    }
+    fn name(&self) -> &str { "exit_plan_mode" }
 
     fn description(&self) -> &str {
-        r#"Exit plan-first mode and return to normal tool execution.
-Call this once you have reviewed and approved the plan, or if you no longer
-need plan-first behavior."#
+        r#"Exit plan-first mode and present the plan for approval.
+Call this once you have explored the codebase and have a concrete plan ready.
+
+The plan will include specific file paths, changes needed, and the implementation order."#
     }
 
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
-            "properties": {},
-            "required": []
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "Summary of what was learned and the recommended approach."
+                },
+                "steps": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ordered list of implementation steps."
+                },
+                "files_to_modify": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of files that need to be modified."
+                }
+            },
+            "required": ["summary", "steps", "files_to_modify"]
         })
     }
 
-    async fn execute(&self, _input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
-        set_plan_mode(false);
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+        let summary = input.get("summary").and_then(|v| v.as_str()).unwrap_or("Plan completed");
+        let steps: Vec<String> = input.get("steps")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let files: Vec<String> = input.get("files_to_modify")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+
+        // Deactivate plan mode
+        let _prev = crate::plan_mode::exit_plan_mode();
+
+        let mut output = String::from("## ✅ Plan Complete\n\n");
+        output.push_str(&format!("**Summary:** {}\n\n", summary));
+
+        if !steps.is_empty() {
+            output.push_str("### Implementation Steps\n\n");
+            for (i, step) in steps.iter().enumerate() {
+                output.push_str(&format!("{}. {}\n", i + 1, step));
+            }
+            output.push('\n');
+        }
+
+        if !files.is_empty() {
+            output.push_str("### Files to Modify\n\n");
+            for f in &files {
+                output.push_str(&format!("- `{}`\n", f));
+            }
+            output.push('\n');
+        }
+
+        output.push_str("Plan mode deactivated. Proceeding with implementation.\n");
 
         Ok(ToolOutput {
-            output: "✅ Plan mode deactivated. Proceeding with normal tool execution.\n\n"
-                .to_string(),
-            title: Some("✅ Exiting Plan Mode".into()),
+            output,
+            title: Some("✅ Plan Ready".into()),
             metadata: None,
             images: Vec::new(),
         })

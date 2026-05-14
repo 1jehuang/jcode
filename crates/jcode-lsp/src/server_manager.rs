@@ -419,8 +419,7 @@ impl LspServerManager {
     /// 列出所有已启动的 Servers
     pub async fn list_running_servers(&self) -> Vec<(String, bool)> {
         let servers = self.servers.read().await;
-        servers.iter()
-            .map(|(name, _)| (name.clone(), true))
+        servers.keys().map(|name| (name.clone(), true))
             .collect()
     }
 

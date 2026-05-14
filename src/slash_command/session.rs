@@ -1,28 +1,26 @@
 use super::{register, SlashResult};
 
 pub(crate) async fn register_export() {
-    register("export", "Export a session to markdown file",
-        "/export [session-id] [output-file]",
+    register("export", "Export session to markdown", "/export [session-id] [file]",
         std::sync::Arc::new(|args: &str| {
-            spawn_async(move || async move {
-                let parts: Vec<&str> = args.trim().split_whitespace().collect();
-                let sid = parts.first().map(|s| *s).unwrap_or("latest");
-                let out = parts.get(1).map(|s| s.to_string()).unwrap_or_else(|| "session_export.md".to_string());
+            let a = args.to_string();
+            spawn(move || async move {
+                let parts: Vec<&str> = a.split_whitespace().collect();
+                let sid = parts.first().copied().unwrap_or("latest");
+                let out = parts.get(1).map(|s| s.to_string()).unwrap_or_else(|| "session_export.md".into());
                 match crate::replay::load_session(sid) {
                     Ok(s) => {
                         use std::io::Write;
-                        let mut f = match std::fs::File::create(&out) {
-                            Ok(f) => f, Err(e) => { eprintln!("❌ Cannot write {}: {}", out, e); return; }
-                        };
+                        let mut f = match std::fs::File::create(&out) { Ok(f)=>f, Err(e)=>{eprintln!("❌ {}",e); return; }};
                         let _ = writeln!(f, "# Session Export\n**ID:** {}\n**Messages:** {}\n", s.id, s.messages.len());
                         for msg in &s.messages {
-                            let _ = writeln!(f, "## {} ({})", msg.role, msg.timestamp.format("%H:%M"));
+                            let _ = writeln!(f, "## {} ({})", msg.role, msg.timestamp);
                             let _ = writeln!(f, "ID: {}", msg.id);
                             let _ = writeln!(f);
                         }
                         eprintln!("✅ Exported {} messages to {}", s.messages.len(), out);
                     }
-                    Err(e) => eprintln!("❌ Cannot load session '{}': {}", sid, e),
+                    Err(e) => eprintln!("❌ {}", e),
                 }
             });
             SlashResult::Ok("Exporting...".into())
@@ -31,66 +29,68 @@ pub(crate) async fn register_export() {
 }
 
 pub(crate) async fn register_resume() {
-    register("resume", "List or resume a session",
-        "/resume [session-id]",
+    register("resume", "List or resume sessions", "/resume [session-id]",
         std::sync::Arc::new(|args: &str| {
-            spawn_async(move || async move {
-                let trimmed = args.trim().to_string();
+            let a = args.to_string();
+            spawn(move || async move {
+                let trimmed = a.trim().to_string();
                 if trimmed.is_empty() {
-                    let jcode_dir = crate::storage::jcode_dir().ok();
-                    let sessions_dir = jcode_dir.as_ref().map(|d| d.join("sessions"));
-                    let entries = sessions_dir.iter().filter(|d| d.exists())
-                        .flat_map(|d| std::fs::read_dir(d).ok())
-                        .flat_map(|r| r.filter_map(|e| e.ok()))
-                        .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
-                        .collect::<Vec<_>>();
-                    eprintln!("\n📋 Sessions\n");
-                    if entries.is_empty() { eprintln!("  No sessions.\n"); return; }
-                    for e in entries.iter().take(20).rev() {
-                        let name = e.path().file_stem().map(|n| n.to_string_lossy()).unwrap_or_default();
-                        if let Ok(s) = crate::session::Session::load_from_path(&e.path()) {
-                            eprintln!("  [{:.8}] {} — {} msgs", name, s.display_title_or_name(), s.messages.len());
+                    if let Ok(jd) = crate::storage::jcode_dir().map(|d| d.join("sessions")) {
+                        let e: Vec<_> = std::fs::read_dir(&jd).into_iter().flat_map(|r| r.filter_map(|e| e.ok())).filter(|e| e.path().extension().map(|x|x=="json").unwrap_or(false)).collect();
+                        if e.is_empty() { eprintln!("  No sessions.\n"); return; }
+                        eprintln!("\n📋 Sessions\n");
+                        for entry in e.iter().rev().take(20) {
+                            let name = entry.path().file_stem().map(|n| n.to_string_lossy()).unwrap_or_default();
+                            if let Ok(s) = crate::session::Session::load_from_path(&entry.path()) {
+                                eprintln!("  [{:.8}] {} — {} msgs", name, s.display_title_or_name(), s.messages.len());
+                            }
                         }
+                        eprintln!("\n  /resume <id>\n");
                     }
-                    eprintln!("\n  Use /resume <id> to resume.\n");
                 } else {
                     match crate::replay::load_session(&trimmed) {
-                        Ok(s) => {
-                            eprintln!("\n📋 Session: {}\n  ID: {}\n  Model: {}\n  Messages: {}\n",
-                                s.display_title_or_name(), s.id,
-                                s.model.as_deref().unwrap_or("default"), s.messages.len());
-                            eprintln!("  Use: carpai --resume {}\n", s.id);
-                        }
-                        Err(e) => eprintln!("❌ {}", e),
+                        Ok(s) => eprintln!("\n📋 {}\n  ID: {}\n  Model: {}\n  Messages: {}\n  carpai --resume {}\n", s.display_title_or_name(), s.id, s.model.as_deref().unwrap_or("default"), s.messages.len(), s.id),
+                        Err(e) => eprintln!("❌ {}\n", e),
                     }
                 }
             });
-            SlashResult::Ok("Listing sessions...".into())
+            SlashResult::Ok("Resume.".into())
         }),
     ).await;
 }
 
 pub(crate) async fn register_session() {
-    register("session", "Show current session info",
-        "/session",
-        std::sync::Arc::new(|_args: &str| {
-            eprintln!("\n📋 Current session:\n  (Use /resume to list sessions)\n  (Use /export to export)\n");
-            SlashResult::Ok("Session info displayed.".into())
-        }),
+    register("session", "Show current session info", "/session",
+        std::sync::Arc::new(|_| { eprintln!("\n📋 Session\n  Use /resume to list, /export to export.\n"); SlashResult::Ok("Info.".into()) }),
     ).await;
 }
 
 pub(crate) async fn register_fork() {
-    register("fork", "Fork a session to create a branch",
-        "/fork [session-id]",
+    register("fork", "Fork/clone a session", "/fork [session-id]",
         std::sync::Arc::new(|args: &str| {
-            let sid = if args.trim().is_empty() { "current" } else { args.trim() };
-            eprintln!("\n🔄 Forking session: {}\n  (Fork requires active session API.)\n", sid);
-            SlashResult::Ok(format!("Forking: {}", sid))
+            let a = args.to_string();
+            spawn(move || async move {
+                let sid = if a.trim().is_empty() { "latest" } else { a.trim() };
+                match crate::replay::load_session(sid) {
+                    Ok(src) => {
+                        let mut child = crate::session::Session::create(Some(src.id.clone()), Some(format!("Fork of {}", src.display_title_or_name())));
+                        child.messages = src.messages.clone();
+                        child.compaction = src.compaction.clone();
+                        child.model = src.model.clone();
+                        child.provider_key = src.provider_key.clone();
+                        match child.save() {
+                            Ok(_) => eprintln!("\n🔄 Forked: {}\n  New ID: {}\n  carpai --resume {}\n", child.display_title_or_name(), child.id, child.id),
+                            Err(e) => eprintln!("❌ {}\n", e),
+                        }
+                    }
+                    Err(e) => eprintln!("❌ {}\n", e),
+                }
+            });
+            SlashResult::Ok("Forking...".into())
         }),
     ).await;
 }
 
-fn spawn_async<F, Fut>(f: F) where F: FnOnce() -> Fut + Send + 'static, Fut: std::future::Future<Output = ()> + Send {
+fn spawn<F, Fut>(f: F) where F: FnOnce() -> Fut + Send + 'static, Fut: std::future::Future<Output = ()> + Send + 'static {
     if let Ok(h) = tokio::runtime::Handle::try_current() { h.spawn(f()); }
 }

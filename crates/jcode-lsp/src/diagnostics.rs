@@ -143,6 +143,7 @@ pub struct DiagnosticsManager {
 }
 
 #[derive(Debug, Clone)]
+#[derive(Default)]
 struct GlobalStats {
     total_files: usize,
     total_errors: usize,
@@ -151,17 +152,6 @@ struct GlobalStats {
     total_info: usize,
 }
 
-impl Default for GlobalStats {
-    fn default() -> Self {
-        Self {
-            total_files: 0,
-            total_errors: 0,
-            total_warnings: 0,
-            total_hints: 0,
-            total_info: 0,
-        }
-    }
-}
 
 /// 配置选项
 #[derive(Debug, Clone)]
@@ -187,6 +177,12 @@ impl Default for DiagnosticsConfig {
             enable_broadcast: true,
             broadcast_capacity: 64,
         }
+    }
+}
+
+impl Default for DiagnosticsManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -418,7 +414,6 @@ impl DiagnosticsManager {
             
             for diag in &state.diagnostics {
                 match diag.diagnostic.severity
-                    .clone()
                     .map(DiagnosticSeverity::from)
                     .unwrap_or(DiagnosticSeverity::Error)
                 {
@@ -716,9 +711,9 @@ impl QuickFixEngine {
                 };
                 
                 let mut result = lines[..target_line_idx].join("\n");
-                result.push_str("\n");
+                result.push('\n');
                 result.push_str(&new_line);
-                result.push_str("\n");
+                result.push('\n');
                 result.push_str(&lines[(target_line_idx + 1)..].join("\n"));
                 
                 return Ok(result);

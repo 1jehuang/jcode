@@ -5,8 +5,8 @@ use std::process::{Command as ProcessCommand, Stdio};
 use std::time::Instant;
 
 use super::args::{
-    AmbientCommand, Args, AuthCommand, Command, MemoryCommand, ModelCommand, ProviderCommand,
-    RestartCommand, SessionCommand, SessionSubCommand, TranscriptModeArg,
+    AmbientCommand, Args, AuthCommand, Command, DebugCommand, MemoryCommand, ModelCommand,
+    ProviderCommand, RestartCommand, SessionCommand, SessionSubCommand, TranscriptModeArg,
 };
 use crate::{
     agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
@@ -390,6 +390,110 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         }
         Some(Command::Fork { name, checkpoint }) => {
             commands::run_fork_command(name.as_deref(), checkpoint.as_deref()).await?;
+        }
+        Some(Command::Completion { shell, output, install }) => {
+            if install {
+                commands::run_completion_install_command(&shell)?;
+            } else {
+                commands::run_completion_command(&shell, output.as_deref())?;
+            }
+        }
+        Some(Command::CodeNav(cmd)) => {
+            commands::run_code_nav_command(cmd).await?;
+        }
+        Some(Command::CodeRefactor(cmd)) => {
+            commands::run_refactor_command(cmd).await?;
+        }
+        Some(Command::Review {
+            staged,
+            diff,
+            security,
+            json,
+        }) => {
+            commands::run_review_command(staged, diff.as_deref(), security, json).await?;
+        }
+        Some(Command::Debug(cmd)) => {
+            commands::run_debug_command(cmd).await?;
+        }
+
+        // ── Expanded commands ─────────────────────────────────
+        Some(Command::Clear { all, cache }) => {
+            commands::run_clear_command(all, cache).await?;
+        }
+        Some(Command::Cost { json }) => {
+            commands::run_cost_command(json).await?;
+        }
+        Some(Command::Export { output, full }) => {
+            commands::run_session_command(super::args::SessionSubCommand::Export { output, full }).await?;
+        }
+        Some(Command::Resume { id }) => {
+            commands::run_session_command(super::args::SessionSubCommand::Resume { id: Some(id), list: false }).await?;
+        }
+        Some(Command::Env { list, get, set, value }) => {
+            commands::run_env_command(list, get.as_deref(), set.as_deref(), value.as_deref()).await?;
+        }
+        Some(Command::Effort { level }) => {
+            commands::run_effort_command(level.as_deref()).await?;
+        }
+        Some(Command::Fast { state }) => {
+            commands::run_fast_command(state.as_deref()).await?;
+        }
+        Some(Command::Passes { count }) => {
+            commands::run_passes_command(count).await?;
+        }
+        Some(Command::RateLimit { show, rpm, tpm }) => {
+            commands::run_rate_limit_command(show, rpm, tpm).await?;
+        }
+        Some(Command::Files(cmd)) => {
+            commands::run_files_command(cmd).await?;
+        }
+        Some(Command::AddDir { path, recursive }) => {
+            commands::run_add_dir_command(&path, recursive).await?;
+        }
+        Some(Command::FileRename { source, target }) => {
+            commands::run_file_rename_command(&source, &target).await?;
+        }
+        Some(Command::FileCopy { source, target }) => {
+            commands::run_file_copy_command(&source, &target).await?;
+        }
+        Some(Command::Tag { tags, list, remove }) => {
+            commands::run_tag_command(tags, list, remove.as_deref()).await?;
+        }
+        Some(Command::Summary { json, verbose }) => {
+            commands::run_summary_command(json, verbose).await?;
+        }
+        Some(Command::Insights { session, json, tools, performance }) => {
+            commands::run_insights_command(session.as_deref(), json, tools, performance).await?;
+        }
+        Some(Command::Upgrade { version, prerelease, force }) => {
+            commands::run_upgrade_command(version.as_deref(), prerelease, force).await?;
+        }
+        Some(Command::Logout { provider, all }) => {
+            commands::run_logout_command(provider.as_deref(), all).await?;
+        }
+        Some(Command::SecurityReview { staged, diff, json }) => {
+            commands::run_review_command(staged, diff.as_deref(), true, json).await?;
+        }
+        Some(Command::CommitPushPr { branch, title, body, no_open, draft }) => {
+            commands::run_commit_push_pr_command(branch.as_deref(), title.as_deref(), body.as_deref(), no_open, draft).await?;
+        }
+        Some(Command::PrComments { pr, add, reply, resolve }) => {
+            commands::run_pr_comments_command(pr.as_deref(), add.as_deref(), reply.as_deref(), resolve.as_deref()).await?;
+        }
+        Some(Command::AutoFixPr { pr, apply }) => {
+            commands::run_autofix_pr_command(pr.as_deref(), apply).await?;
+        }
+        Some(Command::InstallGithubApp { scope, global }) => {
+            commands::run_install_github_app_command(scope.as_deref(), global).await?;
+        }
+        Some(Command::Buddy { state, share }) => {
+            commands::run_buddy_command(state.as_deref(), share).await?;
+        }
+        Some(Command::InstallSlackApp { workspace }) => {
+            commands::run_install_slack_app_command(workspace.as_deref()).await?;
+        }
+        Some(Command::BatchEdit { files, apply, interactive, pattern, replace }) => {
+            commands::run_batch_edit_command(&files, apply, interactive, pattern.as_deref(), replace.as_deref()).await?;
         }
         None => {
             eprintln!("CarpAI - AI-powered coding assistant\n");

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::info;
 use serde::{Deserialize, Serialize};
 
 /// 语言标识符
@@ -80,7 +80,7 @@ impl LanguageId {
         PathBuf::from(path)
             .extension()
             .and_then(|e| e.to_str())
-            .map(|ext| Self::from_extension(ext))
+            .map(Self::from_extension)
             .unwrap_or(Self::Unknown("".to_string()))
     }
 }
@@ -427,9 +427,9 @@ impl TypeInfo {
     pub fn display_name(&self) -> String {
         let mut name = self.type_name.clone();
         if !self.generic_params.is_empty() {
-            name.push_str("<");
+            name.push('<');
             name.push_str(&self.generic_params.join(", "));
-            name.push_str(">");
+            name.push('>');
         }
         if self.is_reference {
             name = format!("&{}", name);
@@ -685,7 +685,7 @@ impl TreeSitterParserManager {
         // 先检查缓存
         {
             let parsers = self.parsers.read().await;
-            if let Some(parser) = parsers.get(&language) {
+            if let Some(_parser) = parsers.get(&language) {
                 // 注意：这里不能直接返回 parser 的克隆，因为 LanguageParser 是 trait object
                 // 实际实现中应该使用工厂模式或 Arc 包装
                 return Err(ParseError::Internal("Parser cloning not implemented".to_string()));
@@ -702,7 +702,7 @@ impl TreeSitterParserManager {
         }
 
         // 再次获取（这次从缓存）
-        let parsers = self.parsers.read().await;
+        let _parsers = self.parsers.read().await;
         // 返回一个错误提示，实际实现需要更复杂的逻辑
         Err(ParseError::Internal("Parser retrieval needs refactoring".to_string()))
     }
@@ -835,8 +835,8 @@ impl TreeSitterParserManager {
         next_scope_id: &mut u64,
     ) {
         // 根据节点类型决定是否创建符号
-        if node.node_type.is_symbol_definition() {
-            if let Some(ref name) = node.name {
+        if node.node_type.is_symbol_definition()
+            && let Some(ref name) = node.name {
                 let kind = match node.node_type {
                     NodeType::FunctionDeclaration => SymbolKind::Function,
                     NodeType::StructDeclaration => SymbolKind::Struct,
@@ -864,7 +864,6 @@ impl TreeSitterParserManager {
                     scope.symbols.push(name.clone());
                 }
             }
-        }
 
         // 根据节点类型决定是否创建新作用域
         let new_scope_id = match node.node_type {
@@ -1065,8 +1064,7 @@ fn extract_function_name(line: &str) -> String {
     let trimmed = line.trim();
     
     for prefix in ["fn ", "func ", "def ", "function "] {
-        if trimmed.starts_with(prefix) {
-            let rest = &trimmed[prefix.len()..];
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
             if let Some(end) = rest.find(['(', ' ', '<'].as_ref()) {
                 return rest[..end].to_string();
             }
@@ -1082,8 +1080,8 @@ fn extract_struct_name(line: &str) -> String {
     let trimmed = line.trim();
     
     for keyword in ["struct ", "class ", "enum ", "interface ", "type "] {
-        if trimmed.contains(keyword) {
-            if let Some(start) = trimmed.find(keyword) {
+        if trimmed.contains(keyword)
+            && let Some(start) = trimmed.find(keyword) {
                 let after_keyword = &trimmed[start + keyword.len()..];
                 if let Some(end) = after_keyword.find([' ', '{', '<', ':', '('].as_ref()) {
                     return after_keyword[..end].to_string();
@@ -1093,7 +1091,6 @@ fn extract_struct_name(line: &str) -> String {
                     .unwrap_or("Unnamed")
                     .to_string();
             }
-        }
     }
     
     "Unnamed".to_string()

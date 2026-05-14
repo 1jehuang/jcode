@@ -17,14 +17,9 @@
 // └─────────────────────────────┘
 
 use lsp_types::*;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// 代码编辑操作结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +116,12 @@ pub trait AstOperations: Send + Sync {
 
 /// 基于 Regex 的 AST 操作实现（降级方案）
 pub struct RegexAstOperations;
+
+impl Default for RegexAstOperations {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl RegexAstOperations {
     pub fn new() -> Self {
@@ -232,8 +233,7 @@ impl RegexAstOperations {
         let body_lines: Vec<&str> = lines[start..end]
             .iter()
             .skip(1) // 跳过签名行
-            .take(end.saturating_sub(start).saturating_sub(2)) // 去掉最后的 }
-            .map(|l| *l)
+            .take(end.saturating_sub(start).saturating_sub(2)).copied()
             .collect();
 
         // 缩进减少一层
@@ -735,7 +735,7 @@ impl AstOperations for RegexAstOperations {
             .map(|l| l.to_string())
             .collect();
         new_source.extend(source_lines[symbol_end as usize..].iter().map(|l| l.to_string()));
-        let final_source = new_source.join("\n");
+        let _final_source = new_source.join("\n");
 
         // 将符号添加到目标文件
         let final_target = format!("{}\n\n{}\n", target_content, symbol_def);

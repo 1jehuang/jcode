@@ -2,6 +2,21 @@ use super::session::{SshConfig, SshSession};
 
 pub struct SshCommand;
 
+/// Command Executor for SSH sessions
+pub struct CommandExecutor {
+    session: SshSession,
+}
+
+impl CommandExecutor {
+    pub fn new(session: SshSession) -> Self {
+        CommandExecutor { session }
+    }
+
+    pub fn execute(&mut self, command: &str) -> Result<super::session::SshOutput, String> {
+        self.session.execute(command)
+    }
+}
+
 impl SshCommand {
     pub fn execute(args: &[String]) -> String {
         if args.is_empty() {

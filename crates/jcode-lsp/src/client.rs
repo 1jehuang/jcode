@@ -190,7 +190,7 @@ impl LspClient {
         if let Some(stderr) = stderr {
             let server_name = self.server_name.clone();
             tokio::spawn(async move {
-                use tokio::io::AsyncReadExt;
+                
                 let mut reader = tokio::io::BufReader::new(stderr);
                 let mut line = String::new();
                 while reader.read_line(&mut line).await.map(|n| n > 0).unwrap_or(false) {
@@ -224,8 +224,8 @@ impl LspClient {
                                     .map_err(LspError::Transport);
                                 let _ = sender.send(result);
                             }
-                        } else if let Some(method) = response.get("method").and_then(|v| v.as_str()) {
-                            if let Some(params) = response.get("params").cloned() {
+                        } else if let Some(method) = response.get("method").and_then(|v| v.as_str())
+                            && let Some(params) = response.get("params").cloned() {
                                 let handlers = active_handlers.read().await;
                                 if let Some(handlers_for_method) = handlers.get(method) {
                                     for handler in handlers_for_method {
@@ -233,7 +233,6 @@ impl LspClient {
                                     }
                                 }
                             }
-                        }
                     }
                     Err(e) => {
                         if !*is_stopping.read().await {
@@ -862,7 +861,7 @@ async fn read_lsp_response<R: tokio::io::AsyncRead + Unpin>(
         .strip_prefix("Content-Length: ")
         .or_else(|| header_line.strip_prefix("Content-length: "))
         .and_then(|s| s.trim().trim_end_matches('\r').parse::<usize>().ok())
-        .ok_or_else(|| JsonRpcError::InvalidContentLength(header_line))?;
+        .ok_or(JsonRpcError::InvalidContentLength(header_line))?;
     
     let mut blank = [0u8; 2];
     reader.read_exact(&mut blank).await?;

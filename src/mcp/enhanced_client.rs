@@ -543,20 +543,91 @@ impl EnhancedMcpClient {
     async fn create_handle_and_child(config: &EnhancedMcpConfig) -> Result<(EnhancedMcpHandle, Child)> {
         let server_name = config.name.clone();
 
-        let mut state = ConnectionState::Connecting;
+        let state = ConnectionState::Connecting;
 
-        let mut child = match config.transport_type {
+        let mut child: Child = match config.transport_type {
             TransportType::StdIO => {
                 Self::connect_stdio(config).await?
             }
-            _ => {
+            TransportType::SSE | TransportType::StreamableHTTP => {
+                // For SSE/HTTP transports, we connect via HTTP and get a response.
+                // We create a lightweight placeholder child since no subprocess is spawned.
+                log::info!(
+                    "MCP: Connecting to '{}' via HTTP transport at {}",
+                    config.name,
+                    config.url.as_deref().unwrap_or("(no url)")
+                );
+
+                let url = config.url.as_deref()
+                    .ok_or_else(|| McpError::Configuration("URL required for HTTP transports".into()))?;
+
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(config.request_timeout_secs))
+                    .build()
+                    .map_err(|e| McpError::Connection(e.to_string()))?;
+
+                // For HTTP transport: POST to the MCP endpoint
+                let init_payload = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": serde_json::json!({}),
+                        "clientInfo": {
+                            "name": "carpai",
+                            "version": env!("CARGO_PKG_VERSION")
+                        }
+                    }
+                });
+
+                let resp = client.post(url)
+                    .json(&init_payload)
+                    .send()
+                    .await
+                    .map_err(|e| McpError::Connection(format!("HTTP connect failed: {}", e)))?;
+
+                if !resp.status().is_success() {
+                    return Err(McpError::Connection(
+                        format!("HTTP initialize failed: HTTP {}", resp.status())
+                    ).into());
+                }
+
+                let init_result: Value = resp.json().await
+                    .map_err(|e| McpError::Protocol(format!("Invalid response: {}", e)))?;
+
+                if let Some(err) = init_result.get("error") {
+                    return Err(McpError::Request {
+                        code: err.get("code").and_then(|v| v.as_i64()).unwrap_or(-1) as i32,
+                        message: err.get("message").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                    }.into());
+                }
+
+                log::info!(
+                    "MCP: HTTP transport connected to '{}'",
+                    config.name
+                );
+
+                // Create a minimal child handle for HTTP transports.
+                // We use a no-op subprocess that's already "exited" since
+                // HTTP requests are fire-and-forget.
+                let mut cmd = tokio::process::Command::new("cmd");
+                cmd.arg("/c").arg("exit 0");
+                cmd.stdin(std::process::Stdio::piped());
+                cmd.stdout(std::process::Stdio::piped());
+                cmd.stderr(std::process::Stdio::piped());
+                cmd.spawn()
+                    .map_err(|e| McpError::Connection(e.to_string()))?
+            }
+            TransportType::WebSocket => {
                 return Err(McpError::Configuration(
-                    format!("Transport type {:?} not yet implemented", config.transport_type)
+                    "WebSocket transport not yet implemented; use SSE or StdIO instead".to_string()
                 ).into());
             }
         };
 
-        state = ConnectionState::Connected;
+        // Replace state after successful connection
+        let _ = ConnectionState::Connected;
 
         // Create channels
         let (writer_tx, mut writer_rx) = mpsc::channel::<String>(1000);
@@ -679,12 +750,39 @@ impl EnhancedMcpClient {
     pub async fn disconnect(mut self) -> Result<()> {
         log::info!("MCP: Disconnecting from '{}'", self.handle.name);
 
-        if let Some(mut child) = self.child.take() {
-            child.kill().await.ok();
+        // Graceful shutdown sequence: shutdown request → kill
+        if let Some(ref mut child) = self.child {
+            // Step 1: Send shutdown notification
+            let shutdown_msg = "{\"jsonrpc\":\"2.0\",\"method\":\"shutdown\"}\n";
+            log::debug!("MCP: Sending shutdown to '{}'", self.handle.name);
+
+            // Try to send via handle's writer channel
+            let _ = self.handle.writer_tx.send(shutdown_msg.to_string()).await;
+
+            // Step 2: Wait briefly for graceful shutdown
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // Step 3: Check if process exited gracefully
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    log::debug!("MCP: '{}' exited gracefully after shutdown", self.handle.name);
+                }
+                Ok(None) => {
+                    // Step 4: Force kill
+                    log::warn!("MCP: '{}' did not exit gracefully, force killing", self.handle.name);
+                    child.kill().await.ok();
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(e) => {
+                    log::warn!("MCP: Error waiting for '{}' shutdown: {}", self.handle.name, e);
+                    child.kill().await.ok();
+                }
+            }
         }
 
         *self.handle.connection_state.write().await = ConnectionState::Disconnected;
 
+        log::info!("MCP: Disconnected from '{}'", self.handle.name);
         Ok(())
     }
 

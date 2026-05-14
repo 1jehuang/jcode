@@ -214,10 +214,10 @@ impl CompletionManager {
 
         // 否则使用原始文本
         item.item.text_edit.as_ref()
-            .and_then(|te| {
+            .map(|te| {
                 match te {
-                    lsp_types::CompletionTextEdit::Edit(edit) => Some(edit.new_text.clone()),
-                    lsp_types::CompletionTextEdit::InsertAndReplace(op) => Some(op.new_text.clone()),
+                    lsp_types::CompletionTextEdit::Edit(edit) => edit.new_text.clone(),
+                    lsp_types::CompletionTextEdit::InsertAndReplace(op) => op.new_text.clone(),
                 }
             })
             .or_else(|| item.item.insert_text.clone())
@@ -378,8 +378,8 @@ pub fn expand_simple_snippet(snippet: &str) -> Option<(String, Vec<usize>)> {
     let re = regex::Regex::new(r"\$([0-9]+)").ok()?;
     
     for cap in re.captures_iter(snippet) {
-        if let Some(num_match) = cap.get(1) {
-            if let Ok(num) = num_match.as_str().parse::<usize>() {
+        if let Some(num_match) = cap.get(1)
+            && let Ok(num) = num_match.as_str().parse::<usize>() {
                 if num > 0 { // 忽略 $0（它是最终光标位置）
                     tab_stops.push(current_pos + num_match.start());
                 }
@@ -389,7 +389,6 @@ pub fn expand_simple_snippet(snippet: &str) -> Option<(String, Vec<usize>)> {
                     text = text.replacen(full_match.as_str(), "", 1);
                 }
             }
-        }
     }
 
     Some((text, tab_stops))

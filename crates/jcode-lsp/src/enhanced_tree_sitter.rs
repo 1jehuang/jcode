@@ -8,7 +8,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 // 重新导出原有类型
@@ -131,6 +130,12 @@ pub struct ControlFlowGraph {
     
     /// 检测到的循环
     pub loops: Vec<LoopInfo>,
+}
+
+impl Default for ControlFlowGraph {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ControlFlowGraph {
@@ -391,7 +396,7 @@ impl EnhancedTreeSitterParser {
         cfg.set_entry(entry);
         
         // 递归构建基本块
-        self.build_cfg_recursive(&body, &mut cfg, entry)?;
+        self.build_cfg_recursive(body, &mut cfg, entry)?;
         
         // 标记出口块
         self.identify_exit_blocks(&mut cfg);

@@ -220,21 +220,21 @@ impl FileActivityTracker {
         
         {
             let mut window = self.recent_window.write();
-            window.push_back((path, Instant::now()));
-            
+            window.push_back((path.clone(), Instant::now()));
+
             while window.len() > self.config.co_occurrence_window_size {
                 window.pop_front();
             }
         }
-        
+
         info!(file = %path.display(), "File edit recorded");
     }
 
     /// 获取当前最热的 N 个文件 (按热度排序)
     pub fn get_hottest_files(&self, limit: usize) -> Vec<(PathBuf, f64)> {
-        let activities = self.activities.read();
-        
-        let mut scored: Vec<_> = activities.iter()
+        let mut activities = self.activities.write();
+
+        let mut scored: Vec<_> = activities.iter_mut()
             .map(|(path, record)| {
                 record.update_hotness();
                 (path.clone(), record.hotness_score)
@@ -300,27 +300,27 @@ impl FileActivityTracker {
 
     /// 获取统计摘要
     pub fn get_stats(&self) -> ActivityStats {
-        let activities = self.activities.read();
+        let mut activities = self.activities.write();
         let co_occurrence = self.co_occurrence_matrix.read();
-        
+
         let total_accesses: u64 = activities.values()
             .map(|r| r.access_count)
             .sum();
-        
+
         let total_edits: u64 = activities.values()
             .map(|r| r.edit_count)
             .sum();
-        
-        let hottest = activities.values()
+
+        let hottest = activities.values_mut()
             .map(|r| { r.update_hotness(); r.hotness_score })
             .fold(0.0f64, |max, val| max.max(val));
-        
+
         ActivityStats {
             tracked_files: activities.len(),
             total_accesses,
             total_edits,
-            avg_hotness: if activities.is_empty() { 0.0 } else { 
-                let sum: f64 = activities.values()
+            avg_hotness: if activities.is_empty() { 0.0 } else {
+                let sum: f64 = activities.values_mut()
                     .map(|r| { r.update_hotness(); r.hotness_score })
                     .sum();
                 sum / activities.len() as f64

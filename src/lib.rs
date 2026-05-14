@@ -146,6 +146,8 @@ pub mod plan_mode;
 pub mod session_export;
 pub mod version_manager;
 pub mod undo_redo;
+pub mod api;
+pub mod utils;
 
 // Mid-term enhancements
 pub mod dashboard;

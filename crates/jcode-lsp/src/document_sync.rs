@@ -184,7 +184,7 @@ impl DocumentSyncManager {
                 TextDocumentSyncCapability::Options(opts) => Some(opts.change),
                 _ => None,
             })
-            .map_or(false, |change| {
+            .is_some_and(|change| {
                 matches!(change, Some(TextDocumentSyncKind::INCREMENTAL))
             });
 
@@ -300,11 +300,7 @@ impl DocumentSyncManager {
         let old_len = old_content.len();
         let new_len = new_content.len();
         
-        let changed_bytes = if old_len > new_len {
-            old_len - new_len
-        } else {
-            new_len - old_len
-        };
+        let changed_bytes = old_len.abs_diff(new_len);
 
         // 变更比例 < 30% 使用增量同步
         let change_ratio = changed_bytes as f64 / old_len.max(1) as f64;

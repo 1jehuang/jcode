@@ -497,8 +497,8 @@ impl PerformanceMonitor {
 
         for (_name, info) in health.iter() {
             // 检查是否有长时间未操作（可能卡死）
-            if let Some(last_op) = info.last_operation_time {
-                if now.duration_since(last_op) > Duration::from_secs(300) { // 5 分钟无操作
+            if let Some(last_op) = info.last_operation_time
+                && now.duration_since(last_op) > Duration::from_secs(300) { // 5 分钟无操作
                     warn!(
                         server = %info.server_name,
                         idle_seconds = now.duration_since(last_op).as_secs(),
@@ -507,7 +507,6 @@ impl PerformanceMonitor {
                     
                     // TODO: 发送 ping 测试 Server 是否还活着
                 }
-            }
         }
     }
 
@@ -690,11 +689,10 @@ where K: Eq + std::hash::Hash + Clone,
             self.order.retain(|k| k != &key);
         }
         
-        if self.order.len() >= self.capacity {
-            if let Some(lru_key) = self.order.pop_front() {
+        if self.order.len() >= self.capacity
+            && let Some(lru_key) = self.order.pop_front() {
                 self.map.remove(&lru_key);
             }
-        }
         
         self.map.insert(key.clone(), (value, Instant::now()));
         self.order.push_back(key);

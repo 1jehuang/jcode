@@ -1,0 +1,9 @@
+# CarpAI Shell Completion for Zsh
+# ============================================================
+# Generate with:  carpai completion zsh
+# Auto-install:   carpai completion zsh --install
+# Regenerate:     carpai completion zsh -o /usr/local/share/zsh/site-functions/_carpai
+# ============================================================
+#
+# This file is a STUB.  Run `carpai completion zsh`
+# to generate the actual completion script.

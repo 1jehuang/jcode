@@ -13,6 +13,7 @@
 
 use anyhow::Result;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -182,7 +183,7 @@ pub struct EmbeddingStats {
 impl EnhancedEmbeddingEngine {
     /// 创建新的增强版 Embedding 引擎
     pub fn new(config: EmbeddingConfig) -> Self {
-        let cache = lru::LruCache::new(config.cache_max_size);
+        let cache = lru::LruCache::new(std::num::NonZero::new(config.cache_max_size).unwrap());
         
         Self {
             config,
@@ -210,7 +211,7 @@ impl EnhancedEmbeddingEngine {
         // 检查缓存
         let cache_key = self.compute_cache_key(&preprocessed);
         {
-            let cache = self.cache.read().await;
+            let mut cache = self.cache.write().await;
             if let Some(cached) = cache.get(&cache_key) {
                 let mut stats = self.stats.write().await;
                 stats.cache_hits += 1;
@@ -238,7 +239,7 @@ impl EnhancedEmbeddingEngine {
         stats.total_embeddings += 1;
         stats.avg_latency_ms = (stats.avg_latency_ms * (stats.total_requests - 1) as f64 
             + duration_ms as f64) / stats.total_requests as f64;
-        stats.total_tokens += estimate_tokens(&preprocessed);
+        stats.total_tokens += estimate_tokens(&preprocessed) as u64;
         
         // 存入缓存
         if self.config.enable_cache {
@@ -254,7 +255,7 @@ impl EnhancedEmbeddingEngine {
         &self,
         chunks: &[CodeChunk],
     ) -> Result<Vec<EmbeddingResult>> {
-        let results = Vec::with_capacity(chunks.len());
+        let mut results = Vec::with_capacity(chunks.len());
         
         for chunk in chunks {
             let result = self.embed_code(&chunk.content, &chunk.language).await?;
@@ -384,7 +385,7 @@ impl EnhancedEmbeddingEngine {
 
     /// 计算缓存键 (基于内容哈希)
     fn compute_cache_key(&self, content: &str) -> String {
-        use std::collections::hash::{Hash, Hasher};
+        use std::hash::{Hash, Hasher};
         use std::hash::DefaultHasher;
         
         let mut hasher = DefaultHasher::new();

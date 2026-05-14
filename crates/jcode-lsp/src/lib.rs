@@ -51,8 +51,6 @@
 // └──────────────────────────────┘
 // ════════════════════════════════════════════════════════════════
 
-use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info, warn};
 
 mod transport;
 mod client;

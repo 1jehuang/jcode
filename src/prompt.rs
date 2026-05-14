@@ -332,6 +332,11 @@ pub fn build_system_prompt_split(
         dynamic_parts.push(format!("# Active Skill\n\n{}", skill));
     }
 
+    // Plan mode override (injected when agent is in read-only planning phase)
+    if crate::plan_mode::is_plan_mode() {
+        dynamic_parts.push(crate::plan_mode::PLAN_MODE_SYSTEM_PROMPT.to_string());
+    }
+
     let static_part = static_parts.join("\n\n");
     let dynamic_part = dynamic_parts.join("\n\n");
     info.total_chars = static_part.len() + dynamic_part.len();

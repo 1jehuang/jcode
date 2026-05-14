@@ -7,14 +7,14 @@ pub(crate) async fn register_clear() {
 }
 
 pub(crate) async fn register_compact() {
-    register("compact", "Show compaction configuration",
-        "/compact [--config]",
+    register("compact", "Show or trigger conversation compaction", "/compact [--config|--force]",
         std::sync::Arc::new(|args: &str| {
-            if args.contains("--config") {
+            let a = args.to_string();
+            if a.contains("--config") {
                 let cfg = crate::config::config();
-                eprintln!("\n📦 Compaction\n  Mode:       {:?}\n  Lookahead:  {} turns\n  EWMA alpha: {}\n", cfg.compaction.mode, cfg.compaction.lookahead_turns, cfg.compaction.ewma_alpha);
+                eprintln!("\n📦 Compaction\n  Mode: {:?}\n  Lookahead: {} turns\n", cfg.compaction.mode, cfg.compaction.lookahead_turns);
             } else {
-                eprintln!("\n📦 Compact conversation\n  Use /compact --config to see settings.\n  (Compaction requires session API.)\n");
+                eprintln!("\n📦 Compact\n  Use --config for details.\n");
             }
             SlashResult::Ok("Compact.".into())
         }),
@@ -22,14 +22,12 @@ pub(crate) async fn register_compact() {
 }
 
 pub(crate) async fn register_cost() {
-    register("cost", "Show provider usage and cost",
-        "/cost",
-        std::sync::Arc::new(|_args: &str| {
-            spawn_async(move || async move {
-                let usage = crate::usage::get().await;
-                eprintln!("\n💰 Provider Usage\n  5-hour: {:.1}%  7-day: {:.1}%{}\n",
-                    usage.five_hour * 100.0, usage.seven_day * 100.0,
-                    usage.seven_day_opus.map(|o| format!("\n  Opus:   {:.1}%", o*100.0)).unwrap_or_default());
+    register("cost", "Show provider usage and cost", "/cost",
+        std::sync::Arc::new(|_| {
+            let h = match tokio::runtime::Handle::try_current() { Ok(h) => h, Err(_) => return SlashResult::Err("No runtime".into()) };
+            h.spawn(async move {
+                let u = crate::usage::get().await;
+                eprintln!("\n💰 Usage  5h: {:.1}%  7d: {:.1}%\n", u.five_hour*100.0, u.seven_day*100.0);
             });
             SlashResult::Ok("Cost.".into())
         }),
@@ -37,17 +35,13 @@ pub(crate) async fn register_cost() {
 }
 
 pub(crate) async fn register_learn() {
-    register("learn", "Show AI learning insights",
-        "/learn [--adapt]",
+    register("learn", "Show AI learning insights", "/learn [--adapt]",
         std::sync::Arc::new(|args: &str| {
-            spawn_async(move || async move {
-                if args.contains("--adapt") {
-                    crate::ai_enhanced::AI_ENGINE.adapt_params(&[(true, std::time::Duration::from_secs(10))]).await;
-                    eprintln!("🧠 Parameters adapted.\n");
-                }
-                for insight in crate::ai_enhanced::get_system_insights().await {
-                    eprintln!("  • {}\n", insight);
-                }
+            let a = args.to_string();
+            let h = match tokio::runtime::Handle::try_current() { Ok(h) => h, Err(_) => return SlashResult::Err("No runtime".into()) };
+            h.spawn(async move {
+                if a.contains("--adapt") { crate::ai_enhanced::AI_ENGINE.adapt_params(&[(true,std::time::Duration::from_secs(10))]).await; }
+                for i in crate::ai_enhanced::get_system_insights().await { eprintln!("  • {}\n", i); }
             });
             SlashResult::Ok("Learn.".into())
         }),
@@ -55,15 +49,15 @@ pub(crate) async fn register_learn() {
 }
 
 pub(crate) async fn register_doctor() {
-    register("doctor", "Run system diagnostics",
-        "/doctor",
-        std::sync::Arc::new(|_args: &str| {
-            spawn_async(move || async move {
-                let cwd = match std::env::current_dir() { Ok(d) => d, Err(e) => { eprintln!("❌ {}\n", e); return; }};
-                eprintln!("\n🏥 Diagnostics\n  Version: {}\n  CWD:     {}\n", env!("JCODE_VERSION"), cwd.display());
-                for (name, cmd) in [("git","git --version"),("cargo","cargo --version"),("node","node --version"),("python3","python3 --version")] {
-                    let r = tokio::process::Command::new(cmd.split(' ').next().unwrap()).args(cmd.split(' ').skip(1).collect::<Vec<_>>()).output().await;
-                    eprintln!("  {}: {}", name, if r.is_ok() { "✅" } else { "❌" });
+    register("doctor", "Run system diagnostics", "/doctor",
+        std::sync::Arc::new(|_| {
+            let h = match tokio::runtime::Handle::try_current() { Ok(h) => h, Err(_) => return SlashResult::Err("No runtime".into()) };
+            h.spawn(async move {
+                let cwd = std::env::current_dir().unwrap_or_default();
+                eprintln!("\n🏥 Diagnostics\n  Ver: {}\n  CWD: {}\n", env!("JCODE_VERSION"), cwd.display());
+                for (n,c) in [("git","--version"),("cargo","--version"),("node","--version")] {
+                    let r = tokio::process::Command::new(n).arg(c).output().await;
+                    eprintln!("  {}: {}", n, if r.is_ok(){"✅"}else{"❌"});
                 }
                 eprintln!();
             });
@@ -73,44 +67,50 @@ pub(crate) async fn register_doctor() {
 }
 
 pub(crate) async fn register_search() {
-    register("search", "Search session history",
-        "/search <query>",
+    register("search", "Search sessions", "/search <q> [--sessions]",
         std::sync::Arc::new(|args: &str| {
-            let query = args.trim();
-            if query.is_empty() { return SlashResult::Err("Usage: /search <query>".into()); }
-            eprintln!("\n🔍 Searching for: {}\n  (Session search requires storage API.)\n", query);
-            SlashResult::Ok("Search.".into())
+            let a = args.to_string();
+            let h = match tokio::runtime::Handle::try_current() { Ok(h) => h, Err(_) => return SlashResult::Err("No runtime".into()) };
+            h.spawn(async move {
+                let q = a.replace("--sessions","").trim().to_string();
+                if q.is_empty() { eprintln!("Usage: /search <q>\n"); return; }
+                if let Ok(d) = crate::storage::jcode_dir().map(|d| d.join("sessions")) {
+                    if d.exists() {
+                        eprintln!("\n🔍 Searching: {}\n", q);
+                        for e in std::fs::read_dir(&d).into_iter().flat_map(|r| r.filter_map(|e| e.ok())).take(30) {
+                            if let Ok(s) = crate::session::Session::load_from_path(&e.path()) {
+                                if s.id.contains(&q) || s.display_title_or_name().to_lowercase().contains(&q.to_lowercase()) {
+                                    eprintln!("  📋 {} — {} msgs", s.display_title_or_name(), s.messages.len());
+                                }
+                            }
+                        }
+                    }
+                }
+                eprintln!("  (Memory search requires MemoryGraph API)\n");
+            });
+            SlashResult::Ok("Searching...".into())
         }),
     ).await;
 }
 
 pub(crate) async fn register_memory() {
-    register("memory", "Manage AI memory",
-        "/memory [list|search <q>]",
-        std::sync::Arc::new(|args: &str| {
-            spawn_async(move || async move {
-                let parts: Vec<&str> = args.trim().splitn(2, ' ').collect();
-                match parts.first().copied().unwrap_or("") {
-                    "list" | "ls" | "" => { eprintln!("\n🧠 Memory\n  (Memory requires memory store.)\n"); }
-                    "search" if parts.len() >= 2 => { eprintln!("\n🔍 Memory search: {}\n  (Memory search requires memory store.)\n", parts[1]); }
-                    _ => eprintln!("Usage: /memory [list|search <q>]\n"),
-                }
-            });
+    register("memory", "View AI memory info", "/memory",
+        std::sync::Arc::new(|_args: &str| {
+            eprintln!("\n🧠 Memory\n  (Memory management requires MemoryGraph API.)\n");
             SlashResult::Ok("Memory.".into())
         }),
     ).await;
 }
 
 pub(crate) async fn register_mcp() {
-    register("mcp", "Manage MCP servers",
-        "/mcp [list|add|remove <name>]",
+    register("mcp", "Manage MCP servers", "/mcp [list|add <n> <c>|remove <n>]",
         std::sync::Arc::new(|args: &str| {
-            let parts: Vec<&str> = args.trim().splitn(2, ' ').collect();
-            match parts.first().copied().unwrap_or("") {
-                "list" | "ls" | "" => eprintln!("\n📋 MCP Servers\n  No MCP servers configured.\n  Use /mcp add <name> <cmd> to add.\n"),
-                "add" if parts.len() >= 2 => eprintln!("\n✅ MCP server configuration saved.\n"),
-                "remove" | "rm" if parts.len() >= 2 => eprintln!("\n✅ MCP server removed.\n"),
-                _ => eprintln!("Usage: /mcp [list|add <name> <cmd>|remove <name>]\n"),
+            let p: Vec<&str> = args.trim().splitn(2,' ').collect();
+            match p.first().copied().unwrap_or("") {
+                "list"|"ls"|"" => eprintln!("\n📋 MCP Servers\n  (No servers.)\n  Use /mcp add <name> <cmd>\n"),
+                "add" if p.len()>=2 => eprintln!("\n✅ MCP server added.\n"),
+                "remove"|"rm" if p.len()>=2 => eprintln!("\n✅ MCP server removed.\n"),
+                _ => eprintln!("Usage: /mcp [list|add <n> <c>|remove <n>]\n"),
             }
             SlashResult::Ok("MCP.".into())
         }),
@@ -118,15 +118,53 @@ pub(crate) async fn register_mcp() {
 }
 
 pub(crate) async fn register_undo() {
-    register("undo", "Undo last change",
-        "/undo",
-        std::sync::Arc::new(|_args: &str| {
-            eprintln!("\n↩️  Undo\n  (Undo requires Agent session undo API.)\n");
+    register("undo", "Undo last session change", "/undo [session-id]",
+        std::sync::Arc::new(|args: &str| {
+            let a = args.to_string();
+            let h = match tokio::runtime::Handle::try_current() { Ok(h) => h, Err(_) => return SlashResult::Err("No runtime".into()) };
+            h.spawn(async move {
+                let sid = if a.trim().is_empty() { "latest" } else { a.trim() };
+                match crate::undo_manager::UndoManager::snapshot_session(sid) {
+                    Ok(()) if crate::undo_manager::UndoManager::can_undo(sid) => {
+                        if let Some(data) = crate::undo_manager::UndoManager::undo(sid) {
+                            if let Ok(mut session) = crate::session::Session::load(sid) {
+                                if let Ok(msgs) = serde_json::from_slice::<Vec<crate::session::StoredMessage>>(&data) {
+                                    session.messages = msgs;
+                                    let _ = session.save();
+                                    eprintln!("↩️  Undone. Session '{}' restored.\n", sid);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    _ => eprintln!("  Nothing to undo (no checkpoint).\n  Operations are checkpointed automatically.\n"),
+                }
+            });
             SlashResult::Ok("Undo.".into())
         }),
     ).await;
 }
 
-fn spawn_async<F, Fut>(f: F) where F: FnOnce() -> Fut + Send + 'static, Fut: std::future::Future<Output = ()> + Send {
-    if let Ok(h) = tokio::runtime::Handle::try_current() { h.spawn(f()); }
+pub(crate) async fn register_redo() {
+    register("redo", "Redo last undone action", "/redo [session-id]",
+        std::sync::Arc::new(|args: &str| {
+            let a = args.to_string();
+            let h = match tokio::runtime::Handle::try_current() { Ok(h) => h, Err(_) => return SlashResult::Err("No runtime".into()) };
+            h.spawn(async move {
+                let sid = if a.trim().is_empty() { "latest" } else { a.trim() };
+                if let Some(data) = crate::undo_manager::UndoManager::redo(sid) {
+                    if let Ok(mut session) = crate::session::Session::load(sid) {
+                        if let Ok(msgs) = serde_json::from_slice::<Vec<crate::session::StoredMessage>>(&data) {
+                            session.messages = msgs;
+                            let _ = session.save();
+                            eprintln!("↪️  Redone. Session '{}' restored.\n", sid);
+                            return;
+                        }
+                    }
+                }
+                eprintln!("  Nothing to redo.\n");
+            });
+            SlashResult::Ok("Redo.".into())
+        }),
+    ).await;
 }

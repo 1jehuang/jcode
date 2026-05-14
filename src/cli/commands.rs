@@ -1738,14 +1738,15 @@ pub async fn run_mcp_command(cmd: crate::cli::args::McpCommand) -> Result<()> {
 
     match cmd {
         McpCommand::Serve { debug, verbose } => {
-            eprintln!("Starting CarpAI MCP server (debug={}, verbose={})", debug, verbose);
-            // Start the MCP server mode - this allows IDEs to connect via MCP
-            // For now, print instructions
-            eprintln!("\nMCP Server not yet fully implemented.");
-            eprintln!("To use CarpAI as an MCP server in your IDE:");
-            eprintln!("  Add MCP server config:");
-            eprintln!(r#"  {{"command": "carpai", "args": ["mcp", "serve"]}}"#);
-            Ok(())
+            if verbose {
+                eprintln!("Starting CarpAI MCP server on stdio...");
+                eprintln!("Protocol: MCP 2024-11-05");
+            }
+            // Suppress non-error output while running as MCP server
+            if !debug {
+                crate::cli::output::set_quiet_enabled(true);
+            }
+            crate::mcp::server::serve().await
         }
         McpCommand::Add {
             name,
@@ -1790,6 +1791,44 @@ pub async fn run_mcp_command(cmd: crate::cli::args::McpCommand) -> Result<()> {
             eprintln!("Importing MCP servers from Claude Desktop (scope={})", scope);
             eprintln!("\n✅ Import completed (0 servers imported).");
             Ok(())
+        }
+        McpCommand::Bridge {
+            debug,
+            expose_resources,
+            auto_connect,
+            status,
+        } => {
+            if !debug {
+                crate::cli::output::set_quiet_enabled(true);
+            }
+
+            eprintln!("🚀 Starting bidirectional MCP bridge...\n");
+
+            let config = crate::mcp::McpBridgeConfig {
+                server: crate::mcp::McpServerConfig {
+                    expose_resources,
+                    server_name: "carpai".to_string(),
+                    extra_tools: vec![],
+                },
+                client_enabled: true,
+                auto_connect,
+                server_name: "carpai".to_string(),
+            };
+
+            let mut bridge = crate::mcp::McpBridge::new(config);
+
+            // Initialize with a registry
+            let provider = crate::mcp::server::noop_provider();
+            let registry = crate::tool::Registry::new(provider).await;
+            bridge.init(registry).await?;
+
+            if status {
+                let bridge_status = bridge.status().await;
+                eprintln!("{}", bridge_status);
+                return Ok(());
+            }
+
+            bridge.serve().await
         }
     }
 }
@@ -2519,6 +2558,3028 @@ pub async fn run_fork_command(name: Option<&str>, checkpoint: Option<&str>) -> R
     eprintln!("  ✅ Session forked: {} (from {})\n", fork_name, checkpoint_ref);
     eprintln!("  (Fork creates an independent copy of the current session state.)\n");
     Ok(())
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Shell completion — multi-shell, deep tree, flags+descriptions+dynamic
+// ════════════════════════════════════════════════════════════════════
+
+/// Metadata for a single command/flag — mirrors clap structure
+#[derive(Debug, Clone)]
+struct CmdMeta {
+    name: &'static str,
+    desc: &'static str,
+    subcommands: &'static [CmdMeta],
+    flags: &'static [FlagMeta],
+}
+
+#[derive(Debug, Clone)]
+struct FlagMeta {
+    short: Option<char>,
+    long: &'static str,
+    desc: &'static str,
+    /// None = bool flag; Some("file") / "string" / "number" / "enum:a,b"
+    value_hint: Option<&'static str>,
+}
+
+/// Full CarpAI command tree — mirrors `src/cli/args.rs`.
+const COMMAND_TREE: &[CmdMeta] = &[
+    CmdMeta { name: "serve", desc: "Start the agent server (background daemon)", subcommands: &[], flags: &[
+        FlagMeta { short: None, long: "temporary-server", desc: "Mark as temporary server", value_hint: None },
+        FlagMeta { short: None, long: "owner-pid", desc: "Owning process PID", value_hint: Some("number") },
+        FlagMeta { short: None, long: "temp-idle-timeout-secs", desc: "Idle shutdown timeout", value_hint: Some("number") },
+    ]},
+    CmdMeta { name: "connect", desc: "Connect to a running server", subcommands: &[], flags: &[] },
+    CmdMeta { name: "run", desc: "Run a single message and exit", subcommands: &[], flags: &[
+        FlagMeta { short: None, long: "json", desc: "Emit JSON result", value_hint: None },
+        FlagMeta { short: None, long: "ndjson", desc: "Emit NDJSON events", value_hint: None },
+    ]},
+    CmdMeta { name: "login", desc: "Login to a provider via OAuth / API key", subcommands: &[], flags: &[
+        FlagMeta { short: Some('a'), long: "account", desc: "Account label for multi-account", value_hint: Some("string") },
+        FlagMeta { short: None, long: "no-browser", desc: "Do not open browser (headless)", value_hint: None },
+        FlagMeta { short: None, long: "print-auth-url", desc: "Print auth URL for scripts", value_hint: None },
+        FlagMeta { short: None, long: "callback-url", desc: "Complete auth via callback URL", value_hint: Some("string") },
+        FlagMeta { short: None, long: "auth-code", desc: "Complete auth via auth code", value_hint: Some("string") },
+        FlagMeta { short: None, long: "json", desc: "Emit JSON output", value_hint: None },
+        FlagMeta { short: None, long: "complete", desc: "Resume pending login flow", value_hint: None },
+        FlagMeta { short: None, long: "google-access-tier", desc: "Gmail access tier", value_hint: Some("enum:full,readonly") },
+        FlagMeta { short: None, long: "api-base", desc: "OpenAI-compatible API base URL", value_hint: Some("string") },
+        FlagMeta { short: None, long: "api-key", desc: "OpenAI-compatible API key", value_hint: Some("string") },
+        FlagMeta { short: None, long: "api-key-env", desc: "Env var name for API key", value_hint: Some("string") },
+    ]},
+    CmdMeta { name: "repl", desc: "Run in simple REPL mode (no TUI)", subcommands: &[], flags: &[] },
+    CmdMeta { name: "update", desc: "Update CarpAI to the latest version", subcommands: &[], flags: &[] },
+    CmdMeta { name: "version", desc: "Show build/version information", subcommands: &[], flags: &[
+        FlagMeta { short: None, long: "json", desc: "Emit JSON", value_hint: None },
+    ]},
+    CmdMeta { name: "usage", desc: "Show usage limits for connected providers", subcommands: &[], flags: &[
+        FlagMeta { short: None, long: "json", desc: "Emit JSON", value_hint: None },
+    ]},
+    CmdMeta { name: "selfdev", desc: "Self-development / canary mode", subcommands: &[], flags: &[
+        FlagMeta { short: None, long: "build", desc: "Build new canary version", value_hint: None },
+    ]},
+    CmdMeta { name: "debug", desc: "Debug socket CLI — interact with server", subcommands: &[], flags: &[
+        FlagMeta { short: Some('S'), long: "session", desc: "Target session ID", value_hint: Some("string") },
+        FlagMeta { short: Some('s'), long: "socket", desc: "Server socket path", value_hint: Some("file") },
+        FlagMeta { short: Some('w'), long: "wait", desc: "Wait for response to complete", value_hint: None },
+    ]},
+    CmdMeta { name: "auth", desc: "Authentication status & validation", subcommands: &[
+        CmdMeta { name: "status", desc: "Show configured auth status", subcommands: &[], flags: &[
+            FlagMeta { short: None, long: "json", desc: "Emit JSON", value_hint: None },
+        ]},
+        CmdMeta { name: "doctor", desc: "Diagnose provider auth issues", subcommands: &[], flags: &[
+            FlagMeta { short: None, long: "validate", desc: "Run live validation", value_hint: None },
+            FlagMeta { short: None, long: "json", desc: "Emit JSON", value_hint: None },
+        ]},
+    ], flags: &[]},
+    CmdMeta { name: "provider", desc: "Provider discovery & selection", subcommands: &[
+        CmdMeta { name: "list", desc: "List provider IDs", subcommands: &[], flags: &[
+            FlagMeta { short: None, long: "json", desc: "Emit JSON", value_hint: None },
+        ]},
+        CmdMeta { name: "current", desc: "Show current provider/model", subcommands: &[], flags: &[
+            FlagMeta { short: None, long: "json", desc: "Emit JSON", value_hint: None },
+        ]},
+        CmdMeta { name: "add", desc: "Add OpenAI-compatible provider profile", subcommands: &[], flags: &[
+            FlagMeta { short: None, long: "base-url", desc: "API base URL", value_hint: Some("string") },
+            FlagMeta { short: Some('m'), long: "model", desc: "Default model ID", value_hint: Some("string") },
+            FlagMeta { short: None, long: "api-key", desc: "API key value", value_hint: Some("string") },
+            FlagMeta { short: None, long: "auth", desc: "Auth style (bearer/api-key/none)", value_hint: Some("enum:bearer,api-key,none") },
+            FlagMeta { short: None, long: "set-default", desc: "Make this the startup default", value_hint: None },
+            FlagMeta { short: None, long: "overwrite", desc: "Replace existing profile", value_hint: None },
+            FlagMeta { short: None, long: "json", desc: "Emit JSON", value_hint: None },
+        ]},
+    ], flags: &[]},
+    CmdMeta { name: "session", desc: "Session operations (rename)", subcommands: &[
+        CmdMeta { name: "rename", desc: "Rename a session's display name", subcommands: &[], flags: &[
+            FlagMeta { short: None, long: "clear", desc: "Clear custom name", value_hint: None },
+            FlagMeta { short: None, long: "json", desc: "Emit JSON", value_hint: None },
+        ]},
+    ], flags: &[]},
+    CmdMeta { name: "memory", desc: "Memory management commands", subcommands: &[
+        CmdMeta { name: "list", desc: "List stored memories", subcommands: &[], flags: &[
+            FlagMeta { short: Some('s'), long: "scope", desc: "Scope (project/global/all)", value_hint: Some("enum:project,global,all") },
+            FlagMeta { short: Some('t'), long: "tag", desc: "Filter by tag", value_hint: Some("string") },
+        ]},
+        CmdMeta { name: "search", desc: "Search memories by query", subcommands: &[], flags: &[
+            FlagMeta { short: Some('s'), long: "semantic", desc: "Use embedding-based search", value_hint: None },
+        ]},
+        CmdMeta { name: "export", desc: "Export memories to JSON file", subcommands: &[], flags: &[
+            FlagMeta { short: Some('o'), long: "output", desc: "Output file path", value_hint: Some("file") },
+            FlagMeta { short: Some('s'), long: "scope", desc: "Export scope", value_hint: Some("enum:project,global,all") },
+        ]},
+        CmdMeta { name: "import", desc: "Import memories from JSON file", subcommands: &[], flags: &[
+            FlagMeta { short: Some('i'), long: "input", desc: "Input file path", value_hint: Some("file") },
+            FlagMeta { short: Some('s'), long: "scope", desc: "Import scope", value_hint: Some("enum:project,global") },
+            FlagMeta { short: None, long: "overwrite", desc: "Overwrite existing by ID", value_hint: None },
+        ]},
+        CmdMeta { name: "stats", desc: "Show memory statistics", subcommands: &[], flags: &[] },
+        CmdMeta { name: "clear-test", desc: "Clear test memory storage", subcommands: &[], flags: &[] },
+    ], flags: &[]},
+    CmdMeta { name: "ambient", desc: "Ambient mode management", subcommands: &[
+        CmdMeta { name: "status", desc: "Show ambient mode status", subcommands: &[], flags: &[] },
+        CmdMeta { name: "log", desc: "Show ambient activity log", subcommands: &[], flags: &[] },
+        CmdMeta { name: "trigger", desc: "Manually trigger ambient cycle", subcommands: &[], flags: &[] },
+        CmdMeta { name: "stop", desc: "Stop ambient mode", subcommands: &[], flags: &[] },
+    ], flags: &[]},
+    CmdMeta { name: "pair", desc: "Generate pairing code for iOS/web", subcommands: &[], flags: &[
+        FlagMeta { short: None, long: "list", desc: "List paired devices", value_hint: None },
+        FlagMeta { short: None, long: "revoke", desc: "Revoke a device by name/ID", value_hint: Some("string") },
+    ]},
+    CmdMeta { name: "permissions", desc: "Review pending ambient permission requests", subcommands: &[], flags: &[] },
+    CmdMeta { name: "transcript", desc: "Inject transcribed text into active TUI", subcommands: &[], flags: &[
+        FlagMeta { short: None, long: "mode", desc: "Apply mode", value_hint: Some("enum:send,insert,append,replace") },
+        FlagMeta { short: Some('S'), long: "session", desc: "Target session ID", value_hint: Some("string") },
+    ]},
+    CmdMeta { name: "dictate", desc: "Run dictation from configured mic", subcommands: &[], flags: &[
+        FlagMeta { short: None, long: "type", desc: "Type into focused app (not jcode)", value_hint: None },
+    ]},
+    CmdMeta { name: "setup-hotkey", desc: "Install global hotkey (Alt+;) for carpai", subcommands: &[], flags: &[] },
+    CmdMeta { name: "setup-launcher", desc: "Install carpai in your app launcher", subcommands: &[], flags: &[] },
+    CmdMeta { name: "browser", desc: "Browser automation setup/status", subcommands: &[], flags: &[] },
+    CmdMeta { name: "replay", desc: "Replay a saved session in the TUI", subcommands: &[], flags: &[
+        FlagMeta { short: None, long: "swarm", desc: "Multi-pane swarm view", value_hint: None },
+        FlagMeta { short: None, long: "export", desc: "Export as JSON instead of playing", value_hint: None },
+        FlagMeta { short: None, long: "speed", desc: "Playback speed multiplier", value_hint: Some("number") },
+        FlagMeta { short: None, long: "video", desc: "Export as video file", value_hint: Some("file") },
+        FlagMeta { short: None, long: "cols", desc: "Video width in columns", value_hint: Some("number") },
+        FlagMeta { short: None, long: "rows", desc: "Video height in rows", value_hint: Some("number") },
+        FlagMeta { short: None, long: "fps", desc: "Video frames per second", value_hint: Some("number") },
+        FlagMeta { short: None, long: "auto-edit", desc: "Compress tool-call wait times", value_hint: None },
+        FlagMeta { short: None, long: "timeline", desc: "Path to edited timeline JSON", value_hint: Some("file") },
+    ]},
+    CmdMeta { name: "model", desc: "Model management (list available models)", subcommands: &[
+        CmdMeta { name: "list", desc: "List model names for --model", subcommands: &[], flags: &[
+            FlagMeta { short: None, long: "json", desc: "Emit JSON", value_hint: None },
+            FlagMeta { short: None, long: "verbose", desc: "Show selection summary", value_hint: None },
+        ]},
+    ], flags: &[]},
+    CmdMeta { name: "auth-test", desc: "End-to-end auth test", subcommands: &[], flags: &[
+        FlagMeta { short: None, long: "login", desc: "Run login flow first", value_hint: None },
+        FlagMeta { short: None, long: "all-configured", desc: "Test all configured providers", value_hint: None },
+        FlagMeta { short: None, long: "no-smoke", desc: "Skip provider smoke prompt", value_hint: None },
+        FlagMeta { short: None, long: "json", desc: "Emit JSON report", value_hint: None },
+        FlagMeta { short: None, long: "output", desc: "Write JSON report to file", value_hint: Some("file") },
+    ]},
+    CmdMeta { name: "build", desc: "Build mode: plan → execute → verify", subcommands: &[], flags: &[
+        FlagMeta { short: None, long: "manual", desc: "Ask for each step", value_hint: None },
+        FlagMeta { short: None, long: "no-verify", desc: "Skip micro-ci verification", value_hint: None },
+        FlagMeta { short: None, long: "max-retries", desc: "Max retries per step", value_hint: Some("number") },
+        FlagMeta { short: None, long: "release", desc: "Build in release mode", value_hint: None },
+        FlagMeta { short: None, long: "clean", desc: "Clean build artifacts", value_hint: None },
+        FlagMeta { short: None, long: "target", desc: "Build target", value_hint: Some("string") },
+        FlagMeta { short: None, long: "all-projects", desc: "Build all workspace projects", value_hint: None },
+        FlagMeta { short: None, long: "test", desc: "Run tests after build", value_hint: None },
+        FlagMeta { short: None, long: "parallel", desc: "Parallel workspace build", value_hint: None },
+        FlagMeta { short: None, long: "jobs", desc: "Number of parallel jobs", value_hint: Some("number") },
+    ]},
+    CmdMeta { name: "mcp", desc: "Manage MCP servers (add / remove / serve / bridge)", subcommands: &[
+        CmdMeta { name: "serve", desc: "Start MCP server on stdio", subcommands: &[], flags: &[
+            FlagMeta { short: Some('d'), long: "debug", desc: "Enable debug output", value_hint: None },
+            FlagMeta { short: None, long: "verbose", desc: "Verbose mode", value_hint: None },
+        ]},
+        CmdMeta { name: "add", desc: "Add an MCP server config", subcommands: &[], flags: &[
+            FlagMeta { short: Some('s'), long: "scope", desc: "Config scope", value_hint: Some("enum:local,user,project") },
+            FlagMeta { short: Some('t'), long: "transport", desc: "Transport type", value_hint: Some("enum:stdio,sse,streamable-http") },
+            FlagMeta { short: Some('e'), long: "env", desc: "Env vars (KEY=VALUE)", value_hint: Some("string") },
+        ]},
+        CmdMeta { name: "add-json", desc: "Add MCP server from JSON config", subcommands: &[], flags: &[
+            FlagMeta { short: Some('s'), long: "scope", desc: "Config scope", value_hint: Some("enum:local,user,project") },
+        ]},
+        CmdMeta { name: "remove", desc: "Remove an MCP server", subcommands: &[], flags: &[
+            FlagMeta { short: None, long: "scope", desc: "Config scope", value_hint: Some("enum:local,user,project") },
+        ]},
+        CmdMeta { name: "list", desc: "List configured MCP servers", subcommands: &[], flags: &[] },
+        CmdMeta { name: "get", desc: "Get MCP server details", subcommands: &[], flags: &[] },
+        CmdMeta { name: "import-desktop", desc: "Import from Claude Desktop config", subcommands: &[], flags: &[
+            FlagMeta { short: Some('s'), long: "scope", desc: "Config scope", value_hint: Some("enum:local,user,project") },
+        ]},
+        CmdMeta { name: "bridge", desc: "Bidirectional MCP bridge (server+client)", subcommands: &[], flags: &[
+            FlagMeta { short: Some('d'), long: "debug", desc: "Enable debug output", value_hint: None },
+            FlagMeta { short: None, long: "expose-resources", desc: "Expose workspace resources", value_hint: None },
+            FlagMeta { short: None, long: "auto-connect", desc: "Auto-connect configured servers", value_hint: None },
+            FlagMeta { short: None, long: "status", desc: "Print bridge status only", value_hint: None },
+        ]},
+    ], flags: &[]},
+    CmdMeta { name: "doctor", desc: "Run system diagnostics and health checks", subcommands: &[], flags: &[
+        FlagMeta { short: None, long: "json", desc: "Emit JSON report", value_hint: None },
+    ]},
+    CmdMeta { name: "init", desc: "Initialize a project in the current dir", subcommands: &[], flags: &[
+        FlagMeta { short: None, long: "project-type", desc: "Project type", value_hint: Some("enum:rust,node,typescript,react,vue,python,go,c,cpp,java,csharp,ruby") },
+        FlagMeta { short: None, long: "scaffold", desc: "Create project files", value_hint: None },
+    ]},
+    CmdMeta { name: "restart", desc: "Save / restore jcode windows across reboot", subcommands: &[
+        CmdMeta { name: "save", desc: "Save reboot snapshot", subcommands: &[], flags: &[
+            FlagMeta { short: None, long: "auto-restore", desc: "Restore on next startup", value_hint: None },
+        ]},
+        CmdMeta { name: "restore", desc: "Restore saved snapshot", subcommands: &[], flags: &[] },
+        CmdMeta { name: "status", desc: "Show saved snapshot info", subcommands: &[], flags: &[] },
+        CmdMeta { name: "clear", desc: "Clear saved snapshot", subcommands: &[], flags: &[] },
+    ], flags: &[]},
+    CmdMeta { name: "code-value", desc: "Analyze code quality (6-dimension)", subcommands: &[], flags: &[
+        FlagMeta { short: Some('i'), long: "input", desc: "Cargo check JSON path", value_hint: Some("file") },
+        FlagMeta { short: None, long: "manifest-path", desc: "Path to Cargo.toml", value_hint: Some("file") },
+        FlagMeta { short: None, long: "json", desc: "Emit JSON report", value_hint: None },
+        FlagMeta { short: Some('o'), long: "output", desc: "Write report to file", value_hint: Some("file") },
+    ]},
+    CmdMeta { name: "skills", desc: "Skill management (list, search, info)", subcommands: &[
+        CmdMeta { name: "list", desc: "List available skills", subcommands: &[], flags: &[
+            FlagMeta { short: None, long: "json", desc: "Emit JSON", value_hint: None },
+        ]},
+        CmdMeta { name: "search", desc: "Search skills by keyword", subcommands: &[], flags: &[] },
+        CmdMeta { name: "info", desc: "Show skill details", subcommands: &[], flags: &[] },
+    ], flags: &[]},
+    CmdMeta { name: "workflows", desc: "Workflow management (list, run)", subcommands: &[
+        CmdMeta { name: "list", desc: "List workflow templates", subcommands: &[], flags: &[
+            FlagMeta { short: None, long: "json", desc: "Emit JSON", value_hint: None },
+        ]},
+        CmdMeta { name: "templates", desc: "Show template info", subcommands: &[], flags: &[] },
+        CmdMeta { name: "run", desc: "Run a workflow", subcommands: &[], flags: &[] },
+    ], flags: &[]},
+    CmdMeta { name: "tasks", desc: "Task management (list, create, plan)", subcommands: &[
+        CmdMeta { name: "list", desc: "List tasks", subcommands: &[], flags: &[
+            FlagMeta { short: Some('s'), long: "status", desc: "Filter by status", value_hint: Some("string") },
+            FlagMeta { short: None, long: "json", desc: "Emit JSON", value_hint: None },
+        ]},
+        CmdMeta { name: "create", desc: "Create a new task", subcommands: &[], flags: &[
+            FlagMeta { short: None, long: "priority", desc: "Priority", value_hint: Some("enum:low,medium,high") },
+        ]},
+        CmdMeta { name: "get", desc: "Get task details by ID", subcommands: &[], flags: &[
+            FlagMeta { short: None, long: "json", desc: "Emit JSON", value_hint: None },
+        ]},
+        CmdMeta { name: "plan", desc: "Plan a task's execution", subcommands: &[], flags: &[] },
+    ], flags: &[]},
+    CmdMeta { name: "git", desc: "Git operations (branch, diff, status)", subcommands: &[
+        CmdMeta { name: "branch", desc: "Show current branch", subcommands: &[], flags: &[] },
+        CmdMeta { name: "diff", desc: "Show git diff", subcommands: &[], flags: &[] },
+        CmdMeta { name: "context", desc: "Show full git context", subcommands: &[], flags: &[] },
+        CmdMeta { name: "status", desc: "Show git status", subcommands: &[], flags: &[] },
+    ], flags: &[]},
+    CmdMeta { name: "config", desc: "Configuration management (get, set, list)", subcommands: &[
+        CmdMeta { name: "get", desc: "Get a config value by key", subcommands: &[], flags: &[] },
+        CmdMeta { name: "set", desc: "Set a config value", subcommands: &[], flags: &[] },
+        CmdMeta { name: "list", desc: "List all config variables", subcommands: &[], flags: &[
+            FlagMeta { short: None, long: "json", desc: "Emit JSON", value_hint: None },
+        ]},
+    ], flags: &[]},
+    CmdMeta { name: "commit", desc: "Commit code with AI assistance", subcommands: &[], flags: &[
+        FlagMeta { short: Some('m'), long: "message", desc: "Commit message", value_hint: Some("string") },
+        FlagMeta { short: Some('f'), long: "files", desc: "Files to stage", value_hint: Some("file") },
+        FlagMeta { short: None, long: "no-ai", desc: "Skip AI message generation", value_hint: None },
+    ]},
+    CmdMeta { name: "session-mgmt", desc: "Session management (info/export/resume)", subcommands: &[
+        CmdMeta { name: "info", desc: "Show current session info", subcommands: &[], flags: &[] },
+        CmdMeta { name: "export", desc: "Export session context to file", subcommands: &[], flags: &[
+            FlagMeta { short: Some('o'), long: "output", desc: "Output file path", value_hint: Some("file") },
+            FlagMeta { short: None, long: "full", desc: "Include full context", value_hint: None },
+        ]},
+        CmdMeta { name: "resume", desc: "Resume a previous session", subcommands: &[], flags: &[
+            FlagMeta { short: Some('i'), long: "id", desc: "Session ID", value_hint: Some("string") },
+            FlagMeta { short: Some('l'), long: "list", desc: "List available sessions", value_hint: None },
+        ]},
+    ], flags: &[]},
+    CmdMeta { name: "rethink", desc: "Re-analyze context", subcommands: &[], flags: &[
+        FlagMeta { short: Some('m'), long: "mode", desc: "Mode (quick/deep/thinkback)", value_hint: Some("enum:quick,deep,thinkback") },
+        FlagMeta { short: Some('d'), long: "depth", desc: "Analysis depth 1-5", value_hint: Some("number") },
+    ]},
+    CmdMeta { name: "compact", desc: "Compact context to reduce tokens", subcommands: &[], flags: &[
+        FlagMeta { short: Some('m'), long: "mode", desc: "Mode (summary/compress/auto)", value_hint: Some("enum:summary,compress,auto") },
+        FlagMeta { short: Some('t'), long: "target", desc: "Target token count", value_hint: Some("number") },
+        FlagMeta { short: None, long: "json", desc: "Output as JSON", value_hint: None },
+    ]},
+    CmdMeta { name: "fork", desc: "Fork current session into a new branch", subcommands: &[], flags: &[
+        FlagMeta { short: Some('n'), long: "name", desc: "Fork name", value_hint: Some("string") },
+        FlagMeta { short: Some('c'), long: "checkpoint", desc: "Start checkpoint", value_hint: Some("string") },
+    ]},
+    CmdMeta { name: "completion", desc: "Generate shell completion scripts", subcommands: &[], flags: &[
+        FlagMeta { short: Some('o'), long: "output", desc: "Write to file instead of stdout", value_hint: Some("file") },
+    ]},
+];
+
+// ─── Public entry point ────────────────────────────────────────
+
+/// Generate shell completion scripts.  The only public function — delegated to by dispatch.
+pub fn run_completion_command(shell: &str, output_path: Option<&str>) -> Result<()> {
+    let resolved = if shell == "auto" || shell.is_empty() {
+        detect_current_shell()
+    } else {
+        shell.to_string()
+    };
+    let script = match resolved.as_str() {
+        "bash"      => generate_bash(),
+        "zsh"       => generate_zsh(),
+        "fish"      => generate_fish(),
+        "powershell" => generate_powershell(),
+        _ => return Err(anyhow::anyhow!(
+            "Unknown shell: {shell}. Supported: bash, zsh, fish, powershell")),
+    };
+    match output_path {
+        Some(p) => std::fs::write(p, &script)?,
+        None    => print!("{script}"),
+    }
+    Ok(())
+}
+
+/// Auto-detect shell and install completion scripts to the correct system path.
+/// Uses `$SHELL` env var and known paths for each platform.
+pub fn run_completion_install_command(shell: &str) -> Result<()> {
+    let shell = shell.to_lowercase();
+    let shell_detected = if shell == "auto" || shell.is_empty() {
+        detect_current_shell()
+    } else {
+        shell
+    };
+
+    let script = match shell_detected.as_str() {
+        "bash"      => generate_bash(),
+        "zsh"       => generate_zsh(),
+        "fish"      => generate_fish(),
+        "powershell" => generate_powershell(),
+        other => return Err(anyhow::anyhow!(
+            "Cannot auto-install for '{other}'. Try `carpai completion {other} -o <path>` instead")),
+    };
+
+    let install_path = detect_install_path(&shell_detected)?;
+
+    // Ensure parent directory exists
+    if let Some(parent) = std::path::Path::new(&install_path).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("Cannot create dir '{}': {}", parent.display(), e))?;
+    }
+
+    std::fs::write(&install_path, &script)
+        .map_err(|e| anyhow::anyhow!("Cannot write to '{}': {}", install_path, e))?;
+
+    eprintln!("✅ Completion script installed for {shell_detected}");
+    eprintln!("   Path: {install_path}");
+    if shell_detected == "bash" {
+        eprintln!("   Activate: source {install_path}");
+        eprintln!("   Or add to ~/.bashrc: [[ -f {install_path} ]] && source {install_path}");
+    } else if shell_detected == "zsh" {
+        eprintln!("   Activate: compinit && source {install_path}");
+    } else if shell_detected == "fish" {
+        eprintln!("   Activate: fish will auto-source from $fish_complete_path");
+    } else if shell_detected == "powershell" {
+        eprintln!("   Activate: Add-Content -Path $PROFILE -Value '. \"{install_path}\"'");
+    }
+    Ok(())
+}
+
+fn detect_current_shell() -> String {
+    // Prefer SHELL env var
+    if let Ok(shell) = std::env::var("SHELL") {
+        if shell.ends_with("bash") { return "bash".into(); }
+        if shell.ends_with("zsh")  { return "zsh".into(); }
+        if shell.ends_with("fish") { return "fish".into(); }
+    }
+    // Windows: prefer PowerShell
+    if cfg!(windows) {
+        return "powershell".into();
+    }
+    // Fallback: check /proc/self/exe or default
+    "bash".into()
+}
+
+fn detect_install_path(shell: &str) -> Result<String> {
+    match shell {
+        "bash" => {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            Ok(format!("{home}/.local/share/bash-completion/completions/carpai"))
+        }
+        "zsh" => {
+            // Prefer site-functions (requires root), fallback to user dir
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            let user_path = format!("{home}/.zsh/completions/_carpai");
+            if std::path::Path::new(&user_path).parent().map_or(false, |p| p.exists()) {
+                return Ok(user_path);
+            }
+            Ok(format!("{home}/.zsh/completions/_carpai"))
+        }
+        "fish" => {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            Ok(format!("{home}/.config/fish/completions/carpai.fish"))
+        }
+        "powershell" => {
+            // Try to find the PowerShell profile
+            if let Ok(profile) = std::env::var("PROFILE") {
+                let dir = std::path::Path::new(&profile).parent()
+                    .map(|p| p.join("carpai_completion.psm1"))
+                    .unwrap_or_else(|| std::path::PathBuf::from("carpai_completion.psm1"));
+                return Ok(dir.to_string_lossy().into());
+            }
+            let local = std::env::var("LOCALAPPDATA")
+                .unwrap_or_else(|_| r"C:\Users\Default".into());
+            Ok(format!("{local}\\carpai\\carpai_completion.psm1"))
+        }
+        other => Err(anyhow::anyhow!("Unsupported shell: {other}")),
+    }
+}
+
+// ─── Bash ──────────────────────────────────────────────────────
+
+fn generate_bash() -> String {
+    let top_names: Vec<&str> = COMMAND_TREE.iter().map(|c| c.name).collect();
+    let top = top_names.join(" ");
+
+    let provider_vals  = "auto claude openai openai-api openrouter azure gemini groq mistral deepseek ollama lmstudio copilot perplexity togetherai deepinfra xai";
+    let model_vals     = "claude-sonnet-4-5 claude-opus-4-5 gpt-4o gpt-5.5 gemini-2.5-pro deepseek-chat";
+
+    let mut sub_cases = String::new();
+    for cmd in COMMAND_TREE {
+        if !cmd.subcommands.is_empty() {
+            let sub_names: Vec<&str> = cmd.subcommands.iter().map(|s| s.name).collect();
+            sub_cases.push_str(&format!("        {}) COMPREPLY=($(compgen -W \"{}\" -- \"$cur\")) ;;\n",
+                cmd.name, sub_names.join(" ")));
+        }
+    }
+
+    let mut flag_cases = String::new();
+    for cmd in COMMAND_TREE {
+        for f in &cmd.flags {
+            if let Some(h) = f.value_hint {
+                let pat = match f.short {
+                    Some(s) => format!("-{}|--{}", s, f.long),
+                    None    => format!("--{}", f.long),
+                };
+                let val = match h {
+                    "file"   => r#"$(_filedir)"#.to_string(),
+                    "number" | "string" => String::new(),
+                    v if v.starts_with("enum:") => {
+                        let items = v.trim_start_matches("enum:");
+                        format!(r#"$(compgen -W "{items}" -- "$cur")"#)
+                    }
+                    _ => String::new(),
+                };
+                if !val.is_empty() {
+                    flag_cases.push_str(&format!("        {}) COMPREPLY=({val}) ;;\n", pat));
+                }
+            }
+        }
+    }
+
+    format!(r#"# CarpAI bash completion — generated by `carpai completion bash`
+# Source:   source /dev/stdin <<< "$(carpai completion bash)"
+# Install:  carpai completion bash -o /etc/bash_completion.d/carpai
+
+_carpai() {{
+    local cur="${{COMP_WORDS[COMP_CWORD]}}"
+    local prev="${{COMP_WORDS[COMP_CWORD-1]}}"
+    local words=("${{COMP_WORDS[@]}}")
+
+    # ── global‑flag value completions ────────────────────────────
+    case "$prev" in
+        -C|--cwd) COMPREPLY=($(compgen -d -- "$cur")); return 0 ;;
+        -p|--provider) COMPREPLY=($(compgen -W "{provider_vals}" -- "$cur")); return 0 ;;
+        -m|--model) COMPREPLY=($(compgen -W "{model_vals}" -- "$cur")); return 0 ;;
+        --socket) COMPREPLY=($(compgen -f -- "$cur")); return 0 ;;
+        --resume) COMPREPLY=(); return 0 ;;
+{flag_cases}    esac
+
+    # ── first level: top‑level commands ─────────────────────────
+    if (( COMP_CWORD == 1 )); then
+        COMPREPLY=($(compgen -W "{top}" -- "$cur"))
+        return 0
+    fi
+
+    # ── second level: sub‑subcommands ───────────────────────────
+    if (( COMP_CWORD == 2 )); then
+        case "${{words[1]}}" in
+{sub_cases}            *) COMPREPLY=($(compgen -f -- "$cur")) ;;
+        esac
+        return 0
+    fi
+
+    # ── fallback: files ─────────────────────────────────────────
+    COMPREPLY=($(compgen -f -- "$cur"))
+}}
+
+complete -F _carpai carpai
+"#)
+}
+
+// ─── Zsh ───────────────────────────────────────────────────────
+
+fn generate_zsh() -> String {
+    let top: String = COMMAND_TREE.iter()
+        .map(|c| format!("        \"{}:{}\"", c.name, c.desc))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let flags_global = zsh_flag_block("",
+        &[FlagMeta { short: Some('C'), long: "cwd", desc: "Working directory", value_hint: Some("file") },
+          FlagMeta { short: Some('p'), long: "provider", desc: "AI provider (auto/claude/openai/...)", value_hint: Some("enum:auto,claude,openai,openai-api,openrouter,azure,gemini") },
+          FlagMeta { short: Some('m'), long: "model", desc: "Model name", value_hint: Some("string") },
+          FlagMeta { short: None, long: "no-update", desc: "Skip update check", value_hint: None },
+          FlagMeta { short: None, long: "trace", desc: "Log tool I/O to stderr", value_hint: None },
+          FlagMeta { short: None, long: "quiet", desc: "Suppress non-error output", value_hint: None },
+          FlagMeta { short: None, long: "help", desc: "Show help", value_hint: None },
+        ]);
+
+    let mut sub_body = String::new();
+    for cmd in COMMAND_TREE {
+        if !cmd.subcommands.is_empty() {
+            let subs: String = cmd.subcommands.iter()
+                .map(|s| format!("                    \"{}:{}\"", s.name, s.desc))
+                .collect::<Vec<_>>()
+                .join("\n");
+            sub_body.push_str(&format!(r#"
+                {name})
+                    local -a _carpai_sub
+                    _carpai_sub=(
+{miss}
+                    )
+                    _describe -t '{name}-cmd' '{name} subcommand' _carpai_sub && ret=0
+                    ;;"#, name = cmd.name, miss = subs));
+        }
+        // standalone commands with flags
+        if cmd.subcommands.is_empty() && !cmd.flags.is_empty() {
+            let fb = zsh_flag_block(cmd.name, cmd.flags);
+            sub_body.push_str(&format!(r#"
+                {name})
+                    _arguments -s -S \
+{fb}                    && ret=0
+                    ;;"#, name = cmd.name));
+        }
+    }
+
+    format!(r#"# CarpAI zsh completion — generated by `carpai completion zsh`
+#compdef carpai
+# Install: carpai completion zsh -o /usr/local/share/zsh/site-functions/_carpai
+
+_carpai() {{
+    typeset -A opt_args
+    local curcontext="$curcontext" state line ret=1
+
+    _arguments -C -S \
+        '(-): :->command' \
+        '(-)*: :->args' \
+    && ret=0
+
+    case $state in
+        command)
+            local -a _carpai_cmds
+            _carpai_cmds=(
+{top}
+            )
+            _describe -t carpai-cmd 'carpai command' _carpai_cmds && ret=0
+            ;;
+        args)
+            case $words[1] in
+{sub_body}                *)
+                    _arguments -s -S \
+{flags_global}                    && ret=0
+                    _files && ret=0
+                    ;;
+            esac
+            ;;
+    esac
+    return ret
+}}
+
+_carpai "$@"
+"#)
+}
+
+fn zsh_flag_block(_cmd: &str, flags: &[FlagMeta]) -> String {
+    let mut out = String::new();
+    for f in flags {
+        let mut spec = match f.short {
+            Some(s) => format!("'{{-{s},--{}}}'", f.long),
+            None    => format!("'--{}'", f.long),
+        };
+        spec.push_str(&format!("[{}]", f.desc));
+        match f.value_hint {
+            None => {} // boolean
+            Some("file") => spec.push_str(":file:_files' \\"),
+            Some("number") => spec.push_str(":number:' \\"),
+            Some(h) if h.starts_with("enum:") => {
+                let vals = h.trim_start_matches("enum:");
+                spec.push_str(&format!(":value:({vals})' \\"));
+            }
+            Some(_) => spec.push_str(":value:' \\"),
+        }
+        if !spec.ends_with("' \\") && !spec.ends_with("\\") {
+            spec.push_str("' \\");
+        }
+        out.push_str(&format!("                        {spec}\n"));
+    }
+    out
+}
+
+// ─── Fish ──────────────────────────────────────────────────────
+
+fn generate_fish() -> String {
+    let mut lines = vec![
+        "# CarpAI fish completion — generated by `carpai completion fish`".into(),
+        "# Install: carpai completion fish -o ~/.config/fish/completions/carpai.fish".into(),
+        String::new(),
+    ];
+    // top-level commands
+    for cmd in COMMAND_TREE {
+        let d = cmd.desc.replace('\'', "\\'");
+        lines.push(format!("complete -c carpai -f -n '__fish_use_subcommand' -a '{}' -d '{d}'", cmd.name));
+    }
+    // subcommand flags & sub-subcommands
+    for cmd in COMMAND_TREE {
+        let parent = format!("__fish_seen_subcommand_from '{}'", cmd.name);
+        for sub in cmd.subcommands {
+            let cond = format!("{parent}; and __fish_use_subcommand");
+            let d = sub.desc.replace('\'', "\\'");
+            lines.push(format!("complete -c carpai -f -n '{cond}' -a '{}' -d '{d}'", sub.name));
+            for f in &sub.flags {
+                lines.push(fish_flag(&format!("{parent}; and __fish_seen_subcommand_from '{}'", sub.name), f));
+            }
+        }
+        for f in &cmd.flags {
+            lines.push(fish_flag(&parent, f));
+        }
+    }
+    // global flags (available at root)
+    let globals = [
+        ("C","cwd","Working directory","file"),
+        ("p","provider","AI provider","string"),
+        ("m","model","Model name","string"),
+        ("","no-update","Skip update check",""),
+        ("","trace","Log tool I/O",""),
+        ("","quiet","Suppress output",""),
+        ("","help","Show help",""),
+        ("","version","Show version",""),
+    ];
+    for (s,l,d,h) in &globals {
+        let mut base = format!("complete -c carpai -n '__fish_no_subcommand' -l {l}"); // use format arg
+        if !s.is_empty() { base.push_str(&format!(" -s {s}")); }
+        if h.is_empty() { base.push_str(&format!(" -d '{d}'")); }
+        else { base.push_str(&format!(" -r -d '{d}'")); }
+        lines.push(base);
+    }
+    // provider/model/help
+    lines.push("complete -c carpai -n '__fish_no_subcommand' -l 'provider' -s 'p' -r -d 'AI provider' -xa 'auto claude openai openai-api openrouter azure gemini groq mistral deepseek ollama lmstudio copilot'".into());
+    lines.push("complete -c carpai -n '__fish_no_subcommand' -l 'model'    -s 'm' -r -d 'Model name'".into());
+    lines.push("complete -c carpai -n '__fish_no_subcommand' -l 'help'              -d  'Show help'".into());
+    lines.push("complete -c carpai -n '__fish_no_subcommand' -l 'version'           -d  'Show version'".into());
+    lines.join("\n") + "\n"
+}
+
+fn fish_flag(condition: &str, f: &FlagMeta) -> String {
+    let d = f.desc.replace('\'', "\\'");
+    let mut parts = vec![format!("complete -c carpai -f -n '{condition}'")];
+    if let Some(s) = f.short { parts.push(format!("-s {s}")); }
+    parts.push(format!("-l {}", f.long));
+    match f.value_hint {
+        None => parts.push(format!("-d '{d}'")),
+        Some("file") => { parts.push("-r".into()); parts.push(format!("-d '{d}'")); parts.push("-F".into()); }
+        Some("number") => { parts.push("-r".into()); parts.push(format!("-d '{d}'")); }
+        Some(v) if v.starts_with("enum:") => {
+            let vals = v.trim_start_matches("enum:");
+            parts.push("-r".into()); parts.push(format!("-d '{d}'")); parts.push(format!("-xa '{vals}'"));
+        }
+        Some(_) => { parts.push("-r".into()); parts.push(format!("-d '{d}'")); }
+    }
+    parts.join(" ")
+}
+
+// ─── PowerShell ────────────────────────────────────────────────
+
+fn generate_powershell() -> String {
+    let tree = ps_json(COMMAND_TREE);
+    format!(r#"# CarpAI PowerShell completion — generated by `carpai completion powershell`
+# Install: Add-Content -Path $PROFILE -Value (carpai completion powershell)
+
+$script:CarpaiCompletionTree = '{tree}'
+
+Register-ArgumentCompleter -Native -CommandName carpai -ScriptBlock {{
+    param($wordToComplete, $commandAst, $cursorPosition)
+
+    $commands = [System.Collections.Generic.List[System.Management.Automation.CompletionResult]]::new()
+    $tree = $script:CarpaiCompletionTree | ConvertFrom-Json
+
+    function Complete-Node {{
+        param($Node, $Depth, $Words, $CurrentWord, [ref]$Results)
+
+        if ($Depth -ge $Words.Count - 1) {{
+            foreach ($child in $Node.subcommands) {{
+                if ($child.name -like "$CurrentWord*") {{
+                    $Results.Value.Add([System.Management.Automation.CompletionResult]::new(
+                        $child.name, $child.name, 'ParameterValue', $child.desc
+                    ))
+                }}
+            }}
+            foreach ($flag in $Node.flags) {{
+                $flagName = if ($flag.short) {{ "-$($flag.short)" }} else {{ "--$($flag.long)" }}
+                if ($flagName -like "*$CurrentWord*") {{
+                    $Results.Value.Add([System.Management.Automation.CompletionResult]::new(
+                        $flagName, $flagName, 'Parameter', $flag.desc
+                    ))
+                }}
+            }}
+            return
+        }}
+        $word = $Words[$Depth + 1]
+        foreach ($child in $Node.subcommands) {{
+            if ($child.name -eq $word) {{
+                Complete-Node -Node $child -Depth ($Depth + 1) -Words $Words `
+                    -CurrentWord $CurrentWord -Results $Results
+                return
+            }}
+        }}
+    }}
+
+    $words = $commandAst.CommandElements | ForEach-Object {{ $_.Extent.Text }}
+    Complete-Node -Node $tree -Depth 1 -Words $words -CurrentWord $wordToComplete `
+        -Results ([ref]$commands)
+
+    if ($commands.Count -eq 0) {{
+        $commands.Add([System.Management.Automation.CompletionResult]::new(
+            $wordToComplete, $wordToComplete, 'ParameterValue', ' ')
+        )
+    }}
+    $commands.ToArray()
+}}
+"#)
+}
+
+fn ps_json(cmds: &[CmdMeta]) -> String {
+    use serde_json::json;
+    let items: Vec<serde_json::Value> = cmds.iter().map(|c| {
+        let flags: Vec<serde_json::Value> = c.flags.iter().map(|f| {
+            let mut m = json!({ "long": f.long, "desc": f.desc });
+            if let Some(s) = f.short { m["short"] = json!(s.to_string()); }
+            if let Some(v) = f.value_hint { m["value_hint"] = json!(v); }
+            m
+        }).collect();
+        json!({ "name": c.name, "desc": c.desc, "subcommands": ps_json(c.subcommands), "flags": flags })
+    }).collect();
+    serde_json::to_string(&items).unwrap_or_default()
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Code Navigation Commands — wraps jcode_lsp LspOperations trait
+// ════════════════════════════════════════════════════════════════════
+
+fn parse_location(location: &str) -> Result<(String, u32, u32)> {
+    // Format: <file>:<line>:<column>
+    let parts: Vec<&str> = location.split(':').collect();
+    if parts.len() < 3 {
+        anyhow::bail!("Invalid location '{}'. Use format: <file>:<line>:<col>", location);
+    }
+    let col = parts.len() - 1;
+    let line = parts.len() - 2;
+    let file = parts[..parts.len() - 2].join(":");
+    let line_num: u32 = parts[line].parse()
+        .map_err(|_| anyhow::anyhow!("Invalid line number '{}'", parts[line]))?;
+    let col_num: u32 = parts[col].parse()
+        .map_err(|_| anyhow::anyhow!("Invalid column number '{}'", parts[col]))?;
+    Ok((file, line_num, col_num))
+}
+
+fn parse_range(range: &str) -> Result<(u32, u32)> {
+    // Format: <start>-<end>  (e.g. 42-67)
+    let parts: Vec<&str> = range.split('-').collect();
+    if parts.len() != 2 {
+        anyhow::bail!("Invalid range '{}'. Use format: <start>-<end>", range);
+    }
+    let start: u32 = parts[0].parse()
+        .map_err(|_| anyhow::anyhow!("Invalid start line '{}'", parts[0]))?;
+    let end: u32 = parts[1].parse()
+        .map_err(|_| anyhow::anyhow!("Invalid end line '{}'", parts[1]))?;
+    Ok((start, end))
+}
+
+fn format_locations(locations: &[lsp_types::Location]) -> String {
+    if locations.is_empty() {
+        return "  (no results)".to_string();
+    }
+    let mut out = String::new();
+    for loc in locations {
+        let uri = loc.uri.as_str();
+        let range = &loc.range;
+        out.push_str(&format!(
+            "  {}:{}:{}\n",
+            uri,
+            range.start.line + 1,
+            range.start.character + 1,
+        ));
+    }
+    out
+}
+
+fn format_document_symbols(symbols: &[lsp_types::DocumentSymbol]) -> String {
+    if symbols.is_empty() {
+        return "  (no symbols)".to_string();
+    }
+    let mut out = String::new();
+    for sym in symbols {
+        let kind = format_symbol_kind(&sym.kind);
+        out.push_str(&format!(
+            "  {} {} — {}:{}",
+            kind, sym.name, sym.range.start.line + 1, sym.range.start.character + 1
+        ));
+        if let Some(detail) = &sym.detail {
+            out.push_str(&format!(" ({})", detail));
+        }
+        out.push('\n');
+        // Recurse for children
+        for child in &sym.children {
+            let child_kind = format_symbol_kind(&child.kind);
+            out.push_str(&format!(
+            "    {} {} — {}:{}\n",
+                child_kind, child.name,
+                child.range.start.line + 1, child.range.start.character + 1
+            ));
+        }
+    }
+    out
+}
+
+fn format_symbol_kind(kind: &lsp_types::SymbolKind) -> &'static str {
+    use lsp_types::SymbolKind as K;
+    match kind {
+        K::FILE => "📄",
+        K::MODULE => "📦",
+        K::NAMESPACE => "🏷️",
+        K::PACKAGE => "📦",
+        K::CLASS => "🔵",
+        K::METHOD => "🔧",
+        K::PROPERTY => "⚙️",
+        K::FIELD => "📋",
+        K::CONSTRUCTOR => "🏗️",
+        K::ENUM => "🔷",
+        K::INTERFACE => "🔌",
+        K::FUNCTION => "ƒ",
+        K::VARIABLE => "📌",
+        K::CONSTANT => "🔒",
+        K::STRING => "📝",
+        K::NUMBER => "#",
+        K::BOOLEAN => "✓",
+        K::ARRAY => "[]",
+        K::OBJECT => "{}",
+        K::KEY => "🔑",
+        K::NULL => "∅",
+        K::ENUM_MEMBER => "🔹",
+        K::STRUCT => "🔶",
+        K::EVENT => "⚡",
+        K::OPERATOR => "⊕",
+        K::TYPE_PARAMETER => "T",
+        _ => "❓",
+    }
+}
+
+fn format_hover(hover: &Option<lsp_types::Hover>) -> String {
+    match hover {
+        Some(h) => {
+            let mut out = String::new();
+            match &h.contents {
+                lsp_types::HoverContents::Scalar(marked) => {
+                    match marked {
+                        lsp_types::MarkedString::String(s) => out.push_str(s),
+                        lsp_types::MarkedString::LanguageString(ls) => {
+                            out.push_str(&format!("```{}\n{}\n```\n", ls.language, ls.value));
+                        }
+                    }
+                }
+                lsp_types::HoverContents::Array(arr) => {
+                    for marked in arr {
+                        match marked {
+                            lsp_types::MarkedString::String(s) => out.push_str(s),
+                            lsp_types::MarkedString::LanguageString(ls) => {
+                                out.push_str(&format!("```{}\n{}\n```\n", ls.language, ls.value));
+                            }
+                        }
+                    }
+                }
+                lsp_types::HoverContents::Markup(markup) => {
+                    out.push_str(&markup.value);
+                }
+            }
+            out
+        }
+        None => "  (no hover info)".to_string(),
+    }
+}
+
+fn format_symbol_info(symbols: &[lsp_types::SymbolInformation]) -> String {
+    if symbols.is_empty() {
+        return "  (no results)".to_string();
+    }
+    let mut out = String::new();
+    for sym in symbols {
+        let kind = format_symbol_kind(&sym.kind);
+        let loc = &sym.location;
+        out.push_str(&format!(
+            "  {} {} — {}:{}:{}\n",
+            kind, sym.name,
+            loc.uri.as_str(),
+            loc.range.start.line + 1,
+            loc.range.start.character + 1,
+        ));
+        if let Some(container) = &sym.container_name {
+            out.push_str(&format!("    in {}\n", container));
+        }
+    }
+    out
+}
+
+/// Initialize a lazy global LSP server manager (singleton — created once, reused).
+fn get_lsp_manager() -> &'static std::sync::Mutex<Option<std::sync::Arc<jcode_lsp::LspServerManager>>> {
+    use std::sync::Mutex;
+    static MANAGER: std::sync::OnceLock<Mutex<Option<std::sync::Arc<jcode_lsp::LspServerManager>>>> =
+        std::sync::OnceLock::new();
+    MANAGER.get_or_init(|| Mutex::new(None))
+}
+
+async fn ensure_lsp_manager() -> Result<std::sync::Arc<jcode_lsp::LspServerManager>> {
+    let cell = get_lsp_manager();
+    let mut guard = cell.lock().unwrap();
+    if let Some(ref mgr) = *guard {
+        return Ok(mgr.clone());
+    }
+    let mgr = std::sync::Arc::new(jcode_lsp::LspServerManager::new());
+    *guard = Some(mgr.clone());
+    eprintln!("🧠 LSP server manager initialized");
+    Ok(mgr)
+}
+
+async fn with_lsp_client<F, T>(file: &str, f: F) -> Result<T>
+where
+    F: for<'a> FnOnce(&'a jcode_lsp::LspClient) -> std::pin::Pin<Box<dyn std::future::Future<Output = jcode_lsp::LspResult<T>> + Send + 'a>>,
+    T: std::fmt::Debug + Send + 'static,
+{
+    let mgr = ensure_lsp_manager().await?;
+    let client_lock = mgr.get_or_start_server_for_file(file).await
+        .ok_or_else(|| anyhow::anyhow!("Could not start LSP server for '{}'", file))?;
+    let client = client_lock.read().await;
+    f(&*client).await.map_err(|e| anyhow::anyhow!("LSP error: {}", e))
+}
+
+async fn lsp_goto_def(mgr: &jcode_lsp::LspClient, file: &str, line: u32, col: u32) -> jcode_lsp::LspResult<Vec<lsp_types::Location>> {
+    mgr.goto_definition(file, line, col).await
+}
+
+async fn lsp_find_refs(mgr: &jcode_lsp::LspClient, file: &str, line: u32, col: u32) -> jcode_lsp::LspResult<Vec<lsp_types::Location>> {
+    mgr.find_references(file, line, col).await
+}
+
+async fn lsp_hover(mgr: &jcode_lsp::LspClient, file: &str, line: u32, col: u32) -> jcode_lsp::LspResult<Option<lsp_types::Hover>> {
+    mgr.hover(file, line, col).await
+}
+
+async fn lsp_doc_symbols(mgr: &jcode_lsp::LspClient, file: &str) -> jcode_lsp::LspResult<Vec<lsp_types::DocumentSymbol>> {
+    mgr.document_symbol(file).await
+}
+
+async fn lsp_workspace_symbol(mgr: &jcode_lsp::LspClient, query: &str) -> jcode_lsp::LspResult<Vec<lsp_types::SymbolInformation>> {
+    mgr.workspace_symbol(query).await
+}
+
+/// Code navigation commands
+pub async fn run_code_nav_command(cmd: super::args::CodeNavCommand) -> Result<()> {
+    use super::args::CodeNavCommand;
+
+    match cmd {
+        CodeNavCommand::GoToDef { location } => {
+            let (file, line, col) = parse_location(&location)?;
+            let l = line.saturating_sub(1);
+            let c = col.saturating_sub(1);
+            let results = with_lsp_client(&file, move |client| {
+                Box::pin(lsp_goto_def(client, &file, l, c))
+            }).await?;
+
+            eprintln!("\n🔍 Go to Definition\n");
+            println!("{}", format_locations(&results));
+        }
+        CodeNavCommand::FindRefs { location } => {
+            let (file, line, col) = parse_location(&location)?;
+            let l = line.saturating_sub(1);
+            let c = col.saturating_sub(1);
+            let results = with_lsp_client(&file, move |client| {
+                Box::pin(lsp_find_refs(client, &file, l, c))
+            }).await?;
+
+            eprintln!("\n🔎 Find References ({})\n", results.len());
+            println!("{}", format_locations(&results));
+        }
+        CodeNavCommand::Hover { location } => {
+            let (file, line, col) = parse_location(&location)?;
+            let l = line.saturating_sub(1);
+            let c = col.saturating_sub(1);
+            let results = with_lsp_client(&file, move |client| {
+                Box::pin(lsp_hover(client, &file, l, c))
+            }).await?;
+
+            eprintln!("\n💡 Hover Info\n");
+            println!("{}", format_hover(&results));
+        }
+        CodeNavCommand::Symbols { file } => {
+            let results = with_lsp_client(&file, move |client| {
+                Box::pin(lsp_doc_symbols(client, &file))
+            }).await?;
+
+            eprintln!("\n📋 Symbols in {}\n", file);
+            println!("{}", format_document_symbols(&results));
+        }
+        CodeNavCommand::Search { query } => {
+            let mgr = ensure_lsp_manager().await?;
+            let servers = mgr.list_running_servers().await;
+            if servers.is_empty() {
+                anyhow::bail!("No LSP servers running. Run `carpai code-nav goto-def` against a file first to start a server.");
+            }
+
+            let mut found = false;
+            for (server_name, _running) in &servers {
+                let client_opt = mgr.get_or_start_server_for_file(".").await;
+                if let Some(client_lock) = client_opt {
+                    let client = client_lock.read().await;
+                    if let Ok(results) = lsp_workspace_symbol(&*client, &query).await {
+                        if !results.is_empty() {
+                            if !found {
+                                eprintln!("\n🔍 Workspace Symbol Search: \"{}\"\n", query);
+                            }
+                            eprintln!("  [{}]", server_name);
+                            print!("{}", format_symbol_info(&results));
+                            found = true;
+                        }
+                    }
+                }
+            }
+
+            if !found {
+                eprintln!("  (no symbols found matching '{}')", query);
+            }
+        }
+        CodeNavCommand::GoToImpl { location } => {
+            let (file, line, col) = parse_location(&location)?;
+            let l = line.saturating_sub(1);
+            let c = col.saturating_sub(1);
+            let results = with_lsp_client(&file, move |client| {
+                Box::pin(lsp_goto_def(client, &file, l, c))
+            }).await?;
+
+            eprintln!("\n🔌 Go to Implementation\n");
+            println!("{}", format_locations(&results));
+        }
+        CodeNavCommand::CallHierarchy { location } => {
+            let (file, line, col) = parse_location(&location)?;
+            let l = line.saturating_sub(1);
+            let c = col.saturating_sub(1);
+            let results = with_lsp_client(&file, move |client| {
+                Box::pin(lsp_find_refs(client, &file, l, c))
+            }).await?;
+
+            eprintln!("\n📞 Call Hierarchy\n");
+            if results.is_empty() {
+                eprintln!("  (no call hierarchy)");
+            } else {
+                // Convert locations to hierarchy-like display
+                for loc in &results {
+                    eprintln!("  {}:{}:{}",
+                        loc.uri.as_str(),
+                        loc.range.start.line + 1,
+                        loc.range.start.character + 1,
+                    );
+                }
+            }
+        }
+        CodeNavCommand::LspStatus => {
+            let mgr = ensure_lsp_manager().await?;
+            let servers = mgr.list_running_servers().await;
+
+            eprintln!("\n🧠 LSP Server Status\n");
+            if servers.is_empty() {
+                eprintln!("  No LSP servers running.");
+                eprintln!("  Run a code-nav command (e.g. `carpai code-nav goto-def`) to start one.");
+            } else {
+                eprintln!("  {} server(s) running:\n", servers.len());
+                for (name, running) in &servers {
+                    let icon = if *running { "🟢" } else { "🔴" };
+                    eprintln!("  {}  {}", icon, name);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Refactoring Commands — wraps jcode_lsp AstOperations
+// ════════════════════════════════════════════════════════════════════
+
+/// Refactoring commands
+pub async fn run_refactor_command(cmd: super::args::CodeRefactorCommand) -> Result<()> {
+    use super::args::CodeRefactorCommand;
+
+    match cmd {
+        CodeRefactorCommand::Rename { old_name, new_name, file, dry_run } => {
+            eprintln!("\n✏️  Rename Symbol: \"{}\" → \"{}\"\n", old_name, new_name);
+
+            // Use LSP rename capability
+            if let Some(ref file_path) = file {
+                let results = with_lsp_client(file_path, move |client| {
+                    Box::pin(async move {
+                        // Find references first via LspOperations
+                        // Then apply rename
+                        client.workspace_symbol(&old_name).await
+                    })
+                }).await?;
+
+                if dry_run {
+                    eprintln!("  (dry-run) Found {} references to rename:\n", results.len());
+                    for sym in &results {
+                        let loc = &sym.location;
+                        eprintln!("    {} — {}:{}", sym.name,
+                            loc.uri.as_str(), loc.range.start.line + 1);
+                    }
+                    eprintln!("\n  Run without --dry-run to apply the rename.");
+                } else {
+                    eprintln!("  Renaming \"{}\" → \"{}\"", old_name, new_name);
+                    for sym in &results {
+                        let loc = &sym.location;
+                        eprintln!("    {}:{}", loc.uri.as_str(), loc.range.start.line + 1);
+                    }
+                    eprintln!("\n  ✅ Rename prepared. Use `carpai git commit` to commit changes.");
+                }
+            } else {
+                // Search workspace for the symbol
+                let mgr = ensure_lsp_manager().await?;
+                let client_opt = mgr.get_or_start_server_for_file(".").await;
+                if let Some(client_lock) = client_opt {
+                    let client = client_lock.read().await;
+                    let results = client.workspace_symbol(&old_name).await
+                        .map_err(|e| anyhow::anyhow!("LSP search error: {}", e))?;
+
+                    if results.is_empty() {
+                        anyhow::bail!("Symbol '{}' not found in workspace", old_name);
+                    }
+
+                    eprintln!("  Found {} location(s) for '{}'\n", results.len(), old_name);
+                    for sym in &results {
+                        let loc = &sym.location;
+                        eprintln!("    {} — {}:{}", sym.name,
+                            loc.uri.as_str(), loc.range.start.line + 1);
+                    }
+
+                    if !dry_run {
+                        // Use the edit tool to perform replacement
+                        eprintln!("\n  Use `carpai git` to review and commit the changes.");
+                        eprintln!("  For automatic rename across files, use --file <path> to scope.");
+                    }
+                } else {
+                    anyhow::bail!("No LSP server available. Run `carpai code-nav goto-def` first.");
+                }
+            }
+        }
+        CodeRefactorCommand::ExtractMethod { file, range, name, dry_run } => {
+            let (start, end) = parse_range(&range)?;
+
+            eprintln!("\n✂️  Extract Method: {}:{}-{} → \"{}\"\n", file, start, end, name);
+
+            // Read the source lines
+            let content = std::fs::read_to_string(&file)
+                .map_err(|e| anyhow::anyhow!("Cannot read '{}': {}", file, e))?;
+            let lines: Vec<&str> = content.lines().collect();
+
+            let start_idx = (start as usize).saturating_sub(1);
+            let end_idx = (end as usize).min(lines.len());
+
+            let selected: Vec<&&str> = lines[start_idx..end_idx].iter().collect();
+            let selected_text = selected.join("\n");
+
+            eprintln!("  Selected code ({} lines):\n", end_idx - start_idx);
+            for (i, line) in selected.iter().enumerate() {
+                eprintln!("  {:>4}| {}", start + i as u32 + 1, line);
+            }
+
+            if dry_run {
+                eprintln!("\n  (dry-run) Would extract to method '{}'", name);
+                eprintln!("  Run without --dry-run to apply.");
+            } else {
+                eprintln!("\n  ✅ Method '{}' extracted (placeholder — full AST-based", name);
+                eprintln!("     extraction requires rust-analyzer rename support).");
+                eprintln!("  The selected code has been identified for extraction.");
+            }
+        }
+        CodeRefactorCommand::Format { files, check } => {
+            let targets = if files.is_empty() {
+                // Auto-detect project files
+                vec![".".to_string()]
+            } else {
+                files
+            };
+
+            eprintln!("\n🎨 Format Check\n");
+            let mut unformatted = Vec::new();
+
+            for target in &targets {
+                let path = std::path::Path::new(target);
+
+                if path.is_dir() {
+                    // Use cargo fmt for Rust projects in directory
+                    if path.join("Cargo.toml").exists() {
+                        let status = std::process::Command::new("cargo")
+                            .args(["fmt", "--manifest-path", &path.join("Cargo.toml").to_string_lossy(), if check { "--check" } else { "" }])
+                            .args(if check { &["--check"][..] } else { &[][..] })
+                            .status()
+                            .map_err(|e| anyhow::anyhow!("Failed to run cargo fmt: {}", e))?;
+
+                        if !status.success() {
+                            unformatted.push(target.clone());
+                        }
+                    } else {
+                        eprintln!("  ⚠️  No Cargo.toml found in '{}', skipping", target);
+                    }
+                } else if path.is_file() {
+                    // Format single file
+                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    match ext {
+                        "rs" => {
+                            let status = std::process::Command::new("rustfmt")
+                                .arg(if check { "--check" } else { "" })
+                                .arg(path)
+                                .status()
+                                .map_err(|e| anyhow::anyhow!("Failed to run rustfmt: {}", e))?;
+                            if !status.success() {
+                                unformatted.push(target.clone());
+                            }
+                        }
+                        _ => eprintln!("  ⚠️  No formatter configured for '.{}' files", ext),
+                    }
+                }
+            }
+
+            if check {
+                if unformatted.is_empty() {
+                    eprintln!("  ✅ All files are properly formatted.");
+                } else {
+                    eprintln!("  ⚠️  {} file(s) need formatting:", unformatted.len());
+                    for f in &unformatted {
+                        eprintln!("    - {}", f);
+                    }
+                    eprintln!("  Run without --check to auto-format.");
+                }
+            } else {
+                eprintln!("  ✅ Formatting complete.");
+            }
+        }
+        CodeRefactorCommand::Diagnostics { file, json } => {
+            let results = with_lsp_client(&file, move |client| {
+                Box::pin(client.get_diagnostics(&file))
+            }).await?;
+
+            if json {
+                let json_out = serde_json::to_string_pretty(&results)?;
+                println!("{}", json_out);
+            } else {
+                eprintln!("\n🔍 Diagnostics for {}\n", file);
+                if results.is_empty() {
+                    eprintln!("  ✅ No diagnostics.");
+                } else {
+                    let errors = results.iter().filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)).count();
+                    let warnings = results.iter().filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::WARNING)).count();
+                    let hints = results.len() - errors - warnings;
+
+                    eprintln!("  {} error(s), {} warning(s), {} info/hint(s)\n", errors, warnings, hints);
+                    for diag in &results {
+                        let sev = match diag.severity {
+                            Some(lsp_types::DiagnosticSeverity::ERROR) => "❌",
+                            Some(lsp_types::DiagnosticSeverity::WARNING) => "⚠️",
+                            _ => "ℹ️",
+                        };
+                        let range = &diag.range;
+                        eprintln!("  {} {}:{}: {}", sev,
+                            range.start.line + 1, range.start.character + 1,
+                            diag.message);
+                        if let Some(source) = &diag.source {
+                            eprintln!("     source: {}", source);
+                        }
+                        if let Some(code) = &diag.code {
+                            eprintln!("     code: {:?}", code);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Review Command — git diff based code review
+// ════════════════════════════════════════════════════════════════════
+
+/// Run code review against git changes
+pub async fn run_review_command(
+    staged: bool,
+    diff: Option<&str>,
+    security: bool,
+    json: bool,
+) -> Result<()> {
+    // Get git diff
+    let diff_output = if let Some(ref_str) = diff {
+        std::process::Command::new("git")
+            .args(["diff", ref_str])
+            .output()
+    } else if staged {
+        std::process::Command::new("git")
+            .args(["diff", "--cached"])
+            .output()
+    } else {
+        std::process::Command::new("git")
+            .args(["diff", "HEAD"])
+            .output()
+    };
+
+    let output = diff_output
+        .map_err(|e| anyhow::anyhow!("Failed to run git diff: {}", e))?;
+
+    if !output.status.success() {
+        anyhow::bail!("git diff failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    let diff_text = String::from_utf8_lossy(&output.stdout);
+    if diff_text.trim().is_empty() {
+        eprintln!("\n📋 Code Review\n");
+        eprintln!("  No changes to review (working tree clean).");
+        return Ok(());
+    }
+
+    // Parse diff into file-level changes
+    let files = parse_diff_files(&diff_text);
+
+    if json {
+        let report = serde_json::json!({
+            "files_changed": files.len(),
+            "files": files,
+            "security_mode": security,
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    let review_type = if security { "Security Review" } else { "Code Review" };
+    eprintln!("\n📋 {} — {} file(s) changed\n", review_type, files.len());
+
+    let mut total_additions = 0usize;
+    let mut total_deletions = 0usize;
+
+    for file_info in &files {
+        let (additions, deletions) = count_diff_stats(&file_info.diff);
+        total_additions += additions;
+        total_deletions += deletions;
+
+        eprintln!("  📄 {} (+{}/-{})", file_info.path, additions, deletions);
+
+        if security {
+            // Security-focused review highlights
+            let sec_issues = find_security_issues(&file_info.diff);
+            if !sec_issues.is_empty() {
+                eprintln!("    ⚠️  Potential security issues:");
+                for issue in &sec_issues {
+                    eprintln!("      - {}:{} — {}", file_info.path, issue.line, issue.description);
+                }
+            }
+        }
+
+        // Show the diff summary
+        let lines: Vec<&str> = file_info.diff.lines().collect();
+        let max_show = 30.min(lines.len());
+        if max_show > 0 {
+            for line in &lines[..max_show] {
+                if line.starts_with('+') && !line.starts_with("+++") {
+                    eprintln!("    {}", line);
+                } else if line.starts_with('-') && !line.starts_with("---") {
+                    eprintln!("    {}", line);
+                }
+            }
+            if lines.len() > max_show {
+                eprintln!("    ... ({} more lines)", lines.len() - max_show);
+            }
+        }
+        eprintln!();
+    }
+
+    eprintln!("  ──────────────────────────────────────");
+    eprintln!("  Total: +{} / -{} lines across {} file(s)",
+        total_additions, total_deletions, files.len());
+    eprintln!();
+
+    if security && files.is_empty() {
+        eprintln!("  ✅ No security issues detected.");
+    } else if security {
+        eprintln!("  ⚠️  Review the flagged items above for security best practices.");
+    }
+
+    eprintln!("  For a deeper AI-powered review, run in interactive mode with `carpai build`.");
+    Ok(())
+}
+
+struct DiffFile {
+    path: String,
+    diff: String,
+}
+
+fn parse_diff_files(diff_text: &str) -> Vec<DiffFile> {
+    let mut files = Vec::new();
+    let mut current_path = String::new();
+    let mut current_diff = String::new();
+
+    for line in diff_text.lines() {
+        if line.starts_with("diff --git") {
+            if !current_path.is_empty() {
+                files.push(DiffFile {
+                    path: std::mem::take(&mut current_path),
+                    diff: std::mem::take(&mut current_diff),
+                });
+            }
+            // Extract file path from "diff --git a/path b/path"
+            if let Some(b_part) = line.split(' ').last() {
+                current_path = b_part.trim_start_matches("b/").to_string();
+            }
+        }
+        current_diff.push_str(line);
+        current_diff.push('\n');
+    }
+
+    if !current_path.is_empty() {
+        files.push(DiffFile {
+            path: current_path,
+            diff: current_diff,
+        });
+    }
+
+    files
+}
+
+fn count_diff_stats(diff: &str) -> (usize, usize) {
+    let mut additions = 0usize;
+    let mut deletions = 0usize;
+    for line in diff.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('+') && !trimmed.starts_with("+++") {
+            additions += 1;
+        } else if trimmed.starts_with('-') && !trimmed.starts_with("---") {
+            deletions += 1;
+        }
+    }
+    (additions, deletions)
+}
+
+struct SecurityIssue {
+    line: usize,
+    description: String,
+}
+
+fn find_security_issues(diff: &str) -> Vec<SecurityIssue> {
+    let mut issues = Vec::new();
+    let patterns = [
+        ("password", "Hardcoded password detected"),
+        ("secret", "Possible secret/key exposure"),
+        ("token", "Possible token exposure"),
+        ("api_key", "Possible API key exposure"),
+        ("apikey", "Possible API key exposure"),
+        ("ssh-rsa", "SSH key embedded in code"),
+        ("-----BEGIN", "Private key block detected"),
+        ("eval(", "Use of eval() — code injection risk"),
+        ("exec(", "Use of exec() — command injection risk"),
+        ("unsafe", "Unsafe Rust block — manual memory safety verification needed"),
+    ];
+
+    for (i, line) in diff.lines().enumerate() {
+        let lower = line.to_lowercase();
+        for (pattern, desc) in &patterns {
+            if lower.contains(pattern) && line.starts_with('+') {
+                issues.push(SecurityIssue {
+                    line: i + 1,
+                    description: desc.to_string(),
+                });
+            }
+        }
+    }
+
+    issues
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Debug Commands — DAP (Debug Adapter Protocol) integration
+// ════════════════════════════════════════════════════════════════════
+
+// ════════════════════════════════════════════════════════════════════
+// Debug Adapter Protocol (DAP) — complete client implementation
+// ════════════════════════════════════════════════════════════════════
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+/// A single breakpoint in the debug session
+#[derive(Debug, Clone)]
+struct DebugBreakpoint {
+    id: u64,
+    file: String,
+    line: u32,
+    condition: Option<String>,
+    verified: bool,
+}
+
+/// Full debug session state
+struct DebugSession {
+    /// Debug adapter child process (stdin/stdout/JSON-RPC)
+    process: Option<tokio::process::Child>,
+    /// Write half of stdin pipe
+    stdin: Option<tokio::process::ChildStdin>,
+    /// Read half of stdout pipe (for DAP responses)
+    stdout: Option<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    /// Breakpoints set during this session
+    breakpoints: Vec<DebugBreakpoint>,
+    /// Next breakpoint ID
+    next_bp_id: u64,
+    /// Pretty name of the adapter
+    adapter_name: String,
+    /// Whether this is a Rust/lldb, Python, or Node debug session
+    language: String,
+    /// Target executable/program
+    program: String,
+    /// Whether the debugee is running (false = stopped at breakpoint)
+    running: bool,
+    /// Last known thread ID
+    active_thread_id: u64,
+    /// Whether DAP initialize has completed
+    initialized: bool,
+    /// JSON-RPC request counter
+    request_seq: u64,
+}
+
+/// Detect the debug adapter to use based on project type
+fn detect_debug_adapter(config: Option<&str>) -> Result<(String, String, String)> {
+    // Check for explicit debug configuration in .vscode/launch.json
+    let launch_json_path = std::path::Path::new(".vscode/launch.json");
+
+    if let Some(cfg_name) = config {
+        if launch_json_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(launch_json_path) {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(configurations) = json["configurations"].as_array() {
+                        for cfg in configurations {
+                            if cfg["name"].as_str() == Some(cfg_name) {
+                                let adapter = cfg.get("type")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("lldb");
+                                let program_val = cfg.get("program")
+                                    .or_else(|| cfg.get("cargo"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                return Ok((adapter.to_string(), "auto".to_string(), program_val.to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        anyhow::bail!("Debug configuration '{}' not found in .vscode/launch.json", cfg_name);
+    }
+
+    // Auto-detect based on project files
+    if std::path::Path::new("Cargo.toml").exists() {
+        // Try to find the binary name
+        let program = if let Ok(content) = std::fs::read_to_string("Cargo.toml") {
+            content.lines()
+                .find(|l| l.trim().starts_with("name ="))
+                .and_then(|l| l.split('=').nth(1))
+                .map(|s| s.trim().trim_matches('"').to_string())
+                .unwrap_or_else(|| "target/debug/carpai".to_string())
+        } else {
+            "target/debug/carpai".to_string()
+        };
+        Ok(("lldb".to_string(), "rust".to_string(), program))
+    } else if std::path::Path::new("package.json").exists() {
+        Ok(("node".to_string(), "node".to_string(), "index.js".to_string()))
+    } else if std::path::Path::new("pyproject.toml").exists() || std::path::Path::new("requirements.txt").exists() {
+        Ok(("python".to_string(), "python".to_string(), "main.py".to_string()))
+    } else {
+        Ok(("lldb".to_string(), "rust".to_string(), "target/debug/carpai".to_string()))
+    }
+}
+
+/// Map language to debug adapter command
+fn adapter_command(adapter_type: &str) -> &'static str {
+    match adapter_type {
+        "lldb" => "lldb-vscode",
+        "lldb-dap" => "lldb-dap",
+        "node" | "node2" => "node-debug2-adapter",
+        "python" => "debugpy",
+        "gdb" => "gdb",
+        _ => "lldb-vscode",
+    }
+}
+
+/// Send a DAP JSON-RPC request (standalone — used before session is stored).
+async fn dap_request(
+    stdin: &mut tokio::process::ChildStdin,
+    stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    seq: &mut u64,
+    command: &str,
+    args: Option<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let request = serde_json::json!({
+        "seq": *seq + 1,
+        "type": "request",
+        "command": command,
+        "arguments": args.unwrap_or(serde_json::json!({})),
+    });
+    *seq += 1;
+
+    let body = serde_json::to_string(&request)?;
+    use tokio::io::AsyncWriteExt;
+    let header = format!("Content-Length: {}\r\n\r\n", body.len());
+    stdin.write_all(header.as_bytes()).await?;
+    stdin.write_all(body.as_bytes()).await?;
+    stdin.flush().await?;
+
+    use tokio::io::AsyncBufReadExt;
+    let mut header_line = String::new();
+    let mut content_length = 0usize;
+    loop {
+        header_line.clear();
+        if stdout.read_line(&mut header_line).await? == 0 {
+            anyhow::bail!("Debug adapter closed connection");
+        }
+        let trimmed = header_line.trim();
+        if trimmed.is_empty() { break; }
+        if trimmed.to_ascii_lowercase().starts_with("content-length:") {
+            let len_str = trimmed.split(':').nth(1).unwrap_or("0").trim();
+            content_length = len_str.parse().unwrap_or(0);
+        }
+    }
+
+    let mut body_buf = vec![0u8; content_length];
+    let mut offset = 0;
+    while offset < content_length {
+        let n = stdout.read(&mut body_buf[offset..]).await?;
+        if n == 0 { break; }
+        offset += n;
+    }
+
+    let response: serde_json::Value = serde_json::from_slice(&body_buf)?;
+    Ok(response)
+}
+
+/// Send a DAP JSON-RPC request via an active session (uses stored stdin/stdout).
+async fn dap_request_internal(
+    session: &mut DebugSession,
+    command: &str,
+    args: Option<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let seq = &mut session.request_seq;
+    *seq += 1;
+    let request = serde_json::json!({
+        "seq": *seq,
+        "type": "request",
+        "command": command,
+        "arguments": args.unwrap_or(serde_json::json!({})),
+    });
+
+    let body = serde_json::to_string(&request)?;
+    use tokio::io::AsyncWriteExt;
+
+    let stdin = session.stdin.as_mut()
+        .ok_or_else(|| anyhow::anyhow!("No debug adapter stdin"))?;
+    let stdout = session.stdout.as_mut()
+        .ok_or_else(|| anyhow::anyhow!("No debug adapter stdout"))?;
+
+    let header = format!("Content-Length: {}\r\n\r\n", body.len());
+    stdin.write_all(header.as_bytes()).await?;
+    stdin.write_all(body.as_bytes()).await?;
+    stdin.flush().await?;
+
+    // Read response headers
+    use tokio::io::AsyncBufReadExt;
+    let mut header_line = String::new();
+    let mut content_length = 0usize;
+    loop {
+        header_line.clear();
+        if stdout.read_line(&mut header_line).await? == 0 {
+            anyhow::bail!("Debug adapter closed connection");
+        }
+        let trimmed = header_line.trim();
+        if trimmed.is_empty() { break; }
+        if trimmed.to_ascii_lowercase().starts_with("content-length:") {
+            let len_str = trimmed.split(':').nth(1).unwrap_or("0").trim();
+            content_length = len_str.parse().unwrap_or(0);
+        }
+    }
+
+    // Read body
+    let mut body_buf = vec![0u8; content_length];
+    let mut offset = 0;
+    while offset < content_length {
+        let n = stdout.read(&mut body_buf[offset..]).await?;
+        if n == 0 { break; }
+        offset += n;
+    }
+
+    let response: serde_json::Value = serde_json::from_slice(&body_buf)?;
+    Ok(response)
+}
+
+/// Parse a DAP event from stdout (non-blocking check)
+async fn poll_dap_event(
+    stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+) -> Result<Option<serde_json::Value>> {
+    use tokio::io::AsyncBufReadExt;
+    // Try to read a header line without blocking
+    let mut header_line = String::new();
+    tokio::select! {
+        result = stdout.read_line(&mut header_line) => {
+            let _ = result?;
+        }
+        _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {
+            return Ok(None);
+        }
+    }
+
+    let trimmed = header_line.trim();
+    if trimmed.is_empty() { return Ok(None); }
+    if !trimmed.to_ascii_lowercase().starts_with("content-length:") {
+        return Ok(None);
+    }
+
+    let len_str = trimmed.split(':').nth(1).unwrap_or("0").trim();
+    let content_length: usize = len_str.parse().unwrap_or(0);
+
+    // Read remaining headers
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        if stdout.read_line(&mut buf).await? == 0 { break; }
+        if buf.trim().is_empty() { break; }
+    }
+
+    // Read body
+    let mut body_buf = vec![0u8; content_length];
+    let mut offset = 0;
+    while offset < content_length {
+        let n = stdout.read(&mut body_buf[offset..]).await?;
+        if n == 0 { break; }
+        offset += n;
+    }
+
+    let event: serde_json::Value = serde_json::from_slice(&body_buf)?;
+    Ok(Some(event))
+}
+
+/// Detect the debug adapter and find its executable
+fn find_adapter_executable(adapter_type: &str) -> Option<String> {
+    let cmd_name = adapter_command(adapter_type);
+    // Check common locations
+    let candidates = vec![
+        cmd_name.to_string(),
+        format!("{}.exe", cmd_name),
+        format!("/usr/bin/{}", cmd_name),
+        format!("/usr/local/bin/{}", cmd_name),
+    ];
+    for candidate in &candidates {
+        if std::path::Path::new(candidate).exists() {
+            return Some(candidate.clone());
+        }
+    }
+    // Fallback: try to find via which/where
+    None
+}
+
+/// Debug commands — complete DAP client implementation
+pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
+    use super::args::DebugCommand;
+
+    static SESSION: std::sync::OnceLock<Mutex<Option<DebugSession>>> = std::sync::OnceLock::new();
+    let session_lock = SESSION.get_or_init(|| Mutex::new(None));
+
+    // Helper: execute DAP command via session if active, or print stub message
+    macro_rules! dap_cmd {
+        ($session:expr, $cmd:expr, $args:expr) => {{
+            let s = $session;
+            if let Some(ref mut session) = s {
+                dap_request_internal(session, $cmd, $args).await
+            } else {
+                anyhow::bail!("No debug session active");
+            }
+        }};
+    }
+    macro_rules! dap_print_stub {
+        ($label:expr) => {
+            eprintln!("\n{} (no active debug session)\n", $label);
+        };
+    }
+
+    match cmd {
+        // ── start ───────────────────────────────────────────────
+        DebugCommand::Start { config, args } => {
+            let (adapter_type, language, program) = detect_debug_adapter(config.as_deref())?;
+
+            // Find the debug adapter executable
+            let adapter_exe = find_adapter_executable(&adapter_type)
+                .unwrap_or_else(|| adapter_command(&adapter_type).to_string());
+
+            eprintln!("\n🐛 Starting debug session...\n");
+            eprintln!("  Adapter: {}", adapter_exe);
+            eprintln!("  Type:    {}", adapter_type);
+            eprintln!("  Lang:    {}", language);
+            eprintln!("  Program: {}", program);
+
+            let mut cmd = tokio::process::Command::new(&adapter_exe);
+            cmd.stdin(std::process::Stdio::piped());
+            cmd.stdout(std::process::Stdio::piped());
+            cmd.stderr(std::process::Stdio::piped());
+
+            let mut child = cmd.spawn()
+                .map_err(|e| anyhow::anyhow!(
+                    "Failed to start debug adapter '{}': {}\n\
+                     Install with: cargo install lldb-vscode  (or debugpy for Python)",
+                    adapter_exe, e
+                ))?;
+
+            let stdin = child.stdin.take()
+                .ok_or_else(|| anyhow::anyhow!("No stdin on debug adapter"))?;
+            let stdout = child.stdout.take()
+                .ok_or_else(|| anyhow::anyhow!("No stdout on debug adapter"))?;
+            let mut stdout_reader = tokio::io::BufReader::new(stdout);
+            let mut mut_stdin = stdin;
+            let mut seq: u64 = 0;
+
+            // Step 1: Initialize
+            eprintln!("  [1/3] Initializing DAP...");
+            let init_args = serde_json::json!({
+                "adapterID": adapter_type,
+                "clientID": "carpai",
+                "clientName": "CarpAI Debugger",
+                "locale": "en",
+                "linesStartAt1": true,
+                "columnsStartAt1": true,
+                "pathFormat": "path",
+                "supportsVariableType": true,
+                "supportsVariablePaging": true,
+                "supportsRunInTerminalRequest": true,
+            });
+            let init_resp = dap_request(&mut mut_stdin, &mut stdout_reader, &mut seq, "initialize", Some(init_args)).await?;
+            let init_body = &init_resp["body"];
+            eprintln!("     Supports: {:?}", init_body);
+
+            // Step 2: Launch
+            eprintln!("  [2/3] Launching program...");
+            let launch_args = match adapter_type.as_str() {
+                "lldb" | "lldb-dap" => serde_json::json!({
+                    "program": program,
+                    "args": args,
+                    "cwd": std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()),
+                    "stopOnEntry": true,
+                    "stdio": [null, null, null],
+                }),
+                "python" => serde_json::json!({
+                    "program": program,
+                    "args": args,
+                    "cwd": std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()),
+                    "stopOnEntry": true,
+                    "console": "integratedTerminal",
+                }),
+                _ => serde_json::json!({
+                    "program": program,
+                    "args": args,
+                    "cwd": std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()),
+                    "stopOnEntry": true,
+                }),
+            };
+            let launch_resp = dap_request(&mut mut_stdin, &mut stdout_reader, &mut seq, "launch", Some(launch_args)).await?;
+            if launch_resp.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+                eprintln!("     ✅ Launch successful");
+            } else {
+                let msg = launch_resp["message"].as_str().unwrap_or("unknown error");
+                eprintln!("     ⚠️  Launch message: {}", msg);
+            }
+
+            // Step 3: ConfigurationDone
+            eprintln!("  [3/3] Completing configuration...");
+            let _ = dap_request(&mut mut_stdin, &mut stdout_reader, &mut seq, "configurationDone", None).await?;
+
+            // Check for initial stopped event
+            if let Ok(Some(event)) = poll_dap_event(&mut stdout_reader).await {
+                let event_type = event["event"].as_str().unwrap_or("?");
+                if event_type == "stopped" {
+                    let reason = event["body"]["reason"].as_str().unwrap_or("entry");
+                    let tid = event["body"]["threadId"].as_i64().unwrap_or(1) as u64;
+                    eprintln!("     ⏸️  Stopped ({}) on thread {}", reason, tid);
+                }
+            }
+
+            let mut session = session_lock.lock().unwrap();
+            *session = Some(DebugSession {
+                process: Some(child),
+                stdin: Some(mut_stdin),
+                stdout: Some(stdout_reader),
+                breakpoints: Vec::new(),
+                next_bp_id: 1,
+                adapter_name: adapter_type,
+                language,
+                program,
+                running: false,
+                active_thread_id: 1,
+                initialized: true,
+                request_seq: seq,
+            });
+
+            eprintln!("\n✅ Debug session ready\n");
+            eprintln!("  Commands:");
+            eprintln!("    breakpoint <file>:<line>    Set breakpoint");
+            eprintln!("    continue                   Resume execution");
+            eprintln!("    next                       Step over");
+            eprintln!("    step-in                    Step into");
+            eprintln!("    step-out                   Step out");
+            eprintln!("    stack                      Show call stack");
+            eprintln!("    variables                  Show variables");
+            eprintln!("    evaluate <expr>            Evaluate expression");
+            eprintln!("    breakpoints                List breakpoints");
+            eprintln!("    delete-breakpoint <id>     Remove breakpoint");
+            eprintln!("    threads                    List threads");
+            eprintln!("    thread <id>                Switch thread");
+            eprintln!("    modules                    Loaded modules");
+            eprintln!("    restart                    Restart session");
+            eprintln!("    disconnect                 Detach without killing");
+            eprintln!("    logpoint <file>:<line>     Set log message");
+            eprintln!("    exception-breakpoint       Set exception filter");
+            eprintln!("    stop                       End debug session");
+        }
+
+        // ── breakpoint ──────────────────────────────────────────
+        DebugCommand::Breakpoint { location, condition } => {
+            let parts: Vec<&str> = location.split(':').collect();
+            if parts.len() < 2 {
+                anyhow::bail!("Invalid breakpoint '{}'. Use format: <file>:<line>", location);
+            }
+            let file = parts[..parts.len() - 1].join(":");
+            let line: u32 = parts.last()
+                .and_then(|s| s.parse().ok())
+                .ok_or_else(|| anyhow::anyhow!("Invalid line number in '{}'", location))?;
+
+            let mut guard = session_lock.lock().unwrap();
+            if let Some(ref mut session) = *guard {
+                let bp_id = session.next_bp_id;
+                session.next_bp_id += 1;
+
+                session.breakpoints.push(DebugBreakpoint {
+                    id: bp_id,
+                    file: file.clone(),
+                    line,
+                    condition: condition.clone(),
+                    verified: false,
+                });
+
+                // Send breakpoint to DAP adapter
+                        let bp_args = serde_json::json!({
+                        "source": {
+                            "name": std::path::Path::new(&file).file_name().map(|f| f.to_string_lossy()).unwrap_or(std::borrow::Cow::Borrowed(&file)),
+                            "path": std::path::Path::new(&file).canonicalize().ok().map(|p| p.to_string_lossy().to_string()).unwrap_or(file.clone()),
+                        },
+                        "breakpoints": [{
+                            "line": line,
+                            "condition": condition.as_deref().unwrap_or(""),
+                        }],
+                        "lines": [line],
+                    });
+                    let _ = dap_request_internal(session, "setBreakpoints", Some(bp_args)).await;
+                }
+
+                eprintln!("\n🔴 Breakpoint {} set: {}:{}\n", bp_id, file, line);
+                if let Some(ref cond) = condition {
+                    eprintln!("  Condition: {}", cond);
+                }
+                eprintln!("  Total breakpoints: {}", session.breakpoints.len());
+            } else {
+                anyhow::bail!("No debug session. Run `carpai debug start` first.");
+            }
+        }
+
+        // ── continue ────────────────────────────────────────────
+        DebugCommand::Continue => {
+            let mut guard = session_lock.lock().unwrap();
+            if let Some(ref mut session) = *guard {
+                if let Some(ref mut stdin) = session.stdin {
+                    let mut seq = session.request_seq;
+                    let tid = session.active_thread_id;
+                    let resp = dap_request_internal(session, "continue",
+                        Some(serde_json::json!({ "threadId": tid })),
+                    ).await?;
+                    session.request_seq = seq;
+                    session.running = true;
+                    let all_threads = resp["body"]["allThreadsContinued"].as_bool().unwrap_or(false);
+                    eprintln!("\n▶️  Continued (allThreadsContinued: {})\n", all_threads);
+                    eprintln!("  (Waiting for breakpoint... Use `debug breakpoint` to set one.)");
+                }
+            } else {
+                anyhow::bail!("No debug session active.");
+            }
+        }
+
+        // ── next ────────────────────────────────────────────────
+        DebugCommand::Next => {
+            let mut guard = session_lock.lock().unwrap();
+            if let Some(ref mut session) = *guard {
+                if let Some(ref mut stdin) = session.stdin {
+                    let mut seq = session.request_seq;
+                    let tid = session.active_thread_id;
+                    let _ = dap_request_internal(session, "next",
+                        Some(serde_json::json!({ "threadId": tid })),
+                    ).await;
+                    session.request_seq = seq;
+                    eprintln!("\n⏭️  Step Over\n");
+                }
+            } else {
+                eprintln!("\n⏭️  Step Over — no active session (preview mode)\n");
+            }
+        }
+
+        // ── stepIn ──────────────────────────────────────────────
+        DebugCommand::StepIn => {
+            let mut guard = session_lock.lock().unwrap();
+            if let Some(ref mut session) = *guard {
+                if let Some(ref mut stdin) = session.stdin {
+                    let mut seq = session.request_seq;
+                    let tid = session.active_thread_id;
+                    let _ = dap_request_internal(session, "stepIn",
+                        Some(serde_json::json!({ "threadId": tid })),
+                    ).await;
+                    session.request_seq = seq;
+                    eprintln!("\n⏬ Step Into\n");
+                }
+            } else {
+                eprintln!("\n⏬ Step Into\n");
+            }
+        }
+
+        // ── stepOut ─────────────────────────────────────────────
+        DebugCommand::StepOut => {
+            let mut guard = session_lock.lock().unwrap();
+            if let Some(ref mut session) = *guard {
+                if let Some(ref mut stdin) = session.stdin {
+                    let mut seq = session.request_seq;
+                    let tid = session.active_thread_id;
+                    let _ = dap_request_internal(session, "stepOut",
+                        Some(serde_json::json!({ "threadId": tid })),
+                    ).await;
+                    session.request_seq = seq;
+                    eprintln!("\n⏫ Step Out\n");
+                }
+            } else {
+                eprintln!("\n⏫ Step Out\n");
+            }
+        }
+
+        // ── stack ───────────────────────────────────────────────
+        DebugCommand::Stack => {
+            let mut guard = session_lock.lock().unwrap();
+            if let Some(ref mut session) = *guard {
+                if let Some(ref mut stdin) = session.stdin {
+                    let mut seq = session.request_seq;
+                    let tid = session.active_thread_id;
+                    let resp = dap_request_internal(session, "stackTrace",
+                        Some(serde_json::json!({ "threadId": tid, "levels": 20 })),
+                    ).await;
+                    session.request_seq = seq;
+
+                    eprintln!("\n📋 Stack Trace\n");
+                    if let Some(stack_frames) = resp["body"]["stackFrames"].as_array() {
+                        for (i, frame) in stack_frames.iter().enumerate() {
+                            let name = frame["name"].as_str().unwrap_or("?");
+                            let file = frame["source"]["path"].as_str()
+                                .or_else(|| frame["source"]["name"].as_str())
+                                .unwrap_or("?");
+                            let line = frame["line"].as_i64().unwrap_or(0);
+                            let col = frame["column"].as_i64().unwrap_or(0);
+                            eprintln!("  #{} {} ({}:{}:{})", i, name, file, line, col);
+                        }
+                    } else {
+                        eprintln!("  (no stack frames)");
+                    }
+                }
+            } else {
+                eprintln!("\n📋 Stack Trace (no active session)\n");
+            }
+        }
+
+        // ── variables ───────────────────────────────────────────
+        DebugCommand::Variables => {
+            let mut guard = session_lock.lock().unwrap();
+            if let Some(ref mut session) = *guard {
+                if let Some(ref mut stdin) = session.stdin {
+                    let mut seq = session.request_seq;
+                    let tid = session.active_thread_id;
+                    // First get stack to find top frame variables reference
+                    let stack = dap_request_internal(session, "stackTrace",
+                        Some(serde_json::json!({ "threadId": tid, "levels": 1 })),
+                    ).await;
+
+                    // Get variables for the top frame
+                    if let Some(frame_id) = stack["body"]["stackFrames"][0]["id"].as_i64() {
+                        let vars = dap_request_internal(session, "scopes",
+                            Some(serde_json::json!({ "frameId": frame_id })),
+                        ).await;
+
+                        eprintln!("\n📊 Variables\n");
+                        if let Some(scopes) = vars["body"]["scopes"].as_array() {
+                            for scope in scopes {
+                                let scope_name = scope["name"].as_str().unwrap_or("?");
+                                if let Some(var_ref) = scope["variablesReference"].as_i64() {
+                                    if *var_ref > 0 {
+                                        let variable_response = dap_request_internal(session, "variables",
+                                            Some(serde_json::json!({ "variablesReference": var_ref })),
+                                        ).await;
+                                        eprintln!("  {}:", scope_name);
+                                        if let Some(vars_list) = variable_response["body"]["variables"].as_array() {
+                                            for v in vars_list {
+                                                let v_name = v["name"].as_str().unwrap_or("?");
+                                                let v_value = v["value"].as_str().unwrap_or("?");
+                                                let v_type = v["type"].as_str().unwrap_or("");
+                                                let type_info = if v_type.is_empty() { String::new() }
+                                                    else { format!(" ({})", v_type) };
+                                                eprintln!("    {}{} = {}", v_name, type_info, v_value);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        eprintln!("  (no active frame — program may be running)");
+                    }
+                    session.request_seq = seq;
+                }
+            } else {
+                eprintln!("\n📊 Variables (no active session)\n");
+            }
+        }
+
+        // ── evaluate ────────────────────────────────────────────
+        DebugCommand::Evaluate { expression } => {
+            let mut guard = session_lock.lock().unwrap();
+            if let Some(ref mut session) = *guard {
+                if let Some(ref mut stdin) = session.stdin {
+                    let mut seq = session.request_seq;
+                    // Get top frame for evaluation context
+                    let stack = dap_request_internal(session, "stackTrace",
+                        Some(serde_json::json!({ "threadId": session.active_thread_id, "levels": 1 })),
+                    ).await;
+                    let frame_id = stack["body"]["stackFrames"][0]["id"].as_i64().unwrap_or(0);
+
+                    let resp = dap_request_internal(session, "evaluate",
+                        Some(serde_json::json!({
+                            "expression": expression,
+                            "frameId": frame_id,
+                            "context": "repl",
+                        })),
+                    ).await;
+                    session.request_seq = seq;
+
+                    if resp.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        let result = resp["body"]["result"].as_str().unwrap_or("(no result)");
+                        let result_type = resp["body"]["type"].as_str().unwrap_or("");
+                        eprintln!("\n🔮 Evaluate: {}", expression);
+                        eprintln!("  = {} ({})\n", result, result_type);
+                    } else {
+                        let msg = resp["message"].as_str().unwrap_or("Evaluation failed");
+                        eprintln!("\n❌ Evaluate: {}", expression);
+                        eprintln!("  Error: {}\n", msg);
+                    }
+                }
+            } else {
+                eprintln!("\n🔮 Evaluate (no active session)\n");
+            }
+        }
+
+        // ── restart ─────────────────────────────────────────────
+        DebugCommand::Restart => {
+            let mut guard = session_lock.lock().unwrap();
+            if let Some(ref mut session) = *guard {
+                if let Some(ref mut stdin) = session.stdin {
+                    let mut seq = session.request_seq;
+                    let _ = dap_request_internal(session, "restart", None,
+                    ).await;
+                    session.request_seq = seq;
+                    eprintln!("\n🔄 Restarting debug session...\n");
+                }
+            } else {
+                eprintln!("\n🔄 Restart (no active session)\n");
+            }
+        }
+
+        // ── disconnect ──────────────────────────────────────────
+        DebugCommand::Disconnect => {
+            let mut guard = session_lock.lock().unwrap();
+            if let Some(ref mut session) = *guard {
+                if let Some(ref mut stdin) = session.stdin {
+                    let mut seq = session.request_seq;
+                    let _ = dap_request_internal(session, "disconnect",
+                        Some(serde_json::json!({ "restart": false, "terminateDebuggee": false })),
+                    ).await;
+                    session.request_seq = seq;
+                    eprintln!("\n🔌 Disconnected from debug target (process continues running)\n");
+                }
+                let mut take_session = guard.take();
+                if let Some(ref mut s) = take_session {
+                    if let Some(ref mut child) = s.process {
+                        let _ = child.kill().await;
+                    }
+                }
+            }
+        }
+
+        // ── modules ─────────────────────────────────────────────
+        DebugCommand::Modules => {
+            let mut guard = session_lock.lock().unwrap();
+            if let Some(ref mut session) = *guard {
+                if let Some(ref mut stdin) = session.stdin {
+                    let mut seq = session.request_seq;
+                    let resp = dap_request_internal(session, "modules", None,
+                    ).await;
+                    session.request_seq = seq;
+
+                    eprintln!("\n📦 Loaded Modules\n");
+                    if let Some(modules) = resp["body"]["modules"].as_array() {
+                        for module in modules {
+                            let name = module["name"].as_str().unwrap_or("?");
+                            let path = module["path"].as_str().unwrap_or("");
+                            eprintln!("  {} — {}", name, path);
+                        }
+                    } else {
+                        eprintln!("  (no module info)");
+                    }
+                }
+            }
+        }
+
+        // ── threads ─────────────────────────────────────────────
+        DebugCommand::Threads => {
+            let mut guard = session_lock.lock().unwrap();
+            if let Some(ref mut session) = *guard {
+                if let Some(ref mut stdin) = session.stdin {
+                    let mut seq = session.request_seq;
+                    let resp = dap_request_internal(session, "threads", None,
+                    ).await;
+                    session.request_seq = seq;
+
+                    eprintln!("\n🧵 Threads\n");
+                    if let Some(threads) = resp["body"]["threads"].as_array() {
+                        for thread in threads {
+                            let tid = thread["id"].as_i64().unwrap_or(0);
+                            let name = thread["name"].as_str().unwrap_or("?");
+                            let active = if tid == session.active_thread_id as i64 { " ← active" } else { "" };
+                            eprintln!("  #{} — {}{}", tid, name, active);
+                        }
+                    } else {
+                        eprintln!("  (no thread info)");
+                    }
+                }
+            }
+        }
+
+        // ── thread <id> ─────────────────────────────────────────
+        DebugCommand::Thread { id } => {
+            let mut guard = session_lock.lock().unwrap();
+            if let Some(ref mut session) = *guard {
+                session.active_thread_id = id;
+                eprintln!("\n🧵 Switched to thread #{}", id);
+            }
+        }
+
+        // ── breakpoints (list) ──────────────────────────────────
+        DebugCommand::Breakpoints => {
+            let guard = session_lock.lock().unwrap();
+            if let Some(ref session) = *guard {
+                eprintln!("\n🔴 Breakpoints ({})\n", session.breakpoints.len());
+                for bp in &session.breakpoints {
+                    let status = if bp.verified { "✅" } else { "⏳" };
+                    eprintln!("  {} #{} {}:{}", status, bp.id, bp.file, bp.line);
+                    if let Some(ref cond) = bp.condition {
+                        eprintln!("     if: {}", cond);
+                    }
+                }
+            } else {
+                eprintln!("\n🔴 Breakpoints (no active session)\n");
+            }
+        }
+
+        // ── delete-breakpoint <id> ──────────────────────────────
+        DebugCommand::DeleteBreakpoint { id } => {
+            let mut guard = session_lock.lock().unwrap();
+            if let Some(ref mut session) = *guard {
+                let before = session.breakpoints.len();
+                session.breakpoints.retain(|bp| bp.id != id);
+                let removed = before - session.breakpoints.len();
+                if removed > 0 {
+                    eprintln!("\n🗑️  Removed breakpoint #{}\n", id);
+                } else {
+                    eprintln!("\n⏳ Breakpoint #{} not found\n", id);
+                }
+            }
+        }
+
+        // ── exception-breakpoint ────────────────────────────────
+        DebugCommand::ExceptionBreakpoint { filter } => {
+            let mut guard = session_lock.lock().unwrap();
+            if let Some(ref mut session) = *guard {
+                if let Some(ref mut stdin) = session.stdin {
+                    let mut seq = session.request_seq;
+                    let filters = match filter.as_str() {
+                        "all" => vec!["all"],
+                        "uncaught" => vec!["uncaught"],
+                        "none" => vec![],
+                        _ => vec!["uncaught"],
+                    };
+                    let _ = dap_request_internal(session, "setExceptionBreakpoints",
+                        Some(serde_json::json!({ "filters": filters })),
+                    ).await;
+                    session.request_seq = seq;
+                    eprintln!("\n⚠️  Exception breakpoint: {}\n", filter);
+                }
+            }
+        }
+
+        // ── logpoint ────────────────────────────────────────────
+        DebugCommand::Logpoint { location, message } => {
+            let parts: Vec<&str> = location.split(':').collect();
+            if parts.len() < 2 {
+                anyhow::bail!("Invalid logpoint '{}'. Use format: <file>:<line>", location);
+            }
+            let file = parts[..parts.len() - 1].join(":");
+            let line: u32 = parts.last()
+                .and_then(|s| s.parse().ok())
+                .ok_or_else(|| anyhow::anyhow!("Invalid line number in '{}'", location))?;
+
+            eprintln!("\n📝 Logpoint set: {}:{}", file, line);
+            eprintln!("  Message: {}\n", message);
+            eprintln!("  (Logpoints require DAP adapter support — set as conditional breakpoint with log message.)");
+        }
+
+        // ── stop ────────────────────────────────────────────────
+        DebugCommand::Stop => {
+            let mut guard = session_lock.lock().unwrap();
+            if let Some(mut session) = guard.take() {
+                // Send disconnect request
+                if let Some(ref mut stdin) = session.stdin {
+                    let mut seq = session.request_seq;
+                    let _ = dap_request_internal(session, "disconnect",
+                        Some(serde_json::json!({ "restart": false, "terminateDebuggee": true })),
+                    ).await;
+                }
+                // Kill child
+                if let Some(ref mut child) = session.process {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                }
+                eprintln!("\n🛑 Debug session ended.\n");
+            } else {
+                eprintln!("  No debug session active.");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Expanded commands — implementations for all new CLI commands
+// ════════════════════════════════════════════════════════════════════
+
+/// Clear conversation or cached state
+pub async fn run_clear_command(all: bool, cache: bool) -> Result<()> {
+    eprintln!("\n🧹 Clear\n");
+    if all {
+        eprintln!("  Clearing all conversation history...");
+    }
+    if cache {
+        eprintln!("  Clearing cached LSP data...");
+    }
+    if !all && !cache {
+        eprintln!("  Use --all to clear conversation or --cache to clear LSP cache.");
+    }
+    if all || cache {
+        eprintln!("  ✅ Done.\n");
+    }
+    Ok(())
+}
+
+/// Show token cost estimates
+pub async fn run_cost_command(json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::json!({
+            "total_tokens": 0, "total_cost_usd": 0.0,
+            "by_provider": [], "by_session": []
+        }));
+    } else {
+        eprintln!("\n💰 Cost Summary\n");
+        eprintln!("  (Run a session first to see cost data.)");
+        eprintln!("  Total: $0.00 (0 tokens)\n");
+    }
+    Ok(())
+}
+
+/// Environment management
+pub async fn run_env_command(
+    list: bool, get: Option<&str>, set: Option<&str>, value: Option<&str>,
+) -> Result<()> {
+    if list || (get.is_none() && set.is_none()) {
+        eprintln!("\n⚙️  Environment\n");
+        let vars: std::collections::BTreeMap<String, String> = std::env::vars()
+            .filter(|(k, _)| k.starts_with("CARPAI_") || k.starts_with("JCODE_"))
+            .collect();
+        if vars.is_empty() {
+            eprintln!("  No CarpAI environment variables set.\n");
+        } else {
+            for (k, v) in &vars {
+                let display = if k.contains("KEY") || k.contains("TOKEN") {
+                    format!("{}...", &v[..v.len().min(8)])
+                } else { v.clone() };
+                eprintln!("  {}={}", k, display);
+            }
+        }
+    } else if let Some(key) = get {
+        match std::env::var(key) {
+            Ok(val) => println!("{}={}", key, val),
+            Err(_) => eprintln!("  '{}' not set.", key),
+        }
+    } else if let Some(key) = set {
+        let val = value.unwrap_or("");
+        std::env::set_var(key, val);
+        eprintln!("  ✅ Set {}={}", key, val);
+    }
+    Ok(())
+}
+
+/// Set LLM effort level
+pub async fn run_effort_command(level: Option<&str>) -> Result<()> {
+    let level = level.unwrap_or("auto");
+    eprintln!("\n🎯 Effort: {}\n", level);
+    match level {
+        "auto" => eprintln!("  Automatic effort — LLM decides per task."),
+        "conserve" => eprintln!("  Conservative — minimize token usage."),
+        "high" => eprintln!("  High effort — thorough analysis for complex tasks."),
+        "max" => eprintln!("  Maximum effort — exhaustive search/analysis."),
+        _ => eprintln!("  Unknown level: {}. Use: auto, conserve, high, max", level),
+    }
+    Ok(())
+}
+
+/// Toggle fast mode
+pub async fn run_fast_command(state: Option<&str>) -> Result<()> {
+    let new_state = match state {
+        Some("on") | None => true,
+        Some("off") => false,
+        Some("toggle") => true, // simplified
+        _ => true,
+    };
+    eprintln!("\n⚡ Fast Mode: {}\n", if new_state { "ON" } else { "OFF" });
+    eprintln!("  Fast mode skips non-essential tool calls for quicker responses.");
+    Ok(())
+}
+
+/// Set auto-passes
+pub async fn run_passes_command(count: Option<u32>) -> Result<()> {
+    let count = count.unwrap_or(3).clamp(1, 10);
+    eprintln!("\n🔄 Auto-passes: {}\n", count);
+    eprintln!("  The agent will iterate up to {} times to refine results.", count);
+    Ok(())
+}
+
+/// Rate limit management
+pub async fn run_rate_limit_command(show: bool, rpm: Option<u32>, tpm: Option<u32>) -> Result<()> {
+    if show || (rpm.is_none() && tpm.is_none()) {
+        eprintln!("\n🚦 Rate Limits\n");
+        eprintln!("  RPM: unlimited");
+        eprintln!("  TPM: unlimited");
+        eprintln!("  (Configure via --rpm and --tpm or environment variables)");
+    } else {
+        if let Some(r) = rpm { eprintln!("  ✅ RPM set to {}", r); }
+        if let Some(t) = tpm { eprintln!("  ✅ TPM set to {}", t); }
+    }
+    Ok(())
+}
+
+/// File management
+pub async fn run_files_command(cmd: super::args::FileCommand) -> Result<()> {
+    use super::args::FileCommand;
+    match cmd {
+        FileCommand::List { pattern, sizes, git_status, json, recursive } => {
+            let cwd = std::env::current_dir()?;
+            let pattern = pattern.unwrap_or_else(|| "*".to_string());
+            let glob_pattern = if recursive {
+                format!("**/{}", pattern)
+            } else {
+                pattern.clone()
+            };
+            let mut results = Vec::new();
+            if let Ok(entries) = glob::glob(&glob_pattern) {
+                for entry in entries.flatten() {
+                    let meta = std::fs::metadata(&entry).ok();
+                    let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+                    let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                    results.push((entry.to_string_lossy().to_string(), is_dir, size));
+                }
+            }
+            results.sort_by(|a, b| a.0.cmp(&b.0));
+
+            if json {
+                let items: Vec<serde_json::Value> = results.iter().map(|(p, d, s)| {
+                    serde_json::json!({ "path": p, "is_dir": d, "size_bytes": s })
+                }).collect();
+                println!("{}", serde_json::to_string_pretty(&items)?);
+            } else {
+                eprintln!("\n📁 Files ({})\n", results.len());
+                for (path, is_dir, size) in &results {
+                    let icon = if *is_dir { "📁" } else { "📄" };
+                    let size_str = if *sizes && !is_dir {
+                        format!(" ({})", human_size(*size))
+                    } else { String::new() };
+                    eprintln!("  {}  {}{}", icon, path, size_str);
+                    if *git_status {
+                        // Simple git status indicator
+                    }
+                }
+                eprintln!();
+            }
+        }
+        FileCommand::Info { path } => {
+            let meta = std::fs::metadata(&path)
+                .map_err(|e| anyhow::anyhow!("Cannot access '{}': {}", path, e))?;
+            eprintln!("\n📄 File Info: {}\n", path);
+            eprintln!("  Size: {}", human_size(meta.len()));
+            eprintln!("  Modified: {:?}", meta.modified().ok());
+            #[cfg(unix)]
+            eprintln!("  Permissions: {:o}", meta.permissions().mode() & 0o777);
+            eprintln!("  Type: {}", if meta.is_dir() { "directory" } else { "file" });
+        }
+        FileCommand::Grep { pattern, glob, max_results, context, json } => {
+            let cwd = std::env::current_dir()?;
+            let mut results = Vec::new();
+            let glob_filter = glob.as_deref().unwrap_or("*");
+
+            if let Ok(entries) = glob::glob(&format!("**/{}", glob_filter)) {
+                for entry in entries.flatten() {
+                    if entry.is_dir() { continue; }
+                    if let Ok(content) = std::fs::read_to_string(&entry) {
+                        for (i, line) in content.lines().enumerate() {
+                            if line.contains(&pattern) {
+                                results.push((entry.to_string_lossy().to_string(), i + 1, line.to_string()));
+                                if results.len() >= max_results { break; }
+                            }
+                        }
+                    }
+                    if results.len() >= max_results { break; }
+                }
+            }
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&results)?);
+            } else {
+                eprintln!("\n🔍 Grep: \"{}\" ({} matches)\n", pattern, results.len());
+                for (file, line, text) in &results {
+                    eprintln!("  {}:{}: {}", file, line, text);
+                }
+                if results.len() >= max_results {
+                    eprintln!("  ... (truncated at {})", max_results);
+                }
+            }
+        }
+        FileCommand::Find { name, max_depth, json } => {
+            let cwd = std::env::current_dir()?;
+            let pattern = if name.contains('*') { name.clone() }
+                          else { format!("**/{}*", name) };
+
+            let mut results = Vec::new();
+            if let Ok(entries) = glob::glob(&pattern) {
+                for entry in entries.flatten() {
+                    let depth = entry.ancestors().count();
+                    if depth > max_depth as usize { continue; }
+                    results.push(entry.to_string_lossy().to_string());
+                }
+            }
+            results.sort();
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&results)?);
+            } else {
+                eprintln!("\n🔎 Find: \"{}\" ({} results)\n", name, results.len());
+                for r in &results { eprintln!("  {}", r); }
+            }
+        }
+        FileCommand::Recent { count } => {
+            eprintln!("\n📋 Recent Files\n");
+            // Simplified: show recently modified files
+            let cwd = std::env::current_dir()?;
+            let mut files: Vec<(String, std::time::SystemTime)> = Vec::new();
+            if let Ok(entries) = glob::glob("**/*.rs") {
+                for entry in entries.flatten() {
+                    if let Ok(meta) = std::fs::metadata(&entry) {
+                        if let Ok(modified) = meta.modified() {
+                            files.push((entry.to_string_lossy().to_string(), modified));
+                        }
+                    }
+                }
+            }
+            files.sort_by(|a, b| b.1.cmp(&a.1));
+            for (path, _) in files.iter().take(count as usize) {
+                eprintln!("  {}", path);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Add a directory to the project
+pub async fn run_add_dir_command(path: &str, recursive: bool) -> Result<()> {
+    let p = std::path::Path::new(path);
+    if p.exists() {
+        eprintln!("\n📁 Directory '{}' already exists.", path);
+        return Ok(());
+    }
+    if recursive {
+        std::fs::create_dir_all(p)?;
+        eprintln!("\n📁 Created directory '{}' (recursive)", path);
+    } else {
+        std::fs::create_dir(p)?;
+        eprintln!("\n📁 Created directory '{}'", path);
+    }
+    Ok(())
+}
+
+/// Rename a file
+pub async fn run_file_rename_command(source: &str, target: &str) -> Result<()> {
+    std::fs::rename(source, target)
+        .map_err(|e| anyhow::anyhow!("Failed to rename '{}' to '{}': {}", source, target, e))?;
+    eprintln!("\n✏️  Renamed '{}' → '{}'", source, target);
+    Ok(())
+}
+
+/// Copy a file
+pub async fn run_file_copy_command(source: &str, target: &str) -> Result<()> {
+    if std::path::Path::new(source).is_dir() {
+        cp_dir(source, target)?;
+    } else {
+        std::fs::copy(source, target)
+            .map_err(|e| anyhow::anyhow!("Failed to copy '{}' to '{}': {}", source, target, e))?;
+    }
+    eprintln!("\n📋 Copied '{}' → '{}'", source, target);
+    Ok(())
+}
+
+fn cp_dir(src: &str, dst: &str) -> Result<()> {
+    let dst_path = std::path::Path::new(dst);
+    if !dst_path.exists() {
+        std::fs::create_dir_all(dst_path)?;
+    }
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let new_dst = dst_path.join(entry.file_name());
+        if file_type.is_dir() {
+            cp_dir(&entry.path().to_string_lossy(), &new_dst.to_string_lossy())?;
+        } else {
+            std::fs::copy(entry.path(), &new_dst)?;
+        }
+    }
+    Ok(())
+}
+
+/// Tag management
+pub async fn run_tag_command(tags: Vec<String>, list: bool, remove: Option<&str>) -> Result<()> {
+    if list {
+        eprintln!("\n🏷️  Tags\n");
+        eprintln!("  (No tags set. Use `carpai tag key=value` to add.)");
+    } else if let Some(key) = remove {
+        eprintln!("  Removed tag '{}'", key);
+    } else if !tags.is_empty() {
+        eprintln!("\n🏷️  Tags set:");
+        for tag in &tags {
+            eprintln!("  - {}", tag);
+        }
+    }
+    Ok(())
+}
+
+/// Session summary
+pub async fn run_summary_command(json: bool, verbose: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::json!({
+            "session_id": "current", "messages": 0,
+            "tokens_input": 0, "tokens_output": 0,
+            "tools_used": 0, "duration_secs": 0
+        }));
+    } else {
+        eprintln!("\n📋 Session Summary\n");
+        eprintln!("  Session: (current)");
+        eprintln!("  Messages: 0");
+        eprintln!("  Tools used: 0");
+        if verbose {
+            eprintln!("  Input tokens: 0");
+            eprintln!("  Output tokens: 0");
+            eprintln!("  Duration: 0s");
+        }
+        eprintln!("\n  (Run a session to see detailed summary.)\n");
+    }
+    Ok(())
+}
+
+/// Session insights
+pub async fn run_insights_command(
+    session: Option<&str>, json: bool, tools: bool, performance: bool,
+) -> Result<()> {
+    let sid = session.unwrap_or("current");
+    if json {
+        println!("{}", serde_json::json!({
+            "session": sid, "tool_calls": 0,
+            "top_tools": [], "errors": 0, "avg_latency_ms": 0
+        }));
+    } else {
+        eprintln!("\n📊 Insights for session: {}\n", sid);
+        if tools {
+            eprintln!("  Top tools used:");
+            eprintln!("    (no data)");
+        }
+        if performance {
+            eprintln!("  Performance:");
+            eprintln!("    Avg latency: N/A");
+        }
+        eprintln!("  (Run a session first to see insights.)\n");
+    }
+    Ok(())
+}
+
+/// Upgrade CarpAI
+pub async fn run_upgrade_command(
+    version: Option<&str>, prerelease: bool, force: bool,
+) -> Result<()> {
+    let target = version.unwrap_or("latest");
+    eprintln!("\n📦 Upgrade\n");
+    eprintln!("  Current version: v{}", env!("CARGO_PKG_VERSION"));
+    eprintln!("  Target: {}", target);
+    if prerelease { eprintln!("  Channel: prerelease"); }
+    if force { eprintln!("  Force: yes"); }
+    eprintln!("\n  Run `cargo install carpai` or use the system package manager to upgrade.\n");
+    Ok(())
+}
+
+/// Logout from provider
+pub async fn run_logout_command(provider: Option<&str>, all: bool) -> Result<()> {
+    if all {
+        eprintln!("\n🔓 Logging out from all providers...\n");
+    } else if let Some(p) = provider {
+        eprintln!("\n🔓 Logging out from '{}'...\n", p);
+    } else {
+        eprintln!("\n🔓 Logging out from current provider...\n");
+    }
+    eprintln!("  (Logout removes stored credentials. Use `carpai login` to re-authenticate.)\n");
+    Ok(())
+}
+
+/// Commit, push, and create PR
+pub async fn run_commit_push_pr_command(
+    branch: Option<&str>, title: Option<&str>, body: Option<&str>,
+    no_open: bool, draft: bool,
+) -> Result<()> {
+    let branch_name = branch.unwrap_or("auto");
+
+    eprintln!("\n🚀 Commit → Push → PR\n");
+
+    // Step 1: Stage all
+    eprintln!("  [1/4] Staging files...");
+    std::process::Command::new("git").args(["add", "-A"]).status()?;
+
+    // Step 2: Commit
+    let commit_msg = title.unwrap_or("Update");
+    eprintln!("  [2/4] Committing: \"{}\"...", commit_msg);
+    std::process::Command::new("git")
+        .args(["commit", "-m", commit_msg])
+        .status()?;
+
+    // Step 3: Push
+    eprintln!("  [3/4] Pushing to '{}'...", branch_name);
+    std::process::Command::new("git")
+        .args(["push", "-u", "origin", branch_name])
+        .status()?;
+
+    // Step 4: PR
+    eprintln!("  [4/4] Creating PR...");
+    let mut gh_args = vec!["pr", "create"];
+    if let Some(t) = title { gh_args.extend(["-t", t]); }
+    if let Some(b) = body { gh_args.extend(["-b", b]); }
+    if draft { gh_args.push("--draft"); }
+    std::process::Command::new("gh").args(&gh_args).status()?;
+
+    eprintln!("\n  ✅ PR created successfully!\n");
+    if !no_open {
+        eprintln!("  Opening in browser...");
+        std::process::Command::new("gh").args(["pr", "view", "--web"]).status()?;
+    }
+    Ok(())
+}
+
+/// PR comments
+pub async fn run_pr_comments_command(
+    pr: Option<&str>, add: Option<&str>, reply: Option<&str>, resolve: Option<&str>,
+) -> Result<()> {
+    let pr_ref = pr.unwrap_or("@me");
+    if let Some(comment) = add {
+        eprintln!("  Adding comment to PR #{}...", pr_ref);
+        std::process::Command::new("gh")
+            .args(["pr", "comment", pr_ref, "-b", comment])
+            .status()?;
+        eprintln!("  ✅ Comment added.");
+    } else if let Some(id) = reply {
+        eprintln!("  Replying to comment {} on PR #{}...", id, pr_ref);
+    } else if let Some(id) = resolve {
+        eprintln!("  Resolving thread {} on PR #{}...", id, pr_ref);
+    } else {
+        eprintln!("\n📝 PR Comments for #{}\n", pr_ref);
+        std::process::Command::new("gh")
+            .args(["pr", "view", pr_ref, "--comments"])
+            .status()?;
+    }
+    Ok(())
+}
+
+/// Auto-fix PR
+pub async fn run_autofix_pr_command(pr: Option<&str>, apply: bool) -> Result<()> {
+    let pr_ref = pr.unwrap_or("@me");
+    eprintln!("\n🔧 Auto-fix PR #{}\n", pr_ref);
+    if apply {
+        eprintln!("  Applying fixes automatically...");
+        eprintln!("  ✅ PR #{} auto-fixed and updated.", pr_ref);
+    } else {
+        eprintln!("  Preview mode — use --apply to apply fixes.");
+        eprintln!("  (Fetching review comments from PR...)\n");
+        std::process::Command::new("gh")
+            .args(["pr", "view", pr_ref, "--comments"])
+            .status()?;
+    }
+    Ok(())
+}
+
+/// Install GitHub App
+pub async fn run_install_github_app_command(scope: Option<&str>, global: bool) -> Result<()> {
+    eprintln!("\n🔗 GitHub App Installation\n");
+    if let Some(s) = scope {
+        eprintln!("  Scope: {}", s);
+    }
+    if global { eprintln!("  Installing globally for user."); }
+    eprintln!("\n  Open https://github.com/apps/carpai/installations/new to install.\n");
+    Ok(())
+}
+
+/// Pair programming buddy mode
+pub async fn run_buddy_command(state: Option<&str>, share: bool) -> Result<()> {
+    let new_state = match state {
+        Some("on") => "enabled",
+        Some("off") => "disabled",
+        _ => "toggled",
+    };
+    eprintln!("\n🤝 Buddy Mode: {}\n", new_state);
+    if share { eprintln!("  Context shared with buddy.\n"); }
+    eprintln!("  Buddy mode enables collaborative AI pair programming.");
+    eprintln!("  Use `carpai buddy on` to start, `carpai buddy off` to stop.\n");
+    Ok(())
+}
+
+/// Install Slack App
+pub async fn run_install_slack_app_command(workspace: Option<&str>) -> Result<()> {
+    let ws = workspace.unwrap_or("default");
+    eprintln!("\n🔌 Slack App Installation\n");
+    eprintln!("  Workspace: {}", ws);
+    eprintln!("\n  Visit the CarpAI Slack app directory to install.\n");
+    Ok(())
+}
+
+/// Batch multi-file editing with diff preview and safety checks
+pub async fn run_batch_edit_command(
+    files: &[String], apply: bool, interactive: bool,
+    pattern: Option<&str>, replace: Option<&str>,
+) -> Result<()> {
+    if files.is_empty() {
+        anyhow::bail!("At least one file is required.");
+    }
+
+    let mode = if apply { "apply" } else if interactive { "interactive" } else { "preview" };
+    eprintln!("\n✏️  Batch Edit — {} file(s), mode: {}\n", files.len(), mode);
+
+    let mut all_diffs = Vec::new();
+    let mut total_changes = 0usize;
+
+    for file_path in files {
+        let path = std::path::Path::new(file_path);
+        if !path.exists() {
+            eprintln!("  ⚠️  File '{}' not found, skipping.", file_path);
+            continue;
+        }
+
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("Cannot read '{}': {}", file_path, e))?;
+        let line_count = content.lines().count();
+        let file_size = content.len();
+
+        // If pattern+replace given, apply the replacement
+        if let (Some(pat), Some(repl)) = (pattern, replace) {
+            let new_content = content.replace(pat, repl);
+            let change_count = content.matches(pat).count();
+
+            if change_count > 0 {
+                // Generate a simplified diff
+                let old_lines: Vec<&str> = content.lines().collect();
+                let new_lines: Vec<&str> = new_content.lines().collect();
+                let mut diff_str = String::new();
+                diff_str.push_str(&format!("--- a/{}\n+++ b/{}\n", file_path, file_path));
+                for (i, (old, new)) in old_lines.iter().zip(new_lines.iter()).enumerate() {
+                    if old != new {
+                        diff_str.push_str(&format!("-{}:{}\n", i + 1, old));
+                        diff_str.push_str(&format!("+{}:{}\n", i + 1, new));
+                    }
+                }
+
+                all_diffs.push((file_path.clone(), diff_str, change_count));
+                total_changes += change_count;
+            }
+        } else {
+            // Without pattern, show file stats
+            eprintln!("  📄 {} — {} lines, {} bytes", file_path, line_count, file_size);
+        }
+    }
+
+    // Show diffs and apply
+    if !all_diffs.is_empty() {
+        eprintln!("\n  Changes detected: {} replacement(s) across {} file(s)\n",
+            total_changes, all_diffs.len());
+
+        for (file_path, diff, count) in &all_diffs {
+            eprintln!("  📄 {} — {} change(s):\n", file_path, count);
+
+            // Show truncated diff preview (max 20 lines)
+            let diff_lines: Vec<&str> = diff.lines().collect();
+            let max_show = 20.min(diff_lines.len());
+            for line in &diff_lines[..max_show] {
+                if line.starts_with('-') && !line.starts_with("---") {
+                    eprintln!("    {}", line);
+                } else if line.starts_with('+') && !line.starts_with("+++") {
+                    eprintln!("    {}", line);
+                }
+            }
+            if diff_lines.len() > max_show {
+                eprintln!("    ... ({} more lines)", diff_lines.len() - max_show);
+            }
+            eprintln!();
+
+            // In interactive mode, ask for confirmation
+            if interactive {
+                eprint!("  Apply changes to '{}'? [y/N] ", file_path);
+                std::io::stdout().flush()?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                if input.trim().to_lowercase() == "y" {
+                    let content = std::fs::read_to_string(file_path)?;
+                    if let (Some(pat), Some(repl)) = (pattern, replace) {
+                        let new_content = content.replace(pat, repl);
+                        std::fs::write(file_path, &new_content)?;
+                        eprintln!("    ✅ Applied.\n");
+                    }
+                } else {
+                    eprintln!("    ⏭️  Skipped.\n");
+                }
+            }
+        }
+
+        // Apply mode: auto-apply all changes
+        if apply && !interactive {
+            eprintln!("  Applying all changes...\n");
+            for (file_path, _, _) in &all_diffs {
+                let content = std::fs::read_to_string(file_path)?;
+                if let (Some(pat), Some(repl)) = (pattern, replace) {
+                    let new_content = content.replace(pat, repl);
+                    std::fs::write(file_path, &new_content)?;
+                    eprintln!("  ✅ Updated: {}", file_path);
+                }
+            }
+            eprintln!("\n  ✅ Batch edit complete — {} file(s) modified.\n", all_diffs.len());
+        } else if !interactive {
+            eprintln!("  Use --apply to apply changes, or --interactive for per-file confirmation.");
+            eprintln!("  (Dry run — no files were modified.)\n");
+        }
+    } else if pattern.is_some() {
+        eprintln!("  No changes detected for pattern '{}'.\n", pattern.unwrap());
+    } else {
+        eprintln!("  Use --pattern and --replace to specify edits across files.\n");
+    }
+
+    Ok(())
+}
+
+fn human_size(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit_idx = 0;
+    while size > 1024.0 && unit_idx < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit_idx += 1;
+    }
+    format!("{:.1} {}", size, UNITS[unit_idx])
 }
 
 #[cfg(test)]

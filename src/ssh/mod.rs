@@ -1,69 +1,119 @@
-//! # SSH Remote Connection - 远程连接模块
+//! # Enhanced SSH Remote Connection System
 //!
-//! 提供完整的SSH远程连接和文件传输能力，包括：
-//! - **会话管理** (SshSession) - 连接生命周期管理
-//! - **命令执行** - 同步/流式命令执行
-//! - **文件传输** - SCP上传/下载
-//! - **CLI接口** (SshCommand) - 命令行封装
+//! 深度移植Claude Code的SSH远程能力，提供企业级SSH连接管理：
 //!
-//! ## 功能特性
+//! ## 核心功能模块
 //!
-//! ✅ **安全连接** - 支持密钥文件认证
-//! ✅ **超时控制** - 可配置连接和执行超时
-//! ✅ **流式输出** - 实时显示远程命令输出
-//! ✅ **文件传输** - 基于SCP的安全传输
-//! ✅ **状态追踪** - 连接状态和运行时间监控
+//! ### 1. 会话管理 (Session Management)
+//! - 连接池 (Connection Pool) - 复用SSH连接提升性能
+//! - 多会话支持 (Multi-session) - 同时管理多个远程主机
+//! - 心跳检测 (Heartbeat) - 自动检测连接状态
+//! - 自动重连 (Auto-reconnect) - 断线后自动恢复
 //!
-//! ## 使用示例
+//! ### 2. 高级命令执行 (Advanced Execution)
+//! - 同步执行 (Sync) - 阻塞等待结果
+//! - 异步执行 (Async) - 后台任务队列
+//! - 流式输出 (Streaming) - 实时数据传输
+//! - 交互式终端 (Interactive PTY) - 支持sudo等交互命令
+//! - 并行执行 (Parallel) - 多主机同时执行
 //!
-//! ```rust,no_run
-//! use carpai::ssh::{SshSession, SshConfig};
-//! use std::time::Duration;
+//! ### 3. 文件传输增强 (Enhanced File Transfer)
+//! - SCP上传/下载 (基础传输)
+//! - Rsync同步 (增量同步)
+//! - 目录递归操作 (Recursive operations)
+//! - 传输进度追踪 (Progress tracking)
+//! - 断点续传 (Resume support)
 //!
-//! // 配置连接
-//! let config = SshConfig {
-//!     host: "example.com".to_string(),
-//!     port: 2222,
-//!     user: "deploy".to_string(),
-//!     identity_file: Some(std::path::PathBuf::from("~/.ssh/id_rsa")),
-//!     connect_timeout: Duration::from_secs(30),
-//! };
+//! ### 4. 端口转发 (Port Forwarding)
+//! - 本地端口转发 (Local forwarding) - L:local:port -> remote:port
+//! - 远程端口转发 (Remote forwarding) - R:remote:port -> local:port
+//! - 动态端口转发 (Dynamic/SOCKS) - SOCKS5代理
 //!
-//! // 创建并连接
-//! let mut session = SshSession::new(config);
-//! session.connect().expect("Failed to connect");
+//! ### 5. 隧道与代理 (Tunneling & Proxy)
+//! - SSH隧道建立 (Tunnel creation)
+//! - 跳板机支持 (Jump host/Bastion)
+//! - HTTP/SOCKS5代理 (Proxy chaining)
+//! - VPN模式 (Tun device)
 //!
-//! // 执行命令
-//! let output = session.execute("ls -la").expect("Execution failed");
-//! println!("Output:\n{}", output.stdout);
+//! ### 6. 配置管理 (Configuration)
+//! - ~/.ssh/config 解析 (Config file parsing)
+//! - Host别名 (Host aliases)
+//! - Identity文件管理 (Key management)
+//! - Known hosts验证 (Host key verification)
 //!
-//! // 流式执行（实时输出）
-//! session.execute_streaming("tail -f /var/log/app.log", |line| {
-//!     println!("{}", line);
-//! }).ok();
+//! ### 7. 安全特性 (Security)
+//! - 密钥认证 (Public key auth)
+//! - SSH Agent集成 (Agent forwarding)
+//! - 审计日志 (Audit logging)
+//! - 命令白名单 (Command whitelist)
 //!
-//! // 文件上传
-//! session.upload(
-//!     &std::path::PathBuf::from("local-file.txt"),
-//!     &std::path::PathBuf::from("/remote/path/file.txt")
-//! ).expect("Upload failed");
+//! ## 架构设计
 //!
-//! // 断开连接
-//! session.disconnect().ok();
 //! ```
-//!
-//! ## 安全建议
-//!
-//! 1. **使用密钥认证** - 避免密码明文传输
-//! 2. **限制端口范围** - 仅开放必要端口
-//! 3. **设置合理超时** - 防止无限等待
-//! 4. **定期轮换密钥** - 保持安全性
+//! SshManager (全局管理器)
+//! ├── SshConfigParser (~/.ssh/config解析器)
+//! ├── ConnectionPool (连接池)
+│   └── Vec<SshSession> (活跃连接)
+│       ├── CommandExecutor (命令执行器)
+│       │   ├── SyncExecutor
+│       │   ├── AsyncExecutor
+│       │   └── StreamingExecutor
+│       ├── FileTransfer (文件传输)
+│       │   ├── ScpTransfer
+│       │   └── RsyncTransfer
+│       └── PortForwarder (端口转发)
+│           ├── LocalForward
+│           ├── RemoteForward
+│           └── DynamicForward (SOCKS5)
+├── SessionRegistry (会话注册表)
+│   └── HashMap<session_id, SshSession>
+└── AuditLogger (审计日志)
+//!     └── Vec<SshEvent> (操作记录)
+//! ```
 
 pub mod session;
 pub mod command;
+pub mod config;
+pub mod tunnel;
+pub mod transfer;
+pub mod pool;
+pub mod audit;
+pub mod resilience;
 
-#[cfg(test)]
-mod tests;
+// New advanced modules (Phase 1-2 completion)
+pub mod sftp;              // SFTP protocol support
+pub mod agent;             // SSH Agent forwarding
+pub mod host_keys;         // Known Hosts management
+pub mod pty;               // Full PTY terminal support
+pub mod enhanced_scp;      // Enhanced SCP with options
+pub mod mfa;               // Multi-factor authentication
 
+// Enhanced integration layer
+pub mod enhanced;           // High-level manager and utilities
+
+// Re-export main types for convenience
 pub use session::{SshSession, SshConfig, SshOutput};
-pub use command::SshCommand;
+pub use command::{SshCommand, CommandExecutor};
+pub use config::{SshHostConfig, ConfigParser};
+pub use tunnel::{PortForwarder, ForwardType};
+pub use resilience::{
+    ResilientSshSession, SmartRetryHandler, CircuitBreaker, RetryPolicy,
+    ReconnectStrategy, ErrorClassification, ResilientConnectionPool
+};
+
+// Re-export new advanced features
+pub use sftp::{SftpClient, SftpTransferResult, SftpError, SftpFileInfo, SftpSessionManager};
+pub use agent::{
+    SshAgentManager, AgentIdentity, AgentHealthStatus, AgentError, ensure_ssh_agent_running
+};
+pub use host_keys::{
+    KnownHostsManager, KnownHostEntry, VerificationResult, HashAlgorithm, 
+    KnownHostsError, KnownHostsStats
+};
+pub use pty::{PtySession, PtyConfig, PtyState, TerminalSize, PtyError, PtySessionManager};
+pub use enhanced_scp::{EnhancedScp, EnhancedTransferResult, SymlinkBehavior, ScpError};
+pub use mfa::{
+    MfaManager, MfaConfig, AuthMethodType, MfaSession, AuthChallenge, AuthResult,
+    TotpAuthenticator, TotpConfig, TotpError, U2fAuthenticator, U2fConfig, U2fError,
+    RateLimitConfig
+};
