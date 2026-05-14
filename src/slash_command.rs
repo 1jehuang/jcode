@@ -562,26 +562,44 @@ async fn run_review(_args: &str) {
 async fn register_model_command() {
     register(
         "model",
-        "Switch AI model for the session",
-        "/model <model-name>",
+        "Show or switch the AI model",
+        "/model [model-name]",
         std::sync::Arc::new(|args: &str| {
-            if args.trim().is_empty() {
-                SlashResult::Err("Usage: /model <model-name> (e.g., /model claude-opus-4-5)".into())
-            } else {
-                let model = args.trim().to_string();
-                let model_display = model.clone();
-                let rt = tokio::runtime::Handle::try_current();
-                match rt {
-                    Ok(handle) => {
-                        handle.spawn(async move {
-                            eprintln!("\n🔄 Switching model to: {}\n", model_display);
-                            eprintln!("  Model change requested: {}", model_display);
-                            eprintln!("  (Full model switching requires session re-init)\n");
-                        });
-                        SlashResult::Ok(format!("Switching to model: {}", model))
+            let rt = tokio::runtime::Handle::try_current();
+            match rt {
+                Ok(handle) => {
+                    let trimmed = args.trim().to_string();
+                    handle.spawn(async move {
+                        use crate::config::Config;
+                        let cfg = Config::load();
+                        let current_model = cfg.provider.default_model.as_deref().unwrap_or("not set");
+                        let current_provider = cfg.provider.default_provider.as_deref().unwrap_or("not set");
+                        if trimmed.is_empty() {
+                            eprintln!("\n📋 Current model configuration\n");
+                            eprintln!("  Provider: {}", current_provider);
+                            eprintln!("  Model:    {}\n", current_model);
+                            let available = cfg.providers.keys();
+                            if available.len() > 0 {
+                                eprintln!("  Configured providers:");
+                                for name in available {
+                                    eprintln!("    - {}", name);
+                                }
+                                eprintln!();
+                            }
+                        } else {
+                            match Config::set_default_model_only(Some(&trimmed)) {
+                                Ok(_) => eprintln!("\n✅ Default model changed to: {}\n", trimmed),
+                                Err(e) => eprintln!("\n❌ Failed: {:#}\n", e),
+                            }
+                        }
+                    });
+                    if args.trim().is_empty() {
+                        SlashResult::Ok("Showing current model config.".into())
+                    } else {
+                        SlashResult::Ok(format!("Setting model to: {}", args.trim()))
                     }
-                    Err(_) => SlashResult::Err("No async runtime available".into()),
                 }
+                Err(_) => SlashResult::Err("No async runtime available".into()),
             }
         }),
     )
@@ -593,11 +611,15 @@ async fn register_model_command() {
 async fn register_clear_command() {
     register(
         "clear",
-        "Clear the current session context",
+        "Clear the terminal screen",
         "/clear",
         std::sync::Arc::new(|_args: &str| {
-            eprintln!("\n🗑️  Session context cleared.\n");
-            SlashResult::Ok("Session context cleared.".into())
+            // Actually clear the terminal
+            #[cfg(unix)]
+            let _ = std::process::Command::new("clear").status();
+            #[cfg(windows)]
+            let _ = std::process::Command::new("cls").status();
+            SlashResult::Ok("Terminal cleared.".into())
         }),
     )
     .await;
@@ -608,12 +630,31 @@ async fn register_clear_command() {
 async fn register_compact_command() {
     register(
         "compact",
-        "Compact/compress the conversation to save tokens",
-        "/compact",
-        std::sync::Arc::new(|_args: &str| {
-            eprintln!("\n📦 Compacting conversation...\n");
-            eprintln!("  (Compaction requires full session API; CLI placeholder)\n");
-            SlashResult::Ok("Compact requested.".into())
+        "Show compaction/summary settings from config",
+        "/compact [--config]",
+        std::sync::Arc::new(|args: &str| {
+            let show_config = args.contains("--config");
+            let rt = tokio::runtime::Handle::try_current();
+            match rt {
+                Ok(handle) => {
+                    handle.spawn(async move {
+                        use crate::config::Config;
+                        if show_config {
+                            let cfg = Config::load();
+                            eprintln!("\n📦 Compaction Configuration\n");
+                            eprintln!("  Mode:         {:?}", cfg.compaction.mode);
+                            eprintln!("  Lookahead:    {} turns", cfg.compaction.lookahead_turns);
+                            eprintln!("  EWMA alpha:   {}\n", cfg.compaction.ewma_alpha);
+                        } else {
+                            eprintln!("\n📦 Compaction info:\n");
+                            eprintln!("  /compact --config    Show compaction settings\n");
+                            eprintln!("  (Full compaction triggered via session API.)\n");
+                        }
+                    });
+                    SlashResult::Ok("Showing compaction info.".into())
+                }
+                Err(_) => SlashResult::Ok("Compacting requires async runtime.".into()),
+            }
         }),
     )
     .await;
@@ -624,19 +665,30 @@ async fn register_compact_command() {
 async fn register_cost_command() {
     register(
         "cost",
-        "Show estimated token usage and cost for the session",
+        "Show token usage and cost estimates",
         "/cost [--json]",
         std::sync::Arc::new(|args: &str| {
             let is_json = args.contains("--json");
-            if is_json {
-                SlashResult::Ok(r#"{"tokens_in":0,"tokens_out":0,"cost_usd":0.0}"#.into())
-            } else {
-                eprintln!("\n💰 Session Cost (estimated)\n");
-                eprintln!("  (Cost tracking requires active session)\n");
-                eprintln!("  Tokens in:    -");
-                eprintln!("  Tokens out:   -");
-                eprintln!("  Estimated:    $0.00\n");
-                SlashResult::Ok("Cost info displayed.".into())
+            let rt = tokio::runtime::Handle::try_current();
+            match rt {
+                Ok(handle) => {
+                    handle.spawn(async move {
+                        use crate::usage;
+                        let usage_data = usage::get().await;
+                        eprintln!("\n💰 Provider Usage\n");
+                        eprintln!("  5-hour window:  {:.1}%", usage_data.five_hour * 100.0);
+                        eprintln!("  7-day window:   {:.1}%", usage_data.seven_day * 100.0);
+                        if let Some(op) = usage_data.seven_day_opus {
+                            eprintln!("  7-day Opus:     {:.1}%", op * 100.0);
+                        }
+                        if let Some(ref err) = usage_data.last_error {
+                            eprintln!("  ⚠️  {}", err);
+                        }
+                        eprintln!();
+                    });
+                    SlashResult::Ok("Showing cost info.".into())
+                }
+                Err(_) => SlashResult::Err("No async runtime available".into()),
             }
         }),
     )
@@ -648,22 +700,46 @@ async fn register_cost_command() {
 async fn register_export_command() {
     register(
         "export",
-        "Export the current session to a file",
-        "/export [--format json|markdown] [output-file]",
+        "Export a session to a markdown file",
+        "/export [session-id] [output-file]",
         std::sync::Arc::new(|args: &str| {
-            let trimmed = args.trim();
-            let path = if trimmed.is_empty() || trimmed.starts_with("--") {
-                "session_export.md".to_string()
-            } else {
-                trimmed
-                    .split_whitespace()
-                    .last()
-                    .unwrap_or("session_export.md")
-                    .to_string()
-            };
-            eprintln!("\n📤 Exporting session to: {}\n", path);
-            eprintln!("  (Session export requires active session.)\n");
-            SlashResult::Ok(format!("Exporting to {}", path))
+            let rt = tokio::runtime::Handle::try_current();
+            match rt {
+                Ok(handle) => {
+                    let parts: Vec<&str> = args.trim().split_whitespace().filter(|s| !s.is_empty()).collect();
+                    let session_id = parts.first().map(|s| s.to_string());
+                    let output_path = parts.get(1).map(|s| s.to_string())
+                        .unwrap_or_else(|| "session_export.md".to_string());
+                    handle.spawn(async move {
+                        let sid = session_id.as_deref().unwrap_or("latest");
+                        match crate::replay::load_session(sid) {
+                            Ok(session) => {
+                                use std::io::Write;
+                                let mut file = match std::fs::File::create(&output_path) {
+                                    Ok(f) => f,
+                                    Err(e) => {
+                                        eprintln!("\n❌ Cannot create file '{}': {}\n", output_path, e);
+                                        return;
+                                    }
+                                };
+                                let _ = writeln!(file, "# Session Export\n");
+                                let _ = writeln!(file, "**ID:** {}", session.id);
+                                let _ = writeln!(file, "**Created:** {}", session.created_at.format("%Y-%m-%d %H:%M:%S"));
+                                let _ = writeln!(file, "**Messages:** {}\n", session.messages.len());
+                                for msg in &session.messages {
+                                    let _ = writeln!(file, "## {} ({})", msg.role, msg.timestamp.format("%H:%M:%S"));
+                                    let _ = writeln!(file, "ID: {}", msg.id);
+                                    let _ = writeln!(file);
+                                }
+                                eprintln!("\n✅ Exported {} messages to {}\n", session.messages.len(), output_path);
+                            }
+                            Err(e) => eprintln!("\n❌ Cannot load session '{}': {}\n", sid, e),
+                        }
+                    });
+                    SlashResult::Ok(format!("Exporting to {}", output_path))
+                }
+                Err(_) => SlashResult::Err("No async runtime available".into()),
+            }
         }),
     )
     .await;
@@ -677,16 +753,72 @@ async fn register_resume_command() {
         "List or resume a previous session",
         "/resume [session-id]",
         std::sync::Arc::new(|args: &str| {
-            let trimmed = args.trim();
-            if trimmed.is_empty() {
-                eprintln!("\n📋 Recent Sessions\n");
-                eprintln!("  (Session listing requires session storage.)\n");
-                eprintln!("  Use `/resume <session-id>` to resume a session.\n");
-                SlashResult::Ok("No sessions listed.".into())
-            } else {
-                eprintln!("\n📋 Resuming session: {}\n", trimmed);
-                eprintln!("  (Session resume requires full session API.)\n");
-                SlashResult::Ok(format!("Resuming session: {}", trimmed))
+            let rt = tokio::runtime::Handle::try_current();
+            match rt {
+                Ok(handle) => {
+                    let trimmed = args.trim().to_string();
+                    handle.spawn(async move {
+                        if trimmed.is_empty() {
+                            // List recent sessions
+                            let jcode_dir = crate::storage::jcode_dir().ok();
+                            let sessions_dir = jcode_dir.as_ref().map(|d| d.join("sessions"));
+                            let entries = match sessions_dir {
+                                Some(ref dir) if dir.exists() => {
+                                    let mut e: Vec<_> = std::fs::read_dir(dir)
+                                        .ok()
+                                        .into_iter()
+                                        .flat_map(|r| r.filter_map(|e| e.ok()))
+                                        .filter(|e| e.path().extension().map(|ext| ext == "json").unwrap_or(false))
+                                        .collect();
+                                    e.sort_by_key(|e| e.path());
+                                    e.reverse();
+                                    e
+                                }
+                                _ => vec![],
+                            };
+                            eprintln!("\n📋 Recent Sessions\n");
+                            if entries.is_empty() {
+                                eprintln!("  No sessions found.\n");
+                            } else {
+                                for entry in entries.iter().take(20) {
+                                    let path = entry.path();
+                                    let name = path.file_stem()
+                                        .map(|n| n.to_string_lossy())
+                                        .unwrap_or(std::borrow::Cow::Borrowed("unknown"));
+                                    if let Ok(sess) = crate::session::Session::load_from_path(&path) {
+                                        eprintln!("  [{:.8}] {} — {} msgs",
+                                            name,
+                                            sess.display_title_or_name(),
+                                            sess.messages.len(),
+                                        );
+                                    } else {
+                                        eprintln!("  [{}] (unreadable)", name);
+                                    }
+                                }
+                                eprintln!("\n  Use `/resume <session-id>` to resume.\n");
+                            }
+                        } else {
+                            // Try to load session by ID or path
+                            match crate::replay::load_session(&trimmed) {
+                                Ok(session) => {
+                                    eprintln!("\n📋 Session: {}\n", session.display_title_or_name());
+                                    eprintln!("  ID:       {}", session.id);
+                                    eprintln!("  Created:  {}", session.created_at.format("%Y-%m-%d %H:%M:%S"));
+                                    eprintln!("  Messages: {}", session.messages.len());
+                                    eprintln!("  Model:    {}\n", session.model.as_deref().unwrap_or("(default)"));
+                                    eprintln!("  (To resume, use: carpai --resume {})\n", session.id);
+                                }
+                                Err(e) => eprintln!("\n❌ Cannot load session: {}\n", e),
+                            }
+                        }
+                    });
+                    if trimmed.is_empty() {
+                        SlashResult::Ok("Listing sessions...".into())
+                    } else {
+                        SlashResult::Ok(format!("Looking up session: {}", trimmed))
+                    }
+                }
+                Err(_) => SlashResult::Err("No async runtime available".into()),
             }
         }),
     )

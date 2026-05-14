@@ -877,6 +877,23 @@ impl Agent {
                         tool_elapsed.as_secs_f64()
                     ));
 
+                    // AI learning: record tool outcome for adaptive learning
+                    {
+                        let name = tc.name.clone();
+                        let success = result.is_ok();
+                        let dur = tool_elapsed;
+                        tokio::spawn(async move {
+                            crate::ai_enhanced::record_tool_outcome(
+                                &name,
+                                success,
+                                dur,
+                                0.1,
+                                0.5,
+                            )
+                            .await;
+                        });
+                    }
+
                     match result {
                         Ok(output) => {
                             let _ = event_tx.send(ServerEvent::ToolDone {

@@ -1,5 +1,4 @@
 use super::registry::SkillRegistry;
-use super::skill::SkillCategory;
 
 pub struct SkillCommand;
 

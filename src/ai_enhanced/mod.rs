@@ -5,14 +5,26 @@
 //! - Adaptive parameter tuning
 //! - Anomaly detection
 //! - Predictive analytics
+//!
+//! # Global Instance
+//!
+//! The system exposes a global [`AI_ENGINE`] singleton via `std::sync::LazyLock`.
+//! All agent and build subsystems can call into it without acquiring a reference.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
+
+// ════════════════════════════════════════════════════════════════════
+// Global instance (thread-safe singleton)
+// ════════════════════════════════════════════════════════════════════
+
+/// Singleton AI engine – can be called from agent, build, or CLI subsystems.
+pub static AI_ENGINE: LazyLock<AiEngine> = LazyLock::new(AiEngine::new);
 
 /// Skill recommendation based on context analysis
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -556,4 +568,69 @@ impl AiEngine {
 
         insights
     }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Convenience helpers (delegates to AI_ENGINE singleton)
+// ════════════════════════════════════════════════════════════════════
+
+/// Record a tool execution outcome for adaptive learning.
+/// This is the primary integration point for the agent system.
+pub async fn record_tool_outcome(
+    tool_name: &str,
+    success: bool,
+    duration: Duration,
+    error_rate: f64,
+    task_complexity: f64,
+) {
+    let ctx = ContextFeatures {
+        task_complexity,
+        error_rate,
+        previous_successes: if success { 1 } else { 0 },
+        previous_failures: if success { 0 } else { 1 },
+        ..Default::default()
+    };
+
+    AI_ENGINE
+        .learn_from_outcome(tool_name, &ctx, success, duration, if success { 1.0 } else { 0.0 })
+        .await;
+
+    // Periodically adapt parameters
+    if instant_now() % 10 == 0 {
+        // Every ~10 calls, adapt
+        let recent_results = vec![(success, duration)];
+        AI_ENGINE.adapt_params(&recent_results).await;
+    }
+}
+
+/// Record a successful build outcome for learning.
+pub async fn record_build_outcome(
+    project_type: &str,
+    success: bool,
+    duration: Duration,
+    error_count: usize,
+    warning_count: usize,
+) {
+    let tool_name = format!("build:{}", project_type);
+    let error_rate = if error_count > 0 {
+        (error_count as f64).min(1.0)
+    } else {
+        (warning_count as f64 * 0.1).min(0.5)
+    };
+    let complexity = if error_count > 5 { 0.9 } else if error_count > 2 { 0.7 } else { 0.4 };
+
+    record_tool_outcome(&tool_name, success, duration, error_rate, complexity).await;
+}
+
+/// Get recent insights about system behavior.
+pub async fn get_system_insights() -> Vec<String> {
+    AI_ENGINE.get_insights().await
+}
+
+/// Simple deterministic pseudo-now for periodic triggers.
+fn instant_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }

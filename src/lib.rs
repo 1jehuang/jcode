@@ -133,6 +133,7 @@ pub mod plan_verifier;
 pub mod streaming_diff_preview;
 pub mod workflow;
 pub mod codereview;
+pub mod ai_enhanced;
 pub mod git;
 pub mod task_planner;
 
