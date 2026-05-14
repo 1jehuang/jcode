@@ -96,7 +96,6 @@ fn resume_invocation_args_includes_socket_when_present() {
     assert_eq!(
         args,
         vec![
-            "--fresh-spawn".to_string(),
             "--resume".to_string(),
             "ses_123".to_string(),
             "--socket".to_string(),
@@ -111,7 +110,6 @@ fn resume_invocation_args_omits_blank_socket() {
     assert_eq!(
         args,
         vec![
-            "--fresh-spawn".to_string(),
             "--resume".to_string(),
             "ses_123".to_string()
         ]
@@ -135,7 +133,6 @@ fn build_resume_command_uses_imported_jcode_session_for_claude_code() {
     assert_eq!(
         args,
         vec![
-            "--fresh-spawn".to_string(),
             "--resume".to_string(),
             crate::import::imported_claude_code_session_id("claude-session-123")
         ]
@@ -161,7 +158,6 @@ fn build_resume_command_uses_imported_jcode_session_for_codex() {
     assert_eq!(
         args,
         vec![
-            "--fresh-spawn".to_string(),
             "--resume".to_string(),
             crate::import::imported_codex_session_id("codex-session-123")
         ]

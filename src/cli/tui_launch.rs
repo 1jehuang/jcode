@@ -455,7 +455,10 @@ pub fn spawn_resume_in_new_terminal_with_provider(
     provider_key: Option<&str>,
 ) -> Result<bool> {
     let title = resumed_window_title(session_id);
-    let mut args = vec!["--fresh-spawn".to_string()];
+    // Fresh-spawn is communicated via JCODE_FRESH_SPAWN by TerminalCommand.
+    // Do not pass --fresh-spawn as a CLI arg: spawned commands may resolve to
+    // release/test binaries that do not accept hidden dev-only CLI flags.
+    let mut args = Vec::new();
     if let Some(provider_key) = provider_key.filter(|value| !value.trim().is_empty()) {
         args.push("--provider".to_string());
         args.push(provider_key.to_string());
@@ -484,7 +487,10 @@ pub fn spawn_selfdev_in_new_terminal_with_provider(
     provider_key: Option<&str>,
 ) -> Result<bool> {
     let selfdev_title = format!("{} [self-dev]", resumed_window_title(session_id));
-    let mut args = vec!["--fresh-spawn".to_string()];
+    // Fresh-spawn is communicated via JCODE_FRESH_SPAWN by TerminalCommand.
+    // Do not pass --fresh-spawn as a CLI arg: spawned commands may resolve to
+    // release/test binaries that do not accept hidden dev-only CLI flags.
+    let mut args = Vec::new();
     if let Some(provider_key) = provider_key.filter(|value| !value.trim().is_empty()) {
         args.push("--provider".to_string());
         args.push(provider_key.to_string());

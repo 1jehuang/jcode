@@ -374,7 +374,6 @@ pub(super) fn mask_email(email: &str) -> String {
 /// Returns Ok(true) if a terminal was successfully launched, Ok(false) if no terminal found.
 fn resume_invocation_args(session_id: &str, socket: Option<&str>) -> Vec<String> {
     let mut args = vec![
-        "--fresh-spawn".to_string(),
         "--resume".to_string(),
         session_id.to_string(),
     ];
