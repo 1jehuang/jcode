@@ -81,6 +81,7 @@ pub mod todo;
 pub mod tool;
 pub mod transport;
 pub mod tui;
+pub mod undo_manager;
 pub mod update;
 pub mod usage;
 pub mod util;
@@ -140,10 +141,20 @@ pub mod plugins;
 pub mod ssh;
 pub mod task_manager;
 pub mod task_cli;
-pub mod slash_commands;
+pub mod slash_command;
 pub mod plan_mode;
 pub mod session_export;
 pub mod version_manager;
+pub mod undo_redo;
+
+// Mid-term enhancements
+pub mod dashboard;
+pub mod marketplace;
+pub mod i18n;
+
+// Long-term vision
+pub mod distributed;
+pub mod ai_optimization;
 
 use anyhow::Result;
 use std::sync::Mutex;

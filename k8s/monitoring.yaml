@@ -1,0 +1,132 @@
+# Prometheus Configuration for CarpAI
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: carpai-system
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    scrape_configs:
+      - job_name: 'carpai'
+        static_configs:
+          - targets: ['carpai-service:8080']
+        metrics_path: /metrics
+        scrape_interval: 5s
+
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+
+    rule_files:
+      - /etc/prometheus/rules.yml
+
+  rules.yml: |
+    groups:
+      - name: carpai_alerts
+        rules:
+          - alert: HighErrorRate
+            expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.1
+            for: 5m
+            labels:
+              severity: critical
+            annotations:
+              summary: "High error rate detected"
+              description: "Error rate is {{ $value }}"
+
+          - alert: HighLatency
+            expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 1
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High latency detected"
+              description: "P95 latency is {{ $value }}s"
+
+          - alert: LowSuccessRate
+            expr: rate(carpai_auto_approve_total[1h]) / rate(carpai_decision_total[1h]) < 0.7
+            for: 30m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Low auto-approval success rate"
+              description: "Auto-approval success rate is {{ $value }}"
+---
+# Grafana Dashboard Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: carpai-system
+data:
+  carpai-dashboard.json: |
+    {
+      "dashboard": {
+        "title": "CarpAI Overview",
+        "panels": [
+          {
+            "title": "Request Rate",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(http_requests_total[5m])",
+                "legendFormat": "{{ method }} {{ handler }}"
+              }
+            ]
+          },
+          {
+            "title": "Response Time (P95)",
+            "type": "gauge",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))",
+                "legendFormat": "P95 Latency"
+              }
+            ]
+          },
+          {
+            "title": "Active Tasks",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "carpai_tasks_active",
+                "legendFormat": "Active Tasks"
+              }
+            ]
+          },
+          {
+            "title": "Plugin Status",
+            "type": "table",
+            "targets": [
+              {
+                "expr": "carpai_plugins_enabled",
+                "legendFormat": "Enabled Plugins"
+              }
+            ]
+          }
+        ],
+        "refresh": "5s",
+        "schemaVersion": 30,
+        "version": 1
+      }
+    }
+---
+# Prometheus ServiceMonitor (if using Prometheus Operator)
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: carpai-monitor
+  namespace: carpai-system
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: carpai
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

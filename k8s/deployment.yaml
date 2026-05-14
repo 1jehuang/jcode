@@ -1,0 +1,252 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: carpai-system
+  labels:
+    app.kubernetes.io/name: carpai
+    app.kubernetes.io/component: namespace
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: carpai-config
+  namespace: carpai-system
+  labels:
+    app.kubernetes.io/name: carpai
+    app.kubernetes.io/component: config
+data:
+  APP_ENV: "production"
+  LOG_LEVEL: "info"
+  # Dashboard configuration
+  DASHBOARD_ENABLED: "true"
+  DASHBOARD_PORT: "8080"
+  DASHBOARD_REFRESH_INTERVAL: "5"
+  # Auto mode settings
+  AUTO_MODE_DEFAULT: "false"
+  AUTO_APPROVAL_THRESHOLD: "0.85"
+  MAX_AUTO_ACTIONS: "50"
+  # Plugin system
+  PLUGINS_DIR: "/data/plugins"
+  # Session management
+  SESSION_DIR: "/data/sessions"
+  VERSION_DIR: "/data/versions"
+  # Distributed mode (optional)
+  CLUSTER_MODE: "single"
+  NODE_ID: "auto"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: carpai
+  namespace: carpai-system
+  labels:
+    app.kubernetes.io/name: carpai
+    app.kubernetes.io/component: server
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: carpai
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: carpai
+        app.kubernetes.io/component: server
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: carpai
+          image: carpai:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: carpai-config
+          env:
+            - name: RUST_LOG
+              value: "carpai=info,actix_web=info"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: carpai-secrets
+                  key: database-url
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: carpai-secrets
+                  key: api-key
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 1
+          volumeMounts:
+            - name: data-volume
+              mountPath: /data
+            - name: plugins-volume
+              mountPath: /data/plugins
+            - name: sessions-volume
+              mountPath: /data/sessions
+      volumes:
+        - name: data-volume
+          emptyDir: {}
+        - name: plugins-volume
+          persistentVolumeClaim:
+            claimName: plugins-pvc
+        - name: sessions-volume
+          persistentVolumeClaim:
+            claimName: sessions-pvc
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/name
+                      operator: In
+                      values:
+                        - carpai
+                topologyKey: kubernetes.io/hostname
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: carpai-service
+  namespace: carpai-system
+  labels:
+    app.kubernetes.io/name: carpai
+    app.kubernetes.io/component: service
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: carpai
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: carpai-ingress
+  namespace: carpai-system
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - carpai.example.com
+      secretName: carpai-tls
+  rules:
+    - host: carpai.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: carpai-service
+                port:
+                  number: 80
+          - path: /dashboard
+            pathType: Prefix
+            backend:
+              service:
+                name: carpai-service
+                port:
+                  number: 80
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: carpai-service
+                port:
+                  number: 80
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: carpai-hpa
+  namespace: carpai-system
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: carpai
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: plugins-pvc
+  namespace: carpai-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: standard
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sessions-pvc
+  namespace: carpai-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: standard
