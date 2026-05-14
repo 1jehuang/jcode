@@ -750,7 +750,16 @@ pub(crate) async fn spawn_server(
     let client_requested_selfdev = selfdev::client_selfdev_requested();
     let exe = build::shared_server_update_candidate(client_requested_selfdev)
         .map(|(path, _)| path)
-        .or_else(|| std::env::current_exe().ok())
+        .or_else(|| {
+            // Fall back to current_exe(), but skip cargo test binaries
+            // (they have a test harness entry point, not jcode's main).
+            let exe = std::env::current_exe().ok()?;
+            if exe.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()) == Some("deps") {
+                None
+            } else {
+                Some(exe)
+            }
+        })
         .ok_or_else(|| anyhow::anyhow!("Could not determine executable path for server spawn"))?;
     let mut cmd = ProcessCommand::new(&exe);
     cmd.env_remove(selfdev::CLIENT_SELFDEV_ENV);

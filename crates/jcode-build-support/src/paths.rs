@@ -423,9 +423,11 @@ pub fn shared_server_update_candidate(
         return Some(stable);
     }
 
-    std::env::current_exe().ok().map(|exe| (exe, "current"))
+    std::env::current_exe()
+        .ok()
+        .filter(|exe| !is_test_binary_path(exe))
+        .map(|exe| (exe, "current"))
 }
-
 /// Resolve the best binary to use for `/reload`.
 ///
 /// This mostly follows `client_update_candidate`, but if a freshly built repo
