@@ -118,6 +118,7 @@ impl std::fmt::Display for AnomalyType {
 /// Historical data point for trend analysis
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DataPoint {
+    #[serde(skip)]
     timestamp: Instant,
     value: f64,
     metadata: HashMap<String, String>,
@@ -262,7 +263,7 @@ impl AiEngine {
         context: &ContextFeatures,
         skill_name: &str,
     ) -> String {
-        let reasons = Vec::new();
+        let mut reasons = Vec::new();
 
         if context.error_rate > 0.2 {
             reasons.push("high error rate detected");
@@ -322,12 +323,12 @@ impl AiEngine {
             // Adjust parameters based on success rate
             if success_rate < 0.5 {
                 // Poor success rate - be more conservative
-                new_params.quality_threshold.0 = (params.quality_threshold.0 * 0.9).max(0.4);
-                new_params.max_iterations.0 = (params.max_iterations.0 * 1.2).min(30);
+                new_params.quality_threshold.0 = (params.quality_threshold.0 as f64 * 0.9).max(0.4);
+                new_params.max_iterations.0 = (params.max_iterations.0 as f64 * 1.2).min(30.0) as u32;
             } else if success_rate > 0.9 && avg_duration < Duration::from_secs(60) {
                 // High success and fast - can be more aggressive
-                new_params.quality_threshold.1 = (params.quality_threshold.1 * 1.05).min(0.99);
-                new_params.timeout_secs.1 = (params.timeout_secs.1 * 0.9).max(30);
+                new_params.quality_threshold.1 = (params.quality_threshold.1 as f64 * 1.05).min(0.99);
+                new_params.timeout_secs.1 = (params.timeout_secs.1 as f64 * 0.9).max(30.0) as u64;
             }
 
             // Apply learning rate
@@ -397,7 +398,7 @@ impl AiEngine {
                     ((current_value - baseline_value) / baseline_value.abs().max(1.0) * 100.0),
                     baseline_value
                 ),
-                Some("Consider optimizing the operation or reducing load"),
+                Some("Consider optimizing the operation or reducing load".to_string()),
             ),
         ];
 
@@ -534,7 +535,7 @@ impl AiEngine {
                     .take(10)
                     .map(|p| p.value)
                     .sum::<f64>()
-                    / 10.0.min(history.len().saturating_sub(10) as f64);
+                    / 10.0_f64.min(history.len().saturating_sub(10) as f64);
 
                 if older_avg > 0.0 {
                     let change_percent =

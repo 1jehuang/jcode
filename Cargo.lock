@@ -1382,6 +1382,7 @@ dependencies = [
  "jcode-tui-workspace",
  "jcode-update-core",
  "jcode-usage-types",
+ "lazy_static",
  "libc",
  "lsp-types",
  "once_cell",

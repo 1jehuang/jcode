@@ -2098,14 +2098,14 @@ pub async fn run_tasks_command(cmd: super::args::TasksCommand) -> Result<()> {
     use crate::task_planner::TaskPlanner;
 
     match cmd {
-        super::args::TasksCommand::List { status } => {
+        super::args::TasksCommand::List { status, .. } => {
             eprintln!("\n📋 Tasks");
             if let Some(ref s) = status {
                 eprintln!("  Filter: status = {}\n", s);
             }
             eprintln!("  (No tasks created. Use `carpai tasks create <description>` to add one.)");
         }
-        super::args::TasksCommand::Create { description } => {
+        super::args::TasksCommand::Create { description, .. } => {
             let mut planner = TaskPlanner::new();
             let plan_id = planner.create_plan("default", "Ad-hoc task", &description);
             let task = crate::task_planner::EnhancedTask::new(&description);
@@ -2133,7 +2133,7 @@ pub async fn run_tasks_command(cmd: super::args::TasksCommand) -> Result<()> {
                 None => eprintln!("Plan '{}' not found", id),
             }
         }
-        super::args::TasksCommand::Status { id } => {
+        super::args::TasksCommand::Get { id, .. } => {
             let planner = TaskPlanner::new();
             let plan_id = planner.find_plan_for_task(&id);
             if let Some(pid) = plan_id {

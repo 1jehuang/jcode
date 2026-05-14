@@ -215,6 +215,7 @@ regex = "1"
 urlencoding = "2"        # URL encoding for web search
 tracing = "0.1"          # Structured logging
 once_cell = "1"          # Lazy static initialization
+lazy_static = "1.5"      # Static lazy initialization
 lsp-types = { workspace = true }
 uuid = { version = "1", features = ["v4", "v5"] }
 proctitle = "0.1"

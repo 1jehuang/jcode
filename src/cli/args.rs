@@ -930,19 +930,35 @@ pub(crate) enum TasksCommand {
         /// Filter by status
         #[arg(short, long)]
         status: Option<String>,
+
+        /// Only show pending tasks
+        #[arg(long)]
+        pending: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Create a new task
     Create {
         /// Task description
         description: String,
+
+        /// Priority (low, medium, high)
+        #[arg(long, default_value = "medium")]
+        priority: String,
+    },
+    /// Get task details by ID
+    Get {
+        /// Task ID
+        id: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Plan task execution
     Plan {
-        /// Task ID
-        id: String,
-    },
-    /// Show task status
-    Status {
         /// Task ID
         id: String,
     },
