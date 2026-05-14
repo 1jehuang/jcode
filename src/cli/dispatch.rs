@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use super::args::{
     AmbientCommand, Args, AuthCommand, Command, MemoryCommand, ModelCommand,
-    ProviderCommand, RestartCommand, SessionCommand, TranscriptModeArg,
+    ProviderCommand, RestartCommand, SessionCommand, SessionSubCommand, TranscriptModeArg,
 };
 use crate::{
     agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
@@ -367,6 +367,29 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         }
         Some(Command::Config(subcmd)) => {
             commands::run_config_command(subcmd)?;
+        }
+        Some(Command::Commit {
+            message,
+            files,
+            no_ai,
+        }) => {
+            commands::run_commit_command(message.as_deref(), &files, no_ai).await?;
+        }
+        Some(Command::SessionMgmt(subcmd)) => {
+            commands::run_session_command(subcmd).await?;
+        }
+        Some(Command::Rethink { mode, depth }) => {
+            commands::run_rethink_command(mode.as_deref(), depth).await?;
+        }
+        Some(Command::Compact {
+            mode,
+            target,
+            json,
+        }) => {
+            commands::run_compact_command(mode.as_deref(), target, json).await?;
+        }
+        Some(Command::Fork { name, checkpoint }) => {
+            commands::run_fork_command(name.as_deref(), checkpoint.as_deref()).await?;
         }
         None => {
             eprintln!("CarpAI - AI-powered coding assistant\n");

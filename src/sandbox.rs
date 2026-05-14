@@ -70,7 +70,9 @@ pub struct SandboxResult {
     pub temp_dir: Option<PathBuf>,
 }
 
-const MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024; // 10MB
+const MAX_OUTPUT_BYTES: usize = 50 * 1024 * 1024; // 50MB raw capture limit
+const SMART_HEAD_BYTES: usize = 200 * 1024; // 200KB head
+const SMART_TAIL_BYTES: usize = 100 * 1024; // 100KB tail
 
 #[derive(Debug, Clone)]
 pub struct Sandbox {
@@ -155,8 +157,8 @@ impl Sandbox {
         let _ = self.cleanup_temp_dir(&temp_dir);
 
         let elapsed = start.elapsed().as_millis() as u64;
-        let stdout = String::from_utf8_lossy(&output_buf).to_string();
-        let stderr = String::from_utf8_lossy(&stderr_buf).to_string();
+        let stdout = String::from_utf8_lossy(&Self::smart_truncate(&output_buf)).to_string();
+        let stderr = String::from_utf8_lossy(&Self::smart_truncate(&stderr_buf)).to_string();
 
         debug!(
             "Sandbox complete: exit={:?} elapsed={}ms stdout={} stderr={}",
@@ -315,6 +317,31 @@ impl Sandbox {
             buf.extend_from_slice(&chunk[..n]);
         }
         Ok(())
+    }
+
+    /// Smart layered truncation: keep head 200KB + tail 100KB, replace middle with marker.
+    /// If the data is smaller than the threshold, returns it as-is.
+    fn smart_truncate(data: &[u8]) -> Vec<u8> {
+        let threshold = SMART_HEAD_BYTES + SMART_TAIL_BYTES + 64; // +64 for marker overhead
+        if data.len() <= threshold {
+            return data.to_vec();
+        }
+
+        let head = &data[..SMART_HEAD_BYTES];
+        let tail = &data[data.len() - SMART_TAIL_BYTES..];
+        let truncated_bytes = data.len() - SMART_HEAD_BYTES - SMART_TAIL_BYTES;
+
+        let marker = format!(
+            "\n[... truncated {} bytes ({} KB) ...]\n",
+            truncated_bytes,
+            truncated_bytes / 1024
+        );
+
+        let mut result = Vec::with_capacity(SMART_HEAD_BYTES + marker.len() + SMART_TAIL_BYTES);
+        result.extend_from_slice(head);
+        result.extend_from_slice(marker.as_bytes());
+        result.extend_from_slice(tail);
+        result
     }
 
     #[cfg(unix)]

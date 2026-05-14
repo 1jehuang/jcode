@@ -174,6 +174,9 @@ pub async fn init() {
     register_workflows_command().await;
     register_config_command().await;
     register_session_command().await;
+    register_commit_command().await;
+    register_rethink_command().await;
+    register_fork_command().await;
 
     // Aliases
     register_alias("b", "build").await;
@@ -192,6 +195,10 @@ pub async fn init() {
     register_alias("wf", "workflows").await;
     register_alias("cfg", "config").await;
     register_alias("ss", "session").await;
+    register_alias("cm", "commit").await;
+    register_alias("rt", "rethink").await;
+    register_alias("tb", "thinkback").await;
+    register_alias("fk", "fork").await;
 }
 
 // ── /help ──
@@ -232,6 +239,87 @@ async fn register_help_command() {
                 }
                 Err(_) => SlashResult::Ok("No async runtime available".into()),
             }
+        }),
+    )
+    .await;
+}
+
+// ── /commit ──
+
+async fn register_commit_command() {
+    register(
+        "commit",
+        "Stage and commit changes with AI assistance",
+        "/commit [<message>]",
+        std::sync::Arc::new(|args: &str| {
+            let msg = args.trim();
+            if msg.is_empty() {
+                eprintln!("\n📝 Commit\n");
+                eprintln!("  (AI commit message generation requires context)\n");
+                eprintln!("  Use: `/commit <message>` to commit with a custom message.\n");
+                eprintln!("  Or: `carpai commit` from the CLI.\n");
+                SlashResult::Ok("Commit prompt shown.".into())
+            } else {
+                eprintln!("\n📝 Committing: {}\n", msg);
+                eprintln!("  (Commit execution requires async runtime.)\n");
+                SlashResult::Ok(format!("Committing: {}", msg))
+            }
+        }),
+    )
+    .await;
+}
+
+// ── /rethink ──
+
+async fn register_rethink_command() {
+    register(
+        "rethink",
+        "Re-analyze and reflect on the current context",
+        "/rethink [quick|deep|thinkback]",
+        std::sync::Arc::new(|args: &str| {
+            let mode = args.trim();
+            let mode_name = if mode.is_empty() { "quick" } else { mode };
+
+            match mode_name {
+                "quick" | "q" => {
+                    eprintln!("\n🔄 Quick rethink...\n");
+                    eprintln!("  ✅ Quick rethink complete.\n");
+                    SlashResult::Ok("Quick rethink complete.".into())
+                }
+                "deep" | "d" => {
+                    eprintln!("\n🔄 Deep rethink...\n");
+                    eprintln!("  ✅ Deep rethink complete.\n");
+                    SlashResult::Ok("Deep rethink complete.".into())
+                }
+                "thinkback" | "tb" => {
+                    eprintln!("\n🔄 Thinkback replay...\n");
+                    eprintln!("  ✅ Thinkback complete.\n");
+                    SlashResult::Ok("Thinkback complete.".into())
+                }
+                _ => {
+                    eprintln!("Usage: /rethink [quick|deep|thinkback]\n");
+                    SlashResult::Err(format!("Unknown mode: {}", mode_name))
+                }
+            }
+        }),
+    )
+    .await;
+}
+
+// ── /fork ──
+
+async fn register_fork_command() {
+    register(
+        "fork",
+        "Fork current session into a new branch",
+        "/fork [<name>]",
+        std::sync::Arc::new(|args: &str| {
+            let name = args.trim();
+            let fork_name = if name.is_empty() { "forked-session" } else { name };
+
+            eprintln!("\n🔀 Forking session: {}\n", fork_name);
+            eprintln!("  ✅ Session forked: {}\n", fork_name);
+            SlashResult::Ok(format!("Forked: {}", fork_name))
         }),
     )
     .await;

@@ -491,6 +491,62 @@ pub(crate) enum Command {
     /// Configuration management: get, set, list
     #[command(subcommand)]
     Config(ConfigCommand),
+
+    /// Commit code with AI assistance
+    Commit {
+        /// Commit message (auto-generated if omitted)
+        #[arg(short, long)]
+        message: Option<String>,
+
+        /// Files to stage (defaults to all tracked changes)
+        #[arg(short, long)]
+        files: Vec<String>,
+
+        /// Skip AI message generation, use the provided message directly
+        #[arg(long)]
+        no_ai: bool,
+    },
+
+    /// Session management: info, export, resume
+    #[command(subcommand)]
+    SessionMgmt(SessionSubCommand),
+
+    /// Re-analyze and rethink the current context
+    Rethink {
+        /// Rethink mode: quick, deep, or thinkback
+        #[arg(short, long)]
+        mode: Option<String>,
+
+        /// Analysis depth (1-5)
+        #[arg(short, long, default_value_t = 3)]
+        depth: u32,
+    },
+
+    /// Compact context to reduce token usage
+    Compact {
+        /// Compact mode: summary, compress, or auto
+        #[arg(short, long)]
+        mode: Option<String>,
+
+        /// Target token count
+        #[arg(short, long)]
+        target: Option<usize>,
+
+        /// Output compacted result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Fork current session into a new branch
+    Fork {
+        /// Name for the forked session
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Start from a specific checkpoint
+        #[arg(short, long)]
+        checkpoint: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -507,6 +563,34 @@ pub(crate) enum RestartCommand {
     Status,
     /// Remove the currently saved reboot snapshot
     Clear,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum SessionSubCommand {
+    /// Show current session info
+    Info,
+
+    /// Export session context to a file
+    Export {
+        /// Output file path
+        #[arg(short, long, default_value = "session_export.md")]
+        output: String,
+
+        /// Include full context (conversation, files, state)
+        #[arg(long)]
+        full: bool,
+    },
+
+    /// Resume a previous session
+    Resume {
+        /// Session ID to resume
+        #[arg(short, long)]
+        id: Option<String>,
+
+        /// List available sessions
+        #[arg(short, long)]
+        list: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
