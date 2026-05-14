@@ -19,7 +19,9 @@ mod utils;
 use self::streaming::{
     send_stream_keepalive_broadcast, send_stream_keepalive_mpsc, stream_keepalive_ticker,
 };
-use self::tools::{print_tool_summary, tool_output_to_content_blocks};
+use self::tools::{
+    maybe_elide_and_cache_tool_output, print_tool_summary, tool_output_to_content_blocks,
+};
 use self::utils::trace_enabled;
 use crate::build;
 use crate::bus::{Bus, BusEvent, SubagentStatus, ToolEvent, ToolStatus};

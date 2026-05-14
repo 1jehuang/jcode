@@ -134,6 +134,43 @@ fn tool_output_to_content_blocks_preserves_labeled_images() {
     }
 }
 
+#[test]
+fn tool_output_to_content_blocks_elides_and_caches_large_text_output() {
+    let full_output = (0..650)
+        .map(|i| format!("tok{i}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let blocks = tool_output_to_content_blocks(
+        "call_large/output".to_string(),
+        ToolOutput::new(full_output.clone()),
+    );
+    assert_eq!(blocks.len(), 1);
+
+    let content = match &blocks[0] {
+        ContentBlock::ToolResult { content, .. } => content,
+        other => panic!("expected tool result, got {other:?}"),
+    };
+
+    assert!(content.contains("tok0"));
+    assert!(content.contains("tok249"));
+    assert!(content.contains("tok400"));
+    assert!(content.contains("tok649"));
+    assert!(content.contains("elided 150 middle tokens"));
+    assert!(content.contains("jcode-tool-output-cache"));
+    assert!(!content.contains("tok250 tok251 tok252"));
+
+    let marker = "full output cached at ";
+    let path_start = content.find(marker).expect("cache marker") + marker.len();
+    let path_end = content[path_start..]
+        .find(" ...]")
+        .expect("cache marker end")
+        + path_start;
+    let cached_path = &content[path_start..path_end];
+    let cached = std::fs::read_to_string(cached_path).expect("read cached full tool output");
+    assert_eq!(cached, full_output);
+}
+
 #[tokio::test]
 async fn run_turn_streaming_mpsc_emits_keepalive_while_provider_is_quiet() {
     let _guard = crate::storage::lock_test_env();

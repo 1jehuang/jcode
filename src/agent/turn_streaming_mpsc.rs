@@ -888,11 +888,14 @@ impl Agent {
                     ));
 
                     match result {
-                        Ok(output) => {
+                        Ok(mut output) => {
+                            let output_text =
+                                maybe_elide_and_cache_tool_output(&tc.id, output.output.clone());
+                            output.output = output_text.clone();
                             let _ = event_tx.send(ServerEvent::ToolDone {
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),
-                                output: output.output.clone(),
+                                output: output_text,
                                 error: None,
                             });
 
