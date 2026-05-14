@@ -24,3 +24,6 @@ pub mod management_commands;
 
 // Phase 2 - P1高频命令
 pub mod p1_commands;
+
+// Phase 3 - P2专业特性
+pub mod p2_commands;
