@@ -39,6 +39,9 @@ mod swarm;
 mod swarm_channels;
 mod swarm_mutation_state;
 mod swarm_persistence;
+mod lsp_event_bridge;
+mod conflict_detector;
+mod collab;
 mod util;
 
 pub(super) use self::await_members_state::AwaitMembersRuntime;

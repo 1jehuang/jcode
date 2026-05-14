@@ -26,6 +26,8 @@ mod activity;
 mod cache;
 #[path = "memory/pending.rs"]
 mod pending;
+#[path = "memory/session_intelligence.rs"]
+mod session_intelligence;
 #[path = "memory_prompt.rs"]
 mod prompt_support;
 

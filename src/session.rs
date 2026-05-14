@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::path::Path;
 mod storage_paths;
 mod replay;
+mod sharing;
 use active_pids::{active_pids_dir, register_active_pid, unregister_active_pid};
 pub use active_pids::{active_session_ids, find_active_session_id_by_pid};
 mod crash;
