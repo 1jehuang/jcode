@@ -4529,19 +4529,18 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
                 });
 
                 // Send breakpoint to DAP adapter
-                        let bp_args = serde_json::json!({
-                        "source": {
-                            "name": std::path::Path::new(&file).file_name().map(|f| f.to_string_lossy()).unwrap_or(std::borrow::Cow::Borrowed(&file)),
-                            "path": std::path::Path::new(&file).canonicalize().ok().map(|p| p.to_string_lossy().to_string()).unwrap_or(file.clone()),
-                        },
-                        "breakpoints": [{
-                            "line": line,
-                            "condition": condition.as_deref().unwrap_or(""),
-                        }],
-                        "lines": [line],
-                    });
-                    let _ = dap_request_internal(session, "setBreakpoints", Some(bp_args)).await;
-                }
+                let bp_args = serde_json::json!({
+                    "source": {
+                        "name": std::path::Path::new(&file).file_name().map(|f| f.to_string_lossy()).unwrap_or(std::borrow::Cow::Borrowed(&file)),
+                        "path": std::path::Path::new(&file).canonicalize().ok().map(|p| p.to_string_lossy().to_string()).unwrap_or(file.clone()),
+                    },
+                    "breakpoints": [{
+                        "line": line,
+                        "condition": condition.as_deref().unwrap_or(""),
+                    }],
+                    "lines": [line],
+                });
+                let _ = dap_request_internal(session, "setBreakpoints", Some(bp_args)).await;
 
                 eprintln!("\n🔴 Breakpoint {} set: {}:{}\n", bp_id, file, line);
                 if let Some(ref cond) = condition {

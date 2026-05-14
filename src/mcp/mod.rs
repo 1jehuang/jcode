@@ -37,6 +37,7 @@
 
 pub mod bridge;
 pub mod client;
+pub mod dynamic_registry;
 pub mod enhanced_client;
 pub mod manager;
 pub mod pool;
@@ -48,6 +49,10 @@ pub use bridge::{
     BridgeCapabilities, BridgeStatus, McpBridge, McpBridgeConfig,
 };
 pub use client::{McpClient, McpHandle};
+pub use dynamic_registry::{
+    DynamicTool, DynamicToolRegistry, DynamicRegistryConfig, RegisterResult,
+    UnregisterResult, ToolCategory, ToolChangeEvent, RegistryStats,
+};
 pub use enhanced_client::{
     ConnectionState, EnhancedMcpClient, EnhancedMcpConfig, EnhancedMcpHandle,
     HealthStatus, McpError, ProgressStage, ToolCallProgress, TransportType,

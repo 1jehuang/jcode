@@ -13,6 +13,7 @@
 //! - Graceful shutdown notification handling
 
 use crate::tool::{Registry, ToolContext, ToolExecutionMode};
+use crate::mcp::dynamic_registry::{DynamicToolRegistry, DynamicTool, RegisterResult, UnregisterResult};
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::io::{BufRead, Read, Write};
@@ -54,6 +55,7 @@ impl Default for McpServerConfig {
 /// Supports RFC-compliant Content-Length framing.
 pub struct McpServer {
     registry: Arc<Registry>,
+    dynamic_registry: Arc<DynamicToolRegistry>,
     initialized: bool,
     config: McpServerConfig,
 }
@@ -62,6 +64,7 @@ impl McpServer {
     pub fn new(registry: Registry) -> Self {
         Self {
             registry: Arc::new(registry),
+            dynamic_registry: Arc::new(DynamicToolRegistry::with_defaults()),
             initialized: false,
             config: McpServerConfig::default(),
         }
@@ -70,6 +73,11 @@ impl McpServer {
     pub fn with_config(mut self, config: McpServerConfig) -> Self {
         self.config = config;
         self
+    }
+
+    /// Get access to the dynamic tool registry (for programmatic registration)
+    pub fn dynamic_registry(&self) -> Arc<DynamicToolRegistry> {
+        Arc::clone(&self.dynamic_registry)
     }
 
     /// Start the MCP server loop — reads JSON-RPC from stdin, dispatches, writes to stdout.
@@ -133,6 +141,12 @@ impl McpServer {
             "ping" => json_result(id, &json!({})),
             "tools/list" => self.handle_tools_list(id).await,
             "tools/call" => self.handle_tools_call(id, params).await,
+            // Dynamic tool registration methods
+            "tools/register" => self.handle_tool_register(id, params).await,
+            "tools/unregister" => self.handle_tool_unregister(id, params).await,
+            "tools/search" => self.handle_tool_search(id, params).await,
+            "tools/stats" => self.handle_tool_stats(id).await,
+            // Standard MCP methods
             "resources/list" => self.handle_resources_list(id),
             "resources/read" => self.handle_resource_read(id, params),
             "prompts/list" => self.handle_prompts_list(id),
@@ -224,6 +238,75 @@ impl McpServer {
                 "isError": true
             })),
         }
+    }
+
+    // ─── Dynamic Tool Registration Methods ─────────────
+
+    /// Handle tools/register - Register a new dynamic tool
+    async fn handle_tool_register(&self, id: Option<&Value>, params: Option<&Value>) -> String {
+        let tool_def = match params.and_then(|p| p.get("tool")) {
+            Some(t) => t,
+            None => return error_json(id, -32602, "Missing 'tool' parameter".to_string()),
+        };
+
+        let dynamic_tool = match serde_json::from_value::<DynamicTool>(tool_def.clone()) {
+            Ok(t) => t,
+            Err(e) => return error_json(id, -32602, format!("Invalid tool definition: {}", e)),
+        };
+
+        match self.dynamic_registry.register_tool(dynamic_tool).await {
+            Ok(result) => json_result(id, &json!({ "result": result })),
+            Err(e) => error_json(id, -32603, format!("Registration failed: {}", e)),
+        }
+    }
+
+    /// Handle tools/unregister - Unregister a dynamic tool
+    async fn handle_tool_unregister(&self, id: Option<&Value>, params: Option<&Value>) -> String {
+        let name = match params.and_then(|p| p.get("name")).and_then(|v| v.as_str()) {
+            Some(n) => n,
+            None => return error_json(id, -32602, "Missing 'name' parameter".to_string()),
+        };
+
+        match self.dynamic_registry.unregister_tool(name).await {
+            Ok(result) => json_result(id, &json!({ "result": result })),
+            Err(e) => error_json(id, -32603, format!("Unregistration failed: {}", e)),
+        }
+    }
+
+    /// Handle tools/search - Search tools by query
+    async fn handle_tool_search(&self, id: Option<&Value>, params: Option<&Value>) -> String {
+        let query = params
+            .and_then(|p| p.get("query"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if query.is_empty() {
+            return error_json(id, -32602, "Missing 'query' parameter".to_string());
+        }
+
+        let results = self.dynamic_registry.search_fuzzy(query).await;
+        
+        let tools: Vec<Value> = results.iter().map(|t| {
+            json!({
+                "name": t.name,
+                "description": t.description,
+                "category": format!("{}", t.category),
+                "version": t.version,
+                "tags": t.tags,
+                "enabled": t.enabled
+            })
+        }).collect();
+
+        json_result(id, &json!({ 
+            "tools": tools,
+            "count": tools.len()
+        }))
+    }
+
+    /// Handle tools/stats - Get registry statistics
+    async fn handle_tool_stats(&self, id: Option<&Value>) -> String {
+        let stats = self.dynamic_registry.get_stats().await;
+        json_result(id, &json!({ "stats": stats }))
     }
 
     fn handle_resources_list(&self, id: Option<&Value>) -> String {
