@@ -15,6 +15,7 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration as StdDuration;
 use tokio::process::Command;
 
 pub struct PrWatchTool;
@@ -32,6 +33,7 @@ enum PrWatchAction {
     Status,
     List,
     PollNow,
+    Monitor,
     Stop,
     Readiness,
     Handoff,
@@ -50,8 +52,15 @@ struct PrWatchInput {
     #[serde(default)]
     poll_interval_seconds: Option<u64>,
     #[serde(default)]
+    quiet_cycles_required: Option<u64>,
+    #[serde(default)]
+    max_runtime_seconds: Option<u64>,
+    #[serde(default)]
     target: Option<String>,
 }
+
+const DEFAULT_MONITOR_MAX_RUNTIME_SECONDS: u64 = 540;
+const MAX_MONITOR_MAX_RUNTIME_SECONDS: u64 = 900;
 
 #[async_trait]
 impl Tool for PrWatchTool {
@@ -71,7 +80,7 @@ impl Tool for PrWatchTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["start", "status", "list", "poll_now", "ack_baseline", "stop", "readiness", "handoff"],
+                    "enum": ["start", "status", "list", "poll_now", "monitor", "ack_baseline", "stop", "readiness", "handoff"],
                     "description": "Action. poll_now performs read-only gh CLI collection and updates local state; no mutations are performed."
                 },
                 "repo": {"type": "string", "description": "Repository in owner/name form."},
@@ -80,6 +89,8 @@ impl Tool for PrWatchTool {
                 "dry_run": {"type": "boolean", "description": "Preview changes without writing state."},
                 "schedule_next": {"type": "boolean", "description": "If true, schedule the next visible poll wakeup after start, poll_now, or ack_baseline."},
                 "poll_interval_seconds": {"type": "integer", "description": "Interval for the next scheduled poll. Defaults to state polling interval."},
+                "quiet_cycles_required": {"type": "integer", "description": "Quiet cycles required before the monitor stops as satisfied. Defaults to watch state or 3."},
+                "max_runtime_seconds": {"type": "integer", "description": "Maximum monitor runtime budget. Single-cycle monitor caps this to 900 and records the bounded value."},
                 "target": {"type": "string", "enum": ["resume", "spawn"], "description": "Schedule delivery target. Defaults to resuming the current session."}
             }
         })
@@ -96,6 +107,7 @@ impl Tool for PrWatchTool {
             PrWatchAction::Start => start_watch(&store, params, &ctx),
             PrWatchAction::List => list_watches(&store),
             PrWatchAction::PollNow => poll_now(&root, &store, params, &ctx).await,
+            PrWatchAction::Monitor => monitor_once(&root, &store, params, &ctx).await,
             PrWatchAction::AckBaseline => ack_baseline(&root, &store, params, &ctx).await,
             PrWatchAction::Status => status_like(&store, params),
             PrWatchAction::Readiness => readiness_report(&store, params),
@@ -111,6 +123,51 @@ fn watch_dir(root: &Path) -> PathBuf {
 
 fn state_path(store: &Path, watch_id: &str) -> PathBuf {
     store.join(format!("{watch_id}-state.json"))
+}
+
+fn lock_path(store: &Path, watch_id: &str) -> PathBuf {
+    store.join(format!("{watch_id}.lock"))
+}
+
+struct WatchLock {
+    path: PathBuf,
+}
+
+impl Drop for WatchLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn acquire_watch_lock(store: &Path, watch_id: &str) -> Result<Option<WatchLock>> {
+    fs::create_dir_all(store)?;
+    let path = lock_path(store, watch_id);
+    match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(mut file) => {
+            let lock = WatchLock { path: path.clone() };
+            writeln!(file, "pid={} at={}", std::process::id(), now_iso())?;
+            Ok(Some(lock))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("failed to create {}", path.display())),
+    }
+}
+
+fn watch_locked_output(store: &Path, state: &PrWatchState, action: &str) -> ToolOutput {
+    ToolOutput::new(format!(
+        "PR watch {action} already running or locked: {}\nRepo: {}\nPR: #{}\nLock: {}\nNo state was changed.",
+        state.watch_id,
+        state.pr.repo,
+        state.pr.number,
+        lock_path(store, &state.watch_id).display()
+    ))
+    .with_title(format!("{} locked", state.watch_id))
+    .with_metadata(json!({
+        "watch": state,
+        "watch_locked": true,
+        "action": action,
+        "written": false,
+    }))
 }
 
 fn write_state_atomic(path: &Path, state: &PrWatchState) -> Result<()> {
@@ -188,9 +245,101 @@ fn apply_schedule_fields(state: &mut PrWatchState, params: &PrWatchInput) {
     if let Some(seconds) = params.poll_interval_seconds {
         state.polling.poll_interval_seconds = seconds.max(60);
     }
+    if let Some(required) = params.quiet_cycles_required {
+        state.polling.required_quiet_cycles = required.max(1);
+    }
     if params.schedule_next {
         let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
         state.polling.next_poll_at = Some(wake_at.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+    }
+}
+
+fn monitor_max_runtime_seconds(params: &PrWatchInput) -> u64 {
+    params
+        .max_runtime_seconds
+        .unwrap_or(DEFAULT_MONITOR_MAX_RUNTIME_SECONDS)
+        .clamp(1, MAX_MONITOR_MAX_RUNTIME_SECONDS)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MonitorStatus {
+    QuietSatisfied,
+    PendingNextPoll,
+    ActionRequired,
+    ChecksPending,
+    ChecksFailed,
+    TransientFailure,
+    AlreadyRunning,
+    Stopped,
+}
+
+impl MonitorStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            MonitorStatus::QuietSatisfied => "quiet_satisfied",
+            MonitorStatus::PendingNextPoll => "pending_next_poll",
+            MonitorStatus::ActionRequired => "action_required",
+            MonitorStatus::ChecksPending => "checks_pending",
+            MonitorStatus::ChecksFailed => "checks_failed",
+            MonitorStatus::TransientFailure => "transient_failure",
+            MonitorStatus::AlreadyRunning => "already_running",
+            MonitorStatus::Stopped => "stopped",
+        }
+    }
+}
+
+fn monitor_status_for_state(state: &PrWatchState, partial_failure: bool) -> MonitorStatus {
+    if state.terminal {
+        return if state.stop_reason.as_deref() == Some("quiet_cycles_satisfied") {
+            MonitorStatus::QuietSatisfied
+        } else {
+            MonitorStatus::Stopped
+        };
+    }
+    if !state.pending_actionable.is_empty() {
+        MonitorStatus::ActionRequired
+    } else if state.last_cycle.failed_check_count > 0 {
+        MonitorStatus::ChecksFailed
+    } else if state.last_cycle.pending_check_count > 0 {
+        MonitorStatus::ChecksPending
+    } else if partial_failure || state.polling.consecutive_transient_failures > 0 {
+        MonitorStatus::TransientFailure
+    } else if state.polling.quiet_cycles >= state.polling.required_quiet_cycles {
+        MonitorStatus::QuietSatisfied
+    } else {
+        MonitorStatus::PendingNextPoll
+    }
+}
+
+fn monitor_should_schedule_followup(status: MonitorStatus) -> bool {
+    matches!(
+        status,
+        MonitorStatus::PendingNextPoll
+            | MonitorStatus::ChecksPending
+            | MonitorStatus::TransientFailure
+    )
+}
+
+fn watch_state_changed_since_load(
+    current_state: &PrWatchState,
+    loaded_existing_state: bool,
+    loaded_updated_at: &Option<String>,
+    loaded_cycle_number: u64,
+) -> bool {
+    !loaded_existing_state
+        || current_state.updated_at != *loaded_updated_at
+        || current_state.polling.cycle_number != loaded_cycle_number
+}
+
+fn timed_out_collection(max_runtime_seconds: u64) -> GhCollection {
+    let message = format!("monitor collection exceeded max_runtime_seconds={max_runtime_seconds}");
+    GhCollection {
+        metadata: Err(SurfaceError::transient("metadata", message.clone())),
+        checks: Err(SurfaceError::transient("checks", message.clone())),
+        review_comments: Err(SurfaceError::transient("review_comments", message.clone())),
+        issue_comments: Err(SurfaceError::transient("issue_comments", message.clone())),
+        reviews: Err(SurfaceError::transient("reviews", message.clone())),
+        review_threads: Err(SurfaceError::transient("review_threads", message)),
     }
 }
 
@@ -243,6 +392,55 @@ fn maybe_schedule_next(
     )))
 }
 
+fn maybe_schedule_next_monitor(
+    ctx: &ToolContext,
+    state: &PrWatchState,
+    params: &PrWatchInput,
+) -> Result<Option<String>> {
+    if !params.schedule_next || params.dry_run.unwrap_or(false) || state.terminal {
+        return Ok(None);
+    }
+    let wake_at = Utc::now() + Duration::seconds(state.polling.poll_interval_seconds as i64);
+    let task = scheduled_monitor_prompt(state, monitor_max_runtime_seconds(params));
+    let target = match params.target.as_deref() {
+        Some("spawn") => ScheduleTarget::Spawn {
+            parent_session_id: ctx.session_id.clone(),
+        },
+        Some("resume") | None => ScheduleTarget::Session {
+            session_id: ctx.session_id.clone(),
+        },
+        Some(other) => bail!("invalid schedule target {other}; expected resume or spawn"),
+    };
+    let mut manager = AmbientManager::new()?;
+    let id = manager.schedule(ScheduleRequest {
+        wake_in_minutes: None,
+        wake_at: Some(wake_at),
+        context: task.clone(),
+        priority: Priority::Normal,
+        target,
+        created_by_session: ctx.session_id.clone(),
+        working_dir: ctx
+            .working_dir
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        task_description: Some(task),
+        relevant_files: vec![format!(
+            ".jcode/pr-feedback-watch/{}-state.json",
+            state.watch_id
+        )],
+        git_branch: None,
+        additional_context: Some(
+            "Scheduled by pr_watch monitor; invoke structured monitor action only.".to_string(),
+        ),
+    })?;
+    super::ambient::nudge_schedule_runner();
+    Ok(Some(format!(
+        "{} at {}",
+        id,
+        wake_at.format("%Y-%m-%dT%H:%M:%SZ")
+    )))
+}
+
 fn scheduled_poll_prompt(state: &PrWatchState) -> String {
     if state.last_successful_fetch.is_empty() {
         return format!(
@@ -256,6 +454,19 @@ fn scheduled_poll_prompt(state: &PrWatchState) -> String {
     )
 }
 
+fn scheduled_monitor_prompt(state: &PrWatchState, max_runtime_seconds: u64) -> String {
+    format!(
+        "Run the next structured PR watch monitor cycle for {}. Use pr_watch with action=monitor, repo={}, pr={}, watch_id={}, schedule_next=true, poll_interval_seconds={}, quiet_cycles_required={}, max_runtime_seconds={}. The monitor is read-only: do not push, comment, resolve threads, or merge.",
+        state.watch_id,
+        state.pr.repo,
+        state.pr.number,
+        state.watch_id,
+        state.polling.poll_interval_seconds,
+        state.polling.required_quiet_cycles,
+        max_runtime_seconds,
+    )
+}
+
 async fn ack_baseline(
     root: &Path,
     store: &Path,
@@ -266,6 +477,7 @@ async fn ack_baseline(
     let path = state_path(store, &state.watch_id);
     let loaded_updated_at = state.updated_at.clone();
     let loaded_cycle_number = state.polling.cycle_number;
+    let would_write = !params.dry_run.unwrap_or(false);
     if state.terminal {
         let readiness = state.readiness();
         return Ok(ToolOutput::new(format!(
@@ -278,11 +490,18 @@ async fn ack_baseline(
         .with_title(format!("{} stopped", state.watch_id))
         .with_metadata(json!({"watch": state, "readiness": readiness, "written": false})));
     }
+    let _lock = if would_write {
+        match acquire_watch_lock(store, &state.watch_id)? {
+            Some(lock) => Some(lock),
+            None => return Ok(watch_locked_output(store, &state, "ack_baseline")),
+        }
+    } else {
+        None
+    };
     let collected_at = now_iso();
     let collection = collect_with_gh(root, &state.pr.repo, state.pr.number).await;
     let partial_failure = apply_baseline_from_collection(&mut state, collection, &collected_at);
     apply_schedule_fields(&mut state, &params);
-    let would_write = !params.dry_run.unwrap_or(false);
     if would_write {
         let current_text = fs::read_to_string(&path).with_context(|| {
             format!(
@@ -543,6 +762,7 @@ async fn poll_now(
     let path = state_path(store, &state.watch_id);
     let loaded_updated_at = state.updated_at.clone();
     let loaded_cycle_number = state.polling.cycle_number;
+    let would_write = !params.dry_run.unwrap_or(false);
     if state.terminal {
         let readiness = state.readiness();
         return Ok(ToolOutput::new(format!(
@@ -555,6 +775,14 @@ async fn poll_now(
         .with_title(format!("{} stopped", state.watch_id))
         .with_metadata(json!({"watch": state, "readiness": readiness, "written": false})));
     }
+    let _lock = if would_write {
+        match acquire_watch_lock(store, &state.watch_id)? {
+            Some(lock) => Some(lock),
+            None => return Ok(watch_locked_output(store, &state, "poll_now")),
+        }
+    } else {
+        None
+    };
     let collected_at = now_iso();
     let result = collect_with_gh(root, &state.pr.repo, state.pr.number).await;
     let outcome = update_state_from_collection(&mut state, result, &collected_at);
@@ -569,7 +797,6 @@ async fn poll_now(
         state.stop_reason = Some("quiet_cycles_satisfied".to_string());
         state.polling.next_poll_at = None;
     }
-    let would_write = !params.dry_run.unwrap_or(false);
     if would_write {
         let current_text = fs::read_to_string(&path).with_context(|| {
             format!(
@@ -625,6 +852,175 @@ async fn poll_now(
     Ok(ToolOutput::new(text)
         .with_title(format!("{} {:?}", state.watch_id, state.last_cycle.status))
         .with_metadata(json!({"watch": state, "readiness": readiness, "written": would_write})))
+}
+
+async fn monitor_once(
+    root: &Path,
+    store: &Path,
+    params: PrWatchInput,
+    ctx: &ToolContext,
+) -> Result<ToolOutput> {
+    let watch_id = match &params.watch_id {
+        Some(id) => id.clone(),
+        None => target_from_params(&params)?.watch_id(),
+    };
+    let path = state_path(store, &watch_id);
+    let Some(_lock) = acquire_watch_lock(store, &watch_id)? else {
+        return Ok(ToolOutput::new(format!(
+            "PR watch monitor already running: {watch_id}\nLock: {}\nNo state was changed.",
+            lock_path(store, &watch_id).display()
+        ))
+        .with_title(format!("{} monitor locked", watch_id))
+        .with_metadata(json!({"watch_id": watch_id, "monitor_status": MonitorStatus::AlreadyRunning.as_str(), "written": false})));
+    };
+
+    let loaded_existing_state = path.exists();
+    let mut state = if loaded_existing_state {
+        load_state_for_params(store, &params)?
+    } else {
+        let target = target_from_params(&params)?;
+        let mut state = PrWatchState::new(target);
+        if let Some(id) = &params.watch_id {
+            state.watch_id = id.clone();
+        }
+        state.created_at = Some(now_iso());
+        state
+    };
+    let loaded_updated_at = state.updated_at.clone();
+    let loaded_cycle_number = state.polling.cycle_number;
+
+    let max_runtime_seconds = monitor_max_runtime_seconds(&params);
+    let would_write = !params.dry_run.unwrap_or(false);
+    let mut partial_failure = false;
+    let mode;
+
+    if state.terminal {
+        mode = "terminal";
+    } else {
+        let collected_at = now_iso();
+        let collection = match tokio::time::timeout(
+            StdDuration::from_secs(max_runtime_seconds),
+            collect_with_gh(root, &state.pr.repo, state.pr.number),
+        )
+        .await
+        {
+            Ok(collection) => collection,
+            Err(_) => timed_out_collection(max_runtime_seconds),
+        };
+        if state.last_successful_fetch.is_empty() {
+            partial_failure = apply_baseline_from_collection(&mut state, collection, &collected_at);
+            mode = "baseline";
+        } else {
+            let outcome = update_state_from_collection(&mut state, collection, &collected_at);
+            partial_failure = outcome.partial_failure;
+            mode = "poll";
+        }
+        apply_schedule_fields(&mut state, &params);
+        if state.polling.quiet_cycles >= state.polling.required_quiet_cycles
+            && state.pending_actionable.is_empty()
+            && state.last_cycle.pending_check_count == 0
+            && state.last_cycle.failed_check_count == 0
+            && !partial_failure
+        {
+            state.terminal = true;
+            state.stop_reason = Some("quiet_cycles_satisfied".to_string());
+            state.polling.next_poll_at = None;
+        }
+        state.push_event(WatchEvent {
+            at: collected_at,
+            kind: "monitor_cycle_completed".to_string(),
+            data: json!({
+                "mode": mode,
+                "max_runtime_seconds": max_runtime_seconds,
+                "partial_failure": partial_failure,
+            }),
+        });
+    }
+
+    if would_write {
+        fs::create_dir_all(store)?;
+        if path.exists() {
+            let current_text = fs::read_to_string(&path).with_context(|| {
+                format!(
+                    "failed to re-read {} before writing monitor result",
+                    path.display()
+                )
+            })?;
+            let current_state = normalize_watch_state_json(&current_text).with_context(|| {
+                format!(
+                    "failed to parse {} before writing monitor result",
+                    path.display()
+                )
+            })?;
+            if watch_state_changed_since_load(
+                &current_state,
+                loaded_existing_state,
+                &loaded_updated_at,
+                loaded_cycle_number,
+            ) {
+                let readiness = current_state.readiness();
+                return Ok(ToolOutput::new(format!(
+                    "PR watch monitor result is stale: {}\nRepo: {}\nPR: #{}\nNo state was changed because another watch action updated the state first.",
+                    current_state.watch_id, current_state.pr.repo, current_state.pr.number
+                ))
+                .with_title(format!("{} stale monitor", current_state.watch_id))
+                .with_metadata(json!({"watch": current_state, "readiness": readiness, "monitor_status": "stale", "written": false, "stale_monitor": true})));
+            }
+        } else if loaded_existing_state {
+            return Ok(ToolOutput::new(format!(
+                "PR watch monitor result is stale: {watch_id}\nState path disappeared before write: {}\nNo state was changed.",
+                path.display()
+            ))
+            .with_title(format!("{} stale monitor", watch_id))
+            .with_metadata(json!({"watch_id": watch_id, "monitor_status": "stale", "written": false, "stale_monitor": true})));
+        }
+        write_state_atomic(&path, &state)?;
+    }
+    let status = monitor_status_for_state(&state, partial_failure);
+    let scheduled = if monitor_should_schedule_followup(status) {
+        maybe_schedule_next_monitor(ctx, &state, &params)?
+    } else {
+        None
+    };
+    let readiness = state.readiness();
+    let text = format!(
+        "PR watch monitor cycle: {}\nRepo: {}\nPR: #{}\nMode: {}\nMonitor status: {}\nState: {:?}\nReadiness: {}\nQuiet cycles: {}/{}\nActionable: {}\nPending checks: {}\nFailed checks: {}\nPartial failure: {}\nMax runtime seconds: {}\nState path: {}{}{}",
+        state.watch_id,
+        state.pr.repo,
+        state.pr.number,
+        mode,
+        status.as_str(),
+        state.last_cycle.status,
+        readiness_label(&readiness),
+        state.polling.quiet_cycles,
+        state.polling.required_quiet_cycles,
+        state.pending_actionable.len(),
+        state.last_cycle.pending_check_count,
+        state.last_cycle.failed_check_count,
+        partial_failure,
+        max_runtime_seconds,
+        path.display(),
+        scheduled
+            .as_deref()
+            .map(|s| format!("\nScheduled: {s}"))
+            .unwrap_or_default(),
+        if would_write {
+            ""
+        } else {
+            "\nDry run: no file written"
+        }
+    );
+    Ok(ToolOutput::new(text)
+        .with_title(format!("{} monitor {}", state.watch_id, status.as_str()))
+        .with_metadata(json!({
+            "watch": state,
+            "readiness": readiness,
+            "monitor_status": status.as_str(),
+            "monitor_mode": mode,
+            "max_runtime_seconds": max_runtime_seconds,
+            "scheduled": scheduled,
+            "written": would_write,
+        })))
 }
 
 async fn collect_with_gh(root: &Path, repo: &str, pr: u64) -> GhCollection {
@@ -943,9 +1339,11 @@ fn update_state_from_collection(
     let mut pending_actionable = Vec::new();
     let mut pending_check_count = 0;
     let mut failed_check_count = 0;
+    let mut any_surface_success = false;
 
     match collection.metadata {
         Ok(metadata) => {
+            any_surface_success = true;
             let previous_head_sha = state.pr.head_sha.clone();
             let next_head_sha = metadata.identity.head_sha.clone();
             if previous_head_sha.is_some()
@@ -980,6 +1378,7 @@ fn update_state_from_collection(
 
     match collection.checks {
         Ok(checks) => {
+            any_surface_success = true;
             pending_check_count = checks
                 .iter()
                 .filter(|check| is_pending_check(check))
@@ -1003,6 +1402,7 @@ fn update_state_from_collection(
 
     match collection.review_comments {
         Ok(comments) => {
+            any_surface_success = true;
             state
                 .last_cycle
                 .surface_counts
@@ -1053,6 +1453,7 @@ fn update_state_from_collection(
 
     match collection.issue_comments {
         Ok(comments) => {
+            any_surface_success = true;
             state
                 .last_cycle
                 .surface_counts
@@ -1103,6 +1504,7 @@ fn update_state_from_collection(
 
     match collection.review_threads {
         Ok(threads) => {
+            any_surface_success = true;
             state
                 .last_cycle
                 .surface_counts
@@ -1163,6 +1565,7 @@ fn update_state_from_collection(
 
     match collection.reviews {
         Ok(reviews) => {
+            any_surface_success = true;
             state
                 .last_cycle
                 .surface_counts
@@ -1200,6 +1603,12 @@ fn update_state_from_collection(
             partial_failure = true;
             state.push_event(surface_error_event(collected_at, err));
         }
+    }
+
+    if partial_failure && !any_surface_success {
+        pending_actionable = state.pending_actionable.clone();
+        pending_check_count = state.last_cycle.pending_check_count;
+        failed_check_count = state.last_cycle.failed_check_count;
     }
 
     let outcome = CycleOutcome {
@@ -1529,14 +1938,22 @@ fn human_next_step(state: &PrWatchState) -> String {
 
 fn stop_watch(store: &Path, params: PrWatchInput) -> Result<ToolOutput> {
     let mut state = load_state_for_params(store, &params)?;
+    let would_write = !params.dry_run.unwrap_or(false);
+    let _lock = if would_write {
+        match acquire_watch_lock(store, &state.watch_id)? {
+            Some(lock) => Some(lock),
+            None => return Ok(watch_locked_output(store, &state, "stop")),
+        }
+    } else {
+        None
+    };
     state.terminal = true;
     state.stop_reason = Some("stopped_by_pr_watch_tool".to_string());
     state.polling.next_poll_at = None;
     state.last_cycle.status = jcode_pr_watch_core::CycleStatus::Stopped;
     let path = state_path(store, &state.watch_id);
-    let would_write = !params.dry_run.unwrap_or(false);
     if would_write {
-        fs::write(&path, serde_json::to_vec_pretty(&state)?)?;
+        write_state_atomic(&path, &state)?;
     }
     Ok(ToolOutput::new(format!(
         "PR watch stopped: {}{}",
@@ -1612,8 +2029,256 @@ mod tests {
             .unwrap();
         assert!(actions.iter().any(|value| value == "start"));
         assert!(actions.iter().any(|value| value == "poll_now"));
+        assert!(actions.iter().any(|value| value == "monitor"));
         assert!(actions.iter().any(|value| value == "ack_baseline"));
+        assert!(
+            schema
+                .pointer("/properties/quiet_cycles_required")
+                .is_some()
+        );
+        assert!(schema.pointer("/properties/max_runtime_seconds").is_some());
         assert!(!actions.iter().any(|value| value == "authorize"));
+    }
+
+    fn monitor_params(max_runtime_seconds: Option<u64>) -> PrWatchInput {
+        PrWatchInput {
+            action: PrWatchAction::Monitor,
+            repo: Some("owner/repo".to_string()),
+            pr: Some(7),
+            watch_id: None,
+            dry_run: None,
+            schedule_next: false,
+            poll_interval_seconds: None,
+            quiet_cycles_required: None,
+            max_runtime_seconds,
+            target: None,
+        }
+    }
+
+    #[test]
+    fn monitor_defaults_are_bounded() {
+        assert_eq!(
+            monitor_max_runtime_seconds(&monitor_params(None)),
+            DEFAULT_MONITOR_MAX_RUNTIME_SECONDS
+        );
+        assert!(DEFAULT_MONITOR_MAX_RUNTIME_SECONDS <= 540);
+        assert_eq!(
+            monitor_max_runtime_seconds(&monitor_params(Some(5_000))),
+            MAX_MONITOR_MAX_RUNTIME_SECONDS
+        );
+        assert_eq!(monitor_max_runtime_seconds(&monitor_params(Some(0))), 1);
+    }
+
+    #[test]
+    fn monitor_lock_prevents_concurrent_runs() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let first = acquire_watch_lock(temp.path(), "owner-repo-pr-7")
+            .expect("first lock")
+            .expect("lock acquired");
+        let second = acquire_watch_lock(temp.path(), "owner-repo-pr-7").expect("second lock");
+        assert!(second.is_none());
+        drop(first);
+        let third = acquire_watch_lock(temp.path(), "owner-repo-pr-7")
+            .expect("third lock")
+            .expect("lock reacquired");
+        drop(third);
+    }
+
+    #[test]
+    fn watch_locked_output_uses_shared_lock_metadata() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 7,
+        });
+
+        let output = watch_locked_output(temp.path(), &state, "poll_now");
+        assert!(output.text.contains("already running or locked"));
+        assert!(output.text.contains("owner/repo"));
+        assert_eq!(
+            output.metadata.pointer("/watch_locked"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            output.metadata.pointer("/action"),
+            Some(&Value::String("poll_now".to_string()))
+        );
+    }
+
+    #[test]
+    fn monitor_status_maps_actionable_and_checks() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 7,
+        });
+        state.pending_actionable.push(ActionableItem {
+            id: "thread-1".into(),
+            surface: "review_threads".into(),
+            summary: "fix it".into(),
+            url: None,
+            path: None,
+            status: Some("unresolved".into()),
+        });
+        assert_eq!(
+            monitor_status_for_state(&state, false),
+            MonitorStatus::ActionRequired
+        );
+        state.pending_actionable.clear();
+        state.last_cycle.failed_check_count = 1;
+        assert_eq!(
+            monitor_status_for_state(&state, false),
+            MonitorStatus::ChecksFailed
+        );
+        state.last_cycle.failed_check_count = 0;
+        state.last_cycle.pending_check_count = 1;
+        assert_eq!(
+            monitor_status_for_state(&state, false),
+            MonitorStatus::ChecksPending
+        );
+        state.last_cycle.pending_check_count = 0;
+        assert_eq!(
+            monitor_status_for_state(&state, true),
+            MonitorStatus::TransientFailure
+        );
+        state.polling.quiet_cycles = state.polling.required_quiet_cycles;
+        assert_eq!(
+            monitor_status_for_state(&state, false),
+            MonitorStatus::QuietSatisfied
+        );
+    }
+
+    #[test]
+    fn monitor_should_schedule_recoverable_statuses() {
+        assert!(monitor_should_schedule_followup(
+            MonitorStatus::PendingNextPoll
+        ));
+        assert!(monitor_should_schedule_followup(
+            MonitorStatus::ChecksPending
+        ));
+        assert!(monitor_should_schedule_followup(
+            MonitorStatus::TransientFailure
+        ));
+        assert!(!monitor_should_schedule_followup(
+            MonitorStatus::ActionRequired
+        ));
+        assert!(!monitor_should_schedule_followup(
+            MonitorStatus::ChecksFailed
+        ));
+        assert!(!monitor_should_schedule_followup(
+            MonitorStatus::QuietSatisfied
+        ));
+        assert!(!monitor_should_schedule_followup(MonitorStatus::Stopped));
+    }
+
+    #[test]
+    fn monitor_stale_guard_detects_concurrent_state_changes() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 7,
+        });
+        state.updated_at = Some("2026-05-14T11:00:00Z".into());
+        state.polling.cycle_number = 2;
+
+        assert!(!watch_state_changed_since_load(
+            &state,
+            true,
+            &state.updated_at,
+            state.polling.cycle_number,
+        ));
+
+        let mut updated_at_changed = state.clone();
+        updated_at_changed.updated_at = Some("2026-05-14T11:01:00Z".into());
+        assert!(watch_state_changed_since_load(
+            &updated_at_changed,
+            true,
+            &state.updated_at,
+            state.polling.cycle_number,
+        ));
+
+        let mut cycle_changed = state.clone();
+        cycle_changed.polling.cycle_number += 1;
+        assert!(watch_state_changed_since_load(
+            &cycle_changed,
+            true,
+            &state.updated_at,
+            state.polling.cycle_number,
+        ));
+
+        assert!(watch_state_changed_since_load(
+            &state,
+            false,
+            &state.updated_at,
+            state.polling.cycle_number,
+        ));
+    }
+
+    #[test]
+    fn timed_out_collection_marks_all_surfaces_transient() {
+        let collection = timed_out_collection(12);
+        for (surface, result) in [
+            ("metadata", collection.metadata.map(|_| ())),
+            ("checks", collection.checks.map(|_| ())),
+            ("review_comments", collection.review_comments.map(|_| ())),
+            ("issue_comments", collection.issue_comments.map(|_| ())),
+            ("reviews", collection.reviews.map(|_| ())),
+            ("review_threads", collection.review_threads.map(|_| ())),
+        ] {
+            let err = result.expect_err("surface should time out");
+            assert_eq!(err.surface, surface);
+            assert!(err.transient);
+            assert!(err.message.contains("max_runtime_seconds=12"));
+        }
+    }
+
+    #[test]
+    fn total_transient_failure_preserves_existing_blockers() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 7,
+        });
+        state.pending_actionable.push(ActionableItem {
+            id: "THREAD_BLOCKER".into(),
+            surface: "review_threads".into(),
+            summary: "Existing unresolved thread".into(),
+            url: Some("https://thread".into()),
+            path: Some("src/lib.rs".into()),
+            status: Some("unresolved".into()),
+        });
+        state.last_cycle.pending_check_count = 1;
+        state.last_cycle.failed_check_count = 1;
+
+        let outcome = update_state_from_collection(
+            &mut state,
+            timed_out_collection(12),
+            "2026-05-14T13:00:00Z",
+        );
+
+        assert!(outcome.partial_failure);
+        assert_eq!(outcome.pending_actionable.len(), 1);
+        assert_eq!(outcome.pending_actionable[0].id, "THREAD_BLOCKER");
+        assert_eq!(outcome.pending_check_count, 1);
+        assert_eq!(outcome.failed_check_count, 1);
+        assert_eq!(state.pending_actionable.len(), 1);
+        assert_eq!(state.last_cycle.pending_check_count, 1);
+        assert_eq!(state.last_cycle.failed_check_count, 1);
+    }
+
+    #[test]
+    fn scheduled_monitor_prompt_is_structured() {
+        let mut state = PrWatchState::new(PrTarget {
+            repo: "owner/repo".into(),
+            number: 7,
+        });
+        state.polling.poll_interval_seconds = 120;
+        state.polling.required_quiet_cycles = 2;
+        let prompt = scheduled_monitor_prompt(&state, 540);
+        assert!(prompt.contains("action=monitor"));
+        assert!(prompt.contains("repo=owner/repo"));
+        assert!(prompt.contains("pr=7"));
+        assert!(prompt.contains("poll_interval_seconds=120"));
+        assert!(prompt.contains("quiet_cycles_required=2"));
+        assert!(prompt.contains("max_runtime_seconds=540"));
+        assert!(prompt.contains("read-only"));
     }
 
     #[test]
@@ -1791,6 +2456,8 @@ mod tests {
             dry_run: Some(true),
             schedule_next: true,
             poll_interval_seconds: Some(1),
+            quiet_cycles_required: None,
+            max_runtime_seconds: None,
             target: None,
         };
         apply_schedule_fields(&mut state, &params);

@@ -1,7 +1,7 @@
 # Native Bounded PR Watch Monitor Design
 
-> Status: design spike from overnight run `overnight_1778725947328_14110328904992016774`
-> Scope: implementation-level plan only, no runtime behavior changed by this document.
+> Status: Slice B implemented in PR #4 from overnight run `overnight_1778725947328_14110328904992016774`
+> Scope: documents the implemented single-cycle monitor plus deferred multi-cycle/stale-lock enhancements.
 
 ## Problem
 
@@ -191,7 +191,7 @@ Then test:
 
 ## Implementation slices
 
-### Slice A: monitor helpers only
+### Slice A: monitor helpers only ✅ implemented
 
 - add input fields
 - add lock helper
@@ -199,13 +199,13 @@ Then test:
 - no long loop yet
 - tests for parsing/defaults/status
 
-### Slice B: single-cycle monitor
+### Slice B: single-cycle monitor ✅ implemented
 
 - monitor performs one baseline/poll cycle and schedules next monitor if requested
 - no internal sleep
 - this already replaces most prose scheduled wakeups with structured invocations
 
-### Slice C: bounded multi-cycle monitor
+### Slice C: bounded multi-cycle monitor ⏳ deferred
 
 - add internal sleep loop for short runtimes
 - emit `JCODE_PROGRESS`
