@@ -1072,7 +1072,6 @@ pub(crate) fn redraw_interval_with_policy(
 
     if state.is_processing()
         || !state.streaming_text().is_empty()
-        || state.status_notice().is_some()
         || state.has_pending_mouse_scroll_animation()
         || state.has_notification()
         || state.rate_limit_remaining().is_some()
@@ -1081,6 +1080,14 @@ pub(crate) fn redraw_interval_with_policy(
             crate::perf::PerformanceTier::Minimal => REDRAW_IDLE,
             _ => fast_interval,
         };
+    }
+
+    // Status notices are static text with a short TTL. They need periodic
+    // redraws so they disappear, but they should not drive the high-frequency
+    // render loop over long transcripts while the user is just typing a slash
+    // command.
+    if state.status_notice().is_some() {
+        return REDRAW_PASSIVE_LIVENESS;
     }
 
     if state.remote_startup_phase_active() {
