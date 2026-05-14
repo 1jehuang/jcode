@@ -1,5 +1,6 @@
 use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, FileOp, FileTouch};
+use crate::tool::code_hygiene::run_post_edit_hygiene_for_paths;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -103,21 +104,24 @@ impl Tool for WriteTool {
             detail,
         }));
 
+        let hygiene = run_post_edit_hygiene_for_paths(&ctx, &[path.to_path_buf()]).await;
+
         if existed {
             Ok(ToolOutput::new(format!(
-                "Updated {} ({} lines){}\n{}",
+                "Updated {} ({} lines){}\n{}{}",
                 params.file_path,
                 line_count,
                 if diff.is_empty() { "" } else { ":" },
-                diff
+                diff,
+                hygiene
             ))
             .with_title(params.file_path.clone()))
         } else {
             // For new files, show all lines as additions
             let diff = generate_diff_summary("", &params.content);
             Ok(ToolOutput::new(format!(
-                "Created {} ({} lines):\n{}",
-                params.file_path, line_count, diff
+                "Created {} ({} lines):\n{}{}",
+                params.file_path, line_count, diff, hygiene
             ))
             .with_title(params.file_path.clone()))
         }

@@ -1,5 +1,6 @@
 use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, FileOp, FileTouch};
+use crate::tool::code_hygiene::run_post_edit_hygiene_for_paths;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -221,7 +222,12 @@ impl Tool for ApplyPatchTool {
         if results.is_empty() {
             Ok(ToolOutput::new("No changes applied"))
         } else {
-            let output = ToolOutput::new(results.join("\n"));
+            let resolved_touched_paths = touched_paths
+                .iter()
+                .map(|path| ctx.resolve_path(Path::new(path)))
+                .collect::<Vec<_>>();
+            let hygiene = run_post_edit_hygiene_for_paths(&ctx, &resolved_touched_paths).await;
+            let output = ToolOutput::new(format!("{}{}", results.join("\n"), hygiene));
             if touched_paths.len() == 1 {
                 Ok(output.with_title(touched_paths[0].clone()))
             } else {

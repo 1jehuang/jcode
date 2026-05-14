@@ -1,4 +1,5 @@
 use super::{Tool, ToolContext, ToolOutput};
+use crate::tool::code_hygiene::run_post_edit_hygiene_for_paths;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -155,6 +156,7 @@ impl Tool for MultiEditTool {
         if !applied.is_empty() {
             output.push_str("\nDiff:\n");
             output.push_str(&generate_diff_summary(&original_content, &content));
+            output.push_str(&run_post_edit_hygiene_for_paths(&ctx, &[path.to_path_buf()]).await);
         }
 
         Ok(ToolOutput::new(output).with_title(params.file_path.clone()))

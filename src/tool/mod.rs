@@ -6,6 +6,7 @@ mod bash;
 mod batch;
 mod bg;
 mod browser;
+mod code_hygiene;
 mod codesearch;
 mod communicate;
 mod conversation_search;
