@@ -139,6 +139,7 @@ pub mod codereview;
 pub mod ai_enhanced;
 pub mod git;
 pub mod task_planner;
+pub mod team_sync;
 pub mod plugins;
 pub mod ssh;
 pub mod task_manager;
@@ -153,11 +154,14 @@ pub mod utils;
 // Mid-term enhancements
 pub mod dashboard;
 pub mod marketplace;
+pub mod debug_panel;
+pub mod plugin_market;
 pub mod i18n;
 
 // Long-term vision
 pub mod distributed;
 pub mod ai_optimization;
+pub mod ab_testing;
 
 // Reasoning & Context (Claude Code 级别)
 pub mod context;

@@ -11,6 +11,8 @@ pub mod registry;
 pub mod specs;
 pub mod completer;
 pub mod snippet;
+pub mod powershell;
+pub mod fish;
 
 use serde::{Deserialize, Serialize};
 
