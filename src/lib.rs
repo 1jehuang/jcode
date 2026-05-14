@@ -163,6 +163,13 @@ pub mod ai_optimization;
 pub mod context;
 pub mod reasoning;
 
+// NLP & Prototype (Claude Code 深度借鉴)
+pub mod nlp;
+pub mod prototype;
+
+// Enhanced Refactoring System (跨语言迁移 & 现代化)
+pub mod refactor;
+
 use anyhow::Result;
 use std::sync::Mutex;
 
