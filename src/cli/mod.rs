@@ -12,3 +12,12 @@ pub mod selfdev;
 pub mod startup;
 pub mod terminal;
 pub mod tui_launch;
+
+// Claude Code CLI 兼容层 (Phase 1 - P0核心命令)
+pub mod claude_compat;
+pub mod print_mode;
+pub mod session_resume;
+pub mod pipe_handler;
+pub mod slash_commands;
+pub mod cli_flags;
+pub mod management_commands;
