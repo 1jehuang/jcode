@@ -471,6 +471,26 @@ pub(crate) enum Command {
         #[arg(short, long)]
         output: Option<String>,
     },
+
+    /// Skill management: list, search, info
+    #[command(subcommand)]
+    Skills(SkillsCommand),
+
+    /// Workflow management: list, templates, run
+    #[command(subcommand)]
+    Workflows(WorkflowsCommand),
+
+    /// Task management: list, create, plan, status
+    #[command(subcommand)]
+    Tasks(TasksCommand),
+
+    /// Git operations: branch, diff, context, status
+    #[command(subcommand)]
+    Git(GitCommand),
+
+    /// Configuration management: get, set, list
+    #[command(subcommand)]
+    Config(ConfigCommand),
 }
 
 #[derive(Subcommand, Debug)]
@@ -776,6 +796,111 @@ pub(crate) enum MemoryCommand {
 
     /// Clear test memory storage (used by debug sessions)
     ClearTest,
+}
+
+/// Skills management commands.
+#[derive(Subcommand, Debug)]
+pub(crate) enum SkillsCommand {
+    /// List available skills
+    List {
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Search skills by query
+    Search {
+        query: String,
+    },
+    /// Show detailed info about a skill
+    Info {
+        skill: String,
+    },
+}
+
+/// Workflow management commands.
+#[derive(Subcommand, Debug)]
+pub(crate) enum WorkflowsCommand {
+    /// List available workflow templates
+    List {
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show workflow template info
+    Templates {
+        /// Template name
+        name: Option<String>,
+    },
+    /// Run a workflow
+    Run {
+        /// Workflow name or template
+        workflow: String,
+    },
+}
+
+/// Task management commands.
+#[derive(Subcommand, Debug)]
+pub(crate) enum TasksCommand {
+    /// List tasks
+    List {
+        /// Filter by status
+        #[arg(short, long)]
+        status: Option<String>,
+    },
+    /// Create a new task
+    Create {
+        /// Task description
+        description: String,
+    },
+    /// Plan task execution
+    Plan {
+        /// Task ID
+        id: String,
+    },
+    /// Show task status
+    Status {
+        /// Task ID
+        id: String,
+    },
+}
+
+/// Git operations commands.
+#[derive(Subcommand, Debug)]
+pub(crate) enum GitCommand {
+    /// Show current branch info
+    Branch,
+    /// Show git diff
+    Diff {
+        /// Path to show diff for
+        path: Option<String>,
+    },
+    /// Show git context (branch, status, recent commits)
+    Context,
+    /// Show git status
+    Status,
+}
+
+/// Configuration management commands.
+#[derive(Subcommand, Debug)]
+pub(crate) enum ConfigCommand {
+    /// Get a configuration value
+    Get {
+        /// Config key
+        key: String,
+    },
+    /// Set a configuration value
+    Set {
+        /// Config key
+        key: String,
+        /// Config value
+        value: String,
+    },
+    /// List all configuration
+    List {
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[cfg(test)]

@@ -233,6 +233,43 @@ impl TaskPlanner {
 
         Some(workflow)
     }
+
+    /// Find the plan ID that contains a given task
+    pub fn find_plan_for_task(&self, task_id: &str) -> Option<String> {
+        for (plan_id, plan) in &self.plans {
+            if plan.tasks.contains(&task_id.to_string()) {
+                return Some(plan_id.clone());
+            }
+        }
+        None
+    }
+}
+
+impl EnhancedTask {
+    /// Create a new task with a description
+    pub fn new(description: &str) -> Self {
+        let now = Utc::now();
+        let id = format!("task-{}", now.timestamp());
+        EnhancedTask {
+            id,
+            title: description.to_string(),
+            description: description.to_string(),
+            status: TaskStatus::Backlog,
+            priority: TaskPriority::Medium,
+            category: TaskCategory::Other,
+            dependencies: vec![],
+            subtasks: vec![],
+            assigned_to: None,
+            created_at: now,
+            updated_at: now,
+            due_date: None,
+            tags: vec![],
+            estimated_hours: None,
+            actual_hours: None,
+            notes: vec![],
+            plan_id: None,
+        }
+    }
 }
 
 impl Default for TaskPlanner {

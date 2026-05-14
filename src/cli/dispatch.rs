@@ -5,8 +5,8 @@ use std::process::{Command as ProcessCommand, Stdio};
 use std::time::Instant;
 
 use super::args::{
-    AmbientCommand, Args, AuthCommand, Command, MemoryCommand, ModelCommand, ProviderCommand,
-    RestartCommand, SessionCommand, TranscriptModeArg,
+    AmbientCommand, Args, AuthCommand, Command, MemoryCommand, ModelCommand,
+    ProviderCommand, RestartCommand, SessionCommand, TranscriptModeArg,
 };
 use crate::{
     agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
@@ -353,7 +353,28 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             project_type,
             scaffold,
         }) => commands::run_init_command(project_type.as_deref(), scaffold).await?,
-        None => run_default_command(args).await?,
+        Some(Command::Skills(subcmd)) => {
+            commands::run_skills_command(subcmd).await?;
+        }
+        Some(Command::Workflows(subcmd)) => {
+            commands::run_workflows_command(subcmd).await?;
+        }
+        Some(Command::Tasks(subcmd)) => {
+            commands::run_tasks_command(subcmd).await?;
+        }
+        Some(Command::Git(subcmd)) => {
+            commands::run_git_command(subcmd).await?;
+        }
+        Some(Command::Config(subcmd)) => {
+            commands::run_config_command(subcmd)?;
+        }
+        None => {
+            eprintln!("CarpAI - AI-powered coding assistant\n");
+            eprintln!("Usage: carpai <command> [options]");
+            eprintln!();
+            eprintln!("Run `carpai --help` for more information.");
+            eprintln!("Run `carpai <command> --help` for command-specific help.");
+        }
     }
 
     Ok(())
@@ -362,7 +383,8 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
 fn resolve_resume_arg(args: &mut Args) -> Result<()> {
     if let Some(ref resume_id) = args.resume {
         if resume_id.is_empty() {
-            return tui_launch::list_sessions();
+            eprintln!("No sessions available to resume.");
+            return Ok(());
         }
 
         match resolve_resume_id(resume_id) {

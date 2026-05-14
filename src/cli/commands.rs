@@ -1602,7 +1602,7 @@ pub async fn run_build_command(
                     duration: total_dur,
                     warning_count: wr.projects.values().map(|r| r.warning_count).sum(),
                     error_count: wr.projects.values().map(|r| r.error_count).sum(),
-                    project_type,
+                    project_type: project_type.clone(),
                     build_dir: cwd.clone(),
                     stdout: String::new(),
                     stderr: String::new(),
@@ -1701,6 +1701,25 @@ pub async fn run_build_command(
     };
 
     eprintln!("\n{}", report.to_string().trim_end());
+
+    // AI learning: record build outcome for adaptive learning
+    {
+        let project_type_str = format!("{:?}", project_type.clone());
+        let success = build_result.as_ref().map(|r| r.success).unwrap_or(false);
+        let duration = build_elapsed;
+        let err_count = report.error_count;
+        let warn_count = report.warning_count;
+        tokio::spawn(async move {
+            crate::ai_enhanced::record_build_outcome(
+                &project_type_str,
+                success,
+                duration,
+                err_count,
+                warn_count,
+            )
+            .await;
+        });
+    }
 
     match build_result {
         Ok(result) if result.success => Ok(()),
@@ -1936,6 +1955,349 @@ pub async fn run_init_command(project_type: Option<&str>, scaffold: bool) -> Res
     }
 
     eprintln!("\n✅ Project initialized.\n");
+    Ok(())
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Skills management commands
+// ════════════════════════════════════════════════════════════════════
+
+pub async fn run_skills_command(cmd: super::args::SkillsCommand) -> Result<()> {
+    use crate::skills::SkillRegistry;
+    use std::sync::Arc;
+
+    let registry = Arc::new(SkillRegistry::new());
+
+    match cmd {
+        super::args::SkillsCommand::List { json } => {
+            let skills = registry.list_sync();
+            if json {
+                let items: Vec<serde_json::Value> = skills.iter().map(|s| {
+                    serde_json::json!({
+                        "name": s.definition.name,
+                        "display_name": s.definition.display_name,
+                        "description": s.definition.description,
+                        "category": s.definition.category.label(),
+                        "builtin": s.definition.is_builtin,
+                        "tags": s.definition.tags,
+                    })
+                }).collect();
+                println!("{}", serde_json::to_string_pretty(&items)?);
+            } else {
+                if skills.is_empty() {
+                    eprintln!("No skills registered.");
+                    return Ok(());
+                }
+                eprintln!("\n🧩 Available Skills ({})\n", skills.len());
+                for skill in &skills {
+                    let builtin = if skill.definition.is_builtin { "[builtin]" } else { "[loaded]" };
+                    eprintln!("  {} {} — {}", builtin, skill.definition.name, skill.definition.description);
+                }
+            }
+        }
+        super::args::SkillsCommand::Search { query } => {
+            let results = registry.search_sync(&query);
+            if results.is_empty() {
+                eprintln!("No skills found matching '{}'", query);
+            } else {
+                eprintln!("\n🧩 Skills matching '{}' ({}):\n", query, results.len());
+                for skill in &results {
+                    eprintln!("  {} — {}", skill.definition.name, skill.definition.description);
+                }
+            }
+        }
+        super::args::SkillsCommand::Info { skill } => {
+            match registry.get_sync(&skill) {
+                Some(s) => {
+                    eprintln!("\n🧩 Skill: {} ({})", s.definition.display_name, s.definition.name);
+                    eprintln!("  Description: {}", s.definition.description);
+                    eprintln!("  Category: {}", s.definition.category.label());
+                    eprintln!("  Built-in: {}", s.definition.is_builtin);
+                    if !s.definition.tags.is_empty() {
+                        eprintln!("  Tags: {}", s.definition.tags.join(", "));
+                    }
+                    if !s.definition.params.is_empty() {
+                        eprintln!("  Parameters:");
+                        for p in &s.definition.params {
+                            let req = if p.required { "(required)" } else { "(optional)" };
+                            eprintln!("    - {}: {} {}", p.name, p.description, req);
+                        }
+                    }
+                }
+                None => eprintln!("Skill '{}' not found", skill),
+            }
+        }
+    }
+    Ok(())
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Workflows management commands
+// ════════════════════════════════════════════════════════════════════
+
+pub async fn run_workflows_command(cmd: super::args::WorkflowsCommand) -> Result<()> {
+    match cmd {
+        super::args::WorkflowsCommand::List { json } => {
+            use crate::workflow::template::WorkflowTemplate;
+            let templates = WorkflowTemplate::all();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&templates)?);
+            } else {
+                eprintln!("\n📋 Available Workflow Templates ({})", templates.len());
+                for tmpl in templates {
+                    eprintln!("  - {}: {} ({} steps)", tmpl.name, tmpl.description, tmpl.steps.len());
+                }
+            }
+        }
+        super::args::WorkflowsCommand::Templates { name } => {
+            use crate::workflow::template::WorkflowTemplate;
+            if let Some(tmpl_name) = name {
+                match WorkflowTemplate::find(&tmpl_name) {
+                    Some(tmpl) => {
+                        eprintln!("\n📋 Workflow: {}", tmpl.name);
+                        eprintln!("  Description: {}", tmpl.description);
+                        eprintln!("  Steps:");
+                        for (i, step) in tmpl.steps.iter().enumerate() {
+                            eprintln!("    {}. {} — {}", i + 1, step.name, step.description);
+                        }
+                    }
+                    None => eprintln!("Template '{}' not found", tmpl_name),
+                }
+            } else {
+                let all = WorkflowTemplate::all();
+                eprintln!("\n📋 Workflow Templates:\n");
+                for tmpl in all {
+                    eprintln!("  {} — {} ({} steps)", tmpl.name, tmpl.description, tmpl.steps.len());
+                }
+            }
+        }
+        super::args::WorkflowsCommand::Run { workflow } => {
+            use crate::workflow::template::WorkflowTemplate;
+            match WorkflowTemplate::to_config(&workflow) {
+                Some(config) => {
+                    eprintln!("\n🚀 Running workflow: {}\n", workflow);
+                    let runner = crate::workflow::runner::WorkflowRunner::new();
+                    let id = runner.register(config).await;
+                    match runner.execute(&id).await {
+                        Ok(()) => eprintln!("✅ Workflow '{}' completed successfully", workflow),
+                        Err(e) => eprintln!("❌ Workflow failed: {}", e),
+                    }
+                }
+                None => eprintln!("Workflow '{}' not found. Use `carpai workflows list` to see available templates.", workflow),
+            }
+        }
+    }
+    Ok(())
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Task management commands
+// ════════════════════════════════════════════════════════════════════
+
+pub async fn run_tasks_command(cmd: super::args::TasksCommand) -> Result<()> {
+    use crate::task_planner::TaskPlanner;
+
+    match cmd {
+        super::args::TasksCommand::List { status } => {
+            eprintln!("\n📋 Tasks");
+            if let Some(ref s) = status {
+                eprintln!("  Filter: status = {}\n", s);
+            }
+            eprintln!("  (No tasks created. Use `carpai tasks create <description>` to add one.)");
+        }
+        super::args::TasksCommand::Create { description } => {
+            let mut planner = TaskPlanner::new();
+            let plan_id = planner.create_plan("default", "Ad-hoc task", &description);
+            let task = crate::task_planner::EnhancedTask::new(&description);
+            match planner.add_task(&plan_id, task) {
+                Ok(_) => eprintln!("✅ Task created in plan: {}", plan_id),
+                Err(e) => eprintln!("❌ Failed to create task: {}", e),
+            }
+        }
+        super::args::TasksCommand::Plan { id } => {
+            let planner = TaskPlanner::new();
+            match planner.get_plan(&id) {
+                Some(plan) => {
+                    eprintln!("\n📋 Plan: {} (ID: {})", plan.name, plan.id);
+                    eprintln!("  Description: {}", plan.description);
+                    eprintln!("  Goal: {}", plan.goal);
+                    eprintln!("  Tasks: {}", plan.tasks.len());
+                    for task_id in &plan.tasks {
+                        if let Some(task) = planner.get_task(task_id) {
+                            let status = if matches!(task.status, crate::task_planner::TaskStatus::Completed) { "✅" } else { "⏳" };
+                            eprintln!("    {} {} — {} (priority: {})",
+                                status, task.id, task.description, task.priority.label());
+                        }
+                    }
+                }
+                None => eprintln!("Plan '{}' not found", id),
+            }
+        }
+        super::args::TasksCommand::Status { id } => {
+            let planner = TaskPlanner::new();
+            let plan_id = planner.find_plan_for_task(&id);
+            if let Some(pid) = plan_id {
+                if let Some(_plan) = planner.get_plan(&pid) {
+                    if let Some(task) = planner.get_task(&id) {
+                        let status = match task.status {
+                            crate::task_planner::TaskStatus::Completed => "✅ Completed",
+                            _ => "⏳ In Progress",
+                        };
+                        eprintln!("\n📋 Task: {} ({})", task.id, task.description);
+                        eprintln!("  Status: {}", status);
+                        eprintln!("  Priority: {}", task.priority.label());
+                        eprintln!("  Category: {}", task.category.label());
+                        return Ok(());
+                    }
+                }
+            }
+            eprintln!("Task '{}' not found", id);
+        }
+    }
+    Ok(())
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Git operations commands
+// ════════════════════════════════════════════════════════════════════
+
+pub async fn run_git_command(cmd: super::args::GitCommand) -> Result<()> {
+    use crate::git::operations::GitOperations;
+
+    let git_ops = GitOperations::new(".".into());
+
+    match cmd {
+        super::args::GitCommand::Branch => {
+            let current = git_ops.current_branch().unwrap_or_default();
+            let branches = git_ops.list_branches();
+            let names: Vec<String> = branches.iter().map(|b| b.name.clone()).collect();
+            eprintln!("\n🔀 Git Branch");
+            eprintln!("  Current: {}", current);
+            eprintln!("  All branches: {}", names.join(", "));
+        }
+        super::args::GitCommand::Diff { path } => {
+            let staged_diff = git_ops.format_diff(true);
+            let unstaged_diff = git_ops.format_diff(false);
+            let mut full_diff = String::new();
+            if !staged_diff.is_empty() {
+                full_diff.push_str("--- Staged ---\n");
+                full_diff.push_str(&staged_diff);
+            }
+            if !unstaged_diff.is_empty() {
+                full_diff.push_str("--- Unstaged ---\n");
+                full_diff.push_str(&unstaged_diff);
+            }
+
+            if let Some(p) = path {
+                // Filter diff for specific path
+                let filtered: Vec<&str> = full_diff.lines()
+                    .skip_while(|l| !l.contains(&p))
+                    .collect();
+                full_diff = filtered.join("\n");
+            }
+
+            if full_diff.is_empty() {
+                eprintln!("No changes to show.");
+            } else {
+                let lines: Vec<&str> = full_diff.lines().collect();
+                let added = lines.iter().filter(|l| l.starts_with('+') && !l.starts_with("+++")).count();
+                let removed = lines.iter().filter(|l| l.starts_with('-') && !l.starts_with("---")).count();
+                eprintln!("\n📝 Git Diff (+{}/-{})", added, removed);
+                if full_diff.len() > 4000 {
+                    eprintln!("{}", &full_diff[..4000]);
+                    eprintln!("... [truncated, total {} bytes]", full_diff.len());
+                } else {
+                    println!("{}", full_diff);
+                }
+            }
+        }
+        super::args::GitCommand::Context => {
+            let ctx = git_ops.get_context();
+            eprintln!("\n🔍 Git Context");
+            eprintln!("  Branch: {}", ctx.current_branch);
+            eprintln!("  Repository: {}", ctx.repository_root.display());
+            eprintln!("  Status:");
+            for s in &ctx.staged_changes {
+                eprintln!("    [staged] {:?} {}", s.change_type, s.path);
+            }
+            for s in &ctx.unstaged_changes {
+                eprintln!("    [unstaged] {:?} {}", s.change_type, s.path);
+            }
+            for f in &ctx.untracked_files {
+                eprintln!("    [untracked] {}", f);
+            }
+            eprintln!("  Recent commits:");
+            for c in git_ops.recent_commits(5) {
+                eprintln!("    {}", c);
+            }
+        }
+        super::args::GitCommand::Status => {
+            let ctx = git_ops.get_context();
+            eprintln!("\n📊 Git Status\n");
+            eprintln!("  Branch: {}", ctx.current_branch);
+            let total_changes = ctx.staged_changes.len() + ctx.unstaged_changes.len() + ctx.untracked_files.len();
+            eprintln!("  Working tree changes: {}", total_changes);
+            if total_changes == 0 {
+                eprintln!("  Working tree clean");
+            } else {
+                eprintln!("  Changes:");
+                for s in &ctx.staged_changes {
+                    eprintln!("    [staged] {:?} {}", s.change_type, s.path);
+                }
+                for s in &ctx.unstaged_changes {
+                    eprintln!("    [unstaged] {:?} {}", s.change_type, s.path);
+                }
+                for f in &ctx.untracked_files {
+                    eprintln!("    [untracked] {}", f);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Config management commands
+// ════════════════════════════════════════════════════════════════════
+
+pub fn run_config_command(cmd: super::args::ConfigCommand) -> Result<()> {
+    match cmd {
+        super::args::ConfigCommand::Get { key } => {
+            match std::env::var(&key) {
+                Ok(val) => println!("{}={}", key, val),
+                Err(_) => eprintln!("Config key '{}' not found", key),
+            }
+        }
+        super::args::ConfigCommand::Set { key, value } => {
+            // SAFETY: set_var is called in a single-threaded CLI context
+            unsafe { std::env::set_var(&key, &value); }
+            eprintln!("✅ Set {}={}", key, value);
+            eprintln!("  (Note: env vars are session-scoped; use config file for persistence)");
+        }
+        super::args::ConfigCommand::List { json } => {
+            use std::env;
+            let vars: std::collections::BTreeMap<String, String> = env::vars()
+                .filter(|(k, _)| k.starts_with("CARPAI_") || k.starts_with("JCODE_") || k.starts_with("CLAUDE_"))
+                .collect();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&vars)?);
+            } else {
+                if vars.is_empty() {
+                    eprintln!("No CarpAI/JCODE config variables found.");
+                } else {
+                    eprintln!("\n⚙️  Config:\n");
+                    for (k, v) in &vars {
+                        let display = if k.contains("KEY") || k.contains("TOKEN") || k.contains("SECRET") {
+                            format!("{}...", &v[..v.len().min(8)])
+                        } else {
+                            v.clone()
+                        };
+                        eprintln!("  {}={}", k, display);
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 
