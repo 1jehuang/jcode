@@ -9,6 +9,7 @@ Audience: jcode core, browser bridge authors, adapter authors
 jcode should expose a single first-class `browser` tool while remaining compatible with multiple browser automation backends:
 
 - Firefox Agent Bridge
+- CloakBrowser Playwright fallback
 - Chrome Agent Bridge
 - Chrome remote debugging / CDP adapters
 - WebDriver / BiDi adapters
@@ -662,6 +663,27 @@ Semantics or qualities that influence jcode behavior:
 - `manual_setup_required`
 - `extension_required`
 - `remote_debugging_required`
+
+---
+
+## Built-in CloakBrowser fallback
+
+jcode includes an optional CloakBrowser-backed provider for Chromium/Playwright automation.
+It is intentionally a fallback, not the default setup path:
+
+- `browser="auto"` still prefers the Firefox Agent Bridge when it is ready.
+- If Firefox is not ready and the Python `cloakbrowser` module is installed, `auto` falls back to CloakBrowser.
+- `browser="chrome"` selects CloakBrowser directly.
+- `browser action="setup" browser="chrome"` installs the Python `cloakbrowser` wrapper with `python3 -m pip install cloakbrowser`.
+- `JCODE_CLOAKBROWSER_PYTHON` can point at a specific Python interpreter or virtualenv.
+
+The fallback currently supports the core page actions `open`, `snapshot`, `get_content`,
+`screenshot`, `eval`, `click`, `type`, and `wait`. It uses a persistent profile under
+`~/.jcode/cloakbrowser/<session-id>` and enables CloakBrowser's `humanize` behavior.
+
+Because CloakBrowser downloads and launches a custom Chromium build, users should treat it
+as an explicitly trusted optional backend and use it only for legitimate browser automation,
+testing, or authorized access.
 
 ### Stability
 

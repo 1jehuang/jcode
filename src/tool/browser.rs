@@ -6,10 +6,12 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::AsyncWriteExt;
 
 pub struct BrowserTool;
 
 static FIREFOX_PROVIDER: FirefoxBridgeProvider = FirefoxBridgeProvider;
+static CLOAK_PROVIDER: CloakBrowserProvider = CloakBrowserProvider;
 
 impl BrowserTool {
     pub fn new() -> Self {
@@ -275,7 +277,7 @@ impl Tool for BrowserTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: BrowserInput = serde_json::from_value(input)?;
-        let provider = resolve_provider(params.browser.as_deref())?;
+        let provider = resolve_provider(params.browser.as_deref()).await?;
 
         match params.action.as_str() {
             "status" => provider.status(&ctx).await,
@@ -332,17 +334,245 @@ fn attach_browser_metadata(
     output
 }
 
-fn resolve_provider(browser: Option<&str>) -> Result<&'static dyn BrowserProvider> {
+async fn resolve_provider(browser: Option<&str>) -> Result<&'static dyn BrowserProvider> {
     let browser = browser.unwrap_or("auto");
+    if browser == "auto" {
+        if FIREFOX_PROVIDER.ensure_ready().await.is_ok() {
+            return Ok(&FIREFOX_PROVIDER);
+        }
+        if CLOAK_PROVIDER.ensure_ready().await.is_ok() {
+            return Ok(&CLOAK_PROVIDER);
+        }
+        return Ok(&FIREFOX_PROVIDER);
+    }
     if FIREFOX_PROVIDER.supported_browsers().contains(&browser) {
         return Ok(&FIREFOX_PROVIDER);
     }
+    if CLOAK_PROVIDER.supported_browsers().contains(&browser) {
+        return Ok(&CLOAK_PROVIDER);
+    }
 
     anyhow::bail!(
-        "Browser backend '{}' is not wired into the built-in browser tool yet. Use auto/firefox for now.",
+        "Browser backend '{}' is not wired into the built-in browser tool yet. Use auto/firefox/chrome for now.",
         browser
     )
 }
+
+struct CloakBrowserProvider;
+
+#[async_trait]
+impl BrowserProvider for CloakBrowserProvider {
+    fn id(&self) -> &'static str {
+        "cloakbrowser_playwright"
+    }
+    fn supported_browsers(&self) -> &'static [&'static str] {
+        &["chrome"]
+    }
+
+    async fn status(&self, _ctx: &ToolContext) -> Result<ToolOutput> {
+        match cloak_python_check().await {
+            Ok(version) => Ok(ToolOutput::new(format!("CloakBrowser fallback is available via Python module cloakbrowser ({}).", version))
+                .with_title("browser status")
+                .with_metadata(json!({"ready": true, "backend": self.id(), "browser": "chrome", "module_installed": true}))),
+            Err(err) => Ok(ToolOutput::new(format!("CloakBrowser fallback is not available yet. Install it with `python3 -m pip install cloakbrowser`, or run browser action='setup' with browser='chrome'.\n\n{}", err))
+                .with_title("browser status")
+                .with_metadata(json!({"ready": false, "backend": self.id(), "browser": "chrome", "module_installed": false}))),
+        }
+    }
+
+    async fn setup(&self) -> Result<ToolOutput> {
+        let output = tokio::process::Command::new(cloak_python_bin())
+            .args(["-m", "pip", "install", "cloakbrowser"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+            .context("failed to run python3 -m pip install cloakbrowser")?;
+        let mut log = String::new();
+        log.push_str(&String::from_utf8_lossy(&output.stdout));
+        log.push_str(&String::from_utf8_lossy(&output.stderr));
+        let ready = output.status.success() && cloak_python_check().await.is_ok();
+        Ok(ToolOutput::new(log)
+            .with_title(if ready {
+                "browser setup"
+            } else {
+                "browser setup (incomplete)"
+            })
+            .with_metadata(json!({
+                "ready": ready, "backend": self.id(), "browser": "chrome", "module_installed": ready
+            })))
+    }
+
+    async fn ensure_ready(&self) -> Result<Option<String>> {
+        cloak_python_check().await.map(|_| None)
+    }
+
+    async fn execute(
+        &self,
+        action: &str,
+        input: &BrowserInput,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput> {
+        let result = cloak_run_action(action, input, ctx).await?;
+        if action == "screenshot" {
+            return cloak_screenshot_output(result, self.id(), "chrome").await;
+        }
+        Ok(attach_browser_metadata(
+            render_browser_output(action, format!("browser {}", action), result),
+            self.id(),
+            "chrome",
+        ))
+    }
+}
+
+async fn cloak_screenshot_output(
+    result: Value,
+    backend: &'static str,
+    browser: &'static str,
+) -> Result<ToolOutput> {
+    let saved = result
+        .get("saved")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
+    let mut output = ToolOutput::new(match &saved {
+        Some(path) => format!("Captured browser screenshot to {}.", path.display()),
+        None => "Captured browser screenshot.".to_string(),
+    })
+    .with_title("browser screenshot")
+    .with_metadata(result.clone());
+
+    if let Some(path) = saved
+        && let Ok(bytes) = tokio::fs::read(&path).await
+    {
+        output = output.with_labeled_image(
+            "image/png",
+            STANDARD.encode(&bytes),
+            format!("browser screenshot: {}", path.display()),
+        );
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    Ok(attach_browser_metadata(output, backend, browser))
+}
+
+fn cloak_python_bin() -> String {
+    std::env::var("JCODE_CLOAKBROWSER_PYTHON").unwrap_or_else(|_| "python3".to_string())
+}
+
+async fn cloak_python_check() -> Result<String> {
+    let output = tokio::process::Command::new(cloak_python_bin())
+        .args([
+            "-c",
+            "import cloakbrowser; print(getattr(cloakbrowser, '__version__', 'installed'))",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        anyhow::bail!(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+async fn cloak_run_action(action: &str, input: &BrowserInput, ctx: &ToolContext) -> Result<Value> {
+    if !matches!(
+        action,
+        "open" | "snapshot" | "get_content" | "screenshot" | "eval" | "click" | "type" | "wait"
+    ) {
+        anyhow::bail!(
+            "CloakBrowser fallback currently supports open, snapshot, get_content, screenshot, eval, click, type, and wait. Use Firefox bridge for '{}'.",
+            action
+        );
+    }
+    let request = json!({
+        "action": action,
+        "url": input.url,
+        "selector": input.selector,
+        "text": input.text,
+        "script": input.script,
+        "format": input.format,
+        "wait": input.wait,
+        "timeout_ms": input.timeout_ms,
+        "screenshot_path": if action == "screenshot" { Some(temp_screenshot_path().to_string_lossy().to_string()) } else { None::<String> },
+        "profile_dir": cloak_profile_dir(&ctx.session_id).to_string_lossy().to_string(),
+    });
+    let mut child = tokio::process::Command::new(cloak_python_bin())
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("failed to start CloakBrowser Python helper")?;
+    let script = format!(
+        "{}\nREQ = {}\nmain(REQ)\n",
+        CLOAK_HELPER_PY,
+        serde_json::to_string(&request)?
+    );
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .await?;
+    drop(child.stdin.take());
+    let output = child.wait_with_output().await?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !output.status.success() {
+        anyhow::bail!(if stderr.is_empty() { stdout } else { stderr });
+    }
+    serde_json::from_str(&stdout).or_else(|_| Ok(json!({"raw": stdout})))
+}
+
+fn cloak_profile_dir(session_id: &str) -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".jcode")
+        .join("cloakbrowser")
+        .join(session_id)
+}
+
+const CLOAK_HELPER_PY: &str = r#"
+import json, pathlib, sys
+from cloakbrowser import launch_persistent_context
+
+def main(req):
+    pathlib.Path(req['profile_dir']).mkdir(parents=True, exist_ok=True)
+    ctx = launch_persistent_context(req['profile_dir'], headless=True, humanize=True)
+    page = ctx.pages[0] if ctx.pages else ctx.new_page()
+    try:
+        action = req['action']
+        timeout = req.get('timeout_ms') or 30000
+        if req.get('url') and action != 'open':
+            page.goto(req['url'], wait_until='domcontentloaded', timeout=timeout)
+        if action == 'open':
+            page.goto(req['url'], wait_until='domcontentloaded', timeout=timeout)
+            result = {'ok': True, 'url': page.url, 'title': page.title()}
+        elif action in ('snapshot', 'get_content'):
+            fmt = 'annotated' if action == 'snapshot' else (req.get('format') or 'text')
+            content = page.content() if fmt == 'html' else page.locator('body').inner_text(timeout=timeout)
+            result = {'content': content, 'url': page.url, 'title': page.title(), 'format': fmt}
+        elif action == 'screenshot':
+            page.screenshot(path=req['screenshot_path'], full_page=True, timeout=timeout)
+            result = {'saved': req['screenshot_path'], 'url': page.url, 'title': page.title()}
+        elif action == 'eval':
+            result = {'result': page.evaluate(req['script']), 'url': page.url}
+        elif action == 'click':
+            page.click(req['selector'], timeout=timeout)
+            result = {'ok': True, 'url': page.url}
+        elif action == 'type':
+            page.fill(req['selector'], req.get('text') or '', timeout=timeout)
+            result = {'ok': True, 'url': page.url}
+        elif action == 'wait':
+            if req.get('selector'):
+                page.wait_for_selector(req['selector'], timeout=timeout)
+            elif req.get('text'):
+                page.get_by_text(req['text']).wait_for(timeout=timeout)
+            result = {'ok': True, 'url': page.url}
+        print(json.dumps(result))
+    finally:
+        ctx.close()
+"#;
 
 async fn firefox_status(
     provider: &FirefoxBridgeProvider,

@@ -169,17 +169,20 @@ fn schema_exposes_advanced_browser_fields() {
     assert!(props.contains_key("scroll_to"));
 }
 
-#[test]
-fn resolve_provider_accepts_auto_and_firefox() {
-    assert!(resolve_provider(Some("auto")).is_ok());
-    assert!(resolve_provider(Some("firefox")).is_ok());
+#[tokio::test]
+async fn resolve_provider_accepts_auto_firefox_and_chrome() {
+    assert!(resolve_provider(Some("auto")).await.is_ok());
+    assert!(resolve_provider(Some("firefox")).await.is_ok());
+    let chrome = resolve_provider(Some("chrome")).await.unwrap();
+    assert_eq!(chrome.id(), "cloakbrowser_playwright");
 }
 
-#[test]
-fn resolve_provider_rejects_unsupported_browser() {
-    let err = resolve_provider(Some("chrome"))
+#[tokio::test]
+async fn resolve_provider_rejects_unsupported_browser() {
+    let err = resolve_provider(Some("edge"))
+        .await
         .err()
-        .expect("chrome should not resolve yet");
+        .expect("edge should not resolve yet");
     assert!(
         err.to_string()
             .contains("not wired into the built-in browser tool")
