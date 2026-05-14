@@ -114,6 +114,7 @@ pub mod slash_command;
 pub mod browser_bridge;
 pub mod ide_integration;
 pub mod checkpoint;
+pub mod refactor_engine;
 pub mod sub_agents;
 pub mod hooks_system;
 pub mod lsp_client;
@@ -142,7 +143,6 @@ pub mod plugins;
 pub mod ssh;
 pub mod task_manager;
 pub mod task_cli;
-pub mod slash_command;
 pub mod plan_mode;
 pub mod session_export;
 pub mod version_manager;
@@ -158,6 +158,10 @@ pub mod i18n;
 // Long-term vision
 pub mod distributed;
 pub mod ai_optimization;
+
+// Reasoning & Context (Claude Code 级别)
+pub mod context;
+pub mod reasoning;
 
 use anyhow::Result;
 use std::sync::Mutex;
