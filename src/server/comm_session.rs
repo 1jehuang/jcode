@@ -12,7 +12,7 @@ use super::{
     update_member_status, update_member_status_with_report,
 };
 use crate::agent::Agent;
-use crate::protocol::{NotificationType, ServerEvent};
+use crate::protocol::{CommSpawnMode, NotificationType, ServerEvent};
 use crate::provider::Provider;
 use crate::session::Session;
 use std::collections::{HashMap, HashSet};
@@ -140,6 +140,14 @@ fn provider_key_for_spawn_model(
     }
 
     crate::provider::provider_for_model(model).map(str::to_string)
+}
+
+fn spawn_mode_key(spawn_mode: Option<CommSpawnMode>) -> &'static str {
+    match spawn_mode.unwrap_or_default() {
+        CommSpawnMode::Visible => "visible",
+        CommSpawnMode::Headless => "headless",
+        CommSpawnMode::Auto => "auto",
+    }
 }
 
 fn persist_headed_startup_message(session_id: &str, message: &str) {
@@ -291,6 +299,7 @@ pub(super) async fn spawn_swarm_agent(
     swarm_id: &str,
     working_dir: Option<String>,
     initial_message: Option<String>,
+    spawn_mode: Option<CommSpawnMode>,
     sessions: &SessionAgents,
     global_session_id: &Arc<RwLock<String>>,
     provider_template: &Arc<dyn Provider>,
@@ -330,52 +339,63 @@ pub(super) async fn spawn_swarm_agent(
         .as_deref()
         .map(append_swarm_completion_report_instructions);
 
-    let visible_spawn = prepare_visible_spawn_session(
-        resolved_working_dir.as_deref(),
-        spawn_model.as_deref(),
-        spawn_provider_key.as_deref(),
-        coordinator_is_canary,
-        startup_message.as_deref(),
-        spawn_visible_session_window,
-    );
+    let spawn_mode = spawn_mode.unwrap_or_default();
+    let spawn_headless = || async {
+        let cmd = if let Some(ref dir) = resolved_working_dir {
+            format!("create_session:{dir}")
+        } else {
+            "create_session".to_string()
+        };
+        create_headless_session(
+            sessions,
+            global_session_id,
+            provider_template,
+            &cmd,
+            swarm_members,
+            swarms_by_id,
+            swarm_coordinators,
+            swarm_plans,
+            soft_interrupt_queues,
+            coordinator_is_canary,
+            spawn_model.clone(),
+            spawn_provider_key.clone(),
+            Some(Arc::clone(mcp_pool)),
+            Some(req_session_id.to_string()),
+        )
+        .await
+        .and_then(|result_json| {
+            serde_json::from_str::<serde_json::Value>(&result_json)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("session_id")
+                        .and_then(|session_id| session_id.as_str())
+                        .map(|session_id| session_id.to_string())
+                })
+                .map(|session_id| (session_id, true))
+                .ok_or_else(|| anyhow::anyhow!("Failed to parse spawned session id"))
+        })
+    };
 
-    let (new_session_id, is_headless_fallback) = match visible_spawn {
-        Ok((new_session_id, true)) => Ok((new_session_id, false)),
-        Ok((_, false)) | Err(_) => {
-            let cmd = if let Some(ref dir) = resolved_working_dir {
-                format!("create_session:{dir}")
-            } else {
-                "create_session".to_string()
-            };
-            create_headless_session(
-                sessions,
-                global_session_id,
-                provider_template,
-                &cmd,
-                swarm_members,
-                swarms_by_id,
-                swarm_coordinators,
-                swarm_plans,
-                soft_interrupt_queues,
+    let (new_session_id, is_headless_fallback) = match spawn_mode {
+        CommSpawnMode::Headless => spawn_headless().await,
+        CommSpawnMode::Visible | CommSpawnMode::Auto => {
+            let visible_spawn = prepare_visible_spawn_session(
+                resolved_working_dir.as_deref(),
+                spawn_model.as_deref(),
+                spawn_provider_key.as_deref(),
                 coordinator_is_canary,
-                spawn_model.clone(),
-                spawn_provider_key.clone(),
-                Some(Arc::clone(mcp_pool)),
-                Some(req_session_id.to_string()),
-            )
-            .await
-            .and_then(|result_json| {
-                serde_json::from_str::<serde_json::Value>(&result_json)
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .get("session_id")
-                            .and_then(|session_id| session_id.as_str())
-                            .map(|session_id| session_id.to_string())
-                    })
-                    .map(|session_id| (session_id, true))
-                    .ok_or_else(|| anyhow::anyhow!("Failed to parse spawned session id"))
-            })
+                startup_message.as_deref(),
+                spawn_visible_session_window,
+            );
+
+            match visible_spawn {
+                Ok((new_session_id, true)) => Ok((new_session_id, false)),
+                Ok((_, false)) if spawn_mode == CommSpawnMode::Auto => spawn_headless().await,
+                Ok((_, false)) => Err(anyhow::anyhow!("Visible session launch was not available")),
+                Err(_error) if spawn_mode == CommSpawnMode::Auto => spawn_headless().await,
+                Err(error) => Err(error),
+            }
         }
     }?;
 
@@ -510,6 +530,7 @@ pub(super) async fn handle_comm_spawn(
     req_session_id: String,
     working_dir: Option<String>,
     initial_message: Option<String>,
+    spawn_mode: Option<CommSpawnMode>,
     request_nonce: Option<String>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     sessions: &SessionAgents,
@@ -551,6 +572,7 @@ pub(super) async fn handle_comm_spawn(
             swarm_id.clone(),
             working_dir.clone().unwrap_or_default(),
             initial_message.clone().unwrap_or_default(),
+            spawn_mode_key(spawn_mode).to_string(),
             request_nonce.clone().unwrap_or_default(),
         ],
     );
@@ -572,6 +594,7 @@ pub(super) async fn handle_comm_spawn(
         &swarm_id,
         working_dir,
         initial_message,
+        spawn_mode,
         sessions,
         global_session_id,
         provider_template,

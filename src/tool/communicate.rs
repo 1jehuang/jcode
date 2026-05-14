@@ -3,9 +3,9 @@
 use super::{Tool, ToolContext, ToolOutput};
 use crate::plan::PlanItem;
 use crate::protocol::{
-    AgentInfo, AgentStatusSnapshot, AwaitedMemberStatus, CommDeliveryMode, ContextEntry,
-    HistoryMessage, PlanGraphStatus, Request, ServerEvent, SwarmChannelInfo, ToolCallSummary,
-    comm_cleanup_candidate_session_ids, default_comm_await_target_statuses,
+    AgentInfo, AgentStatusSnapshot, AwaitedMemberStatus, CommDeliveryMode, CommSpawnMode,
+    ContextEntry, HistoryMessage, PlanGraphStatus, Request, ServerEvent, SwarmChannelInfo,
+    ToolCallSummary, comm_cleanup_candidate_session_ids, default_comm_await_target_statuses,
     default_comm_cleanup_target_statuses, default_comm_run_await_statuses,
     format_comm_awaited_members_with_reports, format_comm_channels, format_comm_context_entries,
     format_comm_context_history, format_comm_members, format_comm_plan_followup,
@@ -256,6 +256,7 @@ async fn run_swarm_plan_to_terminal(
                 working_dir: params.working_dir.clone(),
                 prefer_spawn: params.prefer_spawn,
                 spawn_if_needed,
+                spawn_mode: params.spawn_mode,
                 message: params.message.clone(),
             };
             match send_request(request).await {
@@ -305,6 +306,7 @@ async fn spawn_assignment_session(ctx: &ToolContext, params: &CommunicateInput) 
         session_id: ctx.session_id.clone(),
         working_dir: params.working_dir.clone(),
         initial_message: None,
+        spawn_mode: params.spawn_mode,
         request_nonce: Some(fresh_spawn_request_nonce(ctx)),
     };
 
@@ -489,6 +491,8 @@ struct CommunicateInput {
     #[serde(default)]
     spawn_if_needed: Option<bool>,
     #[serde(default)]
+    spawn_mode: Option<CommSpawnMode>,
+    #[serde(default)]
     prefer_spawn: Option<bool>,
     #[serde(default)]
     plan_items: Option<Vec<PlanItem>>,
@@ -607,6 +611,11 @@ impl Tool for CommunicateTool {
                 "spawn_if_needed": {
                     "type": "boolean",
                     "description": "For assign_task without an explicit target_session: if no reusable agent is available, spawn a fresh agent and retry the assignment automatically."
+                },
+                "spawn_mode": {
+                    "type": "string",
+                    "enum": ["visible", "headless", "auto"],
+                    "description": "For spawn/assign_next/fill_slots/run_plan: visible opens a terminal, headless runs in-process, auto tries visible then falls back to headless."
                 },
                 "prefer_spawn": {
                     "type": "boolean",
@@ -959,6 +968,7 @@ impl Tool for CommunicateTool {
                     session_id: ctx.session_id.clone(),
                     working_dir: params.working_dir.clone(),
                     initial_message: params.spawn_initial_message(),
+                    spawn_mode: params.spawn_mode,
                     request_nonce: None,
                 };
 
@@ -1234,6 +1244,7 @@ impl Tool for CommunicateTool {
                     working_dir: params.working_dir.clone(),
                     prefer_spawn: params.prefer_spawn,
                     spawn_if_needed: params.spawn_if_needed,
+                    spawn_mode: params.spawn_mode,
                     message: params.message.clone(),
                 };
 
@@ -1282,6 +1293,7 @@ impl Tool for CommunicateTool {
                         working_dir: params.working_dir.clone(),
                         prefer_spawn: params.prefer_spawn,
                         spawn_if_needed: params.spawn_if_needed,
+                        spawn_mode: params.spawn_mode,
                         message: params.message.clone(),
                     };
 

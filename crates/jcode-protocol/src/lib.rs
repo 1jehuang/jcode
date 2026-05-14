@@ -44,6 +44,18 @@ pub enum CommDeliveryMode {
     Wake,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CommSpawnMode {
+    /// Launch a visible terminal session. This preserves the historical behavior.
+    Visible,
+    /// Create the agent session in-process/headlessly and skip terminal launch.
+    Headless,
+    /// Try a visible terminal first, then fall back to headless on launch failure.
+    #[default]
+    Auto,
+}
+
 /// A message in conversation history (for sync)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryMessage {
@@ -270,7 +282,10 @@ pub enum Request {
     /// The `request_id` must match the value the server included in the
     /// preceding `ServerEvent::AskUserQuestionOpened` event.
     #[serde(rename = "submit_ask_user_answer")]
-    SubmitAskUserAnswer { id: u64, answer: AskUserAnswerPayload },
+    SubmitAskUserAnswer {
+        id: u64,
+        answer: AskUserAnswerPayload,
+    },
 
     /// Health check
     #[serde(rename = "ping")]
@@ -612,6 +627,8 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         initial_message: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        spawn_mode: Option<CommSpawnMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         request_nonce: Option<String>,
     },
 
@@ -712,6 +729,8 @@ pub enum Request {
         prefer_spawn: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         spawn_if_needed: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spawn_mode: Option<CommSpawnMode>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },

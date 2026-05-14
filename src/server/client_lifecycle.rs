@@ -357,6 +357,7 @@ async fn handle_lightweight_control_request(
             session_id: req_session_id,
             working_dir,
             initial_message,
+            spawn_mode,
             request_nonce,
         } => {
             handle_comm_spawn(
@@ -364,6 +365,7 @@ async fn handle_lightweight_control_request(
                 req_session_id,
                 working_dir,
                 initial_message,
+                spawn_mode,
                 request_nonce,
                 &client_event_tx,
                 sessions,
@@ -586,6 +588,7 @@ async fn handle_lightweight_control_request(
             working_dir,
             prefer_spawn,
             spawn_if_needed,
+            spawn_mode,
             message,
         } => {
             handle_comm_assign_next(
@@ -595,6 +598,7 @@ async fn handle_lightweight_control_request(
                 working_dir,
                 prefer_spawn,
                 spawn_if_needed,
+                spawn_mode,
                 message,
                 &client_event_tx,
                 sessions,
@@ -2211,6 +2215,7 @@ pub(super) async fn handle_client(
                 session_id: req_session_id,
                 working_dir,
                 initial_message,
+                spawn_mode,
                 request_nonce,
             } => {
                 handle_comm_spawn(
@@ -2218,6 +2223,7 @@ pub(super) async fn handle_client(
                     req_session_id,
                     working_dir,
                     initial_message,
+                    spawn_mode,
                     request_nonce,
                     &client_event_tx,
                     &sessions,
@@ -2450,6 +2456,7 @@ pub(super) async fn handle_client(
                 working_dir,
                 prefer_spawn,
                 spawn_if_needed,
+                spawn_mode,
                 message,
             } => {
                 handle_comm_assign_next(
@@ -2459,6 +2466,7 @@ pub(super) async fn handle_client(
                     working_dir,
                     prefer_spawn,
                     spawn_if_needed,
+                    spawn_mode,
                     message,
                     &client_event_tx,
                     &sessions,
