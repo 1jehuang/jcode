@@ -754,7 +754,12 @@ pub(crate) async fn spawn_server(
             // Fall back to current_exe(), but skip cargo test binaries
             // (they have a test harness entry point, not jcode's main).
             let exe = std::env::current_exe().ok()?;
-            if exe.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()) == Some("deps") {
+            if exe
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                == Some("deps")
+            {
                 None
             } else {
                 Some(exe)

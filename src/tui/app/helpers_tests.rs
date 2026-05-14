@@ -107,13 +107,7 @@ fn resume_invocation_args_includes_socket_when_present() {
 #[test]
 fn resume_invocation_args_omits_blank_socket() {
     let args = resume_invocation_args("ses_123", Some("   "));
-    assert_eq!(
-        args,
-        vec![
-            "--resume".to_string(),
-            "ses_123".to_string()
-        ]
-    );
+    assert_eq!(args, vec!["--resume".to_string(), "ses_123".to_string()]);
 }
 
 #[test]

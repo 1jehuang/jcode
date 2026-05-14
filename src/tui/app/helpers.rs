@@ -375,10 +375,7 @@ pub(super) fn mask_email(email: &str) -> String {
 /// Spawn a new terminal window that resumes a jcode session.
 /// Returns Ok(true) if a terminal was successfully launched, Ok(false) if no terminal found.
 fn resume_invocation_args(session_id: &str, socket: Option<&str>) -> Vec<String> {
-    let mut args = vec![
-        "--resume".to_string(),
-        session_id.to_string(),
-    ];
+    let mut args = vec!["--resume".to_string(), session_id.to_string()];
     if let Some(socket) = socket.filter(|s| !s.trim().is_empty()) {
         args.push("--socket".to_string());
         args.push(socket.to_string());
