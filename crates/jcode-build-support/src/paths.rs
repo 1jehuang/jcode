@@ -349,6 +349,18 @@ pub fn update_launcher_symlink_to_stable() -> Result<PathBuf> {
     update_launcher_symlink(&stable)
 }
 
+/// Check if a path looks like a Cargo test binary.
+///
+/// Test binaries live in `target/<profile>/deps/` and have the test harness as
+/// their entry point, meaning they won't recognize jcode CLI flags like
+/// `--fresh-spawn` or `--resume`.
+fn is_test_binary_path(exe: &Path) -> bool {
+    exe.parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s == "deps")
+}
+
 /// Resolve which client binary should be considered for launches, updates, and reloads.
 ///
 /// Order matters:
@@ -383,7 +395,11 @@ pub fn client_update_candidate(is_selfdev_session: bool) -> Option<(PathBuf, &'s
         return Some(stable);
     }
 
-    std::env::current_exe().ok().map(|exe| (exe, "current"))
+    // Avoid launching cargo test binaries whose entry point is the test harness.
+    std::env::current_exe()
+        .ok()
+        .filter(|exe| !is_test_binary_path(exe))
+        .map(|exe| (exe, "current"))
 }
 
 /// Resolve the binary that the shared daemon should spawn or reload into.

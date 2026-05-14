@@ -36,9 +36,11 @@ pub(super) fn extract_bracketed_system_message(message: &str) -> Option<String> 
 }
 
 pub(super) fn launch_client_executable() -> PathBuf {
+    // client_update_candidate prefers published channels, then repo dev binaries,
+    // then current_exe() (filtering out cargo test binaries). If none found,
+    // fall through to PATH-resolved "jcode".
     crate::build::client_update_candidate(crate::cli::selfdev::client_selfdev_requested())
         .map(|(path, _label)| path)
-        .or_else(|| std::env::current_exe().ok())
         .unwrap_or_else(|| PathBuf::from("jcode"))
 }
 
