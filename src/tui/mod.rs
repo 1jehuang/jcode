@@ -1,8 +1,10 @@
 pub mod account_picker;
 mod app;
 mod ui_blocks;
+mod ui_context_actions;
 mod ui_actions;
 mod ui_streaming;
+mod ui_timeline;
 pub mod backend;
 pub(crate) mod color_support;
 mod core;
