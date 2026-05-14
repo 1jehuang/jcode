@@ -1169,10 +1169,13 @@ impl Provider for MultiProvider {
             .iter()
             .copied()
         {
+            let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+            if !crate::provider_catalog::provider_is_enabled(&resolved.id) {
+                continue;
+            }
             if !crate::provider_catalog::openai_compatible_profile_is_configured(profile) {
                 continue;
             }
-            let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
             let api_method = format!("openai-compatible:{}", resolved.id);
             let mut profile_models =
                 crate::provider_catalog::openai_compatible_profile_static_models(profile);
@@ -1286,7 +1289,7 @@ impl Provider for MultiProvider {
         }
 
         // GitHub Copilot models
-        {
+        if crate::provider_catalog::provider_is_enabled("copilot") {
             if let Some(copilot) = self.copilot_provider() {
                 let copilot_models = copilot.available_models_display();
                 let detail = copilot.model_catalog_detail();
@@ -1523,7 +1526,10 @@ impl Provider for MultiProvider {
             ));
         }
 
-        dedupe_model_routes(routes)
+        crate::provider_catalog::filter_model_routes_by_allowlist(
+            "multi-provider",
+            dedupe_model_routes(routes),
+        )
     }
 
     async fn prefetch_models(&self) -> Result<()> {
