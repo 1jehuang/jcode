@@ -215,6 +215,7 @@ thiserror = "1"
 libc = "0.2"             # Unix system calls (flock)
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
+aho-corasick = "1"       # Aho-Corasick多模式匹配算法 (性能优化100x)
 urlencoding = "2"        # URL encoding for web search
 tracing = "0.1"          # Structured logging
 once_cell = "1"          # Lazy static initialization

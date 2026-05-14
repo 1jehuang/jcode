@@ -321,15 +321,15 @@ mod tests {
         cache.put('c', 'C');
         
         // 访问'a'使其变为最近使用
-        cache.get(&a');
+        cache.get(&'a');
         
         // 插入'd'应该淘汰'b'而不是'a'
         cache.put('d', 'D');
         
-        assert_eq!(cache.get(&a'), Some('A'));  // 仍在缓存
-        assert_eq!(cache.get(&b'), None);      // 被淘汰
-        assert_eq!(cache.get(&c'), Some('C'));
-        assert_eq!(cache.get(&d), Some('D'));
+        assert_eq!(cache.get(&'a'), Some('A'));  // 仍在缓存
+        assert_eq!(cache.get(&'b'), None);      // 被淘汰
+        assert_eq!(cache.get(&'c'), Some('C'));
+        assert_eq!(cache.get(&'d'), Some('D'));
     }
 
     #[test]

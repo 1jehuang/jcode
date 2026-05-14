@@ -25,8 +25,10 @@
 //!         └─ FileEdit / FileCreate
 //! ```
 
-pub mod engine;
+pub mod aho_corasick;
 pub mod confidence;
+pub mod enhanced_confidence;
+pub mod engine;
 pub mod safety;
 pub mod learning;
 

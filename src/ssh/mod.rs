@@ -51,24 +51,24 @@
 //!
 //! ```
 //! SshManager (全局管理器)
-//! ├── SshConfigParser (~/.ssh/config解析器)
-//! ├── ConnectionPool (连接池)
-│   └── Vec<SshSession> (活跃连接)
-│       ├── CommandExecutor (命令执行器)
-│       │   ├── SyncExecutor
-│       │   ├── AsyncExecutor
-│       │   └── StreamingExecutor
-│       ├── FileTransfer (文件传输)
-│       │   ├── ScpTransfer
-│       │   └── RsyncTransfer
-│       └── PortForwarder (端口转发)
-│           ├── LocalForward
-│           ├── RemoteForward
-│           └── DynamicForward (SOCKS5)
-├── SessionRegistry (会话注册表)
-│   └── HashMap<session_id, SshSession>
-└── AuditLogger (审计日志)
-//!     └── Vec<SshEvent> (操作记录)
+//! +-- SshConfigParser (~/.ssh/config解析器)
+//! +-- ConnectionPool (连接池)
+//! |   +-- Vec<SshSession> (活跃连接)
+//! |       +-- CommandExecutor (命令执行器)
+//! |       |   +-- SyncExecutor
+//! |       |   +-- AsyncExecutor
+//! |       |   +-- StreamingExecutor
+//! |       +-- FileTransfer (文件传输)
+//! |       |   +-- ScpTransfer
+//! |       |   +-- RsyncTransfer
+//! |       +-- PortForwarder (端口转发)
+//! |           +-- LocalForward
+//! |           +-- RemoteForward
+//! |           +-- DynamicForward (SOCKS5)
+//! +-- SessionRegistry (会话注册表)
+//! |   +-- HashMap<session_id, SshSession>
+//! +-- AuditLogger (审计日志)
+//!     +-- Vec<SshEvent> (操作记录)
 //! ```
 
 pub mod session;
