@@ -1,0 +1,26 @@
+# Agent DB Substrate — local Postgres for agent analytics
+# Well-known credentials; only accessible from localhost.
+# Start: docker compose -f docker-compose.agent-db.yml up -d
+# Stop:  docker compose -f docker-compose.agent-db.yml down -v
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: jcode-agent-db
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: jcode_agent
+      POSTGRES_PASSWORD: jcode_agent_local
+      POSTGRES_DB: jcode_agent_workspace
+    volumes:
+      - jcode_agent_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jcode_agent -d jcode_agent_workspace"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  jcode_agent_db_data:
