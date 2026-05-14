@@ -277,19 +277,6 @@ impl App {
         let skills = self.current_skills_snapshot();
         push_skill_commands(&mut commands, &mut seen, &skills);
 
-        // Remote/minimal TUI clients can start with an empty local skill registry,
-        // while direct slash invocation reloads on miss. Mirror that behavior for
-        // autocomplete so project-local skills like `/optimization` are suggested
-        // before the user has activated them once.
-        let working_dir = self
-            .session
-            .working_dir
-            .as_deref()
-            .map(std::path::Path::new);
-        if let Ok(reloaded) = crate::skill::SkillRegistry::load_for_working_dir(working_dir) {
-            push_skill_commands(&mut commands, &mut seen, &reloaded);
-        }
-
         commands
     }
 
