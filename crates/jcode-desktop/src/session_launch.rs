@@ -105,7 +105,10 @@ pub fn launch_resume_session(session_id: &str, title: &str) -> Result<()> {
 }
 
 pub fn launch_new_session() -> Result<()> {
-    let candidates = terminal_candidates("jcode · new session", &["--fresh-spawn"]);
+    // Fresh-spawn is signaled via JCODE_FRESH_SPAWN by jcode-terminal-launch.
+    // Do not pass --fresh-spawn as a CLI arg: release/test binaries do not
+    // accept it, which leaves orphan terminal windows and can trigger auth churn.
+    let candidates = terminal_candidates("jcode · new session", &[]);
     launch_first_available_terminal(candidates, "jcode")
 }
 

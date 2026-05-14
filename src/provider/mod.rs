@@ -2008,25 +2008,26 @@ impl Provider for MultiProvider {
         let current_model = self.model();
         let active = self.active_provider();
 
-        let claude = if matches!(active, ActiveProvider::Claude) && self.claude_provider().is_some()
-        {
-            Some(Arc::new(claude::ClaudeProvider::new()))
-        } else {
-            None
-        };
-        let anthropic = if self.anthropic_provider().is_some() {
-            Some(Arc::new(anthropic::AnthropicProvider::new()))
-        } else {
-            None
-        };
-        let openai = if self.openai_provider().is_some() {
-            auth::codex::load_credentials()
-                .ok()
-                .map(openai::OpenAIProvider::new)
-                .map(Arc::new)
-        } else {
-            None
-        };
+        // Shallow-clone all provider slots so no re-construction occurs.
+        // Each read is a cheap RwLock read + Option<Arc>::clone (atomic increment).
+        // If a non-active slot is later needed by failover,
+        // reconcile_auth_if_provider_missing / handle_auth_changed will
+        // hot-initialize it on demand.
+        let claude = self
+            .claude
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let anthropic = self
+            .anthropic
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let openai = self
+            .openai
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         let copilot_api = self
             .copilot_api
             .read()
@@ -2042,31 +2043,21 @@ impl Provider for MultiProvider {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let cursor_provider = if self
+        let cursor_provider = self
             .cursor
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_some()
-        {
-            Some(Arc::new(cursor::CursorCliProvider::new()))
-        } else {
-            None
-        };
-        let bedrock_provider = if self.bedrock_provider().is_some() {
-            Some(Arc::new(bedrock::BedrockProvider::new()))
-        } else {
-            None
-        };
-        let openrouter = if self
+            .clone();
+        let bedrock_provider = self
+            .bedrock
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let openrouter = self
             .openrouter
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_some()
-        {
-            openrouter::OpenRouterProvider::new().ok().map(Arc::new)
-        } else {
-            None
-        };
+            .clone();
 
         let provider = Self {
             claude: RwLock::new(claude),
@@ -2084,8 +2075,6 @@ impl Provider for MultiProvider {
             forced_provider: self.forced_provider,
         };
 
-        provider.spawn_anthropic_catalog_refresh_if_needed();
-        provider.spawn_openai_catalog_refresh_if_needed();
         if matches!(active, ActiveProvider::Copilot) {
             let _ = provider.set_model(&format!("copilot:{}", current_model));
         } else if matches!(active, ActiveProvider::Antigravity) {

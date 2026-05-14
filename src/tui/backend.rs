@@ -834,12 +834,22 @@ impl RemoteConnection {
                         ));
                         continue;
                     }
+                    let trimmed = self.line_buffer.trim_start();
+                    if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+                        let preview: String = self.line_buffer.chars().take(240).collect();
+                        crate::logging::warn(&format!(
+                            "RemoteConnection::next_event: skipping non-json stray line preview={:?} (session_id={:?}, client_instance_id={:?})",
+                            preview, self.session_id, self.client_instance_id
+                        ));
+                        continue;
+                    }
                     match serde_json::from_str(&self.line_buffer) {
                         Ok(event) => return RemoteRead::Event(event),
                         Err(error) => {
+                            let preview: String = self.line_buffer.chars().take(240).collect();
                             crate::logging::warn(&format!(
-                                "RemoteConnection::next_event: protocol error={} line={:?} (session_id={:?}, client_instance_id={:?})",
-                                error, self.line_buffer, self.session_id, self.client_instance_id
+                                "RemoteConnection::next_event: protocol error={} line_preview={:?} (session_id={:?}, client_instance_id={:?})",
+                                error, preview, self.session_id, self.client_instance_id
                             ));
                             return RemoteRead::Disconnected(RemoteDisconnectReason::Protocol(
                                 error.to_string(),
