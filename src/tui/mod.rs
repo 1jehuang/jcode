@@ -1,5 +1,8 @@
 pub mod account_picker;
 mod app;
+mod ui_blocks;
+mod ui_actions;
+mod ui_streaming;
 pub mod backend;
 pub(crate) mod color_support;
 mod core;
@@ -22,6 +25,7 @@ mod stream_buffer;
 pub mod test_harness;
 mod ui;
 mod ui_diff;
+pub mod ui_json;
 pub mod usage_overlay;
 pub mod visual_debug;
 pub mod workspace_client;

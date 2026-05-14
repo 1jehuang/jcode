@@ -13,6 +13,7 @@ pub mod completer;
 pub mod snippet;
 pub mod powershell;
 pub mod fish;
+pub mod nl_command;
 
 use serde::{Deserialize, Serialize};
 
