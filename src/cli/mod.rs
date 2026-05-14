@@ -21,3 +21,6 @@ pub mod pipe_handler;
 pub mod slash_commands;
 pub mod cli_flags;
 pub mod management_commands;
+
+// Phase 2 - P1高频命令
+pub mod p1_commands;
