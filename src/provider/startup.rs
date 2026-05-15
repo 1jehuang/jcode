@@ -69,6 +69,21 @@ impl MultiProvider {
         let cfg = crate::config::config();
         let provider_state = ProviderState::from_parts(cfg, &auth_status);
         let mut default_named_provider_profile: Option<String> = None;
+
+        // When no explicit CLI provider profile override is active, clear any
+        // stale named-provider env vars that may be lingering from a previous
+        // session's shell environment.  Without this, stale
+        // JCODE_NAMED_PROVIDER_PROFILE / JCODE_ACTIVE_PROVIDER / etc. will
+        // block the config.toml default_provider from taking effect, causing
+        // the model picker and session provider key to resolve to the wrong
+        // provider.
+        if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_none() {
+            crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
+            crate::env::remove_var("JCODE_OPENROUTER_CACHE_NAMESPACE");
+            crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
+            crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
+        }
+
         if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_none()
             && std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none()
             && let Some(pref) = provider_state.default_provider_key()
