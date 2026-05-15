@@ -408,8 +408,10 @@ impl SessionPicker {
             " Esc cancel "
         } else if self.search_active {
             " type to filter, Esc cancel "
+        } else if self.pending_delete_targets.is_some() {
+            " Confirm delete: d/D/Delete/Enter · Esc cancel "
         } else {
-            " Space select · Enter resume · s next filter · S prev · d debug · / search · h/l focus · ↑↓ · q "
+            " Space select · Enter resume · d/D/Delete delete · s next filter · S prev · t tests · / search · h/l focus · ↑↓ · q "
         };
 
         let border_dim: Color = rgb(70, 70, 70);

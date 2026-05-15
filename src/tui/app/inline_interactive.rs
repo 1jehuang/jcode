@@ -1486,7 +1486,9 @@ impl App {
 
         let manual: Vec<String> = failed.iter().map(|cmd| format!("  {}", cmd)).collect();
 
-        if spawned > 0 {
+        if spawned == 0 && !targets.is_empty() {
+            self.handle_session_picker_current_terminal_selection(targets);
+        } else if spawned > 0 {
             self.push_display_message(DisplayMessage::system(format!(
                 "Resumed **{} session(s)** in new windows. {} failed:\n```\n{}\n```",
                 spawned,
@@ -1500,6 +1502,42 @@ impl App {
                 manual.join("\n")
             )));
         }
+    }
+
+    pub(super) fn handle_session_picker_delete(&mut self, targets: &[ResumeTarget]) {
+        if targets.is_empty() {
+            return;
+        }
+
+        let mut deleted = 0usize;
+        let mut failed = Vec::new();
+        for target in targets {
+            let Some(session_id) = crate::import::imported_session_id_for_target(target) else {
+                continue;
+            };
+            match crate::session::delete_session_artifacts(&session_id) {
+                Ok(result) if !result.removed.is_empty() => deleted += 1,
+                Ok(_) => {}
+                Err(err) => failed.push(format!("{session_id}: {err}")),
+            }
+        }
+
+        session_picker::invalidate_session_list_cache();
+        self.session_picker_overlay = None;
+        self.session_picker_mode = SessionPickerMode::Resume;
+        if failed.is_empty() {
+            self.push_display_message(DisplayMessage::system(format!(
+                "Deleted **{} session(s)**.",
+                deleted
+            )));
+        } else {
+            self.push_display_message(DisplayMessage::error(format!(
+                "Deleted {} session(s); failed: {}",
+                deleted,
+                failed.join("; ")
+            )));
+        }
+        self.set_status_notice(format!("Deleted {} session(s)", deleted));
     }
 
     pub(super) fn handle_session_picker_current_terminal_selection(
@@ -1666,7 +1704,14 @@ impl App {
                 }
             }
             OverlayAction::Selected(PickerResult::SelectedInCurrentTerminal(ids)) => {
-                self.handle_session_picker_current_terminal_selection(&ids);
+                if self.session_picker_mode == SessionPickerMode::CatchUp {
+                    self.handle_session_picker_selection(&ids);
+                } else {
+                    self.handle_session_picker_current_terminal_selection(&ids);
+                }
+            }
+            OverlayAction::Selected(PickerResult::DeleteSessions(targets)) => {
+                self.handle_session_picker_delete(&targets);
             }
             OverlayAction::Selected(PickerResult::RestoreAllCrashed) => {
                 self.handle_batch_crash_restore();

@@ -449,7 +449,7 @@ impl Default for KeybindingsConfig {
             workspace_down: "alt+j".to_string(),
             workspace_up: "alt+k".to_string(),
             workspace_right: "alt+l".to_string(),
-            session_picker_enter: SessionPickerResumeAction::NewTerminal,
+            session_picker_enter: SessionPickerResumeAction::CurrentTerminal,
         }
     }
 }

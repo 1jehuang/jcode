@@ -39,7 +39,9 @@ pub(crate) use storage_paths::session_journal_path_from_snapshot;
 #[cfg(test)]
 pub(crate) use storage_paths::session_path_in_dir;
 use storage_paths::{estimate_json_bytes, persist_vector_mode_label};
-pub use storage_paths::{session_exists, session_journal_path, session_path};
+pub use storage_paths::{
+    delete_session_artifacts, session_exists, session_journal_path, session_path,
+};
 
 fn stored_messages_to_messages(messages: &[StoredMessage]) -> Vec<Message> {
     messages.iter().map(StoredMessage::to_message).collect()

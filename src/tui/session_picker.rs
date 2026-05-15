@@ -48,6 +48,7 @@ pub enum PickerResult {
     Selected(Vec<ResumeTarget>),
     SelectedInCurrentTerminal(Vec<ResumeTarget>),
     SelectedInNewTerminal(Vec<ResumeTarget>),
+    DeleteSessions(Vec<ResumeTarget>),
     RestoreAllCrashed,
 }
 
@@ -169,6 +170,7 @@ pub struct SessionPicker {
     cached_search_refs: Vec<SessionRef>,
     /// Lightweight placeholder shown while the picker list is loading.
     loading_message: Option<String>,
+    pending_delete_targets: Option<Vec<ResumeTarget>>,
 }
 
 impl SessionPicker {
@@ -206,6 +208,7 @@ impl SessionPicker {
             cached_search_query: String::new(),
             cached_search_refs: Vec::new(),
             loading_message: None,
+            pending_delete_targets: None,
         };
         picker.rebuild_items();
         picker
@@ -239,6 +242,7 @@ impl SessionPicker {
             cached_search_query: String::new(),
             cached_search_refs: Vec::new(),
             loading_message: Some("Loading sessions…".to_string()),
+            pending_delete_targets: None,
         }
     }
 
@@ -305,6 +309,7 @@ impl SessionPicker {
             cached_search_query: String::new(),
             cached_search_refs: Vec::new(),
             loading_message: None,
+            pending_delete_targets: None,
         };
         picker.rebuild_items();
         picker
@@ -365,6 +370,18 @@ impl SessionPicker {
 
     pub fn clear_selected_sessions(&mut self) {
         self.selected_session_ids.clear();
+        self.pending_delete_targets = None;
+    }
+
+    fn is_delete_key(code: KeyCode) -> bool {
+        matches!(
+            code,
+            KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Delete
+        )
+    }
+
+    fn is_delete_confirm_key(code: KeyCode) -> bool {
+        Self::is_delete_key(code) || matches!(code, KeyCode::Enter)
     }
 
     fn selected_session_ref(&self) -> Option<SessionRef> {
@@ -579,6 +596,20 @@ impl SessionPicker {
             return Ok(OverlayAction::Continue);
         }
 
+        if let Some(targets) = self.pending_delete_targets.clone() {
+            if Self::is_delete_confirm_key(code) {
+                self.pending_delete_targets = None;
+                return Ok(OverlayAction::Selected(PickerResult::DeleteSessions(
+                    targets,
+                )));
+            }
+            match code {
+                KeyCode::Esc | KeyCode::Char('q') => self.pending_delete_targets = None,
+                _ => {}
+            }
+            return Ok(OverlayAction::Continue);
+        }
+
         match code {
             KeyCode::Esc => {
                 if !self.search_query.is_empty() {
@@ -591,6 +622,12 @@ impl SessionPicker {
             KeyCode::Char('q') => return Ok(OverlayAction::Close),
             KeyCode::Char(' ') => {
                 self.toggle_selected_session();
+            }
+            code if Self::is_delete_key(code) => {
+                let targets = self.selection_or_current_targets();
+                if !targets.is_empty() {
+                    self.pending_delete_targets = Some(targets);
+                }
             }
             KeyCode::Enter => {
                 let targets = self.selection_or_current_targets();
@@ -608,7 +645,7 @@ impl SessionPicker {
             KeyCode::Char('/') => {
                 self.search_active = true;
             }
-            KeyCode::Char('d') => {
+            KeyCode::Char('t') | KeyCode::Char('T') => {
                 self.toggle_test_sessions();
             }
             KeyCode::Char('s') => {
@@ -644,7 +681,12 @@ impl SessionPicker {
                 PickerResult::SelectedInNewTerminal(targets)
             }
             crate::config::SessionPickerResumeAction::CurrentTerminal => {
-                PickerResult::SelectedInCurrentTerminal(targets)
+                let target = self
+                    .selected_session()
+                    .map(|session| session.resume_target.clone())
+                    .into_iter()
+                    .collect();
+                PickerResult::SelectedInCurrentTerminal(target)
             }
         }
     }
@@ -1225,6 +1267,18 @@ impl SessionPicker {
 
                         // Normal mode
                         match key.code {
+                            code if self.pending_delete_targets.is_some()
+                                && Self::is_delete_confirm_key(code) =>
+                            {
+                                let targets = self.pending_delete_targets.take().unwrap();
+                                break Ok(Some(PickerResult::DeleteSessions(targets)));
+                            }
+                            KeyCode::Esc | KeyCode::Char('q')
+                                if self.pending_delete_targets.is_some() =>
+                            {
+                                self.pending_delete_targets = None;
+                                continue;
+                            }
                             KeyCode::Esc => {
                                 if !self.search_query.is_empty() {
                                     // Clear active search filter first
@@ -1239,6 +1293,12 @@ impl SessionPicker {
                             }
                             KeyCode::Char(' ') => {
                                 self.toggle_selected_session();
+                            }
+                            code if Self::is_delete_key(code) => {
+                                let targets = self.selection_or_current_targets();
+                                if !targets.is_empty() {
+                                    self.pending_delete_targets = Some(targets);
+                                }
                             }
                             KeyCode::Enter => {
                                 let targets = self.selection_or_current_targets();
@@ -1257,7 +1317,7 @@ impl SessionPicker {
                             KeyCode::Char('/') => {
                                 self.search_active = true;
                             }
-                            KeyCode::Char('d') => {
+                            KeyCode::Char('t') | KeyCode::Char('T') => {
                                 self.toggle_test_sessions();
                             }
                             KeyCode::Char('s') => {

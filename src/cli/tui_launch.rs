@@ -991,6 +991,23 @@ pub fn list_sessions() -> Result<()> {
 
             Ok(())
         }
+        Some(tui::session_picker::PickerResult::DeleteSessions(targets)) => {
+            let mut deleted = 0usize;
+            for target in targets {
+                let Some(session_id) = crate::import::imported_session_id_for_target(&target)
+                else {
+                    continue;
+                };
+                match session::delete_session_artifacts(&session_id) {
+                    Ok(result) if !result.removed.is_empty() => deleted += 1,
+                    Ok(_) => eprintln!("No local jcode artifacts found for {session_id}."),
+                    Err(err) => eprintln!("Failed to delete {session_id}: {err}"),
+                }
+            }
+            tui::session_picker::invalidate_session_list_cache();
+            eprintln!("Deleted {deleted} session(s).");
+            Ok(())
+        }
         Some(tui::session_picker::PickerResult::RestoreAllCrashed) => {
             let recovered = session::recover_crashed_sessions()?;
             if recovered.is_empty() {

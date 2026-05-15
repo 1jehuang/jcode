@@ -726,20 +726,80 @@ fn test_space_selects_multiple_sessions_and_enter_returns_them() {
         .unwrap();
 
     match action {
-        OverlayAction::Selected(PickerResult::SelectedInNewTerminal(ids)) => {
+        OverlayAction::Selected(PickerResult::SelectedInCurrentTerminal(ids)) => {
             assert_eq!(
                 ids,
-                vec![
-                    ResumeTarget::JcodeSession {
-                        session_id: "session_newer".to_string(),
-                    },
-                    ResumeTarget::JcodeSession {
-                        session_id: "session_older".to_string(),
-                    }
-                ]
+                vec![ResumeTarget::JcodeSession {
+                    session_id: "session_older".to_string(),
+                }]
             );
         }
         other => panic!("expected selected sessions, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_delete_requires_confirmation_and_returns_selected_sessions() {
+    let newer = make_session("session_newer", "newer", false, SessionStatus::Closed);
+    let older = make_session("session_older", "older", false, SessionStatus::Closed);
+    let mut picker = SessionPicker::new(vec![older, newer]);
+
+    picker
+        .handle_overlay_key(KeyCode::Char(' '), KeyModifiers::empty())
+        .unwrap();
+    let first = picker
+        .handle_overlay_key(KeyCode::Char('D'), KeyModifiers::empty())
+        .unwrap();
+    assert!(matches!(first, OverlayAction::Continue));
+
+    let confirmed = picker
+        .handle_overlay_key(KeyCode::Char('D'), KeyModifiers::empty())
+        .unwrap();
+    match confirmed {
+        OverlayAction::Selected(PickerResult::DeleteSessions(targets)) => {
+            assert_eq!(
+                targets,
+                vec![ResumeTarget::JcodeSession {
+                    session_id: "session_older".to_string(),
+                }]
+            );
+        }
+        other => panic!("expected delete selection, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_delete_accepts_lowercase_d_and_delete_key() {
+    let newer = make_session("session_newer", "newer", false, SessionStatus::Closed);
+    let older = make_session("session_older", "older", false, SessionStatus::Closed);
+    let mut picker = SessionPicker::new(vec![older, newer]);
+
+    picker
+        .handle_overlay_key(KeyCode::Char('d'), KeyModifiers::empty())
+        .unwrap();
+    let cancelled = picker
+        .handle_overlay_key(KeyCode::Esc, KeyModifiers::empty())
+        .unwrap();
+    assert!(matches!(cancelled, OverlayAction::Continue));
+
+    let first = picker
+        .handle_overlay_key(KeyCode::Delete, KeyModifiers::empty())
+        .unwrap();
+    assert!(matches!(first, OverlayAction::Continue));
+
+    let confirmed = picker
+        .handle_overlay_key(KeyCode::Char('d'), KeyModifiers::empty())
+        .unwrap();
+    match confirmed {
+        OverlayAction::Selected(PickerResult::DeleteSessions(targets)) => {
+            assert_eq!(
+                targets,
+                vec![ResumeTarget::JcodeSession {
+                    session_id: "session_older".to_string(),
+                }]
+            );
+        }
+        other => panic!("expected delete selection, got {other:?}"),
     }
 }
 

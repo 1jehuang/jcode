@@ -166,14 +166,14 @@ fn test_native_scrollbars_default_to_enabled() {
 }
 
 #[test]
-fn test_session_picker_resume_action_defaults_to_new_terminal() {
+fn test_session_picker_resume_action_defaults_to_current_terminal() {
     assert_eq!(
         Config::default().keybindings.session_picker_enter,
-        SessionPickerResumeAction::NewTerminal
+        SessionPickerResumeAction::CurrentTerminal
     );
     assert_eq!(
-        SessionPickerResumeAction::NewTerminal.alternate(),
-        SessionPickerResumeAction::CurrentTerminal
+        SessionPickerResumeAction::CurrentTerminal.alternate(),
+        SessionPickerResumeAction::NewTerminal
     );
 }
 
