@@ -480,6 +480,29 @@ pub fn apply_named_provider_profile_env(profile_name: &str) -> anyhow::Result<St
     apply_named_provider_profile_env_from_config(profile_name, config)
 }
 
+pub fn rehydrate_active_named_provider_profile_env_from_config(
+    config: &crate::config::Config,
+) -> anyhow::Result<Option<String>> {
+    let profile_name = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+        .ok()
+        .or_else(|| std::env::var("JCODE_PROVIDER_PROFILE_NAME").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let Some(profile_name) = profile_name else {
+        return Ok(None);
+    };
+
+    if !config.providers.contains_key(&profile_name) {
+        return Ok(None);
+    }
+
+    let profile_name = apply_named_provider_profile_env_from_config(&profile_name, config)?;
+    crate::env::set_var("JCODE_PROVIDER_PROFILE_NAME", &profile_name);
+    crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
+    Ok(Some(profile_name))
+}
+
 pub fn apply_named_provider_profile_env_from_config(
     profile_name: &str,
     config: &crate::config::Config,

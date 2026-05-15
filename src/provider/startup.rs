@@ -69,6 +69,15 @@ impl MultiProvider {
         let cfg = crate::config::config();
         let provider_state = ProviderState::from_parts(cfg, &auth_status);
         let mut default_named_provider_profile: Option<String> = None;
+        match crate::provider_catalog::rehydrate_active_named_provider_profile_env_from_config(cfg)
+        {
+            Ok(Some(profile_name)) => default_named_provider_profile = Some(profile_name),
+            Ok(None) => {}
+            Err(err) => crate::logging::warn(&format!(
+                "Failed to rehydrate active provider profile from config: {}",
+                err
+            )),
+        }
         if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_none()
             && std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none()
             && let Some(pref) = provider_state.default_provider_key()

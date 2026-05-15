@@ -68,6 +68,30 @@ fn test_load_agents_md_files_uses_sandboxed_global_files() {
 }
 
 #[test]
+fn test_load_agents_md_files_deduplicates_home_project_file() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let temp = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let external = temp.path().join("external");
+    std::fs::create_dir_all(&external).unwrap();
+    std::fs::write(external.join("AGENTS.md"), "shared home instructions").unwrap();
+
+    let (content, info) = load_agents_md_files_from_dir(Some(&external));
+
+    assert!(info.has_project_agents_md);
+    assert!(!info.has_global_agents_md);
+    let content = content.expect("project instructions content");
+    assert_eq!(content.matches("shared home instructions").count(), 1);
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
 fn test_session_context_includes_time_timezone_and_system_info() {
     let context = build_session_context(None);
     assert!(context.contains("# Session Context"));

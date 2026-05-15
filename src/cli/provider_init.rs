@@ -1225,6 +1225,9 @@ async fn init_provider_with_options(
         crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
     }
 
+    let cfg = crate::config::config();
+    crate::provider_catalog::rehydrate_active_named_provider_profile_env_from_config(cfg)?;
+
     if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_none()
         && std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none()
     {

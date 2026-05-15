@@ -505,6 +505,64 @@ fn named_provider_profile_maps_to_openai_compatible_runtime_env() {
 }
 
 #[test]
+fn active_named_provider_profile_is_rehydrated_from_config_when_env_is_partial() {
+    let _lock = crate::storage::lock_test_env();
+    let _guard = EnvGuard::save(&[
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_MODEL",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+    ]);
+
+    let cfg: crate::config::Config = toml::from_str(
+        r#"
+        [providers.ollama-cloud]
+        type = "openai-compatible"
+        base_url = "https://ollama.com/v1"
+        auth = "bearer"
+        api_key_env = "OLLAMA_API_KEY"
+        env_file = "ollama.env"
+        default_model = "deepseek-v4-pro"
+        "#,
+    )
+    .expect("config should parse");
+
+    crate::env::set_var("JCODE_NAMED_PROVIDER_PROFILE", "ollama-cloud");
+    crate::env::remove_var("JCODE_OPENROUTER_API_BASE");
+    crate::env::remove_var("JCODE_OPENROUTER_API_KEY_NAME");
+    crate::env::remove_var("JCODE_OPENROUTER_ENV_FILE");
+
+    let applied = rehydrate_active_named_provider_profile_env_from_config(&cfg)
+        .expect("rehydrate should succeed");
+
+    assert_eq!(applied.as_deref(), Some("ollama-cloud"));
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_BASE").ok().as_deref(),
+        Some("https://ollama.com/v1")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
+            .ok()
+            .as_deref(),
+        Some("OLLAMA_API_KEY")
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_ENV_FILE").ok().as_deref(),
+        Some("ollama.env")
+    );
+    assert_eq!(
+        std::env::var("JCODE_PROVIDER_PROFILE_ACTIVE")
+            .ok()
+            .as_deref(),
+        Some("1")
+    );
+}
+
+#[test]
 fn named_provider_inline_api_key_is_private_runtime_fallback() {
     let _lock = crate::storage::lock_test_env();
     let _guard = EnvGuard::save(&[
