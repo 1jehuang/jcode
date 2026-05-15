@@ -523,18 +523,8 @@ impl App {
             }
         };
 
-        let routes = if routes.is_empty() && self.is_remote && current_model != "unknown" {
-            vec![crate::provider::ModelRoute {
-                model: current_model.clone(),
-                provider: self
-                    .remote_provider_name
-                    .clone()
-                    .unwrap_or_else(|| "current".to_string()),
-                api_method: "current".to_string(),
-                available: true,
-                detail: "catalog still loading".to_string(),
-                cheapness: None,
-            }]
+        let routes = if routes.is_empty() && self.is_remote {
+            self.build_remote_config_model_routes_fallback(&current_model)
         } else {
             routes
         };
@@ -908,9 +898,18 @@ impl App {
     }
 
     pub(super) fn build_remote_model_routes_fallback(&self) -> Vec<crate::provider::ModelRoute> {
+        let mut routes =
+            Self::build_remote_model_routes_for_entries(&self.remote_available_entries);
+        Self::append_remote_named_provider_routes(&mut routes, &self.remote_available_entries);
+        routes
+    }
+
+    fn build_remote_model_routes_for_entries(
+        entries: &[String],
+    ) -> Vec<crate::provider::ModelRoute> {
         let auth = crate::auth::AuthStatus::check_fast();
         let mut routes = Vec::new();
-        for model in &self.remote_available_entries {
+        for model in entries {
             if !crate::provider::is_listable_model_name(model) {
                 continue;
             }
@@ -1085,6 +1084,146 @@ impl App {
             }
         }
         routes
+    }
+
+    fn build_remote_config_model_routes_fallback(
+        &self,
+        current_model: &str,
+    ) -> Vec<crate::provider::ModelRoute> {
+        let mut models = Vec::new();
+        let mut push_model = |model: &str| {
+            let model = model.trim();
+            if model.is_empty()
+                || model == "unknown"
+                || model.contains('*')
+                || !crate::provider::is_listable_model_name(model)
+                || models.iter().any(|existing| existing == model)
+            {
+                return;
+            }
+            models.push(model.to_string());
+        };
+
+        push_model(current_model);
+
+        let cfg = crate::config::config();
+        if let Some(default_model) = cfg.provider.default_model.as_deref() {
+            let default_model = default_model
+                .strip_prefix("copilot:")
+                .unwrap_or(default_model)
+                .strip_prefix("cursor:")
+                .unwrap_or(default_model)
+                .strip_prefix("antigravity:")
+                .unwrap_or(default_model)
+                .split('@')
+                .next()
+                .unwrap_or(default_model);
+            push_model(default_model);
+        }
+
+        for patterns in cfg.provider.model_allowlist.values() {
+            for pattern in patterns {
+                let pattern = pattern.trim();
+                let model = pattern.strip_prefix('=').unwrap_or(pattern);
+                push_model(model);
+            }
+        }
+
+        let mut routes = Self::build_remote_model_routes_for_entries(&models);
+        Self::append_remote_named_provider_routes(&mut routes, &models);
+        routes
+    }
+
+    fn append_remote_named_provider_routes(
+        routes: &mut Vec<crate::provider::ModelRoute>,
+        models: &[String],
+    ) {
+        let cfg = crate::config::config();
+        for (profile_name, profile) in &cfg.providers {
+            if !crate::provider_catalog::provider_is_enabled(profile_name) {
+                continue;
+            }
+
+            let mut profile_models = Vec::new();
+            if let Some(default_model) = profile.default_model.as_deref() {
+                Self::push_unique_model(&mut profile_models, default_model);
+            }
+            for model in &profile.models {
+                Self::push_unique_model(&mut profile_models, &model.id);
+            }
+            if let Some(allowlist_models) = cfg.provider.model_allowlist.get(profile_name) {
+                for model in allowlist_models {
+                    Self::push_unique_model(&mut profile_models, model);
+                }
+            }
+
+            let Some(api_base) = crate::provider_catalog::normalize_api_base(&profile.base_url)
+            else {
+                continue;
+            };
+            let requires_key = profile
+                .requires_api_key
+                .unwrap_or_else(|| !crate::provider_catalog::api_base_uses_localhost(&api_base));
+            let has_credentials = match profile.auth {
+                crate::config::NamedProviderAuth::None => true,
+                crate::config::NamedProviderAuth::Bearer
+                | crate::config::NamedProviderAuth::Header => {
+                    !requires_key
+                        || profile
+                            .api_key
+                            .as_deref()
+                            .map(str::trim)
+                            .is_some_and(|value| !value.is_empty())
+                        || profile
+                            .api_key_env
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .and_then(|env_key| {
+                                if let Some(env_file) = profile.env_file.as_deref() {
+                                    crate::provider_catalog::load_env_value_from_env_or_config(
+                                        env_key, env_file,
+                                    )
+                                } else {
+                                    std::env::var(env_key).ok()
+                                }
+                            })
+                            .map(|value| value.trim().to_string())
+                            .is_some_and(|value| !value.is_empty())
+                }
+            };
+            let api_method = format!("openai-compatible:{}", profile_name);
+            for model in models {
+                if !profile_models.iter().any(|candidate| candidate == model) {
+                    continue;
+                }
+                if routes.iter().any(|route| {
+                    route.model == *model
+                        && route.provider == *profile_name
+                        && route.api_method == api_method
+                }) {
+                    continue;
+                }
+                routes.push(crate::provider::ModelRoute {
+                    model: model.clone(),
+                    provider: profile_name.clone(),
+                    api_method: api_method.clone(),
+                    available: has_credentials,
+                    detail: api_base.clone(),
+                    cheapness: None,
+                });
+            }
+        }
+    }
+
+    fn push_unique_model(models: &mut Vec<String>, model: &str) {
+        let model = model.trim().strip_prefix('=').unwrap_or(model.trim());
+        if !model.is_empty()
+            && crate::provider::is_listable_model_name(model)
+            && !models.iter().any(|existing| existing == model)
+        {
+            models.push(model.to_string());
+        }
     }
 
     pub(super) fn remote_model_should_offer_copilot_route(model: &str) -> bool {

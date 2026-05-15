@@ -623,8 +623,9 @@ pub struct ProviderConfig {
     /// (e.g. "anthropic", "openai", "gemini", "antigravity") to a list of
     /// allowed model identifiers. When a provider has a non-empty entry,
     /// the model picker and `/model` command only expose the listed models
-    /// (substring match, case-insensitive). Providers absent from this map
-    /// or with an empty list are unrestricted.
+    /// (substring match, case-insensitive). Prefix a pattern with `=` for an
+    /// exact match. Providers absent from this map or with an empty list are
+    /// unrestricted.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub model_allowlist: BTreeMap<String, Vec<String>>,
 }

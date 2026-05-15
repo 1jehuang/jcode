@@ -15,6 +15,7 @@ mod comm_control;
 mod comm_plan;
 mod comm_session;
 mod comm_sync;
+mod config_reload;
 mod debug;
 mod debug_ambient;
 mod debug_command_exec;
@@ -912,6 +913,8 @@ impl Server {
             )
             .await;
         });
+
+        config_reload::spawn_config_reload_monitor();
 
         // Log when we receive SIGTERM for debugging
         #[cfg(unix)]

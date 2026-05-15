@@ -377,9 +377,13 @@ fn allowlist_key_for_route(route: &crate::provider::ModelRoute) -> Option<String
 }
 
 fn model_matches_any(model_lower: &str, lower_patterns: &[String]) -> bool {
-    lower_patterns
-        .iter()
-        .any(|pattern| model_lower == pattern || model_lower.contains(pattern))
+    lower_patterns.iter().any(|pattern| {
+        if let Some(exact) = pattern.strip_prefix('=') {
+            model_lower == exact
+        } else {
+            model_lower == pattern || model_lower.contains(pattern)
+        }
+    })
 }
 
 pub fn openai_compatible_profile_by_id(id: &str) -> Option<OpenAiCompatibleProfile> {
@@ -438,6 +442,7 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
             push("kimi-k2.5");
             push("glm-5");
             push("glm-5.1");
+            push("deepseek-v4-pro");
             push("deepseek-v4-flash");
             push("qwen3.5-plus");
         }
@@ -629,10 +634,12 @@ pub fn openai_compatible_profile_context_limit(profile_id: &str, model: &str) ->
     let model = model.trim().to_ascii_lowercase();
 
     match profile_id.as_str() {
-        // DeepSeek V4 direct API models advertise a 1M token context window. The
-        // direct profile runs through the OpenRouter/OpenAI-compatible provider
-        // implementation, whose live catalog can be unavailable during startup.
-        "deepseek" if model.starts_with("deepseek-v4-") => Some(1_000_000),
+        // DeepSeek V4 models advertise a 1M token context window. These
+        // providers run through the OpenRouter/OpenAI-compatible implementation,
+        // whose live catalog can be unavailable during startup.
+        "deepseek" | "opencode-go" | "ollama-cloud" if model.starts_with("deepseek-v4-") => {
+            Some(1_000_000)
+        }
         _ => None,
     }
 }

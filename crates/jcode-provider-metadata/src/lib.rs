@@ -157,7 +157,7 @@ pub const OPENCODE_GO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile
     api_key_env: "OPENCODE_GO_API_KEY",
     env_file: "opencode-go.env",
     setup_url: "https://opencode.ai/docs/providers#opencode-go",
-    default_model: Some("kimi-k2.5"),
+    default_model: Some("deepseek-v4-pro"),
     requires_api_key: true,
 };
 

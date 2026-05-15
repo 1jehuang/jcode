@@ -160,8 +160,8 @@ fn provider_enabled_and_model_allowlists_filter_cross_provider_routes() {
 enabled_providers = ["openai", "ollama-cloud"]
 
 [provider.model_allowlist]
-openai = ["gpt-5.5"]
-ollama-cloud = ["deepseek-v4-pro"]
+openai = ["=gpt-5.5"]
+ollama-cloud = ["=deepseek-v4-pro"]
 "#,
     )
     .expect("write config");
@@ -189,7 +189,7 @@ ollama-cloud = ["deepseek-v4-pro"]
             cheapness: None,
         },
         crate::provider::ModelRoute {
-            model: "gpt-5.4".to_string(),
+            model: "gpt-5.5-mini".to_string(),
             provider: "OpenAI".to_string(),
             api_method: "openai-oauth".to_string(),
             available: true,

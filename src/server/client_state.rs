@@ -679,15 +679,17 @@ async fn write_event(writer: &Arc<Mutex<WriteHalf>>, event: &ServerEvent) -> Res
 
 pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Arc<Mutex<Agent>>) {
     tokio::spawn(async move {
-        let (provider_name, initial_models) = {
+        let (provider_name, initial_models, initial_routes) = {
             let agent_guard = agent.lock().await;
             (
                 agent_guard.provider_name(),
                 agent_guard.available_models_display(),
+                agent_guard.model_routes(),
             )
         };
 
-        if !initial_models.is_empty() {
+        if !initial_routes.is_empty() {
+            Bus::global().publish_models_updated();
             return;
         }
 
@@ -711,7 +713,7 @@ pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Ar
             )
         };
 
-        if refreshed.0 == initial_models && refreshed.1.is_empty() {
+        if refreshed.0 == initial_models && refreshed.1 == initial_routes {
             return;
         }
 

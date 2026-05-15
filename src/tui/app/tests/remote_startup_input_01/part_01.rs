@@ -813,24 +813,98 @@ fn test_remote_model_switch_failure_restores_deferred_prompt() {
 
 #[test]
 fn test_model_picker_remote_falls_back_to_current_model_when_catalog_empty() {
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.remote_provider_name = Some("openrouter".to_string());
-    app.remote_provider_model = Some("anthropic/claude-sonnet-4".to_string());
-    app.remote_available_entries.clear();
-    app.remote_model_options.clear();
+    with_temp_jcode_home(|| {
+        crate::config::invalidate_config_cache();
 
-    app.open_model_picker();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("openrouter".to_string());
+        app.remote_provider_model = Some("anthropic/claude-sonnet-4".to_string());
+        app.remote_available_entries.clear();
+        app.remote_model_options.clear();
 
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker should open with current-model fallback");
+        app.open_model_picker();
 
-    assert_eq!(picker.entries.len(), 1);
-    assert_eq!(picker.entries[0].name, "anthropic/claude-sonnet-4");
-    assert_eq!(picker.entries[0].options.len(), 1);
-    assert_eq!(picker.entries[0].options[0].provider, "openrouter");
-    assert_eq!(picker.entries[0].options[0].api_method, "current");
-    assert!(picker.entries[0].options[0].available);
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("model picker should open with current-model fallback");
+
+        assert_eq!(picker.entries.len(), 1);
+        assert_eq!(picker.entries[0].name, "anthropic/claude-sonnet-4");
+        assert_eq!(picker.entries[0].options.len(), 1);
+        assert_eq!(picker.entries[0].options[0].provider, "auto");
+        assert_eq!(picker.entries[0].options[0].api_method, "openrouter");
+        assert_ne!(picker.entries[0].options[0].detail, "catalog still loading");
+    });
+}
+
+#[test]
+fn test_model_picker_remote_falls_back_to_named_openai_compatible_profile() {
+    with_temp_jcode_home(|| {
+        let config_path = crate::config::Config::path().expect("config path");
+        std::fs::create_dir_all(config_path.parent().expect("config parent"))
+            .expect("create config dir");
+        std::fs::write(
+            &config_path,
+            r#"
+[provider.model_allowlist]
+ollama-cloud = ["=deepseek-v4-pro", "=deepseek-v4-flash"]
+
+[providers.ollama-cloud]
+type = "openai-compatible"
+base_url = "http://localhost:11434/v1"
+auth = "none"
+default_model = "deepseek-v4-pro"
+models = [
+  { id = "deepseek-v4-pro", context_window = 1000000 },
+  { id = "deepseek-v4-flash", context_window = 1000000 },
+]
+"#,
+        )
+        .expect("write config");
+        crate::config::invalidate_config_cache();
+        assert!(
+            crate::config::config()
+                .providers
+                .contains_key("ollama-cloud"),
+            "test config should include ollama-cloud profile"
+        );
+
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("ollama-cloud".to_string());
+        app.remote_provider_model = Some("deepseek-v4-pro".to_string());
+        app.remote_available_entries = vec![
+            "deepseek-v4-pro".to_string(),
+            "deepseek-v4-flash".to_string(),
+        ];
+        app.remote_model_options.clear();
+
+        app.open_model_picker();
+
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("model picker should open with named provider fallback");
+        assert!(
+            picker.entries.iter().any(|entry| {
+                entry.name == "deepseek-v4-pro"
+                    && entry.options.iter().any(|option| {
+                        option.provider == "ollama-cloud"
+                            && option.api_method == "openai-compatible:ollama-cloud"
+                            && option.available
+                    })
+            }),
+            "expected ollama-cloud route, got: {:?}",
+            picker.entries
+        );
+        assert!(
+            picker
+                .entries
+                .iter()
+                .flat_map(|entry| entry.options.iter())
+                .all(|option| option.detail != "catalog still loading")
+        );
+    });
 }
