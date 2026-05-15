@@ -28,6 +28,75 @@ use tokio::sync::{Notify, RwLock};
 
 const MAX_IDLE_POLL_SECS: u64 = 30;
 
+/// Pure helper: given the error returned by an ambient agent turn, decide
+/// whether the runner should attempt a provider switch and what label to
+/// switch to. Returns `Some(target_provider_id)` when the error carries a
+/// failover prompt; `None` otherwise.
+///
+/// Split out from [`try_headless_provider_failover`] so it can be unit
+/// tested without constructing a real `Agent`/`Provider`.
+fn parse_failover_target(run_result: &anyhow::Result<String>) -> Option<String> {
+    let err = run_result.as_ref().err()?;
+    let prompt = crate::provider::parse_failover_prompt_message(&err.to_string())?;
+    Some(prompt.to_provider)
+}
+
+/// Try to recover from a provider-level failure during a headless ambient cycle
+/// by switching providers once and re-running the original message.
+///
+/// Returns `true` if a switch + retry was attempted (regardless of outcome).
+/// The caller is responsible for inspecting `ambient_tools::take_cycle_result()`
+/// after this returns; if the retry produced a result, it will be picked up
+/// by the same code path that handles a normal successful turn.
+///
+/// We intentionally cap this at a single retry per cycle to avoid burning
+/// through every configured account/provider in one wake-up when an outage
+/// is global rather than per-provider.
+async fn try_headless_provider_failover(
+    provider: &Arc<dyn Provider>,
+    agent: &mut Agent,
+    run_result: &anyhow::Result<String>,
+    initial_message: &str,
+) -> bool {
+    let Some(target_provider) = parse_failover_target(run_result) else {
+        return false;
+    };
+    // We re-parse here for the human-readable labels in the log line; the
+    // pure helper above only returns the machine-readable target id.
+    let prompt_for_log = run_result
+        .as_ref()
+        .err()
+        .and_then(|e| crate::provider::parse_failover_prompt_message(&e.to_string()));
+    match provider.switch_active_provider_to(&target_provider) {
+        Ok(()) => {
+            if let Some(prompt) = prompt_for_log {
+                logging::info(&format!(
+                    "Ambient cycle: headless failover {} → {} (reason: {}); retrying initial message",
+                    prompt.from_label, prompt.to_label, prompt.reason
+                ));
+            } else {
+                logging::info(&format!(
+                    "Ambient cycle: headless failover → {}; retrying initial message",
+                    target_provider
+                ));
+            }
+        }
+        Err(switch_err) => {
+            logging::warn(&format!(
+                "Ambient cycle: headless failover to {} failed: {}",
+                target_provider, switch_err
+            ));
+            return false;
+        }
+    }
+    // Re-issue the original user message on the new provider. The agent's
+    // conversation history already contains the failed turn, which the new
+    // provider will see as prior assistant context; that's intentional, since
+    // the failover prompt explicitly notes the input would be resent.
+    let _ = agent.run_once_capture(initial_message).await;
+    true
+}
+
 /// Shared ambient runner state, accessible from the server, debug socket, and TUI.
 #[derive(Clone)]
 pub struct AmbientRunnerHandle {
@@ -925,6 +994,27 @@ impl AmbientRunnerHandle {
 
         // Check if end_ambient_cycle was called
         if let Some(result) = ambient_tools::take_cycle_result() {
+            ambient_tools::unregister_ambient_session(&ambient_session_id);
+            let conversation = agent.export_conversation_markdown();
+            agent.mark_closed();
+            return Ok(AmbientCycleResult {
+                started_at,
+                ended_at: Utc::now(),
+                conversation: Some(conversation),
+                ..result
+            });
+        }
+
+        // If the initial turn errored with a provider-failover prompt (e.g. the
+        // active provider hit its rate cap), try switching providers once and
+        // re-running the original message. In headless mode there is no TUI to
+        // surface the countdown, so this is the analogue of the TUI's auto-
+        // switch path. A single retry keeps the blast radius bounded.
+        let attempted_failover =
+            try_headless_provider_failover(provider, &mut agent, &run_result, &initial_message)
+                .await;
+
+        if attempted_failover && let Some(result) = ambient_tools::take_cycle_result() {
             ambient_tools::unregister_ambient_session(&ambient_session_id);
             let conversation = agent.export_conversation_markdown();
             agent.mark_closed();

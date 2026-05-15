@@ -1,4 +1,5 @@
 use super::AmbientRunnerHandle;
+use super::parse_failover_target;
 use crate::ambient::{Priority, ScheduleTarget, ScheduledItem};
 use crate::message::{Message, Role, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
@@ -13,6 +14,33 @@ use std::time::Duration;
 struct EnvVarGuard {
     key: &'static str,
     prev: Option<std::ffi::OsString>,
+}
+
+#[test]
+fn parse_failover_target_extracts_provider_from_failover_prompt_error() {
+    let prompt = crate::provider::ProviderFailoverPrompt {
+        from_provider: "openai".to_string(),
+        from_label: "OpenAI".to_string(),
+        to_provider: "claude".to_string(),
+        to_label: "Anthropic".to_string(),
+        reason: "rate limit reached".to_string(),
+        estimated_input_chars: 1234,
+        estimated_input_tokens: 567,
+    };
+    let err: anyhow::Result<String> = Err(anyhow::anyhow!(prompt.to_error_message()));
+    assert_eq!(parse_failover_target(&err).as_deref(), Some("claude"));
+}
+
+#[test]
+fn parse_failover_target_returns_none_for_unrelated_errors() {
+    let err: anyhow::Result<String> = Err(anyhow::anyhow!("network timeout after 30s"));
+    assert!(parse_failover_target(&err).is_none());
+}
+
+#[test]
+fn parse_failover_target_returns_none_for_ok_results() {
+    let ok: anyhow::Result<String> = Ok("done".to_string());
+    assert!(parse_failover_target(&ok).is_none());
 }
 
 impl EnvVarGuard {
