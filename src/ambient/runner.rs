@@ -881,11 +881,20 @@ impl AmbientRunnerHandle {
         self.set_running_detail("gathering context").await;
         let (system_prompt, initial_message) = self.build_cycle_context(provider).await?;
 
-        // Visible mode: spawn a full TUI instead of running headlessly
+        // Visible mode: spawn a full TUI instead of running headlessly.
+        // If the configured terminal is unavailable, fall back to headless so
+        // external wakeups (Discord/Telegram/email) still produce a cycle.
         if visible {
-            return self
-                .run_cycle_visible(started_at, system_prompt, initial_message)
-                .await;
+            match self
+                .run_cycle_visible(started_at, system_prompt.clone(), initial_message.clone())
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(e) => logging::warn(&format!(
+                    "Ambient visible cycle failed ({}), falling back to headless",
+                    e
+                )),
+            }
         }
 
         // Headless mode: run agent directly
