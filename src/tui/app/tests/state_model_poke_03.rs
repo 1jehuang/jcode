@@ -242,7 +242,7 @@ impl SubscriptionModelRoutesProvider {
             },
             crate::provider::ModelRoute {
                 model: "deepseek-v4-pro".to_string(),
-                provider: "opencode-go".to_string(),
+                provider: "OpenCode Go".to_string(),
                 api_method: "openai-compatible:opencode-go".to_string(),
                 available: true,
                 detail: "https://opencode.ai/zen/go/v1".to_string(),
@@ -250,7 +250,7 @@ impl SubscriptionModelRoutesProvider {
             },
             crate::provider::ModelRoute {
                 model: "deepseek-v4-flash".to_string(),
-                provider: "opencode-go".to_string(),
+                provider: "OpenCode Go".to_string(),
                 api_method: "openai-compatible:opencode-go".to_string(),
                 available: true,
                 detail: "https://opencode.ai/zen/go/v1".to_string(),
@@ -1289,10 +1289,15 @@ ollama-cloud = ["=deepseek-v4-pro", "=deepseek-v4-flash"]
         assert!(
             route_pairs.iter().any(|(model, provider, method)| {
                 model == "deepseek-v4-pro"
-                    && provider == "opencode-go"
+                    && provider == "OpenCode Go"
                     && method == "openai-compatible:opencode-go"
             }),
             "opencode-go Pro route should remain available: {:?}",
+            route_pairs
+        );
+        assert!(
+            route_pairs.iter().all(|(_, provider, _)| provider != "opencode-go"),
+            "known provider ids should render with display labels: {:?}",
             route_pairs
         );
         assert!(

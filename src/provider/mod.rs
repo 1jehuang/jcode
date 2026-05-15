@@ -1221,6 +1221,13 @@ impl Provider for MultiProvider {
                 continue;
             }
             let api_method = format!("openai-compatible:{}", profile_name);
+            let provider_label =
+                crate::provider_catalog::openai_compatible_profile_by_id(profile_name)
+                    .map(|profile| {
+                        crate::provider_catalog::resolve_openai_compatible_profile(profile)
+                            .display_name
+                    })
+                    .unwrap_or_else(|| profile_name.clone());
             let mut named_models = Vec::new();
             if let Some(default_model) = profile.default_model.as_deref().map(str::trim)
                 && !default_model.is_empty()
@@ -1278,7 +1285,7 @@ impl Provider for MultiProvider {
             for model in named_models {
                 routes.push(ModelRoute {
                     model,
-                    provider: profile_name.clone(),
+                    provider: provider_label.clone(),
                     api_method: api_method.clone(),
                     available: has_credentials,
                     detail: profile.base_url.clone(),
