@@ -61,7 +61,9 @@ impl App {
 
     pub(crate) fn open_login_picker_inline(&mut self) {
         let status = crate::auth::AuthStatus::check_fast();
-        let providers = crate::provider_catalog::tui_login_providers();
+        let providers = crate::provider_catalog::filter_disabled_login_providers(
+            crate::provider_catalog::tui_login_providers(),
+        );
         let models = providers
             .into_iter()
             .map(|provider| {

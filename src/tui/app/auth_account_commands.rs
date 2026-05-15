@@ -23,7 +23,9 @@ pub(crate) fn handle_auth_command(app: &mut App, trimmed: &str) -> bool {
         .strip_prefix("/login ")
         .or_else(|| trimmed.strip_prefix("/auth "))
     {
-        let providers = crate::provider_catalog::tui_login_providers();
+        let providers = crate::provider_catalog::filter_disabled_login_providers(
+            crate::provider_catalog::tui_login_providers(),
+        );
         if let Some(provider) =
             crate::provider_catalog::resolve_login_selection(provider, &providers)
         {
@@ -967,12 +969,17 @@ fn render_auth_doctor_markdown(provider_filter: Option<&str>) -> String {
             }
         },
         None => {
-            let configured = crate::provider_catalog::auth_status_login_providers()
+            let providers = crate::provider_catalog::filter_disabled_login_providers(
+                crate::provider_catalog::auth_status_login_providers(),
+            );
+            let configured = providers
+                .iter()
+                .copied()
                 .into_iter()
                 .filter(|provider| status.assessment_for_provider(*provider).is_configured())
                 .collect::<Vec<_>>();
             if configured.is_empty() {
-                crate::provider_catalog::auth_status_login_providers().to_vec()
+                providers
             } else {
                 configured
             }

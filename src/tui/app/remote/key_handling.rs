@@ -809,8 +809,8 @@ async fn handle_remote_key_internal(
 
                 if app_mod::model_context::is_refresh_model_list_command(trimmed) {
                     app.pending_remote_model_refresh_snapshot = Some((
-                        app.remote_available_entries.clone(),
-                        app.remote_model_options.clone(),
+                        app.visible_remote_available_entries(),
+                        app.visible_remote_model_options(),
                     ));
                     super::super::local::handle_ui_activity(
                         app,

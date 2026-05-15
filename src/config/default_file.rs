@@ -155,6 +155,8 @@ update_channel = "stable"
 # Default provider (optional: claude|openai|copilot|openrouter)
 # When set, this provider is preferred on startup if available
 # default_provider = "copilot"
+# Providers excluded from auto-selection, failover, auth surfaces, and model routing
+# disabled_providers = ["copilot"]
 # OpenAI reasoning effort (none|low|medium|high|xhigh)
 openai_reasoning_effort = "low"
 # OpenAI transport mode (auto|websocket|https)

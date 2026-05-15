@@ -159,7 +159,9 @@ pub(super) fn run_auth_status_command(emit_json: bool) -> Result<()> {
 fn build_auth_status_report() -> AuthStatusReport {
     let status = crate::auth::AuthStatus::check();
     let validation = crate::auth::validation::load_all();
-    let providers = crate::provider_catalog::auth_status_login_providers();
+    let providers = crate::provider_catalog::filter_disabled_login_providers(
+        crate::provider_catalog::auth_status_login_providers(),
+    );
     let reports = providers
         .into_iter()
         .map(|provider| {
@@ -526,12 +528,17 @@ fn select_auth_doctor_providers(
         return Ok(vec![provider]);
     }
 
-    let configured = crate::provider_catalog::auth_status_login_providers()
+    let providers = crate::provider_catalog::filter_disabled_login_providers(
+        crate::provider_catalog::auth_status_login_providers(),
+    );
+    let configured = providers
+        .iter()
+        .copied()
         .into_iter()
         .filter(|provider| status.assessment_for_provider(*provider).is_configured())
         .collect::<Vec<_>>();
     if configured.is_empty() {
-        Ok(crate::provider_catalog::auth_status_login_providers().to_vec())
+        Ok(providers)
     } else {
         Ok(configured)
     }

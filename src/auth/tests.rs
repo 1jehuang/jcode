@@ -452,11 +452,13 @@ fn copilot_recent_token_exchange_failure_is_not_auto_usable() {
     let prev_copilot_token = std::env::var_os("COPILOT_GITHUB_TOKEN");
     let prev_gh_token = std::env::var_os("GH_TOKEN");
     let prev_github_token = std::env::var_os("GITHUB_TOKEN");
+    let prev_allow_github_env = std::env::var_os("JCODE_COPILOT_ALLOW_GITHUB_ENV");
 
     crate::env::set_var("JCODE_HOME", temp.path());
     crate::env::remove_var("COPILOT_GITHUB_TOKEN");
     crate::env::remove_var("GH_TOKEN");
     crate::env::remove_var("GITHUB_TOKEN");
+    crate::env::remove_var("JCODE_COPILOT_ALLOW_GITHUB_ENV");
     AuthStatus::invalidate_cache();
     crate::auth::copilot::invalidate_github_token_cache();
 
@@ -490,6 +492,13 @@ fn copilot_recent_token_exchange_failure_is_not_auto_usable() {
     AuthStatus::invalidate_cache();
     crate::auth::copilot::invalidate_github_token_cache();
     let status = AuthStatus::check_fast();
+    assert_eq!(status.copilot, AuthState::Expired);
+    assert!(!status.copilot_has_api_token);
+
+    crate::env::set_var("JCODE_COPILOT_ALLOW_GITHUB_ENV", "1");
+    AuthStatus::invalidate_cache();
+    crate::auth::copilot::invalidate_github_token_cache();
+    let status = AuthStatus::check_fast();
     assert_eq!(status.copilot, AuthState::Available);
     assert!(status.copilot_has_api_token);
 
@@ -497,6 +506,57 @@ fn copilot_recent_token_exchange_failure_is_not_auto_usable() {
     restore_env_var("COPILOT_GITHUB_TOKEN", prev_copilot_token);
     restore_env_var("GH_TOKEN", prev_gh_token);
     restore_env_var("GITHUB_TOKEN", prev_github_token);
+    restore_env_var("JCODE_COPILOT_ALLOW_GITHUB_ENV", prev_allow_github_env);
+    AuthStatus::invalidate_cache();
+    crate::auth::copilot::invalidate_github_token_cache();
+}
+
+#[test]
+fn copilot_does_not_auto_use_generic_github_env_without_opt_in() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    let home = temp.path().join("home");
+    let xdg = temp.path().join("xdg");
+    std::fs::create_dir_all(&home).expect("create temp home");
+    std::fs::create_dir_all(&xdg).expect("create temp xdg config");
+
+    let saved = [
+        "JCODE_HOME",
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "COPILOT_GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "JCODE_COPILOT_ALLOW_GITHUB_ENV",
+    ]
+    .into_iter()
+    .map(|key| (key, std::env::var_os(key)))
+    .collect::<Vec<_>>();
+
+    crate::env::set_var("JCODE_HOME", temp.path().join("jcode-home"));
+    crate::env::set_var("HOME", &home);
+    crate::env::set_var("XDG_CONFIG_HOME", &xdg);
+    crate::env::remove_var("COPILOT_GITHUB_TOKEN");
+    crate::env::set_var("GH_TOKEN", "gho_generic_github_token");
+    crate::env::set_var("GITHUB_TOKEN", "ghp_generic_github_token");
+    crate::env::remove_var("JCODE_COPILOT_ALLOW_GITHUB_ENV");
+
+    AuthStatus::invalidate_cache();
+    crate::auth::copilot::invalidate_github_token_cache();
+    let status = AuthStatus::check_fast();
+    assert_eq!(status.copilot, AuthState::NotConfigured);
+    assert!(!status.copilot_has_api_token);
+
+    crate::env::set_var("JCODE_COPILOT_ALLOW_GITHUB_ENV", "1");
+    AuthStatus::invalidate_cache();
+    crate::auth::copilot::invalidate_github_token_cache();
+    let status = AuthStatus::check_fast();
+    assert_eq!(status.copilot, AuthState::Available);
+    assert!(status.copilot_has_api_token);
+
+    for (key, value) in saved {
+        restore_env_var(key, value);
+    }
     AuthStatus::invalidate_cache();
     crate::auth::copilot::invalidate_github_token_cache();
 }

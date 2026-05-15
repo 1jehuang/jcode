@@ -21,7 +21,9 @@ impl App {
                     return;
                 }
             },
-            None => crate::provider_catalog::login_providers().to_vec(),
+            None => crate::provider_catalog::filter_disabled_login_providers(
+                crate::provider_catalog::login_providers().iter().copied(),
+            ),
         };
 
         let mut items = Vec::new();

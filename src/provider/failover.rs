@@ -3,6 +3,9 @@ use jcode_provider_core::{FailoverDecision, ProviderFailoverPrompt};
 
 impl MultiProvider {
     pub(super) fn provider_is_configured(&self, provider: ActiveProvider) -> bool {
+        if Self::provider_is_disabled(provider) {
+            return false;
+        }
         self.reconcile_auth_if_provider_missing(provider)
     }
 
@@ -25,7 +28,7 @@ impl MultiProvider {
         if let Some(forced) = forced_provider {
             vec![forced]
         } else {
-            Self::fallback_sequence(active)
+            Self::enabled_fallback_sequence(active)
         }
     }
 

@@ -152,6 +152,9 @@ pub struct Config {
     /// Provider configuration
     pub provider: ProviderConfig,
 
+    /// Policy-level overrides.
+    pub policy: PolicyConfig,
+
     /// Named provider profiles, keyed by profile name.
     ///
     /// Example:
@@ -181,6 +184,23 @@ pub struct Config {
 
     /// Auto-judge configuration
     pub autojudge: AutoJudgeConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PolicyConfig {
+    /// Providers excluded from auth probes, auto-selection, fallback, and model routing.
+    pub disabled_providers: Vec<String>,
+}
+
+impl Config {
+    pub fn disabled_provider_entries(&self) -> impl Iterator<Item = &str> {
+        self.provider
+            .disabled_providers
+            .iter()
+            .chain(self.policy.disabled_providers.iter())
+            .map(String::as_str)
+    }
 }
 
 /// External dictation / speech-to-text integration.

@@ -593,6 +593,8 @@ pub struct ProviderConfig {
     pub default_model: Option<String>,
     /// Default provider to use (claude|openai|copilot|openrouter)
     pub default_provider: Option<String>,
+    /// Providers excluded from auto-selection, fallback, and model routing.
+    pub disabled_providers: Vec<String>,
     /// Reasoning effort for OpenAI Responses API (none|low|medium|high|xhigh)
     pub openai_reasoning_effort: Option<String>,
     /// OpenAI transport mode (auto|websocket|https)
@@ -618,6 +620,7 @@ impl Default for ProviderConfig {
         Self {
             default_model: None,
             default_provider: None,
+            disabled_providers: Vec::new(),
             openai_reasoning_effort: Some("low".to_string()),
             openai_transport: None,
             openai_service_tier: Some("priority".to_string()),

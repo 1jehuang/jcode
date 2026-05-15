@@ -294,7 +294,9 @@ pub(crate) fn resolve_auth_test_targets(
 pub(crate) fn configured_auth_test_targets(
     status: &crate::auth::AuthStatus,
 ) -> Vec<ResolvedAuthTestTarget> {
-    crate::provider_catalog::auth_status_login_providers()
+    crate::provider_catalog::filter_disabled_login_providers(
+        crate::provider_catalog::auth_status_login_providers(),
+    )
         .into_iter()
         .filter(|provider| status.assessment_for_provider(*provider).is_configured())
         .filter_map(ResolvedAuthTestTarget::from_provider)

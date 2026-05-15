@@ -167,6 +167,32 @@ fn test_forced_provider_disables_cross_provider_fallback_sequence() {
 }
 
 #[test]
+fn test_enabled_fallback_sequence_omits_disabled_providers() {
+    let _guard = crate::storage::lock_test_env();
+    let previous = std::env::var_os("JCODE_DISABLED_PROVIDERS");
+    crate::env::set_var("JCODE_DISABLED_PROVIDERS", "copilot,openrouter");
+    crate::config::invalidate_config_cache();
+
+    assert_eq!(
+        MultiProvider::enabled_fallback_sequence(ActiveProvider::Claude),
+        vec![
+            ActiveProvider::Claude,
+            ActiveProvider::OpenAI,
+            ActiveProvider::Gemini,
+            ActiveProvider::Cursor,
+            ActiveProvider::Bedrock,
+        ]
+    );
+
+    if let Some(previous) = previous {
+        crate::env::set_var("JCODE_DISABLED_PROVIDERS", previous);
+    } else {
+        crate::env::remove_var("JCODE_DISABLED_PROVIDERS");
+    }
+    crate::config::invalidate_config_cache();
+}
+
+#[test]
 fn test_set_model_rejects_cross_provider_without_creds() {
     let _guard = crate::storage::lock_test_env();
     let runtime = enter_test_runtime();

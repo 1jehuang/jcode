@@ -281,6 +281,27 @@ fn test_env_override_trusted_external_auth_splits_source_and_path_entries() {
 }
 
 #[test]
+fn test_env_override_disabled_providers_normalizes_entries() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_DISABLED_PROVIDERS");
+    crate::env::set_var("JCODE_DISABLED_PROVIDERS", " Copilot, OPENAI ,, gemini ");
+
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+
+    assert_eq!(
+        cfg.provider.disabled_providers,
+        vec!["copilot", "openai", "gemini"]
+    );
+
+    if let Some(prev) = prev {
+        crate::env::set_var("JCODE_DISABLED_PROVIDERS", prev);
+    } else {
+        crate::env::remove_var("JCODE_DISABLED_PROVIDERS");
+    }
+}
+
+#[test]
 fn test_external_auth_source_allowed_for_path_matches_saved_entry() {
     let _guard = crate::storage::lock_test_env();
     let dir = tempfile::TempDir::new().expect("tempdir");

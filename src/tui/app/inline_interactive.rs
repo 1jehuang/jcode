@@ -316,7 +316,7 @@ impl App {
         let routes_started = std::time::Instant::now();
         let routes: Vec<crate::provider::ModelRoute> = if self.is_remote {
             if !self.remote_model_options.is_empty() {
-                self.remote_model_options.clone()
+                self.visible_remote_model_options()
             } else {
                 self.build_remote_model_routes_fallback()
             }
@@ -904,8 +904,14 @@ impl App {
     pub(super) fn build_remote_model_routes_fallback(&self) -> Vec<crate::provider::ModelRoute> {
         let auth = crate::auth::AuthStatus::check_fast();
         let mut routes = Vec::new();
+        let copilot_disabled = crate::provider_catalog::login_provider_disabled(
+            crate::provider_catalog::COPILOT_LOGIN_PROVIDER,
+        );
         for model in &self.remote_available_entries {
             if !crate::provider::is_listable_model_name(model) {
+                continue;
+            }
+            if copilot_disabled && Self::remote_model_should_offer_copilot_route(model) {
                 continue;
             }
 
@@ -1045,7 +1051,10 @@ impl App {
                 added_any = true;
             }
 
-            if Self::remote_model_should_offer_copilot_route(model) && !model.contains("[1m]") {
+            if !copilot_disabled
+                && Self::remote_model_should_offer_copilot_route(model)
+                && !model.contains("[1m]")
+            {
                 routes.push(crate::provider::build_copilot_route(
                     model,
                     auth.copilot == crate::auth::AuthState::Available
@@ -1079,6 +1088,34 @@ impl App {
             }
         }
         routes
+    }
+
+    pub(super) fn visible_remote_model_options(&self) -> Vec<crate::provider::ModelRoute> {
+        self.remote_model_options
+            .iter()
+            .filter(|route| !Self::model_route_disabled_by_config(route))
+            .cloned()
+            .collect()
+    }
+
+    pub(super) fn visible_remote_available_entries(&self) -> Vec<String> {
+        let copilot_disabled = crate::provider_catalog::login_provider_disabled(
+            crate::provider_catalog::COPILOT_LOGIN_PROVIDER,
+        );
+        self.remote_available_entries
+            .iter()
+            .filter(|model| {
+                !(copilot_disabled && Self::remote_model_should_offer_copilot_route(model))
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn model_route_disabled_by_config(route: &crate::provider::ModelRoute) -> bool {
+        route.api_method.eq_ignore_ascii_case("copilot")
+            && crate::provider_catalog::login_provider_disabled(
+                crate::provider_catalog::COPILOT_LOGIN_PROVIDER,
+            )
     }
 
     pub(super) fn remote_model_should_offer_copilot_route(model: &str) -> bool {

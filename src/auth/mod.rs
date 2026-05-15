@@ -160,6 +160,10 @@ fn model_smoke_readiness_for_provider(provider: LoginProviderDescriptor) -> Auth
 }
 
 fn copilot_auth_state_from_credentials() -> (AuthState, bool) {
+    if provider_key_disabled("copilot") {
+        return (AuthState::NotConfigured, false);
+    }
+
     if !copilot::has_copilot_credentials_fast() {
         return (AuthState::NotConfigured, false);
     }
@@ -169,6 +173,17 @@ fn copilot_auth_state_from_credentials() -> (AuthState, bool) {
     } else {
         (AuthState::Available, true)
     }
+}
+
+fn provider_key_disabled(key: &str) -> bool {
+    crate::config::config()
+        .disabled_provider_entries()
+        .any(|raw| {
+            let value = raw.trim();
+            value.eq_ignore_ascii_case(key)
+                || (key.eq_ignore_ascii_case("copilot")
+                    && value.eq_ignore_ascii_case("github copilot"))
+        })
 }
 
 impl AuthStatus {
@@ -262,7 +277,13 @@ impl AuthStatus {
             LoginProviderAuthStateKey::Azure => self.azure,
             LoginProviderAuthStateKey::Bedrock => self.bedrock,
             LoginProviderAuthStateKey::OpenRouterLike => self.openrouter,
-            LoginProviderAuthStateKey::Copilot => self.copilot,
+            LoginProviderAuthStateKey::Copilot => {
+                if provider_key_disabled("copilot") {
+                    AuthState::NotConfigured
+                } else {
+                    self.copilot
+                }
+            }
             LoginProviderAuthStateKey::Antigravity => self.antigravity,
             LoginProviderAuthStateKey::Gemini => self.gemini,
             LoginProviderAuthStateKey::Cursor => self.cursor,
@@ -319,6 +340,13 @@ impl AuthStatus {
                     AuthState::Available
                 } else {
                     AuthState::NotConfigured
+                }
+            }
+            crate::provider_catalog::LoginProviderTarget::Copilot => {
+                if provider_key_disabled("copilot") {
+                    AuthState::NotConfigured
+                } else {
+                    self.state_for_key(provider.auth_state_key)
                 }
             }
             _ => self.state_for_key(provider.auth_state_key),

@@ -135,24 +135,27 @@ impl CopilotApiToken {
     }
 }
 
+const COPILOT_ENV_KEYS: &[&str] = &["COPILOT_GITHUB_TOKEN"];
+const COPILOT_GENERIC_GITHUB_ENV_KEYS: &[&str] =
+    &["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"];
+
 /// Load a GitHub OAuth token from standard Copilot/CLI config locations.
 ///
 /// Checks in order:
 /// 1. COPILOT_GITHUB_TOKEN environment variable
-/// 2. GH_TOKEN environment variable
-/// 3. GITHUB_TOKEN environment variable
-/// 4. ~/.copilot/config.json (official Copilot CLI plaintext fallback)
-/// 5. ~/.config/github-copilot/hosts.json (legacy Copilot CLI)
-/// 6. ~/.config/github-copilot/apps.json (legacy VS Code)
-/// 7. trusted OpenCode/pi auth.json OAuth entries
-/// 8. optional `gh auth token` fallback when JCODE_COPILOT_ALLOW_GH_AUTH_TOKEN=1
+/// 2. optionally GH_TOKEN/GITHUB_TOKEN when JCODE_COPILOT_ALLOW_GITHUB_ENV=1
+/// 3. ~/.copilot/config.json (official Copilot CLI plaintext fallback)
+/// 4. ~/.config/github-copilot/hosts.json (legacy Copilot CLI)
+/// 5. ~/.config/github-copilot/apps.json (legacy VS Code)
+/// 6. trusted OpenCode/pi auth.json OAuth entries
+/// 7. optional `gh auth token` fallback when JCODE_COPILOT_ALLOW_GH_AUTH_TOKEN=1
 pub fn load_github_token() -> Result<String> {
     if let Some(token) = cached_github_token() {
         return Ok(token);
     }
 
-    for env_key in ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
-        if let Ok(token) = std::env::var(env_key)
+    for env_key in copilot_env_keys() {
+        if let Ok(token) = std::env::var(*env_key)
             && !token.trim().is_empty()
         {
             let token = token.trim().to_string();
@@ -205,13 +208,22 @@ pub fn load_github_token() -> Result<String> {
 
     anyhow::bail!(
         "GitHub Copilot token not found. \
-         Set COPILOT_GITHUB_TOKEN/GH_TOKEN/GITHUB_TOKEN, run `jcode login --provider copilot`, \
+         Set COPILOT_GITHUB_TOKEN, run `jcode login --provider copilot`, \
+         set JCODE_COPILOT_ALLOW_GITHUB_ENV=1 to explicitly reuse GH_TOKEN/GITHUB_TOKEN, \
          or set JCODE_COPILOT_ALLOW_GH_AUTH_TOKEN=1 to explicitly reuse `gh auth token`."
     )
 }
 
+fn allow_generic_github_env_for_copilot() -> bool {
+    truthy_env("JCODE_COPILOT_ALLOW_GITHUB_ENV")
+}
+
 fn allow_gh_cli_fallback() -> bool {
-    std::env::var("JCODE_COPILOT_ALLOW_GH_AUTH_TOKEN")
+    truthy_env("JCODE_COPILOT_ALLOW_GH_AUTH_TOKEN")
+}
+
+fn truthy_env(key: &str) -> bool {
+    std::env::var(key)
         .ok()
         .map(|value| {
             let value = value.trim();
@@ -220,15 +232,21 @@ fn allow_gh_cli_fallback() -> bool {
         .unwrap_or(false)
 }
 
+fn copilot_env_keys() -> &'static [&'static str] {
+    if allow_generic_github_env_for_copilot() {
+        COPILOT_GENERIC_GITHUB_ENV_KEYS
+    } else {
+        COPILOT_ENV_KEYS
+    }
+}
+
 fn copilot_env_token_present() -> bool {
-    ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]
-        .into_iter()
-        .any(|env_key| {
-            std::env::var(env_key)
-                .ok()
-                .map(|token| !token.trim().is_empty())
-                .unwrap_or(false)
-        })
+    copilot_env_keys().iter().any(|env_key| {
+        std::env::var(*env_key)
+            .ok()
+            .map(|token| !token.trim().is_empty())
+            .unwrap_or(false)
+    })
 }
 
 /// Return true when a recent `auth-test` proved the discovered Copilot token is
@@ -281,8 +299,8 @@ pub fn has_copilot_credentials() -> bool {
 pub fn has_copilot_credentials_fast() -> bool {
     use crate::auth::external::{ExternalAuthSource, source_has_copilot_oauth};
 
-    for env_key in ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
-        if let Ok(token) = std::env::var(env_key)
+    for env_key in copilot_env_keys() {
+        if let Ok(token) = std::env::var(*env_key)
             && !token.trim().is_empty()
         {
             cache_github_token(token.trim());

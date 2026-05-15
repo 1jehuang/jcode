@@ -145,6 +145,47 @@ pub fn runtime_provider_display_name(provider_name: &str) -> String {
     }
 }
 
+pub fn login_provider_disabled(provider: LoginProviderDescriptor) -> bool {
+    let Some(key) = login_provider_disable_key(provider) else {
+        return false;
+    };
+
+    crate::config::config()
+        .disabled_provider_entries()
+        .any(|raw| {
+            let value = raw.trim();
+            value.eq_ignore_ascii_case(key)
+                || (key == "copilot" && value.eq_ignore_ascii_case("github copilot"))
+        })
+}
+
+pub fn filter_disabled_login_providers(
+    providers: impl IntoIterator<Item = LoginProviderDescriptor>,
+) -> Vec<LoginProviderDescriptor> {
+    providers
+        .into_iter()
+        .filter(|provider| !login_provider_disabled(*provider))
+        .collect()
+}
+
+fn login_provider_disable_key(provider: LoginProviderDescriptor) -> Option<&'static str> {
+    match provider.target {
+        LoginProviderTarget::Claude => Some("claude"),
+        LoginProviderTarget::OpenAi | LoginProviderTarget::OpenAiApiKey => Some("openai"),
+        LoginProviderTarget::OpenRouter => Some("openrouter"),
+        LoginProviderTarget::Bedrock => Some("bedrock"),
+        LoginProviderTarget::OpenAiCompatible(profile) => Some(profile.id),
+        LoginProviderTarget::Cursor => Some("cursor"),
+        LoginProviderTarget::Copilot => Some("copilot"),
+        LoginProviderTarget::Gemini => Some("gemini"),
+        LoginProviderTarget::Antigravity => Some("antigravity"),
+        LoginProviderTarget::AutoImport
+        | LoginProviderTarget::Jcode
+        | LoginProviderTarget::Azure
+        | LoginProviderTarget::Google => None,
+    }
+}
+
 pub fn openai_compatible_profile_by_id(id: &str) -> Option<OpenAiCompatibleProfile> {
     let normalized = id.trim().to_ascii_lowercase();
     openai_compatible_profiles()

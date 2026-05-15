@@ -139,7 +139,9 @@ impl App {
             crate::auth::AuthState::Expired => "needs attention",
             crate::auth::AuthState::NotConfigured => "not configured",
         };
-        let providers = crate::provider_catalog::auth_status_login_providers();
+        let providers = crate::provider_catalog::filter_disabled_login_providers(
+            crate::provider_catalog::auth_status_login_providers(),
+        );
         let mut message = String::from(
             "**Authentication Status:**\n\n| Provider | Status | Method | Health | Validation |\n|----------|--------|--------|--------|------------|\n",
         );

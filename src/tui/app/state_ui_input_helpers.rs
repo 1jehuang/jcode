@@ -313,7 +313,7 @@ impl App {
             }
 
             let routes = if !self.remote_model_options.is_empty() {
-                self.remote_model_options.clone()
+                self.visible_remote_model_options()
             } else {
                 self.build_remote_model_routes_fallback()
             };
@@ -322,8 +322,8 @@ impl App {
                 push_unique(&mut seen, &mut models, route.model);
             }
 
-            for model in &self.remote_available_entries {
-                push_unique(&mut seen, &mut models, model.clone());
+            for model in self.visible_remote_available_entries() {
+                push_unique(&mut seen, &mut models, model);
             }
         } else {
             push_unique(&mut seen, &mut models, self.provider.model());
@@ -369,7 +369,7 @@ impl App {
 
         if self.is_remote {
             let routes = if !self.remote_model_options.is_empty() {
-                self.remote_model_options.clone()
+                self.visible_remote_model_options()
             } else {
                 self.build_remote_model_routes_fallback()
             };
@@ -715,9 +715,11 @@ impl App {
                 suggestions.push(("/auth doctor".into(), "Diagnose provider auth issues"));
             }
             suggestions.extend(
-                crate::provider_catalog::tui_login_providers()
-                    .iter()
-                    .map(|provider| (format!("{} {}", base, provider.id), provider.menu_detail)),
+                crate::provider_catalog::filter_disabled_login_providers(
+                    crate::provider_catalog::tui_login_providers(),
+                )
+                .iter()
+                .map(|provider| (format!("{} {}", base, provider.id), provider.menu_detail)),
             );
             return self.rank_suggestions(input, suggestions);
         }
@@ -743,7 +745,9 @@ impl App {
                     "Set custom OpenAI-compatible API base",
                 ),
             ];
-            for provider in crate::provider_catalog::login_providers() {
+            for provider in crate::provider_catalog::filter_disabled_login_providers(
+                crate::provider_catalog::login_providers().iter().copied(),
+            ) {
                 suggestions.push((
                     format!("/account {}", provider.id),
                     "Open this provider's account/settings actions",

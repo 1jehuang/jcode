@@ -105,6 +105,14 @@ impl MultiProvider {
             .is_available();
         let has_bedrock_creds = bedrock::BedrockProvider::has_credentials();
         let has_openrouter_creds = openrouter::OpenRouterProvider::has_credentials();
+        let claude_enabled = !Self::provider_is_disabled(ActiveProvider::Claude);
+        let openai_enabled = !Self::provider_is_disabled(ActiveProvider::OpenAI);
+        let copilot_enabled = !Self::provider_is_disabled(ActiveProvider::Copilot);
+        let antigravity_enabled = !Self::provider_is_disabled(ActiveProvider::Antigravity);
+        let gemini_enabled = !Self::provider_is_disabled(ActiveProvider::Gemini);
+        let cursor_enabled = !Self::provider_is_disabled(ActiveProvider::Cursor);
+        let bedrock_enabled = !Self::provider_is_disabled(ActiveProvider::Bedrock);
+        let openrouter_enabled = !Self::provider_is_disabled(ActiveProvider::OpenRouter);
 
         let use_claude_cli = std::env::var("JCODE_USE_CLAUDE_CLI")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -115,7 +123,7 @@ impl MultiProvider {
             );
         }
 
-        let claude = if has_claude_creds && use_claude_cli {
+        let claude = if claude_enabled && has_claude_creds && use_claude_cli {
             crate::logging::info(
                 "Using deprecated Claude CLI provider (forced by JCODE_USE_CLAUDE_CLI=1)",
             );
@@ -124,13 +132,13 @@ impl MultiProvider {
             None
         };
 
-        let anthropic = if has_claude_creds && !use_claude_cli {
+        let anthropic = if claude_enabled && has_claude_creds && !use_claude_cli {
             Some(Arc::new(anthropic::AnthropicProvider::new()))
         } else {
             None
         };
 
-        let openai = if has_openai_creds {
+        let openai = if openai_enabled && has_openai_creds {
             auth::codex::load_credentials()
                 .ok()
                 .map(openai::OpenAIProvider::new)
@@ -139,7 +147,7 @@ impl MultiProvider {
             None
         };
 
-        let copilot_api = if has_copilot_api {
+        let copilot_api = if copilot_enabled && has_copilot_api {
             let copilot_init_start = std::time::Instant::now();
             match copilot::CopilotApiProvider::new() {
                 Ok(p) => {
@@ -170,31 +178,31 @@ impl MultiProvider {
             None
         };
 
-        let antigravity_provider = if has_antigravity_creds {
+        let antigravity_provider = if antigravity_enabled && has_antigravity_creds {
             Some(Arc::new(antigravity::AntigravityProvider::new()))
         } else {
             None
         };
 
-        let gemini_provider = if has_gemini_creds {
+        let gemini_provider = if gemini_enabled && has_gemini_creds {
             Some(Arc::new(gemini::GeminiProvider::new()))
         } else {
             None
         };
 
-        let cursor_provider = if has_cursor_creds {
+        let cursor_provider = if cursor_enabled && has_cursor_creds {
             Some(Arc::new(cursor::CursorCliProvider::new()))
         } else {
             None
         };
 
-        let bedrock_provider = if has_bedrock_creds {
+        let bedrock_provider = if bedrock_enabled && has_bedrock_creds {
             Some(Arc::new(bedrock::BedrockProvider::new()))
         } else {
             None
         };
 
-        let openrouter = if has_openrouter_creds {
+        let openrouter = if openrouter_enabled && has_openrouter_creds {
             let named_profile = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
                 .ok()
                 .or_else(|| default_named_provider_profile.clone());
@@ -226,14 +234,14 @@ impl MultiProvider {
             Some("0")
         );
         let availability = ProviderAvailability {
-            openai: openai.is_some(),
-            claude: claude.is_some() || anthropic.is_some(),
-            copilot: copilot_api.is_some(),
-            antigravity: antigravity_provider.is_some(),
-            gemini: gemini_provider.is_some(),
-            cursor: cursor_provider.is_some(),
-            bedrock: bedrock_provider.is_some(),
-            openrouter: openrouter.is_some(),
+            openai: openai_enabled && openai.is_some(),
+            claude: claude_enabled && (claude.is_some() || anthropic.is_some()),
+            copilot: copilot_enabled && copilot_api.is_some(),
+            antigravity: antigravity_enabled && antigravity_provider.is_some(),
+            gemini: gemini_enabled && gemini_provider.is_some(),
+            cursor: cursor_enabled && cursor_provider.is_some(),
+            bedrock: bedrock_enabled && bedrock_provider.is_some(),
+            openrouter: openrouter_enabled && openrouter.is_some(),
             copilot_premium_zero,
         };
         let mut active = Self::auto_default_provider(availability);
@@ -246,9 +254,14 @@ impl MultiProvider {
 
         let forced_provider = Self::forced_provider_from_env();
         if let Some(forced) = forced_provider {
-            active = forced;
             let is_configured = availability.is_configured(forced);
-            if is_configured {
+            if Self::provider_is_disabled(forced) {
+                crate::logging::warn(&format!(
+                    "Forced provider '{}' is disabled by config; using auto-detected default",
+                    Self::provider_key(forced)
+                ));
+            } else if is_configured {
+                active = forced;
                 let display = if matches!(forced, ActiveProvider::OpenRouter) {
                     crate::provider_catalog::active_openai_compatible_display_name()
                         .unwrap_or_else(|| Self::provider_key(forced).to_string())
@@ -264,6 +277,7 @@ impl MultiProvider {
                     "Forced provider '{}' is not configured; requests will fail until credentials are available",
                     Self::provider_key(forced)
                 ));
+                active = forced;
             }
         } else if let Some(pref) = provider_state.default_provider_key() {
             if let Some(selection) = provider_state.default_provider_selection() {

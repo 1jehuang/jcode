@@ -69,6 +69,9 @@ impl MultiProvider {
     }
 
     pub(super) fn provider_slot_available(&self, provider: ActiveProvider) -> bool {
+        if Self::provider_is_disabled(provider) {
+            return false;
+        }
         match provider {
             ActiveProvider::Claude => self.has_claude_runtime(),
             ActiveProvider::OpenAI => self.openai_provider().is_some(),

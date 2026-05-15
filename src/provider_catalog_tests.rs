@@ -148,6 +148,19 @@ fn auth_issue_runtime_display_name_tracks_direct_compatible_profiles() {
 }
 
 #[test]
+fn disabled_login_providers_are_filtered_from_user_facing_lists() {
+    let _lock = crate::storage::lock_test_env();
+    let _guard = EnvGuard::save(&["JCODE_DISABLED_PROVIDERS"]);
+    crate::env::set_var("JCODE_DISABLED_PROVIDERS", "copilot,github copilot");
+    crate::config::invalidate_config_cache();
+
+    let providers = filter_disabled_login_providers(login_providers().iter().copied());
+    assert!(!providers.iter().any(|provider| provider.id == "copilot"));
+
+    crate::config::invalidate_config_cache();
+}
+
+#[test]
 fn auth_profile_env_application_flushes_stale_openrouter_catalog_state() {
     let _lock = crate::storage::lock_test_env();
     let _guard = EnvGuard::save(&[

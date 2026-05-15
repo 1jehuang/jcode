@@ -382,6 +382,14 @@ impl Config {
                 self.provider.default_provider = Some(trimmed);
             }
         }
+        if let Ok(v) = std::env::var("JCODE_DISABLED_PROVIDERS") {
+            self.provider.disabled_providers = v
+                .split(',')
+                .map(str::trim)
+                .filter(|provider| !provider.is_empty())
+                .map(|provider| provider.to_ascii_lowercase())
+                .collect();
+        }
         if let Ok(v) = std::env::var("JCODE_OPENAI_REASONING_EFFORT") {
             let trimmed = v.trim().to_string();
             if !trimmed.is_empty() {

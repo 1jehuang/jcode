@@ -73,6 +73,24 @@ impl MultiProvider {
         jcode_provider_core::provider_key(provider)
     }
 
+    pub(super) fn provider_is_disabled(provider: ActiveProvider) -> bool {
+        crate::config::config()
+            .disabled_provider_entries()
+            .any(|raw| {
+                let value = raw.trim();
+                !value.is_empty()
+                    && (Self::parse_provider_hint(value) == Some(provider)
+                        || value.eq_ignore_ascii_case(Self::provider_key(provider)))
+            })
+    }
+
+    pub(super) fn enabled_fallback_sequence(active: ActiveProvider) -> Vec<ActiveProvider> {
+        Self::fallback_sequence(active)
+            .into_iter()
+            .filter(|provider| !Self::provider_is_disabled(*provider))
+            .collect()
+    }
+
     pub(super) fn set_active_provider(&self, provider: ActiveProvider) {
         *self
             .active
