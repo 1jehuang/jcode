@@ -15,6 +15,7 @@ mod comm_control;
 mod comm_plan;
 mod comm_session;
 mod comm_sync;
+mod config_watcher;
 mod debug;
 mod debug_ambient;
 mod debug_command_exec;
@@ -912,6 +913,12 @@ impl Server {
             )
             .await;
         });
+
+        // Watch config and instruction files from inside the shared daemon. New
+        // client processes often attach to an already-running server, so relying
+        // on the launcher to re-read config is not enough. A changed config must
+        // make the daemon exec a fresh copy before future sessions are created.
+        config_watcher::spawn_config_reload_watcher(self.identity.git_hash.clone());
 
         // Log when we receive SIGTERM for debugging
         #[cfg(unix)]
