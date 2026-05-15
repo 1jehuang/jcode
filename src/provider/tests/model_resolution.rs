@@ -628,6 +628,68 @@ fn test_configured_direct_compatible_profiles_are_listed_without_openrouter_key(
 }
 
 #[test]
+fn test_named_provider_allowlist_exact_markers_are_not_model_ids() {
+    with_clean_provider_test_env(|| {
+        let config_path = crate::storage::jcode_dir()
+            .expect("temp jcode home")
+            .join("config.toml");
+        std::fs::write(
+            config_path,
+            r#"
+[provider]
+enabled_providers = ["ollama-cloud"]
+
+[provider.model_allowlist]
+ollama-cloud = ["=deepseek-v4-pro", "=deepseek-v4-flash"]
+
+[providers.ollama-cloud]
+type = "openai-compatible"
+base_url = "http://localhost:11434/v1"
+auth = "none"
+default_model = "deepseek-v4-pro"
+"#,
+        )
+        .expect("write temp config");
+        crate::config::invalidate_config_cache();
+
+        let provider = MultiProvider {
+            claude: RwLock::new(None),
+            anthropic: RwLock::new(None),
+            openai: RwLock::new(None),
+            copilot_api: RwLock::new(None),
+            antigravity: RwLock::new(None),
+            gemini: RwLock::new(None),
+            cursor: RwLock::new(None),
+            bedrock: RwLock::new(None),
+            openrouter: RwLock::new(None),
+            active: RwLock::new(ActiveProvider::OpenRouter),
+            use_claude_cli: false,
+            startup_notices: RwLock::new(Vec::new()),
+            forced_provider: Some(ActiveProvider::OpenRouter),
+        };
+
+        let routes = provider.model_routes();
+        assert!(routes.iter().any(|route| {
+            route.model == "deepseek-v4-pro"
+                && route.provider == "ollama-cloud"
+                && route.api_method == "openai-compatible:ollama-cloud"
+        }));
+        assert!(routes.iter().any(|route| {
+            route.model == "deepseek-v4-flash"
+                && route.provider == "ollama-cloud"
+                && route.api_method == "openai-compatible:ollama-cloud"
+        }));
+        assert!(
+            !routes.iter().any(|route| route.model.starts_with('=')),
+            "allowlist exact-match markers must not leak into model ids: {:?}",
+            routes
+        );
+
+        crate::config::invalidate_config_cache();
+    });
+}
+
+#[test]
 fn test_profile_prefixed_model_switch_reinitializes_direct_compatible_runtime() {
     with_clean_provider_test_env(|| {
         with_env_var("DEEPSEEK_API_KEY", "test-deepseek-key", || {

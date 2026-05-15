@@ -1185,7 +1185,7 @@ impl Provider for MultiProvider {
                 .get(&resolved.id)
             {
                 for model in allowlist_models {
-                    let model = model.trim();
+                    let model = model.trim().strip_prefix('=').unwrap_or(model.trim());
                     if !model.is_empty() && !profile_models.iter().any(|existing| existing == model)
                     {
                         profile_models.push(model.to_string());
@@ -1235,7 +1235,7 @@ impl Provider for MultiProvider {
             }
             if let Some(allowlist_models) = cfg.provider.model_allowlist.get(profile_name) {
                 for model in allowlist_models {
-                    let model = model.trim();
+                    let model = model.trim().strip_prefix('=').unwrap_or(model.trim());
                     if !model.is_empty() && !named_models.iter().any(|existing| existing == model) {
                         named_models.push(model.to_string());
                     }

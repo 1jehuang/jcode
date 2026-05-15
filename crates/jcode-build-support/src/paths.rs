@@ -253,6 +253,7 @@ pub fn find_dev_binary(repo_dir: &Path) -> Option<PathBuf> {
 
 fn current_exe_is_repo_binary() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
     let name = exe.file_name()?.to_str()?;
     if name != binary_name() {
         return None;
