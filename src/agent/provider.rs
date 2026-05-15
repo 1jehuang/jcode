@@ -22,11 +22,19 @@ impl Agent {
     }
 
     pub fn available_models_for_switching(&self) -> Vec<String> {
+        let routes = self.model_routes();
+        if !routes.is_empty() {
+            return crate::provider::listable_model_names_from_routes(&routes);
+        }
         let models = self.provider.available_models_for_switching();
         crate::provider_catalog::filter_models_by_allowlist(self.provider.name(), models)
     }
 
     pub fn available_models_display(&self) -> Vec<String> {
+        let routes = self.model_routes();
+        if !routes.is_empty() {
+            return crate::provider::listable_model_names_from_routes(&routes);
+        }
         let models = self.provider.available_models_display();
         crate::provider_catalog::filter_models_by_allowlist(self.provider.name(), models)
     }

@@ -132,6 +132,13 @@ impl App {
         let auth = crate::auth::AuthStatus::check_fast();
         let mut routes = Vec::new();
 
+        let route_catalog = crate::provider_catalog::filter_model_routes_by_allowlist(
+            self.provider.name(),
+            self.provider.model_routes(),
+        );
+        if !route_catalog.is_empty() {
+            return route_catalog;
+        }
         let display = crate::provider_catalog::filter_models_by_allowlist(
             self.provider.name(),
             self.provider.available_models_display(),
@@ -1050,7 +1057,10 @@ impl App {
                 added_any = true;
             }
 
-            if Self::remote_model_should_offer_copilot_route(model) && !model.contains("[1m]") {
+            if crate::provider_catalog::provider_is_enabled("copilot")
+                && Self::remote_model_should_offer_copilot_route(model)
+                && !model.contains("[1m]")
+            {
                 routes.push(crate::provider::build_copilot_route(
                     model,
                     auth.copilot == crate::auth::AuthState::Available

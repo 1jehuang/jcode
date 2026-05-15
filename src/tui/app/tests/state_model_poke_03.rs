@@ -71,6 +71,11 @@ struct MixedModelRoutesProvider {
 }
 
 #[derive(Clone)]
+struct SubscriptionModelRoutesProvider {
+    model: StdArc<StdMutex<String>>,
+}
+
+#[derive(Clone)]
 struct AuthUxStateSpaceProvider {
     authed: StdArc<AtomicBool>,
     refreshes: StdArc<AtomicUsize>,
@@ -178,6 +183,93 @@ impl MixedModelRoutesProvider {
                 api_method: "openrouter".to_string(),
                 available: true,
                 detail: String::new(),
+                cheapness: None,
+            },
+        ]
+    }
+}
+
+impl SubscriptionModelRoutesProvider {
+    fn routes() -> Vec<crate::provider::ModelRoute> {
+        vec![
+            crate::provider::ModelRoute {
+                model: "copilot-gpt-5".to_string(),
+                provider: "Copilot".to_string(),
+                api_method: "copilot".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "claude-opus-4-7[1m]".to_string(),
+                provider: "Anthropic".to_string(),
+                api_method: "claude-oauth".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "claude-sonnet-4-6[1m]".to_string(),
+                provider: "Anthropic".to_string(),
+                api_method: "claude-oauth".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "gpt-5.5".to_string(),
+                provider: "OpenAI".to_string(),
+                api_method: "openai-oauth".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "gpt-5.4".to_string(),
+                provider: "OpenAI".to_string(),
+                api_method: "openai-oauth".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "gpt-5.3-codex-spark".to_string(),
+                provider: "OpenAI".to_string(),
+                api_method: "openai-oauth".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "deepseek-v4-pro".to_string(),
+                provider: "opencode-go".to_string(),
+                api_method: "openai-compatible:opencode-go".to_string(),
+                available: true,
+                detail: "https://opencode.ai/zen/go/v1".to_string(),
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "deepseek-v4-flash".to_string(),
+                provider: "opencode-go".to_string(),
+                api_method: "openai-compatible:opencode-go".to_string(),
+                available: true,
+                detail: "https://opencode.ai/zen/go/v1".to_string(),
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "deepseek-v4-pro".to_string(),
+                provider: "ollama-cloud".to_string(),
+                api_method: "openai-compatible:ollama-cloud".to_string(),
+                available: true,
+                detail: "https://ollama.com/v1".to_string(),
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "deepseek-v4-flash".to_string(),
+                provider: "ollama-cloud".to_string(),
+                api_method: "openai-compatible:ollama-cloud".to_string(),
+                available: true,
+                detail: "https://ollama.com/v1".to_string(),
                 cheapness: None,
             },
         ]
@@ -293,6 +385,48 @@ impl Provider for MixedModelRoutesProvider {
         let model = model.strip_prefix("chutes:").unwrap_or(model);
         if !Self::routes().iter().any(|route| route.model == model) {
             anyhow::bail!("model {model} is not available in the mixed catalog");
+        }
+        *self.model.lock().unwrap() = model.to_string();
+        Ok(())
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for SubscriptionModelRoutesProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<crate::provider::EventStream> {
+        unimplemented!("SubscriptionModelRoutesProvider")
+    }
+
+    fn name(&self) -> &str {
+        "OpenRouter"
+    }
+
+    fn model(&self) -> String {
+        self.model.lock().unwrap().clone()
+    }
+
+    fn available_models_display(&self) -> Vec<String> {
+        crate::provider::listable_model_names_from_routes(&Self::routes())
+    }
+
+    fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
+        Self::routes()
+    }
+
+    fn set_model(&self, model: &str) -> Result<()> {
+        let found = Self::routes().iter().any(|route| route.model == model);
+        if !found {
+            anyhow::bail!("model {model} is not available in the subscription catalog");
         }
         *self.model.lock().unwrap() = model.to_string();
         Ok(())
@@ -1069,6 +1203,106 @@ fn test_model_picker_state_space_preserves_provider_labels_after_route_hydration
         "opening the model list must not collapse every route to the recently authenticated direct provider: {:?}",
         routes_by_model
     );
+}
+
+#[test]
+fn test_model_picker_keeps_subscription_routes_under_openrouter_profile_allowlist() {
+    with_temp_jcode_home(|| {
+        let config_path = crate::storage::jcode_dir()
+            .expect("temp jcode home")
+            .join("config.toml");
+        std::fs::write(
+            config_path,
+            r#"
+[provider]
+default_provider = "ollama-cloud"
+default_model = "deepseek-v4-pro"
+enabled_providers = ["anthropic", "openai", "opencode-go", "ollama-cloud"]
+
+[provider.model_allowlist]
+anthropic = ["=claude-opus-4-7[1m]", "=claude-sonnet-4-6[1m]"]
+openai = ["=gpt-5.5", "=gpt-5.4", "=gpt-5.3-codex-spark"]
+opencode-go = ["=deepseek-v4-pro", "=deepseek-v4-flash"]
+ollama-cloud = ["=deepseek-v4-pro", "=deepseek-v4-flash"]
+"#,
+        )
+        .expect("write temp config");
+        crate::config::invalidate_config_cache();
+        clear_persisted_test_ui_state();
+        crate::tui::ui::clear_test_render_state_for_tests();
+
+        let provider: Arc<dyn Provider> = Arc::new(SubscriptionModelRoutesProvider {
+            model: StdArc::new(StdMutex::new("deepseek-v4-pro".to_string())),
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        let mut app = App::new_for_test_harness(provider, registry);
+        app.queue_mode = false;
+        app.diff_mode = crate::config::DiffDisplayMode::Inline;
+
+        app.open_model_picker();
+        wait_for_model_picker_load(&mut app);
+
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("subscription model picker should be open");
+        let route_pairs: Vec<(String, String, String)> = picker
+            .entries
+            .iter()
+            .flat_map(|entry| {
+                entry.options.iter().map(|route| {
+                    (
+                        entry.name.clone(),
+                        route.provider.clone(),
+                        route.api_method.clone(),
+                    )
+                })
+            })
+            .collect();
+
+        for expected in [
+            "claude-opus-4-7[1m]",
+            "claude-sonnet-4-6[1m]",
+            "gpt-5.5",
+            "gpt-5.4",
+            "gpt-5.3-codex-spark",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+        ] {
+            assert!(
+                route_pairs.iter().any(|(model, _, _)| model == expected),
+                "missing {expected} from picker routes: {:?}",
+                route_pairs
+            );
+        }
+
+        assert!(
+            route_pairs.iter().any(|(model, provider, method)| {
+                model == "deepseek-v4-pro"
+                    && provider == "ollama-cloud"
+                    && method == "openai-compatible:ollama-cloud"
+            }),
+            "ollama-cloud Pro route should remain available: {:?}",
+            route_pairs
+        );
+        assert!(
+            route_pairs.iter().any(|(model, provider, method)| {
+                model == "deepseek-v4-pro"
+                    && provider == "opencode-go"
+                    && method == "openai-compatible:opencode-go"
+            }),
+            "opencode-go Pro route should remain available: {:?}",
+            route_pairs
+        );
+        assert!(
+            route_pairs.iter().all(|(_, provider, _)| provider != "Copilot"),
+            "Copilot routes should be hidden when Copilot is not enabled: {:?}",
+            route_pairs
+        );
+
+        crate::config::invalidate_config_cache();
+    });
 }
 
 #[test]
