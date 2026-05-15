@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use std::process::Stdio;
 use tokio::process::Command as TokioCommand;
 
-const DB_EXECUTE_DESCRIPTION: &str = "Execute a SQL statement against the agent's local Postgres database. The statement is scoped to the agent's own schema. Use for CREATE TABLE, INSERT, UPDATE, DELETE, SELECT, DROP TABLE, etc. For queries that may return large results, limit with SQL clauses.";
+const DB_EXECUTE_DESCRIPTION: &str = "Execute a SQL statement against the agent's local Postgres database. Statements run as a per-session role that owns the session's schema; agents cannot access other sessions' data. Use for CREATE TABLE, INSERT, UPDATE, DELETE, SELECT, DROP TABLE, etc. For queries that may return large results, limit with SQL clauses.";
 
 pub struct DbExecuteTool;
 
@@ -47,9 +47,24 @@ fn agent_schema_name(session_id: &str) -> String {
     format!("agent_{}", short)
 }
 
-fn provision_schema_sql(schema: &str) -> String {
+fn provision_role_and_schema_sql(schema: &str) -> String {
+    // Creates a NOLOGIN role for the session (if missing), grants it to
+    // jcode_agent, creates/owns the schema, and sets the effective role
+    // + search_path. All SQL from the agent runs as this per-session role,
+    // which owns its schema but has no USAGE on any other agent's schema.
     format!(
-        "CREATE SCHEMA IF NOT EXISTS {schema};\nSET search_path TO {schema};"
+        "DO $$\n\
+         BEGIN\n\
+           IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '{schema}') THEN\n\
+             CREATE ROLE {schema} NOLOGIN;\n\
+           END IF;\n\
+         END\n\
+         $$;\n\
+         GRANT {schema} TO jcode_agent;\n\
+         CREATE SCHEMA IF NOT EXISTS {schema} AUTHORIZATION {schema};\n\
+         ALTER SCHEMA {schema} OWNER TO {schema};\n\
+         SET ROLE {schema};\n\
+         SET search_path TO {schema};"
     )
 }
 
@@ -83,7 +98,7 @@ impl Tool for DbExecuteTool {
 
         let full_sql = format!(
             "{}\n{}",
-            provision_schema_sql(&schema),
+            provision_role_and_schema_sql(&schema),
             params.sql.trim()
         );
 
@@ -105,9 +120,9 @@ async fn run_psql(sql: &str) -> Result<String> {
             "jcode_agent_workspace",
             "-v",
             "ON_ERROR_STOP=1",
-            "-A",  // unaligned output
-            "-t",  // tuples only (no headers)
-            "-q",  // quiet
+            "-A", // unaligned output
+            "-t", // tuples only (no headers)
+            "-q", // quiet
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
