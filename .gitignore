@@ -8,3 +8,6 @@ ios_simulator_screenshot.png
 .jcode/pr-feedback-watch/
 /.omc/
 /.playwright-mcp/
+
+# Local/generated overnight run artifacts
+.jcode/overnight-runs/

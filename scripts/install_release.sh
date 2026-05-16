@@ -87,6 +87,8 @@ echo "Updated stable symlink: $stable_dir/jcode -> $version_dir/jcode"
 echo "Updated current symlink: $current_dir/jcode -> $version_dir/jcode"
 echo "Updated launcher symlink: $install_dir/jcode -> $current_dir/jcode"
 
+"$repo_root/scripts/install_jcode_dev.sh"
+
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$install_dir"; then
   echo ""
   echo "Tip: add $install_dir to PATH if needed."

@@ -732,6 +732,28 @@ Then symlink to your PATH:
 scripts/install_release.sh
 ```
 
+For source checkouts, `scripts/install_release.sh` also installs a `jcode-dev`
+shim into the same install directory. `jcode` remains the normal launcher for
+the documented channel, while `jcode-dev` launches this checkout through
+`scripts/jcode-dev.sh`.
+
+`jcode-dev` normally fetches remotes and checks whether the current branch can
+be safely rebased before launching. For local work in a dirty or intentionally
+diverged checkout, skip that preflight explicitly:
+
+```bash
+jcode-dev --no-sync --version
+JCODE_DEV_SYNC=skip jcode-dev --version
+```
+
+By default `jcode-dev` runs this checkout through the fast local dev cargo path.
+If you intentionally want to delegate to an installed `selfdev` helper instead,
+set `JCODE_DEV_USE_SELFDEV=1`.
+
+When the checkout is dirty or diverged, the default sync preflight warns and
+continues without rebasing so `jcode-dev` still launches. Set
+`JCODE_DEV_SYNC=require` when you want blocked sync to stop the launcher.
+
 ### Platform Support
 
 | Platform | Status |
