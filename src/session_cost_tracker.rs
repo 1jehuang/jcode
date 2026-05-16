@@ -9,16 +9,16 @@
 //!
 //! ```text
 //! Session starts
-//!     │
-//! restoreCostStateForSession()  ←── reads from project config
-//!     │
+//!     |
+//! restoreCostStateForSession()  <--- reads from project config
+//!     |
 //! Agent runs, costs accumulate
-//!     │
-//! saveCurrentSessionCosts()    ──→ writes to project config
-//!     │
+//!     |
+//! saveCurrentSessionCosts()    ---> writes to project config
+//!     |
 //! (crash / restart / resume)
-//!     │
-//! restoreCostStateForSession()  ←── restores full history
+//!     |
+//! restoreCostStateForSession()  <--- restores full history
 //! ```
 
 use serde::{Deserialize, Serialize};

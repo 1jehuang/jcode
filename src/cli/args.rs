@@ -198,7 +198,7 @@ pub(crate) enum Command {
     },
 
     /// Debug socket CLI - interact with running jcode server
-    Debug {
+    DebugSocket {
         /// Debug command to run (list, start, sessions, create_session, message, tool, state, history, etc.)
         #[arg(default_value = "help")]
         command: String,
@@ -575,9 +575,9 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Debug(DebugCommand),
 
-    // ──────────────────────────────────────────────────────────
+    // ----------------------------------------------------------
     // Expanded commands matching Claude Code coverage (~106 total)
-    // ──────────────────────────────────────────────────────────
+    // ----------------------------------------------------------
 
     /// Clear conversation history or cached state
     Clear {
@@ -900,18 +900,6 @@ pub(crate) enum Command {
         #[arg(long)]
         json: bool,
     },
-
-    /// Code navigation: goto-definition, find-references, hover, symbols
-    #[command(subcommand)]
-    CodeNav(CodeNavCommand),
-
-    /// Refactoring operations: rename, extract-method, format
-    #[command(subcommand)]
-    CodeRefactor(CodeRefactorCommand),
-
-    /// Debugger integration (DAP client)
-    #[command(subcommand)]
-    Debug(DebugCommand),
 }
 
 #[derive(Subcommand, Debug)]

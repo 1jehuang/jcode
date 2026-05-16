@@ -231,7 +231,7 @@ impl PermissionsApp {
     }
 
     fn render_separator(&self, frame: &mut Frame, area: Rect) {
-        let sep = "─".repeat(area.width as usize);
+        let sep = "-".repeat(area.width as usize);
         let line = Line::from(Span::styled(sep, Style::default().fg(rgb(60, 60, 70))));
         frame.render_widget(Paragraph::new(vec![line]), area);
     }
@@ -409,7 +409,7 @@ impl PermissionsApp {
                 ("d", "deny"),
                 ("A", "approve all"),
                 ("D", "deny all"),
-                ("↑↓", "navigate"),
+                ("^v", "navigate"),
                 ("q", "quit"),
             ]
         };

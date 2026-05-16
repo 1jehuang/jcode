@@ -1,4 +1,4 @@
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum AuthTestChoicePlan {
     Run { model: Option<String> },
     Skip(String),

@@ -85,7 +85,7 @@ impl Default for EngineHealth {
 // ════════════════════════════════════════════════════════════════════
 
 /// 统一编译引擎入口。
-/// 内部自动启动后台调度循环，连接 GlobalScheduler → NodeScheduler → TaskScheduler。
+/// 内部自动启动后台调度循环，连接 GlobalScheduler -> NodeScheduler -> TaskScheduler。
 pub struct BuildEngine {
     global: Arc<GlobalScheduler>,
     node: Arc<NodeScheduler>,
@@ -242,9 +242,9 @@ impl BuildEngine {
         &self.task
     }
 
-    // ── 后台调度循环 ──
+    // -- 后台调度循环 --
 
-    /// 后台循环：从 GlobalScheduler 出队 → NodeScheduler 分配 → TaskScheduler 执行
+    /// 后台循环：从 GlobalScheduler 出队 -> NodeScheduler 分配 -> TaskScheduler 执行
     async fn scheduler_loop(
         global: Arc<GlobalScheduler>,
         task: Arc<TaskScheduler>,

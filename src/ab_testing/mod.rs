@@ -134,6 +134,8 @@ pub struct StatisticalResult {
     pub test_statistic: f64,
     pub confidence_interval: (f64, f64),
     pub effect_size: f64,
+    pub winner: Option<String>,
+    pub confidence: Option<f64>,
     pub power: Option<f64>,
 }
 
@@ -254,7 +256,7 @@ impl AbTestManager {
         let result = self.analyze_results(experiment_id)?;
         self.results_store.winner = result.winner.clone();
         self.results_store.confidence = result.confidence;
-        self.results_store.effect_size = result.effect_size;
+        self.results_store.effect_size = Some(result.effect_size);
         Ok(self.results_store.clone())
     }
 

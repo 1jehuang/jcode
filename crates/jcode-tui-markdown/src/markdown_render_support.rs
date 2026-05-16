@@ -14,7 +14,7 @@ pub fn extract_copy_targets_from_rendered_lines(lines: &[Line<'static>]) -> Vec<
     while idx < lines.len() {
         let text = line_plain_text(&lines[idx]);
         let trimmed = text.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("┌─ ") {
+        if let Some(rest) = trimmed.strip_prefix("+- ") {
             let label = rest.trim();
             let language = if label.is_empty() || label == "code" {
                 None
@@ -28,11 +28,11 @@ pub fn extract_copy_targets_from_rendered_lines(lines: &[Line<'static>]) -> Vec<
             while idx < lines.len() {
                 let line_text = line_plain_text(&lines[idx]);
                 let line_trimmed = line_text.trim_start();
-                if line_trimmed.starts_with("└─") {
+                if line_trimmed.starts_with("+-") {
                     idx += 1;
                     break;
                 }
-                if let Some(code) = line_trimmed.strip_prefix("│ ") {
+                if let Some(code) = line_trimmed.strip_prefix("| ") {
                     content_lines.push(code.to_string());
                 }
                 idx += 1;
@@ -75,7 +75,7 @@ pub(super) fn render_table(rows: &[Vec<String>], max_width: Option<usize>) -> Ve
 
     // Apply max width constraint if specified
     if let Some(max_w) = max_width {
-        // Account for separators: " │ " = 3 chars between each column
+        // Account for separators: " | " = 3 chars between each column
         let separator_space = if num_cols > 1 { (num_cols - 1) * 3 } else { 0 };
         let available = max_w.saturating_sub(separator_space);
 
@@ -139,7 +139,7 @@ pub(super) fn render_table(rows: &[Vec<String>], max_width: Option<usize>) -> Ve
             };
 
             if i > 0 {
-                spans.push(Span::styled(" │ ", Style::default().fg(table_color())));
+                spans.push(Span::styled(" | ", Style::default().fg(table_color())));
             }
             spans.push(Span::styled(padded, style));
         }
@@ -150,9 +150,9 @@ pub(super) fn render_table(rows: &[Vec<String>], max_width: Option<usize>) -> Ve
         if row_idx == 0 {
             let separator: String = col_widths
                 .iter()
-                .map(|&w| "─".repeat(w))
+                .map(|&w| "-".repeat(w))
                 .collect::<Vec<_>>()
-                .join("─┼─");
+                .join("-+-");
             lines.push(
                 Line::from(Span::styled(separator, Style::default().fg(table_color())))
                     .left_aligned(),

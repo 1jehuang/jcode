@@ -9,7 +9,7 @@ use std::sync::Arc;
 use url::Url;
 use uuid::Uuid;
 
-use super::replay::{RecordedSession, SessionMetadata};
+use super::replay::{RecordedEvent, RecordedSession};
 
 pub struct SessionSharingService {
     storage: Arc<dyn ShareStorage>,
@@ -462,7 +462,7 @@ impl Default for UserId {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShareVisibility {
     Public,
     Unlisted,
@@ -871,7 +871,7 @@ impl ShareEncoder {
             md.push_str("\n\n");
         }
         if !session.metadata.tags.is_empty() {
-            md.push("**Tags:** ");
+            md.push_str("**Tags:** ");
             md.push_str(&session.metadata.tags.join(", "));
             md.push_str("\n\n");
         }
@@ -941,18 +941,18 @@ impl ShareEncoder {
             session.metadata.id.full_uuid,
             Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
         ));
-        script.push_str('echo "=== CarpAI Session Replay ==="\necho ""\n');
+        script.push_str("echo \"=== CarpAI Session Replay ===\"\necho \"\"\n");
         for msg in &session.content.conversation {
             match &msg.content {
                 SharedContent::Text(t) => {
                     if matches!(msg.role, MessageRole::User) {
                         script.push_str(&format!(
-                            'echo "[USER] {}"\n',
+                            "echo \"[USER] {}\"\n",
                             t.replace('"', "\\\"").replace('$', "\\$")
                         ));
                     } else if matches!(msg.role, MessageRole::Assistant) {
                         script.push_str(&format!(
-                            'echo "[ASSISTANT] {}"\n',
+                            "echo \"[ASSISTANT] {}\"\n",
                             t.replace('"', "\\\"").replace('$', "\\$")
                         ));
                     }
@@ -960,19 +960,19 @@ impl ShareEncoder {
                 SharedContent::Code { language, code } => {
                     if language == "bash" || language == "sh" {
                         script.push_str(&format!(
-                            '# --- Code block ({}) ---\n{}\n',
+                            "# --- Code block ({}) ---\n{}\n",
                             language, code
                         ));
                     } else {
                         script.push_str(&format!(
-                            'echo "### Code ({}):"\ncat << \'CODEEOF\'\n{}\nCODEEOF\n',
+                            "echo \"### Code ({}):\"\ncat << 'CODEEOF'\n{}\nCODEEOF\n",
                             language, code
                         ));
                     }
                 }
                 SharedContent::Json(v) => {
                     script.push_str(&format!(
-                        'echo "### JSON payload:"\necho \'{}\'\n',
+                        "echo \"### JSON payload:\"\necho '{}'\n",
                         v.to_string().replace('\'', "'\\''")
                     ));
                 }
@@ -984,13 +984,13 @@ impl ShareEncoder {
                 }
                 SharedContent::Multimodal { text, .. } => {
                     script.push_str(&format!(
-                        'echo "[MULTIMODAL] {}"\n',
+                        "echo \"[MULTIMODAL] {}\"\n",
                         text.replace('"', "\\\"")
                     ));
                 }
             }
         }
-        script.push_str('\necho ""\necho "=== Replay Complete ==="\n');
+        script.push_str("\necho \"\"\necho \"=== Replay Complete ===\"\n");
         Ok(script)
     }
 
@@ -1151,12 +1151,12 @@ impl ShareAnalytics {
         let map = self.views.read().await;
         match map.get(&key) {
             Some(record) => {
-                let top_referrers: Vec<(String, u64)> = record
+                let top_referrers: Vec<String, u64> = record
                     .referrers
                     .iter()
                     .map(|(k, v)| (k.clone(), *v))
                     .collect();
-                let views_over_time: Vec<(DateTime<Utc>, u64)> = record
+                let views_over_time: Vec<DateTime<Utc>, u64> = record
                     .timestamps
                     .iter()
                     .map(|t| (*t, 1))
@@ -1398,10 +1398,10 @@ pub struct ShareAnalyticsData {
     pub total_views: u64,
     pub unique_viewers: u64,
     pub avg_view_duration: Option<ChronoDuration>,
-    pub top_referrers: Vec<(String, u64)>,
-    pub views_over_time: Vec<(DateTime<Utc>, u64)>,
+    pub top_referrers: Vec<String, u64>,
+    pub views_over_time: Vec<DateTime<Utc>, u64>,
     pub clone_count: u64,
-    pub geographic_distribution: Vec<(String, u64)>,
+    pub geographic_distribution: Vec<String, u64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

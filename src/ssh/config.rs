@@ -340,7 +340,7 @@ impl ConfigParser {
     /// Validate SSH configuration file
     pub fn validate_config() -> Result<Vec<String>, String> {
         let mut warnings = vec![];
-        let errors = vec![];
+        let mut errors = vec![];
 
         let config_path = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))

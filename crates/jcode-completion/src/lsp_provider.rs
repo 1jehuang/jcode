@@ -2,10 +2,10 @@
 //!
 //! 通信方式: JSON-RPC 2.0 over stdio
 //! 支持的 LSP 方法:
-//!   - textDocument/hover → 类型信息 (expected_type)
-//!   - textDocument/definition → 符号定义位置 (parent_symbol)
-//!   - textDocument/completion → 精准补全候选
-//!   - textDocument/semanticTokens → 语法级上下文
+//!   - textDocument/hover -> 类型信息 (expected_type)
+//!   - textDocument/definition -> 符号定义位置 (parent_symbol)
+//!   - textDocument/completion -> 精准补全候选
+//!   - textDocument/semanticTokens -> 语法级上下文
 
 use crate::ast_context::{AstContextProvider, CompletionContext, ScopeKind};
 use async_trait::async_trait;

@@ -1981,7 +1981,7 @@ impl App {
                 self.set_status_notice("Checking for updates...");
             }
             UpdateStatus::Available { current, latest } => {
-                self.set_status_notice(format!("Update available: {} → {}", current, latest));
+                self.set_status_notice(format!("Update available: {} -> {}", current, latest));
             }
             UpdateStatus::Downloading { version } => {
                 self.set_status_notice(format!("⬇️  Downloading {}...", version));

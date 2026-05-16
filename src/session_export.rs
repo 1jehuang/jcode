@@ -56,7 +56,6 @@
 //!
 //! ```rust,no_run
 //! use carpai::session_export::{SessionExporter, MessageRole};
-//! use std::path::PathBuf;
 //!
 //! // 准备消息数据
 //! let messages = vec![
@@ -86,5 +85,4 @@
 //! }
 //! ```
 
-use std::path::PathBuf;
 use serde::{Serialize, Deserialize};

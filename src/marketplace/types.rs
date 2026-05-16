@@ -34,17 +34,17 @@ pub enum Category {
 }
 
 impl Category {
-    pub fn display(&self) -> &'static str {
+    pub fn display(&self) -> String {
         match self {
-            Category::Development => "🛠️ Development",
-            Category::Productivity => "⚡ Productivity",
-            Category::Integration => "🔗 Integration",
-            Category::Theme => "🎨 Theme",
-            Category::Language => "💬 Language",
-            Category::Tool => "🔧 Tool",
-            Category::AI => "🤖 AI & ML",
-            Category::Security => "🔒 Security",
-            Category::Other(name) => name.as_str(),
+            Category::Development => "🛠️ Development".to_string(),
+            Category::Productivity => "⚡ Productivity".to_string(),
+            Category::Integration => "🔗 Integration".to_string(),
+            Category::Theme => "🎨 Theme".to_string(),
+            Category::Language => "💬 Language".to_string(),
+            Category::Tool => "🔧 Tool".to_string(),
+            Category::AI => "🤖 AI & ML".to_string(),
+            Category::Security => "🔒 Security".to_string(),
+            Category::Other(name) => name.clone(),
         }
     }
 

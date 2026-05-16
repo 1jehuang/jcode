@@ -575,7 +575,7 @@ impl CommandBlock {
             *y += 1;
         }
         if *y < area.y + area.height {
-            let sep: String = "─".repeat(area.width as usize);
+            let sep: String = "-".repeat(area.width as usize);
             Line::from(Span::styled(sep, Style::default().fg(Color::DarkGray)))
                 .render(Rect::new(base_x, *y, area.width, 1), buf);
             *y += 1;
@@ -659,7 +659,7 @@ impl CommandBlock {
             }
             if code.line_numbers {
                 let num = Span::styled(
-                    format!("{:>4} │ ", i + 1),
+                    format!("{:>4} | ", i + 1),
                     Style::default().fg(Color::DarkGray),
                 );
                 let content = Span::styled(line.to_string(), Style::default());

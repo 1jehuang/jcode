@@ -23,7 +23,7 @@ use tracing::{debug, info, warn};
 static SEQ: AtomicU64 = AtomicU64::new(1);
 fn next_seq() -> u64 { SEQ.fetch_add(1, Ordering::SeqCst) }
 
-// ── DAP Protocol Types ──
+// -- DAP Protocol Types --
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
@@ -59,7 +59,7 @@ struct DapResponse {
     event: Option<String>,
 }
 
-// ── Public Types ──
+// -- Public Types --
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DebugConfig {
@@ -176,7 +176,7 @@ pub struct DebugResult {
     pub elapsed_ms: u64,
 }
 
-// ── Debugger Client ──
+// -- Debugger Client --
 
 pub struct DebugClient {
     config: DebugConfig,
@@ -327,7 +327,7 @@ impl DebugClient {
         Ok(())
     }
 
-    // ── internal ──
+    // -- internal --
 
     async fn send_initialize(&mut self) -> Result<Value> {
         let args = json!({
@@ -490,7 +490,7 @@ impl DebugClient {
     }
 }
 
-// ── Crash Analyzer ──
+// -- Crash Analyzer --
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrashInfo {

@@ -28,6 +28,7 @@ pub struct ToolSearchResult {
 }
 
 /// 工具嵌入索引条目
+#[allow(dead_code)]
 struct ToolIndexEntry {
     name: String,
     description: String,
@@ -93,7 +94,7 @@ impl ToolEmbeddingIndex {
         self.entries.iter().map(|e| e.name.as_str()).collect()
     }
 
-    // ─── 内部方法 ─────────────────────────────────
+    // --- 内部方法 ---------------------------------
 
     fn extract_tags(name: &str, description: &str) -> Vec<String> {
         let mut tags = Vec::new();

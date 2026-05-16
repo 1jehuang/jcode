@@ -58,7 +58,7 @@ impl App {
         }
         if self.streaming_input_tokens > 0 || self.streaming_output_tokens > 0 {
             parts.push(format!(
-                "↑{} ↓{}",
+                "^{} v{}",
                 format_tokens(self.streaming_input_tokens),
                 format_tokens(self.streaming_output_tokens)
             ));

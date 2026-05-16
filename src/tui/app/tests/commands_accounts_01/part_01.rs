@@ -832,7 +832,7 @@ fn test_compact_mode_command_updates_local_session_mode() {
 
     let last = app.display_messages().last().expect("missing response");
     assert_eq!(last.role, "system");
-    assert_eq!(last.content, "✓ Compaction mode → semantic");
+    assert_eq!(last.content, "✓ Compaction mode -> semantic");
 }
 
 #[test]

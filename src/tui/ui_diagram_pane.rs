@@ -456,7 +456,7 @@ pub(crate) fn draw_pinned_diagram(
         ));
     }
     if total > 1 {
-        title_parts.push(Span::styled(" Ctrl+←/→", Style::default().fg(dim_color())));
+        title_parts.push(Span::styled(" Ctrl+<-/->", Style::default().fg(dim_color())));
     }
     title_parts.push(Span::styled(
         " Ctrl+H/L focus",

@@ -250,7 +250,7 @@ impl SsrfGuard {
         }
     }
 
-    // ─── 检查逻辑实现 ─────────────────────────────────
+    // --- 检查逻辑实现 ---------------------------------
 
     fn is_whitelisted(&self, url: &str) -> bool {
         let host_lower = Self::extract_host(url).unwrap_or_default().to_lowercase();
@@ -424,7 +424,7 @@ impl SsrfGuard {
         }
     }
 
-    // ─── 工具函数 ──────────────────────────────────────
+    // --- 工具函数 --------------------------------------
 
     fn extract_host(url: &str) -> Option<String> {
         // 移除协议前缀
@@ -463,7 +463,7 @@ impl SsrfGuard {
 
     fn extract_mapped_ipv4(ip: &Ipv6Addr) -> Option<Ipv4Addr> {
         let octets = ip.octets();
-        // IPv4-mapped 格式: ::ffff:a.b.c.d → 前 10 字节是 0, 第 11-12 是 0xff, 后 4 字节是 IPv4
+        // IPv4-mapped 格式: ::ffff:a.b.c.d -> 前 10 字节是 0, 第 11-12 是 0xff, 后 4 字节是 IPv4
         if octets[0..10] == [0; 10] && octets[10..12] == [0xff, 0xff] {
             Some(Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]))
         } else {

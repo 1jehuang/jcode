@@ -45,6 +45,7 @@ pub struct EnhancedCompletionItem {
 }
 
 /// 补全排序策略
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub enum CompletionSortStrategy {
     /// 默认 LSP 排序
@@ -95,10 +96,10 @@ impl Default for CompletionConfig {
 pub struct CompletionManager {
     config: CompletionConfig,
     
-    /// 补全缓存 (uri + position → results)
+    /// 补全缓存 (uri + position -> results)
     cache: Arc<RwLock<HashMap<String, Vec<EnhancedCompletionItem>>>>,
     
-    /// 使用频率统计 (item label → count)
+    /// 使用频率统计 (item label -> count)
     usage_stats: Arc<RwLock<HashMap<String, u64>>>,
 }
 
@@ -238,7 +239,7 @@ impl CompletionManager {
         );
     }
 
-    // ─── 内部方法 ─────────────────────────
+    // --- 内部方法 -------------------------
 
     async fn enhance_completion_item(
         &self,
@@ -368,6 +369,7 @@ impl CompletionManager {
 // ============================================================================
 
 /// 简单的 snippet 展开器（不依赖外部库）
+#[allow(dead_code)]
 pub fn expand_simple_snippet(snippet: &str) -> Option<(String, Vec<usize>)> {
     // 返回 (展开后的文本, tab stop 位置列表)
     let mut text = snippet.to_string();

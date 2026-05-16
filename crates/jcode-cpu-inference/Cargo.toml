@@ -1,0 +1,24 @@
+[package]
+name = "jcode-cpu-inference"
+version = "0.1.0"
+edition = "2024"
+description = "CarpAI CPU Inference Engine — llama.cpp wrapper for enterprise server"
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1", features = ["full", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+sys-info = "0.9"
+num_cpus = "1"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+jcode-llm = { path = "../jcode-llm" }
+
+[lib]
+name = "jcode_cpu_inference"
+path = "src/lib.rs"

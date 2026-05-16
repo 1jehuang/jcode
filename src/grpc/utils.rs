@@ -168,12 +168,12 @@ fn extract_symbols(content: &str, line: i32, character: i32) -> Vec<SymbolInfo> 
     }
 
     let mut start = char_idx;
-    while start > 0 && target_line.chars().nth(start - 1).unwrap().is_alphanumeric() {
+    while start > 0 && target_line.chars().nth(start - 1).unwrap_or(' ').is_alphanumeric() {
         start -= 1;
     }
 
     let mut end = char_idx;
-    while end < target_line.len() && target_line.chars().nth(end).unwrap().is_alphanumeric() {
+    while end < target_line.len() && target_line.chars().nth(end).unwrap_or(' ').is_alphanumeric() {
         end += 1;
     }
 

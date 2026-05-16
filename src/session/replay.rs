@@ -33,7 +33,7 @@ pub struct TokenUsageStats {
     pub estimated_cost_usd: Option<f64>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum RecordedEvent {
     UserInput { text: String, timestamp: i64 },
     ToolCall { tool: String, input: serde_json::Value, timestamp: i64 },
@@ -68,7 +68,7 @@ impl PartialEq for Value {
 
 impl Eq for Value {}
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
@@ -177,6 +177,8 @@ pub struct MergeResult {
     pub merged_event_count: usize,
 }
 
+/// 合并冲突
+#[derive(Debug, Clone)]
 pub struct MergeConflict {
     pub event_index: usize,
     pub version_a: RecordedEvent,
@@ -215,7 +217,7 @@ impl std::fmt::Display for ReplayError {
 
 impl std::error::Error for ReplayError {}
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum MergeError {
     Conflicts(Vec<MergeConflict>),
     BranchNotFound,
@@ -772,7 +774,7 @@ impl SessionReplayer {
                     ..
                 } => {
                     md.push_str(&format!(
-                        "**[{}] 🔄 State Change:** `{}`: `{:?}` → `{:?}`\n",
+                        "**[{}] 🔄 State Change:** `{}`: `{:?}` -> `{:?}`\n",
                         i + 1, field, old_value, new_value
                     ));
                 }
@@ -837,9 +839,15 @@ render();
         )
     }
 
-    fn generate_gif_placeholder(&self) -> Vec<u8] {
-        let header = "GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;";
-        header.as_bytes().to_vec()
+    fn generate_gif_placeholder(&self) -> Vec<u8> {
+        let header: &[u8] = &[
+            0x47, 0x49, 0x46, 0x38, 0x39, 0x61,
+            0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0xff, 0xff, 0xff,
+            0x00, 0x00, 0x00, 0x21, 0xf9, 0x04, 0x01, 0x00, 0x00, 0x00,
+            0x00, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+            0x02, 0x02, 0x44, 0x01, 0x00, 0x3b,
+        ];
+        header.to_vec()
     }
 
     fn event_type_name(&self, event: &RecordedEvent) -> &'static str {

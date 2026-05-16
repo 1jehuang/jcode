@@ -46,7 +46,7 @@ pub async fn handle_completion(
         "Completion requested"
     );
 
-    let completions = match get_lsp_manager(session_manager).await {
+    let completions: Vec<CompletionItem> = match get_lsp_manager(session_manager).await {
         Some(manager) => {
             match manager.get_completion(file_path, line, character).await {
                 Ok(items) => items.into_iter().map(|item| CompletionItem {
@@ -59,7 +59,7 @@ pub async fn handle_completion(
                     kind: item.kind.map(|k| format!("{:?}", k)),
                     insert_text: item.insert_text.unwrap_or_default(),
                     sort_priority: item.sort_text
-                        .and_then(|s| s.parse::<i32>().ok())
+                        .and_then(|s: String| s.parse::<i32>().ok())
                         .unwrap_or(0),
                 }).collect(),
                 Err(e) => {
@@ -103,7 +103,7 @@ pub async fn handle_definition(
         "Definition requested"
     );
 
-    let definitions = match get_lsp_manager(session_manager).await {
+    let definitions: Vec<serde_json::Value> = match get_lsp_manager(session_manager).await {
         Some(manager) => {
             match manager.goto_definition(file_path, position.line, position.character).await {
                 Ok(locations) => locations.into_iter().map(|loc| {
@@ -117,7 +117,7 @@ pub async fn handle_definition(
                             "end": { "line": range.end.line, "character": range.end.character }
                         }
                     })
-                }).collect::<Vec<_>>(),
+                }).collect(),
                 Err(e) => {
                     warn!(error = %e, "LSP goto_definition failed, returning empty");
                     vec![]
@@ -154,7 +154,7 @@ pub async fn handle_references(
         "References requested"
     );
 
-    let references = match get_lsp_manager(session_manager).await {
+    let references: Vec<serde_json::Value> = match get_lsp_manager(session_manager).await {
         Some(manager) => {
             match manager.find_references(file_path, position.line, position.character).await {
                 Ok(locations) => locations.into_iter().map(|loc| {
@@ -168,7 +168,7 @@ pub async fn handle_references(
                             "end": { "line": range.end.line, "character": range.end.character }
                         }
                     })
-                }).collect::<Vec<_>>(),
+                }).collect(),
                 Err(e) => {
                     warn!(error = %e, "LSP find_references failed, returning empty");
                     vec![]
@@ -199,7 +199,7 @@ pub async fn handle_diagnostics(
         "Diagnostics requested"
     );
 
-    let diagnostics = match get_lsp_manager(session_manager).await {
+    let diagnostics: Vec<DiagnosticInfo> = match get_lsp_manager(session_manager).await {
         Some(manager) => {
             match manager.get_diagnostics(file_path).await {
                 Ok(diags) => diags.into_iter().map(|d| DiagnosticInfo {

@@ -10,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::sync::RwLock;
 use tracing::warn;
 
-// ── 服务器状态机 ──
+// -- 服务器状态机 --
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LspServerState { Stopped, Starting, Running, Stopping, Error }
@@ -39,7 +39,7 @@ impl LspServerInstance {
     }
 }
 
-// ── 诊断注册表 ──
+// -- 诊断注册表 --
 
 #[derive(Debug, Clone)]
 pub struct LspDiagnostic {
@@ -67,7 +67,7 @@ impl LspDiagnosticRegistry {
 
 impl Default for LspDiagnosticRegistry { fn default() -> Self { Self::new() } }
 
-// ── LSP 工具操作 ──
+// -- LSP 工具操作 --
 
 #[derive(Debug, Clone)]
 pub enum LspOperation {
@@ -84,7 +84,7 @@ impl LspOperation {
     }
 }
 
-// ── 服务器管理器 ──
+// -- 服务器管理器 --
 
 pub struct LspServerManager {
     servers: RwLock<HashMap<String, LspServerInstance>>,

@@ -12,7 +12,7 @@ use crate::provider_catalog::{
     resolve_login_provider, save_env_value_to_env_file,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ProviderAddOptions {
     pub name: String,
     pub base_url: String,

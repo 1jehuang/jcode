@@ -104,7 +104,7 @@ impl SafetyChecker {
         self
     }
 
-    // ─── 公开 API ─────────────────────────────────────
+    // --- 公开 API -------------------------------------
 
     /// 检查单个路径是否安全
     pub fn check_path(&self, path: &str) -> SafetyCheckResult {
@@ -146,19 +146,19 @@ impl SafetyChecker {
     pub fn check_tool_call(&self, req: &ToolSafetyRequest) -> SafetyCheckResult {
         match req.tool_name.to_lowercase().as_str() {
             "write" | "edit" | "fileedit" | "file_write" => {
-                // 文件写入 → 路径安全检查
+                // 文件写入 -> 路径安全检查
                 self.check_path(&req.tool_input)
             }
             "read" | "fileread" | "file_read" => {
-                // 文件读取 → 敏感文件重点检查
+                // 文件读取 -> 敏感文件重点检查
                 self.check_path(&req.tool_input)
             }
             "bash" | "shell" | "command" => {
-                // 命令执行 → 危险命令模式检测
+                // 命令执行 -> 危险命令模式检测
                 self.check_command_for_dangerous_patterns(&req.tool_input)
             }
             _ => {
-                // 其他工具 → 如果有路径参数则做基本检查
+                // 其他工具 -> 如果有路径参数则做基本检查
                 if req.tool_input.contains('/') || req.tool_input.contains('\\') || req.tool_input.contains('.') {
                     self.check_path(&req.tool_input)
                 } else {
@@ -168,7 +168,7 @@ impl SafetyChecker {
         }
     }
 
-    // ─── 内部检查逻辑 ─────────────────────────────────
+    // --- 内部检查逻辑 ---------------------------------
 
     /// 检查路径是否涉及敏感目录
     fn check_sensitive_dir(&self, path: &str) -> Option<SafetyViolation> {
@@ -256,7 +256,7 @@ impl SafetyChecker {
                             violation_type: SafetyViolationType::PathTraversal,
                             target: original.to_string(),
                             description: format!(
-                                "可疑的路径穿越: '{}' → '{}'",
+                                "可疑的路径穿越: '{}' -> '{}'",
                                 original, cleaned.display()
                             ),
                         });
@@ -317,7 +317,7 @@ impl SafetyChecker {
         }
     }
 
-    // ─── 工具函数 ──────────────────────────────────────
+    // --- 工具函数 --------------------------------------
 
     /// 规范化路径 (解析 . 和 ..)
     fn normalize_path(path: &str) -> String {

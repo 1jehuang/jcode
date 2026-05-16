@@ -1,4 +1,4 @@
-use crate::id::{extract_session_name, new_id, new_memorable_session_id};
+﻿use crate::id::{extract_session_name, new_id, new_memorable_session_id};
 use crate::message::{ContentBlock, Message, Role};
 use crate::storage;
 use chrono::{DateTime, Utc};
@@ -8,6 +8,7 @@ use std::path::Path;
 mod storage_paths;
 mod replay;
 mod sharing;
+mod active_pids;
 use active_pids::{active_pids_dir, register_active_pid, unregister_active_pid};
 pub use active_pids::{active_session_ids, find_active_session_id_by_pid};
 mod crash;
@@ -16,7 +17,6 @@ mod memory_profile;
 mod model;
 mod persistence;
 mod render;
-mod storage_paths;
 pub use crash::{
     CrashedSessionsInfo, detect_crashed_sessions, find_recent_crashed_sessions,
     find_session_by_name_or_id, recover_crashed_sessions,

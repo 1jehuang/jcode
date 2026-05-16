@@ -1,5 +1,4 @@
 use std::process::{Command, Child, Stdio};
-use std::path::PathBuf;
 use std::time::Duration;
 use std::io::{Read, Write, self};
 
@@ -49,7 +48,7 @@ impl Default for PtyConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PtyState {
     Created,
     Running,
@@ -165,8 +164,14 @@ impl PtySession {
     /// Create new PTY session with custom configuration
     pub fn with_config(config: PtyConfig) -> Self {
         PtySession {
+            child: None,
+            pty_master: None,
+            session_id: uuid::Uuid::new_v4().to_string(),
             config,
-            ..Self::new()
+            state: PtyState::Created,
+            created_at: std::time::Instant::now(),
+            last_activity: None,
+            dimensions: TerminalSize::default(),
         }
     }
 
@@ -185,7 +190,7 @@ impl PtySession {
         
         // If running, try to resize immediately
         if let Some(ref mut master) = self.pty_master {
-            let _ = self._resize_pty(master);
+            let _ = Self::_resize_pty_static(master, rows, cols);
         }
     }
 
@@ -523,7 +528,7 @@ impl PtySession {
             }
 
             // Also check if process has exited
-            if let Some(ref child) = self.child {
+            if let Some(child) = self.child.as_mut() {
                 if let Ok(Some(_)) = child.try_wait() {
                     break;
                 }
@@ -635,7 +640,7 @@ impl PtySession {
         }
     }
 
-    fn _resize_pty(&self, master: &PtyMaster) -> Result<(), PtyError> {
+    fn _resize_pty_static(master: &PtyMaster, rows: u16, cols: u16, xpixel: u16, ypixel: u16) -> Result<(), PtyError> {
         #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;
@@ -668,7 +673,7 @@ impl PtySession {
         }
     }
 
-    fn _send_signal(&mut self, signal_name: &str, operation: &str) -> Result<(), PtyError> {
+    fn _send_signal(&mut self, signal_name: &str, _operation: &str) -> Result<(), PtyError> {
         #[cfg(unix)]
         {
             if let Some(ref child) = self.child {

@@ -132,7 +132,7 @@ impl SettingsPriorityResolver {
 
     /// 获取设置值（不关心来源）
     pub fn get_value(&self, key: &str) -> Option<&str> {
-        self.get(key).map(|v| {
+        self.get(key).map(|_v| {
             // 借用一个临时字符串... 实际上需要不同的API设计
             // 使用 get_value_ref 代替
             unimplemented!("Use get_value_ref instead")

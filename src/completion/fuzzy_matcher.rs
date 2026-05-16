@@ -268,7 +268,7 @@ impl FuzzyMatcher {
         bonus
     }
 
-    /// 检查是否是首字母缩写匹配（如 "gs" → "git status"）
+    /// 检查是否是首字母缩写匹配（如 "gs" -> "git status"）
     fn is_acronym_match(&self, acronym: &str, text: &str) -> bool {
         if acronym.len() > text.len() || acronym.is_empty() {
             return false;

@@ -372,7 +372,7 @@ impl ConfidenceModel {
     fn prune_insignificant_features(&mut self) {
         let threshold = self.config.feature_importance_threshold;
         
-        self.weights.retain(|_, &w| w.abs() > threshold);
+        self.weights.retain(|_: &String, &w: &f64| w.abs() > threshold);
     }
 
     /// 估算当前模型准确率

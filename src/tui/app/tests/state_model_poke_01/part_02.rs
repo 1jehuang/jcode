@@ -157,8 +157,8 @@ fn test_side_panel_uses_left_splitter_instead_of_rounded_box() {
         .expect("expected side panel area after render");
     let buf = terminal.backend().buffer();
 
-    assert_eq!(buf[(diff_area.x, diff_area.y)].symbol(), "│");
-    assert_eq!(buf[(diff_area.x, diff_area.y + 1)].symbol(), "│");
+    assert_eq!(buf[(diff_area.x, diff_area.y)].symbol(), "|");
+    assert_eq!(buf[(diff_area.x, diff_area.y + 1)].symbol(), "|");
     assert!(text.contains("side Plan 1/1"), "rendered text: {text}");
 }
 
@@ -195,8 +195,8 @@ fn test_pinned_content_uses_left_splitter_instead_of_rounded_box() {
         .expect("expected pinned pane area after render");
     let buf = terminal.backend().buffer();
 
-    assert_eq!(buf[(diff_area.x, diff_area.y)].symbol(), "│");
-    assert_eq!(buf[(diff_area.x, diff_area.y + 1)].symbol(), "│");
+    assert_eq!(buf[(diff_area.x, diff_area.y)].symbol(), "|");
+    assert_eq!(buf[(diff_area.x, diff_area.y + 1)].symbol(), "|");
     assert!(text.contains("pinned"), "rendered text: {text}");
 }
 
@@ -236,7 +236,7 @@ fn test_file_diff_uses_left_splitter_instead_of_rounded_box() {
         .expect("expected file diff pane area after render");
     let buf = terminal.backend().buffer();
 
-    assert_eq!(buf[(diff_area.x, diff_area.y)].symbol(), "│");
-    assert_eq!(buf[(diff_area.x, diff_area.y + 1)].symbol(), "│");
+    assert_eq!(buf[(diff_area.x, diff_area.y)].symbol(), "|");
+    assert_eq!(buf[(diff_area.x, diff_area.y + 1)].symbol(), "|");
     assert!(text.contains("demo.rs"), "rendered text: {text}");
 }

@@ -1,4 +1,4 @@
-//! **统一调度队列** — 融合 Ruflo 任务队列 + Parallax 请求信号
+﻿//! **统一调度队列** — 融合 Ruflo 任务队列 + Parallax 请求信号
 //!
 //! ## 设计特点
 //!
@@ -22,17 +22,16 @@
 //! ```
 //! pop_ready() 从最高优先级的非空堆中取出.
 
-use std::cmp::Ordering;
 use std::collections::{HashSet, HashMap};
 
-use super::types::*;
-use super::SchedulerError;
+use super::*;
 
 // ============================================================================
 // UnifiedQueue 结构体
 // ============================================================================
 
 /// 统一调度队列
+#[derive(Debug)]
 pub struct UnifiedQueue {
     /// 分层优先队列 (每层一个 MaxHeap, 但 Ord 反转使其行为像 MinHeap... 不对, 我们要高优先级先出)
     ///
@@ -118,11 +117,11 @@ impl UnifiedQueue {
     /// 取出下一个就绪任务 (依赖已满足的最高优先级任务)
     ///
     /// 这是调度循环的核心调用。
-    /// 依次检查 Critical → Urgent → High → Medium → Low 各层，
+    /// 依次检查 Critical -> Urgent -> High -> Medium -> Low 各层，
     /// 返回第一个依赖已满足的任务。
     pub fn pop_ready(
         &mut self,
-        task_registry: &dashmap::DashMap<TaskId, ScheduledTask>,
+        _task_registry: &dashmap::DashMap<TaskId, ScheduledTask>,
     ) -> Result<Option<ScheduledTask>, SchedulerError> {
         // 从最高优先级到最低优先级扫描
         for priority_idx in 0..5 {
@@ -149,7 +148,7 @@ impl UnifiedQueue {
                     }
                     break;
                 } else {
-                    // 依赖未满足 → 暂存
+                    // 依赖未满足 -> 暂存
                     temp.push(task);
                 }
             }
@@ -199,8 +198,8 @@ impl UnifiedQueue {
         let now = chrono::Utc::now();
         self.waiting_since
             .iter()
-            .filter(|(_, &ts)| {
-                let elapsed = now.signed_duration_since(ts);
+            .filter(|&(_, ref ts)| {
+                let elapsed = now.signed_duration_since(*ts);
                 elapsed.num_milliseconds() as u64 > timeout_ms
             })
             .map(|(&id, _)| id)
@@ -235,7 +234,7 @@ impl UnifiedQueue {
         ]
     }
 
-    /// 优先级枚举 → 数组索引
+    /// 优先级枚举 -> 数组索引
     fn priority_to_index(priority: TaskPriority) -> usize {
         match priority {
             TaskPriority::Critical => 0,
@@ -246,7 +245,7 @@ impl UnifiedQueue {
         }
     }
 
-    /// 数组索引 → 优先级枚举
+    /// 数组索引 -> 优先级枚举
     pub fn index_to_priority(idx: usize) -> TaskPriority {
         match idx {
             0 => TaskPriority::Critical,
@@ -336,7 +335,7 @@ mod tests {
         queue.push(child).unwrap();
         queue.push(independent).unwrap();
 
-        // dep 未完成 → Critical 任务不可弹出
+        // dep 未完成 -> Critical 任务不可弹出
         let popped = queue.pop_ready(&registry).unwrap().unwrap();
         assert_eq!(popped.id, independent.id, "应弹出独立的低优先级任务");
 

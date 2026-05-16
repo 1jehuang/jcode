@@ -226,11 +226,11 @@ pub struct BashParser {
 impl Default for BashParser {
     fn default() -> Self {
         Self {
-            word_regex: Regex::new(r"[^\s|&;<>()'\"$]+").unwrap(),
-            operator_regex: Regex::new(r"(&&|\|\||[;&])").unwrap(),
-            redirect_regex: Regex::new(r"(>>?|<<-?|<|>&?|<&?)").unwrap(),
+            word_regex: Regex::new(r#"[^\s|&;<>()'"\$]+"#).unwrap(),
+            operator_regex: Regex::new(r#"(&&|\|\||[;&])"#).unwrap(),
+            redirect_regex: Regex::new(r#"(>>?|<<-?|<|>&?|<&?)"#).unwrap(),
             quote_regex: Regex::new(r#"['"]"#).unwrap(),
-            variable_regex: Regex::new(r"\$\w+|\$\{[^}]+\}").unwrap(),
+            variable_regex: Regex::new(r#"\$\w+|\$\{[^}]+\}"#).unwrap(),
         }
     }
 }
@@ -547,7 +547,7 @@ impl BashParser {
                 Token::Operator(op) => {
                     // 处理列表操作符
                     if !current_cmd_words.is_empty() {
-                        let left_cmd = self.build_command_node(current_cmd_words.clone());
+                        let _left_cmd = self.build_command_node(current_cmd_words.clone());
                         
                         if !commands.is_empty() {
                             let left_ast = if commands.len() == 1 {
@@ -620,7 +620,7 @@ impl BashParser {
             ("add", "添加文件到暂存区", 89),
             ("reset", "重置HEAD到指定状态", 88),
             ("stash", "暂存更改", 87),
-            ("rebase",变基分支", 86),
+            ("rebase", "变基分支", 86),
             ("tag", "创建/列出/删除标签", 85),
             ("fetch", "从远程下载对象", 84),
             ("remote", "管理远程仓库", 83),

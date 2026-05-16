@@ -3,8 +3,8 @@
 //!
 //! ## 架构
 //! ```text
-//! TAPD需求 → IDE编码 → 单元测试 → 部署
-//!    ↓          ↓          ↓         ↓
+//! TAPD需求 -> IDE编码 -> 单元测试 -> 部署
+//!    v          v          v         v
 //! Skill 1    Skill 2    Skill 3   Skill 4
 //! ```
 //!
@@ -31,11 +31,11 @@ use std::sync::Arc;
 
 /// 预定义流水线名称常量
 pub mod pipelines {
-    /// TAPD 需求 → 代码生成 → CI → 部署
+    /// TAPD 需求 -> 代码生成 -> CI -> 部署
     pub const TAPD_TO_DEPLOY: &[&str] = &["tapd_fetch", "fullstack_scaffold", "ci_pipeline", "deploy"];
-    /// 仅 CI → 部署
+    /// 仅 CI -> 部署
     pub const CI_TO_DEPLOY: &[&str] = &["ci_pipeline", "deploy"];
-    /// TAPD → 代码审查
+    /// TAPD -> 代码审查
     pub const TAPD_TO_REVIEW: &[&str] = &["tapd_fetch", "code_review"];
 }
 
@@ -63,7 +63,7 @@ impl SkillsEngine {
     }
 
     fn register_builtins(&mut self) {
-        self.register(Arc::new(CodeReviewSkill));
+        self.register(Arc::new(CodeReviewSkill::new()));
         self.register(Arc::new(CiPipelineSkill));
         self.register(Arc::new(FullstackScaffoldSkill));
         self.register(Arc::new(DeploySkill));
@@ -119,7 +119,7 @@ impl SkillsEngine {
                 Ok(Ok(skills)) => {
                     for (name, skill) in skills {
                         tracing::info!("[Skills] Loaded '{}' from source {}", name, i + 1);
-                        self.skills.insert(name, skill);
+                        self.skills.insert(name.clone(), skill.clone());
                     }
                 }
                 Ok(Err(e)) => {
@@ -142,7 +142,7 @@ impl SkillsEngine {
             return Ok(skills);
         }
 
-        let mut entries = Vec::new();
+        let mut entries: Vec<std::path::PathBuf> = Vec::new();
         if let Ok(read_dir) = tokio::fs::read_dir(dir).await {
             use tokio_stream::wrappers::ReadDirStream;
             use tokio_stream::StreamExt;
@@ -240,21 +240,21 @@ impl SkillsEngine {
         caller.execute(skill_names, context).await
     }
 
-    /// TAPD → 部署 全自动流水线
+    /// TAPD -> 部署 全自动流水线
     ///
-    /// 从 TAPD 获取需求 → 生成项目代码 → CI 构建测试 → 部署到目标环境
+    /// 从 TAPD 获取需求 -> 生成项目代码 -> CI 构建测试 -> 部署到目标环境
     pub async fn tapd_to_deploy(&self, context: ChainContext) -> anyhow::Result<ChainResult> {
         self.run_chain(pipelines::TAPD_TO_DEPLOY, context).await
     }
 
-    /// CI → 部署 流水线
+    /// CI -> 部署 流水线
     ///
     /// 对已有代码运行 CI 检查后直接部署
     pub async fn ci_to_deploy(&self, context: ChainContext) -> anyhow::Result<ChainResult> {
         self.run_chain(pipelines::CI_TO_DEPLOY, context).await
     }
 
-    /// TAPD → 审查 流水线
+    /// TAPD -> 审查 流水线
     ///
     /// 从 TAPD 获取需求后进行代码审查
     pub async fn tapd_to_review(&self, context: ChainContext) -> anyhow::Result<ChainResult> {

@@ -385,10 +385,10 @@ pub(super) fn draw_messages(
                 if abs_idx == active.start_line {
                     line.spans.insert(
                         0,
-                        Span::styled(format!("→ edit#{} ", active.edit_index), highlight_style),
+                        Span::styled(format!("-> edit#{} ", active.edit_index), highlight_style),
                     );
                 } else {
-                    line.spans.insert(0, Span::styled("  │ ", accent_style));
+                    line.spans.insert(0, Span::styled("  | ", accent_style));
                 }
             }
         }
@@ -562,13 +562,13 @@ pub(super) fn draw_messages(
                 width: 1,
                 height: 1,
             };
-            let bar = Paragraph::new(Span::styled("│", Style::default().fg(user_color())));
+            let bar = Paragraph::new(Span::styled("|", Style::default().fg(user_color())));
             frame.render_widget(bar, bar_area);
         }
     }
 
     if !show_native_scrollbar && scroll > 0 {
-        let indicator = format!("↑{}", scroll);
+        let indicator = format!("^{}", scroll);
         let indicator_area = Rect {
             x: render_area.x + render_area.width.saturating_sub(indicator.len() as u16 + 2),
             y: render_area.y,
@@ -661,7 +661,7 @@ pub(super) fn draw_messages(
     }
 
     if !show_native_scrollbar && app.auto_scroll_paused() && scroll < max_scroll {
-        let indicator = format!("↓{}", max_scroll - scroll);
+        let indicator = format!("v{}", max_scroll - scroll);
         let indicator_area = Rect {
             x: render_area.x + render_area.width.saturating_sub(indicator.len() as u16 + 2),
             y: render_area.y + render_area.height.saturating_sub(1),

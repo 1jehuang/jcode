@@ -95,7 +95,9 @@ impl PluginLoader {
         let dest = target_dir.join(&manifest.name);
         std::fs::create_dir_all(&dest).map_err(|e| format!("Failed to create directory: {}", e))?;
         // Copy source to target
-        for entry in std::fs::read_dir(source).unwrap().flatten() {
+        let source_dir = std::fs::read_dir(source)
+            .map_err(|e| format!("Failed to read plugin source directory: {}", e))?;
+        for entry in source_dir.flatten() {
             let from = entry.path();
             let to = dest.join(entry.file_name());
             if from.is_dir() {
@@ -165,7 +167,9 @@ impl PluginLoader {
 
 fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
     std::fs::create_dir_all(dst).map_err(|e| format!("{}", e))?;
-    for entry in std::fs::read_dir(src).unwrap().flatten() {
+    let entries = std::fs::read_dir(src)
+        .map_err(|e| format!("Failed to read directory '{}': {}", src.display(), e))?;
+    for entry in entries.flatten() {
         let from = entry.path();
         let to = dst.join(entry.file_name());
         if from.is_dir() {

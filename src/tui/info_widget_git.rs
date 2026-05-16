@@ -19,10 +19,10 @@ pub(super) fn render_git_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<
 
     let mut stats_len = 0usize;
     if info.ahead > 0 {
-        stats_len += format!(" ↑{}", info.ahead).chars().count();
+        stats_len += format!(" ^{}", info.ahead).chars().count();
     }
     if info.behind > 0 {
-        stats_len += format!(" ↓{}", info.behind).chars().count();
+        stats_len += format!(" v{}", info.behind).chars().count();
     }
     if info.modified > 0 {
         stats_len += format!(" ~{}", info.modified).chars().count();
@@ -63,13 +63,13 @@ pub(super) fn render_git_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<
     }
     if info.ahead > 0 {
         parts.push(Span::styled(
-            format!(" ↑{}", info.ahead),
+            format!(" ^{}", info.ahead),
             Style::default().fg(rgb(100, 200, 100)),
         ));
     }
     if info.behind > 0 {
         parts.push(Span::styled(
-            format!(" ↓{}", info.behind),
+            format!(" v{}", info.behind),
             Style::default().fg(rgb(255, 140, 100)),
         ));
     }
@@ -110,13 +110,13 @@ pub(super) fn render_git_compact(info: &GitInfo, width: u16) -> Vec<Line<'static
 
     if info.ahead > 0 {
         parts.push(Span::styled(
-            format!(" ↑{}", info.ahead),
+            format!(" ^{}", info.ahead),
             Style::default().fg(rgb(100, 200, 100)),
         ));
     }
     if info.behind > 0 {
         parts.push(Span::styled(
-            format!(" ↓{}", info.behind),
+            format!(" v{}", info.behind),
             Style::default().fg(rgb(255, 140, 100)),
         ));
     }

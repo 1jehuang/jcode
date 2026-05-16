@@ -13,14 +13,15 @@
 //! - 自动冲突检测与解决
 //! - 完整的审计日志
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, info, warn};
 
-// ─── Types ──────────────────────────────────────────────────
+// --- Types --------------------------------------------------
 
 /// 动态工具定义
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +74,24 @@ fn default_version() -> String {
 
 fn default_enabled() -> bool {
     true
+}
+
+impl Default for DynamicTool {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: String::new(),
+            input_schema: serde_json::Value::Null,
+            category: ToolCategory::default(),
+            version: default_version(),
+            author: None,
+            tags: Vec::new(),
+            enabled: default_enabled(),
+            created_at: std::time::Instant::now(),
+            updated_at: std::time::SystemTime::now(),
+            metadata: HashMap::new(),
+        }
+    }
 }
 
 /// 工具分类枚举
@@ -154,7 +173,7 @@ pub enum ToolChangeEvent {
     BatchChanged { added: usize, removed: usize, updated: usize },
 }
 
-// ─── Hooks ────────────────────────────────────────────────
+// --- Hooks ------------------------------------------------
 
 /// 注册前钩子 (可拒绝或修改工具)
 pub type PreRegisterHook =
@@ -170,7 +189,7 @@ pub type PreUnregisterHook =
 /// 注销后钩子
 pub type PostUnregisterHook = dyn Fn(&str) + Send + Sync;
 
-// ─── Configuration ───────────────────────────────────────
+// --- Configuration ---------------------------------------
 
 /// 动态注册配置
 #[derive(Debug, Clone)]
@@ -188,7 +207,6 @@ pub struct DynamicRegistryConfig {
     pub notify_on_change: bool,
     
     /// 保护的基础工具列表 (不可注销)
-    #[serde(default)]
     protected_tools: Vec<String>,
 }
 
@@ -210,17 +228,17 @@ impl Default for DynamicRegistryConfig {
     }
 }
 
-// ─── Core Registry ──────────────────────────────────────
+// --- Core Registry --------------------------------------
 
 /// 动态工具注册表
 pub struct DynamicToolRegistry {
-    /// 工具存储 (name → tool)
+    /// 工具存储 (name -> tool)
     tools: Arc<RwLock<HashMap<String, DynamicTool>>>,
     
-    /// 分类索引 (category → [name])
+    /// 分类索引 (category -> [name])
     category_index: Arc<RwLock<HashMap<ToolCategory, Vec<String>>>>,
     
-    /// 标签索引 (tag → [name])
+    /// 标签索引 (tag -> [name])
     tag_index: Arc<RwLock<HashMap<String, Vec<String>>>>,
     
     /// 配置
@@ -280,7 +298,7 @@ impl DynamicToolRegistry {
         Self::new(DynamicRegistryConfig::default())
     }
 
-    // ─── Registration ──────────────────────────────────
+    // --- Registration ----------------------------------
 
     /// 注册新工具 (或更新已存在的)
     pub async fn register_tool(&self, mut tool: DynamicTool) -> Result<RegisterResult> {
@@ -367,9 +385,9 @@ impl DynamicToolRegistry {
                         category: tool.category.clone(),
                     }
                 }
-                RegisterResult::Updated { name, old_version: _, new_version: _ } => {
+                RegisterResult::Updated { tool_name, old_version: _, new_version: _ } => {
                     ToolChangeEvent::Updated {
-                        name: name.clone(),
+                        name: tool_name.clone(),
                         old_version: "0.0.0".to_string(),
                         new_version: tool.version.clone(),
                     }
@@ -436,7 +454,7 @@ impl DynamicToolRegistry {
         Ok(results)
     }
 
-    // ─── Unregistration ────────────────────────────────
+    // --- Unregistration --------------------------------
 
     /// 注销工具
     pub async fn unregister_tool(&self, name: &str) -> Result<UnregisterResult> {
@@ -515,7 +533,7 @@ impl DynamicToolRegistry {
         Ok(count)
     }
 
-    // ─── Query ─────────────────────────────────────────
+    // --- Query -----------------------------------------
 
     /// 获取所有工具列表
     pub async fn list_tools(&self) -> Vec<DynamicTool> {
@@ -582,7 +600,7 @@ impl DynamicToolRegistry {
         tools.contains_key(name)
     }
 
-    // ─── Metadata ──────────────────────────────────────
+    // --- Metadata --------------------------------------
 
     /// 更新工具元数据
     pub async fn update_metadata(
@@ -613,7 +631,7 @@ impl DynamicToolRegistry {
         }
     }
 
-    // ─── Stats ─────────────────────────────────────────
+    // --- Stats -----------------------------------------
 
     /// 获取统计信息
     pub async fn get_stats(&self) -> RegistryStats {
@@ -630,14 +648,14 @@ impl DynamicToolRegistry {
         self.tools.read().await.is_empty()
     }
 
-    // ─── Event Subscription ───────────────────────────
+    // --- Event Subscription ---------------------------
 
     /// 订阅工具变更事件
     pub fn subscribe_changes(&self) -> broadcast::Receiver<ToolChangeEvent> {
         self.change_tx.subscribe()
     }
 
-    // ─── Hook Management ─────────────────────────────
+    // --- Hook Management -----------------------------
 
     /// 添加预注册钩子
     pub fn add_pre_register_hook<F>(&mut self, hook: F)
@@ -671,7 +689,7 @@ impl DynamicToolRegistry {
         self.post_unregister_hooks.push(Box::new(hook));
     }
 
-    // ─── Internal Helpers ─────────────────────────────
+    // --- Internal Helpers -----------------------------
 
     /// 更新分类和标签索引
     async fn update_indexes(&self, tool: &DynamicTool) {
@@ -777,7 +795,7 @@ impl DynamicToolRegistry {
     }
 }
 
-// ─── MCP Integration Helpers ────────────────────────────
+// --- MCP Integration Helpers ----------------------------
 
 impl DynamicToolRegistry {
     /// 将动态工具转换为 MCP tools/list 格式
@@ -811,7 +829,7 @@ impl DynamicToolRegistry {
     }
 }
 
-// ─── Tests ─────────────────────────────────────────────
+// --- Tests ---------------------------------------------
 
 #[cfg(test)]
 mod tests {

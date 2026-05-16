@@ -8,7 +8,7 @@
 // Client 的 LLM 能力来增强其功能 (如智能搜索、内容生成等)。
 // ════════════════════════════════════════════════════════════════
 
-use crate::types::{CreateMessageRequest, CreateMessageResult, ContentBlock, SamplingMessage};
+use crate::types::{CreateMessageRequest, CreateMessageResult, ContentBlock};
 
 /// Sampling 回调函数签名
 pub type SamplingCallback = Box<dyn Fn(CreateMessageRequest) -> std::pin::Pin<Box<dyn std::future::Future<Output = CreateMessageResult> + Send>> + Send + Sync>;
@@ -72,7 +72,7 @@ impl SamplingHandler {
         })
     }
 
-    // ─── 内置默认采样实现 ─────────────────────────
+    // --- 内置默认采样实现 -------------------------
 
     /// 创建一个简单的回显采样处理器 (用于测试)
     pub fn echo_handler() -> Self {

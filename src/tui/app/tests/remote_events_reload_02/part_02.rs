@@ -267,5 +267,5 @@ fn test_handle_server_event_compaction_mode_changed_updates_remote_mode() {
     );
 
     let last = app.display_messages().last().expect("missing response");
-    assert_eq!(last.content, "✓ Compaction mode → semantic");
+    assert_eq!(last.content, "✓ Compaction mode -> semantic");
 }

@@ -18,7 +18,7 @@ fn test_build_turn_footer_combines_compact_duration_with_streaming_stats() {
     );
     assert!(footer.contains(" tps"), "unexpected footer: {footer}");
     assert!(
-        footer.ends_with("↑210k ↓440"),
+        footer.ends_with("^210k v440"),
         "unexpected footer: {footer}"
     );
 }

@@ -302,7 +302,7 @@ impl CommandRegistry {
                         "--no-ff".into(), "--autostash".into()],
                 examples: None,
 
-        ..Default::default(),
+        ..Default::default()
 });
 
         git_subcommands.insert("checkout".to_string(), SubcommandSpec {
@@ -341,7 +341,7 @@ impl CommandRegistry {
                         "--show-current".into()],
                 examples: None,
 
-        ..Default::default(),
+        ..Default::default()
 });
 
         git_subcommands.insert("merge".to_string(), SubcommandSpec {
@@ -358,7 +358,7 @@ impl CommandRegistry {
                         "-m".into(), "--no-commit".into()],
                 examples: None,
 
-        ..Default::default(),
+        ..Default::default()
 });
 
         git_subcommands.insert("log".to_string(), SubcommandSpec {
@@ -391,7 +391,7 @@ impl CommandRegistry {
                         "--name-only".into(), "--color".into()],
                 examples: None,
 
-        ..Default::default(),
+        ..Default::default()
 });
 
         git_subcommands.insert("add".to_string(), SubcommandSpec {
@@ -427,7 +427,7 @@ impl CommandRegistry {
                         "--merge".into(), "--keep".into()],
                 examples: None,
 
-        ..Default::default(),
+        ..Default::default()
 });
 
         // 更多Git子命令...
@@ -488,7 +488,7 @@ impl CommandRegistry {
                         "--filter=".into(), "--format=".into()],
                 examples: None,
 
-        ..Default::default(),
+        ..Default::default()
 });
 
         docker_subcommands.insert("run".to_string(), SubcommandSpec {
@@ -610,7 +610,7 @@ impl CommandRegistry {
             options: vec!["-g".into(), "--global".into()],
                 examples: None,
 
-        ..Default::default(),
+        ..Default::default()
 });
 
         npm_subcommands.insert("test".to_string(), SubcommandSpec {
@@ -620,7 +620,7 @@ impl CommandRegistry {
             options: vec!["--watch".into(), "-w".into()],
                 examples: None,
 
-        ..Default::default(),
+        ..Default::default()
 });
 
         // 更多NPM子命令...
@@ -641,7 +641,7 @@ impl CommandRegistry {
                 args: vec![],
                 options: vec!["--help".into()],
                 examples: None,
-            ..Default::default(),
+            ..Default::default()
 });
         }
 
@@ -698,7 +698,7 @@ impl CommandRegistry {
             options: vec!["-n".into(), "--namespace=".into()],
                 examples: None,
 
-        ..Default::default(),
+        ..Default::default()
 });
 
         kubectl_subcommands.insert("apply".to_string(), SubcommandSpec {
@@ -715,7 +715,7 @@ impl CommandRegistry {
                         "--dry-run=client".to_string()],
                 examples: None,
 
-        ..Default::default(),
+        ..Default::default()
 });
 
         kubectl_subcommands.insert("delete".to_string(), SubcommandSpec {
@@ -729,7 +729,7 @@ impl CommandRegistry {
                         "--force".into(), "--grace-period=".into()],
                 examples: None,
 
-        ..Default::default(),
+        ..Default::default()
 });
 
         // 更多Kubectl子命令...
@@ -750,7 +750,7 @@ impl CommandRegistry {
                 args: vec![],
                 options: vec!["--help".into()],
                 examples: None,
-            ..Default::default(),
+            ..Default::default()
 });
         }
 
@@ -937,7 +937,7 @@ impl CommandRegistry {
             ]),
             "npm_scripts" => {
                 // 尝试读取package.json
-                std::fs::read_to_string("package.json")
+                let scripts: Vec<String> = std::fs::read_to_string("package.json")
                     .ok()
                     .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
                     .and_then(|pkg| pkg.get("scripts").cloned())
@@ -946,15 +946,16 @@ impl CommandRegistry {
                             obj.keys().cloned().collect()
                         })
                     })
-                    .unwrap_or_default()
-                    .into()
+                    .unwrap_or_default();
+                scripts.into()
             }
             _ => Err(format!("Unknown generator: {}", generator)),
         };
 
         // 更新缓存
         if let Ok(ref data) = data {
-            self.dynamic_cache.insert(generator.to_string(), (data.clone(), std::time::Instant::now()));
+            let cache_entry: (Vec<String>, std::time::Instant) = (data.clone(), std::time::Instant::now());
+            self.dynamic_cache.insert(generator.to_string(), cache_entry);
         }
 
         data

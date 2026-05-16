@@ -983,5 +983,5 @@ pub fn import_opencode_session_from_path(
 }
 
 #[cfg(test)]
-#[path = "import_tests.rs"]
+#[path = "../import_tests.rs"]
 mod tests;

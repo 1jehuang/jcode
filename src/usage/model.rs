@@ -130,7 +130,7 @@ pub(super) struct ExtraUsageResponse {
     pub(super) is_enabled: Option<bool>,
 }
 
-// ─── Combined usage for /usage command ───────────────────────────────────────
+// --- Combined usage for /usage command ---------------------------------------
 
 /// Normalized OpenAI/Codex usage window info used by the TUI widget.
 #[derive(Debug, Clone, Default)]

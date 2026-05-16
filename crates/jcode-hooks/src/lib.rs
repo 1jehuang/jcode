@@ -5,19 +5,19 @@
 // 核心能力:
 //
 //   7 类 Hook 点:
-//   ┌──────────────────────────────────────────────────┐
-//   │ 1. Session 级别: Start / End                     │
-//   │ 2. Agent 执行: PreAgentExecute / PostAgentExecute│
-//   │ 3. Prompt 注入: PrePrompt (修改 system prompt)   │
-//   │ 4. 工具调用: PreToolCall / PostToolCall          │
-//   │ 5. HTTP 请求: PreHttpRequest / PostHttpResponse  │
-//   │ 6. 安全检查: SsrfCheck                           │
-//   │ 7. 自定义: Custom(event_name, payload)            │
-//   └──────────────────────────────────────────────────┘
+//   +--------------------------------------------------+
+//   | 1. Session 级别: Start / End                     |
+//   | 2. Agent 执行: PreAgentExecute / PostAgentExecute|
+//   | 3. Prompt 注入: PrePrompt (修改 system prompt)   |
+//   | 4. 工具调用: PreToolCall / PostToolCall          |
+//   | 5. HTTP 请求: PreHttpRequest / PostHttpResponse  |
+//   | 6. 安全检查: SsrfCheck                           |
+//   | 7. 自定义: Custom(event_name, payload)            |
+//   +--------------------------------------------------+
 //
 // 架构模式:
 //
-//   Publisher → EventBus → [Handler1, Handler2, ...] → Action(Allow|Modify|Block)
+//   Publisher -> EventBus -> [Handler1, Handler2, ...] -> Action(Allow|Modify|Block)
 //
 // 使用示例:
 //

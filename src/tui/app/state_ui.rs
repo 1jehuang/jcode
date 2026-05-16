@@ -1287,7 +1287,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             duration_str, turn_count
         ));
         info.push_str(&format!(
-            "**Tokens:** ↑{} ↓{}\n",
+            "**Tokens:** ^{} v{}\n",
             app.total_input_tokens, app.total_output_tokens
         ));
         info.push_str(&format!("**Terminal:** {}\n", terminal_size));
@@ -1493,7 +1493,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             }
         ));
         if let Some((input, output)) = total_tokens {
-            context_report.push_str(&format!("- session tokens: ↑{} ↓{}\n", input, output));
+            context_report.push_str(&format!("- session tokens: ^{} v{}\n", input, output));
         }
         context_report.push_str("\n## Prompt / Context Composition\n");
         context_report.push_str(&format!(

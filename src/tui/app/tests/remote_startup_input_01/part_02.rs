@@ -72,8 +72,8 @@ fn test_refresh_model_list_command_shows_summary_and_status_notice() {
     let last = app.display_messages.last().expect("display message");
     assert_eq!(last.role, "system");
     assert!(last.content.contains("**Model List Refresh Complete**"));
-    assert!(last.content.contains("Models: 12 → 15  (+3 / -0)"));
-    assert!(last.content.contains("Routes: 20 → 29  (+9 / -0 / ~2)"));
+    assert!(last.content.contains("Models: 12 -> 15  (+3 / -0)"));
+    assert!(last.content.contains("Routes: 20 -> 29  (+9 / -0 / ~2)"));
 }
 
 #[test]
@@ -137,8 +137,8 @@ fn test_remote_available_models_updated_after_refresh_shows_summary_and_updates_
     let last = app.display_messages.last().expect("display message");
     assert_eq!(last.role, "system");
     assert!(last.content.contains("**Model List Refresh Complete**"));
-    assert!(last.content.contains("Models: 1 → 2  (+1 / -0)"));
-    assert!(last.content.contains("Routes: 1 → 2  (+1 / -0 / ~1)"));
+    assert!(last.content.contains("Models: 1 -> 2  (+1 / -0)"));
+    assert!(last.content.contains("Routes: 1 -> 2  (+1 / -0 / ~1)"));
 }
 
 #[test]

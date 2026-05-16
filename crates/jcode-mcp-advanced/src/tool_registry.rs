@@ -16,7 +16,7 @@ pub struct ToolCacheEntry {
 
 /// MCP 工具注册表 — 管理从 MCP Server 获取的工具定义
 pub struct MCPToolRegistry {
-    /// tool_name → ToolCacheEntry
+    /// tool_name -> ToolCacheEntry
     tools: HashMap<String, ToolCacheEntry>,
     
     /// TTL for cache invalidation

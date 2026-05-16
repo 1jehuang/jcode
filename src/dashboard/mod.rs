@@ -10,15 +10,15 @@
 //! ## 架构设计
 //!
 //! ```
-//! Browser ←→ WebSocket/SSE ←→ Dashboard Server
-//!     │                         │
-//!     │                    ┌────┴────┐
-//!     │                    │ Metrics │ Collector
-//!     │                    └────┬────┘
-//!     │                         │
-//!     │              ┌──────────┼──────────┐
-//!     │              │          │          │
-//!     │         TaskManager PluginRegistry AutoModeEngine
+//! Browser <--> WebSocket/SSE <--> Dashboard Server
+//!     |                         |
+//!     |                    +----+----+
+//!     |                    | Metrics | Collector
+//!     |                    +----+----+
+//!     |                         |
+//!     |              +----------+----------+
+//!     |              |          |          |
+//!     |         TaskManager PluginRegistry AutoModeEngine
 //! ```
 
 pub mod server;

@@ -1790,7 +1790,7 @@ fn format_event_for_expanded(
 ) -> (&'static str, String, Color) {
     match &event.kind {
         MemoryEventKind::EmbeddingComplete { latency_ms, hits } => (
-            "→",
+            "->",
             truncate_with_ellipsis(&format!("{} hits ({}ms)", hits, latency_ms), max_width),
             rgb(140, 180, 255),
         ),
@@ -1868,7 +1868,7 @@ fn format_event_for_expanded(
         ),
         MemoryEventKind::ToolLinked { from, to } => (
             "🔗",
-            truncate_with_ellipsis(&format!("{} → {}", from, to), max_width),
+            truncate_with_ellipsis(&format!("{} -> {}", from, to), max_width),
             rgb(200, 180, 255),
         ),
         MemoryEventKind::ToolListed { count } => {

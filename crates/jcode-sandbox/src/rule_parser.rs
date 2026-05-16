@@ -2,9 +2,9 @@
 // 权限规则解析器 — 移植自 Claude Code permissionRuleParser.ts
 //
 // 支持 3 种匹配模式:
-//   Exact:   "Read(./src/main.ts)"     → 精确字符串匹配
-//   Prefix:  "Bash(git status:*)"       → 前缀匹配 (* 为通配符后缀)
-//   Wildcard: "*Write*"                 → 全局通配符匹配
+//   Exact:   "Read(./src/main.ts)"     -> 精确字符串匹配
+//   Prefix:  "Bash(git status:*)"       -> 前缀匹配 (* 为通配符后缀)
+//   Wildcard: "*Write*"                 -> 全局通配符匹配
 //
 // 额外能力:
 //   - Shadowed Rule Detection (检测被高优先级规则覆盖的无效规则)
@@ -18,10 +18,10 @@ use std::sync::LazyLock;
 
 /// 规则语法: ToolName(pattern) 或 ToolName
 /// 示例:
-///   "Read(./src/main.ts)"     → tool=Read, pattern="./src/main.ts", match=Exact
-///   "Bash(git status:*)"      → tool=Bash, pattern="git status:*", match=Prefix
-///   "Bash(git *)"            → tool=Bash, pattern="git *", match=Wildcard
-///   "Write"                   → tool=Write, pattern="", match=Exact(全量)
+///   "Read(./src/main.ts)"     -> tool=Read, pattern="./src/main.ts", match=Exact
+///   "Bash(git status:*)"      -> tool=Bash, pattern="git status:*", match=Prefix
+///   "Bash(git *)"            -> tool=Bash, pattern="git *", match=Wildcard
+///   "Write"                   -> tool=Write, pattern="", match=Exact(全量)
 static RULE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"^(\w+)(?:\((.*)\))?$"#).expect("rule regex must compile")
 });
@@ -46,7 +46,7 @@ pub enum ParseError {
     UnknownMatchType,
 }
 
-// ─── 规则解析器 ─────────────────────────────────────────────
+// --- 规则解析器 ---------------------------------------------
 
 pub struct PermissionRuleParser {
     /// 已解析的规则列表 (按 priority DESC 排序)
@@ -277,7 +277,7 @@ if PREFIX_SUFFIX_RE.is_match(ps) || ps.ends_with(":*") {
         re
     }
 
-    // ─── Shadowed Rule Detection ──────────────────────────
+    // --- Shadowed Rule Detection --------------------------
 
     /// 检测被其他规则 shadowed (覆盖/失效) 的规则
     ///

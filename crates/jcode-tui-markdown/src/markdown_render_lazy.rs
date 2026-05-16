@@ -410,7 +410,7 @@ pub fn render_markdown_lazy(
                     // Add header
                     lines.push(
                         Line::from(Span::styled(
-                            format!("┌─ {} ", lang_label),
+                            format!("+- {} ", lang_label),
                             Style::default().fg(md_dim_color()),
                         ))
                         .left_aligned(),
@@ -420,7 +420,7 @@ pub fn render_markdown_lazy(
                         // Render highlighted code
                         for hl_line in hl_lines {
                             let mut spans =
-                                vec![Span::styled("│ ", Style::default().fg(md_dim_color()))];
+                                vec![Span::styled("| ", Style::default().fg(md_dim_color()))];
                             spans.extend(hl_line.spans);
                             lines.push(Line::from(spans).left_aligned());
                         }
@@ -430,7 +430,7 @@ pub fn render_markdown_lazy(
                             placeholder_code_block(&code_block_content, code_block_lang.as_deref());
                         for pl_line in placeholder {
                             let mut spans =
-                                vec![Span::styled("│ ", Style::default().fg(md_dim_color()))];
+                                vec![Span::styled("| ", Style::default().fg(md_dim_color()))];
                             spans.extend(pl_line.spans);
                             lines.push(Line::from(spans).left_aligned());
                         }
@@ -438,7 +438,7 @@ pub fn render_markdown_lazy(
 
                     // Add footer
                     lines.push(
-                        Line::from(Span::styled("└─", Style::default().fg(md_dim_color())))
+                        Line::from(Span::styled("+-", Style::default().fg(md_dim_color())))
                             .left_aligned(),
                     );
                 }
@@ -601,7 +601,7 @@ pub fn render_markdown_lazy(
                 );
                 let block_start = lines.len();
                 let width = rendered_rule_width(max_width);
-                let rule = Span::styled("─".repeat(width), Style::default().fg(md_dim_color()));
+                let rule = Span::styled("-".repeat(width), Style::default().fg(md_dim_color()));
                 lines.push(with_blockquote_prefix(
                     Line::from(rule).left_aligned(),
                     blockquote_depth,

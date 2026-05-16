@@ -1,9 +1,10 @@
 //! LSP Client — Industrial JSON-RPC over stdio Implementation
 //!
-//! ## Integration Sources
+//! ## Integration Sources (unified from 4 overlapping implementations)
 //! - **IDE Integration**: Process lifecycle management, Handler lazy queue, crash recovery
 //! - **Completion LSP Provider**: Real JSON-RPC read/write logic
 //! - **jcode-lsp**: Type system, LspOperations trait
+//! - **src/lsp_enhanced.rs** (:scissors: merged): Notification handlers, Metrics, CodeAction, Document sync lifecycle
 //!
 //! ## Capabilities (matching Claude Code LSPClient.ts)
 //! ✅ Persistent connection (not restart per call)
@@ -12,13 +13,18 @@
 //! ✅ Handler lazy registration queue
 //! ✅ Crash detection and recovery
 //! ✅ Graceful shutdown sequence
+//! ✅ Notification handler dispatch
+//! ✅ Performance metrics tracking
+//! ✅ Full document sync lifecycle: didOpen -> didChange -> didClose
 
 use crate::transport::{build_request, build_notification, parse_response, JsonRpcError};
+use crate::document_sync::DocumentSyncManager;
 use lsp_types::*;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, oneshot, RwLock};
 use tracing::{debug, error, info, warn};
@@ -56,11 +62,43 @@ pub enum LspError {
 /// Pending request waiter
 type PendingRequest = oneshot::Sender<Result<Value, LspError>>;
 
+/// Notification handler type (merged from lsp_enhanced)
+pub type NotificationHandler = Arc<dyn Fn(Value) + Send + Sync>;
+
+/// LSP Performance Metrics (merged from lsp_enhanced)
+#[derive(Debug, Clone)]
+pub struct LspMetrics {
+    pub total_requests: u64,
+    pub total_notifications: u64,
+    pub successful_requests: u64,
+    pub failed_requests: u64,
+    pub average_latency_ms: f64,
+    pub last_request_latency_ms: Option<f64>,
+    pub uptime_seconds: u64,
+    pub restart_count: u32,
+}
+
+impl Default for LspMetrics {
+    fn default() -> Self {
+        Self {
+            total_requests: 0,
+            total_notifications: 0,
+            successful_requests: 0,
+            failed_requests: 0,
+            average_latency_ms: 0.0,
+            last_request_latency_ms: None,
+            uptime_seconds: 0,
+            restart_count: 0,
+        }
+    }
+}
+
 /// Single LSP Server client instance
 ///
 /// Architecture mirrors Claude Code `createLSPClient()`:
 /// All internal state uses Arc<RwLock<>> for interior mutability,
 /// allowing all methods to take &self instead of &mut self.
+#[allow(dead_code)]
 pub struct LspClient {
     /// Server process (stdio pipe)
     process: Arc<RwLock<Option<tokio::process::Child>>>,
@@ -106,6 +144,21 @@ pub struct LspClient {
     
     /// Reader task handle (for cleanup)
     _reader_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    
+    /// Notification handler registry (merged from lsp_enhanced)
+    notification_handlers: Arc<RwLock<HashMap<String, Vec<NotificationHandler>>>>,
+    
+    /// Active handler queue for lazy registration (reader task dispatches here)
+    active_handlers: Arc<RwLock<HashMap<String, Vec<Box<dyn Fn(Value) + Send + Sync>>>>>,
+    
+    /// Performance metrics (merged from lsp_enhanced)
+    metrics: Arc<Mutex<LspMetrics>>,
+    
+    /// Server start time (for uptime calculation)
+    start_time: Arc<RwLock<Option<Instant>>>,
+    
+    /// Document sync manager (full lifecycle: didOpen->didChange->didClose)
+    doc_sync: Arc<DocumentSyncManager>,
 }
 
 impl LspClient {
@@ -126,6 +179,11 @@ impl LspClient {
             is_stopping: Arc::new(RwLock::new(false)),
             on_crash: Arc::new(RwLock::new(None)),
             _reader_task: Arc::new(RwLock::new(None)),
+            notification_handlers: Arc::new(RwLock::new(HashMap::new())),
+            active_handlers: Arc::new(RwLock::new(HashMap::new())),
+            metrics: Arc::new(Mutex::new(LspMetrics::default())),
+            start_time: Arc::new(RwLock::new(None)),
+            doc_sync: Arc::new(DocumentSyncManager::new()),
         }
     }
 
@@ -204,7 +262,9 @@ impl LspClient {
         }
 
         let pending_requests = self.pending_requests.clone();
-        let active_handlers = Arc::new(RwLock::new(HashMap::<String, Vec<Box<dyn Fn(Value) + Send + Sync>>>::new()));
+        let active_handlers = self.active_handlers.clone();
+        let notification_handlers = self.notification_handlers.clone();
+        let metrics = self.metrics.clone();
         let server_name = self.server_name.clone();
         let is_stopping = self.is_stopping.clone();
         
@@ -217,6 +277,7 @@ impl LspClient {
                 
                 match read_lsp_response(&mut reader).await {
                     Ok(response) => {
+                        // Handle response (has "id") vs notification (has "method" but no "id")
                         if let Some(id) = response.get("id").and_then(|v| v.as_u64()) {
                             let mut pending = pending_requests.lock().await;
                             if let Some(sender) = pending.remove(&id) {
@@ -226,11 +287,28 @@ impl LspClient {
                             }
                         } else if let Some(method) = response.get("method").and_then(|v| v.as_str())
                             && let Some(params) = response.get("params").cloned() {
-                                let handlers = active_handlers.read().await;
-                                if let Some(handlers_for_method) = handlers.get(method) {
-                                    for handler in handlers_for_method {
+                                // Dispatch to lazily registered handlers
+                                let handlers_guard = active_handlers.read().await;
+                                if let Some(lazy_handlers) = handlers_guard.get(method) {
+                                    for handler in lazy_handlers {
                                         handler(params.clone());
                                     }
+                                }
+                                drop(handlers_guard);
+                                
+                                // Dispatch to notification handlers (merged from lsp_enhanced)
+                                let handlers_guard = notification_handlers.read().await;
+                                if let Some(handlers) = handlers_guard.get(method) {
+                                    for handler in handlers {
+                                        handler(params.clone());
+                                    }
+                                }
+                                drop(handlers_guard);
+                                
+                                // Track notification metrics
+                                {
+                                    let mut m = metrics.lock().await;
+                                    m.total_notifications += 1;
                                 }
                             }
                     }
@@ -249,6 +327,7 @@ impl LspClient {
         *self.process.write().await = Some(child);
         *self.stdin.write().await = Some(stdin);
         *self._reader_task.write().await = Some(reader_task);
+        *self.start_time.write().await = Some(Instant::now());
         
         info!("LSP server {} started successfully", self.server_name);
         Ok(())
@@ -314,7 +393,7 @@ impl LspClient {
         Ok(result)
     }
 
-    /// Send generic JSON-RPC request
+    /// Send generic JSON-RPC request with metrics tracking
     pub async fn send_request<T: serde::de::DeserializeOwned>(
         &self,
         method: &str,
@@ -328,6 +407,7 @@ impl LspClient {
 
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let request = build_request(method, params.into());
+        let start = Instant::now();
         
         debug!("LSP request -> [{}] {}: {}", id, self.server_name, method);
 
@@ -350,21 +430,39 @@ impl LspClient {
             stdin.flush().await?;
         }
 
-        match tokio::time::timeout(
+        let result = match tokio::time::timeout(
             std::time::Duration::from_secs(30),
             rx,
         ).await {
             Ok(Ok(result)) => {
+                let latency = start.elapsed();
                 let parsed: T = serde_json::from_value(result?)?;
+                
+                // Update metrics
+                let mut metrics = self.metrics.lock().await;
+                metrics.total_requests += 1;
+                metrics.successful_requests += 1;
+                let total = metrics.total_requests;
+                metrics.average_latency_ms = 
+                    ((metrics.average_latency_ms * (total - 1) as f64) + latency.as_millis() as f64)
+                    / total as f64;
+                metrics.last_request_latency_ms = Some(latency.as_millis() as f64);
+                
                 Ok(parsed)
             }
-            Ok(Err(_)) => Err(LspError::Transport(JsonRpcError::ProcessExited)),
+            Ok(Err(_)) => {
+                self.metrics.lock().await.failed_requests += 1;
+                Err(LspError::Transport(JsonRpcError::ProcessExited))
+            }
             Err(_) => {
                 let mut pending = self.pending_requests.lock().await;
                 pending.remove(&id);
+                self.metrics.lock().await.failed_requests += 1;
                 Err(LspError::Timeout { timeout_ms: 30000 })
             }
-        }
+        };
+        
+        result
     }
 
     /// Send notification (no response expected)
@@ -432,22 +530,15 @@ impl LspClient {
         Ok(())
     }
 
-    // ─── Document sync methods ──────────────────────
+    // --- Document sync methods ----------------------
 
     pub async fn open_document(&self, uri: &str, language_id: &str, content: &str) -> LspResult<()> {
-        let url = Url::parse(uri).map_err(|e| LspError::Server { 
-            code: -32600, 
-            message: format!("Invalid URI: {}", e) 
+        // Generate params via DocumentSyncManager (handles full/incremental strategy selection)
+        let params = self.doc_sync.open_document(uri, language_id, content).await;
+        let url = Url::parse(uri).map_err(|e| LspError::Server {
+            code: -32600,
+            message: format!("Invalid URI: {}", e),
         })?;
-        
-        let params = DidOpenTextDocumentParams {
-            text_document: TextDocumentItem {
-                uri: url.clone(),
-                language_id: language_id.to_string(),
-                version: 1,
-                text: content.to_string(),
-            },
-        };
 
         self.open_documents.write().await.insert(url, 1);
         self.send_notification("textDocument/didOpen", json!(params)).await
@@ -457,23 +548,15 @@ impl LspClient {
         let url = Url::parse(uri).ok();
         
         if let Some(url) = url {
-            let new_version = self.open_documents.read().await
-                .get(&url).copied().unwrap_or(0) + 1;
-
-            let params = DidChangeTextDocumentParams {
-                text_document: VersionedTextDocumentIdentifier {
-                    uri: url.clone(),
-                    version: new_version,
-                },
-                content_changes: vec![TextDocumentContentChangeEvent {
-                    range: None,
-                    range_length: None,
-                    text: content.to_string(),
-                }],
-            };
-
+            // Delegate to DocumentSyncManager for smart full/incremental sync
+            let caps = self.capabilities.read().await.as_ref().cloned();
+            let params_value = self.doc_sync.update_document(uri, content, caps.as_ref()).await?;
+            
+            let new_version = self.doc_sync.get_document_version(uri).await
+                .unwrap_or(0);
+            
             self.open_documents.write().await.insert(url, new_version);
-            self.send_notification("textDocument/didChange", json!(params)).await
+            self.send_notification("textDocument/didChange", params_value).await
         } else {
             Err(LspError::Server { 
                 code: -32600, 
@@ -482,7 +565,7 @@ impl LspClient {
         }
     }
 
-    // ─── Core functionality methods ──────────────────────
+    // --- Core functionality methods ----------------------
 
     pub async fn goto_definition(
         &self,
@@ -643,7 +726,7 @@ impl LspClient {
         }
     }
 
-    // ─── Advanced LSP operations ──────────────────────
+    // --- Advanced LSP operations ----------------------
 
     /// Get document symbols (functions, classes, variables, etc.)
     pub async fn document_symbol(
@@ -847,6 +930,68 @@ impl LspClient {
                 Err(_) => Ok(vec![])
             }
         }
+    }
+
+    // --- New methods merged from lsp_enhanced ------------
+
+    /// Register notification handler (merged from lsp_enhanced::on_notification)
+    pub async fn on_notification<F>(&self, method: &str, handler: F)
+    where
+        F: Fn(Value) + Send + Sync + 'static,
+    {
+        let handler = Arc::new(handler) as NotificationHandler;
+        let mut handlers = self.notification_handlers.write().await;
+        handlers
+            .entry(method.to_string())
+            .or_insert_with(Vec::new)
+            .push(handler);
+    }
+
+    /// Execute code action request (merged from lsp_enhanced)
+    pub async fn code_action(
+        &self,
+        file: &str,
+        range: Range,
+        context: CodeActionContext,
+    ) -> LspResult<Vec<CodeActionOrCommand>> {
+        let params = CodeActionParams {
+            text_document: TextDocumentIdentifier {
+                uri: Url::parse(file).map_err(|e| LspError::Server {
+                    code: -32600,
+                    message: format!("Invalid URI: {}", e),
+                })?,
+            },
+            range,
+            context,
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        let response: Value = self.send_request("textDocument/codeAction", json!(params)).await?;
+
+        match response {
+            Value::Array(actions) => {
+                let actions: Vec<CodeActionOrCommand> = actions.into_iter()
+                    .filter_map(|v| serde_json::from_value(v).ok())
+                    .collect();
+                Ok(actions)
+            }
+            _ => Ok(vec![])
+        }
+    }
+
+    /// Close document notification — completes the didOpen->didChange->didClose lifecycle
+    pub async fn close_document(&self, uri: &str) -> LspResult<()> {
+        // Generate close params via DocumentSyncManager
+        let params = self.doc_sync.close_document(uri).await;
+        
+        // Send didClose notification
+        self.send_notification("textDocument/didClose", params).await
+    }
+
+    /// Get performance metrics snapshot
+    pub async fn metrics(&self) -> LspMetrics {
+        self.metrics.lock().await.clone()
     }
 }
 

@@ -4,9 +4,9 @@
 // 核心设计:
 //   - 每个 EventType 有一个独立的 Handler 链
 //   - Handler 按 priority 升序执行
-//   - 任一 Handler 返回 Block → 终止链, 返回 Block
-//   - 任一 Handler 返回 Modify → 将修改后的数据传递给下一个
-//   - 全部返回 Allow → 最终结果为 Allow
+//   - 任一 Handler 返回 Block -> 终止链, 返回 Block
+//   - 任一 Handler 返回 Modify -> 将修改后的数据传递给下一个
+//   - 全部返回 Allow -> 最终结果为 Allow
 //
 // 线程安全:
 //   - 使用 RwLock 保护 Handler 注册表
@@ -67,7 +67,7 @@ impl HookEventBus {
         }
     }
 
-    // ─── Handler 管理 ──────────────────────────────
+    // --- Handler 管理 ------------------------------
 
     /// 注册 Handler 到指定事件类型
     ///
@@ -125,7 +125,7 @@ impl HookEventBus {
         info!("All hook handlers cleared");
     }
 
-    // ─── 事件发布 ─────────────────────────────────
+    // --- 事件发布 ---------------------------------
 
     /// 发布事件并收集所有 Handler 的动作
     ///
@@ -134,9 +134,9 @@ impl HookEventBus {
     /// for handler in sorted_handlers:
     ///     action = await handler.handle(event)
     ///     match action:
-    ///         Block(reason) → return Block(reason) immediately
-    ///         Modify(data)  → event.data = data; continue
-    ///         Allow        → continue to next handler
+    ///         Block(reason) -> return Block(reason) immediately
+    ///         Modify(data)  -> event.data = data; continue
+    ///         Allow        -> continue to next handler
     /// return Allow (all handlers passed)
     /// ```
     pub async fn emit(&self, event: HookEventData) -> HookAction {
@@ -241,7 +241,7 @@ impl HookEventBus {
         matches!(self.emit(event).await, HookAction::Allow)
     }
 
-    // ─── 启用/禁用 ─────────────────────────────────
+    // --- 启用/禁用 ---------------------------------
 
     pub async fn enable(&self) {
         *self.enabled.write().await = true;
@@ -255,7 +255,7 @@ impl HookEventBus {
         *self.enabled.read().await
     }
 
-    // ─── 查询 ─────────────────────────────────────
+    // --- 查询 -------------------------------------
 
     /// 列出所有已注册的事件类型和对应的 Handler 数量
     pub async fn list_registered_types(&self) -> Vec<(HookEventType, usize)> {

@@ -1847,7 +1847,7 @@ fn session_switcher_styled_lines(
             SingleSessionLineStyle::OverlayTitle,
         ),
         styled_line(
-            "↑/↓ select · type filter · Backspace edit filter · Enter resume · Ctrl+R reload · Ctrl+P/Esc close",
+            "^/v select · type filter · Backspace edit filter · Enter resume · Ctrl+R reload · Ctrl+P/Esc close",
             SingleSessionLineStyle::Overlay,
         ),
         styled_line(
@@ -1970,7 +1970,7 @@ fn model_picker_styled_lines(picker: &ModelPickerState) -> Vec<SingleSessionStyl
             SingleSessionLineStyle::Meta,
         ),
         styled_line(
-            "↑/↓ select · type filter · Backspace edit filter · Enter switch · Ctrl+R reload · Esc close",
+            "^/v select · type filter · Backspace edit filter · Enter switch · Ctrl+R reload · Esc close",
             SingleSessionLineStyle::Overlay,
         ),
         styled_line(
@@ -2148,7 +2148,7 @@ const SINGLE_SESSION_HELP_SECTIONS: &[HelpSection] = &[
             ("Ctrl+U/K", "delete to line start/end"),
             ("Ctrl+W/Ctrl+Backspace", "delete previous word"),
             ("Alt+Backspace", "delete previous word, terminal-style"),
-            ("Ctrl/Alt+←/→, Ctrl+B/F", "move by word"),
+            ("Ctrl/Alt+<-/->, Ctrl+B/F", "move by word"),
             ("Alt+B/F", "move by word, terminal-style"),
             ("Alt+D", "delete next word"),
             ("Ctrl+X", "cut input line to clipboard"),
@@ -2368,7 +2368,7 @@ fn render_assistant_markdown_lines(content: &str) -> Vec<SingleSessionStyledLine
                     SingleSessionLineStyle::AssistantTable,
                 );
                 in_table_row = false;
-                lines.push(styled_line("┆ ─", SingleSessionLineStyle::AssistantTable));
+                lines.push(styled_line("┆ -", SingleSessionLineStyle::AssistantTable));
             }
             Event::Start(Tag::TableRow) => {
                 flush_current_line(
@@ -2395,7 +2395,7 @@ fn render_assistant_markdown_lines(content: &str) -> Vec<SingleSessionStyledLine
                     current.push_str("┆ ");
                 }
                 if in_table_row && table_cell_count > 0 {
-                    current.push_str(" │ ");
+                    current.push_str(" | ");
                 }
                 table_cell_count += 1;
             }
@@ -2452,7 +2452,7 @@ fn render_assistant_markdown_lines(content: &str) -> Vec<SingleSessionStyledLine
             }
             Event::Rule => {
                 flush_current_line(&mut lines, &mut current, current_style);
-                lines.push(styled_line("───", SingleSessionLineStyle::Meta));
+                lines.push(styled_line("---", SingleSessionLineStyle::Meta));
             }
             _ => {}
         }

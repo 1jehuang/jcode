@@ -298,7 +298,7 @@ fn summarize_swarm_tool_action(tool: &ToolCall, bounded: &dyn Fn(usize) -> usize
         "dm" | "message" => {
             let base = target
                 .as_deref()
-                .map(|target| format!("{} → {}", action, target))
+                .map(|target| format!("{} -> {}", action, target))
                 .unwrap_or_else(|| action.to_string());
             if let Some(prompt) = prompt.as_deref().filter(|value| !value.is_empty()) {
                 format!("{} '{}'", base, prompt)
@@ -499,7 +499,7 @@ fn browser_summary(tool: &ToolCall, max_width: Option<usize>) -> String {
                 Some(truncate_path_display(path, bounded(28)))
             };
             match (target, file) {
-                (Some(target), Some(file)) => format!("upload {} ← {}", target, file),
+                (Some(target), Some(file)) => format!("upload {} <- {}", target, file),
                 (Some(target), None) => format!("upload {}", target),
                 (None, Some(file)) => format!("upload {}", file),
                 (None, None) => "upload".to_string(),

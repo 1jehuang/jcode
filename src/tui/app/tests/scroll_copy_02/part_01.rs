@@ -189,7 +189,7 @@ fn test_copy_selection_swarm_message_skips_rail_chrome() {
     assert!(selected.contains("Broadcast"));
     assert!(selected.contains("hello team"));
     assert!(
-        !selected.contains('│'),
+        !selected.contains('|'),
         "selection should omit swarm rail chrome: {selected:?}"
     );
 }

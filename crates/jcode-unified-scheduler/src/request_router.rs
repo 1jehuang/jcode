@@ -1,4 +1,4 @@
-//! **请求路由器 (Phase 2)** — 移植自 Parallax `request_routing.py`
+﻿//! **请求路由器 (Phase 2)** — 移植自 Parallax `request_routing.py`
 //!
 //! ## 算法概述
 //!
@@ -12,8 +12,8 @@
 //!
 //! 在此 DAG 上运行 **动态规划** 寻找从 Layer 0 到 Layer L 的最小延迟路径。
 
-use super::types::*;
-use super::SchedulerError;
+use super::*;
+use std::sync::Arc;
 use std::collections::{BTreeMap, HashMap};
 
 // ============================================================================
@@ -31,6 +31,7 @@ pub trait RoutingStrategy: Send + Sync {
 }
 
 /// 请求路由器 — Phase 2 主入口
+#[derive(Debug)]
 pub struct RequestRouter {
     /// 当前路由策略
     strategy: Box<dyn RoutingStrategy>,
@@ -72,7 +73,7 @@ impl RequestRouter {
                     debug!("[Router] 发现 {} 个转折点, 可裁剪冗余层", turning_points.len());
                     // 裁剪逻辑: 更新路径中的节点层范围
                 }
-                result = Some((path.clone(), *lat));
+                result = Some((path.clone(), lat));
             }
         }
 
@@ -146,7 +147,7 @@ impl RoutingStrategy for DPRouting {
                 }
             }
         } else {
-            // 无节点托管第 0 层 → 无法构建路径
+            // 无节点托管第 0 层 -> 无法构建路径
             return Ok(None);
         }
 
@@ -243,22 +244,21 @@ impl RoutingStrategy for DPRouting {
 // ============================================================================
 
 struct RandomRouting {
-    rng_state: u64,
+    rng_state: std::sync::atomic::AtomicU64,
 }
 
 impl RandomRouting {
     fn new() -> Self {
-        Self { rng_state: 42 }
+        Self { rng_state: std::sync::atomic::AtomicU64::new(42) }
     }
 }
 
 impl RoutingStrategy for RandomRouting {
     fn find_optimal_path(
-        &mut self,
+        &self,
         _num_layers: u32,
         nodes: &[Arc<NodeInfo>],
     ) -> Result<Option<(Vec<NodeId>, f64)>, SchedulerError> {
-        // 过滤可用节点 (不过载且在线)
         let candidates: Vec<&Arc<NodeInfo>> = nodes
             .iter()
             .filter(|n| n.is_online() && !n.is_overloaded())
@@ -268,9 +268,8 @@ impl RoutingStrategy for RandomRouting {
             return Ok(None);
         }
 
-        // 简单伪随机选择
-        self.rng_state = self.rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        let idx = (self.rng_state as usize) % candidates.len();
+        let new_state = self.rng_state.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let idx = (new_state as usize) % candidates.len();
         let chosen = candidates[idx];
 
         Ok(Some((
@@ -285,18 +284,18 @@ impl RoutingStrategy for RandomRouting {
 // ============================================================================
 
 struct RoundRobinRouting {
-    counter: usize,
+    counter: std::sync::atomic::AtomicUsize,
 }
 
 impl RoundRobinRouting {
     fn new() -> Self {
-        Self { counter: 0 }
+        Self { counter: std::sync::atomic::AtomicUsize::new(0) }
     }
 }
 
 impl RoutingStrategy for RoundRobinRouting {
     fn find_optimal_path(
-        &mut self,
+        &self,
         _num_layers: u32,
         nodes: &[Arc<NodeInfo>],
     ) -> Result<Option<(Vec<NodeId>, f64)>, SchedulerError> {
@@ -309,8 +308,7 @@ impl RoutingStrategy for RoundRobinRouting {
             return Ok(None);
         }
 
-        let idx = self.counter % candidates.len();
-        self.counter += 1;
+        let idx = self.counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % candidates.len();
 
         let chosen = candidates[idx];
         Ok(Some((
@@ -329,8 +327,8 @@ impl RoutingStrategy for RoundRobinRouting {
 /// 通过 Layer-level DP 分析最优路由, 发现可以裁剪的冗余层片段。
 ///
 /// 返回: `(node_id, layer_index, kind)` 列表
-/// - `"tail"`: 路由在第 l 层离开此节点, 但该节点仍托管 l 及之后的层 → 裁剪 [l, end)
-/// - `"head"`: 路由首次在第 l 层使用此节点, 但该节点从更早的层就开始托管 → 裁剪 [start, l)
+/// - `"tail"`: 路由在第 l 层离开此节点, 但该节点仍托管 l 及之后的层 -> 裁剪 [l, end)
+/// - `"head"`: 路由首次在第 l 层使用此节点, 但该节点从更早的层就开始托管 -> 裁剪 [start, l)
 pub fn find_turning_points(nodes: &[Arc<NodeInfo>], num_layers: u32) -> Vec<(NodeId, u32, &'static str)> {
     if num_layers == 0 || nodes.is_empty() {
         return vec![];
@@ -348,7 +346,7 @@ pub fn find_turning_points(nodes: &[Arc<NodeInfo>], num_layers: u32) -> Vec<(Nod
         })
         .collect();
 
-    // 如果有任何层没有 host → 无法分析
+    // 如果有任何层没有 host -> 无法分析
     if layer_hosts.iter().any(|h| h.is_empty()) {
         return vec![];
     }
@@ -418,7 +416,7 @@ pub fn find_turning_points(nodes: &[Arc<NodeInfo>], num_layers: u32) -> Vec<(Nod
 
     let end_i = last_dp
         .iter()
-        .min_by_key(|(_, &cost)| ordered_float::OrderedFloat(cost))
+        .min_by_key(|(_, cost)| ordered_float::OrderedFloat(*cost))
         .map(|(&i, _)| i);
 
     let end_i = match end_i {
@@ -471,7 +469,7 @@ pub fn find_turning_points(nodes: &[Arc<NodeInfo>], num_layers: u32) -> Vec<(Nod
     // Head truncation: 节点被使用的起始层晚于其托管起始层
     let mut first_used: HashMap<usize, u32> = HashMap::new();
     for (l, &idx) in path_idx.iter().enumerate() {
-        first_used.entry(*idx).or_insert(l as u32);
+        first_used.entry(idx).or_insert(l as u32);
     }
 
     for (&idx, &first_l) in &first_used {
@@ -514,7 +512,7 @@ pub fn estimate_pipeline_latency(
             total += prev_node.get_rtt_to(node);
         }
 
-        prev = Some(node);
+        prev = Some(nodes_map.get(nid).unwrap());
     }
 
     total
@@ -579,7 +577,7 @@ mod tests {
         Arc::make_mut(&mut nodes[1]).max_requests = 1;
 
         let result = router.find_optimal_path(12, &nodes).unwrap();
-        // B 过载 → 应返回 None 或绕过 B
+        // B 过载 -> 应返回 None 或绕过 B
         if let Some((path, _)) = result {
             assert!(!path.contains(&nodes[1].node_id), "不应包含过载节点");
         }

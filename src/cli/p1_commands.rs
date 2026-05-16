@@ -11,9 +11,9 @@
 //! - `/bashes` : 后台进程管理
 
 use anyhow::Result;
-use serde_json::json;
 
-// ─── Review Command ──────────────────────────
+
+// --- Review Command --------------------------
 
 /// 处理 /review 命令
 pub async fn handle_review_command(target: Option<&str>, options: ReviewOptions) -> Result<String> {
@@ -187,7 +187,7 @@ async fn performance_review(_target: &str) -> Result<String> {
 
 ### 优化建议
 1. **数据库**: 添加索引、使用连接池、实现查询缓存
-2. **算法**: O(n²) → O(n log n) 排序优化
+2. **算法**: O(n²) -> O(n log n) 排序优化
 3. **内存**: 对象池复用、延迟加载
 4. **并发**: 异步IO、并行处理
 
@@ -199,7 +199,7 @@ async fn performance_review(_target: &str) -> Result<String> {
     )
 }
 
-// ─── Init Command ───────────────────────────
+// --- Init Command ---------------------------
 
 /// 处理 /init 命令
 pub async fn handle_init_command(project_type: Option<&str>) -> Result<String> {
@@ -282,7 +282,7 @@ cargo fmt            # 格式化
     ))
 }
 
-// ─── Memory Command ──────────────────────────
+// --- Memory Command --------------------------
 
 /// 处理 /memory 命令
 pub async fn handle_memory_command(action: Option<&str>) -> Result<String> {
@@ -416,7 +416,7 @@ fn memory_help() -> String {
 "#.to_string()
 }
 
-// ─── Permissions Command ──────────────────────
+// --- Permissions Command ----------------------
 
 /// 处理 /permissions 命令
 pub async fn handle_permissions_command(action: Option<&str>) -> Result<String> {
@@ -534,7 +534,7 @@ fn permissions_help() -> String {
 "#.to_string()
 }
 
-// ─── Vim Mode Command ───────────────────────
+// --- Vim Mode Command -----------------------
 
 /// 处理 /vim 命令
 pub async fn handle_vim_command() -> Result<String> {
@@ -549,7 +549,7 @@ pub async fn handle_vim_command() -> Result<String> {
 
 ### 导航
 ```
-h/j/k/l      ←↓→→ 移动光标
+h/j/k/l      <-v->-> 移动光标
 w/b          词首/词尾跳转
 gg/G         文件头/尾
 {/}          段落跳转
@@ -579,7 +579,7 @@ n/N          下/上一个匹配
     )
 }
 
-// ─── Bug Report Command ──────────────────────
+// --- Bug Report Command ----------------------
 
 /// 处理 /bug 命令
 pub async fn handle_bug_command() -> Result<String> {
@@ -619,7 +619,7 @@ pub async fn handle_bug_command() -> Result<String> {
     )
 }
 
-// ─── StatusLine Command ──────────────────────
+// --- StatusLine Command ----------------------
 
 /// 处理 /statusline 命令
 pub async fn handle_statusline_command(content: Option<&str>) -> Result<String> {
@@ -655,7 +655,7 @@ pub async fn handle_statusline_command(content: Option<&str>) -> Result<String> 
     }
 }
 
-// ─── Bashes Command ──────────────────────────
+// --- Bashes Command --------------------------
 
 /// 处理 /bashes 命令
 pub async fn handle_bashes_command(action: Option<&str>) -> Result<String> {

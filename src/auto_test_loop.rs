@@ -1,6 +1,6 @@
 //! # auto_test_loop — 自动化测试闭环引擎
 //!
-//! Claude Code 最核心的差异化能力：编码 → 构建 → 测试 → 诊断 → 修复 → 重试
+//! Claude Code 最核心的差异化能力：编码 -> 构建 -> 测试 -> 诊断 -> 修复 -> 重试
 //! - 测试执行：并行/串行运行测试套件，收集 stdout/stderr/exit code
 //! - 失败诊断：解析测试输出，归类为编译错误/断言失败/超时/crash
 //! - 自动修复：根据诊断信息反向修正源文件（调用 agent 修复）
@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
-// ── Types ──
+// -- Types --
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestLoopConfig {
@@ -112,7 +112,7 @@ pub struct LoopResult {
     pub rounds: Vec<RoundResult>,
 }
 
-// ── Failure Analyzer ──
+// -- Failure Analyzer --
 
 #[derive(Debug, Clone)]
 pub enum FailureCategory {
@@ -131,7 +131,7 @@ pub struct FailureDiagnosis {
     pub confidence: f64,
 }
 
-// ── Engine ──
+// -- Engine --
 
 pub struct TestLoopEngine {
     config: TestLoopConfig,
@@ -371,7 +371,7 @@ impl TestLoopEngine {
     }
 }
 
-// ── Diagnosis ──
+// -- Diagnosis --
 
 fn diagnose_failure(stderr: &str, stdout: &str) -> Vec<FailureDiagnosis> {
     let mut diagnoses = Vec::new();

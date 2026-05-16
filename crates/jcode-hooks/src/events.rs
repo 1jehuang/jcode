@@ -16,39 +16,39 @@ pub type EventId = Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HookEventType {
-    // ── Session 级别 ──
+    // -- Session 级别 --
     /// 会话开始
     SessionStart,
     /// 会话结束
     SessionEnd,
 
-    // ── Agent 执行 ──
+    // -- Agent 执行 --
     /// Agent 执行前 (可注入上下文/修改 prompt)
     PreAgentExecute,
     /// Agent 执行后 (可修改结果/记录指标)
     PostAgentExecute,
 
-    // ── Prompt 注入 ──
+    // -- Prompt 注入 --
     /// 在发送给 LLM 前, 可修改 system/user prompt
     PrePrompt,
 
-    // ── 工具调用 ──
+    // -- 工具调用 --
     /// 工具调用前 (权限检查、参数校验、日志)
     PreToolCall,
     /// 工具调用后 (结果处理、缓存、副作用)
     PostToolCall,
 
-    // ── HTTP 请求 ──
+    // -- HTTP 请求 --
     /// 发出 HTTP 请求前 (SSRF 检查、Header 注入)
     PreHttpRequest,
     /// 收到 HTTP 响应后 (响应处理、缓存)
     PostHttpResponse,
 
-    // ── 安全检查 ──
+    // -- 安全检查 --
     /// SSRF / 安全检查点
     SsrfCheck,
 
-    // ── 自定义 ──
+    // -- 自定义 --
     /// 自定义事件 (携带 name + payload)
     Custom(String),
 }
@@ -95,7 +95,7 @@ impl HookEvent {
     }
 }
 
-// ─── Session Events ─────────────────────────────────
+// --- Session Events ---------------------------------
 
 #[derive(Debug, Clone)]
 pub struct SessionStartEvent {
@@ -124,7 +124,7 @@ pub enum SessionEndReason {
     UserDisconnect,
 }
 
-// ─── Agent Execution Events ─────────────────────────
+// --- Agent Execution Events -------------------------
 
 #[derive(Debug, Clone)]
 pub struct PreAgentExecuteEvent {
@@ -148,7 +148,7 @@ pub struct PostAgentExecuteEvent {
     pub duration_ms: u64,
 }
 
-// ─── Prompt Injection Event ─────────────────────────
+// --- Prompt Injection Event -------------------------
 
 #[derive(Debug, Clone)]
 pub struct PrePromptEvent {
@@ -163,7 +163,7 @@ pub struct PromptMessage {
     pub content: String,
 }
 
-// ─── Tool Call Events ───────────────────────────────
+// --- Tool Call Events -------------------------------
 
 #[derive(Debug, Clone)]
 pub struct PreToolCallEvent {
@@ -188,7 +188,7 @@ pub struct PostToolCallEvent {
     pub output_preview: Option<String>,
 }
 
-// ─── HTTP Request/Response Events ─────────────────────
+// --- HTTP Request/Response Events ---------------------
 
 #[derive(Debug, Clone)]
 pub struct PreHttpRequestEvent {
@@ -209,7 +209,7 @@ pub struct PostHttpResponseEvent {
     pub duration_ms: u64,
 }
 
-// ─── Security Events ─────────────────────────────────
+// --- Security Events ---------------------------------
 
 #[derive(Debug, Clone)]
 pub struct SsrfCheckEvent {
@@ -220,7 +220,7 @@ pub struct SsrfCheckEvent {
     pub block_reason: Option<String>,
 }
 
-// ─── Custom Event ───────────────────────────────────
+// --- Custom Event -----------------------------------
 
 #[derive(Debug, Clone)]
 pub struct CustomEvent {

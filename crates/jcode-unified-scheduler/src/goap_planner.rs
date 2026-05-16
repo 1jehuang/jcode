@@ -1,4 +1,4 @@
-//! **GOAP A* 规划器** — 移植自 Ruflo Goal Module
+﻿//! **GOAP A* 规划器** — 移植自 Ruflo Goal Module
 //!
 //! ## 算法概述
 //!
@@ -17,8 +17,7 @@
 //! 当环境变化或动作失败时, 规划器会从**当前状态**重新规划,
 //! 而不是从头开始。响应时间 < 500ms。
 
-use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::types::*;
@@ -188,7 +187,7 @@ impl GoapPlanner {
         let result = self.search(&initial_state, &goal_state)?;
 
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-        let prev_total_ns = self.total_planning_ns.swap(
+        let _prev_total_ns = self.total_planning_ns.swap(
             start.elapsed().as_nanos() as usize,
             Ordering::Relaxed,
         );
@@ -279,7 +278,7 @@ impl GoapPlanner {
             // 跟踪最佳部分解 (即使没到达目标也返回最有希望的方案)
             if current.h_cost < best_h_cost {
                 best_h_cost = current.h_cost;
-                best_partial = Some(current);
+                best_partial = Some(current.clone());
             }
 
             // 状态哈希 (用于 closed set 去重)
@@ -322,7 +321,7 @@ impl GoapPlanner {
             }
         }
 
-        // 搜索耗尽但没有完整解 → 返回最佳部分解 (如果有)
+        // 搜索耗尽但没有完整解 -> 返回最佳部分解 (如果有)
         if let Some(partial) = best_partial {
             if partial.h_cost < 2.0 { // 接近目标的部分解也可以接受
                 return Ok(Some(self.build_plan(&partial, iterations)));
@@ -386,9 +385,7 @@ impl GoapPlanner {
     fn cheapest_action_for(&self, key: &str) -> Option<f64> {
         self.actions
             .iter()
-            .filter(|a| a.effects.iter().any(|e| e.key == key))
-            .map(|a| a.cost)
-            .min()
+            .filter(|a| a.effects.iter().any(|e| e.key == key)).map(|a| a.cost).reduce(f64::min)
     }
 
     /// 状态哈希 (用于去重)
@@ -408,7 +405,7 @@ impl GoapPlanner {
             .path
             .iter()
             .enumerate()
-            .map(|&(idx, step_num)| {
+            .map(|(idx, step_num)| {
                 let action = &self.actions[idx];
                 GoapStep {
                     step_number: step_num + 1,
@@ -443,7 +440,7 @@ impl GoapPlanner {
         let mut state = WorldState::new();
 
         // 基于任务元数据推断
-        if let Some(ref meta) = task.metadata {
+        let meta = &task.metadata; if meta.is_object() {
             if let Some(lang) = meta.get("language") {
                 state.set(
                     format!("language_{}", lang.as_str().unwrap_or("unknown")),
@@ -483,17 +480,17 @@ impl GoapPlanner {
     ///
     /// 对应 Ruflo Goal Module 的目标解析逻辑。
     /// 支持:
-    /// - "部署应用" → deployed=true, monitoring_active=true
-    /// - "重构认证模块" → refactored=true, tests_written=true
-    /// - "修复 bug #123" → bug_123_fixed=true
+    /// - "部署应用" -> deployed=true, monitoring_active=true
+    /// - "重构认证模块" -> refactored=true, tests_written=true
+    /// - "修复 bug #123" -> bug_123_fixed=true
     fn parse_goal(&self, goal: &str) -> Result<WorldState, GoapError> {
         let lower = goal.to_lowercase();
         let mut state = WorldState::new();
 
         // === 部署相关 ===
         if lower.contains("部署") || lower.contains("deploy") {
-            state.set("dependencies_installed".into(), WorldStateValue::Bool(true));
-            state.set("tests_written".into(), WorldStateValue::Bool(true));
+            state.set("dependencies_installed", WorldStateValue::Bool(true));
+            state.set("tests_written".to_string(), WorldStateValue::Bool(true));
             state.set("built".into(), WorldStateValue::Bool(true));
             state.set("deployed".into(), WorldStateValue::Bool(true));
             state.set("monitoring_active".into(), WorldStateValue::Bool(true));
@@ -505,7 +502,7 @@ impl GoapPlanner {
         if lower.contains("重构") || lower.contains("refactor") {
             state.set("analyzed".into(), WorldStateValue::Bool(true));
             state.set("documented".into(), WorldStateValue::Bool(true));
-            state.set("tests_written".into(), WorldStateValue::Bool(true));
+            state.set("tests_written".to_string(), WorldStateValue::Bool(true));
             state.set("refactored".into(), WorldStateValue::Bool(true));
 
             return Ok(state);
@@ -559,8 +556,8 @@ impl GoapPlanner {
                 name: "analyze_codebase".into(),
                 preconditions: vec![],
                 effects: vec![
-                    WorldStateEffect { key: "analyzed".into(), op: EffectOp::Set, value: WorldStateValue::Bool(true) },
-                    WorldStateEffect { key: "dependencies_known".into(), op: EffectOp::Set, value: WorldStateValue::Bool(true) },
+                    WorldStateEffect { key: "analyzed".into(), operation: EffectOp::Set, value: WorldStateValue::Bool(true) },
+                    WorldStateEffect { key: "dependencies_known".into(), operation: EffectOp::Set, value: WorldStateValue::Bool(true) },
                 ],
                 cost: 1.0,
                 category: ActionCategory::Analysis,
@@ -572,10 +569,10 @@ impl GoapPlanner {
             GoapActionDef {
                 name: "install_dependencies".into(),
                 preconditions: vec![
-                    WorldStateCondition { key: "dependencies_known".into(), op: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
+                    WorldStateCondition { key: "dependencies_known".into(), operator: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
                 ],
                 effects: vec![
-                    WorldStateEffect { key: "dependencies_installed".into(), op: EffectOp::Set, value: WorldStateValue::Bool(true) },
+                    WorldStateEffect { key: "dependencies_installed".into(), operation: EffectOp::Set, value: WorldStateValue::Bool(true) },
                 ],
                 cost: 2.0,
                 category: ActionCategory::Execution,
@@ -587,10 +584,10 @@ impl GoapPlanner {
             GoapActionDef {
                 name: "build_project".into(),
                 preconditions: vec![
-                    WorldStateCondition { key: "dependencies_installed".into(), op: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
+                    WorldStateCondition { key: "dependencies_installed".into(), operator: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
                 ],
                 effects: vec![
-                    WorldStateEffect { key: "built".into(), op: EffectOp::Set, value: WorldStateValue::Bool(true) },
+                    WorldStateEffect { key: "built".into(), operation: EffectOp::Set, value: WorldStateValue::Bool(true) },
                 ],
                 cost: 3.0,
                 category: ActionCategory::Execution,
@@ -602,10 +599,10 @@ impl GoapPlanner {
             GoapActionDef {
                 name: "write_tests".into(),
                 preconditions: vec![
-                    WorldStateCondition { key: "analyzed".into(), op: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
+                    WorldStateCondition { key: "analyzed".into(), operator: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
                 ],
                 effects: vec![
-                    WorldStateEffect { key: "tests_written".into(), op: EffectOp::Set, value: WorldStateValue::Bool(true) },
+                    WorldStateEffect { key: "tests_written".into(), operation: EffectOp::Set, value: WorldStateValue::Bool(true) },
                 ],
                 cost: 2.5,
                 category: ActionCategory::Creation,
@@ -615,11 +612,11 @@ impl GoapPlanner {
             GoapActionDef {
                 name: "run_tests".into(),
                 preconditions: vec![
-                    WorldStateCondition { key: "tests_written".into(), op: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
-                    WorldStateCondition { key: "built".into(), op: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
+                    WorldStateCondition { key: "tests_written".into(), operator: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
+                    WorldStateCondition { key: "built".into(), operator: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
                 ],
                 effects: vec![
-                    WorldStateEffect { key: "tests_passed".into(), op: EffectOp::Set, value: WorldStateValue::Bool(true) },
+                    WorldStateEffect { key: "tests_passed".into(), operation: EffectOp::Set, value: WorldStateValue::Bool(true) },
                 ],
                 cost: 2.0,
                 category: ActionCategory::Execution,
@@ -631,10 +628,10 @@ impl GoapPlanner {
             GoapActionDef {
                 name: "document_behavior".into(),
                 preconditions: vec![
-                    WorldStateCondition { key: "analyzed".into(), op: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
+                    WorldStateCondition { key: "analyzed".into(), operator: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
                 ],
                 effects: vec![
-                    WorldStateEffect { key: "documented".into(), op: EffectOp::Set, value: WorldStateValue::Bool(true) },
+                    WorldStateEffect { key: "documented".into(), operation: EffectOp::Set, value: WorldStateValue::Bool(true) },
                 ],
                 cost: 1.5,
                 category: ActionCategory::Creation,
@@ -646,11 +643,11 @@ impl GoapPlanner {
             GoapActionDef {
                 name: "plan_refactoring".into(),
                 preconditions: vec![
-                    WorldStateCondition { key: "documented".into(), op: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
-                    WorldStateCondition { key: "tests_written".into(), op: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
+                    WorldStateCondition { key: "documented".into(), operator: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
+                    WorldStateCondition { key: "tests_written".into(), operator: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
                 ],
                 effects: vec![
-                    WorldStateEffect { key: "refactor_plan_ready".into(), op: EffectOp::Set, value: WorldStateValue::Bool(true) },
+                    WorldStateEffect { key: "refactor_plan_ready".into(), operation: EffectOp::Set, value: WorldStateValue::Bool(true) },
                 ],
                 cost: 2.0,
                 category: ActionCategory::Analysis,
@@ -660,13 +657,13 @@ impl GoapPlanner {
             GoapActionDef {
                 name: "apply_refactoring".into(),
                 preconditions: vec![
-                    WorldStateCondition { key: "refactor_plan_ready".into(), op: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
-                    WorldStateCondition { key: "tests_passed".into(), op: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
+                    WorldStateCondition { key: "refactor_plan_ready".into(), operator: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
+                    WorldStateCondition { key: "tests_passed".into(), operator: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
                 ],
                 effects: vec![
-                    WorldStateEffect { key: "refactored".into(), op: EffectOp::Set, value: WorldStateValue::Bool(true) },
+                    WorldStateEffect { key: "refactored".into(), operation: EffectOp::Set, value: WorldStateValue::Bool(true) },
                     // 重构后需要回归测试
-                    WorldStateEffect { key: "tests_passed".into(), op: EffectOp::Set, value: WorldStateValue::Bool(false) },
+                    WorldStateEffect { key: "tests_passed".into(), operation: EffectOp::Set, value: WorldStateValue::Bool(false) },
                 ],
                 cost: 4.0,
                 category: ActionCategory::Creation,
@@ -678,11 +675,11 @@ impl GoapPlanner {
             GoapActionDef {
                 name: "deploy_application".into(),
                 preconditions: vec![
-                    WorldStateCondition { key: "tests_passed".into(), op: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
-                    WorldStateCondition { key: "built".into(), op: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
+                    WorldStateCondition { key: "tests_passed".into(), operator: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
+                    WorldStateCondition { key: "built".into(), operator: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
                 ],
                 effects: vec![
-                    WorldStateEffect { key: "deployed".into(), op: EffectOp::Set, value: WorldStateValue::Bool(true) },
+                    WorldStateEffect { key: "deployed".into(), operation: EffectOp::Set, value: WorldStateValue::Bool(true) },
                 ],
                 cost: 2.0,
                 category: ActionCategory::Execution,
@@ -692,10 +689,10 @@ impl GoapPlanner {
             GoapActionDef {
                 name: "setup_monitoring".into(),
                 preconditions: vec![
-                    WorldStateCondition { key: "deployed".into(), op: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
+                    WorldStateCondition { key: "deployed".into(), operator: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
                 ],
                 effects: vec![
-                    WorldStateEffect { key: "monitoring_active".into(), op: EffectOp::Set, value: WorldStateValue::Bool(true) },
+                    WorldStateEffect { key: "monitoring_active".into(), operation: EffectOp::Set, value: WorldStateValue::Bool(true) },
                 ],
                 cost: 1.5,
                 category: ActionCategory::Execution,
@@ -708,7 +705,7 @@ impl GoapPlanner {
                 name: "security_scan".into(),
                 preconditions: vec![],
                 effects: vec![
-                    WorldStateEffect { key: "scanned".into(), op: EffectOp::Set, value: WorldStateValue::Bool(true) },
+                    WorldStateEffect { key: "scanned".into(), operation: EffectOp::Set, value: WorldStateValue::Bool(true) },
                 ],
                 cost: 2.0,
                 category: ActionCategory::Verification,
@@ -718,10 +715,10 @@ impl GoapPlanner {
             GoapActionDef {
                 name: "fix_vulnerabilities".into(),
                 preconditions: vec![
-                    WorldStateCondition { key: "scanned".into(), op: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
+                    WorldStateCondition { key: "scanned".into(), operator: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
                 ],
                 effects: vec![
-                    WorldStateEffect { key: "vulnerabilities_fixed".into(), op: EffectOp::Set, value: WorldStateValue::Bool(true) },
+                    WorldStateEffect { key: "vulnerabilities_fixed".into(), operation: EffectOp::Set, value: WorldStateValue::Bool(true) },
                 ],
                 cost: 3.0,
                 category: ActionCategory::Creation,
@@ -734,8 +731,8 @@ impl GoapPlanner {
                 name: "diagnose_issue".into(),
                 preconditions: vec![],
                 effects: vec![
-                    WorldStateEffect { key: "diagnosed".into(), op: EffectOp::Set, value: WorldStateValue::Bool(true) },
-                    WorldStateEffect { key: "root_cause_found".into(), op: EffectOp::Set, value: WorldStateValue::Bool(true) },
+                    WorldStateEffect { key: "diagnosed".into(), operation: EffectOp::Set, value: WorldStateValue::Bool(true) },
+                    WorldStateEffect { key: "root_cause_found".into(), operation: EffectOp::Set, value: WorldStateValue::Bool(true) },
                 ],
                 cost: 2.5,
                 category: ActionCategory::Analysis,
@@ -745,11 +742,11 @@ impl GoapPlanner {
             GoapActionDef {
                 name: "apply_fix".into(),
                 preconditions: vec![
-                    WorldStateCondition { key: "root_cause_found".into(), op: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
+                    WorldStateCondition { key: "root_cause_found".into(), operator: ConditionOp::Equals, value: WorldStateValue::Bool(true) },
                 ],
                 effects: vec![
-                    WorldStateEffect { key: "fix_applied".into(), op: EffectOp::Set, value: WorldStateValue::Bool(true) },
-                    WorldStateEffect { key: "tests_passed".into(), op: EffectOp::Set, value: WorldStateValue::Bool(false) }, // fix后需重新测试
+                    WorldStateEffect { key: "fix_applied".into(), operation: EffectOp::Set, value: WorldStateValue::Bool(true) },
+                    WorldStateEffect { key: "tests_passed".into(), operation: EffectOp::Set, value: WorldStateValue::Bool(false) }, // fix后需重新测试
                 ],
                 cost: 2.0,
                 category: ActionCategory::Creation,
@@ -844,7 +841,7 @@ mod tests {
 
         rt.block_on(async {
             let mut state = WorldState::new();
-            state.set("dependencies_installed".into(), WorldStateValue::Bool(true));
+            state.set("dependencies_installed", WorldStateValue::Bool(true));
             state.set("built".into(), WorldStateValue::Bool(true));
             // 还没写测试
 
@@ -891,3 +888,4 @@ mod tests {
         assert_eq!(planner.action_count(), GoapPlanner::new().action_count() + 1);
     }
 }
+

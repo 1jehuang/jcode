@@ -7,23 +7,23 @@
 //   2. 父 Agent 将任务描述 + 上下文传递给子 Agent
 //   3. 子 Agent 独立运行完整的感知-推理-行动循环
 //   4. 完成后将结果返回父 Agent
-//   5. 支持多层嵌套 (Agent → Agent → Agent)
+//   5. 支持多层嵌套 (Agent -> Agent -> Agent)
 //   6. 资源限制: 最大深度、最大并发子Agent数、超时控制
 //
 // 架构:
 //
-// ┌──────────────────────────────┐
-// │         Parent Agent          │
-// │  ┌────────────────────────┐  │
-// │  │  SubAgentPool (池化)    │  │
-// │  │  ├─ SubAgent #1 [Busy]  │  │
-// │  │  ├─ SubAgent #2 [Idle]  │  │
-// │  │  └─ SubAgent #3 [Idle]  │  │
-// │  └───────────┬────────────┘  │
-// │              │ result        │
-// │              ▼               │
-// │     (继续父 Agent 循环)       │
-// └──────────────────────────────┘
+// +------------------------------+
+// |         Parent Agent          |
+// |  +------------------------+  |
+// |  |  SubAgentPool (池化)    |  |
+// |  |  +- SubAgent #1 [Busy]  |  |
+// |  |  +- SubAgent #2 [Idle]  |  |
+// |  |  +- SubAgent #3 [Idle]  |  |
+// |  +-----------+------------+  |
+// |              | result        |
+// |              ▼               |
+// |     (继续父 Agent 循环)       |
+// +------------------------------+
 // ════════════════════════════════════════════════════════════════
 
 use anyhow::Result;
@@ -170,6 +170,7 @@ impl Default for SubAgentConfig {
 }
 
 /// 子 Agent 实例 (内部状态机)
+#[allow(dead_code)]
 struct SubAgentInstance {
     id: SubAgentId,
     status: SubAgentStatus,
@@ -205,7 +206,7 @@ pub enum SubAgentProgress {
     Cancelled { agent_id: SubAgentId },
 }
 
-// ─── 子 Agent 池管理器 ─────────────────────────────────
+// --- 子 Agent 池管理器 ---------------------------------
 
 /// SubAgentPool — 管理 Agent 的生命周期和资源
 ///
@@ -262,10 +263,10 @@ impl SubAgentPool {
         mut task: SubAgentTask,
         parent_depth: u32,
     ) -> Result<oneshot::Receiver<SubAgentResult>> {
-        // ── 1. 资源检查 ──
+        // -- 1. 资源检查 --
         self.check_resource_limits(&task, parent_depth).await?;
 
-        // ── 2. 填充默认值 ──
+        // -- 2. 填充默认值 --
         if task.max_turns == 0 {
             task.max_turns = self.config.default_max_turns;
         }
@@ -276,7 +277,7 @@ impl SubAgentPool {
             task.allow_nested_agents = false;
         }
 
-        // ── 3. 创建 Agent 实例 ──
+        // -- 3. 创建 Agent 实例 --
         let agent_id = Uuid::new_v4();
         let instance = SubAgentInstance {
             id: agent_id,
@@ -296,20 +297,20 @@ impl SubAgentPool {
 
         *self.running_count.write().await += 1;
 
-        // ── 4. 创建结果 channel ──
+        // -- 4. 创建结果 channel --
         let (result_tx, result_rx) = oneshot::channel();
         {
             let mut pending = self.pending_results.write().await;
             pending.insert(task.task_id.clone(), result_tx);
         }
 
-        // ── 5. 发送进度事件 ──
+        // -- 5. 发送进度事件 --
         let _ = self.progress_broadcast.send(SubAgentProgress::Started {
             agent_id,
             task_id: task.task_id.clone(),
         });
 
-        // ── 6. Spawn 执行 ──
+        // -- 6. Spawn 执行 --
         let runner = self.runner.clone();
         let progress_tx = self.progress_broadcast.subscribe();
         let agents_map = self.agents.clone();
@@ -441,7 +442,7 @@ impl SubAgentPool {
             .collect()
     }
 
-    // ─── 内部方法 ─────────────────────────────────────
+    // --- 内部方法 -------------------------------------
 
     async fn check_resource_limits(
         &self,
@@ -586,7 +587,7 @@ mod tests {
         }, 0).await;
         assert!(r.is_ok(), "Depth 0 should work");
 
-        // Depth 1 (already at max) → nested disabled automatically
+        // Depth 1 (already at max) -> nested disabled automatically
         let r = pool.submit(SubAgentTask {
             task_id: "t2".into(),
             prompt: "t2".into(),

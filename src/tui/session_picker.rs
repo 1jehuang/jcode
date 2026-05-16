@@ -845,7 +845,7 @@ impl SessionPicker {
         lines.push(Line::from("").alignment(align));
         lines.push(
             Line::from(vec![Span::styled(
-                "─".repeat(area.width.saturating_sub(4) as usize),
+                "-".repeat(area.width.saturating_sub(4) as usize),
                 Style::default().fg(rgb(60, 60, 60)),
             )])
             .alignment(align),

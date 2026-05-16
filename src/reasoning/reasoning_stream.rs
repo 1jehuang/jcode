@@ -18,40 +18,40 @@
 //! ## 架构设计
 //!
 //! ```
-//! ┌─────────────────────────────────────────────────────┐
-//! │           Reasoning Stream (实时回传)               │
-//! ├─────────────────────────────────────────────────────┤
-//!                                                     │
-//!  CoT Engine                                         │
-//!    ↓                                                │
-//!  ┌─────────────────┐                              │
-//!  │ Event Emitter   │ ← 生成推理事件                │
-//!  └────────┬────────┘                              │
-//!           ↓                                       │
-//!  ┌─────────────────┐                              │
-//!  │ Event Bus       │ ← 事件广播                   │
-//!  └────────┬────────┘                              │
-//!           ↓                                       │
-//!  ┌─────────────────┐     ┌──────────────────┐     │
-//!  │ Listener 1      │     │ Listener 2       │     │
-//!  │ (UI Display)    │     │ (Log/Debug)      │     │
-//!  └─────────────────┘     └──────────────────┘     │
-//!           ↓                       ↓                │
-//!  ┌─────────────────┐     ┌──────────────────┐     │
-//!  │ WebSocket       │     │ File Logger      │     │
-//!  │ (Real-time)     │     │ (Persistence)    │     │
-//!  └─────────────────┘     └──────────────────┘     │
-//!                                                     │
-//!  事件类型:                                          │
-//!  ├── ReasoningStarted                               │
-//!  ├── StepStarted                                    │
-//!  ├── StepReasoning (核心: 思维内容)                 │
-//!  ├── StepCompleted                                  │
-//!  ├── SelfReflection                                 │
-//!  ├── CorrectionApplied                              │
-//!  └── ReasoningCompleted                             │
-//!                                                     │
-//! └─────────────────────────────────────────────────────┘
+//! +-----------------------------------------------------+
+//! |           Reasoning Stream (实时回传)               |
+//! +-----------------------------------------------------+
+//!                                                     |
+//!  CoT Engine                                         |
+//!    v                                                |
+//!  +-----------------+                              |
+//!  | Event Emitter   | <- 生成推理事件                |
+//!  +--------+--------+                              |
+//!           v                                       |
+//!  +-----------------+                              |
+//!  | Event Bus       | <- 事件广播                   |
+//!  +--------+--------+                              |
+//!           v                                       |
+//!  +-----------------+     +------------------+     |
+//!  | Listener 1      |     | Listener 2       |     |
+//!  | (UI Display)    |     | (Log/Debug)      |     |
+//!  +-----------------+     +------------------+     |
+//!           v                       v                |
+//!  +-----------------+     +------------------+     |
+//!  | WebSocket       |     | File Logger      |     |
+//!  | (Real-time)     |     | (Persistence)    |     |
+//!  +-----------------+     +------------------+     |
+//!                                                     |
+//!  事件类型:                                          |
+//!  +-- ReasoningStarted                               |
+//!  +-- StepStarted                                    |
+//!  +-- StepReasoning (核心: 思维内容)                 |
+//!  +-- StepCompleted                                  |
+//!  +-- SelfReflection                                 |
+//!  +-- CorrectionApplied                              |
+//!  +-- ReasoningCompleted                             |
+//!                                                     |
+//! +-----------------------------------------------------+
 //! ```
 
 use anyhow::Result;
@@ -61,7 +61,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, info};
 
-// ─── Types ─────────────────────────────────
+// --- Types ---------------------------------
 
 /// 推理事件类型
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,7 +115,7 @@ pub struct ReasoningEvent {
     /// 事件类型
     pub event_type: ReasoningEventType,
     
-    /// 时间戳
+    #[serde(skip)]
     pub timestamp: std::time::Instant,
     
     /// 步骤序号 (如果是步骤相关事件)
@@ -232,7 +232,7 @@ pub trait ReasoningEventListener: Send + Sync {
     fn name(&self) -> &str;
 }
 
-// ─── Core Stream ──────────────────────────────
+// --- Core Stream ------------------------------
 
 /// 推理流 (事件总线)
 pub struct ReasoningStream {
@@ -368,7 +368,7 @@ impl ReasoningStream {
             chain.push_str(&format!("{}\n\n", event.content));
             
             if let Some(conf) = event.confidence {
-                chain.push_str(&format!("*置信度: {:.1%}*\n\n", conf));
+                chain.push_str(&format!("*置信度: {:.1}%*\n\n", conf));
             }
             
             chain.push_str("---\n\n");
@@ -378,7 +378,7 @@ impl ReasoningStream {
     }
 }
 
-// ─── Built-in Listeners ──────────────────────
+// --- Built-in Listeners ----------------------
 
 /// 控制台输出监听器 (用于调试)
 pub struct ConsoleListener;
@@ -453,7 +453,7 @@ impl ReasoningEventListener for WebSocketListener {
     }
 }
 
-// ─── Tests ──────────────────────────────────
+// --- Tests ----------------------------------
 
 #[cfg(test)]
 mod tests {

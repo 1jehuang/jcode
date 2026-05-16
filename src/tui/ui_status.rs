@@ -166,7 +166,7 @@ pub(super) fn format_status_for_debug(app: &dyn TuiState) -> String {
         }
         ProcessingStatus::Streaming => {
             let (input, output) = app.streaming_tokens();
-            format!("Streaming (↑{} ↓{})", input, output)
+            format!("Streaming (^{} v{})", input, output)
         }
         ProcessingStatus::WaitingForNetwork { ref listener } => {
             format!("Waiting for network to retry ({})", listener)

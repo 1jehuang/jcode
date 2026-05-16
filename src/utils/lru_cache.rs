@@ -94,26 +94,39 @@ where
 
     /// 获取缓存值
     pub fn get(&mut self, key: &K) -> Option<V> {
-        // 先检查是否存在且未过期
-        if let Some(entry) = self.data.get_mut(key) {
-            if self.is_expired(entry) {
-                self.remove_entry(key);
+        let expired = {
+            if let Some(entry) = self.data.get(key) {
+                self.is_expired(entry)
+            } else {
+                self.stats.misses += 1;
                 return None;
             }
+        };
 
-            // 更新访问时间和顺序
-            entry.last_accessed = Instant::now();
-            entry.access_count += 1;
-            
-            // 移动到队尾（最近使用）
+        if expired {
+            self.remove_entry(key);
+            self.stats.misses += 1;
+            return None;
+        }
+
+        let value = {
+            if let Some(entry) = self.data.get_mut(key) {
+                entry.last_accessed = Instant::now();
+                entry.access_count += 1;
+                Some(entry.value.clone())
+            } else {
+                None
+            }
+        };
+
+        if value.is_some() {
             self.touch_key(key);
-            
             self.stats.hits += 1;
-            Some(entry.value.clone())
         } else {
             self.stats.misses += 1;
-            None
         }
+
+        value
     }
 
     /// 插入或更新缓存值
@@ -273,8 +286,9 @@ impl<V: Clone> StringResultCache<V> {
             value
         } else {
             let value = factory();
+            let result = value.clone();
             self.put(key.to_string(), value);
-            value.clone()
+            result
         }
     }
 }

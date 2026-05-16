@@ -14,12 +14,12 @@ use uuid::Uuid;
 
 /// 权限请求管理器
 /// 
-/// 管理 CCR → Client 的权限请求生命周期:
+/// 管理 CCR -> Client 的权限请求生命周期:
 /// ```
-/// CCR 发送 ControlRequest → 存入 pending → 等待用户响应 → 发送 ControlResponse
+/// CCR 发送 ControlRequest -> 存入 pending -> 等待用户响应 -> 发送 ControlResponse
 /// ```
 pub struct PermissionRequestManager {
-    /// 挂起的权限请求 (request_id → request)
+    /// 挂起的权限请求 (request_id -> request)
     pending_requests: HashMap<Uuid, SdkControlPermissionRequest>,
     
     /// 已处理的请求 (用于去重和历史记录)

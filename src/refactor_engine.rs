@@ -6,12 +6,12 @@
 //! ## 核心流程
 //! ```text
 //! EditTool.execute()
-//!     → RefactorEngine.execute()
-//!         → CheckpointManager.track_edit() (备份)
-//!         → AtomicEditCoordinator (事务)
-//!             → PreciseEditEngine (精确编辑)
-//!         → 验证
-//!     → 如果失败: CheckpointManager.rewind() (回滚)
+//!     -> RefactorEngine.execute()
+//!         -> CheckpointManager.track_edit() (备份)
+//!         -> AtomicEditCoordinator (事务)
+//!             -> PreciseEditEngine (精确编辑)
+//!         -> 验证
+//!     -> 如果失败: CheckpointManager.rewind() (回滚)
 //! ```
 
 use anyhow::{Context, Result};
@@ -134,9 +134,9 @@ impl RefactorEngine {
 
     /// 直接执行 (无两阶段提交)
     async fn execute_direct(
-        &self,
+        &mut self,
         ops: Vec<EditOperation>,
-        start: std::time::Instant>,
+        start: std::time::Instant,
         snapshot_created: bool,
     ) -> RefactorResult {
         // Begin transaction
@@ -274,7 +274,7 @@ impl RefactorEngine {
     }
 
     /// 回滚到指定事务
-    pub async fn rollback(&self, transaction_id: &str) -> Result<usize> {
+    pub async fn rollback(&mut self, transaction_id: &str) -> Result<usize> {
         self.coordinator.rollback(transaction_id)
             .map_err(|e| anyhow::anyhow!("Rollback failed: {}", e))
     }

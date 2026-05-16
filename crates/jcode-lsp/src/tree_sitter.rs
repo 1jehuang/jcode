@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::info;
 use serde::{Deserialize, Serialize};
 
 /// 语言标识符
@@ -508,6 +508,7 @@ impl Default for ParserConfig {
 }
 
 /// 语言解析器 trait
+#[allow(dead_code)]
 #[async_trait::async_trait]
 pub trait LanguageParser: Send + Sync {
     async fn parse(&self, source: &str) -> Result<AstNode, ParseError>;
@@ -794,7 +795,7 @@ impl TreeSitterRustParser {
             if !self.is_in_comment_or_string(node) {
                 // If scope_line specified, only rename symbols in same scope
                 if let Some(sl) = scope_line {
-                    let node_start_line = node.start_position().row as u32;
+                    let _node_start_line = node.start_position().row as u32;
                     // Find the enclosing definition - must be same scope
                     if let Some(enclosing) = self.find_enclosing_definition(node) {
                         let enc_start = enclosing.start_position().row as u32;

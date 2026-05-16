@@ -322,11 +322,11 @@ fn test_chat_native_scrollbar_hides_scroll_counters() {
         "did not expect dotted scrollbar track to render:\n{text}"
     );
     assert!(
-        !text.contains(&format!("↑{scroll}")),
+        !text.contains(&format!("^{scroll}")),
         "top scroll counter should be hidden when native scrollbar is visible:\n{text}"
     );
     assert!(
-        !text.contains(&format!("↓{remaining}")),
+        !text.contains(&format!("v{remaining}")),
         "bottom scroll counter should be hidden when native scrollbar is visible:\n{text}"
     );
 }

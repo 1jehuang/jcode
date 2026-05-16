@@ -138,7 +138,7 @@ impl ErrorDetector {
         }
     }
 
-    // ── 1. 类型错误检测 ──
+    // -- 1. 类型错误检测 --
 
     fn detect_type_errors(&self, files: &[(String, String)]) -> Vec<CodeError> {
         let mut errors = Vec::new();
@@ -163,7 +163,7 @@ impl ErrorDetector {
         errors
     }
 
-    // ── 2. 字段错误检测 ──
+    // -- 2. 字段错误检测 --
 
     fn detect_field_errors(&self, files: &[(String, String)]) -> Vec<CodeError> {
         let mut errors = Vec::new();
@@ -203,7 +203,7 @@ impl ErrorDetector {
         errors
     }
 
-    // ── 3. 前后端字段不一致检测 ──
+    // -- 3. 前后端字段不一致检测 --
 
     fn detect_field_mismatches(&self, files: &[(String, String)]) -> Vec<CodeError> {
         let mut errors = Vec::new();
@@ -257,7 +257,7 @@ impl ErrorDetector {
         errors
     }
 
-    // ── 4. API 字段不一致检测 (实现版) ──
+    // -- 4. API 字段不一致检测 (实现版) --
 
     fn detect_api_inconsistencies(&self, files: &[(String, String)]) -> Vec<CodeError> {
         let mut errors = Vec::new();
@@ -309,7 +309,7 @@ impl ErrorDetector {
         errors
     }
 
-    // ── 5. 数据库字段缺失检测 (实现版) ──
+    // -- 5. 数据库字段缺失检测 (实现版) --
 
     fn detect_missing_db_fields(&self, files: &[(String, String)]) -> Vec<CodeError> {
         let mut errors = Vec::new();
@@ -360,7 +360,7 @@ impl ErrorDetector {
         errors
     }
 
-    // ── 6. 语法错误检测 (基于 tree-sitter，实现版) ──
+    // -- 6. 语法错误检测 (基于 tree-sitter，实现版) --
 
     fn detect_syntax_errors(&self, files: &[(String, String)]) -> Vec<CodeError> {
         let mut errors = Vec::new();
@@ -450,7 +450,7 @@ impl ErrorDetector {
         }
     }
 
-    // ── 7. 路由错误检测 ──
+    // -- 7. 路由错误检测 --
 
     fn detect_route_errors(&self, files: &[(String, String)]) -> Vec<CodeError> {
         let mut errors = Vec::new();

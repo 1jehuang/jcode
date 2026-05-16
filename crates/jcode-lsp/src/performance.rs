@@ -333,7 +333,7 @@ impl PerformanceMonitor {
         })
     }
 
-    // ─── 内部方法 ─────────────────────────
+    // --- 内部方法 -------------------------
 
     async fn update_server_health(&self, server_name: &str, success: bool) {
         let mut health = self.server_health.write().await;
@@ -523,7 +523,7 @@ impl PerformanceMonitor {
 
     fn extract_server_from_operation(&self, operation: &str) -> Option<String> {
         // 从操作名称推断 Server 类型
-        // 例如: "rust-analyzer/goto_definition" → "rust-analyzer"
+        // 例如: "rust-analyzer/goto_definition" -> "rust-analyzer"
         operation.split('/')
             .next()
             .map(|s| s.to_string())
@@ -535,6 +535,7 @@ impl PerformanceMonitor {
 // ============================================================================
 
 /// 用于在 async 上下文中自动记录操作性能
+#[allow(dead_code)]
 pub trait WithPerformanceTracking {
     type Output;
     
@@ -644,6 +645,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// LRU 缓存 - 用于缓存 LSP 响应结果
+#[allow(dead_code)]
 pub struct LruCache<K, V> where K: Eq + std::hash::Hash + Clone, V: Clone {
     capacity: usize,
     map: HashMap<K, (V, Instant)>,
@@ -718,6 +720,7 @@ where K: Eq + std::hash::Hash + Clone,
 }
 
 /// 请求批处理器 - 将多个小请求合并为批量请求
+#[allow(dead_code)]
 pub struct RequestBatcher<T> {
     batch_size: usize,
     batch_timeout: Duration,
@@ -765,6 +768,7 @@ impl<T> RequestBatcher<T> {
 }
 
 /// 轻量级内存池 - 复用缓冲区减少分配
+#[allow(dead_code)]
 pub struct BufferPool<T> {
     pool: Vec<Vec<T>>,
     default_capacity: usize,

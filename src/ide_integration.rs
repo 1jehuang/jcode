@@ -271,18 +271,21 @@ impl JetBrainsPluginDetector {
         for pattern in &ide_dirs {
             let plugin_dir = base.join(pattern).join("plugins");
             // 展开通配符（简化处理）
-            if plugin_dir.parent().is_some_and(|p| p.exists())
-                && let Ok(entries) = std::fs::read_dir(plugin_dir.parent().unwrap()) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.is_dir() {
-                            let plugins_path = path.join("plugins");
-                            if plugins_path.exists() {
-                                dirs.push(plugins_path);
+            if let Some(parent) = plugin_dir.parent() {
+                if parent.exists() {
+                    if let Ok(entries) = std::fs::read_dir(parent) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.is_dir() {
+                                let plugins_path = path.join("plugins");
+                                if plugins_path.exists() {
+                                    dirs.push(plugins_path);
+                                }
                             }
                         }
                     }
                 }
+            }
         }
 
         dirs

@@ -11,17 +11,17 @@
 //!
 //! ```
 //! Plugin Marketplace
-//! ├── Registry (注册中心)
-//! │   ├── Plugin Metadata Store
-//! │   ├── Version History
-//! │   └── User Reviews
-//! ├── Client (客户端)
-//! │   ├── Search & Browse
-//! │   ├── Install/Uninstall
-│   └── Update Checker
-//! └── API Server
-│     ├── RESTful Endpoints
-│     └── Authentication
+//! +-- Registry (注册中心)
+//! |   +-- Plugin Metadata Store
+//! |   +-- Version History
+//! |   +-- User Reviews
+//! +-- Client (客户端)
+//! |   +-- Search & Browse
+//! |   +-- Install/Uninstall
+//! |   +-- Update Checker
+//! +-- API Server
+//!     +-- RESTful Endpoints
+//!     +-- Authentication
 //! ```
 
 pub mod registry;

@@ -43,9 +43,9 @@ fn test_table_render_basic() {
     assert!(
         rendered
             .iter()
-            .any(|l| l.contains('│') && l.contains('A') && l.contains('B'))
+            .any(|l| l.contains('|') && l.contains('A') && l.contains('B'))
     );
-    assert!(rendered.iter().any(|l| l.contains('─') && l.contains('┼')));
+    assert!(rendered.iter().any(|l| l.contains('-') && l.contains('+')));
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn test_table_width_truncation_with_three_columns_stays_within_limit() {
     let rendered: Vec<String> = lines.iter().map(line_to_string).collect();
 
     assert!(
-        rendered.iter().any(|line| line.contains("─┼─")),
+        rendered.iter().any(|line| line.contains("-+-")),
         "expected table separator line: {:?}",
         rendered
     );
@@ -131,7 +131,7 @@ fn test_mermaid_block_detection() {
     // 3. Error lines (if parsing failed)
     // All are valid outcomes
 
-    // Should NOT have the code block border (┌─ mermaid) since mermaid removes it
+    // Should NOT have the code block border (+- mermaid) since mermaid removes it
     let text: String = lines
         .iter()
         .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -170,9 +170,9 @@ fn test_inline_math_render() {
 fn test_display_math_render() {
     let lines = render_markdown("$$\nE = mc^2\n$$");
     let rendered = lines_to_string(&lines);
-    assert!(rendered.contains("┌─ math"));
+    assert!(rendered.contains("+- math"));
     assert!(rendered.contains("E = mc^2"));
-    assert!(rendered.contains("└─"));
+    assert!(rendered.contains("+-"));
 }
 
 #[test]
@@ -201,7 +201,7 @@ fn test_blockquote_footnote_and_definition_list_render() {
     let md = "> quote line\n\nRef[^a]\n\n[^a]: footnote body\n\nTerm\n  : definition text";
     let lines = render_markdown(md);
     let rendered = lines_to_string(&lines);
-    assert!(rendered.contains("│ quote line"));
+    assert!(rendered.contains("| quote line"));
     assert!(rendered.contains("[^a]"));
     assert!(rendered.contains("[^a]: footnote body"));
     assert!(rendered.contains("Term"));
@@ -240,17 +240,17 @@ fn test_structured_markdown_lines_force_left_alignment() {
     let expected = [
         "• [x] done",
         "1. numbered",
-        "│ quoted",
+        "| quoted",
         "[^a]: footnote body",
         "• Term",
         "  -> definition text",
-        "A │ B",
-        "─┼─",
-        "1 │ 2",
-        "┌─ math",
-        "│ E = mc^2",
-        "└─",
-        "────",
+        "A | B",
+        "-+-",
+        "1 | 2",
+        "+- math",
+        "| E = mc^2",
+        "+-",
+        "----",
         "<div>html</div>",
     ];
 
@@ -297,12 +297,12 @@ fn test_wrapped_code_block_repeats_gutter_on_continuations() {
     assert_eq!(
         rendered,
         vec![
-            "┌─ text ",
-            "│ alpha ",
-            "│ beta ",
-            "│ gamma ",
-            "│ delta",
-            "└─",
+            "+- text ",
+            "| alpha ",
+            "| beta ",
+            "| gamma ",
+            "| delta",
+            "+-",
         ]
     );
 }
@@ -316,21 +316,21 @@ fn test_wrapped_syntax_highlighted_code_block_keeps_all_body_lines_in_frame() {
     assert!(
         rendered
             .first()
-            .is_some_and(|line| line.starts_with("┌─ rust ")),
+            .is_some_and(|line| line.starts_with("+- rust ")),
         "expected code block header: {rendered:?}"
     );
-    assert_eq!(rendered.last().map(String::as_str), Some("└─"));
+    assert_eq!(rendered.last().map(String::as_str), Some("+-"));
 
     let body = &rendered[1..rendered.len() - 1];
     assert!(body.len() >= 2, "expected wrapped code body: {rendered:?}");
     assert!(
-        body.iter().all(|line| line.starts_with("│ ")),
+        body.iter().all(|line| line.starts_with("| ")),
         "every wrapped code line should remain inside the code block frame: {rendered:?}"
     );
 
     let flattened = body
         .iter()
-        .map(|line| line.trim_start_matches("│ "))
+        .map(|line| line.trim_start_matches("| "))
         .collect::<String>();
     assert!(
         flattened.contains("let alpha_beta_gamma = delta_epsilon_zeta();"),
@@ -346,13 +346,13 @@ fn test_wrapped_text_code_block_with_long_token_keeps_gutter_on_continuations() 
     let wrapped = wrap_lines(lines, 24);
     let rendered: Vec<String> = wrapped.iter().map(line_to_string).collect();
 
-    assert_eq!(rendered.first().map(String::as_str), Some("┌─ text "));
-    assert_eq!(rendered.last().map(String::as_str), Some("└─"));
+    assert_eq!(rendered.first().map(String::as_str), Some("+- text "));
+    assert_eq!(rendered.last().map(String::as_str), Some("+-"));
 
     let body = &rendered[1..rendered.len() - 1];
     assert!(body.len() >= 2, "expected wrapped code body: {rendered:?}");
     assert!(
-        body.iter().all(|line| line.starts_with("│ ")),
+        body.iter().all(|line| line.starts_with("| ")),
         "every wrapped continuation should preserve the framed gutter: {rendered:?}"
     );
     assert!(
@@ -435,7 +435,7 @@ fn test_centered_mode_centers_other_structured_blocks_as_blocks() {
     let lines = render_markdown_with_width(md, Some(50));
     set_center_code_blocks(saved);
 
-    for snippet in ["│ quoted line", "[^a]: footnote body", "• Term", "A │ B"] {
+    for snippet in ["| quoted line", "[^a]: footnote body", "• Term", "A | B"] {
         let line = lines
             .iter()
             .find(|line| line_to_string(line).contains(snippet))
@@ -457,7 +457,7 @@ fn test_centered_mode_still_centers_framed_code_blocks() {
 
     let header = lines
         .iter()
-        .find(|line| line_to_string(line).contains("┌─ rust "))
+        .find(|line| line_to_string(line).contains("+- rust "))
         .expect("code block header");
     assert!(
         line_to_string(header).starts_with(' '),
@@ -470,7 +470,7 @@ fn test_rule_and_inline_html_render() {
     let md = "before\n\n---\n\ninline <span>html</span> tag";
     let lines = render_markdown(md);
     let rendered = lines_to_string(&lines);
-    assert!(rendered.contains("────────────────"));
+    assert!(rendered.contains("----------------"));
     assert!(rendered.contains("<span>"));
     assert!(rendered.contains("</span>"));
 }
@@ -484,7 +484,7 @@ fn test_centered_mode_centers_rules_as_blocks() {
 
     let rule_line = lines
         .iter()
-        .find(|line| line_to_string(line).contains("────"))
+        .find(|line| line_to_string(line).contains("----"))
         .expect("rule line");
     let text = line_to_string(rule_line);
     assert!(

@@ -6,7 +6,7 @@
 //! startGlobalConfigFreshnessWatcher():
 //!   watchFile(file, { interval: 1000 }, curr => {
 //!     if (curr.mtimeMs <= globalConfigCache.mtime) return
-//!     // 其他进程写入 → 热加载新内容
+//!     // 其他进程写入 -> 热加载新内容
 //!     content = fs.readFile(file)
 //!     parsed = safeParseJSON(content)
 //!     globalConfigCache = { config: parsed, mtime: curr.mtimeMs }
@@ -134,7 +134,7 @@ impl ConfigFileWatcher {
                             }
                         }
 
-                        // mtime 变更 → 重新读取并解析
+                        // mtime 变更 -> 重新读取并解析
                         match fs::read_to_string(&path).await {
                             Ok(content) => {
                                 match serde_json::from_str::<JsonValue>(&content) {

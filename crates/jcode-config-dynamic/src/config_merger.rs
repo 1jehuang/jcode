@@ -3,7 +3,7 @@
 //! 移植自 Claude Code `src/utils/settings/settings.ts`:
 //! ```typescript
 //! // 优先级从低到高:
-//! pluginSettings → userSettings → projectSettings → localSettings → flagSettings → policySettings
+//! pluginSettings -> userSettings -> projectSettings -> localSettings -> flagSettings -> policySettings
 //!
 //! // 合并语义:
 //! // - 数组: 去重并集 (uniq([...objValue, ...srcValue]))
@@ -99,12 +99,12 @@ impl ConfigMerger {
     /// 深度合并两个 JSON 值
     ///
     /// # Rules (移植自 Claude Code settingsMergeCustomizer):
-    /// 1. 两边都是 Object → 递归深合并
-    /// 2. 两边都是 Array → 去重并集 (如果 array_unique_union=true), 否则追加
-    /// 3. 其他情况 → 右侧值覆盖左侧 (右侧为更高优先级)
+    /// 1. 两边都是 Object -> 递归深合并
+    /// 2. 两边都是 Array -> 去重并集 (如果 array_unique_union=true), 否则追加
+    /// 3. 其他情况 -> 右侧值覆盖左侧 (右侧为更高优先级)
     fn deep_merge(base: JsonValue, override_val: JsonValue, options: &MergeOptions) -> JsonValue {
         match (&base, &override_val) {
-            // 两个都是 Object → 递归合并
+            // 两个都是 Object -> 递归合并
             (
                 JsonValue::Object(mut base_map),
                 JsonValue::Object(override_map),

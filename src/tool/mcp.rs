@@ -1,6 +1,7 @@
 //! MCP management tool - connect, disconnect, list, reload MCP servers
 
-use crate::mcp::{McpConfig, McpManager, McpServerConfig};
+use crate::mcp::protocol::McpServerConfig;
+use crate::mcp::{McpConfig, McpManager};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;

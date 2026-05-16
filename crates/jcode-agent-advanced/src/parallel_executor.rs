@@ -71,7 +71,7 @@ impl DependencyGraph {
     
     /// 添加依赖边: after 依赖 before (before 必须在 after 之前执行)
     /// 
-    /// 例如: tool_b 的输入需要 tool_a 的输出 → add_edge("tool_a", "tool_b")
+    /// 例如: tool_b 的输入需要 tool_a 的输出 -> add_edge("tool_a", "tool_b")
     pub fn add_edge(&mut self, before: String, after: String) -> Result<(), String> {
         if !self.nodes.contains(&before) || !self.nodes.contains(&after) {
             return Err(format!("节点不存在: {before} 或 {after}"));

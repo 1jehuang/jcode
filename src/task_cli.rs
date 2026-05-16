@@ -1,4 +1,4 @@
-use super::task_manager::{TaskManager, TaskStatus, TaskPriority, TaskUpdates};
+use super::task_manager::{TaskManager, TaskStatus, TaskPriority, TaskUpdates, Task};
 
 pub struct TaskCliCommand;
 

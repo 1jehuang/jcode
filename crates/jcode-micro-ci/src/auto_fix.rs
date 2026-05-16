@@ -3,9 +3,9 @@
 //! 当前支持的修复:
 //! - 尾随空格
 //! - 缺少末尾换行符
-//! - Tab 字符 → 空格
-//! - println! → tracing::info! (Rust 文件)
-//! - println! in prod → tracing (TypeScript/JavaScript)
+//! - Tab 字符 -> 空格
+//! - println! -> tracing::info! (Rust 文件)
+//! - println! in prod -> tracing (TypeScript/JavaScript)
 
 use crate::Issue;
 use std::path::Path;
@@ -19,7 +19,7 @@ pub enum FixAction {
     AddTrailingNewline,
     /// 将 Tab 替换为空格
     TabToSpaces { spaces_per_tab: usize },
-    /// 替换内容 (模式 → 替换)
+    /// 替换内容 (模式 -> 替换)
     ReplaceContent { pattern: String, replacement: String },
 }
 

@@ -1,0 +1,91 @@
+[package]
+name = "jcode-enterprise-server"
+version = "0.1.0"
+edition = "2024"
+description = "CarpAI Enterprise Server — AI-as-a-Service for low-resource deployments"
+license = "MIT"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full", "sync", "rt-multi-thread", "time", "signal"] }
+async-trait = "0.1"
+futures = "0.3"
+tokio-stream = "0.1"
+
+# HTTP server (REST API)
+axum = { version = "0.8", features = ["ws", "macros", "json", "multipart"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "auth", "limit"] }
+hyper = "1"
+bytes = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+toml = "0.8"
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "chrono", "uuid"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging & Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Time & UUID
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+
+# Crypto
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+base64 = "0.22"
+rand = "0.9"
+sys-info = "0.9"
+num_cpus = "1"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Scheduler
+jcode-unified-scheduler = { path = "../jcode-unified-scheduler" }
+
+# LLM Provider
+jcode-llm = { path = "../jcode-llm" }
+
+# Optional: CPU inference
+jcode-cpu-inference = { path = "../jcode-cpu-inference", optional = true }
+
+# Optional: Node discovery (mDNS)
+mdns-sd = { version = "0.13", optional = true }
+
+# Dedicated crane (shared by enterprises?)
+regex = "1"
+indexmap = "2"
+dashmap = "6"
+parking_lot = "0.12"
+
+[features]
+default = ["sqlite", "mdns", "cpu-inference"]
+sqlite = ["sqlx/sqlite"]
+postgres = ["sqlx/postgres"]
+mdns = ["dep:mdns-sd"]
+cpu-inference = ["dep:jcode-cpu-inference"]
+
+[lib]
+name = "jcode_enterprise_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "carpai-enterprise-server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "carpai-node-agent"
+path = "src/bin/node_agent.rs"
+
+[[bin]]
+name = "carpai-admin-cli"
+path = "src/bin/admin_cli.rs"

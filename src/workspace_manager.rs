@@ -11,7 +11,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -806,7 +806,6 @@ impl WorkspaceManager {
     }
 }
 
-use std::collections::HashSet;
 
 /// Lightweight snapshot of workspace status for display/logging.
 #[derive(Debug, Clone, Serialize, Deserialize)]

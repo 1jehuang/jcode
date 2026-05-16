@@ -1,5 +1,4 @@
-use serde::{Deserialize, Serialize};
-use std::ops::{Bound, Range, RangeBounds};
+﻿use serde::{Deserialize, Serialize};
 
 const LEAF_MIN: usize = 64;
 const LEAF_MAX: usize = 512;
@@ -135,10 +134,10 @@ impl Rope {
         self.build_line_index().line_count()
     }
 
-    pub fn get_line(&self, line_idx: usize) -> Option<&str> {
+    pub fn get_line(&self, line_idx: usize) -> Option<String> {
         let s = self.to_string();
         let idx = self.build_line_index();
-        idx.get_line(&s, line_idx)
+        idx.get_line(&s, line_idx).map(|l| l.to_string())
     }
 
     pub fn pos_to_line(&self, char_pos: usize) -> usize {
@@ -248,18 +247,15 @@ impl Rope {
     }
 }
 
+
 impl Default for Rope {
     fn default() -> Self { Self::new() }
 }
 
-impl Clone for Rope {
-    fn clone(&self) -> Self {
-        Rope { root: self.root.clone(), length: self.length, byte_length: self.byte_length }
-    }
-}
-
 impl PartialEq for Rope {
-    fn eq(&self, other: &Self) -> self.length == other.length && self.to_string() == other.to_string()
+    fn eq(&self, other: &Self) -> bool {
+        self.length == other.length && self.to_string() == other.to_string()
+    }
 }
 
 impl Eq for Rope {}
@@ -308,19 +304,23 @@ impl RopeNode {
             RopeNode::Branch(branch) => {
                 if pos <= branch.weight {
                     let new_left = branch.left.insert_at(pos, text);
+                    let left_depth = left_node_depth(&new_left);
+                    let right_depth = left_node_depth(&branch.right);
                     RopeNode::Branch(RopeBranch {
                         left: Box::new(new_left), right: branch.right.clone(),
                         weight: branch.weight + text.chars().count(),
-                        depth: 1 + left_node_depth(&new_left).max(left_node_depth(&branch.right)),
+                        depth: 1 + left_depth.max(right_depth),
                         char_len: branch.char_len + text.chars().count(),
                         byte_len: branch.byte_len + text.len(),
                     })
                 } else {
                     let new_right = branch.right.insert_at(pos - branch.weight, text);
+                    let left_depth = left_node_depth(&branch.left);
+                    let right_depth = left_node_depth(&new_right);
                     RopeNode::Branch(RopeBranch {
                         left: branch.left.clone(), right: Box::new(new_right),
                         weight: branch.weight,
-                        depth: 1 + left_node_depth(&branch.left).max(left_node_depth(&new_right)),
+                        depth: 1 + left_depth.max(right_depth),
                         char_len: branch.char_len + text.chars().count(),
                         byte_len: branch.byte_len + text.len(),
                     })
@@ -337,10 +337,11 @@ impl RopeNode {
             RopeNode::Leaf(leaf) => {
                 let mut result = String::new();
                 let mut chars = leaf.data.chars();
-                for (i, c) in chars.by_ref().enumerate().take(start) { result.push(c); }
+                for (_i, c) in chars.by_ref().enumerate().take(start) { result.push(c); }
                 for _ in start..end { chars.next(); }
                 for c in chars { result.push(c); }
-                RopeNode::Leaf(RopeLeaf { data: result, char_len: result.chars().count() })
+                let char_len = result.chars().count();
+                RopeNode::Leaf(RopeLeaf { data: result, char_len })
             }
             RopeNode::Branch(branch) => {
                 if end <= branch.weight {
@@ -367,7 +368,8 @@ impl RopeNode {
                 for (i, c) in chars.by_ref().enumerate().take(end) {
                     if i >= start { result.push(c); } else { continue; }
                 }
-                RopeNode::Leaf(RopeLeaf { data: result, char_len: result.chars().count() })
+                let char_len = result.chars().count();
+                RopeNode::Leaf(RopeLeaf { data: result, char_len })
             }
             RopeNode::Branch(branch) => {
                 if end <= branch.weight {
@@ -389,7 +391,7 @@ impl RopeNode {
         let lb = left.byte_len();
         let rb = right.byte_len();
         RopeNode::Branch(RopeBranch {
-            left: Box::new(left), right: Box::new(right),
+            left: Box::new(left.clone()), right: Box::new(right.clone()),
             weight: lc,
             depth: 1 + left_node_depth(&left).max(left_node_depth(&right)),
             char_len: lc + rc, byte_len: lb + rb,
@@ -418,6 +420,10 @@ impl RopeNode {
 }
 
 fn left_node_depth(node: &RopeNode) -> u8 {
+    match node { RopeNode::Leaf(_) => 0, RopeNode::Branch(b) => b.depth }
+}
+
+fn right_node_depth(node: &RopeNode) -> u8 {
     match node { RopeNode::Leaf(_) => 0, RopeNode::Branch(b) => b.depth }
 }
 
@@ -471,8 +477,8 @@ impl<'a> Iterator for Chars<'a> {
         }
         loop {
             if let Some(ref data) = self.leaf_data {
-                if self.leaf_data.as_ref().unwrap().char_indices().nth(self.leaf_pos).is_some() {
-                    let c = self.leaf_data.as_ref().unwrap()[self.leaf_data.as_ref().unwrap().char_indices().nth(self.leaf_pos).unwrap().0..].chars().next()?;
+                if let Some((byte_idx, _)) = data.char_indices().nth(self.leaf_pos) {
+                    let c = data[byte_idx..].chars().next()?;
                     self.leaf_pos += 1;
                     return Some(c);
                 }
@@ -739,9 +745,9 @@ mod tests {
     #[test]
     fn test_get_line() {
         let r = Rope::from_str("first\nsecond\nthird");
-        assert_eq!(r.get_line(0), Some("first"));
-        assert_eq!(r.get_line(1), Some("second"));
-        assert_eq!(r.get_line(2), Some("third"));
+        assert_eq!(r.get_line(0).as_deref(), Some("first"));
+        assert_eq!(r.get_line(1).as_deref(), Some("second"));
+        assert_eq!(r.get_line(2).as_deref(), Some("third"));
         assert_eq!(r.get_line(3), None);
     }
 

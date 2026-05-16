@@ -36,18 +36,11 @@
 //! - `carpai agents` : 子代理管理
 //! - `carpai mcp` : MCP服务器配置
 
-pub mod print_mode;
-pub mod session_resume;
-pub mod pipe_handler;
-pub mod slash_commands;
-pub mod cli_flags;
-pub mod management_commands;
-
 // Re-exports for convenience
-pub use print_mode::run_print_mode;
-pub use session_resume::{run_continue_session, run_resume_session};
-pub use pipe_handler::handle_pipe_input;
-pub use slash_commands::{
+pub use super::print_mode::run_print_mode;
+pub use super::session_resume::{run_continue_session, run_resume_session};
+pub use super::pipe_handler::handle_pipe_input;
+pub use super::slash_commands::{
     handle_help_command,
     handle_clear_command,
     handle_compact_command,
@@ -59,11 +52,11 @@ pub use slash_commands::{
     handle_status_command,
     handle_context_command,
 };
-pub use cli_flags::{
+pub use super::cli_flags::{
     parse_cli_flags,
     CliFlags,
 };
-pub use management_commands::{
+pub use super::management_commands::{
     run_update_command,
     run_agents_command,
     run_mcp_command,

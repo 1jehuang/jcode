@@ -15,6 +15,10 @@ pub mod powershell;
 pub mod fish;
 pub mod nl_command;
 
+// Re-exports from submodules
+pub use parser::BashParser;
+pub use registry::{CommandRegistry, CommandSpec, SubcommandSpec, ArgSpec, ArgType, OptionSpec, CommandCategory};
+
 use serde::{Deserialize, Serialize};
 
 /// 补全建议

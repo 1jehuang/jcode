@@ -548,7 +548,7 @@ impl GitCommands {
                     FileStatus::Added => "+",
                     FileStatus::Deleted => "-",
                     FileStatus::Modified => "~",
-                    FileStatus::Renamed => "→",
+                    FileStatus::Renamed => "->",
                     _ => "?",
                 };
                 println!("  {} {} (+{} / -{})", icon, diff.file_path.display(), diff.additions, diff.deletions);

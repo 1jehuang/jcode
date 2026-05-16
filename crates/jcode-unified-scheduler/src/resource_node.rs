@@ -1,4 +1,4 @@
-//! **资源节点管理器** — 移植自 Parallax `node.py` + `node_management.py`
+﻿//! **资源节点管理器** — 移植自 Parallax `node.py` + `node_management.py`
 //!
 //! ## 功能
 //!
@@ -9,17 +9,18 @@
 //! 3. **网络感知**: RTT 缓存、对称查找
 //! 4. **容量估算**: 基于显存预算计算可容纳的模型层数
 
+use super::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-
-use super::types::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tracing::warn;
 
 // ============================================================================
 // 节点管理器
 // ============================================================================
 
 /// 节点管理器 — 管理所有算力节点的生命周期
+#[derive(Debug)]
 pub struct NodeManager {
     /// 所有已知节点 (node_id -> NodeInfo)
     nodes: HashMap<NodeId, Arc<NodeInfo>>,
@@ -81,8 +82,9 @@ impl NodeManager {
     pub async fn unregister_node(&mut self, node_id: &NodeId) -> Result<(), SchedulerError> {
         if let Some(mut node) = self.nodes.remove(node_id) {
             // 清除服务状态
-            Arc::make_mut(&mut node).clear_serving_state();
-            Arc::make_mut(&mut node).status = NodeStatus::Offline;
+            use std::sync::Arc;
+            Arc::<NodeInfo>::make_mut(&mut node).clear_serving_state();
+            Arc::<NodeInfo>::make_mut(&mut node).status = NodeStatus::Offline;
             self.total_unregistered.fetch_add(1, Ordering::Relaxed);
             Ok(())
         } else {
@@ -98,7 +100,7 @@ impl NodeManager {
     ) -> Result<(), SchedulerError> {
         let node = self.nodes.get_mut(node_id).ok_or(SchedulerError::NodeNotFound(*node_id))?;
         
-        let mut node_mut = Arc::make_mut(node);
+        let node_mut = Arc::make_mut(node);
         node_mut.last_heartbeat = chrono::Utc::now();
 
         if let Some(latency) = latency_ms {
@@ -170,7 +172,7 @@ impl NodeManager {
 
         for (id, node) in &self.nodes {
             let elapsed = now.signed_duration_since(node.last_heartbeat);
-            if elapsed > chrono::Duration::from_std(self.heartbeat_timeout).unwrap_or(Duration::ZERO) {
+            if elapsed > chrono::Duration::from_std(self.heartbeat_timeout).unwrap_or(chrono::TimeDelta::seconds(0)) {
                 expired.push(*id);
             }
         }

@@ -71,7 +71,7 @@ impl TapdSkill {
 
     /// 生成任务计划
     fn generate_task_plan(requirements: &[TapdRequirement]) -> String {
-        let mut plan = String::from("## TAPD 需求 → 代码任务计划\n\n");
+        let mut plan = String::from("## TAPD 需求 -> 代码任务计划\n\n");
         for (i, req) in requirements.iter().enumerate() {
             plan.push_str(&format!(
                 "### {}. {} [{}]\n",
@@ -98,7 +98,7 @@ impl Skill for TapdSkill {
     }
 
     fn description(&self) -> &'static str {
-        "从 TAPD 获取需求 → 生成代码任务计划"
+        "从 TAPD 获取需求 -> 生成代码任务计划"
     }
 
     fn definition(&self) -> SkillDef {

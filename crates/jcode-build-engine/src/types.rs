@@ -49,7 +49,7 @@ impl Default for ProjectId { fn default() -> Self { Self::new() } }
 impl Default for NodeId { fn default() -> Self { Self::new() } }
 impl Default for TaskId { fn default() -> Self { Self::new() } }
 
-// ── Display impls ──
+// -- Display impls --
 
 impl std::fmt::Display for BuildId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

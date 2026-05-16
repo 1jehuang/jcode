@@ -18,7 +18,7 @@
 //!
 //! Trigger condition:
 //! ```text
-//! now - last_assistant_timestamp > gap_threshold_minutes → clear old results
+//! now - last_assistant_timestamp > gap_threshold_minutes -> clear old results
 //! ```
 //!
 //! ### 2. Cached MicroCompact (future: Cache Editing API)
@@ -404,7 +404,7 @@ mod tests {
             make_user_result("tu_recent", "recent grep output"),
         ];
 
-        // Now at 20 min past epoch → gap to tu_old is 20min > 5min threshold
+        // Now at 20 min past epoch -> gap to tu_old is 20min > 5min threshold
         let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1200);
 
         match mc.run(&mut messages, Some(now)) {
@@ -445,7 +445,7 @@ mod tests {
 
         let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(120);
 
-        // Memory tool is not in compactable set → NoOp
+        // Memory tool is not in compactable set -> NoOp
         assert!(matches!(mc.run(&mut messages, Some(now)), MicroCompactResult::NoOp));
     }
 

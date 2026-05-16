@@ -1149,7 +1149,7 @@ async fn login_google_flow(no_browser: bool) -> Result<()> {
                     creds
                 }
                 "3" => {
-                    eprintln!("\n── Step-by-step Google Cloud setup ──\n");
+                    eprintln!("\n-- Step-by-step Google Cloud setup --\n");
 
                     eprintln!("1. Open Google Cloud Console and create a project:");
                     eprintln!("   Opening: https://console.cloud.google.com/projectcreate\n");
@@ -1238,7 +1238,7 @@ async fn login_google_flow(no_browser: bool) -> Result<()> {
         }
     };
 
-    eprintln!("── Gmail Access Level ──\n");
+    eprintln!("-- Gmail Access Level --\n");
     eprintln!("  [1] Full Access (recommended)");
     eprintln!("      Search, read, draft, send, and manage emails.");
     eprintln!("      Send and delete always require your confirmation.\n");
@@ -1261,7 +1261,7 @@ async fn login_google_flow(no_browser: bool) -> Result<()> {
 
     eprintln!("\nAccess level: {}", tier.label());
 
-    eprintln!("\n── Logging in ──\n");
+    eprintln!("\n-- Logging in --\n");
 
     let tokens = auth::google::login(tier, no_browser).await?;
 

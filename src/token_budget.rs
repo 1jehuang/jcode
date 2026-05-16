@@ -279,7 +279,7 @@ mod tests {
         // Turn 3: 30.15k tokens (delta=50, now at 3 continuations + small delta)
         assert!(matches!(tracker.check(30_150), BudgetDecision::Continue { .. }));
 
-        // Turn 4: 30.16k tokens (delta=10, 4 continuations + very small delta → diminishing)
+        // Turn 4: 30.16k tokens (delta=10, 4 continuations + very small delta -> diminishing)
         match tracker.check(30_160) {
             BudgetDecision::Stop { completion_event: Some(ev) } => {
                 assert!(ev.diminishing_returns);

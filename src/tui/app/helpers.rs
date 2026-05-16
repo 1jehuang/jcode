@@ -12,7 +12,7 @@ static AMBIENT_INFO_CACHE: Mutex<
     Option<(std::time::Instant, bool, Option<AmbientWidgetData>, bool)>,
 > = Mutex::new(None);
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(super) struct CachedContextInfo {
     pub session_key: String,
     pub is_remote: bool,
@@ -713,10 +713,7 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
 
     if let Ok(mut guard) = CACHE.lock() {
         if let Some((ts, cached, refreshing)) = guard.as_mut() {
-            if ts.elapsed() < TTL {
-                return cached.clone();
-            }
-            if *refreshing {
+            if ts.elapsed() < TTL || *refreshing {
                 return cached.clone();
             }
             let stale = cached.clone();
@@ -945,10 +942,7 @@ pub(super) fn gather_ambient_info(ambient_enabled: bool) -> Option<AmbientWidget
 
     if let Ok(mut guard) = AMBIENT_INFO_CACHE.lock() {
         if let Some((ts, cached_enabled, cached, refreshing)) = guard.as_mut() {
-            if *cached_enabled == ambient_enabled && ts.elapsed() < TTL {
-                return cached.clone();
-            }
-            if *cached_enabled == ambient_enabled && *refreshing {
+            if *cached_enabled == ambient_enabled && (ts.elapsed() < TTL || *refreshing) {
                 return cached.clone();
             }
             let stale = if *cached_enabled == ambient_enabled {

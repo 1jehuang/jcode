@@ -929,7 +929,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     "✓ Switched to model: {}",
                     model
                 )));
-                app.set_status_notice(format!("Model → {}", model));
+                app.set_status_notice(format!("Model -> {}", model));
             }
             false
         }
@@ -991,7 +991,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     .map(app_mod::effort_display_label)
                     .unwrap_or("default");
                 app.push_display_message(DisplayMessage::system(format!(
-                    "✓ Reasoning effort → {}",
+                    "✓ Reasoning effort -> {}",
                     label
                 )));
                 app.set_status_notice(format!("Effort: {}", label));
@@ -1038,7 +1038,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.remote_transport = transport.clone();
                 let label = transport.as_deref().unwrap_or("unknown");
                 app.push_display_message(DisplayMessage::system(format!(
-                    "✓ Transport → {}",
+                    "✓ Transport -> {}",
                     label
                 )));
                 app.set_status_notice(format!("Transport: {}", label));
@@ -1055,7 +1055,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 let label = mode.as_str();
                 app.remote_compaction_mode = Some(mode);
                 app.push_display_message(DisplayMessage::system(format!(
-                    "✓ Compaction mode → {}",
+                    "✓ Compaction mode -> {}",
                     label
                 )));
                 app.set_status_notice(format!("Compaction: {}", label));
@@ -1279,10 +1279,10 @@ pub(in crate::tui::app) fn handle_server_event(
                         app.set_status_notice(format!("{} launched", label));
                     } else {
                         app.push_display_message(DisplayMessage::system(format!(
-                            "✂ Split → **{}** (opened in new window)",
+                            "✂ Split -> **{}** (opened in new window)",
                             new_session_name,
                         )));
-                        app.set_status_notice(format!("Split → {}", new_session_name));
+                        app.set_status_notice(format!("Split -> {}", new_session_name));
                     }
                 }
                 Ok(false) => {
@@ -1294,7 +1294,7 @@ pub(in crate::tui::app) fn handle_server_event(
                         app.set_status_notice(format!("{} session created", label));
                     } else {
                         app.push_display_message(DisplayMessage::system(format!(
-                            "✂ Split → **{}**\n\nNo terminal found. Resume manually:\n```\njcode --resume {}\n```",
+                            "✂ Split -> **{}**\n\nNo terminal found. Resume manually:\n```\njcode --resume {}\n```",
                             new_session_name, new_session_id,
                         )));
                     }

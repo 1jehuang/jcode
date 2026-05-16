@@ -1261,7 +1261,7 @@ pub(crate) fn render_swarm_message(
 
     let mut lines = Vec::new();
     lines.push(Line::from(vec![
-        Span::styled("│ ", rail_style),
+        Span::styled("| ", rail_style),
         Span::styled(format!("{} {}", icon, title), header_style),
     ]));
 
@@ -1294,7 +1294,7 @@ pub(crate) fn render_swarm_message(
     }
 
     for line in body_lines {
-        let mut spans = vec![Span::styled("│ ", rail_style)];
+        let mut spans = vec![Span::styled("| ", rail_style)];
         spans.extend(line.spans);
         lines.push(Line::from(spans));
     }
@@ -1648,7 +1648,7 @@ pub(crate) fn render_tool_message(
 
         lines.push(
             Line::from(Span::styled(
-                format!("{}┌─ diff", pad_str),
+                format!("{}+- diff", pad_str),
                 Style::default().fg(dim_color()),
             ))
             .alignment(ratatui::layout::Alignment::Left),
@@ -1661,7 +1661,7 @@ pub(crate) fn render_tool_message(
                 let skipped = total_changes - MAX_DIFF_LINES;
                 lines.push(
                     Line::from(Span::styled(
-                        format!("{}│ ... {} more changes ...", pad_str, skipped),
+                        format!("{}| ... {} more changes ...", pad_str, skipped),
                         Style::default().fg(dim_color()),
                     ))
                     .alignment(ratatui::layout::Alignment::Left),
@@ -1675,7 +1675,7 @@ pub(crate) fn render_tool_message(
                 diff_del_color()
             };
 
-            let border_prefix = format!("{}│ ", pad_str);
+            let border_prefix = format!("{}| ", pad_str);
             let prefix_visual_width = unicode_width::UnicodeWidthStr::width(border_prefix.as_str())
                 + unicode_width::UnicodeWidthStr::width(line.prefix.as_str());
             let max_content_width = (width as usize).saturating_sub(prefix_visual_width + 1);
@@ -1718,9 +1718,9 @@ pub(crate) fn render_tool_message(
         }
 
         let footer = if total_changes > 0 && truncated {
-            format!("{}└─ (+{} -{} total)", pad_str, additions, deletions)
+            format!("{}+- (+{} -{} total)", pad_str, additions, deletions)
         } else {
-            format!("{}└─", pad_str)
+            format!("{}+-", pad_str)
         };
         lines.push(
             Line::from(Span::styled(footer, Style::default().fg(dim_color())))

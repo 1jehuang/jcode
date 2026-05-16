@@ -1057,10 +1057,10 @@ pub fn debug_test_scroll(content: Option<&str>) -> ScrollTestResult {
                 modes_seen.push(mode.to_string());
             }
 
-            // Check border was rendered (first column should have │)
+            // Check border was rendered (first column should have |)
             if area.x < buf.area().width && area.y < buf.area().height {
                 let cell = &buf[(area.x, area.y)];
-                if cell.symbol() != "│" {
+                if cell.symbol() != "|" {
                     border_ok = false;
                 }
             }

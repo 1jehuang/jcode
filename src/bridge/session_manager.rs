@@ -4,7 +4,7 @@
 //!
 //! 核心职责：
 //! - 会话创建 (新对话 / 恢复旧会话)
-//! - 会话状态机 (Created → Active → Paused → Closed)
+//! - 会话状态机 (Created -> Active -> Paused -> Closed)
 //! - 断线重连 & 状态恢复
 //! - 会话持久化 (checkpoint)
 //! - 多 IDE 客户端会话同步
@@ -310,7 +310,7 @@ pub enum FileChangeType {
 // ════════════════════════════════════════════════════════════════
 
 /// 会话管理器
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SessionManager {
     sessions: Arc<RwLock<HashMap<String, SessionData>>>,
     checkpoints: Arc<RwLock<HashMap<String, Vec<SessionCheckpoint>>>>,
@@ -629,7 +629,7 @@ impl SessionManager {
         Ok(closed)
     }
 
-    // ─── 内部方法 ──────────────────────────────
+    // --- 内部方法 ------------------------------
 
     async fn transition_state(
         &self,

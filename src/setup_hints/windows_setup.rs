@@ -247,27 +247,27 @@ fn nudge_hotkey(state: &mut SetupHintsState) -> bool {
         "Windows Terminal"
     };
 
-    eprintln!("\x1b[36m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
+    eprintln!("\x1b[36m+-------------------------------------------------------------+\x1b[0m");
     eprintln!(
-        "\x1b[36m│\x1b[0m \x1b[1m💡 Set up Alt+; to launch jcode from anywhere?\x1b[0m              \x1b[36m│\x1b[0m"
+        "\x1b[36m|\x1b[0m \x1b[1m💡 Set up Alt+; to launch jcode from anywhere?\x1b[0m              \x1b[36m|\x1b[0m"
     );
     eprintln!(
-        "\x1b[36m│\x1b[0m                                                             \x1b[36m│\x1b[0m"
+        "\x1b[36m|\x1b[0m                                                             \x1b[36m|\x1b[0m"
     );
     eprintln!(
-        "\x1b[36m│\x1b[0m    Creates a global hotkey - no extra software needed.       \x1b[36m│\x1b[0m"
+        "\x1b[36m|\x1b[0m    Creates a global hotkey - no extra software needed.       \x1b[36m|\x1b[0m"
     );
     eprintln!(
-        "\x1b[36m│\x1b[0m    Opens jcode in {:<39}    \x1b[36m│\x1b[0m",
+        "\x1b[36m|\x1b[0m    Opens jcode in {:<39}    \x1b[36m|\x1b[0m",
         format!("{}.", terminal_name)
     );
     eprintln!(
-        "\x1b[36m│\x1b[0m                                                             \x1b[36m│\x1b[0m"
+        "\x1b[36m|\x1b[0m                                                             \x1b[36m|\x1b[0m"
     );
     eprintln!(
-        "\x1b[36m│\x1b[0m    \x1b[32m[y]\x1b[0m Set up   \x1b[90m[n]\x1b[0m Not now   \x1b[90m[d]\x1b[0m Don't ask again        \x1b[36m│\x1b[0m"
+        "\x1b[36m|\x1b[0m    \x1b[32m[y]\x1b[0m Set up   \x1b[90m[n]\x1b[0m Not now   \x1b[90m[d]\x1b[0m Don't ask again        \x1b[36m|\x1b[0m"
     );
-    eprintln!("\x1b[36m└─────────────────────────────────────────────────────────────┘\x1b[0m");
+    eprintln!("\x1b[36m+-------------------------------------------------------------+\x1b[0m");
     eprint!("\x1b[36m  >\x1b[0m ");
     let _ = io::stderr().flush();
 
@@ -281,7 +281,7 @@ fn nudge_hotkey(state: &mut SetupHintsState) -> bool {
                     state.hotkey_configured = true;
                     let _ = state.save();
                     eprintln!(
-                        "  \x1b[32m✓\x1b[0m Created hotkey (\x1b[1mAlt+;\x1b[0m) → {} + jcode",
+                        "  \x1b[32m✓\x1b[0m Created hotkey (\x1b[1mAlt+;\x1b[0m) -> {} + jcode",
                         terminal_name
                     );
                     eprintln!();
@@ -315,27 +315,27 @@ fn nudge_alacritty(state: &mut SetupHintsState) -> bool {
         _ => "your current terminal",
     };
 
-    eprintln!("\x1b[36m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
+    eprintln!("\x1b[36m+-------------------------------------------------------------+\x1b[0m");
     eprintln!(
-        "\x1b[36m│\x1b[0m \x1b[1m💡 Alacritty: the fastest terminal for jcode\x1b[0m               \x1b[36m│\x1b[0m"
+        "\x1b[36m|\x1b[0m \x1b[1m💡 Alacritty: the fastest terminal for jcode\x1b[0m               \x1b[36m|\x1b[0m"
     );
     eprintln!(
-        "\x1b[36m│\x1b[0m                                                             \x1b[36m│\x1b[0m"
+        "\x1b[36m|\x1b[0m                                                             \x1b[36m|\x1b[0m"
     );
     eprintln!(
-        "\x1b[36m│\x1b[0m    {:<55} \x1b[36m│\x1b[0m",
+        "\x1b[36m|\x1b[0m    {:<55} \x1b[36m|\x1b[0m",
         format!("You're using {}.", current_terminal)
     );
     eprintln!(
-        "\x1b[36m│\x1b[0m    Alacritty is GPU-accelerated with the lowest latency.    \x1b[36m│\x1b[0m"
+        "\x1b[36m|\x1b[0m    Alacritty is GPU-accelerated with the lowest latency.    \x1b[36m|\x1b[0m"
     );
     eprintln!(
-        "\x1b[36m│\x1b[0m                                                             \x1b[36m│\x1b[0m"
+        "\x1b[36m|\x1b[0m                                                             \x1b[36m|\x1b[0m"
     );
     eprintln!(
-        "\x1b[36m│\x1b[0m    \x1b[32m[y]\x1b[0m Install   \x1b[90m[n]\x1b[0m Not now   \x1b[90m[d]\x1b[0m Don't ask again       \x1b[36m│\x1b[0m"
+        "\x1b[36m|\x1b[0m    \x1b[32m[y]\x1b[0m Install   \x1b[90m[n]\x1b[0m Not now   \x1b[90m[d]\x1b[0m Don't ask again       \x1b[36m|\x1b[0m"
     );
-    eprintln!("\x1b[36m└─────────────────────────────────────────────────────────────┘\x1b[0m");
+    eprintln!("\x1b[36m+-------------------------------------------------------------+\x1b[0m");
     eprint!("\x1b[36m  >\x1b[0m ");
     let _ = io::stderr().flush();
 
@@ -364,7 +364,7 @@ fn nudge_alacritty(state: &mut SetupHintsState) -> bool {
                         match create_hotkey_shortcut(true) {
                             Ok(()) => {
                                 eprintln!(
-                                    "  \x1b[32m✓\x1b[0m Hotkey updated: \x1b[1mAlt+;\x1b[0m → Alacritty + jcode"
+                                    "  \x1b[32m✓\x1b[0m Hotkey updated: \x1b[1mAlt+;\x1b[0m -> Alacritty + jcode"
                                 );
                             }
                             Err(e) => {
@@ -393,28 +393,28 @@ fn nudge_alacritty(state: &mut SetupHintsState) -> bool {
 }
 
 fn prompt_try_it_out(installed_alacritty: bool) {
-    eprintln!("\x1b[32m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
+    eprintln!("\x1b[32m+-------------------------------------------------------------+\x1b[0m");
     eprintln!(
-        "\x1b[32m│\x1b[0m \x1b[1m✨ All set! Try it out:\x1b[0m                                     \x1b[32m│\x1b[0m"
+        "\x1b[32m|\x1b[0m \x1b[1m✨ All set! Try it out:\x1b[0m                                     \x1b[32m|\x1b[0m"
     );
     eprintln!(
-        "\x1b[32m│\x1b[0m                                                             \x1b[32m│\x1b[0m"
+        "\x1b[32m|\x1b[0m                                                             \x1b[32m|\x1b[0m"
     );
     eprintln!(
-        "\x1b[32m│\x1b[0m    Press \x1b[1mAlt+;\x1b[0m from anywhere to launch jcode.                \x1b[32m│\x1b[0m"
+        "\x1b[32m|\x1b[0m    Press \x1b[1mAlt+;\x1b[0m from anywhere to launch jcode.                \x1b[32m|\x1b[0m"
     );
     if installed_alacritty {
         eprintln!(
-            "\x1b[32m│\x1b[0m    It will open in \x1b[1mAlacritty\x1b[0m for maximum performance.    \x1b[32m│\x1b[0m"
+            "\x1b[32m|\x1b[0m    It will open in \x1b[1mAlacritty\x1b[0m for maximum performance.    \x1b[32m|\x1b[0m"
         );
     }
     eprintln!(
-        "\x1b[32m│\x1b[0m                                                             \x1b[32m│\x1b[0m"
+        "\x1b[32m|\x1b[0m                                                             \x1b[32m|\x1b[0m"
     );
     eprintln!(
-        "\x1b[32m│\x1b[0m    \x1b[90m(Starting jcode normally in 3 seconds...)\x1b[0m                 \x1b[32m│\x1b[0m"
+        "\x1b[32m|\x1b[0m    \x1b[90m(Starting jcode normally in 3 seconds...)\x1b[0m                 \x1b[32m|\x1b[0m"
     );
-    eprintln!("\x1b[32m└─────────────────────────────────────────────────────────────┘\x1b[0m");
+    eprintln!("\x1b[32m+-------------------------------------------------------------+\x1b[0m");
     eprintln!();
 
     std::thread::sleep(std::time::Duration::from_secs(3));
@@ -518,7 +518,7 @@ pub(super) fn run_setup_hotkey_windows() -> Result<()> {
     };
 
     eprintln!(
-        "  Setting up \x1b[1mAlt+;\x1b[0m → {} + jcode...",
+        "  Setting up \x1b[1mAlt+;\x1b[0m -> {} + jcode...",
         terminal_name
     );
 

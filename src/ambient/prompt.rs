@@ -521,7 +521,7 @@ pub(crate) fn format_duration_rough(d: chrono::Duration) -> String {
 }
 
 /// Format a number of minutes into a human-friendly string.
-/// E.g. 5 → "5m", 90 → "1h 30m", 370 → "6h 10m", 1500 → "1d 1h"
+/// E.g. 5 -> "5m", 90 -> "1h 30m", 370 -> "6h 10m", 1500 -> "1d 1h"
 pub fn format_minutes_human(mins: u32) -> String {
     if mins < 60 {
         format!("{}m", mins)

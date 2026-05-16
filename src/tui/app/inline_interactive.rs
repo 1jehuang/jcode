@@ -917,7 +917,7 @@ impl App {
                 let cached = openrouter_cached;
                 let auto_detail = cached
                     .as_ref()
-                    .and_then(|(eps, _)| eps.first().map(|ep| format!("→ {}", ep.provider_name)))
+                    .and_then(|(eps, _)| eps.first().map(|ep| format!("-> {}", ep.provider_name)))
                     .unwrap_or_default();
                 routes.push(crate::provider::build_openrouter_auto_route(
                     model,
@@ -1200,7 +1200,7 @@ impl App {
                         provider_id: provider_id.clone(),
                         label: label.clone(),
                     });
-                    self.set_status_notice(format!("Account → {} ({})", label, provider_id));
+                    self.set_status_notice(format!("Account -> {} ({})", label, provider_id));
                     return;
                 }
 
@@ -1376,14 +1376,14 @@ impl App {
                     "Queued Catch Up for **{}**.",
                     names[0],
                 )));
-                self.set_status_notice(format!("Catch Up → {}", names[0]));
+                self.set_status_notice(format!("Catch Up -> {}", names[0]));
             } else {
                 self.push_display_message(DisplayMessage::system(format!(
                     "Queued Catch Up for **{} sessions**: {}.",
                     names.len(),
                     names.join(", "),
                 )));
-                self.set_status_notice(format!("Catch Up → {} sessions", names.len()));
+                self.set_status_notice(format!("Catch Up -> {} sessions", names.len()));
             }
             return;
         }
@@ -1542,7 +1542,7 @@ impl App {
         crate::tui::workspace_client::queue_resume_session(session_id);
         self.session_picker_overlay = None;
         self.session_picker_mode = SessionPickerMode::Resume;
-        self.set_status_notice(format!("Switching → {}", name));
+        self.set_status_notice(format!("Switching -> {}", name));
     }
 
     pub(super) fn handle_batch_crash_restore(&mut self) {
@@ -1823,7 +1823,7 @@ impl App {
                     };
 
                     let notice = format!(
-                        "Default → {} via {}",
+                        "Default -> {} via {}",
                         model_spec,
                         provider_key.unwrap_or("auto")
                     );
@@ -1894,7 +1894,7 @@ impl App {
                         content.push(format!("status: {}", status.label_for_display()));
                         content.extend(detail_lines);
                         self.push_display_message(DisplayMessage::usage(content.join("\n")));
-                        self.set_status_notice(format!("Usage → {}", title));
+                        self.set_status_notice(format!("Usage -> {}", title));
                     }
                     PickerAction::AgentTarget(target) => {
                         self.open_agent_model_picker(target);
@@ -1926,7 +1926,7 @@ impl App {
                                         "Saved {} model override: `{}`.",
                                         label, spec
                                     )));
-                                    self.set_status_notice(format!("{} model → {}", label, spec));
+                                    self.set_status_notice(format!("{} model -> {}", label, spec));
                                 }
                             }
                             Err(error) => {
@@ -1962,7 +1962,7 @@ impl App {
 
                         let effort = entry.effort.clone();
                         let notice = format!(
-                            "Model → {} via {} ({})",
+                            "Model -> {} via {} ({})",
                             entry.name, route.provider, route.api_method
                         );
                         let route_detail = route.detail.trim().to_string();

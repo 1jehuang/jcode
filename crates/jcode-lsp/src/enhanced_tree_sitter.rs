@@ -247,6 +247,7 @@ impl ControlFlowGraph {
 }
 
 /// 支配树节点
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct DominatorTreeNode {
     block_id: BlockId,
@@ -254,6 +255,7 @@ struct DominatorTreeNode {
 }
 
 /// 支配树
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct DominatorTree {
     root: Option<Box<DominatorTreeNode>>,

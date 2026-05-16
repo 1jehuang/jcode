@@ -225,7 +225,7 @@ impl EnhancedAgentExecutor {
             );
         }
 
-        // 主循环：edit → build → test → fix → retry
+        // 主循环：edit -> build -> test -> fix -> retry
         for attempt in 0..=self.config.max_retries {
             *self.retry_count.write().await = attempt;
             

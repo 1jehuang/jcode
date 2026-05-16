@@ -291,7 +291,7 @@ impl Tool for CodeIntelTool {
                             kind, sym.name,
                             sym.range.start.line + 1, sym.range.start.character + 1));
                         // Show children with indentation
-                        for child in &sym.children {
+                        for child in sym.children.iter().flatten() {
                             output.push_str(&format!("  - {} `{}` — {}:{}\n",
                                 kind, child.name,
                                 child.range.start.line + 1, child.range.start.character + 1));

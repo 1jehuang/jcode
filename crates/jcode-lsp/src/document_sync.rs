@@ -32,6 +32,7 @@ pub enum SyncStrategy {
 }
 
 /// 文档状态跟踪
+#[allow(dead_code)]
 struct DocumentState {
     /// 当前版本号（每次变更 +1）
     version: i32,
@@ -52,6 +53,7 @@ struct DocumentState {
     stats: DocumentStats,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct DocumentChange {
     timestamp: std::time::Instant,
@@ -292,7 +294,7 @@ impl DocumentSyncManager {
             .collect()
     }
 
-    // ─── 内部方法 ─────────────────────────
+    // --- 内部方法 -------------------------
 
     /// 判断是否应该使用增量同步
     fn should_use_incremental(&self, old_content: &str, new_content: &str) -> bool {

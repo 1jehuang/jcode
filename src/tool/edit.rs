@@ -241,7 +241,7 @@ fn extract_context(
     let context_lines: Vec<String> = lines[start..end]
         .iter()
         .enumerate()
-        .map(|(i, line)| format!("{:>4}│ {}", start + i + 1, line))
+        .map(|(i, line)| format!("{:>4}| {}", start + i + 1, line))
         .collect();
 
     (start + 1, end, context_lines.join("\n"))

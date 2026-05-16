@@ -1,0 +1,24 @@
+    Blocking waiting for file lock on build directory
+    Checking jcode-unified-scheduler v0.1.0 (D:\studying\Codecargo\CarpAI\crates\jcode-unified-scheduler)
+error: mismatched closing delimiter: `}`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:452:26
+    |
+452 |                 state.set(
+    |                          ^ unclosed delimiter
+...
+456 |                     } else {
+    |                     ^ mismatched closing delimiter
+
+error: unexpected closing delimiter: `}`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:478:5
+    |
+444 |         let meta = &task.metadata; if meta.is_object() {
+    |                                                        - the nearest open delimiter
+...
+459 |                 );
+    |                 - missing open `(` for this delimiter
+...
+478 |     }
+    |     ^ unexpected closing delimiter
+
+error: could not compile `jcode-unified-scheduler` (lib) due to 2 previous errors

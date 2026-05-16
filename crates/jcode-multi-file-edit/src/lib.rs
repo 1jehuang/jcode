@@ -4,12 +4,12 @@
 //! ## Architecture
 //!
 //! ```text
-//! Plan (jcode-plan) → FileSetAnalyzer → FileEditPlanner
-//!                                         ↓
-//!                                ParallelASTProcessor  ← tokio::join!
-//!                                         ↓
-//!                                   DiffGenerator     ← similar crate
-//!                                         ↓
+//! Plan (jcode-plan) -> FileSetAnalyzer -> FileEditPlanner
+//!                                         v
+//!                                ParallelASTProcessor  <- tokio::join!
+//!                                         v
+//!                                   DiffGenerator     <- similar crate
+//!                                         v
 //!                                   AtomicCommit
 //! ```
 //!
@@ -28,12 +28,10 @@ mod edit_planner;
 
 pub use file_set::{FileSet, FileOperation, FileEditOp};
 pub use parallel_processor::{ParallelASTProcessor, ProcessedFile};
-pub use diff_merge::{UnifiedDiff, DiffHunk, merge_diffs};
+pub use diff_merge::{UnifiedDiff, merge_diffs};
 pub use atomic_commit::{AtomicCommit, CommitResult};
 pub use edit_planner::{FileEditPlanner, PlannedEdit};
 
-use std::collections::HashMap;
-use similar::{ChangeTag, TextDiff};
 
 /// Composer-style multi-file atomic refactor engine.
 pub struct MultiFileEngine {

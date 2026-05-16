@@ -418,7 +418,7 @@ fn cached_message_indices(messages: &[ApiMessage]) -> Vec<usize> {
         .collect()
 }
 
-/// Helper to build a minimal conversation with N exchanges (user→assistant pairs).
+/// Helper to build a minimal conversation with N exchanges (user->assistant pairs).
 /// Returns messages suitable for add_message_cache_breakpoint (includes a trailing user msg).
 fn build_conversation(exchanges: usize) -> Vec<ApiMessage> {
     let mut messages = vec![ApiMessage {
@@ -457,19 +457,19 @@ fn build_conversation(exchanges: usize) -> Vec<ApiMessage> {
 
 #[test]
 fn test_cache_one_exchange_single_marker() {
-    // Turn 2: only one assistant reply exists → one marker (WRITE only)
+    // Turn 2: only one assistant reply exists -> one marker (WRITE only)
     let mut messages = build_conversation(1);
     add_message_cache_breakpoint(&mut messages);
 
     let indices = cached_message_indices(&messages);
-    assert_eq!(indices.len(), 1, "One assistant message → one cache marker");
+    assert_eq!(indices.len(), 1, "One assistant message -> one cache marker");
     // The assistant message is at index 2 (identity=0, user=1, assistant=2, user=3)
     assert_eq!(indices[0], 2);
 }
 
 #[test]
 fn test_cache_two_exchanges_two_markers() {
-    // Turn 3: two assistant replies → two markers (READ prev + WRITE new)
+    // Turn 3: two assistant replies -> two markers (READ prev + WRITE new)
     let mut messages = build_conversation(2);
     // identity=0, user=1, assistant=2, user=3, assistant=4, user=5
     add_message_cache_breakpoint(&mut messages);
@@ -478,7 +478,7 @@ fn test_cache_two_exchanges_two_markers() {
     assert_eq!(
         indices.len(),
         2,
-        "Two assistant messages → two cache markers"
+        "Two assistant messages -> two cache markers"
     );
     assert!(
         indices.contains(&2),
@@ -492,7 +492,7 @@ fn test_cache_two_exchanges_two_markers() {
 
 #[test]
 fn test_cache_many_exchanges_still_two_markers() {
-    // 10 exchanges → still only 2 markers (within the 4-breakpoint API limit)
+    // 10 exchanges -> still only 2 markers (within the 4-breakpoint API limit)
     let mut messages = build_conversation(10);
     add_message_cache_breakpoint(&mut messages);
 
@@ -505,7 +505,7 @@ fn test_cache_many_exchanges_still_two_markers() {
 
 #[test]
 fn test_cache_cross_turn_read_marker_preserved() {
-    // THE KEY REGRESSION TEST: simulates turn N → turn N+1 and verifies that the
+    // THE KEY REGRESSION TEST: simulates turn N -> turn N+1 and verifies that the
     // assistant message from turn N still has cache_control in the turn N+1 request.
     // Without this, the turn N cache snapshot is written but never read.
 

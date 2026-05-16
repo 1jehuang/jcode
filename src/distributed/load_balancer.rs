@@ -23,7 +23,7 @@ impl LoadBalancer {
         }
     }
 
-    pub fn select_node(&self, nodes: &[&ClusterNode]) -> Option<&ClusterNode> {
+    pub fn select_node<'a>(&self, nodes: &[&'a ClusterNode]) -> Option<&'a ClusterNode> {
         if nodes.is_empty() { return None; }
 
         match &self.strategy {

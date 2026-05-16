@@ -10,8 +10,10 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use crate::nlp::types::Priority;
+use crate::nlp::engine::FileType;
 
-// ─── Types ─────────────────────────────────
+// --- Types ---------------------------------
 
 /// 原型配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,7 +178,7 @@ pub enum CommentLanguage {
     Bilingual,
 }
 
-// ─── Generated Project ──────────────────────
+// --- Generated Project ----------------------
 
 /// 生成的项目结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -588,7 +590,7 @@ pub struct CostBreakdown {
     pub maintenance_annual: f64,
 }
 
-// ─── Core Engine ──────────────────────────────
+// --- Core Engine ------------------------------
 
 /// 快速原型引擎
 pub struct PrototypeEngine {
@@ -744,7 +746,7 @@ impl PrototypeEngine {
     }
 }
 
-// ─── Implementation Methods ─────────────────
+// --- Implementation Methods -----------------
 
 impl PrototypeEngine {
     async fn analyze_requirements(&self, config: &PrototypeConfig) -> RequirementAnalysis {
@@ -895,7 +897,7 @@ impl PrototypeEngine {
     }
 }
 
-// ─── Helper Types and Functions ─────────────
+// --- Helper Types and Functions -------------
 
 struct RequirementAnalysis {
     complexity_score: u8,
@@ -1390,4 +1392,79 @@ fn design_security_model(security_level: &SecurityLevel) -> SecurityModel {
     }
 }
 
-// ... (更多generate_*函数将在后续补充)
+fn generate_web_api_files(_architecture: &ArchitectureOverview, _tech_stack: &TechStackDecision, _config: &PrototypeConfig) -> Vec<ProjectFile> {
+    vec![]
+}
+
+fn generate_cli_files(_architecture: &ArchitectureOverview, _tech_stack: &TechStackDecision, _config: &PrototypeConfig) -> Vec<ProjectFile> {
+    vec![]
+}
+
+fn generate_library_files(_architecture: &ArchitectureOverview, _tech_stack: &TechStackDecision, _config: &PrototypeConfig) -> Vec<ProjectFile> {
+    vec![]
+}
+
+fn generate_microservice_files(_architecture: &ArchitectureOverview, _tech_stack: &TechStackDecision, _config: &PrototypeConfig) -> Vec<ProjectFile> {
+    vec![]
+}
+
+fn generic_project_files(_architecture: &ArchitectureOverview, _tech_stack: &TechStackDecision, _config: &PrototypeConfig) -> Vec<ProjectFile> {
+    vec![]
+}
+
+fn generate_test_files(_tech_stack: &TechStackDecision, _config: &PrototypeConfig) -> Vec<ProjectFile> {
+    vec![]
+}
+
+fn generate_documentation_files(_config: &PrototypeConfig) -> Vec<ProjectFile> {
+    vec![]
+}
+
+fn generate_ci_cd_files(_tech_stack: &TechStackDecision) -> Vec<ProjectFile> {
+    vec![]
+}
+
+fn generate_docker_files() -> Vec<ProjectFile> {
+    vec![]
+}
+
+fn generate_config_files(_tech_stack: &TechStackDecision, _config: &PrototypeConfig) -> Vec<ProjectFile> {
+    vec![]
+}
+
+fn create_phases(_architecture: &ArchitectureOverview, _config: &PrototypeConfig) -> Vec<ImplementationPhase> {
+    vec![]
+}
+
+fn get_prerequisites(_architecture: &ArchitectureOverview) -> Vec<String> {
+    vec![]
+}
+
+fn get_common_pitfalls(_project_type: &ProjectType) -> Vec<String> {
+    vec![]
+}
+
+fn get_best_practices(_pattern: &ArchitecturePattern) -> Vec<String> {
+    vec![]
+}
+
+fn identify_risks(_config: &PrototypeConfig) -> Vec<RiskItem> {
+    vec![]
+}
+
+fn create_mitigation_strategies(_risks: &[RiskItem]) -> HashMap<String, MitigationStrategy> {
+    HashMap::new()
+}
+
+fn calculate_overall_risk_level(_risks: &[RiskItem]) -> RiskLevel {
+    RiskLevel::Low
+}
+
+fn estimate_project_costs(_config: &PrototypeConfig) -> CostEstimate {
+    CostEstimate {
+        development_cost: Money { amount: 0.0, currency: "USD".to_string() },
+        infrastructure_monthly: Money { amount: 0.0, currency: "USD".to_string() },
+        total_first_year: Money { amount: 0.0, currency: "USD".to_string() },
+        breakdown: CostBreakdown::default(),
+    }
+}

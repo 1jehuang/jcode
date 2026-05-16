@@ -233,14 +233,14 @@ fn memory_tile_content_lines(
             let text = item.content.to_string();
             let padding = inner_width.saturating_sub(bullet_width + text_display_width);
             let mut spans = vec![
-                Span::styled("│ ", border_style),
+                Span::styled("| ", border_style),
                 Span::styled(bullet.to_string(), text_fill_style),
                 Span::styled(text, text_fill_style),
             ];
             if padding > 0 {
                 spans.push(Span::raw(" ".repeat(padding)));
             }
-            spans.push(Span::styled(" │", border_style));
+            spans.push(Span::styled(" |", border_style));
             content_lines.push(Line::from(spans));
         } else {
             let indent = bullet_width;
@@ -260,26 +260,26 @@ fn memory_tile_content_lines(
                 if ci == 0 {
                     let padding = inner_width.saturating_sub(bullet_width + chunk_width);
                     let mut spans = vec![
-                        Span::styled("│ ", border_style),
+                        Span::styled("| ", border_style),
                         Span::styled(bullet.to_string(), text_fill_style),
                         Span::styled(chunk.clone(), text_fill_style),
                     ];
                     if padding > 0 {
                         spans.push(Span::raw(" ".repeat(padding)));
                     }
-                    spans.push(Span::styled(" │", border_style));
+                    spans.push(Span::styled(" |", border_style));
                     content_lines.push(Line::from(spans));
                 } else {
                     let padding = inner_width.saturating_sub(indent + chunk_width);
                     let mut spans = vec![
-                        Span::styled("│ ", border_style),
+                        Span::styled("| ", border_style),
                         Span::raw(" ".repeat(indent)),
                         Span::styled(chunk.clone(), text_fill_style),
                     ];
                     if padding > 0 {
                         spans.push(Span::raw(" ".repeat(padding)));
                     }
-                    spans.push(Span::styled(" │", border_style));
+                    spans.push(Span::styled(" |", border_style));
                     content_lines.push(Line::from(spans));
                 }
             }
@@ -293,11 +293,11 @@ fn memory_tile_content_lines(
                 let chunk_width = unicode_width::UnicodeWidthStr::width(chunk.as_str());
                 let padding = inner_width.saturating_sub(indent + chunk_width);
                 content_lines.push(Line::from(vec![
-                    Span::styled("│ ", border_style),
+                    Span::styled("| ", border_style),
                     Span::raw(" ".repeat(indent)),
                     Span::styled(chunk, meta_fill_style),
                     Span::raw(" ".repeat(padding)),
-                    Span::styled(" │", border_style),
+                    Span::styled(" |", border_style),
                 ]));
             }
         }
@@ -305,9 +305,9 @@ fn memory_tile_content_lines(
 
     if content_lines.is_empty() {
         content_lines.push(Line::from(vec![
-            Span::styled("│ ", border_style),
+            Span::styled("| ", border_style),
             Span::raw(" ".repeat(inner_width)),
-            Span::styled(" │", border_style),
+            Span::styled(" |", border_style),
         ]));
     }
 
@@ -330,8 +330,8 @@ fn render_memory_tile_box(
     let title_text = format!(" {} ", title_label);
     let title_len = unicode_width::UnicodeWidthStr::width(title_text.as_str());
     let border_chars = box_width.saturating_sub(title_len + 2);
-    let left_border = "─".repeat(border_chars / 2);
-    let right_border = "─".repeat(border_chars - border_chars / 2);
+    let left_border = "-".repeat(border_chars / 2);
+    let right_border = "-".repeat(border_chars - border_chars / 2);
 
     let top = Line::from(Span::styled(
         format!("╭{}{}{}╮", left_border, title_text, right_border),
@@ -340,7 +340,7 @@ fn render_memory_tile_box(
     let content_lines =
         memory_tile_content_lines(&tile.items, inner_width, border_style, text_style);
     let bottom = Line::from(Span::styled(
-        format!("╰{}╯", "─".repeat(box_width.saturating_sub(2))),
+        format!("╰{}╯", "-".repeat(box_width.saturating_sub(2))),
         border_style,
     ));
 

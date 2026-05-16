@@ -1783,8 +1783,8 @@ fn format_messages_with_identity(messages: Vec<ApiMessage>, _is_oauth: bool) -> 
 /// Add cache_control to messages for conversation caching.
 ///
 /// Strategy: sliding two-marker window
-///   - Second-to-last assistant message → READ marker (re-uses cache snapshot from previous turn)
-///   - Last assistant message           → WRITE marker (creates new snapshot for the next turn)
+///   - Second-to-last assistant message -> READ marker (re-uses cache snapshot from previous turn)
+///   - Last assistant message           -> WRITE marker (creates new snapshot for the next turn)
 ///
 /// This ensures each turn N+1 reads from turn N's conversation cache, paying only
 /// cache_read_input_tokens for the already-cached history instead of full input tokens.

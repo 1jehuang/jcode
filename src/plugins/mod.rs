@@ -40,15 +40,15 @@
 //!
 //! ```
 //! PluginManager (高级API)
-//!     └── PluginRegistry (数据存储)
-//!           ├── plugins: HashMap<String, InstalledPlugin>
-//!           └── plugins_dir: PathBuf
+//!     +-- PluginRegistry (数据存储)
+//!           +-- plugins: HashMap<String, InstalledPlugin>
+//!           +-- plugins_dir: PathBuf
 //!
 //! PluginLoader (工具函数)
-//!     ├── load_from_manifest() - 从JSON加载
-//!     ├── validate_manifest() - 验证字段
-//!     ├── install_from_local() - 本地安装
-//!     └── uninstall() - 卸载清理
+//!     +-- load_from_manifest() - 从JSON加载
+//!     +-- validate_manifest() - 验证字段
+//!     +-- install_from_local() - 本地安装
+//!     +-- uninstall() - 卸载清理
 //! ```
 
 pub mod types;

@@ -3,18 +3,18 @@
 // AST 级代码编辑操作 — 智能重构功能
 //
 // ## 核心能力（对标 Cursor/Claude Code 的代码编辑）
-// 1. **extract_method** - 提取方法（选中代码 → 新函数）
-// 2. **inline_function** - 内联函数（函数体 → 直接插入）
+// 1. **extract_method** - 提取方法（选中代码 -> 新函数）
+// 2. **inline_function** - 内联函数（函数体 -> 直接插入）
 // 3. **rename_symbol** - 重命名符号（全局替换 + 引用更新）
 // 4. **move_symbol** - 移动符号（跨文件/模块移动）
-// 5. **encapsulate_field** - 封装字段（public → private + getter/setter）
+// 5. **encapsulate_field** - 封装字段（public -> private + getter/setter）
 //
 // ## 架构设计
-// ┌─────────────────────────────┐
-// │   LSP-based (Primary)       │ ← 使用 LSP textDocument/codeAction
-// │   ↓ LSP 失败                │
-// │   Regex-based (Fallback)    │ ← 正则匹配 + 启发式规则
-// └─────────────────────────────┘
+// +-----------------------------+
+// |   LSP-based (Primary)       | <- 使用 LSP textDocument/codeAction
+// |   v LSP 失败                |
+// |   Regex-based (Fallback)    | <- 正则匹配 + 启发式规则
+// +-----------------------------+
 
 use lsp_types::*;
 use serde::{Deserialize, Serialize};
@@ -116,6 +116,10 @@ pub trait AstOperations: Send + Sync {
 }
 
 /// 基于 Regex 的 AST 操作实现（降级方案）
+///
+/// ⚠️ **已废弃** — 请使用 `TreeSitterAstOperations`（基于真实 AST，精度更高）。
+/// 仅在 LSP 不可用或 tree-sitter 不支持目标语言时作为后备。
+#[deprecated(since = "0.2.0", note = "Use TreeSitterAstOperations instead — regex-based operations lack scope awareness and may incorrectly match comments/strings")]
 pub struct RegexAstOperations;
 
 impl Default for RegexAstOperations {
@@ -525,7 +529,7 @@ impl AstOperations for RegexAstOperations {
         let replace_count = pattern.find_iter(&content).count();
 
         info!(
-            "Symbol renamed: '{}' → '{}' ({} occurrences)",
+            "Symbol renamed: '{}' -> '{}' ({} occurrences)",
             old_name, params.new_name, replace_count
         );
 
@@ -618,7 +622,7 @@ impl AstOperations for RegexAstOperations {
         let final_content = format!("{}\n{}", new_content, accessors);
 
         info!(
-            "Field encapsulated: {} → private + {} accessor(s)",
+            "Field encapsulated: {} -> private + {} accessor(s)",
             params.field_name,
             if params.generate_getter { 1 } else { 0 } + if params.generate_setter { 1 } else { 0 }
         );
@@ -1240,7 +1244,7 @@ impl AstOperations for TreeSitterAstOperations {
         let new_count = new_content.matches(&params.new_name).count();
 
         info!(
-            "Symbol renamed (AST): '{}' → '{}' ({} → {} occurrences)",
+            "Symbol renamed (AST): '{}' -> '{}' ({} -> {} occurrences)",
             old_name, params.new_name, old_count, new_count
         );
 
@@ -1415,7 +1419,7 @@ impl AstOperations for TreeSitterAstOperations {
         };
 
         // Use AST to find symbol definition precisely
-        if let Some((start, end, sig)) = self.extract_function_signature_ast(&source_content, symbol_name) {
+        if let Some((start, end, _sig)) = self.extract_function_signature_ast(&source_content, symbol_name) {
             let symbol_def = RegexAstOperations::extract_lines(&source_content, start, end);
 
             // Remove from source file

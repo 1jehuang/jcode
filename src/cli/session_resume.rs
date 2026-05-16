@@ -153,7 +153,7 @@ pub async fn list_sessions(project_path: Option<&str>) -> Result<Vec<SessionInfo
     Ok(sessions)
 }
 
-// ─── Internal Methods ──────────────────────
+// --- Internal Methods ----------------------
 
 fn find_most_recent_session(cwd: &std::path::Path) -> Result<SessionInfo> {
     let sessions = tokio::task::block_in_place(|| {

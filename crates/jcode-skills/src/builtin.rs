@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::info;
 
 /// 代码审查技能 — 完整实现 (对标 Claude Code/Cursor)
 ///
@@ -135,7 +135,7 @@ pub struct BestPracticeSuggestion {
 pub enum PracticeCategory {
     ErrorHandling,
     ResourceManagement,
-    API Design,
+    ApiDesign,
     Testing,
     Documentation,
     Maintainability,
@@ -372,7 +372,7 @@ impl CodeReviewSkill {
                     line: Some(line),
                     current_implementation: Some(affected_code),
                     suggested_optimization: rule.optimization.to_string(),
-                    expected_improvement: rule.expected_improvement,
+                    expected_improvement_percent: rule.expected_improvement,
                 });
             }
         }
@@ -444,7 +444,7 @@ impl CodeReviewSkill {
         if language == "python" {
             if !code.contains(": ") && code.contains("def ") {
                 suggestions.push(BestPracticeSuggestion {
-                    category: PracticeCategory::API Design,
+                    category: PracticeCategory::ApiDesign,
                     title: "Add type hints".to_string(),
                     description: "Functions should have type annotations for better IDE support".to_string(),
                     current_implementation: None,
@@ -487,7 +487,7 @@ impl CodeReviewSkill {
              issue_counts.medium_perf * 5) as u8
         );
         
-        let style_score = 100u8.saturating_sub(issue_counts.style_violations.min(20) * 5);
+        let style_score = 100u8.saturating_sub((issue_counts.style_violations.min(20) * 5) as u8);
         
         let overall_score = ((security_score as u32 * 35 +
                            performance_score as u32 * 35 +
@@ -535,7 +535,7 @@ impl Skill for CodeReviewSkill {
             Ok(c) => c,
             Err(e) => {
                 return Ok(SkillOutput {
-                    status: SkillStatus::Failure,
+                    status: SkillStatus::Failed,
                     message: format!("Failed to read file {}: {}", file_path, e),
                     artifacts: vec![],
                     metrics: Default::default(),
@@ -550,7 +550,7 @@ impl Skill for CodeReviewSkill {
         let review_result = self.review_code(&code, &file_path, &language).await;
         
         // 生成报告
-        let report = generate_review_report(&review_result);
+        let _report = generate_review_report(&review_result);
         
         Ok(SkillOutput {
             status: if review_result.overall_score >= 70 {
@@ -588,7 +588,7 @@ fn infer_language_from_path(path: &str) -> String {
         "python".to_string()
     } else if path.ends_with(".ts") || path.ends_with(".tsx") {
         "typescript".to_string()
-    } else if path.ends_with(".js") || path.endsWith(".jsx") {
+    } else if path.ends_with(".js") || path.ends_with(".jsx") {
         "javascript".to_string()
     } else if path.ends_with(".go") {
         "go".to_string()

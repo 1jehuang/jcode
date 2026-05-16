@@ -18,7 +18,7 @@ pub struct SkillOutput {
 
 /// 技能状态
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub enum SkillStatus { Pending, Running, Success, Failed }
+pub enum SkillStatus { Pending, Running, Success, Failed, Warning }
 
 /// 技能定义
 #[derive(Debug, Clone)]

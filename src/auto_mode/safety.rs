@@ -559,7 +559,6 @@ impl SafetyGuardrail {
         for sp in &self.sensitive_patterns {
             if sp.pattern.is_match(operation) {
                 // 比较风险等级（Critical > High > Medium > Low）
-                use std::cmp::Ordering;
                 let current_order = match max_risk {
                     RiskLevel::Critical => 3,
                     RiskLevel::High => 2,

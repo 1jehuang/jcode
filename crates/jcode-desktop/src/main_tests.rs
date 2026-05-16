@@ -471,13 +471,13 @@ fn single_session_markdown_renderer_handles_rich_commonmark_shapes() {
         style_for_text(&lines, "docs ↗ https://example.com and **bold** plus _em_."),
         Some(SingleSessionLineStyle::AssistantLink)
     );
-    assert!(body.contains("┆ name │ value"));
-    assert!(body.contains("┆ alpha │ 42"));
+    assert!(body.contains("┆ name | value"));
+    assert!(body.contains("┆ alpha | 42"));
     assert_eq!(
-        style_for_text(&lines, "┆ alpha │ 42"),
+        style_for_text(&lines, "┆ alpha | 42"),
         Some(SingleSessionLineStyle::AssistantTable)
     );
-    assert!(body.contains("───"));
+    assert!(body.contains("---"));
 }
 
 #[test]
@@ -503,7 +503,7 @@ fn single_session_markdown_structure_uses_distinct_colors_and_cards() {
         ))
     );
     assert_eq!(
-        first_glyph_color_for_text(body, "┆ c │ d"),
+        first_glyph_color_for_text(body, "┆ c | d"),
         Some(single_session_line_color(
             SingleSessionLineStyle::AssistantTable
         ))
@@ -756,7 +756,7 @@ fn single_session_visual_state_smoke_covers_markdown_spinner_and_switcher() {
     assert_visual_text_contains(&markdown_key, "# Heading");
     assert_visual_text_contains(&markdown_key, "▌ quoted");
     assert_visual_text_contains(&markdown_key, "docs ↗ https://example.com");
-    assert_visual_text_contains(&markdown_key, "┆ color │ yes");
+    assert_visual_text_contains(&markdown_key, "┆ color | yes");
     assert_visual_text_contains(&markdown_key, "streaming tail");
 
     let markdown_vertices = build_single_session_vertices(&markdown_app, size, 0.0, 0);

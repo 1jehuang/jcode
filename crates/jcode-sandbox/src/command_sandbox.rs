@@ -127,7 +127,7 @@ impl CommandSandbox {
         self
     }
 
-    // ─── 核心分析 API ─────────────────────────────────
+    // --- 核心分析 API ---------------------------------
 
     /// 分析命令并返回沙箱决策
     pub fn analyze_command(&self, command: &str) -> SandboxResult {

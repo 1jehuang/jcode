@@ -45,29 +45,29 @@ impl Default for MessageId {
 /// 消息类型枚举
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MessageType {
-    // ─── 请求/响应 ──────────────────────────
+    // --- 请求/响应 --------------------------
     Request,
     Response,
     Notification,
     
-    // ─── IDE 操作 ──────────────────────────
+    // --- IDE 操作 --------------------------
     FileEdit,
     FileRead,
     TerminalCommand,
     DiffDisplay,
     
-    // ─── 会话管理 ──────────────────────────
+    // --- 会话管理 --------------------------
     SessionCreate,
     SessionResume,
     SessionClose,
     SessionStatus,
     
-    // ─── 状态同步 ──────────────────────────
+    // --- 状态同步 --------------------------
     Heartbeat,
     StatusUpdate,
     ProgressUpdate,
     
-    // ─── 系统控制 ──────────────────────────
+    // --- 系统控制 --------------------------
     Ping,
     Pong,
     Error,
@@ -308,7 +308,7 @@ pub enum DeliveryStatus {
 // ════════════════════════════════════════════════════════════════
 
 /// 消息路由器核心
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MessageRouter {
     queue: Arc<Mutex<PriorityQueue>>,
     pending_responses: Arc<RwLock<HashMap<MessageId, mpsc::Sender<BridgeMessage>>>>,

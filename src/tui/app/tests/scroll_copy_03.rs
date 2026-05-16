@@ -78,10 +78,10 @@ fn test_scroll_render_bottom() {
         "expected filler content at bottom position"
     );
     // Should have scroll indicator or prompt preview since content extends above viewport.
-    // The prompt preview (N›) renders on top of the ↑ indicator, so check for either.
+    // The prompt preview (N›) renders on top of the ^ indicator, so check for either.
     assert!(
-        text.contains('↑') || text.contains('›'),
-        "expected ↑ indicator or prompt preview when content extends above viewport"
+        text.contains('^') || text.contains('›'),
+        "expected ^ indicator or prompt preview when content extends above viewport"
     );
 }
 
@@ -100,8 +100,8 @@ fn test_scroll_render_scrolled_up() {
     let text_scrolled = render_and_snap(&app, &mut terminal);
 
     assert!(
-        text_scrolled.contains('↓'),
-        "expected ↓ indicator when paused above bottom"
+        text_scrolled.contains('v'),
+        "expected v indicator when paused above bottom"
     );
 }
 

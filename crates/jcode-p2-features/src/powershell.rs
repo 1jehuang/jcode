@@ -8,8 +8,8 @@
 //   - 跨平台支持 (pwsh = PowerShell Core 7+)
 //
 // 与 BashTool 的关系:
-//   BashTool → Linux/WSL/Git Bash
-//   PowerShellBridge → Windows 原生 cmdlet / .NET 对象
+//   BashTool -> Linux/WSL/Git Bash
+//   PowerShellBridge -> Windows 原生 cmdlet / .NET 对象
 // ════════════════════════════════════════════════════════════════
 
 use serde::{Deserialize, Serialize};

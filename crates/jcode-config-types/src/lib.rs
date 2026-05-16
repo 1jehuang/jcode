@@ -708,7 +708,7 @@ pub struct SafetyConfig {
     pub email_imap_host: Option<String>,
     /// IMAP port (default: 993)
     pub email_imap_port: u16,
-    /// Enable email reply → agent directive feature (default: false)
+    /// Enable email reply -> agent directive feature (default: false)
     pub email_reply_enabled: bool,
     /// Enable Telegram notifications (default: false)
     pub telegram_enabled: bool,
@@ -716,7 +716,7 @@ pub struct SafetyConfig {
     pub telegram_bot_token: Option<String>,
     /// Telegram chat ID to send messages to
     pub telegram_chat_id: Option<String>,
-    /// Enable Telegram reply → agent directive feature (default: false)
+    /// Enable Telegram reply -> agent directive feature (default: false)
     pub telegram_reply_enabled: bool,
     /// Enable Discord notifications (default: false)
     pub discord_enabled: bool,
@@ -726,7 +726,7 @@ pub struct SafetyConfig {
     pub discord_channel_id: Option<String>,
     /// Discord bot user ID (for filtering own messages in polling)
     pub discord_bot_user_id: Option<String>,
-    /// Enable Discord reply → agent directive feature (default: false)
+    /// Enable Discord reply -> agent directive feature (default: false)
     pub discord_reply_enabled: bool,
 }
 

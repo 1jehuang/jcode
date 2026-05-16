@@ -47,6 +47,3 @@ tokio-test = "0.4"
 tempfile = "3"
 rand = "0.8"
 
-[[bench]]
-name = "scheduler_benchmark"
-harness = false

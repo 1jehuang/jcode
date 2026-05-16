@@ -3,7 +3,7 @@
 
 use thiserror::Error;
 
-// ── Provider 错误 ──
+// -- Provider 错误 --
 
 #[derive(Error, Debug)]
 pub enum ProviderError {
@@ -23,7 +23,7 @@ pub enum ProviderError {
     Internal(#[from] anyhow::Error),
 }
 
-// ── Tool 执行错误 ──
+// -- Tool 执行错误 --
 
 #[derive(Error, Debug)]
 pub enum ToolExecuteError {
@@ -39,7 +39,7 @@ pub enum ToolExecuteError {
     Internal(#[from] anyhow::Error),
 }
 
-// ── 配置错误 ──
+// -- 配置错误 --
 
 #[derive(Error, Debug)]
 pub enum ConfigError {
@@ -53,7 +53,7 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
 }
 
-// ── Session 错误 ──
+// -- Session 错误 --
 
 #[derive(Error, Debug)]
 pub enum SessionError {
@@ -65,7 +65,7 @@ pub enum SessionError {
     Corrupted(String),
 }
 
-// ── 文件操作 错误 ──
+// -- 文件操作 错误 --
 
 #[derive(Error, Debug)]
 pub enum FileError {

@@ -287,7 +287,7 @@ impl NotificationDispatcher {
         }
     }
 
-    // ─── 渠道实现 ─────────────────────────
+    // --- 渠道实现 -------------------------
 
     async fn send_to_terminal(&self, msg: &NotificationMessage, config: &ChannelConfig) -> Result<(), String> {
         if !config.terminal_show_banner {
@@ -407,7 +407,7 @@ impl NotificationDispatcher {
         Ok(())
     }
 
-    // ─── 内部工具 ────────────────────────
+    // --- 内部工具 ------------------------
 
     async fn is_duplicate(&self, msg: &NotificationMessage) -> bool {
         let key = format!("{}:{}:{}", msg.level, msg.title, msg.body.len());

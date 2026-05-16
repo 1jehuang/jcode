@@ -171,6 +171,12 @@ pub mod reasoning;
 pub mod nlp;
 pub mod prototype;
 
+// Orphaned source files — 已存在的独立模块
+pub mod completion_engine;
+pub mod protocol_memory;
+pub mod memory_prompt;
+pub mod message_notifications;
+
 // Knowledge Base (Rust最佳实践)
 pub mod knowledge;
 

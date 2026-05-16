@@ -179,7 +179,7 @@ pub(super) fn handle_bus_event(
             app.session.model = Some(model.clone());
             let _ = app.session.save();
             app.push_display_message(crate::tui::DisplayMessage::system(message));
-            app.set_status_notice(format!("Model → {}", model));
+            app.set_status_notice(format!("Model -> {}", model));
             if open_picker {
                 app.open_model_picker();
             }

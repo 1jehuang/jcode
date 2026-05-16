@@ -140,7 +140,7 @@ fn render_background_task_progress_message_uses_box_with_progress_bar() {
     assert!(plain.contains("Running tests"));
     assert!(plain.contains("Latest status: bg action=\"status\" task_id=\"bg123\""));
     assert_eq!(
-        plain.matches('│').count(),
+        plain.matches('|').count(),
         4,
         "expected compact progress row plus status hint:\n{plain}"
     );
@@ -715,7 +715,7 @@ fn render_tool_message_shows_inline_diff_for_pascal_case_multiedit() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("┌─ diff"), "plain={plain}");
+    assert!(plain.contains("+- diff"), "plain={plain}");
     assert!(plain.contains("old line"), "plain={plain}");
     assert!(plain.contains("new line"), "plain={plain}");
 }
@@ -973,7 +973,7 @@ fn render_tool_message_batch_subcall_shows_swarm_dm_details() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(rendered.contains("swarm dm → shark"), "rendered={rendered}");
+    assert!(rendered.contains("swarm dm -> shark"), "rendered={rendered}");
     assert!(
         rendered.contains("Please validate the restart"),
         "rendered={rendered}"

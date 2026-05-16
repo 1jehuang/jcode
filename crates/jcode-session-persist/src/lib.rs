@@ -9,7 +9,7 @@
 //   4. 对话摘要 — LLM 压缩长对话，保留关键信息
 //   5. 会话元数据 — 标题/标签/agent/成本 追踪
 //   6. 文件指针 — 记录已读取位置，支持断点续读
-//   7. 多级存储 — memory → disk → archive 三层架构
+//   7. 多级存储 — memory -> disk -> archive 三层架构
 //
 // 对应 Claude Code 源码:
 //   - src/utils/sessionStorage.ts (1384行) — Project 单例核心类
@@ -101,19 +101,19 @@ mod tests {
 
     #[test]
     fn test_session_state_machine() {
-        // Idle → Running
+        // Idle -> Running
         let state = SessionState::Idle;
         assert!(state.can_transition_to(&SessionState::Running));
         
-        // Running → RequiresAction
+        // Running -> RequiresAction
         let state2 = SessionState::Running;
         assert!(state2.can_transition_to(&SessionState::RequiresAction));
         
-        // RequiresAction → Running (用户批准后)
+        // RequiresAction -> Running (用户批准后)
         let state3 = SessionState::RequiresAction;
         assert!(state3.can_transition_to(&SessionState::Running));
         
-        // Running → Idle
+        // Running -> Idle
         let state4 = SessionState::Running;
         assert!(state4.can_transition_to(&SessionState::Idle));
     }

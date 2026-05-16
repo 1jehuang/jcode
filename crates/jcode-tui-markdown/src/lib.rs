@@ -283,11 +283,11 @@ fn repeated_gutter_prefix(line: &Line<'static>) -> Option<(Vec<Span<'static>>, u
 
     let mut rest = &plain[prefix_bytes..];
     let mut gutter_count = 0usize;
-    while let Some(next) = rest.strip_prefix("│ ") {
+    while let Some(next) = rest.strip_prefix("| ") {
         gutter_count += 1;
         rest = next;
     }
-    let gutter_width = gutter_count * UnicodeWidthStr::width("│ ");
+    let gutter_width = gutter_count * UnicodeWidthStr::width("| ");
     let base_prefix_width = leading_width + gutter_width;
 
     if let Some(marker_width) = rendered_list_marker_width(rest) {
@@ -805,7 +805,7 @@ fn ensure_blockquote_prefix(current_spans: &mut Vec<Span<'static>>, blockquote_d
     if blockquote_depth == 0 || !current_spans.is_empty() {
         return;
     }
-    let prefix = "│ ".repeat(blockquote_depth);
+    let prefix = "| ".repeat(blockquote_depth);
     current_spans.push(Span::styled(prefix, Style::default().fg(md_dim_color())));
 }
 
@@ -814,7 +814,7 @@ fn with_blockquote_prefix(line: Line<'static>, blockquote_depth: usize) -> Line<
         return line;
     }
     let mut spans = vec![Span::styled(
-        "│ ".repeat(blockquote_depth),
+        "| ".repeat(blockquote_depth),
         Style::default().fg(md_dim_color()),
     )];
     let alignment = line.alignment;
@@ -962,8 +962,8 @@ fn strip_leading_raw_padding(line: &mut Line<'static>, trim_width: usize) {
 fn blockquote_gutter_width(text: &str) -> (usize, &str) {
     let mut rest = text;
     let mut width = 0usize;
-    while let Some(next) = rest.strip_prefix("│ ") {
-        width += UnicodeWidthStr::width("│ ");
+    while let Some(next) = rest.strip_prefix("| ") {
+        width += UnicodeWidthStr::width("| ");
         rest = next;
     }
     (width, rest)
@@ -1169,11 +1169,11 @@ fn math_inline_span(math: &str) -> Span<'static> {
 fn math_display_lines(math: &str) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     let dim = Style::default().fg(md_dim_color());
-    out.push(Line::from(Span::styled("┌─ math ", dim)).left_aligned());
+    out.push(Line::from(Span::styled("+- math ", dim)).left_aligned());
     for line in math.lines() {
         out.push(
             Line::from(vec![
-                Span::styled("│ ", dim),
+                Span::styled("| ", dim),
                 Span::styled(line.to_string(), Style::default().fg(math_fg())),
             ])
             .left_aligned(),
@@ -1182,13 +1182,13 @@ fn math_display_lines(math: &str) -> Vec<Line<'static>> {
     if math.is_empty() {
         out.push(
             Line::from(vec![
-                Span::styled("│ ", dim),
+                Span::styled("| ", dim),
                 Span::styled("", Style::default().fg(math_fg())),
             ])
             .left_aligned(),
         );
     }
-    out.push(Line::from(Span::styled("└─", dim)).left_aligned());
+    out.push(Line::from(Span::styled("+-", dim)).left_aligned());
     out
 }
 fn table_color() -> Color {
@@ -1344,7 +1344,7 @@ fn looks_like_line_oriented_transcript_line(line: &str) -> bool {
         return true;
     }
 
-    matches!(trimmed.chars().next(), Some('✓' | '✗' | '┌' | '│' | '└'))
+    matches!(trimmed.chars().next(), Some('✓' | '✗' | '+' | '-' | '|'))
 }
 
 fn preserve_line_oriented_softbreaks(text: &str) -> String {

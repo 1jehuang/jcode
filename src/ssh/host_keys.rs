@@ -280,7 +280,7 @@ impl KnownHostsManager {
     /// Find all entries matching a specific host
     pub fn find_entries_for_host(&self, host: &str) -> Vec<&KnownHostEntry> {
         self.entries.iter()
-            .filter(|entry| self._host_matches_pattern(host, &entry.host_pattern))
+            .filter(|entry| Self::_host_matches_pattern(host, &entry.host_pattern))
             .collect()
     }
 
@@ -327,11 +327,13 @@ impl KnownHostsManager {
             };
         }
 
+        let entries_for_types: Vec<_> = existing_entries.iter().map(|e| e.key_type.clone()).collect();
+
         // Check each existing entry for this host
         for entry in existing_entries {
             if entry.key_type == *key_type {
                 // Same key type - verify fingerprint matches
-                if self._fingerprints_match(&entry.public_key, key_fingerprint) {
+                if Self::_fingerprints_match(&entry.public_key, key_fingerprint) {
                     return VerificationResult::Match {
                         entry: entry.clone(),
                         algorithm: entry.hash_type.unwrap_or(self.hash_type),
@@ -348,13 +350,9 @@ impl KnownHostsManager {
         }
 
         // Host exists but with different key types
-        let expected_types: Vec<String> = existing_entries.iter()
-            .map(|e| e.key_type.clone())
-            .collect();
-
         VerificationResult::MismatchedKeyType {
             host: host.to_string(),
-            expected_types,
+            expected_types: entries_for_types,
             actual_type: key_type.to_string(),
         }
     }
@@ -470,7 +468,7 @@ impl KnownHostsManager {
         key_type: &str,
         public_key_b64: &str,
     ) -> Result<(), KnownHostsError> {
-        let hashed_hostname = self._hash_hostname_sha256(host);
+        let hashed_hostname = Self::_hash_hostname_sha256(host);
         
         self.add_host(
             &format!("|1|{}|{}", hashed_hostname.0, hashed_hostname.1),
@@ -484,9 +482,13 @@ impl KnownHostsManager {
     pub fn remove_host(&mut self, host: &str, key_type: &str) -> Result<bool, KnownHostsError> {
         let original_len = self.entries.len();
         
-        self.entries.retain(|entry| {
-            !(self._host_matches_pattern(host, &entry.host_pattern) && entry.key_type == *key_type)
-        });
+        // Use into_iter to avoid borrow conflict with retain
+        self.entries = std::mem::take(&mut self.entries)
+            .into_iter()
+            .filter(|entry| {
+                !(Self::_host_matches_pattern(host, &entry.host_pattern) && entry.key_type == *key_type)
+            })
+            .collect();
 
         let removed = self.entries.len() < original_len;
         if removed {
@@ -500,9 +502,12 @@ impl KnownHostsManager {
     pub fn remove_all_entries_for_host(&mut self, host: &str) -> Result<usize, KnownHostsError> {
         let original_len = self.entries.len();
         
-        self.entries.retain(|entry| {
-            !self._host_matches_pattern(host, &entry.host_pattern)
-        });
+        self.entries = std::mem::take(&mut self.entries)
+            .into_iter()
+            .filter(|entry| {
+                !Self::_host_matches_pattern(host, &entry.host_pattern)
+            })
+            .collect();
 
         let removed = original_len - self.entries.len();
         if removed > 0 {
@@ -514,8 +519,8 @@ impl KnownHostsManager {
 
     /// Mark an entry as revoked (for certificate-based systems)
     pub fn revoke_host(&mut self, host: &str, key_type: &str, reason: &str) -> Result<(), KnownHostsError> {
-        for entry in self.entries.iter_mut() {
-            if self._host_matches_pattern(host, &entry.host_pattern) && entry.key_type == *key_type {
+        for entry in &mut self.entries {
+            if Self::_host_matches_pattern(host, &entry.host_pattern) && entry.key_type == *key_type {
                 entry.comment = Some(format!("@revoked {} ({})", reason, chrono::Utc::now()));
                 self.modified = true;
                 return Ok(());
@@ -535,19 +540,23 @@ impl KnownHostsManager {
         new_key_type: &str,
         new_public_key: &str,
     ) -> Result<(), KnownHostsError> {
-        let entries = self.find_entries_for_host(host);
+        // Pre-scan: collect patterns and keys to avoid borrowing conflicts
+        let matched_indices: Vec<usize> = self.entries.iter().enumerate()
+            .filter(|(_, e)| {
+                Self::_host_matches_pattern(host, &e.host_pattern)
+                    && Self::_fingerprints_match(&e.public_key, old_fingerprint)
+            })
+            .map(|(i, _)| i)
+            .collect();
 
-        if entries.is_empty() {
+        if matched_indices.is_empty() {
             return Err(KnownHostsError::HostNotFound {
-                host: host.to_string(),
+                host: format!("{} with fingerprint {}", host, old_fingerprint),
             });
         }
 
-        let mut rotated = false;
-        for entry in self.entries.iter_mut() {
-            if self._host_matches_pattern(host, &entry.host_pattern) &&
-               self._fingerprints_match(&entry.public_key, old_fingerprint) {
-                
+        for &idx in &matched_indices {
+            if let Some(entry) = self.entries.get_mut(idx) {
                 entry.key_type = new_key_type.to_string();
                 entry.public_key = new_public_key.to_string();
                 entry.last_verified = Some(chrono::Utc::now());
@@ -556,32 +565,28 @@ impl KnownHostsManager {
                     chrono::Utc::now().format("%Y-%m-%d"),
                     old_fingerprint
                 ));
-                
-                self.modified = true;
-                rotated = true;
             }
         }
 
-        if rotated {
-            Ok(())
-        } else {
-            Err(KnownHostsError::HostNotFound {
-                host: format!("{} with fingerprint {}", host, old_fingerprint),
-            })
-        }
+        self.modified = true;
+        Ok(())
     }
 
     /// Update last verified timestamp for all entries matching host
     pub fn mark_as_verified(&mut self, host: &str) -> Result<usize, KnownHostsError> {
-        let mut count = 0;
-        
-        for entry in self.entries.iter_mut() {
-            if self._host_matches_pattern(host, &entry.host_pattern) {
+        // Pre-scan: collect indices to avoid borrowing conflicts
+        let matched_indices: Vec<usize> = self.entries.iter().enumerate()
+            .filter(|(_, e)| Self::_host_matches_pattern(host, &e.host_pattern))
+            .map(|(i, _)| i)
+            .collect();
+
+        for &idx in &matched_indices {
+            if let Some(entry) = self.entries.get_mut(idx) {
                 entry.last_verified = Some(chrono::Utc::now());
-                count += 1;
             }
         }
 
+        let count = matched_indices.len();
         if count > 0 {
             self.modified = true;
         }
@@ -678,7 +683,7 @@ impl KnownHostsManager {
             (parts[0..3].join(" "), 3)
         } else if parts[0].starts_with('@') {
             // Special marker (@cert-authority, @revoked, etc.)
-            (parts[0], 2)  // Skip marker, next field is host
+            (parts[0].to_string(), 2)  // Skip marker, next field is host
         } else {
             // Plain format
             (parts[0].to_string(), 1)
@@ -727,14 +732,14 @@ impl KnownHostsManager {
         Ok(parts.join(" "))
     }
 
-    fn _host_matches_pattern(&self, host: &str, pattern: &str) -> bool {
+    fn _host_matches_pattern(host: &str, pattern: &str) -> bool {
         // Handle hashed format: |1|salt|hash
         if pattern.starts_with("|1|") {
             let parts: Vec<&str> = pattern.split('|').collect();
             if parts.len() >= 4 {
                 let salt = parts[2];
                 let expected_hash = parts[3];
-                let computed_hash = self._sha256_hmac(host, salt);
+                let computed_hash = Self::_sha256_hmac(host, salt);
                 return computed_hash == expected_hash;
             }
             return false;
@@ -742,7 +747,7 @@ impl KnownHostsManager {
 
         // Handle plain patterns (including wildcards)
         if pattern.contains('*') || pattern.contains('?') {
-            return self._glob_match(pattern, host);
+            return Self::_glob_match(pattern, host);
         }
 
         // Exact match
@@ -752,10 +757,10 @@ impl KnownHostsManager {
     fn _glob_match(pattern: &str, text: &str) -> bool {
         let pattern_chars: Vec<char> = pattern.chars().collect();
         let text_chars: Vec<char> = text.chars().collect();
-        self._match_glob_helper(&pattern_chars, &text_chars, 0, 0)
+        Self::_match_glob_helper(&pattern_chars, &text_chars, 0, 0)
     }
 
-    fn _match_glob_helper(&self, pattern: &[char], text: &[usize], p: usize, t: usize) -> bool {
+    fn _match_glob_helper(pattern: &[char], text: &[char], p: usize, t: usize) -> bool {
         if p == pattern.len() {
             return t == text.len();
         }
@@ -764,7 +769,7 @@ impl KnownHostsManager {
             '*' => {
                 // Try matching zero or more characters
                 for i in t..=text.len() {
-                    if self._match_glob_helper(pattern, text, p + 1, i) {
+                    if Self::_match_glob_helper(pattern, text, p + 1, i) {
                         return true;
                     }
                 }
@@ -772,14 +777,14 @@ impl KnownHostsManager {
             }
             '?' => {
                 if t < text.len() {
-                    self._match_glob_helper(pattern, text, p + 1, t + 1)
+                    Self::_match_glob_helper(pattern, text, p + 1, t + 1)
                 } else {
                     false
                 }
             }
             c => {
                 if t < text.len() && text[t] == c {
-                    self._match_glob_helper(pattern, text, p + 1, t + 1)
+                    Self::_match_glob_helper(pattern, text, p + 1, t + 1)
                 } else {
                     false
                 }
@@ -787,7 +792,7 @@ impl KnownHostsManager {
         }
     }
 
-    fn _fingerprints_match(&self, stored: &str, provided: &str) -> bool {
+    fn _fingerprints_match(stored: &str, provided: &str) -> bool {
         // Normalize fingerprints (remove colons, lowercase, trim)
         let normalize = |fp: &str| -> String {
             fp.replace(':', "").to_lowercase().trim().to_string()
@@ -796,7 +801,7 @@ impl KnownHostsManager {
         normalize(stored) == normalize(provided)
     }
 
-    fn _hash_hostname_sha256(&self, hostname: &str) -> (String, String) {
+    fn _hash_hostname_sha256(hostname: &str) -> (String, String) {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
@@ -812,7 +817,7 @@ impl KnownHostsManager {
         (salt, hash)
     }
 
-    fn _sha256_hmac(&self, data: &str, salt: &str) -> String {
+    fn _sha256_hmac(data: &str, salt: &str) -> String {
         let input = format!("{}{}", data, salt);
         let mut hasher = DefaultHasher::new();
         input.hash(&mut hasher);

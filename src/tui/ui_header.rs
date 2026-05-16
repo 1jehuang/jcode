@@ -384,10 +384,10 @@ pub(super) fn build_persistent_header(app: &dyn TuiState, width: u16) -> Vec<Lin
         status_items.push("dev");
     }
     if server_update {
-        status_items.push("srv↑");
+        status_items.push("srv^");
     }
     if client_update {
-        status_items.push("cli↑");
+        status_items.push("cli^");
     }
     if let Some(badge) = crate::perf::profile().tier.badge() {
         status_items.push(badge);

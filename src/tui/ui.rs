@@ -2281,7 +2281,7 @@ pub(crate) fn render_native_scrollbar(
             } else if row + 1 == thumb_offset + thumb_height {
                 "╵"
             } else {
-                "│"
+                "|"
             };
             (glyph, thumb_color)
         } else {

@@ -421,7 +421,7 @@ impl Tool for LspTool {
     }
 }
 
-// ─── Result formatting functions ──────────────────────
+// --- Result formatting functions ----------------------
 
 fn format_locations(locations: &[lsp_types::Location]) -> String {
     if locations.is_empty() {

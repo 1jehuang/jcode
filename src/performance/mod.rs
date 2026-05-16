@@ -7,7 +7,7 @@
 //! - Latency tracking
 //! - Resource monitoring
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -180,8 +180,6 @@ pub struct ThroughputCounter {
     window_duration: Duration,
     history: VecDeque<(Instant, u64)>,
 }
-
-use std::collections::VecDeque;
 
 impl ThroughputCounter {
     pub fn new(name: impl Into<String>, window_secs: u64) -> Self {

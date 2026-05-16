@@ -110,9 +110,9 @@ fn test_line_oriented_tool_transcript_softbreaks_are_preserved() {
         "✓ batch 3 calls\n",
         "  ✓ bash $ git status --short --branch\n",
         "  ✓ communicate list\n",
-        "┌─ diff\n",
-        "│ 810- Session(SessionInfo),\n",
-        "└─\n"
+        "+- diff\n",
+        "| 810- Session(SessionInfo),\n",
+        "+-\n"
     );
 
     let lines = render_markdown_with_width(md, Some(28));
@@ -139,7 +139,7 @@ fn test_line_oriented_tool_transcript_softbreaks_are_preserved() {
     assert!(
         rendered
             .iter()
-            .any(|line| line.trim_start().starts_with("┌─ diff")),
+            .any(|line| line.trim_start().starts_with("+- diff")),
         "expected diff box header to stay on its own line: {rendered:?}"
     );
     assert!(

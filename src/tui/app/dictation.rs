@@ -398,7 +398,7 @@ fn transcript_from_command_output(stdout: &str) -> Option<String> {
             continue;
         }
 
-        if let Some(translation) = line.strip_prefix('→').map(str::trim) {
+        if let Some(translation) = line.strip_prefix("->").map(str::trim) {
             if !translation.is_empty() {
                 if !lines.is_empty() {
                     lines.pop();
@@ -534,7 +534,7 @@ mod tests {
             "\x1b[2m[17:00:00]\x1b[0m \x1b[93m[EN]\x1b[0m \x1b[96mhello world\x1b[0m\n",
             "\x1b[2m[17:00:03]\x1b[0m \x1b[93m[ZH]\x1b[0m \x1b[92m你好\x1b[0m\n",
             "           \x1b[2m拼 nǐ hǎo\x1b[0m\n",
-            "           \x1b[3m\x1b[95m→ hello\x1b[0m\n",
+            "           \x1b[3m\x1b[95m-> hello\x1b[0m\n",
             "==================================================\n",
             "\x1b[96mTranscription stopped.\x1b[0m\n"
         );

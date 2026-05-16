@@ -23,11 +23,11 @@
 //! | 冷启动质量 | 0.5 (随机) | 0.72 (预训练) | **+44%** |
 //! | 特征利用率 | 60% | 95% | **+35%** |
 
-use crate::auto_mode::{ActionType, ToolContext};
+use jcode_tool_core::ToolContext;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-// ─── Constants ──────────────────────────────────────────
+// --- Constants ------------------------------------------
 
 /// 特征维度常量
 pub const FEATURE_DIM: usize = 20;
@@ -35,10 +35,10 @@ pub const FEATURE_DIM: usize = 20;
 /// 预训练嵌入维度
 pub const EMBEDDING_DIM: usize = 64;
 
-// ─── Feature Definitions (20-Dimensional) ─────────────
+// --- Feature Definitions (20-Dimensional) -------------
 
 /// 特征枚举 - 完整的20维特征空间
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EnhancedFeature {
     // === 基础操作特征 (0-4) ===
     /// 操作类型编码 (one-hot)
@@ -163,12 +163,12 @@ impl EnhancedFeature {
     }
 }
 
-// ─── Pretrained Embeddings (Cold Start Solution) ──────
+// --- Pretrained Embeddings (Cold Start Solution) ------
 
 /// 预训练嵌入层 - 为每个操作类型提供初始置信度估计
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PretrainedEmbeddingLayer {
-    /// 操作类型 → 嵌入向量
+    /// 操作类型 -> 嵌入向量
     type_embeddings: HashMap<String, Vec<f64>>,
     
     /// 全局偏置 (当无匹配时的默认估计)
@@ -263,7 +263,7 @@ impl PretrainedEmbeddingLayer {
     }
 }
 
-// ─── Adam Optimizer ─────────────────────────────────────
+// --- Adam Optimizer -------------------------------------
 
 /// Adam优化器 - 自适应学习率优化算法
 /// 
@@ -372,7 +372,7 @@ impl AdamOptimizer {
     }
 }
 
-// ─── Feature Selector (Online Feature Selection) ─────
+// --- Feature Selector (Online Feature Selection) -----
 
 /// 在线特征选择器 - 自动识别并移除无效特征
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -424,7 +424,7 @@ impl OnlineFeatureSelector {
         
         // 如果特征值极端(接近0或1)且结果一致，提高重要性
         if (value < 0.1 || value > 0.9) && !outcome {
-            // 极端值与负面结果相关 → 该特征有判别力
+            // 极端值与负面结果相关 -> 该特征有判别力
             let new_importance = (current_importance * 0.9) + 0.05;
             self.feature_importance.insert(feature_name.to_string(), new_importance);
         } else if (0.3 <= value && value <= 0.7) && outcome {
@@ -442,7 +442,7 @@ impl OnlineFeatureSelector {
     pub fn select_important_features(&self) -> Vec<String> {
         self.feature_importance
             .iter()
-            .filter(|(name, &importance)| {
+            .filter(|(name, importance)| {
                 // 未达最小观察次数的特征暂时保留
                 let usage = self.feature_usage_count.get(name.as_str()).copied().unwrap_or(0);
                 if usage < self.min_observations {
@@ -450,7 +450,7 @@ impl OnlineFeatureSelector {
                 }
                 
                 // 重要度高于阈值的保留
-                *importance > self.removal_threshold &&
+                importance > self.removal_threshold &&
                 !self.disabled_features.contains(name)
             })
             .map(|(name, _)| name.clone())
@@ -458,7 +458,7 @@ impl OnlineFeatureSelector {
     }
     
     /// 获取特征重要性排名
-    pub fn get_feature_ranking(&self) -> Vec<(String, f64)> {
+    pub fn get_feature_ranking(&self) -> Vec<String, f64> {
         let mut ranked: Vec<_> = self.feature_importance.iter().collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
         ranked
@@ -477,10 +477,10 @@ impl OnlineFeatureSelector {
     }
 }
 
-// ─── Multi-Task Learning Heads ───────────────────────
+// --- Multi-Task Learning Heads -----------------------
 
 /// 任务类型 (用于多任务学习)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TaskType {
     /// 文件操作 (读写编辑)
     FileOperation,
@@ -581,7 +581,7 @@ impl MultiTaskHeads {
     }
 }
 
-// ─── Enhanced Confidence Model (v2.0) ──────────────────
+// --- Enhanced Confidence Model (v2.0) ------------------
 
 /// 增强版置信度模型
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -639,6 +639,7 @@ impl Default for EnhancedConfig {
             cold_start_threshold: 100,
             min_confidence: 0.15,
             max_confidence: 0.98,
+            temperature: 1.0,
         }
     }
 }
@@ -734,9 +735,9 @@ impl EnhancedConfidenceModel {
     }
     
     /// 提取20维增强特征
-    fn extract_enhanced_features(&self, action_type: &str, context: &ToolContext) -> Vec<f64> {
+    fn extract_enhanced_features(&mut self, action_type: &str, context: &ToolContext) -> Vec<f64> {
         // 尝试从缓存获取
-        let cache_key = format!("{}_{}", action_type, context.working_dir.map(|p| p.display().to_string()).unwrap_or_default());
+        let cache_key = format!("{}_{}", action_type, context.working_dir.as_ref().map(|p| p.display().to_string()).unwrap_or_default());
         if let Some(cached) = self.feature_cache.get(&cache_key) {
             return cached.clone();
         }
@@ -801,38 +802,38 @@ impl EnhancedConfidenceModel {
     }
     
     fn check_in_project_root(&self, context: &ToolContext) -> f64 {
-        context.working_dir.map(|_| 1.0).unwrap_or(0.5)
+        context.working_dir.as_ref().map(|_| 1.0).unwrap_or(0.5)
     }
     
-    fn check_gitignore(&_context: &ToolContext) -> f64 {
+    fn check_gitignore(&self, _context: &ToolContext) -> f64 {
         0.0 // 简化实现
     }
     
-    fn check_file_exists(&_context: &ToolContext) -> f64 {
+    fn check_file_exists(&self, _context: &ToolContext) -> f64 {
         0.5 // 未知
     }
     
-    fn estimate_file_size(&_context: &ToolContext) -> f64 {
+    fn estimate_file_size(&self, _context: &ToolContext) -> f64 {
         0.5 // 中等大小
     }
     
-    fn estimate_file_recency(&_context: &ToolContext) -> f64 {
+    fn estimate_file_recency(&self, _context: &ToolContext) -> f64 {
         0.7 // 较近时间
     }
     
-    fn check_main_branch(&_context: &ToolContext) -> f64 {
+    fn check_main_branch(&self, _context: &ToolContext) -> f64 {
         0.5 // 未知
     }
     
-    fn check_clean_working_tree(&_context: &ToolContext) -> f64 {
+    fn check_clean_working_tree(&self, _context: &ToolContext) -> f64 {
         0.5 // 未知
     }
     
-    fn estimate_commit_activity(&_context: &ToolContext) -> f64 {
+    fn estimate_commit_activity(&self, _context: &ToolContext) -> f64 {
         0.5 // 中等活动
     }
     
-    fn estimate_session_duration(&self, context: &ToolContext) -> f64 {
+    fn estimate_session_duration(&self, _context: &ToolContext) -> f64 {
         use std::time::SystemTime;
         let session_start = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -933,7 +934,7 @@ impl EnhancedConfidenceModel {
     }
     
     /// 获取特征重要性排名
-    pub fn get_feature_importance(&self) -> Vec<(String, f64)> {
+    pub fn get_feature_importance(&self) -> Vec<String, f64> {
         self.feature_selector.get_feature_ranking()
     }
     
@@ -943,7 +944,7 @@ impl EnhancedConfidenceModel {
     }
 }
 
-// ─── Tests ──────────────────────────────────────────────
+// --- Tests ----------------------------------------------
 
 #[cfg(test)]
 mod tests {

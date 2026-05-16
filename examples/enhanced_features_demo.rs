@@ -249,7 +249,7 @@ async fn example_fast_mode() {
     let registry = init_extended_commands().await;
     let ctx = CommandContext::default();
 
-    // Cycle through modes: Normal → Fast → Turbo → Normal
+    // Cycle through modes: Normal -> Fast -> Turbo -> Normal
     for _ in 0..4 {
         match registry.execute_command("fast", &ctx, None).await {
             Ok(result) => {
@@ -488,7 +488,7 @@ async fn example_appstate_observer() {
 
     // Subscribe to changes
     manager.subscribe(|old_state, new_state| {
-        println!("State changed: v{} → v{}", old_state.version, new_state.version);
+        println!("State changed: v{} -> v{}", old_state.version, new_state.version);
     }).await;
 
     // Subscribe via broadcast channel
@@ -525,35 +525,35 @@ async fn main() {
     
     // 1. MCP Examples
     example_mcp_connect_with_retry().await;
-    println!("\n" + &"─".repeat(60) + "\n");
+    println!("\n" + &"-".repeat(60) + "\n");
     
     // 2. LSP Examples
     example_lsp_lifecycle().await;
-    println!("\n" + &"─".repeat(60) + "\n");
+    println!("\n" + &"-".repeat(60) + "\n");
     
     // 3. Extended Commands
     example_btw_command().await;
-    println!("\n" + &"─".repeat(60) + "\n");
+    println!("\n" + &"-".repeat(60) + "\n");
     
     example_fast_mode().await;
-    println!("\n" + &"─".repeat(60) + "\n");
+    println!("\n" + &"-".repeat(60) + "\n");
     
     // 4. Skills System
     example_loop_skill().await;
-    println!("\n" + &"─".repeat(60) + "\n");
+    println!("\n" + &"-".repeat(60) + "\n");
     
     example_verify_skill().await;
-    println!("\n" + &"─".repeat(60) + "\n");
+    println!("\n" + &"-".repeat(60) + "\n");
     
     example_simplify_skill().await;
-    println!("\n" + &"─".repeat(60) + "\n");
+    println!("\n" + &"-".repeat(60) + "\n");
     
     // 5. AppState Management
     example_appstate_basic().await;
-    println!("\n" + &"─".repeat(60) + "\n");
+    println!("\n" + &"-".repeat(60) + "\n");
     
     example_appstate_persistence().await;
-    println!("\n" + &"─".repeat(60) + "\n");
+    println!("\n" + &"-".repeat(60) + "\n");
     
     println!("✅ All examples completed successfully!");
 }

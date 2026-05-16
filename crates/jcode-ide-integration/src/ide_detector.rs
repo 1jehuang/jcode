@@ -1,7 +1,7 @@
 //! IDE 检测器 - Lockfile 服务发现协议
 //!
 //! 移植自 Claude Code `src/utils/ide.ts`:
-//! - `detectIDEs()` → 扫描 lockfile 目录
+//! - `detectIDEs()` -> 扫描 lockfile 目录
 //! - PID 祖先级检查
 //! - WSL/Windows 路径转换
 //! - IDE 自动发现与连接
@@ -48,9 +48,9 @@ impl Default for IdeDetectorConfig {
 /// Claude Code 使用 Lockfile 协议实现 IDE 自动发现:
 /// ```text
 /// ~/.claude/ide/
-/// ├── 12345.lock          # 格式: {port}.lock
-/// ├── 12346.lock
-/// └── ...
+/// +-- 12345.lock          # 格式: {port}.lock
+/// +-- 12346.lock
+/// +-- ...
 ///
 /// 每个 .lock 文件内容:
 /// {"workspaceFolders": ["/path"], "pid": 12345, "ideName": "Cursor", ...}
@@ -238,12 +238,12 @@ impl IdeDetector {
             .with_context(|| format!("Invalid port number in lockfile: {}", filename))
     }
 
-    /// WSL → Windows 路径转换
+    /// WSL -> Windows 路径转换
     /// 移植自 Claude Code `src/utils/idePathConversion.ts`: WindowsToWSLConverter
     ///
     /// 示例:
-    /// - `/mnt/c/Users/user/project` → `C:\Users\user\project`
-    /// - `/home/user/project` → `\\wsl$\Ubuntu\home\user\project` (反向)
+    /// - `/mnt/c/Users/user/project` -> `C:\Users\user\project`
+    /// - `/home/user/project` -> `\\wsl$\Ubuntu\home\user\project` (反向)
     #[cfg(target_os = "linux")]
     fn convert_wsl_to_windows_path(wsl_path: &str) -> String {
         use std::path::Component;
@@ -265,7 +265,7 @@ impl IdeDetector {
         path.to_string()
     }
 
-    /// Windows → WSL 路径转换 (反向)
+    /// Windows -> WSL 路径转换 (反向)
     /// 用于将 Windows 路径转换为 Linux 路径以便在 WSL 中使用
     #[cfg(target_os = "linux")]
     pub fn convert_windows_to_wsl_path(win_path: &str) -> String {

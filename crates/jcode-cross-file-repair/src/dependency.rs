@@ -107,7 +107,7 @@ impl DependencyAnalyzer {
             }
 
             // Extract extends dependencies (TypeScript/Java/Python)
-            if matches!(ext, "ts" | "tsx" | "js" | "java" | "py") {
+            if matches!(ext.as_str(), "ts" | "tsx" | "js" | "java" | "py") {
                 let extends_deps = self.extract_extends_dependencies(content, ext);
                 for parent_class in extends_deps {
                     edges.push(DependencyEdge {

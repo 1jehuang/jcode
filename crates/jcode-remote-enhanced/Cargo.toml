@@ -24,7 +24,7 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = ["c
 uuid = { version = "1", features = ["v4", "v7"] }
 anyhow = "1"
 thiserror = "1"
-tracing = "1"
+tracing = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
 sha2 = "0.10"

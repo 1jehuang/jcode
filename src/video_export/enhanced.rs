@@ -635,6 +635,7 @@ pub struct GifExportConfig {
     pub quality: GifQuality,
     pub dithering: DitheringMethod,
     pub loop_count: Option<u16>,
+    pub optimize: bool,
 }
 
 impl Default for GifExportConfig {
@@ -647,6 +648,7 @@ impl Default for GifExportConfig {
             quality: GifQuality::High,
             dithering: DitheringMethod::None,
             loop_count: Some(0),
+            optimize: true,
         }
     }
 }
@@ -752,6 +754,9 @@ impl CursorTrace {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RgbaColor { pub r: u8, pub g: u8, pub b: u8, pub a: u8 }
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Position { pub line: u16, pub column: u16 }
 
 #[cfg(test)]
 mod tests {

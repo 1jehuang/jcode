@@ -1,11 +1,11 @@
-//! **层分配器 (Phase 1)** — 移植自 Parallax `layer_allocation.py`
+﻿//! **层分配器 (Phase 1)** — 移植自 Parallax `layer_allocation.py`
 //!
 //! ## 算法概述
 //!
 //! Phase 1 负责将 LLM 的 Transformer 层**静态/半静态地**分配到异构 GPU 集群。
 //!
 //! ### 支持的策略:
-//! 1. **Greedy (贪心)**: 优先构建长流水线 → 最少阶段数
+//! 1. **Greedy (贪心)**: 优先构建长流水线 -> 最少阶段数
 //! 2. **Dynamic Programming (动态规划)**: 平衡流水线数(并发)与阶段数(延迟)
 //!
 //! ### 核心算法 — Water-Filling (注水法):
@@ -13,19 +13,20 @@
 //! 受限于每节点的容量上限 \(l_i \leq C_i\)。通过二分搜索求解 \(\lambda\)。
 //!
 //! ```text
-//! 求解: sum_i min(C_i, λ * P_i) = L_total  →  二分 λ ∈ [0, max(C_i/P_i)]
+//! 求解: sum_i min(C_i, λ * P_i) = L_total  ->  二分 λ ∈ [0, max(C_i/P_i)]
 //! ```
 
-use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::cmp::{Ordering, Reverse};
-use super::types::*;
-use super::SchedulerError;
+use super::*;
+use std::collections::{HashSet};
+use std::cmp::Ordering;
+use tracing::{info, debug, warn};
 
 // ============================================================================
 // 层分配器主结构体
 // ============================================================================
 
 /// 层分配器 — Parallax Phase 1 实现
+#[derive(Debug)]
 pub struct LayerAllocator {
     /// 总模型层数 (如 Llama-3-70B = 80 层, Qwen3-35B-A3B = 40 层等)
     total_layers: u32,
@@ -461,7 +462,7 @@ impl LayerAllocator {
             if s_star < f64::INFINITY {
                 let score = (k_target * k_target) as f64 / s_star;
                 debug!(
-                    "[DP] k={} → s*={}, score={:.2}",
+                    "[DP] k={} -> s*={}, score={:.2}",
                     k_target, s_star, score
                 );
                 if score > best_score {
@@ -539,7 +540,7 @@ impl LayerAllocator {
 
             // 剪枝条件
             let new_needed = k_target.saturating_sub(finished) - open_residuals.len();
-            let need_open: i64 = open_residuals.iter().copied().sum();
+            let need_open: i64 = open_residuals.iter().map(|&x| x as i64).sum();
             let remaining_cap = suffix_sum[i];
             if new_needed < 0
                 || remaining_cap < (need_open.max(0) as usize + new_needed.max(0) as usize * L)
@@ -561,7 +562,7 @@ impl LayerAllocator {
                 if r_after <= 0 {
                     // 尝试关闭 (加上 LM Head)
                     let cap_close = allocator.estimate_node_capacity(&allocator.active_nodes[i], /*lm_head=*/ false) as i64;
-                    let r_after_close = open_residuals[j] - cap_close;
+                    let r_after_close = open_residuals[j] - cap_close as i32;
 
                     if r_after_close <= 0 {
                         let mut new_open = open_residuals.clone();
@@ -606,7 +607,7 @@ impl LayerAllocator {
                     }
                 } else {
                     let mut new_open = open_residuals.clone();
-                    new_open.push(r_new);
+                    new_open.push(r_new as i32);
                     new_open.sort();
                     let cost = 1.0 + solve(i + 1, new_open, finished, k_target, n, L, suffix_sum, allocator, memo);
                     if cost < best {
@@ -620,7 +621,7 @@ impl LayerAllocator {
             best
         }
 
-        solve(0, vec![], 0, k_target, n, L, suffix_sum, self, &mut memo)?;
+        let _solved = solve(0, vec![], 0, k_target, n, L, suffix_sum, self, &mut memo);
         Ok(memo)
     }
 
@@ -638,12 +639,12 @@ impl LayerAllocator {
 
         while i < n && finished < best_k {
             let key = ({
-                let mut ol: Vec<i32> = open_list.iter().map(|(r, _)| *r).collect();
+                let mut ol: Vec<i64> = open_list.iter().map(|(r, _)| *r).collect();
                 ol.sort();
                 ol
             }, finished);
 
-            let action = path.get(&(i, key.0, key.1));
+            let action = path.get(&(i, key.0.clone().into_iter().map(|x| x as i32).collect::<Vec<i32>>(), key.1));
 
             match action.map(|a| a.kind.clone()) {
                 Some(DpActionKind::Done) | Some(DpActionKind::Skip) => {
@@ -672,11 +673,11 @@ impl LayerAllocator {
                             finished += 1;
                         }
                     } else {
-                        open_list.push((L as i64, vec![node]));
+                        open_list.push((i as i64, vec![node]));
                     }
                     i += 1;
                 }
-                None | Some(_) => {
+                None => {
                     i += 1; // 未知动作, 跳过
                 }
             }
@@ -754,7 +755,7 @@ impl LayerAllocator {
         // 4. 整数化 (floor) + 余数分配
         let mut stage_counts: Vec<u32> = target.iter().map(|t| t.floor() as u32).collect();
         let assigned: u32 = stage_counts.iter().sum();
-        let mut remaining = L.saturating_sub(assigned as u32) as i32;
+        let mut remaining = (L as usize).saturating_sub(assigned as usize) as i32;
 
         if remaining > 0 {
             // 按小数部分降序分配余数
@@ -787,7 +788,7 @@ impl LayerAllocator {
         let extra = stage_counts
             .iter()
             .zip(caps.iter())
-            .filter(|(&s, &c)| s > *c)
+            .filter(|&(&s, &c)| s > c)
             .count();
         if extra > 0 {
             // 强制截断到容量上限
@@ -816,7 +817,7 @@ impl LayerAllocator {
 
             // 注意: 实际的 NodeInfo.start_layer/end_layer 更新由外部协调
             debug!(
-                "  节点 {} → layers [{}, {}) = {} layers",
+                "  节点 {} -> layers [{}, {}) = {} layers",
                 idx, start_layer, end_layer, count
             );
             start_layer = end_layer;
@@ -852,7 +853,7 @@ impl LayerAllocator {
         let pipe = self
             .pipelines
             .get(pipeline_idx)
-            .ok_or(SchedulerError::Internal(format!("Pipeline {} 不存在", pipeline_idx)))?;
+            .ok_or(SchedulerError::AllocationFailed(format!("Pipeline {} 不存在", pipeline_idx)))?;
 
         pipe.node_ids
             .iter()
@@ -1088,7 +1089,7 @@ mod tests {
 
         // 分配完成后不应需要
         allocator.allocate_from_standby(&node_refs, 12).unwrap();
-        // 分配后有完整 pipeline, 负载均衡 → 不需要重平衡
+        // 分配后有完整 pipeline, 负载均衡 -> 不需要重平衡
     }
 
     #[test]

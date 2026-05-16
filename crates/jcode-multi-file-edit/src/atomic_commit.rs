@@ -23,7 +23,7 @@ pub struct CommitStats {
 
 impl CommitResult {
     pub fn new(diff: UnifiedDiff, processed: Vec<ProcessedFile>) -> Self {
-        let success = processed.iter().all(|p| !p.new_content.is_empty() || p.path.exists());
+        let success = processed.iter().all(|p| !p.new_content.is_empty() || std::path::Path::new(&p.path).exists());
         let stats = CommitStats {
             files_modified: processed.len(),
             total_additions: diff.total_additions,
@@ -95,7 +95,7 @@ impl AtomicCommit {
 
         for pf in &result.processed_files {
             let target = &pf.path;
-            let temp_path = self.temp_path(target);
+            let temp_path = self.temp_path(target.as_ref());
 
             // Write to temp file
             if let Some(parent) = temp_path.parent() {
@@ -104,7 +104,7 @@ impl AtomicCommit {
 
             match tokio::fs::write(&temp_path, &pf.new_content).await {
                 Ok(_) => {
-                    temp_paths.push((temp_path, target.clone()));
+                    temp_paths.push((temp_path, target.clone().into()));
                 }
                 Err(e) => {
                     // Phase 1 failed — cleanup all temp files
@@ -150,7 +150,7 @@ impl AtomicCommit {
 
         use tokio::io::AsyncWriteExt;
         for pf in &result.processed_files {
-            if let Some(parent) = pf.path.parent() {
+            if let Some(parent) = std::path::Path::new(&pf.path).parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
             let mut file = tokio::fs::File::create(&pf.path).await?;

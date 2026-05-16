@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use std::io::{BufRead, Read, Write};
 use std::sync::Arc;
 
-// ─── Configuration ─────────────────────────────────────────────
+// --- Configuration ---------------------------------------------
 
 /// MCP server configuration
 #[derive(Debug, Clone)]
@@ -49,7 +49,7 @@ impl Default for McpServerConfig {
     }
 }
 
-// ─── Server ────────────────────────────────────────────────────
+// --- Server ----------------------------------------------------
 
 /// MCP Server — reads JSON-RPC from stdin, dispatches, writes to stdout.
 /// Supports RFC-compliant Content-Length framing.
@@ -240,7 +240,7 @@ impl McpServer {
         }
     }
 
-    // ─── Dynamic Tool Registration Methods ─────────────
+    // --- Dynamic Tool Registration Methods -------------
 
     /// Handle tools/register - Register a new dynamic tool
     async fn handle_tool_register(&self, id: Option<&Value>, params: Option<&Value>) -> String {
@@ -404,7 +404,7 @@ impl McpServer {
     }
 }
 
-// ─── NoopProvider (for MCP Server mode without LLM) ─────────────
+// --- NoopProvider (for MCP Server mode without LLM) -------------
 
 struct NoopProvider;
 
@@ -424,7 +424,7 @@ pub fn noop_provider() -> Arc<dyn crate::provider::Provider> {
     Arc::new(NoopProvider)
 }
 
-// ─── Legacy API (backward compatible) ──────────────────────────
+// --- Legacy API (backward compatible) --------------------------
 
 /// Start the MCP server: read JSON-RPC from stdin with Content-Length framing.
 /// This is the entry point used by the CLI: `carpai mcp serve`
@@ -435,7 +435,7 @@ pub async fn serve() -> Result<()> {
     server.serve().await
 }
 
-// ─── Protocol helpers ──────────────────────────────────────────
+// --- Protocol helpers ------------------------------------------
 
 /// Read Content-Length header from stdin.
 /// Returns `Ok(Some(length))` on success, `Ok(None)` on EOF.

@@ -522,7 +522,7 @@ impl EnhancedScp {
     // Private Implementation
     // ==========================================
 
-    fn _build_scp_args(&self, is_upload: bool) -> Vec<String> {
+    fn _build_scp_args(&self, _is_upload: bool) -> Vec<String> {
         let mut args = vec![];
 
         // Basic options
@@ -776,7 +776,7 @@ impl EnhancedScp {
             Err(ScpError::RemoteOperationFailed {
                 operation: "mkdir".to_string(),
                 path: remote_path.to_path_buf(),
-                message: String::from_utf8_lossy(&output.stderr),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
             })
         } else {
             Ok(())
@@ -804,7 +804,7 @@ impl EnhancedScp {
             return Err(ScpError::RemoteOperationFailed {
                 operation: "list".to_string(),
                 path: remote_dir.to_path_buf(),
-                message: String::from_utf8_lossy(&output.stderr),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
             });
         }
 
@@ -816,7 +816,7 @@ impl EnhancedScp {
             let full_path = PathBuf::from(line.trim());
             
             if let Ok(relative) = full_path.strip_prefix(base_path) {
-                files.push((full_path, relative.to_path_buf()));
+                files.push((full_path.clone(), relative.to_path_buf()));
             }
         }
 
@@ -880,7 +880,7 @@ impl EnhancedScp {
             Err(ScpError::RemoteOperationFailed {
                 operation: "checksum".to_string(),
                 path: remote_path.to_path_buf(),
-                message: String::from_utf8_lossy(&output.stderr),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
             })
         }
     }

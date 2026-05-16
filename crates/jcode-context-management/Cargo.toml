@@ -8,7 +8,7 @@ license.workspace = true
 
 [dependencies]
 # Async
-tokio = { workspace = true, features ["full"] }
+tokio = { workspace = true, features = ["full"] }
 async-trait = "0.1"
 
 # Serialization
@@ -32,8 +32,8 @@ parking_lot = "0.12"
 tracing = { workspace = true }
 
 # Internal crates
-jcode-types = { path = "../jcode-types" }
 jcode-provider-core = { path = "../jcode-provider-core" }
+jcode-types = { path = "../jcode-types" }
 
 [dev-dependencies]
 tokio-test = "0.4"

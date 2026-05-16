@@ -205,7 +205,7 @@ async fn test_force_compact_applies_summary() {
     }
 }
 
-// ── ensure_context_fits tests ──────────────────────────────
+// -- ensure_context_fits tests ------------------------------
 
 #[tokio::test]
 async fn test_guard_below_80_does_nothing() {
@@ -328,7 +328,7 @@ async fn test_guard_at_100_percent_drops_messages() {
     }
 }
 
-// ── hard_compact_with edge cases ────────────────────────────────
+// -- hard_compact_with edge cases --------------------------------
 
 #[test]
 fn test_hard_compact_too_few_messages() {
@@ -375,7 +375,7 @@ fn test_hard_compact_preserves_recent_turns() {
     );
 }
 
-// ── safe_compaction_cutoff: tool call/result pair integrity ─────────
+// -- safe_compaction_cutoff: tool call/result pair integrity ---------
 
 #[test]
 fn test_safe_cutoff_preserves_tool_pairs() {
@@ -481,7 +481,7 @@ fn test_safe_cutoff_handles_chained_tool_dependencies_without_rescan() {
     );
 }
 
-// ── emergency_truncate_with ─────────────────────────────────────
+// -- emergency_truncate_with -------------------------------------
 
 #[test]
 fn test_emergency_truncate_large_tool_results() {
@@ -552,7 +552,7 @@ fn test_emergency_truncate_skips_small_results() {
     assert_eq!(truncated, 0, "should not truncate small results");
 }
 
-// ── Double compaction ───────────────────────────────────────────
+// -- Double compaction -------------------------------------------
 
 #[test]
 fn test_hard_compact_twice() {
@@ -605,7 +605,7 @@ fn test_hard_compact_twice() {
     }
 }
 
-// ── messages_for_api_with after compaction ──────────────────────
+// -- messages_for_api_with after compaction ----------------------
 
 #[test]
 fn test_messages_for_api_with_summary_prepended() {
@@ -670,7 +670,7 @@ fn test_persisted_state_round_trip_preserves_compacted_view() {
     }
 }
 
-// ── context_usage accuracy ──────────────────────────────────────
+// -- context_usage accuracy --------------------------------------
 
 #[test]
 fn test_context_usage_with_both_estimate_and_observed() {

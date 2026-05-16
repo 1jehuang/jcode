@@ -810,11 +810,11 @@ fn save_openai_compat_setting(app: &mut App, setting: OpenAiCompatSetting, value
     }
     crate::auth::AuthStatus::invalidate_cache();
     let label = match setting {
-        OpenAiCompatSetting::ApiBase => format!("API base → {}", new.api_base),
-        OpenAiCompatSetting::ApiKeyName => format!("API key variable → {}", new.api_key_env),
-        OpenAiCompatSetting::EnvFile => format!("Env file → {}", new.env_file),
+        OpenAiCompatSetting::ApiBase => format!("API base -> {}", new.api_base),
+        OpenAiCompatSetting::ApiKeyName => format!("API key variable -> {}", new.api_key_env),
+        OpenAiCompatSetting::EnvFile => format!("Env file -> {}", new.env_file),
         OpenAiCompatSetting::DefaultModel => format!(
-            "Default model hint → {}",
+            "Default model hint -> {}",
             new.default_model.as_deref().unwrap_or("(unset)")
         ),
     };

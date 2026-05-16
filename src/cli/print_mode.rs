@@ -11,9 +11,12 @@
 //! ```
 
 use anyhow::Result;
+use futures::StreamExt;
 use std::io::{self, Read};
 
 use crate::agent::Agent;
+use crate::cli::provider_init::{init_provider_and_registry, ProviderChoice};
+use crate::message::StreamEvent;
 
 /// Print模式配置
 #[derive(Debug, Clone)]
@@ -41,6 +44,9 @@ pub struct PrintModeConfig {
     
     /// 温度参数
     pub temperature: Option<f64>,
+
+    /// 提供商选择
+    pub provider_choice: Option<ProviderChoice>,
 }
 
 impl Default for PrintModeConfig {
@@ -54,6 +60,7 @@ impl Default for PrintModeConfig {
             model: None,
             max_tokens: None,
             temperature: None,
+            provider_choice: None,
         }
     }
 }
@@ -87,8 +94,12 @@ pub async fn run_print_mode(config: PrintModeConfig) -> Result<()> {
         eprintln!();
     }
     
-    // 4. 创建Agent并执行查询
-    let mut agent = Agent::new()?;
+    // 4. 初始化Provider和Registry
+    let provider_choice = config.provider_choice.as_ref().unwrap_or(&ProviderChoice::Jcode);
+    let (provider, registry) = init_provider_and_registry(provider_choice, config.model.as_deref()).await?;
+    
+    // 5. 创建Agent并执行查询
+    let mut agent = Agent::new(provider, registry);
     
     // 应用配置
     if let Some(cwd) = &config.cwd {
@@ -136,7 +147,7 @@ pub async fn run_print_mode(config: PrintModeConfig) -> Result<()> {
 /// 读取管道输入 (如果有)
 fn read_piped_input() -> Option<String> {
     // 检查stdin是否是终端 (如果不是说明有管道输入)
-    if atty::is(atty::Stream::Stdin) {
+    if std::io::stdin().is_terminal() {
         return None;
     }
     

@@ -5,17 +5,17 @@
 //!
 //! ```text
 //! AI Repair Suggestion
-//!       ↓
-//! DependencyAnalyzer  ──→  identifies all affected files
-//!       ↓
-//! ASTAdapter (per language)  ──→ parse → edit → validate
-//!       ↓
-//! ParallelFileProcessor  ──→ tokio::join! on all files
-//!       ↓
-//! TypeChecker (rustc bridge)  ──→ compile check
-//!       ↓
-//! SelfCorrectionLoop  ──→ if errors: re-prompt AI with errors
-//!       ↓
+//!       v
+//! DependencyAnalyzer  --->  identifies all affected files
+//!       v
+//! ASTAdapter (per language)  ---> parse -> edit -> validate
+//!       v
+//! ParallelFileProcessor  ---> tokio::join! on all files
+//!       v
+//! TypeChecker (rustc bridge)  ---> compile check
+//!       v
+//! SelfCorrectionLoop  ---> if errors: re-prompt AI with errors
+//!       v
 //! Final validated changes
 //! ```
 
@@ -30,7 +30,7 @@ pub mod bridge;
 pub use ast::{AstAdapter, AstNode, LanguageKind, AstEdit, AstEditOp, TreeSitterAstAdapter};
 pub use dependency::{DependencyAnalyzer, DependencyGraph, DependencyEdge, DepKind};
 pub use type_checker::TypeChecker;
-pub use self_correction::{SelfCorrectionLoop, CorrectionIteration, Fix, FixType, AiFixRequest};
+pub use self_correction::{SelfCorrectionLoop, CorrectionIteration, Fix, FixType, AiFixRequest, AiFixProvider};
 pub use file_processor::CrossFileProcessor;
 pub use error_detector::{ErrorDetector, CodeError, MismatchDirection};
 pub use bridge::EditBridge;

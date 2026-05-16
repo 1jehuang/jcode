@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "Cross-file repair engine — unified AST, dependency analysis, type-checking self-correction loop"
 
+[features]
+default = []
+lsp-bridge = ["jcode-lsp", "lsp-types"]
+multi-lang = ["tree-sitter-typescript", "tree-sitter-python", "tree-sitter-go"]
+
 [dependencies]
 tokio = { workspace = true, features = ["sync", "process", "fs", "rt", "macros"] }
 serde = { workspace = true, features = ["derive"] }
@@ -18,9 +23,14 @@ futures = "0.3"
 async-trait = "0.1"
 jcode-plan = { path = "../jcode-plan" }
 jcode-multi-file-edit = { path = "../jcode-multi-file-edit" }
+jcode-lsp = { path = "../jcode-lsp", optional = true }
+lsp-types = { workspace = true, optional = true }
 # Real tree-sitter for AST analysis
 tree-sitter = "0.24"
 tree-sitter-rust = "0.23"
+tree-sitter-typescript = { version = "0.23", optional = true }
+tree-sitter-python = { version = "0.23", optional = true }
+tree-sitter-go = { version = "0.23", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
 use std::fs;
 use std::io::Write;
+use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
 
@@ -513,6 +514,13 @@ impl SshAuditLogger {
                     .map_err(|e| format!("JSON serialization failed: {}", e))?
             }
             LogFormat::Text => {
+                let event_type_str = match &event.event_type {
+                    SshEventType::Custom(s) => s.as_str(),
+                    other => {
+                        let formatted = format!("{:?}", other);
+                        Box::leak(formatted.into_boxed_str())
+                    }
+                };
                 format!(
                     "[{}] [{}] {} - {} | User: {} | Host: {} | {}",
                     event.timestamp.format("%Y-%m-%dT%H:%M:%SZ"),
@@ -522,10 +530,7 @@ impl SshAuditLogger {
                         EventSeverity::Error => "ERROR",
                         EventSeverity::Critical => "CRIT",
                     },
-                    match &event.event_type {
-                        SshEventType::Custom(s) => s.as_str(),
-                        other => format!("{:?}", other).as_str(),
-                    },
+                    event_type_str,
                     event.details.description,
                     event.user.as_deref().unwrap_or("-"),
                     event.host.as_deref().unwrap_or("-"),

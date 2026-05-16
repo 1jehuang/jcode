@@ -1,6 +1,6 @@
 //! # TaskScheduler — 任务调度层
 //!
-//! 任务分解 → 依赖解析(DAG) → 任务执行 → 超时管理 → 重试 → 结果收集
+//! 任务分解 -> 依赖解析(DAG) -> 任务执行 -> 超时管理 -> 重试 -> 结果收集
 
 use crate::error::{BuildEngineError, Result};
 use crate::types::*;

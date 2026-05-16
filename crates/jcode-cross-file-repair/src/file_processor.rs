@@ -1,9 +1,11 @@
 use crate::ast::{AstAdapter, AstEdit, LanguageKind};
+use crate::bridge::EditBridge;
 use crate::dependency::DependencyGraph;
-use futures::future::join_all;
+use jcode_multi_file_edit::MultiFileEngine;
 use std::path::Path;
 use std::sync::Arc;
 
+#[allow(dead_code)]
 pub struct CrossFileProcessor<A: AstAdapter> {
     ast_adapter: Arc<A>,
 }
@@ -16,6 +18,7 @@ impl<A: AstAdapter> CrossFileProcessor<A> {
         edits: Vec<AstEdit>,
         deps: &DependencyGraph,
     ) -> anyhow::Result<Vec<AstEdit>> {
+        // Step 1: Expand edits to include affected files
         let mut expanded = edits;
         let mut added = true;
         while added {
@@ -24,10 +27,11 @@ impl<A: AstAdapter> CrossFileProcessor<A> {
             for edit in &current {
                 let affected = deps.affected_files(&edit.file_path);
                 for file in affected {
-                    if !expanded.iter().any(|e| e.file_path == file) {
-                        let file_clone = file.clone();
+                    let file_check = file.clone();
+                    if !expanded.iter().any(|e| e.file_path == file_check) {
+                        let file_path = file.clone();
                         expanded.push(AstEdit {
-                            file_path: file_clone,
+                            file_path,
                             language: LanguageKind::from_path(Path::new(&file)),
                             operations: vec![],
                         });
@@ -37,18 +41,17 @@ impl<A: AstAdapter> CrossFileProcessor<A> {
             }
         }
 
-        let futures: Vec<_> = expanded.iter().map(|edit| {
-            let file_path = edit.file_path.clone();
-            async move {
-                if Path::new(&file_path).exists() {
-                    tokio::fs::read_to_string(&file_path).await.ok()
-                } else {
-                    None
-                }
-            }
-        }).collect();
+        // Step 2: Convert AstEdit -> FileSet via EditBridge, then apply via MultiFileEngine
+        let ts_adapter = crate::ast::TreeSitterAstAdapter::default();
+        let bridge = EditBridge::new(ts_adapter);
+        let file_set = bridge.convert(expanded.clone()).await?;
+        let multi_engine = MultiFileEngine::new();
+        let commit_result = multi_engine.execute_atomic(vec![file_set]).await?;
 
-        let _ = join_all(futures).await;
+        if !commit_result.success {
+            anyhow::bail!("Atomic edit failed: {}", commit_result.error.unwrap_or_default());
+        }
+
         Ok(expanded)
     }
 }

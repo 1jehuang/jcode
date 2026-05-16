@@ -4,6 +4,7 @@ use std::path::Path;
 use std::time::SystemTime;
 
 /// 单个检查结果
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CheckResult {
     pub phase: &'static str,
@@ -29,9 +30,10 @@ pub trait AiLogicCheck: Send + Sync {
     async fn check(&self, root: &str) -> anyhow::Result<Vec<crate::Issue>>;
 }
 
-// ── 共享文件扫描基础设施 ──
+// -- 共享文件扫描基础设施 --
 
 /// 增量检查缓存 — 记录每个文件的最后检查时间戳
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct IncrementalCache {
     timestamps: HashMap<String, SystemTime>,
@@ -130,7 +132,7 @@ where
     issues
 }
 
-// ── 默认实现 ──
+// -- 默认实现 --
 
 /// 增强型 AST 结构检查器
 pub struct RegexAstCheck {
@@ -192,7 +194,7 @@ impl RegexAstCheck {
             ));
         }
 
-        // Rust: println! → tracing
+        // Rust: println! -> tracing
         if ext == "rs" && content.contains("println!") {
             issues.push(crate::Issue::warning_with_fix(
                 "ast",
@@ -275,8 +277,10 @@ impl AstCheck for RegexAstCheck {
 }
 
 /// 基于 git diff 的增量检查
+#[allow(dead_code)]
 pub struct GitDiffAstCheck;
 
+#[allow(dead_code)]
 impl GitDiffAstCheck {
     pub fn new() -> Self { Self }
 }

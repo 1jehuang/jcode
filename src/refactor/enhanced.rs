@@ -1,16 +1,18 @@
 //! 增强型代码重构与迁移系统
 //!
 //! 从Claude Code深度借鉴的重构能力，专门针对：
-//! 1. 老系统迁移：.NET / Java / Go → Rust / C++ / TypeScript
-//! 2. .NET Framework → .NET 6/7/8 升级迁移
-//! 3. Java传统线程 → 虚拟线程 (Virtual Threads) 迁移
+//! 1. 老系统迁移：.NET / Java / Go -> Rust / C++ / TypeScript
+//! 2. .NET Framework -> .NET 6/7/8 升级迁移
+//! 3. Java传统线程 -> 虚拟线程 (Virtual Threads) 迁移
 //! 4. 架构现代化和性能优化
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use crate::prototype::{RiskLevel, RiskCategory, ProbabilityLevel, ImpactLevel};
+use crate::nlp::{Priority, ComplexityLevel};
 
-// ─── Core Migration Types ──────────────────
+// --- Core Migration Types ------------------
 
 /// 重构/迁移配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,7 +60,7 @@ pub struct SourceSystem {
     pub known_issues: Vec<KnownIssue>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SourceLanguage {
     CSharpDotNetFramework,
     CSharpDotNetCore,
@@ -152,7 +154,7 @@ pub enum IssueSeverity {
     Info,
 }
 
-// ─── Strategy Types ─────────────────────────
+// --- Strategy Types -------------------------
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum MigrationStrategy {
@@ -198,7 +200,7 @@ pub struct MigrationConstraints {
     pub budget_limit_usd: Option<f64>,
 }
 
-// ─── Result Types ───────────────────────────
+// --- Result Types ---------------------------
 
 /// 重构结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -450,9 +452,9 @@ pub struct RoiProjection {
     pub npv_5_year: f64,
 }
 
-// ─── Specialized Migrators ─────────────────
+// --- Specialized Migrators -----------------
 
-/// .NET Framework → .NET 6/7/8 迁移器
+/// .NET Framework -> .NET 6/7/8 迁移器
 pub struct DotNetMigrator {
     config: DotNetMigrationConfig,
 }
@@ -623,8 +625,8 @@ impl DotNetMigrator {
                     id: 2,
                     name: "API层迁移".to_string(),
                     tasks: vec![
-                        "Controllers → Minimal APIs".to_string(),
-                        "ActionResult → IResult".to_string(),
+                        "Controllers -> Minimal APIs".to_string(),
+                        "ActionResult -> IResult".to_string(),
                         "同步方法改为异步".to_string(),
                         "添加依赖注入".to_string(),
                     ],
@@ -635,7 +637,7 @@ impl DotNetMigrator {
                     id: 3,
                     name: "数据访问层迁移".to_string(),
                     tasks: vec![
-                        "EF6 → EF Core".to_string(),
+                        "EF6 -> EF Core".to_string(),
                         "DbContext重构".to_string(),
                         "LINQ查询优化".to_string(),
                         "连接字符串管理".to_string(),
@@ -747,7 +749,7 @@ impl DotNetMigrator {
     }
 }
 
-// ─── Java Virtual Thread Migrator ───────────
+// --- Java Virtual Thread Migrator -----------
 
 /// Java Virtual Thread 迁移器
 pub struct JavaVtMigrator {
@@ -917,7 +919,7 @@ impl JavaVtMigrator {
         })
     }
     
-    async fn identify_parallelism_opportunities(&self, analysis: &ThreadUsageAnalysis) -> Result<Vec<ParallelismOpportunity>> {
+    async fn identify_parallelism_opportunities(&self, _analysis: &ThreadUsageAnalysis) -> Result<Vec<ParallelismOpportunity>> {
         Ok(vec![
             ParallelismOpportunity {
                 id: "parallel-db-queries".to_string(),
@@ -959,13 +961,13 @@ impl JavaVtMigrator {
                 new_content: generate_sample_vt_service(),
                 changes: vec![
                     VtCodeChange {
-                        description: "ExecutorService → Executors.newVirtualThreadPerTaskExecutor()".to_string(),
+                        description: "ExecutorService -> Executors.newVirtualThreadPerTaskExecutor()".to_string(),
                         before_snippet: "private final ExecutorService executor = Executors.newFixedThreadPool(10);".to_string(),
                         after_snippet: "private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();".to_string(),
                         benefit: "消除线程池大小限制，自动扩展".to_string(),
                     },
                     VtCodeChange {
-                        description: "Future.get() → structured concurrency".to_string(),
+                        description: "Future.get() -> structured concurrency".to_string(),
                         before_snippet: "Future<User> future = executor.submit(() -> userRepository.findById(id));\nUser user = future.get();".to_string(),
                         after_snippet: "try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {\n    Subtask<User> task = scope.fork(() -> userRepository.findById(id));\n    scope.join().throwIfFailed();\n    User user = task.get();\n}".to_string(),
                         benefit: "更好的错误传播和取消支持".to_string(),
@@ -1056,7 +1058,7 @@ impl JavaVtMigrator {
     }
 }
 
-// ─── Helper Types and Functions ─────────────
+// --- Helper Types and Functions -------------
 
 struct DotNetProjectAnalysis {
     total_files: usize,
@@ -1441,9 +1443,9 @@ import java.util.UUID;
  * UserService - Migrated to Virtual Threads (Java 21+)
  * 
  * Key Changes:
- * 1. ExecutorService → VirtualThreadPerTaskExecutor
- * 2. Future.get() → StructuredTaskScope
- * 3. @Async → Explicit virtual thread creation
+ * 1. ExecutorService -> VirtualThreadPerTaskExecutor
+ * 2. Future.get() -> StructuredTaskScope
+ * 3. @Async -> Explicit virtual thread creation
  */
 @Service
 public class UserService {

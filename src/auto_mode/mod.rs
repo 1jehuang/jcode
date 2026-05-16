@@ -10,19 +10,19 @@
 //! ## 决策流程
 //!
 //! ```
-//! 用户请求 → should_auto_approve()
-//!     │
-//!     ├─ 模式未启用 → ManualReview (完全人工)
-//!     │
-//!     ├─ 包含敏感词 → RequiresConfirmation (必须确认)
-//!     │   └─ delete/rm/force/push/deploy
-//!     │
-//!     ├─ 匹配学习模式
-//!     │   ├─ 置信度 ≥ 阈值 → AutoApprove (自动批准)
-//!     │   └─ 置信度 < 阈值 → SuggestApprove (建议但需审核)
-//!     │
-//!     └─ 安全操作 + auto_accept_safe → AutoApprove
-//!         └─ FileEdit / FileCreate
+//! 用户请求 -> should_auto_approve()
+//!     |
+//!     +- 模式未启用 -> ManualReview (完全人工)
+//!     |
+//!     +- 包含敏感词 -> RequiresConfirmation (必须确认)
+//!     |   +- delete/rm/force/push/deploy
+//!     |
+//!     +- 匹配学习模式
+//!     |   +- 置信度 ≥ 阈值 -> AutoApprove (自动批准)
+//!     |   +- 置信度 < 阈值 -> SuggestApprove (建议但需审核)
+//!     |
+//!     +- 安全操作 + auto_accept_safe -> AutoApprove
+//!         +- FileEdit / FileCreate
 //! ```
 
 pub mod aho_corasick;
@@ -257,6 +257,9 @@ pub struct ToolContext {
 
     /// 项目路径
     pub project_path: Option<String>,
+
+    /// 工作目录
+    pub working_dir: Option<std::path::PathBuf>,
 
     /// 额外元数据
     pub metadata: HashMap<String, String>,

@@ -5,21 +5,21 @@
 //!
 //! ## 核心原则
 //!
-### 📦 模块系统规则 (Module System Rules)
+//! ### 模块系统规则 (Module System Rules)
 //!
 //! **规则1: 一个目录 = 一个入口文件**
 //! ```text
 //! ✅ 正确:
 //! src/
-//! └── my_module/
-//!     └── mod.rs          ← 唯一入口
+//! +-- my_module/
+//!     +-- mod.rs          <- 唯一入口
 //!
 //! ❌ 错误:
 //! src/
-//! ├── my_module.rs        ← 多余的外部文件
-//! └── my_module/
-//!     ├── mod.rs          ← 与上面冲突
-//!     └── my_module.rs    ← 冗余的内部文件
+//! +-- my_module.rs        <- 多余的外部文件
+//! +-- my_module/
+//!     +-- mod.rs          <- 与上面冲突
+//!     +-- my_module.rs    <- 冗余的内部文件
 //! ```
 //!
 //! **规则2: mod.rs 是目录模块的标准命名约定**
@@ -55,7 +55,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-// ─── Types ─────────────────────────────────
+// --- Types ---------------------------------
 
 /// Rust最佳实践规则
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,7 +129,7 @@ pub enum SeverityLevel {
     Info,      // 可选，风格偏好
 }
 
-// ─── Core Knowledge Base ──────────────────────
+// --- Core Knowledge Base ----------------------
 
 /// Rust最佳实践知识库
 pub struct RustKnowledgeBase {
@@ -167,18 +167,18 @@ impl RustKnowledgeBase {
             correct_example: r#"
 // ✅ 正确结构
 src/
-└── my_module/
-    └── mod.rs           // 唯一入口，包含所有公开API
++-- my_module/
+    +-- mod.rs           // 唯一入口，包含所有公开API
         pub struct MyStruct;
         pub fn my_function() {}
 "#.to_string(),
             incorrect_example: r#"
 // ❌ 错误结构（冗余）
 src/
-├── my_module.rs       // 多余！与下面的mod.rs冲突
-└── my_module/
-    ├── mod.rs         // 实际代码在这里
-    └── my_module.rs   // 又一个多余的文件
++-- my_module.rs       // 多余！与下面的mod.rs冲突
++-- my_module/
+    +-- mod.rs         // 实际代码在这里
+    +-- my_module.rs   // 又一个多余的文件
 "#.to_string(),
             severity: SeverityLevel::Critical,
             auto_fixable: true,
@@ -244,25 +244,25 @@ impl Parser { /* ... */ }
 
 // 大模块 (>500行)
 // src/database/
-// ├── mod.rs              // 入口 + 公共类型
-// │   pub mod connection;
-// │   pub mod query;
-// │   pub mod migration;
-// │   
-// │   // 重新导出常用项
-// │   pub use connection::Connection;
-// │   pub use query::QueryBuilder;
-// │
-// ├── connection.rs       // 连接管理
-// ├── query.rs            // 查询构建
-// └── migration.rs       // 数据库迁移
+// +-- mod.rs              // 入口 + 公共类型
+// |   pub mod connection;
+// |   pub mod query;
+// |   pub mod migration;
+// |   
+// |   // 重新导出常用项
+// |   pub use connection::Connection;
+// |   pub use query::QueryBuilder;
+// |
+// +-- connection.rs       // 连接管理
+// +-- query.rs            // 查询构建
+// +-- migration.rs       // 数据库迁移
 "#.to_string(),
             incorrect_example: r#"// ❌ 过度拆分
 // src/parser/
-// ├── mod.rs             // 空
-// ├── parser.rs          // 只有struct定义
-// ├── parse_impl.rs      // 实现部分
-// └── parse_utils.rs     // 工具函数
+// +-- mod.rs             // 空
+// +-- parser.rs          // 只有struct定义
+// +-- parse_impl.rs      // 实现部分
+// +-- parse_utils.rs     // 工具函数
 // 结果：文件太多，导航困难
 "#.to_string(),
             severity: SeverityLevel::Minor,
@@ -581,10 +581,10 @@ async fn generate_pdf_bad(report: &Report) -> Result<Vec<u8>, Error> {
             description: "测试文件放在同名目录下的tests子目录，测试函数以test_为前缀并描述测试场景".to_string(),
             correct_example: r#"// ✅ 测试文件结构
 // src/
-// └── utils/
-//     ├── mod.rs
-//     └── tests/
-//         └── mod.rs           // 对utils模块的测试
+// +-- utils/
+//     +-- mod.rs
+//     +-- tests/
+//         +-- mod.rs           // 对utils模块的测试
 
 #[cfg(test)]
 mod tests {
@@ -633,46 +633,46 @@ fn check_email() {}   // 缺少test_前缀
             description: "遵循Rust社区公认的项目结构，便于维护和协作".to_string(),
             correct_example: r#"# ✅ 标准项目结构
 my-project/
-├── Cargo.toml              # 项目元数据和依赖
-├── Cargo.lock             # 依赖锁定文件（提交到VCS）
-├── src/
-│   ├── lib.rs              # 库入口（如果是库）
-│   ├── main.rs             # 二进制入口（如果是应用）
-│   │
-│   ├── bin/                # 多个二进制目标
-│   │   ├── cli-tool.rs
-│   │   └── gui-app.rs
-│   │
-│   ├── lib/                # 库代码的主要模块
-│   │   ├── mod.rs
-│   │   ├── core.rs
-│   │   └── utils.rs
-│   │
-│   ├── tests/             # 集成测试
-│   │   └── integration_tests.rs
-│   │
-│   └── examples/          # 示例代码
-│       └── basic_usage.rs
-│
-├── benches/               # 性能基准测试
-│   └── my_benchmark.rs
-│
-├── docs/                  # 文档
-│   ├── README.md
-│   └── API.md
-│
-└── tests/                 # 单元测试（根级别）
-    └── test_main.rs
++-- Cargo.toml              # 项目元数据和依赖
++-- Cargo.lock             # 依赖锁定文件（提交到VCS）
++-- src/
+|   +-- lib.rs              # 库入口（如果是库）
+|   +-- main.rs             # 二进制入口（如果是应用）
+|   |
+|   +-- bin/                # 多个二进制目标
+|   |   +-- cli-tool.rs
+|   |   +-- gui-app.rs
+|   |
+|   +-- lib/                # 库代码的主要模块
+|   |   +-- mod.rs
+|   |   +-- core.rs
+|   |   +-- utils.rs
+|   |
+|   +-- tests/             # 集成测试
+|   |   +-- integration_tests.rs
+|   |
+|   +-- examples/          # 示例代码
+|       +-- basic_usage.rs
+|
++-- benches/               # 性能基准测试
+|   +-- my_benchmark.rs
+|
++-- docs/                  # 文档
+|   +-- README.md
+|   +-- API.md
+|
++-- tests/                 # 单元测试（根级别）
+    +-- test_main.rs
 "#.to_string(),
             incorrect_example: r#"# ❌ 混乱的项目结构
 my-project-bad/
-├── src/
-│   ├── all_code_in_one_file.rs  # 所有代码混在一起
-│   ├── helper.rs               // 杂乱的工具函数
-│   ├── test_stuff.rs            // 测试和生产代码混合
-│   └── temp.rs                 // 临时文件未清理
-├── code/                       # 自定义的非标准目录
-└── lib.rs                      # 放错位置了
++-- src/
+|   +-- all_code_in_one_file.rs  # 所有代码混在一起
+|   +-- helper.rs               // 杂乱的工具函数
+|   +-- test_stuff.rs            // 测试和生产代码混合
+|   +-- temp.rs                 // 临时文件未清理
++-- code/                       # 自定义的非标准目录
++-- lib.rs                      # 放错位置了
 "#.to_string(),
             severity: SeverityLevel::Major,
             auto_fixable: false,
@@ -700,14 +700,15 @@ my-project-bad/
     
     /// 按类别获取规则
     pub fn get_rules_by_category(&self, category: PracticeCategory) -> Vec<&RustBestPractice> {
-        self.category_index
+        let rules: Vec<&RustBestPractice> = self.category_index
             .get(&category)
             .map(|ids| {
                 ids.iter()
                     .filter_map(|id| self.rules.get(id))
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        rules
     }
     
     /// 获取规则详情
@@ -843,7 +844,7 @@ my-project-bad/
     }
 }
 
-// ─── Report Types ────────────────────────────
+// --- Report Types ----------------------------
 
 /// 验证报告
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -871,6 +872,7 @@ pub struct RuleViolation {
     pub suggestion: String,
     pub location: Option<String>,
     pub auto_fix_available: bool,
+    pub is_violation: bool,
 }
 
 /// 改进建议报告
@@ -912,7 +914,7 @@ pub struct BestPracticeTip {
     pub example: String,
 }
 
-// ─── Tests ──────────────────────────────────
+// --- Tests ----------------------------------
 
 #[cfg(test)]
 mod tests {

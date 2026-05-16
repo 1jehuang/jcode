@@ -91,8 +91,8 @@ fn test_render_swarm_message_uses_left_rail_not_box() {
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
 
     assert_eq!(rendered.len(), 2, "expected compact header + body layout");
-    assert!(rendered[0].starts_with("│ ✉ DM from fox"));
-    assert_eq!(rendered[1], "│ Can you take parser tests?");
+    assert!(rendered[0].starts_with("| ✉ DM from fox"));
+    assert_eq!(rendered[1], "| Can you take parser tests?");
     assert!(
         rendered
             .iter()
@@ -113,8 +113,8 @@ fn test_render_swarm_message_matches_exact_compact_snapshot() {
     assert_eq!(
         rendered,
         vec![
-            "│ ⚑ Task · sheep".to_string(),
-            "│ Implement compaction asymptotic fixes".to_string(),
+            "| ⚑ Task · sheep".to_string(),
+            "| Implement compaction asymptotic fixes".to_string(),
         ]
     );
 }
@@ -127,8 +127,8 @@ fn test_render_swarm_message_trims_extra_newlines() {
     let lines = render_swarm_message(&msg, 80, crate::config::DiffDisplayMode::Off);
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
 
-    assert_eq!(rendered[0], "│ 📣 Broadcast · coordinator");
-    assert_eq!(rendered[1], "│ Plan updated");
+    assert_eq!(rendered[0], "| 📣 Broadcast · coordinator");
+    assert_eq!(rendered[1], "| Plan updated");
     assert_eq!(
         rendered.len(),
         2,
@@ -144,8 +144,8 @@ fn test_render_swarm_message_uses_task_icon_for_assignments() {
     let lines = render_swarm_message(&msg, 80, crate::config::DiffDisplayMode::Off);
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
 
-    assert_eq!(rendered[0], "│ ⚑ Task · sheep");
-    assert_eq!(rendered[1], "│ Implement compaction asymptotic fixes");
+    assert_eq!(rendered[0], "| ⚑ Task · sheep");
+    assert_eq!(rendered[1], "| Implement compaction asymptotic fixes");
 }
 
 #[test]
@@ -169,8 +169,8 @@ fn test_render_swarm_message_centered_mode_left_aligns_with_shared_padding() {
         header_pad, body_pad,
         "centered swarm block should share one left pad"
     );
-    assert_eq!(rendered[0].trim_start(), "│ ☰ Plan · sheep");
-    assert_eq!(rendered[1].trim_start(), "│ 4 items · v1");
+    assert_eq!(rendered[0].trim_start(), "| ☰ Plan · sheep");
+    assert_eq!(rendered[1].trim_start(), "| 4 items · v1");
     for line in &lines {
         assert_eq!(
             line.alignment,
@@ -195,10 +195,10 @@ fn test_render_swarm_message_centered_mode_keeps_task_icon_and_padding() {
         rendered[0].starts_with(' '),
         "centered task header should be padded: {rendered:?}"
     );
-    assert_eq!(rendered[0].trim_start(), "│ ⚑ Task · sheep");
+    assert_eq!(rendered[0].trim_start(), "| ⚑ Task · sheep");
     assert_eq!(
         rendered[1].trim_start(),
-        "│ Implement compaction asymptotic fixes"
+        "| Implement compaction asymptotic fixes"
     );
 
     crate::tui::markdown::set_center_code_blocks(saved);

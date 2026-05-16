@@ -204,7 +204,7 @@ impl LlmProvider for AnthropicProvider {
     }
 }
 
-// ─── YOLO 分类器主结构 ────────────────────────────────
+// --- YOLO 分类器主结构 --------------------------------
 
 pub struct YoloClassifier {
     config: YoloClassifierConfig,
@@ -295,7 +295,7 @@ impl YoloClassifier {
         }
     }
 
-    // ─── Prompt 工程 ───────────────────────────────────
+    // --- Prompt 工程 -----------------------------------
 
     /// 构建系统提示和用户消息
     fn build_prompts(&self, req: &PermissionRequest) -> (String, String) {
@@ -341,7 +341,7 @@ impl YoloClassifier {
         (system_prompt, user_message)
     }
 
-    // ─── 缓存管理 ─────────────────────────────────────
+    // --- 缓存管理 -------------------------------------
 
     fn compute_request_hash(&self, req: &PermissionRequest) -> u64 {
         use std::collections::hash_map::DefaultHasher;
@@ -386,7 +386,7 @@ impl YoloClassifier {
         before - cache.len()
     }
 
-    // ─── 统计 ─────────────────────────────────────────
+    // --- 统计 -----------------------------------------
 
     async fn record_cache_hit(&self) {
         let mut s = self.stats.write().await;

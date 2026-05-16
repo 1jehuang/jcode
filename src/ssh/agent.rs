@@ -95,7 +95,7 @@ impl std::error::Error for AgentError {}
 impl SshAgentManager {
     /// Create new SSH agent manager with automatic detection
     pub fn new() -> Self {
-        let manager = SshAgentManager {
+        let mut manager = SshAgentManager {
             agent_socket: None,
             identities: vec![],
             forwarding_enabled: true,
@@ -103,7 +103,6 @@ impl SshAgentManager {
             confirm_before_use: false,
         };
 
-        // Auto-detect agent on creation
         let _ = manager.detect_agent();
 
         manager
@@ -210,7 +209,7 @@ impl SshAgentManager {
             if stderr.contains("error") || stderr.contains("failed") {
                 return Err(AgentError::RequestFailed {
                     operation: "list_identities".to_string(),
-                    message: stderr,
+                    message: stderr.to_string(),
                 });
             }
         }
@@ -254,7 +253,7 @@ impl SshAgentManager {
         }
 
         let output = self._execute_ssh_add_command_with_args(
-            key_path.display().to_string().as_str(), 
+            key_path.display().to_string(), 
             &args, 
             socket
         )?;
@@ -288,7 +287,7 @@ impl SshAgentManager {
         if !output.status.success() {
             Err(AgentError::RequestFailed {
                 operation: "remove_identity".to_string(),
-                message: String::from_utf8_lossy(&output.stderr),
+                message: stderr.to_string(),
             })
         } else {
             Ok(())
@@ -307,7 +306,7 @@ impl SshAgentManager {
         if !output.status.success() {
             Err(AgentError::RequestFailed {
                 operation: "remove_all_identities".to_string(),
-                message: String::from_utf8_lossy(&output.stderr),
+                message: stderr.to_string(),
             })
         } else {
             Ok(())
@@ -332,7 +331,7 @@ impl SshAgentManager {
         if !output.status.success() {
             Err(AgentError::RequestFailed {
                 operation: "lock_agent".to_string(),
-                message: String::from_utf8_lossy(&output.stderr),
+                message: stderr.to_string(),
             })
         } else {
             Ok(())
@@ -378,7 +377,7 @@ impl SshAgentManager {
         if !output.status.success() {
             Err(AgentError::SigningFailed {
                 key_fingerprint: key_fingerprint.to_string(),
-                message: String::from_utf8_lossy(&output.stderr),
+                message: stderr.to_string(),
             })
         } else {
             // Parse signature output (would be base64 encoded)
@@ -413,7 +412,7 @@ impl SshAgentManager {
         let mut args = vec![];
 
         if self.forwarding_enabled {
-            if let Some(ref socket) = self.agent_socket {
+            if let Some(ref _socket) = self.agent_socket {
                 args.push("-A".to_string());  // Agent forwarding
                 args.push("-o".to_string());
                 args.push("ForwardAgent=yes".to_string());
@@ -625,7 +624,7 @@ pub fn ensure_ssh_agent_running() -> Result<SshAgentManager, AgentError> {
                     if line.contains("SSH_AUTH_SOCK") {
                         if let Some(sock_path) = line.split('=').nth(1) {
                             let trimmed = sock_path.trim_end_matches(';').trim();
-                            env::set_var("SSH_AUTH_SOCK", trimmed);
+                            unsafe { env::set_var("SSH_AUTH_SOCK", trimmed) };
                             eprintln!("[SSH-AGENT] Started new agent at: {}", trimmed);
                             
                             return Ok(SshAgentManager::with_socket(
@@ -637,7 +636,7 @@ pub fn ensure_ssh_agent_running() -> Result<SshAgentManager, AgentError> {
                     if line.contains("SSH_AGENT_PID") {
                         if let Some(pid) = line.split('=').nth(1) {
                             let pid = pid.trim_end_matches(';').trim();
-                            env::set_var("SSH_AGENT_PID", pid);
+                            unsafe { env::set_var("SSH_AGENT_PID", pid) };
                         }
                     }
                 }

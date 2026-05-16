@@ -36,11 +36,9 @@ impl SshManager {
 
     /// Connect to a host and return session ID
     pub fn connect(&self, host: &str) -> Result<String, String> {
-        // Try to load from ~/.ssh/config first
         let config = if let Some(host_config) = self._get_cached_config(host) {
             SshConfig::from_host_config(&host_config.host)?
         } else if let Ok(Some(host_config)) = ConfigParser::find_host(host) {
-            // Cache the config
             if let Ok(mut cache) = self.config_cache.lock() {
                 cache.insert(host.to_string(), host_config.clone());
             }
@@ -49,38 +47,38 @@ impl SshManager {
             SshConfig::with_host(host)
         };
 
+        let config_user = config.user.clone();
+        let config_host = config.host.clone();
         let mut session = SshSession::new(config);
         
-        // Log connection attempt
         self.audit_logger.log_connection_attempt(
-            &session.config().user,
-            &session.config().host,
+            &config_user,
+            &config_host,
             session.id()
         );
 
         match session.connect() {
             Ok(msg) => {
                 let id = session.id().to_string();
+                let session_user = session.config().user.clone();
+                let session_host = session.config().host.clone();
                 
-                // Store session
                 if let Ok(mut sessions) = self.sessions.lock() {
                     sessions.insert(id.clone(), session);
                 }
 
-                // Log success
                 self.audit_logger.log_connection_success(
-                    &session.config().user,
-                    &session.config().host,
+                    &session_user,
+                    &session_host,
                     &id
                 );
 
                 Ok(msg)
             }
             Err(e) => {
-                // Log failure
                 self.audit_logger.log_connection_failure(
-                    &config.user,
-                    &config.host,
+                    &config_user,
+                    &config_host,
                     &e
                 );
                 
@@ -93,25 +91,24 @@ impl SshManager {
     pub fn execute(&self, host: &str, command: &str) -> Result<SshOutput, String> {
         let start = std::time::Instant::now();
         
-        // Use connection pool for better resource management
         let result = self.pool.execute_on(host, |session| {
             session.execute(command)
         });
 
         let duration = start.elapsed();
 
-        // Log command execution
         if let Ok(ref output) = result {
+            let output_preview = if output.stdout.len() > 1024 { 
+                format!("{}... (truncated)", &output.stdout[..1024])
+            } else { 
+                output.stdout.clone()
+            };
             self.audit_logger.log_command_execution(
-                "",  // Session ID not available in pool context
+                "",
                 command,
                 output.exit_code,
                 duration.as_millis() as u64,
-                if output.stdout.len() > 1024 { 
-                    Some(&format!("{}... (truncated)", &output.stdout[..1024])) 
-                } else { 
-                    Some(&output.stdout) 
-                },
+                Some(&output_preview),
             );
         }
 
@@ -169,7 +166,7 @@ impl SshManager {
         let result = transfer.download_file(remote_path, local_path);
 
         // Get actual file size after download
-        let downloaded_size = std::fs::metadata(local_path)
+        let _downloaded_size = std::fs::metadata(local_path)
             .map(|m| m.len())
             .unwrap_or(0);
 
@@ -587,7 +584,7 @@ impl BatchExecutor {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BatchSummary {
     pub total_commands: usize,
     pub successful: usize,

@@ -37,7 +37,7 @@ pub(crate) async fn register_rethink() {
             let total = std::fs::read_dir(&cwd).map(|e|e.filter_map(|e|e.ok()).count()).unwrap_or(0);
             let rs = std::fs::read_dir(&cwd).map(|e|e.filter_map(|e|e.ok()).filter(|e|e.path().extension().map(|x|x=="rs").unwrap_or(false)).count()).unwrap_or(0);
             eprintln!("\n🔄 Rethink\n  Dir: {} ({} items, {} .rs)", cwd.display(), total, rs);
-            if rs > 0 { eprintln!("  → /build to compile"); }
+            if rs > 0 { eprintln!("  -> /build to compile"); }
         }); SlashResult::Ok("Rethink.".into()) }),
     ).await;
 }

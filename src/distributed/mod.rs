@@ -11,13 +11,13 @@
 //!
 //! ```
 //! Cluster (集群)
-//! ├── Node A (Leader)
-//! │   ├── Task Scheduler
-//! │   └── State Manager
-//! ├── Node B (Follower)
-//! │   └── Worker Pool
-//! └── Node C (Follower)
-//!     └── Worker Pool
+//! +-- Node A (Leader)
+//! |   +-- Task Scheduler
+//! |   +-- State Manager
+//! +-- Node B (Follower)
+//! |   +-- Worker Pool
+//! +-- Node C (Follower)
+//!     +-- Worker Pool
 //!
 //! Communication:
 //! - gRPC for inter-node communication

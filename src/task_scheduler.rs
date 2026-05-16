@@ -40,7 +40,7 @@ pub struct TaskExecution {
     pub error: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TaskScheduler {
     tasks: Arc<RwLock<HashMap<String, ScheduledTask>>>,
     runners: Arc<RwLock<HashMap<String, (JoinHandle<()>, AbortHandle)>>>,

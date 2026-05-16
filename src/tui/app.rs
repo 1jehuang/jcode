@@ -404,7 +404,7 @@ impl CopyBadgeUiState {
 }
 
 /// Result from running the TUI
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct RunResult {
     /// Session ID to reload (hot-reload, no rebuild)
     pub reload_session: Option<String>,

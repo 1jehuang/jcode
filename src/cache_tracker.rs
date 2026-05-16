@@ -371,7 +371,7 @@ mod tests {
         let base1 = vec![make_message(Role::User, "Q1")];
         assert!(tracker.record_request(&base1).is_none());
 
-        // Turn 2: conversation grew, no memory → no violation
+        // Turn 2: conversation grew, no memory -> no violation
         let base2 = vec![
             make_message(Role::User, "Q1"),
             make_message(Role::Assistant, "A1"),
@@ -379,7 +379,7 @@ mod tests {
         ];
         assert!(tracker.record_request(&base2).is_none());
 
-        // Turn 3: conversation grew again → no violation
+        // Turn 3: conversation grew again -> no violation
         // (If we had tracked messages_with_memory containing a memory suffix at turn 2,
         // this would falsely flag a violation because the suffix is replaced by A2 here.)
         let base3 = vec![

@@ -57,7 +57,7 @@ pub trait ExtendedCommand: Send + Sync {
     async fn validate_args(&self, args: Option<&str>) -> Result<()>;
 }
 
-// ── /btw Command: Context-Aware Hints ──
+// -- /btw Command: Context-Aware Hints --
 
 pub struct BtwCommand {
     hint_generator: Arc<RwLock<Option<Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>>>>,
@@ -140,7 +140,7 @@ impl ExtendedCommand for BtwCommand {
     }
 }
 
-// ── /fast Command: Fast Mode Toggle ──
+// -- /fast Command: Fast Mode Toggle --
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FastMode {
@@ -294,7 +294,7 @@ impl ExtendedCommand for FastCommand {
     }
 }
 
-// ── /rewind Command: Session Rollback ──
+// -- /rewind Command: Session Rollback --
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSnapshot {
@@ -471,7 +471,7 @@ impl ExtendedCommand for RewindCommand {
     }
 }
 
-// ── Command Registry ──
+// -- Command Registry --
 
 pub struct ExtendedCommandRegistry {
     commands: RwLock<HashMap<String, Arc<dyn ExtendedCommand>>>,

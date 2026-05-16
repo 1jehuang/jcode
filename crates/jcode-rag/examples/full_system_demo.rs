@@ -191,13 +191,13 @@ fn print_surgical_result(result: &jcode_rag::SurgicalResult) {
     
     println!("╠══════════════════════════════════════════════════════╣");
     println!("║ EXECUTION PHASES:                                   ║");
-    println!("┌──────────────────────────────────────────────────────┐");
+    println!("+------------------------------------------------------+");
     
     for (i, phase) in result.phases.iter().enumerate() {
         let phase_name = format!("{:?}", phase.phase);
         let status = if phase.passed { "✅" } else { "❌" };
         
-        println!("│ Phase {}: {:12} | {} | {:>6}ms | {:>3} warnings │",
+        println!("| Phase {}: {:12} | {} | {:>6}ms | {:>3} warnings |",
             i + 1,
             phase_name,
             status,
@@ -208,31 +208,31 @@ fn print_surgical_result(result: &jcode_rag::SurgicalResult) {
         // 显示关键信息
         match &phase.output {
             jcode_rag::PhaseOutput::IndexingOutput { symbols_found, files_indexed, .. } => {
-                println!("│         └─ Symbols: {}, Files: {}", symbols_found, files_indexed);
+                println!("|         +- Symbols: {}, Files: {}", symbols_found, files_indexed);
             }
             jcode_rag::PhaseOutput::RetrievalOutput { context_windows, .. } => {
                 for ctx in context_windows {
-                    println!("│         └─ Context: {} segments, {} tokens", 
+                    println!("|         +- Context: {} segments, {} tokens", 
                         ctx.segments.len(),
                         ctx.total_tokens
                     );
                 }
             }
             jcode_rag::PhaseOutput::EditingOutput { diffs_generated, files_modified, .. } => {
-                println!("│         └─ Diffs: {}, Files: {}", 
+                println!("|         +- Diffs: {}, Files: {}", 
                     diffs_generated.len(),
                     files_modified.len()
                 );
             }
             jcode_rag::PhaseOutput::ValidationOutput { compilation_results, test_results, .. } => {
                 let errors = compilation_results.iter().filter(|r| !r.success).count();
-                println!("│         └─ Compilation errors: {}, Tests: {}", 
+                println!("|         +- Compilation errors: {}, Tests: {}", 
                     errors,
                     test_results.len()
                 );
             }
             jcode_rag::PhaseOutput::DebuggingOutput { logs_injected, breakpoints_set, traces_captured, .. } => {
-                println!("│         └─ Logs: {}, Breakpoints: {}, Traces: {}", 
+                println!("|         +- Logs: {}, Breakpoints: {}, Traces: {}", 
                     logs_injected.len(),
                     breakpoints_set.len(),
                     traces_captured.len()
@@ -241,7 +241,7 @@ fn print_surgical_result(result: &jcode_rag::SurgicalResult) {
         }
     }
     
-    println!("└──────────────────────────────────────────────────────┘");
+    println!("+------------------------------------------------------+");
     
     println!("╠══════════════════════════════════════════════════════╣");
     println!("║ STATISTICS:                                          ║");

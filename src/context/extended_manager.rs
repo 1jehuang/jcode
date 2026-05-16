@@ -18,42 +18,42 @@
 //! ## 架构设计
 //!
 //! ```
-//! ┌─────────────────────────────────────────────────────┐
-//! │        Extended Context Manager (500K+)          │
-//! ├─────────────────────────────────────────────────────┤
-│                                                     │
-│  Input (原始上下文)                                │
-│    ↓                                               │
-│  ┌─────────────────┐                              │
-│  │ Token Counter   │ ← 精确计数 (支持多种tokenizer)│
-│  └────────┬────────┘                              │
-│           ↓                                       │
-│  ┌─────────────────┐                              │
-│  │ Importance      │ ← 基于位置/类型/引用分析     │
-│  │ Analyzer        │   计算每条消息的重要性分数     │
-│  └────────┬────────┘                              │
-│           ↓                                       │
-│  ┌──────────────────────────────────┐              │
-│  │ Three-Tier Storage               │              │
-│  │                                   │              │
-│  │  🔥 Hot Layer (50K tokens)       │ ← 当前活跃对话  │
-│  │     ↓ 完整保留, 零延迟             │              │
-│  │                                   │              │
-│  │  🟡 Warm Layer (150K tokens)     │ ← 最近历史     │
-│  │     ↓ 语义摘要, <1ms延迟            │              │
-│  │                                   │              │
-│  │  🧊 Cold Layer (300K tokens)     │ ← 远程历史     │
-│  │     ↓ 高度压缩, <10ms延迟           │              │
-│  └──────────────────────────────────┘              │
-│           ↓                                       │
-│  ┌─────────────────┐                              │
-│  │ Context         │ ← 智能组装最终上下文    │
-│  │ Assembler       │   (目标: ≤模型上限)       │
-│  └────────┬────────┘                              │
-│           ↓                                       │
-│  Output (优化后上下文 → 发送给LLM)                │
-│                                                     │
-└─────────────────────────────────────────────────────┘
+//! +-----------------------------------------------------+
+//! |        Extended Context Manager (500K+)          |
+//! +-----------------------------------------------------+
+//! |                                                     |
+//! |  Input (原始上下文)                                |
+//! |    v                                               |
+//! |  +-----------------+                              |
+//! |  | Token Counter   | <- 精确计数 (支持多种tokenizer)|
+//! |  +--------+--------+                              |
+//! |           v                                       |
+//! |  +-----------------+                              |
+//! |  | Importance      | <- 基于位置/类型/引用分析     |
+//! |  | Analyzer        |   计算每条消息的重要性分数     |
+//! |  +--------+--------+                              |
+//! |           v                                       |
+//! |  +----------------------------------+              |
+//! |  | Three-Tier Storage               |              |
+//! |  |                                   |              |
+//! |  |  🔥 Hot Layer (50K tokens)       | <- 当前活跃对话  |
+//! |  |     v 完整保留, 零延迟             |              |
+//! |  |                                   |              |
+//! |  |  🟡 Warm Layer (150K tokens)     | <- 最近历史     |
+//! |  |     v 语义摘要, <1ms延迟            |              |
+//! |  |                                   |              |
+//! |  |  🧊 Cold Layer (300K tokens)     | <- 远程历史     |
+//! |  |     v 高度压缩, <10ms延迟           |              |
+//! |  +----------------------------------+              |
+//! |           v                                       |
+//! |  +-----------------+                              |
+//! |  | Context         | <- 智能组装最终上下文    |
+//! |  | Assembler       |   (目标: ≤模型上限)       |
+//! |  +--------+--------+                              |
+//! |           v                                       |
+//! |  Output (优化后上下文 -> 发送给LLM)                |
+//! |                                                     |
+//! +-----------------------------------------------------+
 //!
 //! ## 性能对比
 //!
@@ -72,7 +72,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-// ─── Constants ─────────────────────────────────
+// --- Constants ---------------------------------
 
 /// 默认最大上下文长度 (tokens)
 const DEFAULT_MAX_CONTEXT_TOKENS: usize = 200_000; // 200K (兼容Claude Code)
@@ -92,7 +92,7 @@ const COLD_LAYER_SIZE: usize = 300_000;
 /// 平均字符/token比率
 const AVG_CHARS_PER_TOKEN: f64 = 4.0;
 
-// ─── Types ─────────────────────────────────
+// --- Types ---------------------------------
 
 /// 消息重要性等级
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -167,10 +167,10 @@ pub struct ContextEntry {
     /// 存储层级
     pub tier: StorageTier,
     
-    /// 创建时间戳
+    #[serde(skip)]
     pub created_at: std::time::Instant,
     
-    /// 最后访问时间
+    #[serde(skip)]
     pub last_accessed_at: std::time::Instant,
     
     /// 访问次数
@@ -228,7 +228,7 @@ pub struct TierStats {
     pub cold_tokens: usize,
 }
 
-// ─── Core Manager ────────────────────────────────
+// --- Core Manager --------------------------------
 
 /// 超长上下文管理器
 pub struct ExtendedContextManager {
@@ -563,7 +563,7 @@ impl ExtendedContextManager {
         (hot, warm, cold)
     }
 
-    // ─── Internal Methods ─────────────────────────
+    // --- Internal Methods -------------------------
 
     /// 分析消息重要性
     fn analyze_importance(&self, role: &str, content: &str, tags: &[String]) -> ImportanceLevel {
@@ -673,11 +673,11 @@ impl ExtendedContextManager {
         format!(
             "[Summary of {} lines]\n\
              First: {}\n\
-             Last: {}\n\
-             Key points:\n{}",
+            Last: {}\n\
+            Key points:\n{}",
             lines.len(),
-            lines.first().unwrap_or(""),
-            lines.last().unwrap_or(""),
+            lines.first().map(|s| s.as_str()).unwrap_or(""),
+            lines.last().map(|s| s.as_str()).unwrap_or(""),
             lines.iter()
                 .filter(|l| l.contains("fn ") || l.contains("class ") || l.contains("=> ") || l.contains("error"))
                 .take(3)
@@ -724,7 +724,7 @@ impl ExtendedContextManager {
     }
 }
 
-// ─── Public API Helpers ────────────────────────────
+// --- Public API Helpers ----------------------------
 
 impl ExtendedContextManager {
     /// 快速添加用户消息
@@ -770,7 +770,7 @@ impl ExtendedContextManager {
     }
 }
 
-// ─── Tests ──────────────────────────────────────
+// --- Tests --------------------------------------
 
 #[cfg(test)]
 mod tests {

@@ -276,7 +276,7 @@ impl RuntimeMemoryLogEvent {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RuntimeMemoryLogController {
     config: RuntimeMemoryLogConfig,
     last_process_sample_at: Option<Instant>,

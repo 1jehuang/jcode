@@ -1,7 +1,8 @@
 use std::path::PathBuf;
-use std::collections::{HashSet, HashMap};
+use std::collections::HashSet;
+use std::sync::LazyLock;
 use regex::Regex;
-use crate::tui::ui_blocks::{CommandBlock, ActionType, BlockType};
+use crate::tui::ui_blocks::{CommandBlock, ActionType};
 
 pub struct ContextActionGenerator {
     file_registry: FileRegistry,
@@ -90,6 +91,8 @@ pub struct AnalyzedContext {
     pub commands: Vec<RecognizedCommand>,
 }
 
+/// 带上下文的文件路径
+#[derive(Debug, Clone)]
 pub struct PathWithContext {
     pub path: PathBuf,
     pub exists: bool,
@@ -104,6 +107,8 @@ pub struct UrlWithContext {
     pub is_api_endpoint: bool,
 }
 
+/// 带上下文的 Git 引用
+#[derive(Debug, Clone)]
 pub struct GitRefWithContext {
     pub ref_type: GitRefType,
     pub value: String,
@@ -134,6 +139,8 @@ pub struct SuggestedFix {
     pub confidence: f64,
 }
 
+/// 代码符号引用
+#[derive(Debug, Clone)]
 pub struct CodeSymbolRef {
     pub name: String,
     pub kind: SymbolKind,
@@ -145,6 +152,8 @@ pub struct CodeSymbolRef {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SymbolKind { Function, Class, Variable, Module, Type, Method, Trait, Interface }
 
+/// 包引用
+#[derive(Debug, Clone)]
 pub struct PackageRef {
     pub name: String,
     pub manager: PackageManager,
@@ -155,12 +164,16 @@ pub struct PackageRef {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PackageManager { Npm, Pip, Cargo, Brew, Apt, Yarn, Pnpm, GoMod, Nuget, Gem }
 
+/// Docker 镜像引用
+#[derive(Debug, Clone)]
 pub struct DockerImageRef {
     pub image_name: String,
     pub tag: Option<String>,
     pub is_local: Option<bool>,
 }
 
+/// 识别的命令
+#[derive(Debug, Clone)]
 pub struct RecognizedCommand {
     pub command: String,
     pub category: CommandCategory,
@@ -192,7 +205,7 @@ pub enum ActionGroup { FileOperations, Navigation, FixActions, GitActions, Searc
 
 struct ErrorFixRule {
     pattern: &'static str,
-    fixes: Vec<SuggestedFixTemplate>,
+    fixes: Box<[SuggestedFixTemplate]>,
 }
 
 struct SuggestedFixTemplate {
@@ -202,146 +215,146 @@ struct SuggestedFixTemplate {
     confidence: f64,
 }
 
-const ERROR_FIX_RULES: &[ErrorFixRule] = &[
+static ERROR_FIX_RULES: LazyLock<Vec<ErrorFixRule>> = LazyLock::new(|| vec![
     ErrorFixRule {
         pattern: r"(?i)(EADDRINUSE|address already in use|port.*in use)",
-        fixes: vec![
+        fixes: Box::new([
             SuggestedFixTemplate { command: Some("lsof -i :{port} | grep LISTEN | awk '{print $2}' | xargs kill"), description: "Kill process using port", auto_applicable: false, confidence: 0.9 },
             SuggestedFixTemplate { command: Some("npx kill-port {port}"), description: "Use kill-port tool", auto_applicable: false, confidence: 0.85 },
             SuggestedFixTemplate { command: Some("fuser -k {port}/tcp"), description: "Kill via fuser", auto_applicable: false, confidence: 0.8 },
-        ],
+        ]),
     },
     ErrorFixRule {
         pattern: r"(?i)(permission denied|EACCES|access denied)",
-        fixes: vec![
+        fixes: Box::new([
             SuggestedFixTemplate { command: Some("sudo {original_command}"), description: "Run with sudo", auto_applicable: false, confidence: 0.85 },
             SuggestedFixTemplate { command: Some("chmod +x {file} && {original_command}"), description: "Fix permissions then run", auto_applicable: false, confidence: 0.75 },
-        ],
+        ]),
     },
     ErrorFixRule {
         pattern: r"(?i)(ENOENT|no such file or directory|file not found)",
-        fixes: vec![
+        fixes: Box::new([
             SuggestedFixTemplate { command: Some("ls -la $(dirname {file})"), description: "Check parent directory", auto_applicable: false, confidence: 0.7 },
             SuggestedFixTemplate { command: Some("touch {file}"), description: "Create missing file", auto_applicable: false, confidence: 0.6 },
-        ],
+        ]),
     },
     ErrorFixRule {
         pattern: r"(?i)(ENOTDIR|not a directory|is a file)",
-        fixes: vec![
+        fixes: Box::new([
             SuggestedFixTemplate { command: None, description: "Verify path is not used as directory", auto_applicable: false, confidence: 0.75 },
-        ],
+        ]),
     },
     ErrorFixRule {
         pattern: r"(?i)(EISDIR|is a directory|operation on directory)",
-        fixes: vec![
+        fixes: Box::new([
             SuggestedFixTemplate { command: None, description: "Target path is a directory, use -r for recursive", auto_applicable: false, confidence: 0.78 },
-        ],
+        ]),
     },
     ErrorFixRule {
         pattern: r"(?i)(ENOMEM|out of memory|cannot allocate|OOM killed)",
-        fixes: vec![
+        fixes: Box::new([
             SuggestedFixTemplate { command: Some("free -h"), description: "Check memory usage", auto_applicable: true, confidence: 0.85 },
             SuggestedFixTemplate { command: None, description: "Close other applications or increase swap", auto_applicable: false, confidence: 0.7 },
-        ],
+        ]),
     },
     ErrorFixRule {
         pattern: r"(?i)(ECONNREFUSED|connection refused|could not connect)",
-        fixes: vec![
+        fixes: Box::new([
             SuggestedFixTemplate { command: Some("nc -zv {host} {port}"), description: "Test connectivity to host:port", auto_applicable: true, confidence: 0.88 },
             SuggestedFixTemplate { command: Some("curl -I http://{host}:{port}/health"), description: "Health check endpoint", auto_applicable: true, confidence: 0.82 },
-        ],
+        ]),
     },
     ErrorFixRule {
         pattern: r"(?i)(ETIMEDOUT|timed out|connection timed out|timeout exceeded)",
-        fixes: vec![
+        fixes: Box::new([
             SuggestedFixTemplate { command: Some("ping -c 4 {host}"), description: "Ping target to check latency", auto_applicable: true, confidence: 0.83 },
             SuggestedFixTemplate { command: None, description: "Increase timeout or check network/firewall", auto_applicable: false, confidence: 0.72 },
-        ],
+        ]),
     },
     ErrorFixRule {
         pattern: r"(?i)(module not found|cannot find module|unresolved dependency)",
-        fixes: vec![
+        fixes: Box::new([
             SuggestedFixTemplate { command: Some("npm install {module_name}"), description: "Install missing npm package", auto_applicable: false, confidence: 0.88 },
             SuggestedFixTemplate { command: Some("pip install {module_name}"), description: "Install missing Python package", auto_applicable: false, confidence: 0.86 },
             SuggestedFixTemplate { command: Some("cargo add {module_name}"), description: "Add missing Cargo dependency", auto_applicable: false, confidence: 0.87 },
-        ],
+        ]),
     },
     ErrorFixRule {
         pattern: r"(?i)(cannot compile|compilation failed|build error|syntax error)",
-        fixes: vec![
+        fixes: Box::new([
             SuggestedFixTemplate { command: Some("cargo build 2>&1 | head -50"), description: "View detailed compilation errors", auto_applicable: true, confidence: 0.9 },
             SuggestedFixTemplate { command: Some("npm run build -- --verbose"), description: "Verbose build output", auto_applicable: true, confidence: 0.82 },
-        ],
+        ]),
     },
     ErrorFixRule {
         pattern: r"(?i)(certificate.*error|SSL.*error|self signed certificate|CERT_)",
-        fixes: vec![
+        fixes: Box::new([
             SuggestedFixTemplate { command: None, description: "Check system CA certificates or use NODE_TLS_REJECT_UNAUTHORIZED=0 for dev", auto_applicable: false, confidence: 0.73 },
-        ],
+        ]),
     },
     ErrorFixRule {
         pattern: r"(?i)(disk full|no space left|quota exceeded|ENOSPC)",
-        fixes: vec![
+        fixes: Box::new([
             SuggestedFixTemplate { command: Some("df -h"), description: "Check disk space usage", auto_applicable: true, confidence: 0.92 },
             SuggestedFixTemplate { command: Some("du -sh * | sort -hr | head -10"), description: "Find largest files/dirs", auto_applicable: true, confidence: 0.88 },
-        ],
+        ]),
     },
     ErrorFixRule {
         pattern: r"(?i)(exit status 1|exit code 1|non-zero exit code)",
-        fixes: vec![
+        fixes: Box::new([
             SuggestedFixTemplate { command: None, description: "Check stderr output for specific error details", auto_applicable: false, confidence: 0.65 },
-        ],
+        ]),
     },
     ErrorFixRule {
         pattern: r"(?i)(git.*conflict|merge conflict|both modified)",
-        fixes: vec![
+        fixes: Box::new([
             SuggestedFixTemplate { command: Some("git diff --name-only --diff-filter=U"), description: "List conflicted files", auto_applicable: true, confidence: 0.91 },
             SuggestedFixTemplate { command: Some("git checkout --theirs {file}"), description: "Accept theirs version", auto_applicable: false, confidence: 0.75 },
             SuggestedFixTemplate { command: Some("git checkout --ours {file}"), description: "Accept ours version", auto_applicable: false, confidence: 0.75 },
-        ],
+        ]),
     },
     ErrorFixRule {
         pattern: r"(?i)(detached HEAD|detached head state)",
-        fixes: vec![
+        fixes: Box::new([
             SuggestedFixTemplate { command: Some("git checkout {branch}"), description: "Checkout a branch", auto_applicable: false, confidence: 0.88 },
             SuggestedFixTemplate { command: Some("git switch -"), description: "Switch back to previous branch", auto_applicable: false, confidence: 0.85 },
-        ],
+        ]),
     },
     ErrorFixRule {
         pattern: r"(?i)(docker.*not running|docker daemon|Cannot connect to Docker)",
-        fixes: vec![
+        fixes: Box::new([
             SuggestedFixTemplate { command: Some("docker info"), description: "Check Docker daemon status", auto_applicable: true, confidence: 0.89 },
             SuggestedFixTemplate { command: Some("systemctl start docker"), description: "Start Docker service", auto_applicable: false, confidence: 0.84 },
-        ],
+        ]),
     },
     ErrorFixRule {
         pattern: r"(?i)(image not found|pull access denied|manifest unknown)",
-        fixes: vec![
+        fixes: Box::new([
             SuggestedFixTemplate { command: Some("docker pull {image}"), description: "Pull Docker image", auto_applicable: false, confidence: 0.87 },
             SuggestedFixTemplate { command: Some("docker images | grep {image}"), description: "Check local images", auto_applicable: true, confidence: 0.8 },
-        ],
+        ]),
     },
     ErrorFixRule {
         pattern: r"(?i)(EPIPE|broken pipe|signal SIGPIPE)",
-        fixes: vec![
+        fixes: Box::new([
             SuggestedFixTemplate { command: None, description: "Pipe reader closed early; check downstream command exit", auto_applicable: false, confidence: 0.7 },
-        ],
+        ]),
     },
     ErrorFixRule {
         pattern: r"(?i)(too many open files|EMFILE|ulimit|file descriptor limit)",
-        fixes: vec![
+        fixes: Box::new([
             SuggestedFixTemplate { command: Some("ulimit -n"), description: "Check current file descriptor limit", auto_applicable: true, confidence: 0.86 },
             SuggestedFixTemplate { command: Some("ulimit -n 65535"), description: "Increase fd limit (requires shell restart)", auto_applicable: false, confidence: 0.78 },
-        ],
+        ]),
     },
     ErrorFixRule {
         pattern: r"(?i)(command not found|executable not found|is not recognized)",
-        fixes: vec![
+        fixes: Box::new([
             SuggestedFixTemplate { command: Some("which {command_name} || where {command_name}"), description: "Locate executable in PATH", auto_applicable: true, confidence: 0.84 },
             SuggestedFixTemplate { command: Some("apt install {command_name} || brew install {command_name}"), description: "Install missing tool", auto_applicable: false, confidence: 0.76 },
-        ],
+        ]),
     },
-];
+]);
 
 impl ContextActionGenerator {
     pub fn new(config: ContextActionConfig) -> Self {
@@ -369,12 +382,12 @@ impl ContextActionGenerator {
     fn extract_file_paths(text: &str) -> Vec<PathWithContext> {
         let mut results = Vec::new();
         let patterns = [
-            (r"[A-Z]:\\[^\s\"'`<>]+\.\w+", 0.95),
+            (r#"[A-Z]:\\[^\s"'`<>]+\.\w+"#, 0.95),
             (r"/(?:[\w\-./]+/)*[\w\-./]+\.\w+", 0.92),
-            (r"\./[^\s\"'`<>]+", 0.88),
-            (r"\.\./[^\s\"'`<>]+", 0.88),
+            (r#"\./[^\s"'`<>"+"#, 0.88),
+            (r#"\.\./[^\s"'`<>"+"#, 0.88),
             (r"~/(?:[\w\-./]+/)*[\w\-./]+", 0.85),
-            (r"[^\s\"'`<>@:/]+\.(?:rs|py|js|ts|go|java|rb|sh|yaml|yml|toml|json|md|html|css|sql|mod|lock)", 0.80),
+            (r#"[^\s"'`<>@:/]+\.(?:rs|py|js|ts|go|java|rb|sh|yaml|yml|toml|json|md|html|css|sql|mod|lock)"#, 0.80),
         ];
         let seen: HashSet<String> = HashSet::new();
         for (pat, base_conf) in patterns {
@@ -400,7 +413,7 @@ impl ContextActionGenerator {
 
     fn extract_urls(text: &str) -> Vec<UrlWithContext> {
         let mut results = Vec::new();
-        let re = Regex::new(r"https?://[^\s\"'<>]+").unwrap_or_else(|_| Regex::new("").unwrap());
+        let re = Regex::new(r#"https?://[^\s"'<>]+"#).unwrap_or_else(|_| Regex::new("").unwrap());
         for cap in re.captures_iter(text) {
             let raw = cap.get(0).unwrap().as_str();
             if let Ok(parsed) = url::Url::parse(raw) {
@@ -460,7 +473,7 @@ impl ContextActionGenerator {
 
     fn detect_error_patterns(text: &str) -> Vec<ErrorWithContext> {
         let mut errors = Vec::new();
-        for rule in ERROR_FIX_RULES {
+        for rule in ERROR_FIX_RULES.iter() {
             if let Ok(re) = Regex::new(rule.pattern) {
                 if re.is_match(text) {
                     let severity = if re.as_str().contains("critical") || re.as_str().contains("fatal") {
@@ -508,7 +521,7 @@ impl ContextActionGenerator {
     }
 
     fn extract_code_symbols(text: &str) -> Vec<CodeSymbolRef> {
-        let mut symbols = Vec::new[];
+        let mut symbols = Vec::new();
         let func_re = Regex::new(r"(?:fn|def|function|func)\s+(\w+)").unwrap();
         for cap in func_re.captures_iter(text) {
             symbols.push(CodeSymbolRef {
@@ -539,7 +552,7 @@ impl ContextActionGenerator {
                 context: "variable declaration".to_string(),
             });
         }
-        let import_re = Regex::new(r"(?:import|use|require|from)\s+['\"]?([\w/:.]+)['\"]?").unwrap();
+        let import_re = Regex::new(r#"(?:import|use|require|from)\s+['"]?([\w/:.]+)['"]?"#).unwrap();
         for cap in import_re.captures_iter(text) {
             symbols.push(CodeSymbolRef {
                 name: cap.get(1).unwrap().as_str().to_string(),
@@ -562,8 +575,8 @@ impl ContextActionGenerator {
     }
 
     fn detect_packages(text: &str) -> Vec<PackageRef> {
-        let mut pkgs = Vec::new[];
-        let npm_re = Regex::new(r"""(?:"|')(@?[\w\-./]+@?[\w\-./]*)["']\s*:?\s*["'][^"']*["']|(?:npm install|yarn add|pnpm add)\s+(@?[\w\-./@]+))""").unwrap();
+        let mut pkgs = Vec::new();
+        let npm_re = Regex::new(r####"""(?:"|')(@?[\w\-./]+@?[\w\-./]*)["']\s*:?\s*["'][^"']*["']|(?:npm install|yarn add|pnpm add)\s+(@?[\w\-./@]+))"""####).unwrap();
         for cap in npm_re.captures_iter(text) {
             let name = cap.get(1).or_else(|| cap.get(2)).map(|m| m.as_str()).unwrap_or_default().trim_matches('"').trim_matches('\'').to_string();
             if !name.is_empty() && !name.starts_with("http") {
@@ -597,7 +610,7 @@ impl ContextActionGenerator {
                 version: None,
             });
         }
-        let go_re = Regex::new(r"""(?:(?:go get|import)\s+)"([^"]+)""").unwrap();
+        let go_re = Regex::new(r####"""(?:(?:go get|import)\s+)"([^"]+)""""####).unwrap();
         for cap in go_re.captures_iter(text) {
             pkgs.push(PackageRef {
                 name: cap.get(1).unwrap().as_str().to_string(),
@@ -610,7 +623,7 @@ impl ContextActionGenerator {
     }
 
     fn detect_docker_images(text: &str) -> Vec<DockerImageRef> {
-        let mut images = Vec::new[];
+        let mut images = Vec::new();
         let re = Regex::new(r"(?:docker pull|docker run|image:\s*|FROM\s+)?([\w\-./]+(?::[\w.\-]+)?)").unwrap();
         for cap in re.captures_iter(text) {
             let full = cap.get(1).unwrap().as_str().to_string();
@@ -634,7 +647,7 @@ impl ContextActionGenerator {
     }
 
     fn recognize_commands(text: &str) -> Vec<RecognizedCommand> {
-        let mut cmds = Vec::new[];
+        let mut cmds = Vec::new();
         let patterns: &[(&str, CommandCategory, RiskLevel)] = &[
             (r"(?i)(rm\s+-rf|--force)\s+(/|[~$])", CommandCategory::FileOperation, RiskLevel::Destructive),
             (r"(?i)\b(git\s+(commit|push|pull|merge|rebase|reset|stash|checkout|log|status|diff|add|branch|fetch))\b", CommandCategory::Git, RiskLevel::Low),
@@ -660,7 +673,7 @@ impl ContextActionGenerator {
     }
 
     pub fn suggest_actions(&self, context: &AnalyzedContext, _block: &CommandBlock) -> Vec<SuggestedAction> {
-        let mut actions = Vec::new[];
+        let mut actions = Vec::new();
         if self.config.enable_file_actions {
             actions.extend(self.generate_file_actions(&context.file_paths));
         }
@@ -697,7 +710,7 @@ impl ContextActionGenerator {
     }
 
     fn generate_error_fixes(&self, errors: &[ErrorWithContext]) -> Vec<SuggestedAction> {
-        let mut actions = Vec::new[];
+        let mut actions = Vec::new();
         for err in errors.iter().take(5) {
             for fix in err.suggested_fixes.iter().take(2) {
                 actions.push(SuggestedAction {
@@ -940,7 +953,7 @@ mod tests {
 
     #[test]
     fn test_cargo_package_detection() {
-        let pkgs = ContextActionGenerator::detect_packages('serde = { version = "1.0", features = ["derive"] }');
+        let pkgs = ContextActionGenerator::detect_packages("serde = { version = \"1.0\", features = [\"derive\"] }");
         assert!(pkgs.iter().any(|p| p.name == "serde" && p.manager == PackageManager::Cargo && p.version.as_deref() == Some("1.0")));
     }
 
@@ -952,10 +965,10 @@ mod tests {
 
     #[test]
     fn test_action_generation_priority_sorting() {
-        let gen = ContextActionGenerator::new(ContextActionConfig::default());
-        let ctx = gen.analyze("Error: EADDRINUSE port 3000 in use. See /tmp/log.txt for details.");
+        let r#gen = ContextActionGenerator::new(ContextActionConfig::default());
+        let ctx = r#gen.analyze("Error: EADDRINUSE port 3000 in use. See /tmp/log.txt for details.");
         let block = CommandBlock::new(BlockType::UserInput, "test");
-        let actions = gen.suggest_actions(&ctx, &block);
+        let actions = r#gen.suggest_actions(&ctx, &block);
         assert!(!actions.is_empty());
         for w in actions.windows(2) {
             assert!(w[0].confidence >= w[1].confidence, "actions should be sorted by confidence descending");
@@ -976,8 +989,8 @@ mod tests {
 
     #[test]
     fn test_empty_input_returns_empty_context() {
-        let gen = ContextActionGenerator::new(ContextActionConfig::default());
-        let ctx = gen.analyze("");
+        let r#gen = ContextActionGenerator::new(ContextActionConfig::default());
+        let ctx = r#gen.analyze("");
         assert!(ctx.file_paths.is_empty());
         assert!(ctx.urls.is_empty());
         assert!(ctx.errors.is_empty());
@@ -986,20 +999,20 @@ mod tests {
 
     #[test]
     fn test_no_matching_input_returns_no_actions() {
-        let gen = ContextActionGenerator::new(ContextActionConfig::default());
-        let ctx = gen.analyze("hello world, just plain text with no special patterns");
+        let r#gen = ContextActionGenerator::new(ContextActionConfig::default());
+        let ctx = r#gen.analyze("hello world, just plain text with no special patterns");
         let block = CommandBlock::new(BlockType::UserInput, "plain");
-        let actions = gen.suggest_actions(&ctx, &block);
+        let actions = r#gen.suggest_actions(&ctx, &block);
         assert!(actions.is_empty());
     }
 
     #[test]
     fn test_config_max_suggestions_limits_output() {
         let cfg = ContextActionConfig { max_suggestions: 2, min_confidence: 0.0, ..Default::default() };
-        let gen = ContextActionGenerator::new(cfg);
-        let ctx = gen.analyze("edit /tmp/a.rs, /tmp/b.rs, /tmp/c.rs, /tmp/d.rs, /tmp/e.rs");
+        let r#gen = ContextActionGenerator::new(cfg);
+        let ctx = r#gen.analyze("edit /tmp/a.rs, /tmp/b.rs, /tmp/c.rs, /tmp/d.rs, /tmp/e.rs");
         let block = CommandBlock::new(BlockType::UserInput, "multi");
-        let actions = gen.suggest_actions(&ctx, &block);
+        let actions = r#gen.suggest_actions(&ctx, &block);
         assert!(actions.len() <= 2);
     }
 
@@ -1023,13 +1036,13 @@ mod tests {
 
     #[test]
     fn test_full_analyze_pipeline_integration() {
-        let gen = ContextActionGenerator::new(ContextActionConfig::default());
+        let r#gen = ContextActionGenerator::new(ContextActionConfig::default());
         let input = r#"
 Error: EADDRINUSE port 8080 already in use.
 Check src/main.rs and https://docs.example.com/api/v1/endpoints.
 Run git checkout feature/auth and install lodash from npm.
 "#;
-        let ctx = gen.analyze(input);
+        let ctx = r#gen.analyze(input);
         assert!(!ctx.errors.is_empty(), "should detect port error");
         assert!(!ctx.urls.is_empty(), "should extract URL");
         assert!(!ctx.git_refs.is_empty(), "should find git ref");
@@ -1037,7 +1050,7 @@ Run git checkout feature/auth and install lodash from npm.
         assert!(!ctx.file_paths.is_empty(), "should find file path");
 
         let block = CommandBlock::new(BlockType::UserInput, "integration");
-        let actions = gen.suggest_actions(&ctx, &block);
+        let actions = r#gen.suggest_actions(&ctx, &block);
         assert!(!actions.is_empty(), "should generate suggestions");
     }
 }

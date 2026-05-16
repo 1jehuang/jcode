@@ -363,7 +363,7 @@ fn build_file_diff_cache_entry(
                 }
                 del_count += 1;
                 rows.push(FileDiffDisplayRow {
-                    prefix: format!("{} │-", gutter_pad),
+                    prefix: format!("{} |-", gutter_pad),
                     text: del_text.clone(),
                     kind: FileDiffDisplayRowKind::Del,
                 });
@@ -376,13 +376,13 @@ fn build_file_diff_cache_entry(
             }
             add_count += 1;
             rows.push(FileDiffDisplayRow {
-                prefix: format!("{:>width$} │+", line_num, width = line_num_width),
+                prefix: format!("{:>width$} |+", line_num, width = line_num_width),
                 text: (*line_text).to_string(),
                 kind: FileDiffDisplayRowKind::Add,
             });
         } else {
             rows.push(FileDiffDisplayRow {
-                prefix: format!("{:>width$} │ ", line_num, width = line_num_width),
+                prefix: format!("{:>width$} | ", line_num, width = line_num_width),
                 text: (*line_text).to_string(),
                 kind: FileDiffDisplayRowKind::Normal,
             });
@@ -395,7 +395,7 @@ fn build_file_diff_cache_entry(
         }
         del_count += 1;
         rows.push(FileDiffDisplayRow {
-            prefix: format!("{} │-", gutter_pad),
+            prefix: format!("{} |-", gutter_pad),
             text: del_text.clone(),
             kind: FileDiffDisplayRowKind::Del,
         });

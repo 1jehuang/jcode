@@ -83,10 +83,7 @@ impl WsMessage {
             params: Some(params),
             result: None,
             error: None,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+            timestamp: timestamp_now(),
         }
     }
 
@@ -100,10 +97,7 @@ impl WsMessage {
             params: None,
             result: Some(result),
             error: None,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+            timestamp: timestamp_now(),
         }
     }
 
@@ -117,10 +111,7 @@ impl WsMessage {
             params: None,
             result: None,
             error: Some(error_msg.to_string()),
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+            timestamp: timestamp_now(),
         }
     }
 
@@ -134,10 +125,7 @@ impl WsMessage {
             params: Some(data),
             result: None,
             error: None,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+            timestamp: timestamp_now(),
         }
     }
 
@@ -151,10 +139,7 @@ impl WsMessage {
             params: Some(serde_json::json!({"content": chunk})),
             result: None,
             error: None,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+            timestamp: timestamp_now(),
         }
     }
 
@@ -168,10 +153,7 @@ impl WsMessage {
             params: Some(data),
             result: None,
             error: None,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+            timestamp: timestamp_now(),
         }
     }
 
@@ -185,12 +167,17 @@ impl WsMessage {
             params: Some(serde_json::json!({"timestamp": chrono::Utc::now().to_rfc3339()})),
             result: None,
             error: None,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+            timestamp: timestamp_now(),
         }
     }
+}
+
+/// 获取安全的当前时间戳（毫秒）
+fn timestamp_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 /// WebSocket 请求（简化版，兼容 JSON-RPC）

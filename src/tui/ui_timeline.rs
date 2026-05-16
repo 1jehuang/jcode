@@ -123,7 +123,7 @@ impl TimelineSession {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelinePosition {
     pub session_idx: usize,
     pub block_offset: Option<usize>,
@@ -518,7 +518,7 @@ impl TimelineManager {
             if let Some(ref branch) = session.branch {
                 md.push_str(&format!("- **Branch**: {}\n", branch));
             }
-            md.push_str(&format!("- **Time**: {} → ", session.start_time.format("%Y-%m-%d %H:%M UTC")));
+            md.push_str(&format!("- **Time**: {} -> ", session.start_time.format("%Y-%m-%d %H:%M UTC")));
             if let Some(end) = session.end_time {
                 md.push_str(&format!("{}", end.format("%H:%M UTC")));
             } else {
@@ -879,9 +879,9 @@ fn render_header(area: Rect, buf: &mut Buffer, manager: &TimelineManager) {
         "{}{}",
         manager.view_state.sort_by.label(),
         if manager.view_state.sort_descending {
-            " ↓"
+            " v"
         } else {
-            " ↑"
+            " ^"
         }
     );
     let header_line = Line::from(vec![
@@ -905,7 +905,7 @@ fn render_header(area: Rect, buf: &mut Buffer, manager: &TimelineManager) {
     ]);
     buf.set_line(area.x, area.y, &header_line, area.width);
     let separator = Line::from(Span::styled(
-        "─".repeat(area.width as usize),
+        "-".repeat(area.width as usize),
         Style::default().fg(Color::DarkGray),
     ));
     buf.set_line(area.x, area.y + 1, &separator, area.width);
@@ -920,7 +920,7 @@ fn render_header(area: Rect, buf: &mut Buffer, manager: &TimelineManager) {
         buf.set_line(area.x, area.y + 2, &search_line, area.width);
     } else {
         let help_line = Line::from(Span::styled(
-            "↑↓/jk navigate │ ←→/hl expand │ Enter open │ /search │ t zoom │ f filter │ ? help",
+            "^v/jk navigate | <-->/hl expand | Enter open | /search | t zoom | f filter | ? help",
             Style::default().fg(Color::DarkGray),
         ));
         buf.set_line(area.x, area.y + 2, &help_line, area.width);
@@ -1074,7 +1074,7 @@ fn render_footer(area: Rect, buf: &mut Buffer, manager: &TimelineManager) {
         None => "No session selected".to_string(),
     };
     let sep = Line::from(Span::styled(
-        "─".repeat(area.width as usize),
+        "-".repeat(area.width as usize),
         Style::default().fg(Color::DarkGray),
     ));
     buf.set_line(area.x, area.y, &sep, area.width);
@@ -1111,7 +1111,7 @@ fn generate_sample_sessions(count: usize, now: DateTime<Utc>) -> Vec<TimelineSes
         TagCategory::Warning,
         TagCategory::Error,
     ];
-    let tag_icons = ['✨', '🐛', '♻️', '🧪', '✅', '⚠️', '❌'];
+    let tag_icons = ["✨", "🐛", "♻️", "🧪", "✅", "⚠️", "❌"];
     let tag_labels = [
         "feature", "bugfix", "refactor", "experiment", "success", "warning", "error",
     ];

@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::process::{Command, Stdio, Child};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -146,7 +147,7 @@ impl SshConfig {
             } else if line.starts_with("ConnectTimeout ") {
                 let secs: u64 = line[15..].trim().parse().unwrap_or(30);
                 config.connect_timeout = Duration::from_secs(secs);
-            } else if line.starts_forward("Compression ") && (line.contains("yes") || line.contains("true")) {
+            } else if line.starts_with("Compression ") && (line.contains("yes") || line.contains("true")) {
                 config.compression = true;
             }
         }
@@ -251,7 +252,7 @@ pub struct SshSession {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum SessionState {
+pub enum SessionState {
     Disconnected,
     Connecting,
     Connected,
@@ -383,7 +384,7 @@ impl SshSession {
         
         let start = Instant::now();
         let result = self._execute_sync(command)?;
-        let duration = start.elapsed();
+        let _duration = start.elapsed();
 
         // Update stats
         self.stats.commands_executed += 1;
@@ -422,7 +423,7 @@ impl SshSession {
     }
 
     /// Execute command with streaming output (real-time)
-    pub fn execute_streaming<F>(&self, command: &str, on_line: F) -> Result<(), String>
+    pub fn execute_streaming<F>(&self, command: &str, mut on_line: F) -> Result<(), String>
     where
         F: FnMut(&str) + Send + 'static,
     {
@@ -461,7 +462,7 @@ impl SshSession {
     }
 
     /// Execute interactive command (with PTY) - supports sudo, vim, etc.
-    pub fn execute_interactive<F>(&self, command: &str, input_handler: F) -> Result<(), String>
+    pub fn execute_interactive<F>(&self, command: &str, mut input_handler: F) -> Result<(), String>
     where
         F: FnMut(&str) -> Option<String> + Send + 'static,
     {
@@ -543,19 +544,19 @@ impl SshSession {
     }
 
     /// Upload file to remote host (simple version)
-    pub fn upload(&self, local_path: &Path, remote_path: &Path) -> Result<(), String> {
+    pub fn upload(&mut self, local_path: &Path, remote_path: &Path) -> Result<(), String> {
         self.upload_with_progress(local_path, remote_path, |_current, _total| {})?;
         Ok(())
     }
 
     /// Download file from remote host (simple version)
-    pub fn download(&self, remote_path: &Path, local_path: &Path) -> Result<(), String> {
+    pub fn download(&mut self, remote_path: &Path, local_path: &Path) -> Result<(), String> {
         self.download_with_progress(remote_path, local_path, |_current, _total| {})?;
         Ok(())
     }
 
     /// Upload file with progress callback
-    pub fn upload_with_progress<F>(&self, local_path: &Path, remote_path: &Path, progress_callback: F) -> Result<u64, String>
+    pub fn upload_with_progress<F>(&mut self, local_path: &Path, remote_path: &Path, progress_callback: F) -> Result<u64, String>
     where
         F: Fn(u64, u64) + Send + Sync + 'static,
     {
@@ -585,10 +586,10 @@ impl SshSession {
         self.stats.files_uploaded += 1;
         self.stats.bytes_transferred += file_size;
 
-        eprintln!("\n  📤 Uploaded {} ({:.1} MB/s in {:?})", 
+        eprintln!("\n  📤 Uploaded {} ({:.1} MB/s, {:.1} MB in {:?})", 
             local_path.file_name().unwrap_or_default().to_string_lossy(),
-            file_size as f64 / (1024.0 * 1024.0),
             speed as f64 / (1024.0 * 1024.0),
+            file_size as f64 / (1024.0 * 1024.0),
             duration
         );
 
@@ -596,7 +597,7 @@ impl SshSession {
     }
 
     /// Download file with progress callback
-    pub fn download_with_progress<F>(&self, remote_path: &Path, local_path: &Path, progress_callback: F) -> Result<u64, String>
+    pub fn download_with_progress<F>(&mut self, remote_path: &Path, local_path: &Path, progress_callback: F) -> Result<u64, String>
     where
         F: Fn(u64, u64) + Send + Sync + 'static,
     {
@@ -614,7 +615,7 @@ impl SshSession {
             .map(|m| m.len())
             .unwrap_or(0);
 
-        let duration = start.elapsed();
+        let _duration = start.elapsed();
         self.stats.files_downloaded += 1;
         self.stats.bytes_transferred += file_size;
 
@@ -651,7 +652,7 @@ impl SshSession {
     }
 
     /// Download directory recursively
-    pub fn download_dir(&self, remote_dir: &Path, local_dir: &Path) -> Result<(), String> {
+    pub fn download_dir(&mut self, remote_dir: &Path, local_dir: &Path) -> Result<(), String> {
         self.ensure_connected()?;
 
         if self._is_rsync_available() {
@@ -704,16 +705,20 @@ impl SshSession {
     }
 
     /// Check if session is alive (heartbeat check)
-    pub fn is_alive(&self) -> bool {
+    pub fn is_alive(&mut self) -> bool {
         if !matches!(self.state, SessionState::Connected) {
             return false;
         }
 
-        // Quick connectivity check
         match self.execute("echo alive") {
             Ok(output) => output.stdout.contains("alive"),
             Err(_) => false,
         }
+    }
+    
+    /// Check if session is connected (without heartbeat)
+    pub fn is_connected(&self) -> bool {
+        matches!(self.state, SessionState::Connected)
     }
 
     /// Auto-reconnect if disconnected
@@ -849,8 +854,7 @@ impl SshSession {
         self._walk_and_upload_files(local_dir, remote_dir)
     }
 
-    fn _scp_recursive_download(&self, remote_dir: &Path, local_dir: &Path) -> Result<(), String> {
-        // List remote directory contents, then download each
+    fn _scp_recursive_download(&mut self, remote_dir: &Path, local_dir: &Path) -> Result<(), String> {
         let list_output = self.execute(&format!("ls -la {}", remote_dir.display()))?;
         
         if !list_output.stderr.is_empty() {
@@ -949,36 +953,28 @@ impl SshConnectionPool {
     pub fn get_session(&self, host: &str) -> Result<String, String> {
         let mut sessions = self.sessions.lock().map_err(|e| e.to_string())?;
 
-        // Normalize host key
         let key = host.to_lowercase();
 
-        if let Some(session) = sessions.get(&key) {
+        if let Some(session) = sessions.get_mut(&key) {
             if session.is_alive() {
                 return Ok(session.id().to_string());
             }
-            // Session exists but is dead, remove it
             sessions.remove(&key);
         }
 
         if sessions.len() >= self.max_connections {
-            // Close oldest idle session
             if let Some((id, _)) = sessions.iter()
                 .min_by_key(|(_, s)| s.idle_time().unwrap_or(Duration::MAX))
             {
-                let old_id = id.clone();
-                drop(sessions);
-                if let Ok(mut s) = self.sessions.lock() {
-                    s.remove(&old_id);
-                }
+                sessions.remove(id);
             }
         }
 
-        // Create new session
         let config = self.default_config.clone()
             .unwrap_or_else(|| SshConfig::with_host(host));
 
         let mut session = SshSession::new(config);
-        let session_id = session.connect()?;
+        let _session_id = session.connect()?;
         let id = session.id.clone();
 
         sessions.insert(key, session);
@@ -987,11 +983,10 @@ impl SshConnectionPool {
     }
 
     /// Execute command on specific host
-    pub fn execute_on(&self, host: &str, command: &str) -> Result<SshOutput, String> {
+    pub fn execute_on(&mut self, host: &str, command: &str) -> Result<SshOutput, String> {
         let session_id = self.get_session(host)?;
-        let sessions = self.sessions.lock().map_err(|e| e.to_string())?;
+        let mut sessions = self.sessions.lock().map_err(|e| e.to_string())?;
         
-        // Find session by id
         let session = sessions.values_mut()
             .find(|s| s.id == session_id)
             .ok_or("Session not found after creation")?;
@@ -1000,7 +995,7 @@ impl SshConnectionPool {
     }
 
     /// Parallel execution across multiple hosts
-    pub fn parallel_execute(&self, commands: Vec<(String, String)>) -> Vec<(String, Result<SshOutput, String>)> {
+    pub fn parallel_execute(&mut self, commands: Vec<(String, String)>) -> Vec<(String, Result<SshOutput, String>)> {
         commands.into_iter()
             .map(|(host, cmd)| {
                 let output = self.execute_on(&host, &cmd);
@@ -1072,7 +1067,8 @@ impl SshAuditLogger {
             
             // Keep only last 10000 events
             if events.len() > 10000 {
-                events.drain(..events.len() - 10000);
+                let excess = events.len() - 10000;
+                events.drain(..excess);
             }
         }
     }

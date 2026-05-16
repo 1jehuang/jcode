@@ -140,7 +140,7 @@ pub fn export_timeline(session: &Session) -> Vec<TimelineEvent> {
     let mut t: u64 = 0;
     let session_start = session.created_at;
 
-    // Track tool IDs for pairing ToolUse → ToolResult
+    // Track tool IDs for pairing ToolUse -> ToolResult
     let mut pending_tools: Vec<(String, String, serde_json::Value)> = Vec::new(); // (id, name, input)
 
     // Track memory injections by message index
@@ -817,8 +817,8 @@ fn extract_text(blocks: &[ContentBlock]) -> String {
 /// Auto-edit a timeline for demo-quality pacing.
 ///
 /// Compresses dead time so the replay feels snappy:
-/// - Tool call execution (tool_start → tool_done): capped to `tool_max_ms`
-/// - Gaps between turns (done → next user_message): capped to `gap_max_ms`
+/// - Tool call execution (tool_start -> tool_done): capped to `tool_max_ms`
+/// - Gaps between turns (done -> next user_message): capped to `gap_max_ms`
 /// - Thinking duration: capped to `think_max_ms`
 /// - Streaming text and everything else: preserved as-is
 pub fn auto_edit_timeline(timeline: &[TimelineEvent], opts: &AutoEditOpts) -> Vec<TimelineEvent> {
@@ -829,16 +829,16 @@ pub fn auto_edit_timeline(timeline: &[TimelineEvent], opts: &AutoEditOpts) -> Ve
     let mut out: Vec<TimelineEvent> = Vec::with_capacity(timeline.len());
     let mut time_shift: i64 = 0; // accumulated shift (negative = earlier)
 
-    // Track tool nesting for compressing tool_start→tool_done spans
+    // Track tool nesting for compressing tool_start->tool_done spans
     let mut tool_depth: u32 = 0;
     let mut tool_span_start_t: Option<u64> = None;
     // Track the end of the most recent top-level tool span so we can
     // compress any long idle wait before the assistant resumes.
     let mut last_tool_done_t: Option<u64> = None;
 
-    // Track done→user_message gaps
+    // Track done->user_message gaps
     let mut last_done_t: Option<u64> = None;
-    // Track user_message→thinking gaps
+    // Track user_message->thinking gaps
     let mut last_user_msg_t: Option<u64> = None;
 
     for event in timeline {
@@ -861,7 +861,7 @@ pub fn auto_edit_timeline(timeline: &[TimelineEvent], opts: &AutoEditOpts) -> Ve
 
         match &event.kind {
             TimelineEventKind::Thinking { duration } => {
-                // Clamp gap from done→thinking
+                // Clamp gap from done->thinking
                 if let Some(done_t) = last_done_t.take() {
                     let gap = orig_t.saturating_sub(done_t);
                     if gap > opts.gap_max_ms {
@@ -869,7 +869,7 @@ pub fn auto_edit_timeline(timeline: &[TimelineEvent], opts: &AutoEditOpts) -> Ve
                         new_t = (orig_t as i64 + time_shift).max(0) as u64;
                     }
                 }
-                // Clamp gap from user_message→thinking (model response delay)
+                // Clamp gap from user_message->thinking (model response delay)
                 if let Some(user_t) = last_user_msg_t.take() {
                     let gap = orig_t.saturating_sub(user_t);
                     if gap > opts.response_delay_max_ms {
@@ -932,13 +932,13 @@ pub fn auto_edit_timeline(timeline: &[TimelineEvent], opts: &AutoEditOpts) -> Ve
 
 /// Options for [`auto_edit_timeline`].
 pub struct AutoEditOpts {
-    /// Max ms for a tool_start→tool_done span (default: 800)
+    /// Max ms for a tool_start->tool_done span (default: 800)
     pub tool_max_ms: u64,
-    /// Max ms gap between done→next user_message (default: 2000)
+    /// Max ms gap between done->next user_message (default: 2000)
     pub gap_max_ms: u64,
     /// Max ms for thinking duration (default: 1200)
     pub think_max_ms: u64,
-    /// Max ms between user_message→thinking (model response delay, default: 1000)
+    /// Max ms between user_message->thinking (model response delay, default: 1000)
     pub response_delay_max_ms: u64,
 }
 

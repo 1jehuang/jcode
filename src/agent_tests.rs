@@ -300,7 +300,7 @@ async fn oversized_openai_native_compaction_is_persisted_as_text_fallback() {
     );
 }
 
-// ── InterruptSignal tests ────────────────────────────────────────────────
+// -- InterruptSignal tests ------------------------------------------------
 
 #[tokio::test]
 async fn interrupt_signal_fire_before_notified_does_not_hang() {

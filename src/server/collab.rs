@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, broadcast, RwLock};
+use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
@@ -26,6 +26,7 @@ impl CollabSessionId {
     pub fn as_uuid(&self) -> &Uuid { &self.0 }
 }
 
+#[derive(Clone)]
 pub struct CollabSession {
     pub id: CollabSessionId,
     pub document: CollaborativeDocument,
@@ -36,6 +37,7 @@ pub struct CollabSession {
     pub history: OperationLog,
 }
 
+#[derive(Clone)]
 pub struct CollaborativeDocument {
     pub doc_id: Uuid,
     pub content: Rope,
@@ -75,6 +77,7 @@ impl CrdtDocument {
     }
 }
 
+#[derive(Clone)]
 struct CursorState {
     participant_id: ParticipantId,
     position: Position,
@@ -86,7 +89,7 @@ struct CursorState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SelectionMode { Normal, Word, Line, Block }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Position {
     pub line: usize,
     pub column: usize,
@@ -107,6 +110,7 @@ impl SelectionRange {
     pub fn new(start: Position, end: Position) -> Self { SelectionRange { start, end } }
 }
 
+#[derive(Clone)]
 pub struct Participant {
     pub id: ParticipantId,
     pub user_id: UserId,
@@ -134,6 +138,7 @@ pub enum ParticipantRole { Owner, Editor, Viewer, Commenter }
 
 pub type AvatarUrl = String;
 
+#[derive(Clone)]
 pub struct PermissionSet {
     can_edit: bool,
     can_delete: bool,
@@ -356,6 +361,7 @@ pub struct TypingState {
     pub document_id: Option<Uuid>,
 }
 
+#[derive(Clone)]
 pub struct OperationLog {
     operations: Vec<LoggedOperation>,
     max_size: usize,
@@ -382,6 +388,7 @@ impl OperationLog {
     }
 }
 
+#[derive(Clone)]
 struct LoggedOperation {
     id: u64,
     operation: TextOperation,
@@ -451,6 +458,7 @@ impl Default for CollabConfig {
     }
 }
 
+#[derive(Clone)]
 pub struct CollabSettings {
     pub language: Option<String>,
     pub tab_size: usize,
@@ -529,13 +537,19 @@ impl CollaborationServer {
         session.participants.insert(participant.id.clone());
         self.participants.write().await.insert(participant.id.clone(), participant.clone());
 
-        let existing_info: Vec<ParticipantInfo> = session.participants.iter()
-            .filter_map(|pid| self.participants.read().await.get(pid).map(ParticipantInfo::from))
+        // 异步读取参与者映射（不能在非 async 闭包中 await）
+        let session_clone = session.clone();
+        drop(sessions);
+        let participants_read = self.participants.read().await;
+        let existing_info: Vec<ParticipantInfo> = session_clone.participants.iter()
+            .filter_map(|pid| participants_read.get(pid).map(ParticipantInfo::from))
             .collect();
+        drop(participants_read);
 
+        let document_content = session_clone.document.content.to_string();
         Ok(JoinResult {
-            session: session.clone(),
-            document_content: session.document.content.to_string(),
+            session: session_clone,
+            document_content,
             existing_participants: existing_info,
             missed_operations: Vec::new(),
         })
@@ -548,7 +562,7 @@ impl CollaborationServer {
             return Err("Not a participant".to_string());
         }
 
-        let old_text = session.document.content.to_string();
+        let _old_text = session.document.content.to_string();
         let new_rope = if let Some(ref range) = edit.old_range {
             let start_pos = session.document.content.line_to_pos(range.start.line) + range.start.column;
             let end_pos = session.document.content.line_to_pos(range.end.line) + range.end.column;
@@ -561,7 +575,7 @@ impl CollaborationServer {
         let mut new_version = session.document.version.clone();
         new_version.increment(participant_id);
 
-        let op = TextOperation {
+        let _op = TextOperation {
             op_type: if edit.old_range.is_some() { OpType::Replace } else { OpType::Insert },
             position: edit.position.clone(),
             text: edit.new_text.clone(),
@@ -615,7 +629,7 @@ impl CollaborationServer {
 
         let mut cursor_states = HashMap::new();
         for msg in missed_ops {
-            if let ServerPushMessage::CursorMoved { ref participant, ref position } = msg {
+            if let ServerPushMessage::CursorMoved { participant, position } = msg {
                 cursor_states.insert(participant.clone(), CursorState {
                     participant_id: participant.clone(),
                     position: position.clone(),
@@ -827,6 +841,7 @@ impl DocumentStore {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
     fn test_position_new_and_zero() {

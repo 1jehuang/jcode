@@ -80,7 +80,7 @@ pub fn handle_pipe_input(config: Option<PipeConfig>) -> Result<Option<PipeInput>
     let config = config.unwrap_or_default();
     
     // 检查是否有管道输入
-    if atty::is(atty::Stream::Stdin) {
+    if std::io::stdin().is_terminal() {
         return Ok(None); // stdin是终端，没有管道输入
     }
     

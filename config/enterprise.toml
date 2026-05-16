@@ -1,0 +1,175 @@
+# CarpAI Enterprise 默认部署配置
+#
+# 此配置适配：
+# - 5台 128G/4G显存 台式机（固定服务器）
+# - 20台网吧空闲电脑（动态节点）
+# - 200台员工笔记本（闲置资源）
+
+# ====================
+# 服务器配置
+# ====================
+[server]
+bind = "0.0.0.0"
+api_port = 8000
+admin_port = 8001
+node_port = 8002
+log_level = "info"
+json_log = false
+max_body_mb = 32
+request_timeout_secs = 600
+
+# ====================
+# 数据库配置（推荐 SQLite，轻量无依赖）
+# ====================
+[database]
+url = "sqlite://./data/carpai_enterprise.db?mode=rwc"
+max_connections = 10
+connect_timeout_secs = 30
+auto_migrate = true
+
+# ====================
+# 模型配置
+# ====================
+[models]
+# 默认模型
+default_model = "qwen3-72b-int4"
+# 模型缓存目录（存放 GGUF 量化文件）
+model_cache_dir = "./models"
+# 启动时自动加载的模型
+warm_up_models = ["qwen3-72b-int4"]
+
+# --- 模型列表 ---
+[[models.supported_models]]
+name = "qwen3-72b-int4"
+display_name = "通义千问 3.5 72B (Q4_K_M)"
+model_type = "Chat"
+quantized = true
+quantization = "Q4_K_M"
+gguf_path = "./models/qwen3-72b-Q4_K_M.gguf"
+min_memory_gb = 36.0
+supports_distributed = true
+num_layers = 80
+context_window = 32768
+supports_streaming = true
+supports_function_calling = true
+provider = "llamacpp"
+
+[[models.supported_models]]
+name = "qwq-32b-int4"
+display_name = "QwQ 32B (Q4_K_M)"
+model_type = "Chat"
+quantized = true
+quantization = "Q4_K_M"
+gguf_path = "./models/qwq-32b-Q4_K_M.gguf"
+min_memory_gb = 18.0
+supports_distributed = true
+num_layers = 40
+context_window = 32768
+supports_streaming = true
+supports_function_calling = true
+provider = "llamacpp"
+
+[[models.supported_models]]
+name = "deepseek-r1-32b-int4"
+display_name = "DeepSeek R1 32B (Q4_K_M)"
+model_type = "Code"
+quantized = true
+quantization = "Q4_K_M"
+gguf_path = "./models/deepseek-r1-32b-Q4_K_M.gguf"
+min_memory_gb = 18.0
+supports_distributed = true
+num_layers = 40
+context_window = 16384
+supports_streaming = true
+supports_function_calling = true
+provider = "llamacpp"
+
+[[models.supported_models]]
+name = "glm5-9b-int4"
+display_name = "GLM 5 9B (Q4_K_M)"
+model_type = "Chat"
+quantized = true
+quantization = "Q4_K_M"
+gguf_path = "./models/glm5-9b-Q4_K_M.gguf"
+min_memory_gb = 6.0
+supports_distributed = false
+num_layers = 28
+context_window = 8192
+supports_streaming = true
+supports_function_calling = true
+provider = "llamacpp"
+
+# 作为备用也可以配置 DeepSeek 云端 API
+[[models.supported_models]]
+name = "deepseek-chat"
+display_name = "DeepSeek Chat (云端)"
+model_type = "Chat"
+quantized = false
+quantization = ""
+min_memory_gb = 0.0
+supports_distributed = false
+num_layers = 0
+context_window = 64000
+supports_streaming = true
+supports_function_calling = true
+provider = "deepseek-api"
+api_base_url = "https://api.deepseek.com/v1"
+api_key_env = "DEEPSEEK_API_KEY"
+
+# ====================
+# 调度配置
+# ====================
+[scheduling]
+max_concurrent_tasks = 32
+max_queue_size = 2048
+heartbeat_timeout_secs = 30
+min_bootstrap_nodes = 1
+allocation_strategy = "dp"        # 动态规划，平衡流水线与延迟
+routing_strategy = "dp"          # 动态规划路由
+enable_goap = true                # 启用 GOAP 任务规划
+enable_dynamic_nodes = true       # 启用动态节点调度
+enable_virtual_memory = true      # 启用虚拟内存推理
+vm_large_file_threshold_mb = 4096
+
+# ====================
+# 认证配置
+# ====================
+[auth]
+jwt_secret_env = "CARPAI_JWT_SECRET"
+jwt_expiry_hours = 24
+api_key_hash = "sha256"
+allow_signup = true
+require_email_verification = false
+session_timeout_minutes = 120
+
+# ====================
+# 用量限制
+# ====================
+[limits]
+free_org_max_users = 5
+free_org_daily_token_limit = 100000
+free_org_concurrent_limit = 2
+enterprise_org_max_users = 0         # 0 = 不限
+enterprise_org_daily_token_limit = 0 # 0 = 不限
+enterprise_org_concurrent_limit = 0  # 0 = 不限
+max_tokens_per_request = 16384
+rate_limit_per_minute = 60
+
+# ====================
+# 审计日志
+# ====================
+[audit]
+enabled = true
+retention_days = 90
+log_request_body = true
+log_response_body = false
+
+# ====================
+# 虚拟内存配置
+# ====================
+[virtual_memory]
+enabled = true
+mmap_dir = "./kv_cache_mmap"
+max_mmap_file_gb = 64
+preallocate_mb = 1024
+swap_latency_tolerance_ms = 100

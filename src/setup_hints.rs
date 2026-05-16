@@ -296,36 +296,36 @@ fn nudge_macos_ghostty(state: &mut SetupHintsState) -> Option<String> {
         return None;
     }
 
-    eprintln!("\x1b[36m┌─────────────────────────────────────────────────────────────┐\x1b[0m");
+    eprintln!("\x1b[36m+-------------------------------------------------------------+\x1b[0m");
     eprintln!(
-        "\x1b[36m│\x1b[0m \x1b[1m💡 Better macOS terminal for jcode: Ghostty\x1b[0m                \x1b[36m│\x1b[0m"
+        "\x1b[36m|\x1b[0m \x1b[1m💡 Better macOS terminal for jcode: Ghostty\x1b[0m                \x1b[36m|\x1b[0m"
     );
     eprintln!(
-        "\x1b[36m│\x1b[0m                                                             \x1b[36m│\x1b[0m"
+        "\x1b[36m|\x1b[0m                                                             \x1b[36m|\x1b[0m"
     );
     eprintln!(
-        "\x1b[36m│\x1b[0m    Current terminal: {:<37} \x1b[36m│\x1b[0m",
+        "\x1b[36m|\x1b[0m    Current terminal: {:<37} \x1b[36m|\x1b[0m",
         format!("{}.", terminal.label())
     );
     if ghostty_installed {
         eprintln!(
-            "\x1b[36m│\x1b[0m    Ghostty is installed, but you are not using it now.      \x1b[36m│\x1b[0m"
+            "\x1b[36m|\x1b[0m    Ghostty is installed, but you are not using it now.      \x1b[36m|\x1b[0m"
         );
     } else {
         eprintln!(
-            "\x1b[36m│\x1b[0m    Ghostty offers fast rendering and great jcode UX.         \x1b[36m│\x1b[0m"
+            "\x1b[36m|\x1b[0m    Ghostty offers fast rendering and great jcode UX.         \x1b[36m|\x1b[0m"
         );
     }
     eprintln!(
-        "\x1b[36m│\x1b[0m                                                             \x1b[36m│\x1b[0m"
+        "\x1b[36m|\x1b[0m                                                             \x1b[36m|\x1b[0m"
     );
     eprintln!(
-        "\x1b[36m│\x1b[0m    Let jcode guide you through setup right now?             \x1b[36m│\x1b[0m"
+        "\x1b[36m|\x1b[0m    Let jcode guide you through setup right now?             \x1b[36m|\x1b[0m"
     );
     eprintln!(
-        "\x1b[36m│\x1b[0m    \x1b[32m[y]\x1b[0m Yes      \x1b[90m[n]\x1b[0m Not now      \x1b[90m[d]\x1b[0m Don't ask again    \x1b[36m│\x1b[0m"
+        "\x1b[36m|\x1b[0m    \x1b[32m[y]\x1b[0m Yes      \x1b[90m[n]\x1b[0m Not now      \x1b[90m[d]\x1b[0m Don't ask again    \x1b[36m|\x1b[0m"
     );
-    eprintln!("\x1b[36m└─────────────────────────────────────────────────────────────┘\x1b[0m");
+    eprintln!("\x1b[36m+-------------------------------------------------------------+\x1b[0m");
     eprint!("\x1b[36m  >\x1b[0m ");
     let _ = io::stderr().flush();
 
@@ -370,7 +370,7 @@ pub fn run_setup_hotkey(_listen_macos_hotkey: bool) -> Result<()> {
                 state.hotkey_dismissed = true;
                 let _ = state.save();
                 eprintln!(
-                    "  \x1b[32m✓\x1b[0m Created hotkey (\x1b[1mAlt+;\x1b[0m) → {} + jcode",
+                    "  \x1b[32m✓\x1b[0m Created hotkey (\x1b[1mAlt+;\x1b[0m) -> {} + jcode",
                     installed_terminal.label()
                 );
                 eprintln!();

@@ -11,7 +11,6 @@
 //! The system exposes a global [`AI_ENGINE`] singleton via `std::sync::LazyLock`.
 //! All agent and build subsystems can call into it without acquiring a reference.
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, LazyLock};
@@ -481,7 +480,7 @@ impl AiEngine {
     pub async fn learn_from_outcome(
         &self,
         _skill_name: &str,
-        context: &ContextFeatures,
+        _context: &ContextFeatures,
         success: bool,
         duration: Duration,
         quality_score: f64,

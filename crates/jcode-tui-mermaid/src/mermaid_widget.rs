@@ -35,7 +35,7 @@ pub(super) fn draw_left_border(buf: &mut Buffer, area: Rect) {
     let border_style = Style::default().fg(rgb(100, 100, 100)); // DIM_COLOR
     let y_end = clamped.y.saturating_add(clamped.height);
     for row in clamped.y..y_end {
-        set_cell_if_visible(buf, clamped.x, row, '│', Some(border_style));
+        set_cell_if_visible(buf, clamped.x, row, '|', Some(border_style));
         if clamped.width > 1 {
             let spacer_x = clamped.x.saturating_add(1);
             set_cell_if_visible(buf, spacer_x, row, ' ', None);

@@ -4,9 +4,9 @@
 //! ```typescript
 //! // 过期前 5 分钟主动刷新
 //! const refreshScheduler = new TokenRefreshScheduler(jwt, expires_in)
-//! scheduler.start() → 每 30s 检查一次, 剩余 <5min 时刷新
-//! scheduler.force_refresh() → 401 响应时手动触发
-//! scheduler.stop() → 关闭调度器
+//! scheduler.start() -> 每 30s 检查一次, 剩余 <5min 时刷新
+//! scheduler.force_refresh() -> 401 响应时手动触发
+//! scheduler.stop() -> 关闭调度器
 //! ```
 
 use anyhow::Result;
@@ -207,12 +207,12 @@ impl JwtRefreshScheduler {
 
     /// 手动强制刷新 (401 响应时调用)
     ///
-    /// 对应 Claude Code 的 `401 Recovery → rebuildTransport()` 流程
+    /// 对应 Claude Code 的 `401 Recovery -> rebuildTransport()` 流程
     pub async fn force_refresh(&self) -> Result<String> {
         info!("Force JWT refresh requested");
 
         // TODO: 实际调用刷新 API
-        // POST /bridge → {worker_jwt, expires_in}
+        // POST /bridge -> {worker_jwt, expires_in}
         
         let current = self.jwt.read().await;
         debug!("Current JWT length: {}", current.len());

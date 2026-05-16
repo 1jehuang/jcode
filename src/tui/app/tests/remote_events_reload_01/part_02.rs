@@ -65,7 +65,7 @@ fn test_remote_done_shows_footer_after_final_tool_result_without_trailing_text()
         .filter(|msg| msg.role == "meta")
         .collect();
     assert!(
-        footers.iter().any(|msg| msg.content.contains("↑123 ↓45")),
+        footers.iter().any(|msg| msg.content.contains("^123 v45")),
         "footer not found"
     );
 }

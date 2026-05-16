@@ -11,7 +11,7 @@ fn content_prefers_display_as_logical_lines(content: &str) -> bool {
 
 fn semantic_swarm_line_text(plain: &str) -> (String, usize) {
     let trimmed = plain.trim_start_matches(' ');
-    if let Some(rest) = trimmed.strip_prefix("│ ") {
+    if let Some(rest) = trimmed.strip_prefix("| ") {
         let prefix_width = unicode_width::UnicodeWidthStr::width(plain)
             .saturating_sub(unicode_width::UnicodeWidthStr::width(rest));
         (rest.to_string(), prefix_width)
@@ -576,7 +576,7 @@ pub(super) fn prepare_body_incremental(
                 new_raw_plain_lines.push(msg.content.clone());
                 let prompt_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());
                 let prefix_width =
-                    unicode_width::UnicodeWidthStr::width(prompt_num.to_string().as_str())
+                    unicode_width::UnicodeWidthStr::width(&prompt_num.to_string())
                         + unicode_width::UnicodeWidthStr::width("› ");
                 new_lines.push(
                     Line::from(vec![
@@ -1020,7 +1020,7 @@ pub(super) fn prepare_body(
                 raw_plain_lines.push(msg.content.clone());
                 let prompt_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());
                 let prefix_width =
-                    unicode_width::UnicodeWidthStr::width(prompt_num.to_string().as_str())
+                    unicode_width::UnicodeWidthStr::width(&prompt_num.to_string())
                         + unicode_width::UnicodeWidthStr::width("› ");
                 lines.push(
                     Line::from(vec![

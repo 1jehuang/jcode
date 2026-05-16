@@ -10,15 +10,15 @@
 //!
 //! ```text
 //! Classifier blocks action
-//!        │
+//!        |
 //!   recordDenial()
-//!        │
+//!        |
 //!   consecutiveDenials++ / totalDenials++
-//!        │
+//!        |
 //!   shouldFallbackToPrompting()?
-//!    ┌────┴────┐
+//!    +----+----+
 //!    YES       NO
-//!    │         │
+//!    |         |
 //!  Prompt     Continue silent deny
 //!  user
 //! ```

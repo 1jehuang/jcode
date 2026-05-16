@@ -1,4 +1,6 @@
 use super::*;
+use http::HeaderValue;
+use tokio_tungstenite::tungstenite::error::Error as WsError;
 
 pub(super) async fn openai_access_token(
     credentials: &Arc<RwLock<CodexCredentials>>,
@@ -610,7 +612,10 @@ pub(super) async fn stream_response_websocket_persistent(
     emit_connection_phase(&tx, ConnectionPhase::Connecting).await;
     let connect_start = std::time::Instant::now();
 
-    let connect_result = tokio::time::timeout(
+    let connect_result: Result<
+        Result<(WebSocketStream<MaybeTlsStream<TcpStream>>, axum::body::Body), WsError>,
+        tokio::time::error::Elapsed,
+    > = tokio::time::timeout(
         Duration::from_secs(WEBSOCKET_CONNECT_TIMEOUT_SECS),
         connect_async(ws_request),
     )
@@ -622,7 +627,10 @@ pub(super) async fn stream_response_websocket_persistent(
         ))
     })?;
 
-    let (mut ws_stream, _response) = match connect_result {
+    let (mut ws_stream, _response): (
+        WebSocketStream<MaybeTlsStream<TcpStream>>,
+        axum::body::Body,
+    ) = match connect_result {
         Ok((stream, response)) => {
             let connect_ms = connect_start.elapsed().as_millis();
             crate::logging::info(&format!(
@@ -683,10 +691,10 @@ pub(super) async fn stream_response_websocket_persistent(
         ))
     })?;
     let request_send_started_at = Instant::now();
-    ws_stream
+    let send_result: Result<(), WsError> = ws_stream
         .send(WsMessage::Text(request_text))
-        .await
-        .map_err(|err| OpenAIStreamFailure::Other(anyhow::anyhow!(err)))?;
+        .await;
+    let _ = send_result.map_err(|err| OpenAIStreamFailure::Other(anyhow::anyhow!(err)))?;
     emit_connection_phase(&tx, ConnectionPhase::WaitingForResponse).await;
     crate::logging::info(&format!(
         "Fresh WS request sent in {}ms ({})",
@@ -741,15 +749,18 @@ pub(super) async fn stream_response_websocket_persistent(
                 }
             ))
         })?;
-        let next_item = tokio::time::timeout(Duration::from_secs(timeout_secs), ws_stream.next())
-            .await
-            .map_err(|_| {
-                OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
-                    "WebSocket stream timed out waiting for {} websocket activity ({}s)",
-                    websocket_activity_timeout_kind(saw_api_activity),
-                    timeout_secs
-                ))
-            })?;
+        let next_item: Result<Option<WsMessage>, WsError> = tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            ws_stream.next(),
+        )
+        .await
+        .map_err(|_| {
+            OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
+                "WebSocket stream timed out waiting for {} websocket activity ({}s)",
+                websocket_activity_timeout_kind(saw_api_activity),
+                timeout_secs
+            ))
+        })?;
 
         let Some(result) = next_item else {
             if saw_response_completed {

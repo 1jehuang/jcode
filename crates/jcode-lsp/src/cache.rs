@@ -192,7 +192,7 @@ impl<T: Clone + Send + Sync + 'static> LspResultCache<T> {
         })
     }
 
-    // ─── 内部方法 ─────────────────────────
+    // --- 内部方法 -------------------------
 
     async fn evict_oldest(&self, cache: &mut HashMap<String, CacheEntry<T>>) {
         // 找到最旧的条目并移除

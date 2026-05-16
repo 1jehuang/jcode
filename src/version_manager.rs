@@ -56,6 +56,5 @@
 //! println!("{}", vm.get_changelog(10));
 //! ```
 
-use std::path::PathBuf;
 use std::fs;
 use serde::{Serialize, Deserialize};

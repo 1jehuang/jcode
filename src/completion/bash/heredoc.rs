@@ -505,8 +505,8 @@ impl AliasManager {
 
         for line in content.lines() {
             if let Some(cap) = alias_regex.captures(line) {
-                let name = cap.get(1).unwrap().as_str().to_string();
-                let expansion = cap.get(2).unwrap().as_str().to_string();
+                let name = cap.get(1).expect("alias regex must have group 1").as_str().to_string();
+                let expansion = cap.get(2).expect("alias regex must have group 2").as_str().to_string();
 
                 self.aliases.insert(name.clone(), AliasDefinition {
                     expansion,

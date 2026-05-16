@@ -101,6 +101,7 @@ pub struct ToolResultMessage {
 }
 
 /// Result of executing a single tool.
+#[allow(dead_code)]
 struct ToolExecutionResult {
     /// Result messages (typically one, but could be multiple with progress).
     messages: Vec<ToolResultMessage>,
@@ -199,6 +200,7 @@ impl Default for ExecutorConfig {
 ///     }
 /// }
 /// ```
+#[allow(dead_code)]
 pub struct StreamingToolExecutor {
     /// All tracked tools in arrival order.
     tools: Vec<TrackedTool>,
@@ -379,7 +381,7 @@ impl StreamingToolExecutor {
 
                 // Check concurrency safety: non-safe tools need exclusive access
                 if !me.tools[i].is_concurrency_safe && executing_count > 0 {
-                    // There's something running and we're not concurrency-safe → wait
+                    // There's something running and we're not concurrency-safe -> wait
                     break;
                 }
 

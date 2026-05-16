@@ -235,7 +235,7 @@ impl BackoffStrategy {
                 
                 // 添加随机抖动: ±jitter_factor%
                 let range = capped_delay * jitter_factor;
-                let jitter = rand::thread_rng().gen_range(-range..=range);
+                let jitter = rand::rng().gen_range(-range..=range);
                 
                 Some((capped_delay + jitter).max(1.0) as u64)
             }
@@ -318,7 +318,7 @@ impl Default for RetryPolicy {
 /// 工具降级注册表
 #[derive(Debug, Clone, Default)]
 pub struct ToolFallbackRegistry {
-    /// 工具名 → 备选工具列表 (按优先级排序)
+    /// 工具名 -> 备选工具列表 (按优先级排序)
     fallbacks: HashMap<String, Vec<String>>,
 }
 

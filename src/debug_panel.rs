@@ -1,4 +1,4 @@
-//! # 可视化调试面板 (Debug Panel)
+﻿﻿//! # 可视化调试面板 (Debug Panel)
 //!
 //! 提供终端内嵌的可视化调试能力：
 //! - 决策树 / 记忆图谱 / 性能图表 / 安全日志 等面板类型
@@ -427,10 +427,10 @@ impl DebugPanelManager {
     }
 
     fn render_node_ascii(&self, node: &TreeNode, prefix: &str, is_last: bool, out: &mut String) {
-        let connector = if is_last { "└── " } else { "├── " };
+        let connector = if is_last { "+-- " } else { "+-- " };
         let expanded_marker = if node.expanded { "▼" } else { "▶" };
         writeln!(out, "{}{}{} {}", prefix, connector, expanded_marker, node.label).ok();
-        let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+        let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "|   " });
         for (i, child) in node.children.iter().enumerate() {
             self.render_node_ascii(child, &new_prefix, i == node.children.len() - 1, out);
         }
@@ -445,8 +445,8 @@ impl DebugPanelManager {
     fn collect_mermaid_edges(&self, node: &TreeNode, out: &mut String) {
         let safe_id: String = node.id.chars().filter(|c| c.is_alphanumeric()).collect();
         for child in &node.children {
-            let safe_child: String = child.id.chars().filter(|c| c.is_alphanumeric()).collect();
-            writeln!(out,    {} --> [\"{}\"]", safe_id, safe_child, child.label).ok();
+            let _safe_child: String = child.id.chars().filter(|c| c.is_alphanumeric()).collect();
+            writeln!(out, "{} --> \"{}\"", safe_id, child.label).ok();
             self.collect_mermaid_edges(child, out);
         }
     }
@@ -459,10 +459,10 @@ impl DebugPanelManager {
         let height = 12usize;
         let width = 40usize;
         let mut out = String::new();
-        writeln!(out, "{}", "─".repeat(width + 2)).ok();
+        writeln!(out, "{}", "-".repeat(width + 2)).ok();
         for row in (0..height).rev() {
             let threshold = max_val * row as f64 / height as f64;
-            let mut line = String::from("│");
+            let mut line = String::from("|");
             for d in data.iter().take(width) {
                 if d.value > threshold {
                     line.push('█');
@@ -470,10 +470,10 @@ impl DebugPanelManager {
                     line.push(' ');
                 }
             }
-            line.push('│');
+            line.push('|');
             writeln!(out, "{}", line).ok();
         }
-        writeln!(out, "{}", "─".repeat(width + 2)).ok();
+        writeln!(out, "{}", "-".repeat(width + 2)).ok();
         out
     }
 
@@ -483,10 +483,10 @@ impl DebugPanelManager {
         }
         let mut out = String::new();
         writeln!(out, "{:<6} {:<8} {:<20} {}", "LEVEL", "SOURCE", "MESSAGE", "DETAILS").ok();
-        writeln!(out, "{}", "─".repeat(78)).ok();
+        writeln!(out, "{}", "-".repeat(78)).ok();
         for e in events {
             let detail = e.details.as_deref().unwrap_or("-");
-            writeln!(out, "{} {:<8} {:<20} {}", e.level.icon(), e.level.as_str(), &e.source, &e.message, detail).ok();
+            writeln!(out, "{} {:<8} {:<20} {} {}", e.level.icon(), e.level.as_str(), &e.source, &e.message, detail).ok();
         }
         out
     }
@@ -703,14 +703,14 @@ mod tests {
             .add_child(TreeNode::new("2", "ChildA"))
             .add_child(TreeNode::new("3", "ChildB"));
         let mgr = DebugPanelManager::new();
-        let rendered = mgr.render_node_ascii(&root, "", true, &mut String::new());
+        let _rendered = mgr.render_node_ascii(&root, "", true, &mut String::new());
         let mut output = String::new();
         mgr.render_node_ascii(&root, "", true, &mut output);
         assert!(output.contains("Root"));
         assert!(output.contains("ChildA"));
         assert!(output.contains("ChildB"));
-        assert!(output.contains("└──"));
-        assert!(output.contains("├──"));
+        assert!(output.contains("+--"));
+        assert!(output.contains("+--"));
     }
 
     #[test]

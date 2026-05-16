@@ -1,6 +1,6 @@
 use std::process::{Command, Child, Stdio};
 use std::path::PathBuf;
-use std::time::Duration;
+
 use std::sync::{Arc, Mutex};
 
 /// Port Forwarding Types
@@ -216,8 +216,8 @@ impl PortForwarder {
     }
 
     /// Check if tunnel is running
-    pub fn is_running(&self) -> bool {
-        self.child.as_ref().map_or(false, |c| {
+    pub fn is_running(&mut self) -> bool {
+        self.child.as_mut().map_or(false, |c| {
             c.try_wait().map_or(true, |s| s.is_none())
         })
     }
@@ -289,14 +289,21 @@ impl TunnelManager {
     pub fn list_tunnels(&self) -> Vec<TunnelInfo> {
         self.tunnels.lock()
             .map(|tunnels| {
-                tunnels.iter()
-                    .filter(|t| t.is_running())
+                tunnels.iter_mut()
+                    .filter(|t| {
+                        use std::process::Command;
+                        if let Some(ref mut child) = t.child {
+                            child.try_wait().map_or(true, |s| s.is_none())
+                        } else {
+                            false
+                        }
+                    })
                     .map(|t| TunnelInfo {
                         id: t.id().to_string(),
                         forward_type: t.forward_type(),
                         local_port: t.local_port(),
                         target: t.ssh_target.clone(),
-                        running: t.is_running(),
+                        running: true,
                     })
                     .collect()
             })
@@ -362,7 +369,7 @@ impl JumpHostChain {
     }
 
     /// Create intermediate tunnel through jump hosts
-    pub fn create_tunnel_chain(&self, final_user: &str, final_host: &str, final_port: u16) -> Result<Vec<PortForwarder>, String> {
+    pub fn create_tunnel_chain(&self, _final_user: &str, final_host: &str, final_port: u16) -> Result<Vec<PortForwarder>, String> {
         let mut tunnels = vec![];
         let mut prev_port = final_port;
 

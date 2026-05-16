@@ -3,23 +3,23 @@
 //
 // Auto 模式的完整状态转换:
 //
-//   ┌──────────┐  用户允许    ┌──────────┐
-//   │ Inactive │ ──────────→ │ Active   │
-//   │ (关闭)   │ ←────────── │ (激活中) │
-//   └──────────┘  用户拒绝    └────┬─────┘
-//                              │ 超时/错误
+//   +----------+  用户允许    +----------+
+//   | Inactive | -----------> | Active   |
+//   | (关闭)   | <----------- | (激活中) |
+//   +----------+  用户拒绝    +----+-----+
+//                              | 超时/错误
 //                              ▼
-//                         ┌──────────┐
-//                         │ Cooldown  │
-//                         │ (冷却期)  │
-//                         └──────────┘
+//                         +----------+
+//                         | Cooldown  |
+//                         | (冷却期)  |
+//                         +----------+
 //
 // 状态转换规则:
-// - Inactive → Active: 用户显式开启 auto mode
-// - Active → Inactive: 用户手动关闭, 或连续 N 次拒绝后自动关闭
-// - Active → Cooldown: YOLO 错误/超时/不确定结果 → 进入冷却等待用户确认
-// - Cooldown → Active: 冷却期内收到一次用户确认
-// - Cooldown → Inactive: 冷却期超时无确认, 回退到 Default
+// - Inactive -> Active: 用户显式开启 auto mode
+// - Active -> Inactive: 用户手动关闭, 或连续 N 次拒绝后自动关闭
+// - Active -> Cooldown: YOLO 错误/超时/不确定结果 -> 进入冷却等待用户确认
+// - Cooldown -> Active: 冷却期内收到一次用户确认
+// - Cooldown -> Inactive: 冷却期超时无确认, 回退到 Default
 // ════════════════════════════════════════════════════════════════
 
 use crate::types::PermissionMode;
@@ -139,7 +139,7 @@ impl AutoModeStateMachine {
         let old_state = self.state.clone();
 
         match (&self.state, event) {
-            // ── Inactive 状态 ──
+            // -- Inactive 状态 --
             (AutoModeState::Inactive, AutoModeEvent::UserActivate) => {
                 self.state = AutoModeState::Active {
                     since: Instant::now(),
@@ -148,7 +148,7 @@ impl AutoModeStateMachine {
                 };
             }
 
-            // ── Active 状态 ──
+            // -- Active 状态 --
             (
                 AutoModeState::Active {
                     since,
@@ -177,7 +177,7 @@ impl AutoModeStateMachine {
 
                     AutoModeEvent::YoloAsk { confidence } => {
                         if confidence < 0.5 {
-                            // 低置信度 → 冷却
+                            // 低置信度 -> 冷却
                             new_state = Some(AutoModeState::Cooldown {
                                 reason: format!(
                                     "YOLO 低置信度 ({:.1}%), 需要人工确认",
@@ -209,7 +209,7 @@ impl AutoModeStateMachine {
 
                     AutoModeEvent::UserRejectWhileActive => {
                         if new_successes > 0 && (new_total - new_successes) >= self.config.auto_exit_on_rejects {
-                            // 连续拒绝过多 → 退出 Auto
+                            // 连续拒绝过多 -> 退出 Auto
                             self.state = AutoModeState::Inactive;
                             return TransitionResult::Changed {
                                 from: old_state,
@@ -260,7 +260,7 @@ impl AutoModeStateMachine {
                 return TransitionResult::NoChange;
             }
 
-            // ── Cooldown 状态 ──
+            // -- Cooldown 状态 --
             (AutoModeState::Cooldown { since, duration, .. }, event) => {
                 match event {
                     AutoModeEvent::UserDeactivate => {
@@ -268,7 +268,7 @@ impl AutoModeStateMachine {
                         return self.transition_result(old_state);
                     }
                     AutoModeEvent::UserConfirmWhileActive | AutoModeEvent::UserActivate => {
-                        // 用户确认 → 重新进入 Active
+                        // 用户确认 -> 重新进入 Active
                         self.state = AutoModeState::Active {
                             since: Instant::now(),
                             consecutive_successes: 0,
@@ -286,7 +286,7 @@ impl AutoModeStateMachine {
                 }
             }
 
-            // 其他无效的状态+事件组合 → 忽略
+            // 其他无效的状态+事件组合 -> 忽略
             _ => {}
         }
 

@@ -112,15 +112,15 @@ type RequestHandlerInner = Box<dyn erased_serde::Serialize + Send + Sync>;
 ///
 /// ## 架构
 /// ```text
-/// ┌──────────────────────────────┐
-///     StdioLspClient              │
-/// ├──────────────────────────────┤
-///  process: Child (stdio pipe)    │ ← LSP server 进程
-///  connection: jsonrpc Connection │
-///  capabilities: ServerCaps       │
-///  pending_handlers: Vec          │ ← 延迟注册队列
-///  crash_callback: Option         │
-/// └──────────────────────────────┘
+/// +------------------------------+
+///     StdioLspClient              |
+/// +------------------------------+
+///  process: Child (stdio pipe)    | <- LSP server 进程
+///  connection: jsonrpc Connection |
+///  capabilities: ServerCaps       |
+///  pending_handlers: Vec          | <- 延迟注册队列
+///  crash_callback: Option         |
+/// +------------------------------+
 /// ```
 pub struct StdioLspClient {
     /// LSP 服务器子进程
@@ -492,7 +492,7 @@ pub struct LspServerManager {
     /// 活跃的服务器客户端实例
     active_clients: HashMap<String, Arc<std::sync::Mutex<Box<dyn LspClient>>>>,
     
-    /// 扩展名 → 服务器 ID 映射
+    /// 扩展名 -> 服务器 ID 映射
     extension_map: HashMap<String, String>,
 }
 

@@ -1058,9 +1058,9 @@ impl Provider for MultiProvider {
                         eps.first().map(|ep| {
                             let endpoint_detail = ep.detail_string();
                             if endpoint_detail.trim().is_empty() {
-                                format!("→ {}", ep.provider_name)
+                                format!("-> {}", ep.provider_name)
                             } else {
-                                format!("→ {} · {}", ep.provider_name, endpoint_detail)
+                                format!("-> {} · {}", ep.provider_name, endpoint_detail)
                             }
                         })
                     })

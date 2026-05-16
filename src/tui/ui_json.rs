@@ -1,4 +1,4 @@
-use ratatui::{
+﻿use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -224,19 +224,19 @@ impl JsonRenderer {
             Value::String(s) => {
                 let truncated = self.truncate_string(s, 80);
                 vec![self.styled_line(
-                    format!("\"{}\"", truncated),
+                    &format!("\"{}\"", truncated),
                     self.color_theme.string_color,
                 )]
             }
             Value::Number(n) => {
                 vec![self.styled_line(
-                    n.to_string(),
+                    &n.to_string(),
                     self.color_theme.number_color,
                 )]
             }
             Value::Bool(b) => {
                 vec![self.styled_line(
-                    b.to_string(),
+                    &b.to_string(),
                     self.color_theme.bool_color,
                 )]
             }
@@ -264,7 +264,7 @@ impl JsonRenderer {
 
         if !is_expanded {
             lines.push(self.styled_line(
-                format!(
+                &format!(
                     "{}// ... {} items",
                     child_indent,
                     obj.len()
@@ -272,7 +272,7 @@ impl JsonRenderer {
                 self.color_theme.null_color,
             ));
             lines.push(self.styled_line(
-                format!("{}}}", indent),
+                &format!("{}}}", indent),
                 self.color_theme.brace_color,
             ));
             return lines;
@@ -357,7 +357,7 @@ impl JsonRenderer {
         }
 
         lines.push(self.styled_line(
-            format!("{}}}", indent),
+            &format!("{}}}", indent),
             self.color_theme.brace_color,
         ));
         lines
@@ -381,11 +381,11 @@ impl JsonRenderer {
 
         if !is_expanded {
             lines.push(self.styled_line(
-                format!("{}// ... {} items", child_indent, arr.len()),
+                &format!("{}// ... {} items", child_indent, arr.len()),
                 self.color_theme.null_color,
             ));
             lines.push(self.styled_line(
-                format!("{]}]", indent),
+                &format!("{}]", child_indent),
                 self.color_theme.bracket_color,
             ));
             return lines;
@@ -461,13 +461,13 @@ impl JsonRenderer {
         if arr.len() > self.max_array_items {
             let more = arr.len() - self.max_array_items;
             lines.push(self.styled_line(
-                format!("{}// ... {} more items", child_indent, more),
+                &format!("{}// ... {} more items", child_indent, more),
                 self.color_theme.null_color,
             ));
         }
 
         lines.push(self.styled_line(
-            format!("{]}]", indent),
+            &format!("{}]", child_indent),
             self.color_theme.bracket_color,
         ));
         lines

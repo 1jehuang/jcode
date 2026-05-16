@@ -1,4 +1,4 @@
-//! Bridge module: convert `AstEdit` → `FileSet` for the `jcode-multi-file-edit` crate.
+//! Bridge module: convert `AstEdit` -> `FileSet` for the `jcode-multi-file-edit` crate.
 //!
 //! This module bridges the semantic-level operations of the cross-file repair engine
 //! (symbol names, import paths) to the line-level operations of the multi-file atomic
@@ -7,10 +7,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::ast::{AstAdapter, AstEdit, AstEditOp, AstNode, LanguageKind, TreeSitterAstAdapter};
+use crate::ast::{AstAdapter, AstEdit, AstEditOp, AstNode, TreeSitterAstAdapter};
 use jcode_multi_file_edit::{FileSet, FileOperation, FileEditOp};
 
-/// Bridge converter: AstEdit → FileSet
+/// Bridge converter: AstEdit -> FileSet
 pub struct EditBridge {
     ast_adapter: TreeSitterAstAdapter,
 }
@@ -49,14 +49,17 @@ impl EditBridge {
     /// Resolve all `AstEditOp`s for a single file into `FileEditOp`s.
     async fn resolve_operations(&self, edit: &AstEdit) -> anyhow::Result<Vec<FileEditOp>> {
         let source = tokio::fs::read_to_string(&edit.file_path).await?;
-        let ast = self.ast_adapter.parse(&source, edit.language)?;
+        let ast = self.ast_adapter.parse(&source, std::path::Path::new(&edit.file_path)).await?;
 
         let mut ops = Vec::new();
+
+        // Create a virtual root node for the search functions
+        let root = AstNode { kind: "root".into(), name: None, start_line: 0, end_line: 0, children: ast };
 
         for op in &edit.operations {
             match op {
                 AstEditOp::ReplaceFunction { name, new_body } => {
-                    if let Some(node) = find_function_node(&ast, name) {
+                    if let Some(node) = find_function_node(&root, name) {
                         ops.push(FileEditOp::Replace {
                             start_line: node.start_line,
                             end_line: node.end_line,
@@ -75,7 +78,7 @@ impl EditBridge {
                 }
 
                 AstEditOp::AddImport { import } => {
-                    let insert_line = find_last_import_line(&ast).unwrap_or(1);
+                    let insert_line = find_last_import_line(&root).unwrap_or(1);
                     ops.push(FileEditOp::Insert {
                         line: insert_line + 1,
                         content: format!("{import}\n"),
@@ -83,7 +86,7 @@ impl EditBridge {
                 }
 
                 AstEditOp::RemoveImport { import } => {
-                    if let Some(node) = find_import_node(&ast, import) {
+                    if let Some(node) = find_import_node(&root, import) {
                         ops.push(FileEditOp::Delete {
                             start_line: node.start_line,
                             end_line: node.end_line,
@@ -153,7 +156,7 @@ impl EditBridge {
     }
 }
 
-// ── Helper functions ──────────────────────────────────────────
+// -- Helper functions ------------------------------------------
 
 fn count_lines(source: &str) -> usize {
     source.lines().count()

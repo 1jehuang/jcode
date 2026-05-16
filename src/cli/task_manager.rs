@@ -561,11 +561,11 @@ impl TaskCommands {
         println!("📊 Task Statistics");
         println!("═" .repeat(40));
         println!("Total Tasks:  {}", stats.total);
-        println!("├─ Pending:    {}", stats.pending);
-        println!("├─ In Progress: {}", stats.in_progress);
-        println!("├─ Blocked:    {}", stats.blocked);
-        println!("├─ Completed:  {}", stats.completed);
-        println!("└─ Failed:     {}", stats.failed);
+        println!("+- Pending:    {}", stats.pending);
+        println!("+- In Progress: {}", stats.in_progress);
+        println!("+- Blocked:    {}", stats.blocked);
+        println!("+- Completed:  {}", stats.completed);
+        println!("+- Failed:     {}", stats.failed);
 
         println!("\nBy Priority:");
         println!("  🔴 Critical: {}", stats.critical);

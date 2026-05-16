@@ -6,7 +6,7 @@
 //! to TUI clients.
 //!
 //! Architecture:
-//!   TCP :7643  →  WebSocket upgrade  →  UnixStream::pair()  →  handle_client()
+//!   TCP :7643  ->  WebSocket upgrade  ->  UnixStream::pair()  ->  handle_client()
 //!
 //! Each WebSocket client gets a virtual UnixStream pair. One end is handed
 //! to the server's existing handle_client(); the other is bridged to WebSocket
@@ -225,7 +225,7 @@ async fn handle_ws_connection(
     let mut bridge_reader = BufReader::new(bridge_reader);
     let bridge_writer = Arc::new(tokio::sync::Mutex::new(bridge_writer));
 
-    // Task 1: WebSocket → Unix socket (client requests)
+    // Task 1: WebSocket -> Unix socket (client requests)
     let writer_for_ws = Arc::clone(&bridge_writer);
     let sink_for_ping = Arc::clone(&ws_sink);
     let sink_for_unix = Arc::clone(&ws_sink);
@@ -280,7 +280,7 @@ async fn handle_ws_connection(
         }
     });
 
-    // Task 2: Unix socket → WebSocket (server events)
+    // Task 2: Unix socket -> WebSocket (server events)
     let unix_to_ws = tokio::spawn(async move {
         let mut line = String::new();
         loop {

@@ -6,7 +6,7 @@
 //! - 网络控制：可选择完全断网或白名单模式
 //! - 文件系统限制：只读挂载 workdir，禁止访问系统敏感路径
 //! - 临时工作区：每次执行自动创建/清理临时目录
-//! - 超时强制 kill：进程超时后 SIGTERM → SIGKILL 升级
+//! - 超时强制 kill：进程超时后 SIGTERM -> SIGKILL 升级
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};

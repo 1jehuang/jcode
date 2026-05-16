@@ -8,7 +8,7 @@
 // 统一接口: McpTransport trait
 // ════════════════════════════════════════════════════════════════
 
-use crate::types::{JsonRpcRequest, JsonRpcResponse, JsonRpcSuccessResponse, JsonRpcErrorResponse, ClientCapabilities};
+use crate::types::{JsonRpcRequest, JsonRpcResponse, JsonRpcSuccessResponse, JsonRpcErrorResponse};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -242,7 +242,7 @@ impl McpTransport for StdioTransport {
 
         let mut child_guard = self.child.lock().await;
         if let Some(mut child) = child_guard.take() {
-            // Graceful shutdown sequence: SIGINT → SIGTERM → SIGKILL
+            // Graceful shutdown sequence: SIGINT -> SIGTERM -> SIGKILL
             use std::time::Duration;
 
             // Step 1: Try graceful shutdown
@@ -370,7 +370,7 @@ impl SseTransport {
 
         // 从 SSE stream 读取 endpoint URL
         // Format: event: endpoint\ndata: <session_url>\n\n
-        let body = response.text().await?;
+        let _body = response.text().await?;
 
         // Extract session ID from the body
         // TODO: Parse proper SSE event stream

@@ -725,7 +725,7 @@ fn handle_subagent_model_command(app: &mut App, trimmed: &str) -> bool {
         "Subagent model pinned to `{}` for this session.",
         rest
     )));
-    app.set_status_notice(format!("Subagent model → {}", rest));
+    app.set_status_notice(format!("Subagent model -> {}", rest));
     true
 }
 
@@ -919,7 +919,7 @@ fn handle_catchup_command(app: &mut App, trimmed: &str) -> bool {
                 "Queued Catch Up for **{}**.",
                 target_name,
             )));
-            app.set_status_notice(format!("Catch Up → {}", target_name));
+            app.set_status_notice(format!("Catch Up -> {}", target_name));
             true
         }
         _ => {
@@ -961,7 +961,7 @@ fn handle_back_command(app: &mut App, trimmed: &str) -> bool {
         "Queued return to **{}**.",
         target_name,
     )));
-    app.set_status_notice(format!("Back → {}", target_name));
+    app.set_status_notice(format!("Back -> {}", target_name));
     true
 }
 
@@ -1928,7 +1928,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                 manager.set_mode(mode.clone());
                 let label = mode.as_str();
                 app.push_display_message(DisplayMessage::system(format!(
-                    "✓ Compaction mode → {}",
+                    "✓ Compaction mode -> {}",
                     label
                 )));
                 app.set_status_notice(format!("Compaction: {}", label));

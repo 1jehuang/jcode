@@ -1,0 +1,1437 @@
+﻿cargo :     Blocking waiting for file lock on build directory
+所在位置 行:1 字符: 197
++ ... rgo\CarpAI; cargo check --package jcode-unified-scheduler 2>&1 | ForE ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Blocking wa...build directory:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Checking jcode-unified-scheduler v0.1.0 (D:\studying\Codecargo\CarpAI\crates\jcode-unified-scheduler)
+error[E0425]: cannot find type `HashSet` in this scope
+  --> crates\jcode-unified-scheduler\src\layer_allocator.rs:57:20
+   |
+57 |     hosting_nodes: HashSet<NodeId>,
+   |                    ^^^^^^^ not found in this scope
+   |
+help: consider importing this struct
+   |
+19 + use std::collections::HashSet;
+   |
+
+error[E0433]: failed to resolve: use of undeclared type `HashSet`
+  --> crates\jcode-unified-scheduler\src\layer_allocator.rs:65:28
+   |
+65 |             hosting_nodes: HashSet::new(),
+   |                            ^^^^^^^ use of undeclared type `HashSet`
+   |
+help: consider importing this struct
+   |
+19 + use std::collections::HashSet;
+   |
+
+error[E0425]: cannot find type `Ordering` in this scope
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:100:51
+    |
+100 |     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    |                                                   ^^^^^^^^ not found in this scope
+    |
+help: consider importing one of these enums
+    |
+ 19 + use std::cmp::Ordering;
+    |
+ 19 + use std::sync::atomic::Ordering;
+    |
+
+error[E0425]: cannot find type `Ordering` in this scope
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:106:36
+    |
+106 |     fn cmp(&self, other: &Self) -> Ordering {
+    |                                    ^^^^^^^^ not found in this scope
+    |
+help: consider importing one of these enums
+    |
+ 19 + use std::cmp::Ordering;
+    |
+ 19 + use std::sync::atomic::Ordering;
+    |
+
+error[E0433]: failed to resolve: use of undeclared type `Ordering`
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:109:13
+    |
+109 |             Ordering::Equal => self.layer_id.cmp(&other.layer_id), // 次键: 层ID
+    |             ^^^^^^^^ use of undeclared type `Ordering`
+    |
+help: consider importing one of these enums
+    |
+ 19 + use std::cmp::Ordering;
+    |
+ 19 + use std::sync::atomic::Ordering;
+    |
+
+error[E0433]: failed to resolve: use of undeclared type `Ordering`
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:324:49
+    |
+324 |             cap_b.partial_cmp(&cap_a).unwrap_or(Ordering::Equal)
+    |                                                 ^^^^^^^^ use of undeclared type `Ordering`
+    |
+help: consider importing one of these enums
+    |
+ 19 + use std::cmp::Ordering;
+    |
+ 19 + use std::sync::atomic::Ordering;
+    |
+
+error[E0433]: failed to resolve: use of undeclared type `Ordering`
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:764:60
+    |
+764 |             frac.sort_by(|a, b| b.partial_cmp(a).unwrap_or(Ordering::Equal));
+    |                                                            ^^^^^^^^ use of undeclared type `Ordering`
+    |
+help: consider importing one of these enums
+    |
+ 19 + use std::cmp::Ordering;
+    |
+ 19 + use std::sync::atomic::Ordering;
+    |
+
+error[E0425]: cannot find type `HashMap` in this scope
+  --> crates\jcode-unified-scheduler\src\resource_node.rs:22:12
+   |
+22 |     nodes: HashMap<NodeId, Arc<NodeInfo>>,
+   |            ^^^^^^^ not found in this scope
+   |
+help: consider importing this struct
+   |
+12 + use std::collections::HashMap;
+   |
+
+error[E0425]: cannot find type `Duration` in this scope
+  --> crates\jcode-unified-scheduler\src\resource_node.rs:26:24
+   |
+26 |     heartbeat_timeout: Duration,
+   |                        ^^^^^^^^ not found in this scope
+   |
+help: consider importing one of these items
+   |
+12 + use std::time::Duration;
+   |
+12 + use chrono::Duration;
+   |
+12 + use tokio::time::Duration;
+   |
+
+error[E0425]: cannot find type `AtomicU64` in this scope
+  --> crates\jcode-unified-scheduler\src\resource_node.rs:28:27
+   |
+28 |     pub total_registered: AtomicU64,
+   |                           ^^^^^^^^^ not found in this scope
+   |
+help: consider importing this struct
+   |
+12 + use std::sync::atomic::AtomicU64;
+   |
+
+error[E0425]: cannot find type `AtomicU64` in this scope
+  --> crates\jcode-unified-scheduler\src\resource_node.rs:29:29
+   |
+29 |     pub total_unregistered: AtomicU64,
+   |                             ^^^^^^^^^ not found in this scope
+   |
+help: consider importing this struct
+   |
+12 + use std::sync::atomic::AtomicU64;
+   |
+
+error[E0425]: cannot find type `AtomicU64` in this scope
+  --> crates\jcode-unified-scheduler\src\resource_node.rs:30:27
+   |
+30 |     pub total_heartbeats: AtomicU64,
+   |                           ^^^^^^^^^ not found in this scope
+   |
+help: consider importing this struct
+   |
+12 + use std::sync::atomic::AtomicU64;
+   |
+
+error[E0433]: failed to resolve: use of undeclared type `HashMap`
+  --> crates\jcode-unified-scheduler\src\resource_node.rs:36:20
+   |
+36 |             nodes: HashMap::new(),
+   |                    ^^^^^^^ use of undeclared type `HashMap`
+   |
+help: consider importing this struct
+   |
+12 + use std::collections::HashMap;
+   |
+
+error[E0433]: failed to resolve: use of undeclared type `Duration`
+  --> crates\jcode-unified-scheduler\src\resource_node.rs:38:32
+   |
+38 |             heartbeat_timeout: Duration::from_secs(30),
+   |                                ^^^^^^^^ use of undeclared type `Duration`
+   |
+help: consider importing one of these items
+   |
+12 + use std::time::Duration;
+   |
+12 + use chrono::Duration;
+   |
+12 + use tokio::time::Duration;
+   |
+
+error[E0433]: failed to resolve: use of undeclared type `AtomicU64`
+  --> crates\jcode-unified-scheduler\src\resource_node.rs:39:31
+   |
+39 |             total_registered: AtomicU64::new(0),
+   |                               ^^^^^^^^^ use of undeclared type `AtomicU64`
+   |
+help: consider importing this struct
+   |
+12 + use std::sync::atomic::AtomicU64;
+   |
+
+error[E0433]: failed to resolve: use of undeclared type `AtomicU64`
+  --> crates\jcode-unified-scheduler\src\resource_node.rs:40:33
+   |
+40 |             total_unregistered: AtomicU64::new(0),
+   |                                 ^^^^^^^^^ use of undeclared type `AtomicU64`
+   |
+help: consider importing this struct
+   |
+12 + use std::sync::atomic::AtomicU64;
+   |
+
+error[E0433]: failed to resolve: use of undeclared type `AtomicU64`
+  --> crates\jcode-unified-scheduler\src\resource_node.rs:41:31
+   |
+41 |             total_heartbeats: AtomicU64::new(0),
+   |                               ^^^^^^^^^ use of undeclared type `AtomicU64`
+   |
+help: consider importing this struct
+   |
+12 + use std::sync::atomic::AtomicU64;
+   |
+
+error[E0433]: failed to resolve: use of undeclared type `Duration`
+  --> crates\jcode-unified-scheduler\src\resource_node.rs:47:34
+   |
+47 |         self.heartbeat_timeout = Duration::from_secs(timeout_secs);
+   |                                  ^^^^^^^^ use of undeclared type `Duration`
+   |
+help: consider importing one of these items
+   |
+12 + use std::time::Duration;
+   |
+12 + use chrono::Duration;
+   |
+12 + use tokio::time::Duration;
+   |
+
+error[E0433]: failed to resolve: use of undeclared type `HashMap`
+  --> crates\jcode-unified-scheduler\src\resource_node.rs:65:27
+   |
+65 |             rtt_to_nodes: HashMap::new(),
+   |                           ^^^^^^^ use of undeclared type `HashMap`
+   |
+help: consider importing this struct
+   |
+12 + use std::collections::HashMap;
+   |
+
+error[E0433]: failed to resolve: use of undeclared type `Ordering`
+  --> crates\jcode-unified-scheduler\src\resource_node.rs:72:44
+   |
+72 |         self.total_registered.fetch_add(1, Ordering::Relaxed);
+   |                                            ^^^^^^^^ use of undeclared type `Ordering`
+   |
+help: consider importing one of these enums
+   |
+12 + use std::cmp::Ordering;
+   |
+12 + use std::sync::atomic::Ordering;
+   |
+
+error[E0433]: failed to resolve: use of undeclared type `Ordering`
+  --> crates\jcode-unified-scheduler\src\resource_node.rs:83:50
+   |
+83 |             self.total_unregistered.fetch_add(1, Ordering::Relaxed);
+   |                                                  ^^^^^^^^ use of undeclared type `Ordering`
+   |
+help: consider importing one of these enums
+   |
+12 + use std::cmp::Ordering;
+   |
+12 + use std::sync::atomic::Ordering;
+   |
+
+error[E0433]: failed to resolve: use of undeclared type `Ordering`
+   --> crates\jcode-unified-scheduler\src\resource_node.rs:110:44
+    |
+110 |         self.total_heartbeats.fetch_add(1, Ordering::Relaxed);
+    |                                            ^^^^^^^^ use of undeclared type `Ordering`
+    |
+help: consider importing one of these enums
+    |
+ 12 + use std::cmp::Ordering;
+    |
+ 12 + use std::sync::atomic::Ordering;
+    |
+
+error[E0433]: failed to resolve: use of undeclared type `Duration`
+   --> crates\jcode-unified-scheduler\src\resource_node.rs:170:87
+    |
+170 |             if elapsed > chrono::Duration::from_std(self.heartbeat_timeout).unwrap_or(Duration::ZERO) {
+    |                                                                                       ^^^^^^^^ use of undeclared 
+type `Duration`
+    |
+help: consider importing one of these items
+    |
+ 12 + use std::time::Duration;
+    |
+ 12 + use chrono::Duration;
+    |
+ 12 + use tokio::time::Duration;
+    |
+
+error[E0425]: cannot find type `DashMap` in this scope
+  --> crates\jcode-unified-scheduler\src\lib.rs:76:24
+   |
+76 |     task_registry: Arc<DashMap<TaskId, ScheduledTask>>,
+   |                        ^^^^^^^ not found in this scope
+   |
+help: consider importing this struct
+   |
+47 + use dashmap::DashMap;
+   |
+
+error[E0425]: cannot find type `IndexMap` in this scope
+  --> crates\jcode-unified-scheduler\src\lib.rs:79:34
+   |
+79 |     dependency_graph: Arc<RwLock<IndexMap<TaskId, Vec<TaskId>>>>,
+   |                                  ^^^^^^^^ not found in this scope
+   |
+help: consider importing this struct
+   |
+47 + use indexmap::IndexMap;
+   |
+
+error[E0433]: failed to resolve: use of undeclared type `DashMap`
+   --> crates\jcode-unified-scheduler\src\lib.rs:286:37
+    |
+286 |             task_registry: Arc::new(DashMap::new()),
+    |                                     ^^^^^^^ use of undeclared type `DashMap`
+    |
+help: consider importing this struct
+    |
+ 47 + use dashmap::DashMap;
+    |
+
+error[E0433]: failed to resolve: use of undeclared type `IndexMap`
+   --> crates\jcode-unified-scheduler\src\lib.rs:287:52
+    |
+287 |             dependency_graph: Arc::new(RwLock::new(IndexMap::new())),
+    |                                                    ^^^^^^^^ use of undeclared type `IndexMap`
+    |
+help: consider importing this struct
+    |
+ 47 + use indexmap::IndexMap;
+    |
+
+warning: unused import: `HashMap`
+  --> crates\jcode-unified-scheduler\src\goap_planner.rs:20:36
+   |
+20 | use std::collections::{BinaryHeap, HashMap, HashSet};
+   |                                    ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::cmp::Reverse`
+  --> crates\jcode-unified-scheduler\src\goap_planner.rs:21:5
+   |
+21 | use std::cmp::Reverse;
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `debug`, `error`, `info`, and `warn`
+  --> crates\jcode-unified-scheduler\src\goap_planner.rs:23:15
+   |
+23 | use tracing::{info, debug, warn, error};
+   |               ^^^^  ^^^^^  ^^^^  ^^^^^
+
+warning: unused import: `error`
+  --> crates\jcode-unified-scheduler\src\layer_allocator.rs:20:34
+   |
+20 | use tracing::{info, debug, warn, error};
+   |                                  ^^^^^
+
+warning: unused imports: `error`, `info`, and `warn`
+  --> crates\jcode-unified-scheduler\src\request_router.rs:18:15
+   |
+18 | use tracing::{info, debug, warn, error};
+   |               ^^^^         ^^^^  ^^^^^
+
+warning: unused import: `std::cmp::Ordering`
+  --> crates\jcode-unified-scheduler\src\unified_queue.rs:25:5
+   |
+25 | use std::cmp::Ordering;
+   |     ^^^^^^^^^^^^^^^^^^
+
+error[E0053]: method `find_optimal_path` has an incompatible type for trait
+   --> crates\jcode-unified-scheduler\src\request_router.rs:258:9
+    |
+258 |         &mut self,
+    |         ^^^^^^^^^ types differ in mutability
+    |
+note: type in trait
+   --> crates\jcode-unified-scheduler\src\request_router.rs:28:9
+    |
+ 28 |         &self,
+    |         ^^^^^
+    = note: expected signature `fn(&RandomRouting, _, &_) -> Result<_, _>`
+               found signature `fn(&mut RandomRouting, _, &_) -> Result<_, _>`
+help: change the self-receiver type to match the trait
+    |
+258 -         &mut self,
+258 +         &self,
+    |
+
+error[E0053]: method `find_optimal_path` has an incompatible type for trait
+   --> crates\jcode-unified-scheduler\src\request_router.rs:300:9
+    |
+300 |         &mut self,
+    |         ^^^^^^^^^ types differ in mutability
+    |
+note: type in trait
+   --> crates\jcode-unified-scheduler\src\request_router.rs:28:9
+    |
+ 28 |         &self,
+    |         ^^^^^
+    = note: expected signature `fn(&RoundRobinRouting, _, &_) -> Result<_, _>`
+               found signature `fn(&mut RoundRobinRouting, _, &_) -> Result<_, _>`
+help: change the self-receiver type to match the trait
+    |
+300 -         &mut self,
+300 +         &self,
+    |
+
+error[E0277]: the trait bound `WaterFillingConstraint: Borrow<WaterFillConstraintInner>` is not satisfied
+   --> crates\jcode-unified-scheduler\src\water_filling.rs:251:9
+    |
+251 |         WaterFillingConstraint: std::borrow::Borrow<WaterFillConstraintInner>,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+    |
+help: the trait `Borrow<WaterFillConstraintInner>` is not implemented for `WaterFillingConstraint`
+   --> crates\jcode-unified-scheduler\src\water_filling.rs:309:1
+    |
+309 | pub struct WaterFillingConstraint(pub WaterFillConstraintInner);
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = help: see issue #48214
+
+error[E0282]: type annotations needed
+  --> crates\jcode-unified-scheduler\src\resource_node.rs:81:13
+   |
+81 |             Arc::make_mut(&mut node).clear_serving_state();
+   |             ^^^^^^^^^^^^^ cannot infer type of the type parameter `T` declared on the struct `Arc`
+   |
+help: consider specifying the generic arguments
+   |
+81 |             Arc::<T, A>::make_mut(&mut node).clear_serving_state();
+   |                ++++++++
+
+error[E0308]: mismatched types
+   --> crates\jcode-unified-scheduler\src\lib.rs:335:17
+    |
+334 |             *router = Some(request_router::RequestRouter::new(
+    |                            ---------------------------------- arguments to this function are incorrect
+335 |                 self.config.routing_strategy,
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `RoutingStrategyEnum`, found `RoutingStrategy`
+    |
+note: associated function defined here
+   --> crates\jcode-unified-scheduler\src\request_router.rs:45:12
+    |
+ 45 |     pub fn new(strategy: RoutingStrategyEnum, enable_warmup_trim: bool) -> Self {
+    |            ^^^ -----------------------------
+
+error[E0560]: struct `types::Action` has no field named `params`
+   --> crates\jcode-unified-scheduler\src\lib.rs:410:29
+    |
+410 | ...                   params: s.params.clone(),
+    |                       ^^^^^^ `types::Action` does not have this field
+    |
+    = note: available fields are: `parameters`
+
+error[E0308]: mismatched types
+   --> crates\jcode-unified-scheduler\src\lib.rs:411:44
+    |
+411 | ...                   preconditions: s.preconditions.clone(),
+    |                                      ^^^^^^^^^^^^^^^^^^^^^^^ expected `Vec<WorldStateCondition>`, found `Vec<Stri
+ng>`
+    |
+    = note: expected struct `Vec<types::WorldStateCondition>`
+               found struct `Vec<std::string::String>`
+
+error[E0308]: mismatched types
+   --> crates\jcode-unified-scheduler\src\lib.rs:412:38
+    |
+412 | ...                   effects: s.effects.clone(),
+    |                                ^^^^^^^^^^^^^^^^^ expected `Vec<WorldStateEffect>`, found `Vec<String>`
+    |
+    = note: expected struct `Vec<types::WorldStateEffect>`
+               found struct `Vec<std::string::String>`
+
+error[E0282]: type annotations needed
+   --> crates\jcode-unified-scheduler\src\lib.rs:431:17
+    |
+431 |             let mut dep_graph = self.dependency_graph.write().await;
+    |                 ^^^^^^^^^^^^^
+432 |             dep_graph.insert(task.id, task.dependencies.clone());
+    |             --------- type must be known at this point
+    |
+help: consider giving `dep_graph` an explicit type
+    |
+431 |             let mut dep_graph: /* Type */ = self.dependency_graph.write().await;
+    |                              ++++++++++++
+
+error[E0382]: borrow of moved value
+   --> crates\jcode-unified-scheduler\src\lib.rs:550:13
+    |
+536 |         let node_id = manager.register_node(hardware).await?;
+    |                                             -------- value moved here
+...
+550 |             hardware.tflops_fp16
+    |             ^^^^^^^^^^^^^^^^^^^^ value borrowed here after move
+    |
+    = note: move occurs because value has type `types::NodeHardwareInfo`, which does not implement the `Copy` trait
+    = note: this error originates in the macro `$crate::__macro_support::format_args` which comes from the expansion of
+ the macro `info` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+   --> crates\jcode-unified-scheduler\src\lib.rs:831:43
+    |
+831 |             return self.match_simple_task(&nodes, task).await;
+    |                         ----------------- ^^^^^^ expected `&[Arc<NodeInfo>]`, found `&Vec<&NodeInfo>`
+    |                         |
+    |                         arguments to this method are incorrect
+    |
+    = note: expected reference `&[std::sync::Arc<types::NodeInfo>]`
+               found reference `&Vec<&types::NodeInfo>`
+note: method defined here
+   --> crates\jcode-unified-scheduler\src\lib.rs:868:14
+    |
+868 |     async fn match_simple_task(
+    |              ^^^^^^^^^^^^^^^^^
+869 |         &self,
+870 |         nodes: &[Arc<NodeInfo>],
+    |         -----------------------
+
+error[E0308]: mismatched types
+   --> crates\jcode-unified-scheduler\src\lib.rs:856:63
+    |
+856 |         let result = router.find_optimal_path(virtual_layers, &nodes)?;
+    |                             -----------------                 ^^^^^^ expected `&[Arc<NodeInfo>]`, found `&Vec<&No
+deInfo>`
+    |                             |
+    |                             arguments to this method are incorrect
+    |
+    = note: expected reference `&[std::sync::Arc<types::NodeInfo>]`
+               found reference `&Vec<&types::NodeInfo>`
+note: method defined here
+   --> crates\jcode-unified-scheduler\src\request_router.rs:60:12
+    |
+ 60 |     pub fn find_optimal_path(
+    |            ^^^^^^^^^^^^^^^^^
+...
+ 63 |         nodes: &[Arc<NodeInfo>],
+    |         -----------------------
+
+error[E0597]: `mgr` does not live long enough
+   --> crates\jcode-unified-scheduler\src\lib.rs:927:13
+    |
+926 |             let mgr = self.node_manager.read().await;
+    |                 --- binding `mgr` declared here
+927 |             mgr.active_node_list()
+    |             ^^^ borrowed value does not live long enough
+928 |         })?;
+    |         - `mgr` dropped here while still borrowed
+
+error[E0597]: `mgr` does not live long enough
+   --> crates\jcode-unified-scheduler\src\lib.rs:969:13
+    |
+967 |         let new_node = {
+    |             -------- borrow later stored here
+968 |             let mgr = self.node_manager.read().await;
+    |                 --- binding `mgr` declared here
+969 |             mgr.last_registered_node()
+    |             ^^^ borrowed value does not live long enough
+970 |         };
+    |         - `mgr` dropped here while still borrowed
+
+error[E0282]: type annotations needed
+   --> crates\jcode-unified-scheduler\src\lib.rs:989:19
+    |
+989 |             .map(|r| r.value().clone())
+    |                   ^  - type must be known at this point
+    |
+help: consider giving this closure parameter an explicit type
+    |
+989 |             .map(|r: /* Type */| r.value().clone())
+    |                    ++++++++++++
+
+error[E0282]: type annotations needed
+    --> crates\jcode-unified-scheduler\src\lib.rs:1051:13
+     |
+1051 |         let graph = self.dependency_graph.read().await;
+     |             ^^^^^
+...
+1058 |                 if let Some(deps) = graph.get(&current) {
+     |                                     ----- type must be known at this point
+     |
+help: consider giving `graph` an explicit type
+     |
+1051 |         let graph: /* Type */ = self.dependency_graph.read().await;
+     |                  ++++++++++++
+
+error[E0277]: the trait bound `f64: Ord` is not satisfied
+    --> crates\jcode-unified-scheduler\src\goap_planner.rs:392:14
+     |
+ 392 |             .min()
+     |              ^^^ the trait `Ord` is not implemented for `f64`
+     |
+     = help: the following other types implement trait `Ord`:
+               i128
+               i16
+               i32
+               i64
+               i8
+               isize
+               u128
+               u16
+             and 4 others
+note: the method call chain might not have had the expected associated types
+    --> crates\jcode-unified-scheduler\src\goap_planner.rs:391:14
+     |
+ 388 |         self.actions
+     |         ------------ this expression has type `Vec<GoapActionDef>`
+ 389 |             .iter()
+     |              ------ `Iterator::Item` is `&GoapActionDef` here
+ 390 |             .filter(|a| a.effects.iter().any(|e| e.key == key))
+     |              -------------------------------------------------- `Iterator::Item` remains `&GoapActionDef` here
+ 391 |             .map(|a| a.cost)
+     |              ^^^^^^^^^^^^^^^ `Iterator::Item` changed to `f64` here
+note: required by a bound in `std::iter::Iterator::min`
+    --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\iter\tra
+its\iterator.rs:3220:21
+     |
+3217 |     fn min(self) -> Option<Self::Item>
+     |        --- required by a bound in this associated function
+...
+3220 |         Self::Item: Ord,
+     |                     ^^^ required by this bound in `Iterator::min`
+
+error[E0308]: mismatched types
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:412:19
+    |
+412 |             .map(|&(idx, step_num)| {
+    |                   ^^^^^^^^^^^^^^^^
+    |                   |
+    |                   expected `(usize, &usize)`, found `&_`
+    |                   expected due to this
+    |
+    = note:  expected tuple `(usize, &usize)`
+            found reference `&_`
+
+error[E0308]: mismatched types
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:447:16
+    |
+447 |         if let Some(ref meta) = task.metadata {
+    |                ^^^^^^^^^^^^^^   ------------- this expression has type `serde_json::Value`
+    |                |
+    |                expected `Value`, found `Option<_>`
+    |
+    = note: expected enum `serde_json::Value`
+               found enum `std::option::Option<_>`
+
+error[E0282]: type annotations needed
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:450:44
+    |
+450 |                     format!("language_{}", lang.as_str().unwrap_or("unknown")),
+    |                                            ^^^^ cannot infer type
+
+error[E0282]: type annotations needed
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:457:24
+    |
+457 |                     if has_tests.as_bool().unwrap_or(false) {
+    |                        ^^^^^^^^^ cannot infer type
+
+error[E0283]: type annotations needed
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:496:48
+    |
+496 |             state.set("dependencies_installed".into(), WorldStateValue::Bool(true));
+    |                   ---                          ^^^^
+    |                   |
+    |                   required by a bound introduced by this call
+    |
+    = note: cannot satisfy `_: Into<std::string::String>`
+note: required by a bound in `types::WorldState::set`
+   --> crates\jcode-unified-scheduler\src\types.rs:260:37
+    |
+260 |     pub fn set(&mut self, key: impl Into<String>, value: WorldStateValue) {
+    |                                     ^^^^^^^^^^^^ required by this bound in `WorldState::set`
+help: try using a fully qualified path to specify the expected types
+    |
+496 -             state.set("dependencies_installed".into(), WorldStateValue::Bool(true));
+496 +             state.set(<&str as Into<T>>::into("dependencies_installed"), WorldStateValue::Bool(true));
+    |
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<std::string::
+String>` trivially holds
+    |
+496 -             state.set("dependencies_installed".into(), WorldStateValue::Bool(true));
+496 +             state.set("dependencies_installed", WorldStateValue::Bool(true));
+    |
+
+error[E0560]: struct `types::WorldStateEffect` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:563:64
+    |
+563 |                     WorldStateEffect { key: "analyzed".into(), op: EffectOp::Set, value: WorldStateValue::Bool(tr
+ue) },
+    |                                                                ^^ `types::WorldStateEffect` does not have this fi
+eld
+    |
+    = note: available fields are: `operation`
+
+error[E0560]: struct `types::WorldStateEffect` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:564:74
+    |
+564 |                     WorldStateEffect { key: "dependencies_known".into(), op: EffectOp::Set, value: WorldStateValu
+e::Bool(true) },
+    |                                                                          ^^ `types::WorldStateEffect` does not ha
+ve this field
+    |
+    = note: available fields are: `operation`
+
+error[E0560]: struct `types::WorldStateCondition` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:576:77
+    |
+576 | ...   WorldStateCondition { key: "dependencies_known".into(), op: ConditionOp::Equals, value: WorldStateValue::Bo
+ol(true) },
+    |                                                               ^^ `types::WorldStateCondition` does not have this 
+field
+    |
+    = note: available fields are: `operator`
+
+error[E0560]: struct `types::WorldStateEffect` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:579:78
+    |
+579 |                     WorldStateEffect { key: "dependencies_installed".into(), op: EffectOp::Set, value: WorldState
+Value::Bool(true) },
+    |                                                                              ^^ `types::WorldStateEffect` does no
+t have this field
+    |
+    = note: available fields are: `operation`
+
+error[E0560]: struct `types::WorldStateCondition` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:591:81
+    |
+591 | ...   WorldStateCondition { key: "dependencies_installed".into(), op: ConditionOp::Equals, value: WorldStateValue
+::Bool(true) },
+    |                                                                   ^^ `types::WorldStateCondition` does not have t
+his field
+    |
+    = note: available fields are: `operator`
+
+error[E0560]: struct `types::WorldStateEffect` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:594:61
+    |
+594 |                     WorldStateEffect { key: "built".into(), op: EffectOp::Set, value: WorldStateValue::Bool(true)
+ },
+    |                                                             ^^ `types::WorldStateEffect` does not have this field
+    |
+    = note: available fields are: `operation`
+
+error[E0560]: struct `types::WorldStateCondition` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:606:67
+    |
+606 |                     WorldStateCondition { key: "analyzed".into(), op: ConditionOp::Equals, value: WorldStateValue
+::Bool(true) },
+    |                                                                   ^^ `types::WorldStateCondition` does not have t
+his field
+    |
+    = note: available fields are: `operator`
+
+error[E0560]: struct `types::WorldStateEffect` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:609:69
+    |
+609 |                     WorldStateEffect { key: "tests_written".into(), op: EffectOp::Set, value: WorldStateValue::Bo
+ol(true) },
+    |                                                                     ^^ `types::WorldStateEffect` does not have th
+is field
+    |
+    = note: available fields are: `operation`
+
+error[E0560]: struct `types::WorldStateCondition` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:619:72
+    |
+619 |                     WorldStateCondition { key: "tests_written".into(), op: ConditionOp::Equals, value: WorldState
+Value::Bool(true) },
+    |                                                                        ^^ `types::WorldStateCondition` does not h
+ave this field
+    |
+    = note: available fields are: `operator`
+
+error[E0560]: struct `types::WorldStateCondition` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:620:64
+    |
+620 |                     WorldStateCondition { key: "built".into(), op: ConditionOp::Equals, value: WorldStateValue::B
+ool(true) },
+    |                                                                ^^ `types::WorldStateCondition` does not have this
+ field
+    |
+    = note: available fields are: `operator`
+
+error[E0560]: struct `types::WorldStateEffect` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:623:68
+    |
+623 |                     WorldStateEffect { key: "tests_passed".into(), op: EffectOp::Set, value: WorldStateValue::Boo
+l(true) },
+    |                                                                    ^^ `types::WorldStateEffect` does not have thi
+s field
+    |
+    = note: available fields are: `operation`
+
+error[E0560]: struct `types::WorldStateCondition` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:635:67
+    |
+635 |                     WorldStateCondition { key: "analyzed".into(), op: ConditionOp::Equals, value: WorldStateValue
+::Bool(true) },
+    |                                                                   ^^ `types::WorldStateCondition` does not have t
+his field
+    |
+    = note: available fields are: `operator`
+
+error[E0560]: struct `types::WorldStateEffect` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:638:66
+    |
+638 |                     WorldStateEffect { key: "documented".into(), op: EffectOp::Set, value: WorldStateValue::Bool(
+true) },
+    |                                                                  ^^ `types::WorldStateEffect` does not have this 
+field
+    |
+    = note: available fields are: `operation`
+
+error[E0560]: struct `types::WorldStateCondition` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:650:69
+    |
+650 |                     WorldStateCondition { key: "documented".into(), op: ConditionOp::Equals, value: WorldStateVal
+ue::Bool(true) },
+    |                                                                     ^^ `types::WorldStateCondition` does not have
+ this field
+    |
+    = note: available fields are: `operator`
+
+error[E0560]: struct `types::WorldStateCondition` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:651:72
+    |
+651 |                     WorldStateCondition { key: "tests_written".into(), op: ConditionOp::Equals, value: WorldState
+Value::Bool(true) },
+    |                                                                        ^^ `types::WorldStateCondition` does not h
+ave this field
+    |
+    = note: available fields are: `operator`
+
+error[E0560]: struct `types::WorldStateEffect` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:654:75
+    |
+654 |                     WorldStateEffect { key: "refactor_plan_ready".into(), op: EffectOp::Set, value: WorldStateVal
+ue::Bool(true) },
+    |                                                                           ^^ `types::WorldStateEffect` does not h
+ave this field
+    |
+    = note: available fields are: `operation`
+
+error[E0560]: struct `types::WorldStateCondition` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:664:78
+    |
+664 | ...   WorldStateCondition { key: "refactor_plan_ready".into(), op: ConditionOp::Equals, value: WorldStateValue::B
+ool(true) },
+    |                                                                ^^ `types::WorldStateCondition` does not have this
+ field
+    |
+    = note: available fields are: `operator`
+
+error[E0560]: struct `types::WorldStateCondition` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:665:71
+    |
+665 |                     WorldStateCondition { key: "tests_passed".into(), op: ConditionOp::Equals, value: WorldStateV
+alue::Bool(true) },
+    |                                                                       ^^ `types::WorldStateCondition` does not ha
+ve this field
+    |
+    = note: available fields are: `operator`
+
+error[E0560]: struct `types::WorldStateEffect` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:668:66
+    |
+668 |                     WorldStateEffect { key: "refactored".into(), op: EffectOp::Set, value: WorldStateValue::Bool(
+true) },
+    |                                                                  ^^ `types::WorldStateEffect` does not have this 
+field
+    |
+    = note: available fields are: `operation`
+
+error[E0560]: struct `types::WorldStateEffect` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:670:68
+    |
+670 |                     WorldStateEffect { key: "tests_passed".into(), op: EffectOp::Set, value: WorldStateValue::Boo
+l(false) },
+    |                                                                    ^^ `types::WorldStateEffect` does not have thi
+s field
+    |
+    = note: available fields are: `operation`
+
+error[E0560]: struct `types::WorldStateCondition` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:682:71
+    |
+682 |                     WorldStateCondition { key: "tests_passed".into(), op: ConditionOp::Equals, value: WorldStateV
+alue::Bool(true) },
+    |                                                                       ^^ `types::WorldStateCondition` does not ha
+ve this field
+    |
+    = note: available fields are: `operator`
+
+error[E0560]: struct `types::WorldStateCondition` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:683:64
+    |
+683 |                     WorldStateCondition { key: "built".into(), op: ConditionOp::Equals, value: WorldStateValue::B
+ool(true) },
+    |                                                                ^^ `types::WorldStateCondition` does not have this
+ field
+    |
+    = note: available fields are: `operator`
+
+error[E0560]: struct `types::WorldStateEffect` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:686:64
+    |
+686 |                     WorldStateEffect { key: "deployed".into(), op: EffectOp::Set, value: WorldStateValue::Bool(tr
+ue) },
+    |                                                                ^^ `types::WorldStateEffect` does not have this fi
+eld
+    |
+    = note: available fields are: `operation`
+
+error[E0560]: struct `types::WorldStateCondition` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:696:67
+    |
+696 |                     WorldStateCondition { key: "deployed".into(), op: ConditionOp::Equals, value: WorldStateValue
+::Bool(true) },
+    |                                                                   ^^ `types::WorldStateCondition` does not have t
+his field
+    |
+    = note: available fields are: `operator`
+
+error[E0560]: struct `types::WorldStateEffect` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:699:73
+    |
+699 |                     WorldStateEffect { key: "monitoring_active".into(), op: EffectOp::Set, value: WorldStateValue
+::Bool(true) },
+    |                                                                         ^^ `types::WorldStateEffect` does not hav
+e this field
+    |
+    = note: available fields are: `operation`
+
+error[E0560]: struct `types::WorldStateEffect` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:712:63
+    |
+712 |                     WorldStateEffect { key: "scanned".into(), op: EffectOp::Set, value: WorldStateValue::Bool(tru
+e) },
+    |                                                               ^^ `types::WorldStateEffect` does not have this fie
+ld
+    |
+    = note: available fields are: `operation`
+
+error[E0560]: struct `types::WorldStateCondition` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:722:66
+    |
+722 |                     WorldStateCondition { key: "scanned".into(), op: ConditionOp::Equals, value: WorldStateValue:
+:Bool(true) },
+    |                                                                  ^^ `types::WorldStateCondition` does not have th
+is field
+    |
+    = note: available fields are: `operator`
+
+error[E0560]: struct `types::WorldStateEffect` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:725:77
+    |
+725 |                     WorldStateEffect { key: "vulnerabilities_fixed".into(), op: EffectOp::Set, value: WorldStateV
+alue::Bool(true) },
+    |                                                                             ^^ `types::WorldStateEffect` does not
+ have this field
+    |
+    = note: available fields are: `operation`
+
+error[E0560]: struct `types::WorldStateEffect` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:738:65
+    |
+738 |                     WorldStateEffect { key: "diagnosed".into(), op: EffectOp::Set, value: WorldStateValue::Bool(t
+rue) },
+    |                                                                 ^^ `types::WorldStateEffect` does not have this f
+ield
+    |
+    = note: available fields are: `operation`
+
+error[E0560]: struct `types::WorldStateEffect` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:739:72
+    |
+739 |                     WorldStateEffect { key: "root_cause_found".into(), op: EffectOp::Set, value: WorldStateValue:
+:Bool(true) },
+    |                                                                        ^^ `types::WorldStateEffect` does not have
+ this field
+    |
+    = note: available fields are: `operation`
+
+error[E0560]: struct `types::WorldStateCondition` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:749:75
+    |
+749 | ...   WorldStateCondition { key: "root_cause_found".into(), op: ConditionOp::Equals, value: WorldStateValue::Bool
+(true) },
+    |                                                             ^^ `types::WorldStateCondition` does not have this fi
+eld
+    |
+    = note: available fields are: `operator`
+
+error[E0560]: struct `types::WorldStateEffect` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:752:67
+    |
+752 |                     WorldStateEffect { key: "fix_applied".into(), op: EffectOp::Set, value: WorldStateValue::Bool
+(true) },
+    |                                                                   ^^ `types::WorldStateEffect` does not have this
+ field
+    |
+    = note: available fields are: `operation`
+
+error[E0560]: struct `types::WorldStateEffect` has no field named `op`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:753:68
+    |
+753 | ...   WorldStateEffect { key: "tests_passed".into(), op: EffectOp::Set, value: WorldStateValue::Bool(false) }, //
+ fix后需重新测试
+    |                                                      ^^ `types::WorldStateEffect` does not have this field
+    |
+    = note: available fields are: `operation`
+
+error[E0277]: the `?` operator can only be applied to values that implement `Try`
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:621:9
+    |
+621 |         solve(0, vec![], 0, k_target, n, L, suffix_sum, self, &mut memo)?;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `?` operator cannot be applied to t
+ype `f64`
+    |
+    = help: the nightly-only, unstable trait `Try` is not implemented for `f64`
+
+error[E0277]: a value of type `i64` cannot be made by summing an iterator over elements of type `i32`
+    --> crates\jcode-unified-scheduler\src\layer_allocator.rs:540:65
+     |
+ 540 |             let need_open: i64 = open_residuals.iter().copied().sum();
+     |                                                                 ^^^ value of type `i64` cannot be made by summin
+g a `std::iter::Iterator<Item=i32>`
+     |
+     = help: the trait `Sum<i32>` is not implemented for `i64`
+help: the following other types implement trait `Sum<A>`
+    --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\iter\tra
+its\accum.rs:48:9
+     |
+  48 |         impl Sum for $a {
+     |         ^^^^^^^^^^^^^^^ `i64` implements `Sum`
+...
+  70 |         impl<'a> Sum<&'a $a> for $a {
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `i64` implements `Sum<&i64>`
+...
+ 204 | integer_sum_product! { i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize }
+     | ---------------------------------------------------------------------------- in this macro invocation
+note: the method call chain might not have had the expected associated types
+    --> crates\jcode-unified-scheduler\src\layer_allocator.rs:540:56
+     |
+ 540 |             let need_open: i64 = open_residuals.iter().copied().sum();
+     |                                  -------------- ------ ^^^^^^^^ `Iterator::Item` changed to `i32` here
+     |                                  |              |
+     |                                  |              `Iterator::Item` is `&i32` here
+     |                                  this expression has type `Vec<i32>`
+note: required by a bound in `std::iter::Iterator::sum`
+    --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\iter\tra
+its\iterator.rs:3597:12
+     |
+3594 |     fn sum<S>(self) -> S
+     |        --- required by a bound in this associated function
+...
+3597 |         S: Sum<Self::Item>,
+     |            ^^^^^^^^^^^^^^^ required by this bound in `Iterator::sum`
+     = note: this error originates in the macro `integer_sum_product` (in Nightly builds, run with -Z macro-backtrace f
+or more info)
+
+error[E0308]: mismatched types
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:557:51
+    |
+557 |                 let r_after = open_residuals[j] - cap_i;
+    |                                                   ^^^^^ expected `i32`, found `i64`
+
+error[E0277]: cannot subtract `i64` from `i32`
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:557:49
+    |
+557 |                 let r_after = open_residuals[j] - cap_i;
+    |                                                 ^ no implementation for `i32 - i64`
+    |
+    = help: the trait `Sub<i64>` is not implemented for `i32`
+help: the following other types implement trait `Sub<Rhs>`
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\internal_
+macros.rs:22:9
+    |
+ 22 |         impl const $imp<$u> for &$t {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&i32` implements `Sub<i32>`
+...
+ 33 |         impl const $imp<&$u> for $t {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `i32` implements `Sub<&i32>`
+...
+ 44 |         impl const $imp<&$u> for &$t {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&i32` implements `Sub`
+    |
+   ::: C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\ops\arith
+.rs:212:9
+    |
+212 |         impl const Sub for $t {
+    |         ^^^^^^^^^^^^^^^^^^^^^ `i32` implements `Sub`
+...
+227 | sub_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f16 f32 f64 f128 }
+    | ---------------------------------------------------------------------------------- in this macro invocation
+    = note: this error originates in the macro `forward_ref_binop` which comes from the expansion of the macro `sub_imp
+l` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:562:61
+    |
+562 |                     let r_after_close = open_residuals[j] - cap_close;
+    |                                                             ^^^^^^^^^ expected `i32`, found `i64`
+
+error[E0277]: cannot subtract `i64` from `i32`
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:562:59
+    |
+562 |                     let r_after_close = open_residuals[j] - cap_close;
+    |                                                           ^ no implementation for `i32 - i64`
+    |
+    = help: the trait `Sub<i64>` is not implemented for `i32`
+help: the following other types implement trait `Sub<Rhs>`
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\internal_
+macros.rs:22:9
+    |
+ 22 |         impl const $imp<$u> for &$t {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&i32` implements `Sub<i32>`
+...
+ 33 |         impl const $imp<&$u> for $t {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `i32` implements `Sub<&i32>`
+...
+ 44 |         impl const $imp<&$u> for &$t {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&i32` implements `Sub`
+    |
+   ::: C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\ops\arith
+.rs:212:9
+    |
+212 |         impl const Sub for $t {
+    |         ^^^^^^^^^^^^^^^^^^^^^ `i32` implements `Sub`
+...
+227 | sub_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f16 f32 f64 f128 }
+    | ---------------------------------------------------------------------------------- in this macro invocation
+    = note: this error originates in the macro `forward_ref_binop` which comes from the expansion of the macro `sub_imp
+l` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:607:35
+    |
+607 |                     new_open.push(r_new);
+    |                              ---- ^^^^^ expected `i32`, found `i64`
+    |                              |
+    |                              arguments to this method are incorrect
+    |
+note: method defined here
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\vec\mod.
+rs:993:12
+    |
+993 |     pub fn push(&mut self, value: T) {
+    |            ^^^^
+help: you can convert an `i64` to an `i32` and panic if the converted value doesn't fit
+    |
+607 |                     new_open.push(r_new.try_into().unwrap());
+    |                                        ++++++++++++++++++++
+
+error[E0277]: a value of type `Vec<i32>` cannot be built from an iterator over elements of type `i64`
+    --> crates\jcode-unified-scheduler\src\layer_allocator.rs:639:74
+     |
+ 639 |                 let mut ol: Vec<i32> = open_list.iter().map(|(r, _)| *r).collect();
+     |                                                                          ^^^^^^^ value of type `Vec<i32>` cannot
+ be built from `std::iter::Iterator<Item=i64>`
+     |
+help: the trait `FromIterator<i64>` is not implemented for `Vec<i32>`
+      but trait `FromIterator<i32>` is implemented for it
+    --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\vec\mod
+.rs:3798:1
+     |
+3798 | impl<T> FromIterator<T> for Vec<T> {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = help: for that trait implementation, expected `i32`, found `i64`
+note: the method call chain might not have had the expected associated types
+    --> crates\jcode-unified-scheduler\src\layer_allocator.rs:639:57
+     |
+ 633 |         let mut open_list: Vec<(i64, Vec<Arc<NodeInfo>>)> = vec![];
+     |                                                             ------ this expression has type `Vec<(i64, Vec<Arc<N
+odeInfo>>)>`
+...
+ 639 |                 let mut ol: Vec<i32> = open_list.iter().map(|(r, _)| *r).collect();
+     |                                                  ------ ^^^^^^^^^^^^^^^^ `Iterator::Item` changed to `i64` here
+     |                                                  |
+     |                                                  `Iterator::Item` is `&(i64, Vec<Arc<NodeInfo>>)` here
+note: required by a bound in `collect`
+    --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\iter\tra
+its\iterator.rs:2022:19
+     |
+2022 |     fn collect<B: FromIterator<Self::Item>>(self) -> B
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Iterator::collect`
+
+error[E0308]: mismatched types
+    --> crates\jcode-unified-scheduler\src\layer_allocator.rs:755:46
+     |
+ 755 |         let mut remaining = L.saturating_sub(assigned as u32) as i32;
+     |                               -------------- ^^^^^^^^^^^^^^^ expected `usize`, found `u32`
+     |                               |
+     |                               arguments to this method are incorrect
+     |
+note: method defined here
+    --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\num\uint
+_macros.rs:2263:22
+     |
+2263 |           pub const fn saturating_sub(self, rhs: Self) -> Self {
+     |                        ^^^^^^^^^^^^^^
+     |
+    ::: C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\num\mod.
+rs:1270:5
+     |
+1270 | /     uint_impl! {
+1271 | |         Self = usize,
+1272 | |         ActualT = u64,
+1273 | |         SignedT = isize,
+...    |
+1290 | |         bound_condition = " on 64-bit targets",
+1291 | |     }
+     | |_____- in this macro invocation
+     = note: this error originates in the macro `uint_impl` (in Nightly builds, run with -Z macro-backtrace for more in
+fo)
+help: you can convert a `u32` to a `usize` and panic if the converted value doesn't fit
+     |
+ 755 |         let mut remaining = L.saturating_sub((assigned as u32).try_into().unwrap()) as i32;
+     |                                              +               +++++++++++++++++++++
+
+error[E0614]: type `u32` cannot be dereferenced
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:788:36
+    |
+788 |             .filter(|(&s, &c)| s > *c)
+    |                                    ^^ can't be dereferenced
+
+error[E0599]: no variant or associated item named `Internal` found for enum `SchedulerError` in the current scope
+    --> crates\jcode-unified-scheduler\src\layer_allocator.rs:853:36
+     |
+ 853 |             .ok_or(SchedulerError::Internal(format!("Pipeline {} 不存在", pipeline_idx)))?;
+     |                                    ^^^^^^^^ variant or associated item not found in `SchedulerError`
+     |
+    ::: crates\jcode-unified-scheduler\src\lib.rs:1100:1
+     |
+1100 | pub enum SchedulerError {
+     | ----------------------- variant or associated item `Internal` not found for this enum
+
+error[E0614]: type `f64` cannot be dereferenced
+  --> crates\jcode-unified-scheduler\src\request_router.rs:76:46
+   |
+76 |                 result = Some((path.clone(), *lat));
+   |                                              ^^^^ can't be dereferenced
+
+error[E0614]: type `usize` cannot be dereferenced
+   --> crates\jcode-unified-scheduler\src\request_router.rs:475:26
+    |
+475 |         first_used.entry(*idx).or_insert(l as u32);
+    |                          ^^^^ can't be dereferenced
+
+error[E0308]: mismatched types
+   --> crates\jcode-unified-scheduler\src\request_router.rs:518:21
+    |
+518 |         prev = Some(node);
+    |                ---- ^^^^ expected `&Arc<NodeInfo>`, found `&NodeInfo`
+    |                |
+    |                arguments to this enum variant are incorrect
+    |
+    = note: expected reference `&std::sync::Arc<types::NodeInfo>`
+               found reference `&types::NodeInfo`
+help: the type constructed contains `&types::NodeInfo` due to the type of the argument passed
+   --> crates\jcode-unified-scheduler\src\request_router.rs:518:16
+    |
+518 |         prev = Some(node);
+    |                ^^^^^----^
+    |                     |
+    |                     this argument influences the type of `Some`
+note: tuple variant defined here
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\option.rs
+:608:5
+    |
+608 |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
+    |     ^^^^
+
+error[E0282]: type annotations needed
+   --> crates\jcode-unified-scheduler\src\resource_node.rs:131:34
+    |
+131 |         self.nodes.values().map(|n| n.as_ref()).collect()
+    |                                  ^  - type must be known at this point
+    |
+help: consider giving this closure parameter an explicit type
+    |
+131 |         self.nodes.values().map(|n: /* Type */| n.as_ref()).collect()
+    |                                   ++++++++++++
+
+error[E0282]: type annotations needed
+   --> crates\jcode-unified-scheduler\src\resource_node.rs:160:69
+    |
+160 |         self.last_registered.and_then(|id| self.nodes.get(&id).map(|n| n.as_ref()))
+    |                                                                     ^  - type must be known at this point
+    |
+help: consider giving this closure parameter an explicit type
+    |
+160 |         self.last_registered.and_then(|id| self.nodes.get(&id).map(|n: /* Type */| n.as_ref()))
+    |                                                                      ++++++++++++
+
+error[E0282]: type annotations needed
+   --> crates\jcode-unified-scheduler\src\resource_node.rs:196:22
+    |
+196 |             .filter(|n| n.is_online())
+    |                      ^  - type must be known at this point
+    |
+help: consider giving this closure parameter an explicit type
+    |
+196 |             .filter(|n: /* Type */| n.is_online())
+    |                       ++++++++++++
+
+error[E0282]: type annotations needed
+   --> crates\jcode-unified-scheduler\src\resource_node.rs:205:32
+    |
+205 |             online.iter().map(|n| n.load_ratio()).sum::<f64>() / online.len() as f64
+    |                                ^  - type must be known at this point
+    |
+help: consider giving this closure parameter an explicit type
+    |
+205 |             online.iter().map(|n: /* Type */| n.load_ratio()).sum::<f64>() / online.len() as f64
+    |                                 ++++++++++++
+
+error[E0277]: the trait bound `&&DateTime<Utc>: Borrow<DateTime<_>>` is not satisfied
+   --> crates\jcode-unified-scheduler\src\unified_queue.rs:202:57
+    |
+202 |                 let elapsed = now.signed_duration_since(ts);
+    |                                   --------------------- ^^ the trait `Borrow<DateTime<_>>` is not implemented for
+ `&&DateTime<Utc>`
+    |                                   |
+    |                                   required by a bound introduced by this call
+    |
+note: required by a bound in `DateTime::<Tz>::signed_duration_since`
+   --> C:\Users\lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\chrono-0.4.44\src\datetime\mod.rs:555:19
+    |
+553 |     pub fn signed_duration_since<Tz2: TimeZone>(
+    |            --------------------- required by a bound in this associated function
+554 |         self,
+555 |         rhs: impl Borrow<DateTime<Tz2>>,
+    |                   ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `DateTime::<Tz>::signed_duration_since`
+help: consider dereferencing here
+    |
+202 |                 let elapsed = now.signed_duration_since(*ts);
+    |                                                         +
+
+error[E0599]: no method named `borrow` found for reference `&WaterFillingConstraint` in the current scope
+   --> crates\jcode-unified-scheduler\src\water_filling.rs:254:26
+    |
+254 |             Some(c) => c.borrow().capacities.len(),
+    |                          ^^^^^^
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `Borrow` which provides `borrow` is implemented but not in scope; perhaps you want to import it
+    |
+ 31 + use std::borrow::Borrow;
+    |
+help: there is a method `borrow_mut` with a similar name
+    |
+254 |             Some(c) => c.borrow_mut().capacities.len(),
+    |                                ++++
+
+error[E0599]: no method named `borrow` found for reference `&WaterFillingConstraint` in the current scope
+   --> crates\jcode-unified-scheduler\src\water_filling.rs:261:36
+    |
+261 |             let inner = constraint.borrow();
+    |                                    ^^^^^^
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `Borrow` which provides `borrow` is implemented but not in scope; perhaps you want to import it
+    |
+ 31 + use std::borrow::Borrow;
+    |
+help: there is a method `borrow_mut` with a similar name
+    |
+261 |             let inner = constraint.borrow_mut();
+    |                                          ++++
+
+warning: unused variable: `prev_total_ns`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:192:13
+    |
+192 |         let prev_total_ns = self.total_planning_ns.swap(
+    |             ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prev_total_ns`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+error[E0382]: borrow of moved value: `current`
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:315:37
+    |
+269 |         while let Some(current) = open_set.pop() {
+    |                        -------
+    |                        |
+    |                        this reinitialization might get skipped
+    |                        move occurs because `current` has type `SearchNode`, which does not implement the `Copy` t
+rait
+...
+283 |                 best_partial = Some(current);
+    |                                     ------- value moved here
+...
+315 |                         let mut p = current.path.clone();
+    |                                     ^^^^^^^^^^^^ value borrowed here after move
+    |
+help: consider cloning the value if the performance cost is acceptable
+    |
+283 |                 best_partial = Some(current.clone());
+    |                                            ++++++++
+
+warning: unused variable: `task_registry`
+   --> crates\jcode-unified-scheduler\src\unified_queue.rs:124:9
+    |
+124 |         task_registry: &dashmap::DashMap<TaskId, ScheduledTask>,
+    |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_task_registry`
+
+warning: unused variable: `priority_idx`
+   --> crates\jcode-unified-scheduler\src\unified_queue.rs:211:14
+    |
+211 |         for (priority_idx, queue) in self.queues.iter_mut().enumerate() {
+    |              ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_priority_idx`
+
+warning: variable does not need to be mutable
+   --> crates\jcode-unified-scheduler\src\water_filling.rs:168:13
+    |
+168 |         let mut raw_allocations: Vec<f64> = capacities
+    |             ----^^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `task`
+   --> crates\jcode-unified-scheduler\src\lib.rs:871:9
+    |
+871 |         task: &ScheduledTask,
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_task`
+
+Some errors have detailed explanations: E0053, E0277, E0282, E0283, E0308, E0382, E0425, E0433, E0560...
+For more information about an error, try `rustc --explain E0053`.
+warning: `jcode-unified-scheduler` (lib) generated 11 warnings
+error: could not compile `jcode-unified-scheduler` (lib) due to 104 previous errors; 11 warnings emitted

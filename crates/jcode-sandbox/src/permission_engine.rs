@@ -3,15 +3,15 @@
 //
 // 决策流水线:
 //
-//   ToolCall → [SafetyCheck] → [RuleMatch] → [ModeCheck] → Decision
-//                 ↓               ↓             ↓
+//   ToolCall -> [SafetyCheck] -> [RuleMatch] -> [ModeCheck] -> Decision
+//                 v               v             v
 //           强制审批?       规则命中?     当前模式?
 //
 // 5 种权限模式的状态转换:
 //
-//   Plan ──→ Default ──→ Auto(YOLO) ──→ AcceptEdits ──→ Bypass
-//    ↑          ↑            ↑                ↑
-//    │          │            │                │
+//   Plan ---> Default ---> Auto(YOLO) ---> AcceptEdits ---> Bypass
+//    ^          ^            ^                ^
+//    |          |            |                |
 //   用户切换  连续允许    AI信任积累      显式授权
 // ════════════════════════════════════════════════════════════════
 
@@ -130,10 +130,10 @@ impl PermissionEngine {
     /// 这是主入口，执行完整流水线:
     ///
     /// ```text
-    /// Step 1: 安全检查 (敏感路径/危险命令) → 强制 Ask/Deny
-    /// Step 2: 规则匹配 (用户自定义规则)   → 命中则直接决定
-    /// Step 3: 模式判断 (当前权限模式)     → Bypass/Allow/Ask/Auto
-    /// Step 4: YOLO 分类 (Auto 模式下)      → AI 最终决策
+    /// Step 1: 安全检查 (敏感路径/危险命令) -> 强制 Ask/Deny
+    /// Step 2: 规则匹配 (用户自定义规则)   -> 命中则直接决定
+    /// Step 3: 模式判断 (当前权限模式)     -> Bypass/Allow/Ask/Auto
+    /// Step 4: YOLO 分类 (Auto 模式下)      -> AI 最终决策
     /// Step 5: 拒绝追踪更新
     /// ```
     pub async fn decide(&self, request: &PermissionRequest) -> PermissionDecision {
@@ -146,21 +146,21 @@ impl PermissionEngine {
             "Permission decision start"
         );
 
-        // ── Step 1: 安全检查 (不可绕过!) ──
+        // -- Step 1: 安全检查 (不可绕过!) --
         if self.config.safety_check_enabled {
             if let Some(safety_decision) = self.safety_check(request).await {
                 return safety_decision;
             }
         }
 
-        // ── Step 2: 命令沙箱检查 (Bash 工具专用) ──
+        // -- Step 2: 命令沙箱检查 (Bash 工具专用) --
         if self.config.command_sandbox_enabled && request.tool_name.eq_ignore_ascii_case("bash") {
             if let Some(cmd_decision) = self.command_sandbox_check(request).await {
                 return cmd_decision;
             }
         }
 
-        // ── Step 3: 规则匹配 ──
+        // -- Step 3: 规则匹配 --
         let matched_rule =
             self.rule_parser.match_tool_call(&request.tool_name, &request.tool_input);
 
@@ -181,7 +181,7 @@ impl PermissionEngine {
                     return PermissionDecision::deny(reason, mode);
                 }
                 DecisionBehavior::Ask { reason } => {
-                    // 规则要求确认 → 检查当前模式是否可跳过确认
+                    // 规则要求确认 -> 检查当前模式是否可跳过确认
                     if mode == PermissionMode::Bypass || mode == PermissionMode::AcceptEdits {
                         return PermissionDecision::allow(mode);
                     }
@@ -190,7 +190,7 @@ impl PermissionEngine {
             }
         }
 
-        // ── Step 4: 模式判断 ──
+        // -- Step 4: 模式判断 --
         match mode {
             PermissionMode::Bypass => PermissionDecision::allow(mode),
 
@@ -311,10 +311,10 @@ impl PermissionEngine {
                             self.record_denial().await;
                             PermissionDecision::deny(result.reason, mode)
                         } else if result.confidence >= self.config.yolo_allow_threshold {
-                            // 高置信度 → 自动允许
+                            // 高置信度 -> 自动允许
                             PermissionDecision::allow(mode)
                         } else {
-                            // 中等置信度 → 需要用户确认
+                            // 中等置信度 -> 需要用户确认
                             PermissionDecision::ask(format!(
                                 "{} (置信度 {:.0}%)",
                                 result.reason, result.confidence * 100.0
@@ -401,7 +401,7 @@ impl PermissionEngine {
     /// 生产环境中应将 rule_parser 包装在 Arc<RwLock<>> 中。
     /// 作为替代方案，请使用 `load_rules_from_text` 的批量接口或重新构造 Engine。
     pub async fn rules_mut(&self) -> std::result::Result<tokio::sync::RwLockWriteGuard<'_, PermissionRuleParser>, String> {
-        Err("规则动态加载 API 需要重构: 请通过 PermissionEngine::with_rules() 构造或使用 load_rules_from_text(). 当前限制: Arc<PermissionRuleParser> 不支持 &self → &mut".into())
+        Err("规则动态加载 API 需要重构: 请通过 PermissionEngine::with_rules() 构造或使用 load_rules_from_text(). 当前限制: Arc<PermissionRuleParser> 不支持 &self -> &mut".into())
     }
 
     /// 加载规则文本 (便捷方法)
@@ -551,17 +551,17 @@ mod tests {
         assert_eq!(m1, PermissionMode::Default); // 返回旧模式
         assert_eq!(engine.current_mode().await, PermissionMode::Auto);
 
-        engine.escalate_mode().await; // Auto → AcceptEdits
-        engine.escalate_mode().await; // AcceptEdits → Bypass
+        engine.escalate_mode().await; // Auto -> AcceptEdits
+        engine.escalate_mode().await; // AcceptEdits -> Bypass
         assert_eq!(engine.current_mode().await, PermissionMode::Bypass);
 
-        // Bypass → Bypass (已是最高级)
+        // Bypass -> Bypass (已是最高级)
         engine.escalate_mode().await;
         assert_eq!(engine.current_mode().await, PermissionMode::Bypass);
 
         // 降级测试
-        engine.deescalate_mode().await; // Bypass → AcceptEdits
-        engine.deescalate_mode().await; // AcceptEdits → Auto
+        engine.deescalate_mode().await; // Bypass -> AcceptEdits
+        engine.deescalate_mode().await; // AcceptEdits -> Auto
         assert_eq!(engine.current_mode().await, PermissionMode::Auto);
     }
 }

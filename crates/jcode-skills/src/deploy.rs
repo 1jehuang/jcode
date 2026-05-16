@@ -36,9 +36,10 @@ impl DeployTarget {
 }
 
 /// Kubernetes 部署模式
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 enum K8sDeployMode {
     /// kubectl apply -f <path> (单个文件或目录)
+    #[default]
     Apply,
     /// helm upgrade --install
     Helm,
@@ -67,7 +68,7 @@ impl DeploySkill {
         if !status.success() {
             anyhow::bail!("cp exited with status: {}", status);
         }
-        Ok(format!("Deployed {} → {}", artifact_path, target_dir))
+        Ok(format!("Deployed {} -> {}", artifact_path, target_dir))
     }
 
     /// 执行 SSH 远程部署
@@ -94,7 +95,7 @@ impl DeploySkill {
         if !status.success() {
             anyhow::bail!("rsync exited with status: {}", status);
         }
-        Ok(format!("Deployed {} → {}:{} (port {})", artifact_path, host, remote_path, port))
+        Ok(format!("Deployed {} -> {}:{} (port {})", artifact_path, host, remote_path, port))
     }
 
     /// 执行 Docker 部署

@@ -33,7 +33,7 @@ impl App {
         }
         if action == crate::bus::ClientMaintenanceAction::Rebuild {
             content.push_str(
-                "\n\n**Pipeline:** `git pull --ff-only` → `cargo build --release` → `cargo test --release -- --test-threads=1`",
+                "\n\n**Pipeline:** `git pull --ff-only` -> `cargo build --release` -> `cargo test --release -- --test-threads=1`",
             );
         }
         content

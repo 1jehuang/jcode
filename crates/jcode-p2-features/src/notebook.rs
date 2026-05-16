@@ -32,7 +32,7 @@ pub struct NotebookCell {
 pub struct CellOutput {
     pub output_type: OutputType,
     pub text: Option<String>,
-    pub data: Option<HashMap<String, String>>, // MIME type → base64 content
+    pub data: Option<HashMap<String, String>>, // MIME type -> base64 content
     pub execution_count: Option<u32>,
 }
 

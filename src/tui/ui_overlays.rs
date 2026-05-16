@@ -97,7 +97,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
 
     let separator = || -> Line<'static> {
         Line::from(Span::styled(
-            "  ─────────────────────────────────────────────────",
+            "  -------------------------------------------------",
             sep_style,
         ))
     };

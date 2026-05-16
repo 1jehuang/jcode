@@ -324,11 +324,11 @@ impl AutoModeEngine {
     /// 记录审计日志
     fn log_audit(
         &self,
-        action_type: &ActionType,
-        description: &str,
-        decision: &AutoApprovalDecision,
-        confidence: Option<f64>,
-        start: std::time::Instant,
+        _action_type: &ActionType,
+        _description: &str,
+        _decision: &AutoApprovalDecision,
+        _confidence: Option<f64>,
+        _start: std::time::Instant,
     ) {
         #[cfg(feature = "audit")]
         {
@@ -362,7 +362,7 @@ impl AutoModeEngine {
     }
 
     /// 更新配置
-    pub fn update_config<F>(&self, updater: F)
+    pub fn update_config<F>(&mut self, updater: F)
     where
         F: FnOnce(&mut AutoModeConfig),
     {
@@ -374,7 +374,7 @@ impl AutoModeEngine {
     }
 
     /// 启用/禁用Auto Mode
-    pub fn set_enabled(&self, enabled: bool) {
+    pub fn set_enabled(&mut self, enabled: bool) {
         self.update_config(|cfg| cfg.enabled = enabled);
     }
 

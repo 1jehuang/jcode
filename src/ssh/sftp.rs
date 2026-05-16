@@ -580,7 +580,7 @@ impl SftpClient {
         &self,
         local_path: &Path,
         remote_path: &Path,
-        offset: u64,
+        _offset: u64,
     ) -> Result<SftpTransferResult, SftpError> {
         // Use rsync's --append-verify or --partial for resume
         let remote_target = format!("{}@{}:{}", self.ssh_user, self.ssh_host, remote_path.display());
@@ -589,15 +589,13 @@ impl SftpClient {
         cmd.arg("-avz")
            .arg("--append-verify")  // Resume and verify
            .arg("--partial")
-           .arg("-e")
-           .arg(format!("ssh -o BatchMode=yes -p {}", self.ssh_port));
+           .arg("-e");
 
         if let Some(ref identity) = self.identity_file {
-            let mut ssh_arg = format!("ssh -o BatchMode=yes -p {} -i {}", 
-                self.ssh_port, identity.display());
-            // Replace last -e argument
-            cmd.args.pop();
-            cmd.arg(ssh_arg);
+            cmd.arg(format!("ssh -o BatchMode=yes -p {} -i {}", 
+                self.ssh_port, identity.display()));
+        } else {
+            cmd.arg(format!("ssh -o BatchMode=yes -p {}", self.ssh_port));
         }
 
         cmd.arg(local_path.display().to_string())
@@ -623,7 +621,7 @@ impl SftpClient {
             },
             remote_path: remote_path.to_path_buf(),
             checksum: None,
-            error: if output.status.success { 
+            error: if !output.status.success() { 
                 None 
             } else { 
                 Some(String::from_utf8_lossy(&output.stderr).to_string()) 
@@ -662,6 +660,7 @@ impl SftpClient {
             let permissions = parts[0].to_string();
             let size: u64 = parts[4].parse().unwrap_or(0);
             let name = parts[parts.len()-1].to_string();
+            let name_for_path = name.clone();
             
             let file_type = if permissions.starts_with('d') {
                 SftpFileType::Directory
@@ -675,11 +674,11 @@ impl SftpClient {
 
             Some(SftpFileInfo {
                 name,
-                path: PathBuf::from(&name), // Would be full path in real implementation
+                path: PathBuf::from(&name_for_path),
                 file_type,
                 size,
                 permissions: Some(permissions),
-                modification_time: None, // Would parse date field
+                modification_time: None,
                 owner: Some(parts[2].to_string()),
                 group: Some(parts[3].to_string()),
             })
@@ -876,7 +875,7 @@ impl std::error::Error for SftpError {}
 /// High-level SFTP session manager with connection pooling
 pub struct SftpSessionManager {
     clients: std::collections::HashMap<String, SftpClient>,
-    default_config: Option<(String, String, u16)>,  // (user, host, port)
+    default_config: Option<String, String, u16>,  // (user, host, port)
 }
 
 impl SftpSessionManager {

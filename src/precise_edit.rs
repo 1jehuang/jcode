@@ -1,6 +1,6 @@
 //! # Precise Edit Engine — 精确块级代码编辑器
 //!
-//! Claude Code 核心差异化能力：search_block → replace_block 模式编辑。
+//! Claude Code 核心差异化能力：search_block -> replace_block 模式编辑。
 //! 超越原版的增强点：
 //! - **模糊匹配**：容忍空白/注释差异，支持相似度阈值
 //! - **多候选消歧**：当搜索块匹配多个位置时，用上下文签名消歧
@@ -43,8 +43,8 @@ impl IndentStyle {
     pub fn indent_string(&self) -> String {
         match self {
             Self::Spaces(n) => " ".repeat(*n),
-            _SelfTabs => "\t".to_string(),
-            _SelfMixed => "  ".to_string(),
+            Self::Tabs => "\t".to_string(),
+            Self::Mixed => "  ".to_string(),
         }
     }
 

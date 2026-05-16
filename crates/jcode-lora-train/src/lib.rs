@@ -3,8 +3,8 @@
 //!
 //! ## 流程
 //! 1. 采集: 用户每次接受/拒绝补全时，记录 (before, after, accepted) 三元组
-//! 2. 训练: Python 脚本读取数据 → unsloth LoRA → 输出 adapter
-//! 3. 推理: jcode 在补全时加载 LoRA adapter → Qwen 补全更精准
+//! 2. 训练: Python 脚本读取数据 -> unsloth LoRA -> 输出 adapter
+//! 3. 推理: jcode 在补全时加载 LoRA adapter -> Qwen 补全更精准
 
 mod collector;
 mod inference;
@@ -33,7 +33,7 @@ impl LoraPipeline {
 
     pub fn collector(&self) -> &EditCollector { &self.collector }
 
-    /// 导出数据集 → 供 Python 训练脚本使用
+    /// 导出数据集 -> 供 Python 训练脚本使用
     pub async fn export_dataset(&self) -> anyhow::Result<PathBuf> {
         let samples = self.collector.samples();
         let path = self.data_dir.join("completion_dataset.jsonl");

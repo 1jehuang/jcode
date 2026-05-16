@@ -264,7 +264,7 @@ impl MessageFormat {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MessageList {
     pub messages: Option<Vec<MessageRef>>,
     #[serde(rename = "nextPageToken")]
@@ -374,7 +374,7 @@ pub struct MessageBody {
     pub data: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Header {
     pub name: String,
     pub value: String,
@@ -389,7 +389,7 @@ pub struct ThreadList {
     pub result_size_estimate: Option<u32>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ThreadRef {
     pub id: String,
     pub snippet: Option<String>,

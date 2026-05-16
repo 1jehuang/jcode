@@ -228,7 +228,7 @@ impl BriefFormatter {
         }
     }
 
-    // ─── 内部方法 ─────────────────────────────
+    // --- 内部方法 -----------------------------
 
     fn format_single_line(&self, line: &str) -> LineFormat {
         let trimmed = line.trim();

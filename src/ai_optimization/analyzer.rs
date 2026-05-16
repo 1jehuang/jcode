@@ -52,12 +52,12 @@ impl BehaviorAnalyzer {
                 self.patterns.push(BehaviorPattern {
                     id: uuid::Uuid::new_v4().to_string(),
                     pattern_type: PatternType::CommandSequence,
-                    description: format!("Frequent sequence: {} → {} → {}", seq[0], seq[1], seq[2]),
+                    description: format!("Frequent sequence: {} -> {} -> {}", seq[0], seq[1], seq[2]),
                     confidence: 0.85,
                     frequency: 5,
                     last_seen: chrono::Utc::now(),
                     suggestions: vec![
-                        format!("Create alias for '{} → {} → {}'", seq[0], seq[1], seq[2]),
+                        format!("Create alias for '{} -> {} -> {}'", seq[0], seq[1], seq[2]),
                         "Consider creating a workflow script".to_string(),
                     ],
                 });
@@ -79,7 +79,7 @@ impl BehaviorAnalyzer {
                 acc
             });
 
-        if let Some((&peak_hour, &count)) = hour_counts.iter().max_by_key(|(_, &c)| c) {
+        if let Some((&peak_hour, &count)) = hour_counts.iter().max_by_key(|&(_, c)| c) {
             if count > events.len() / 3 {
                 self.patterns.push(BehaviorPattern {
                     id: uuid::Uuid::new_v4().to_string(),

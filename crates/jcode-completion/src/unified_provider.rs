@@ -2,8 +2,8 @@
 //!
 //! 策略:
 //!   1. 先尝试 LspAstProvider (在线, 高精度)
-//!   2. LSP 不可用 → TreeSitterAstProvider (离线, 快速)
-//!   3. TreeSitter 也不可用 → RegexAstProvider (保底)
+//!   2. LSP 不可用 -> TreeSitterAstProvider (离线, 快速)
+//!   3. TreeSitter 也不可用 -> RegexAstProvider (保底)
 //!
 //! 每一层的输出都向后传递，直到获得足够丰富的信息。
 

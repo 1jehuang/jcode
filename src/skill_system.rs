@@ -90,7 +90,7 @@ pub enum SkillComplexity {
     High,
 }
 
-// ── Loop Skill: Iterative Execution ──
+// -- Loop Skill: Iterative Execution --
 
 pub struct LoopSkill {
     max_retries: u32,
@@ -230,7 +230,7 @@ impl Skill for LoopSkill {
     }
 }
 
-// ── Verify Skill: Validation ──
+// -- Verify Skill: Validation --
 
 pub struct VerifySkill {
     checks: Vec<VerificationCheck>,
@@ -393,7 +393,7 @@ impl Skill for VerifySkill {
     }
 }
 
-// ── Simplify Skill: Code Optimization ──
+// -- Simplify Skill: Code Optimization --
 
 pub struct SimplifySkill {
     rules: Vec<SimplificationRule>,
@@ -520,7 +520,7 @@ impl Skill for SimplifySkill {
     }
 }
 
-// ── Skills Registry ──
+// -- Skills Registry --
 
 pub struct SkillsRegistry {
     skills: RwLock<HashMap<String, Arc<dyn Skill>>>,

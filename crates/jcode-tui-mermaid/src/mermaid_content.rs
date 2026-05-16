@@ -162,15 +162,15 @@ fn image_placeholder_lines(width: u32, height: u32) -> Vec<Line<'static>> {
     let info = Style::default().fg(rgb(140, 170, 200));
 
     vec![
-        Line::from(Span::styled("┌─ mermaid diagram ", dim)),
+        Line::from(Span::styled("+- mermaid diagram ", dim)),
         Line::from(vec![
-            Span::styled("│ ", dim),
+            Span::styled("| ", dim),
             Span::styled(
                 format!("{}×{} px (image protocols not available)", width, height),
                 info,
             ),
         ]),
-        Line::from(Span::styled("└─", dim)),
+        Line::from(Span::styled("+-", dim)),
     ]
 }
 
@@ -192,19 +192,19 @@ pub fn error_to_lines(error: &str) -> Vec<Line<'static>> {
 
     vec![
         Line::from(Span::styled(
-            format!("┌─ {} {}┐", header, "─".repeat(top_padding)),
+            format!("+- {} {}+", header, "-".repeat(top_padding)),
             dim,
         )),
         Line::from(vec![
-            Span::styled("│ ", dim),
+            Span::styled("| ", dim),
             Span::styled(
                 format!("{:<width$}", error, width = content_width),
                 err_style,
             ),
-            Span::styled("│", dim),
+            Span::styled("|", dim),
         ]),
         Line::from(Span::styled(
-            format!("└─{}─┘", "─".repeat(bottom_width)),
+            format!("+-{}-+", "-".repeat(bottom_width)),
             dim,
         )),
     ]

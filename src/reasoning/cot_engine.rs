@@ -18,40 +18,40 @@
 //! ## 架构设计
 //!
 //! ```
-//! ┌─────────────────────────────────────────────────────┐
-//! │              CoT Reasoning Engine                   │
-//! ├─────────────────────────────────────────────────────┤
-│                                                     │
-│  ┌─────────────┐    ┌──────────────────────────┐     │
-│  │ Problem      │───→│ Step-by-Step Decomposer  │     │
-│  │ Analyzer     │    │ (问题分解器)              │     │
-│  └─────────────┘    └────────────┬─────────────┘     │
-│                                  │                  │
-│                     ┌──────────┴──────────┐         │
-│                     ↓                      ↓         │
-│          ┌────────────────┐   ┌────────────────┐   │
-│          │ Logical        │   │ Creative       │   │
-│          │ Reasoner       │   │ Reasoner       │   │
-│          │ (演绎推理)      │   │ (归纳/类比推理)  │   │
-│          └───────┬────────┘   └───────┬────────┘   │
-│                  └──────────┬───────┘             │
-│                     ↓                              │
-│          ┌────────────────────────────┐           │
-│          │ Self-Reflection Module     │           │
-│          │ (自我反思+纠错)            │           │
-│          └────────────┬───────────────┘           │
-│                       ↓                           │
-│          ┌────────────────────────────┐           │
-│          │ Answer Synthesizer         │           │
-│          │ (答案综合+置信度评估)       │           │
-│          └────────────┬───────────────┘           │
-│                       ↓                           │
-│          ┌────────────────────────────┐           │
-│          │ Reasoning Content Exporter │           │
-│          │ (思维链导出/可视化)         │           │
-│          └────────────────────────────┘           │
-│                                                     │
-└─────────────────────────────────────────────────────┘
+//! +-----------------------------------------------------+
+//! |              CoT Reasoning Engine                   |
+//! +-----------------------------------------------------+
+//! |                                                     |
+//! |  +-------------+    +--------------------------+     |
+//! |  | Problem      |---->| Step-by-Step Decomposer  |     |
+//! |  | Analyzer     |    | (问题分解器)              |     |
+//! |  +-------------+    +------------+-------------+     |
+//! |                                  |                  |
+//! |                     +----------+----------+         |
+//! |                     v                      v         |
+//! |          +----------------+   +----------------+   |
+//! |          | Logical        |   | Creative       |   |
+//! |          | Reasoner       |   | Reasoner       |   |
+//! |          | (演绎推理)      |   | (归纳/类比推理)  |   |
+//! |          +-------+--------+   +-------+--------+   |
+//! |                  +----------+-------+             |
+//! |                     v                              |
+//! |          +----------------------------+           |
+//! |          | Self-Reflection Module     |           |
+//! |          | (自我反思+纠错)            |           |
+//! |          +------------+---------------+           |
+//! |                       v                           |
+//! |          +----------------------------+           |
+//! |          | Answer Synthesizer         |           |
+//! |          | (答案综合+置信度评估)       |           |
+//! |          +------------+---------------+           |
+//! |                       v                           |
+//! |          +----------------------------+           |
+//! |          | Reasoning Content Exporter |           |
+//! |          | (思维链导出/可视化)         |           |
+//! |          +----------------------------+           |
+//! |                                                     |
+//! +-----------------------------------------------------+
 //!
 //! ## 性能对比
 //!
@@ -71,7 +71,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-// ─── Types ─────────────────────────────────────────
+// --- Types -----------------------------------------
 
 /// 推理步骤
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,7 +211,7 @@ pub struct ReasoningResult {
     pub reasoning_content: String,
 }
 
-// ─── Core Engine ─────────────────────────────────
+// --- Core Engine ---------------------------------
 
 /// Chain-of-Thought 推理引擎
 pub struct CotEngine {
@@ -408,7 +408,7 @@ impl CotEngine {
         
         let is_complex = problem.len() > 200 || problem.lines().count() > 5;
         
-        let needs_perspective = problem.contains("?") || problem.contains("或者")
+        let needs_perspective = problem.contains('?') || problem.contains("或者")
             || problem.contains("是否");
         
         // 根据特征选择策略
@@ -429,7 +429,7 @@ impl CotEngine {
     async fn standard_cot(&self, problem: &str, context: &str) -> Result<ReasoningResult> {
         let mut chain = Vec::new();
         let mut correction_count = 0usize;
-        let total_steps = 6;
+        let _total_steps = 6;
         
         // Step 1: 问题理解
         self.emit_step_event(1, StepType::Understanding, "开始深度理解问题...", 0.1).await;
@@ -562,7 +562,7 @@ impl CotEngine {
         // Step 3: 选择最优方案并深入
         let best_idx = evaluations.iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.0.partial_cmp(&b.0).unwrap())
+            .max_by(|(_, a), (_, b)| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(i, _)| i)
             .unwrap_or(0);
         
@@ -760,7 +760,7 @@ impl CotEngine {
         })
     }
 
-    // ─── Individual Steps ─────────────────────────
+    // --- Individual Steps -------------------------
 
     async fn step_understanding(&self, problem: &str, _context: &str) -> Result<ReasoningStep> {
         let start = std::time::Instant::now();
@@ -936,7 +936,7 @@ impl CotEngine {
 
     async fn step_self_reflection(
         &self, 
-        problem: &str, 
+        _problem: &str, 
         chain: &[ReasoningStep]
     ) -> Result<SelfReflectionResult> {
         let start = std::time::Instant::now();
@@ -1004,7 +1004,7 @@ impl CotEngine {
         })
     }
 
-    // ─── Helper Methods ───────────────────────────
+    // --- Helper Methods ---------------------------
 
     /// 发送步骤开始事件
     async fn emit_step_event(&self, step_num: usize, step_type: StepType, description: &str, progress: f64) {
@@ -1091,7 +1091,7 @@ impl CotEngine {
     }
 
     fn extract_constraints(&self, text: &str) -> String {
-        let constraints: Vec<&str> = text.matches(|p: char| p == '？' || p == '?' || p == '不得' || p == '必须')
+        let constraints: Vec<&str> = text.matches(|p: char| p == '？' || p == '?' || p == '不' || p == '必')
             .collect();
         
         if constraints.is_empty() {
@@ -1148,7 +1148,7 @@ impl CotEngine {
             content.push_str(&format!("**描述**: {}\n\n", step.description));
             
             if self.config.verbose_reasoning {
-                content.push_str("**推理过程**:\n```\n{}\n```\n\n", step.reasoning);
+            content.push_str(&format!("**推理过程**:\n```\n{}\n```\n\n", step.reasoning));
                 
                 if let Some(output) = &step.output {
                     content.push_str(&format!("**输出**: {}\n\n", output));
@@ -1174,7 +1174,7 @@ impl CotEngine {
             .collect()
     }
 
-    // ─── Simulation Methods (替代真实LLM调用) ─────
+    // --- Simulation Methods (替代真实LLM调用) -----
 
     async fn simulate_llm_call(
         &self,
@@ -1186,7 +1186,7 @@ impl CotEngine {
         let base_answer = match self.classify_problem_type(problem) {
             "数学计算" => {
                 // 模拟数学推理
-                if problem.contains("+") {
+                if problem.contains('+') {
                     let parts: Vec<f64> = problem.split('+')
                         .filter_map(|s| s.trim().parse().ok())
                         .collect();
@@ -1257,7 +1257,7 @@ impl CotEngine {
         // 模拟评估候选方案
         Ok(candidates.iter()
             .enumerate()
-            .map(|(i, c)| {
+            .map(|(i, _c)| {
                 let score = match i {
                     0 => 0.85, // 方案A通常较好
                     1 => 0.72,
@@ -1351,7 +1351,7 @@ impl CotEngine {
         })
     }
 
-    // ─── Public API ───────────────────────────────
+    // --- Public API -------------------------------
 
     /// 获取统计信息
     pub async fn get_stats(&self) -> CotStats {
@@ -1372,7 +1372,7 @@ impl CotEngine {
     }
 }
 
-// ─── Helper Struct ───────────────────────────────
+// --- Helper Struct -------------------------------
 
 struct SelfReflectionResult {
     reflection: String,
@@ -1403,7 +1403,7 @@ impl SelfReflectionResult {
     }
 }
 
-// ─── Tests ──────────────────────────────────────
+// --- Tests --------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -1463,16 +1463,16 @@ mod tests {
     async fn test_auto_strategy_selection() {
         let engine = CotEngine::new(None);
         
-        // 数学问题 → 应该选择 TryAndCorrect
+        // 数学问题 -> 应该选择 TryAndCorrect
         let math_result = engine.reason("计算 23 * 45 + 67", "").await.unwrap();
         
-        // 复杂问题 → 应该选择 TreeOfThoughts 或 Standard
+        // 复杂问题 -> 应该选择 TreeOfThoughts 或 Standard
         let complex_result = engine.reason(
             "设计一个分布式数据库系统的架构方案，需要考虑CAP定理、一致性协议、分片策略、容错机制等多个维度",
             ""
         ).await.unwrap();
         
-        // 需要决策的问题 → 应该选择 RolePlaying
+        // 需要决策的问题 -> 应该选择 RolePlaying
         let decision_result = engine.reason(
             "我们是否应该将单体应用拆分为微服务？请从成本、维护性、团队技能等多角度分析",
             ""

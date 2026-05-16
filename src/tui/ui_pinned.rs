@@ -879,7 +879,7 @@ pub(super) fn draw_pinned_content_cached(
                         .and_then(|e| e.to_str());
 
                     text_lines.push(Line::from(vec![
-                        Span::styled("── ", Style::default().fg(dim_color())),
+                        Span::styled("-- ", Style::default().fg(dim_color())),
                         Span::styled(
                             short_path,
                             Style::default()
@@ -950,7 +950,7 @@ pub(super) fn draw_pinned_content_cached(
                     let source_badge = image_source_badge(source);
 
                     text_lines.push(Line::from(vec![
-                        Span::styled("── 📷 ", Style::default().fg(dim_color())),
+                        Span::styled("-- 📷 ", Style::default().fg(dim_color())),
                         Span::styled(
                             short_label,
                             Style::default()

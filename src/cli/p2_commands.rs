@@ -11,7 +11,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-// ─── Enhanced Agents System ──────────────────
+// --- Enhanced Agents System ------------------
 
 /// 子代理定义
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,7 +146,7 @@ fn format_tools_list(_agent_name: &str) -> String {
         .to_string()
 }
 
-// ─── Plugin Management ──────────────────────
+// --- Plugin Management ----------------------
 
 /// 插件信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -304,7 +304,7 @@ pub async fn list_plugins() -> Result<String> {
     Ok(output)
 }
 
-// ─── Remote Control ─────────────────────────
+// --- Remote Control -------------------------
 
 /// 远程控制服务器配置
 #[derive(Debug, Clone)]
@@ -366,7 +366,7 @@ carpai remote-control stop
     ))
 }
 
-// ─── Setup Token for CI/CD ──────────────────
+// --- Setup Token for CI/CD ------------------
 
 /// 生成长期Token用于CI/CD
 pub async fn generate_setup_token() -> Result<String> {
@@ -378,7 +378,7 @@ pub async fn generate_setup_token() -> Result<String> {
 
 ## Token信息
 ```
-{token}
+{}
 ```
 
 ### 元数据
@@ -394,7 +394,7 @@ pub async fn generate_setup_token() -> Result<String> {
 
 ### 1. 环境变量
 ```bash
-export CARPAI_TOKEN="{token}"
+export CARPAI_TOKEN="{}"
 ```
 
 ### 2. 在脚本中使用
@@ -426,23 +426,24 @@ carpai setup-token # 生成新Token
 ```
 "#,
         token,
-        expiry.format("%Y-%m-%d %H:%M:%S UTC")
+        expiry.format("%Y-%m-%d %H:%M:%S UTC"),
+        token
     ))
 }
 
 fn generate_random_token() -> String {
     use rand::Rng;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     
     format!(
         "cpai_{}_{}_{}",
-        (0..8).map(|_| rng.gen_range(0..16)).collect::<String>(),
-        (0..4).map(|_| rng.gen_range(0..16)).collect::<String>(),
-        (0..12).map(|_| rng.gen_range(0..16)).collect::<String>()
+        (0..8).map(|_| format!("{:x}", rng.random_range(0..16))).collect::<String>(),
+        (0..4).map(|_| format!("{:x}", rng.random_range(0..16))).collect::<String>(),
+        (0..12).map(|_| format!("{:x}", rng.random_range(0..16))).collect::<String>()
     )
 }
 
-// ─── Ultra Review ───────────────────────────
+// --- Ultra Review ---------------------------
 
 /// 超级代码审查 (ultrareview)
 pub async fn run_ultrareview(target: Option<&str>, options: UltraReviewOptions) -> Result<String> {

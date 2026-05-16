@@ -1,4 +1,4 @@
-//! # 插件市场基础架构 (Plugin Market)
+﻿//! # 插件市场基础架构 (Plugin Market)
 //!
 //! 插件的全生命周期管理：
 //! - 搜索与发现：按名称/分类/标签/评分检索插件
@@ -46,11 +46,11 @@ impl Version {
     pub fn satisfies(&self, requirement: &VersionRequirement) -> bool {
         match requirement {
             VersionRequirement::Any => true,
-            VersionRequirement::Exact(ref v) => self == v,
-            VersionRequirement::Compatible(major, minor) => {
-                self.major == *major && self.minor >= *minor
-            }
-            VersionRequirement::Gte(ref v) => self >= v,
+            VersionRequirement::Exact(v) => self == v,
+        VersionRequirement::Compatible(major, minor) => {
+            self.major == *major && self.minor >= *minor
+        }
+        VersionRequirement::Gte(v) => self >= v,
             VersionRequirement::Range(lo, hi) => self >= lo.as_ref() && self <= hi.as_ref(),
         }
     }
@@ -446,13 +446,13 @@ impl DependencyResolver {
         let mut stack = Vec::new();
         let mut order = VecDeque::new();
         stack.push((root_id.to_string(), 0));
-        while let ((id, depth)) = stack.pop() {
+        while let Some((id, depth)) = stack.pop() {
             if visited.contains(&id) {
                 continue;
             }
             visited.insert(id.clone());
-            order.push_front(id);
-            let manifest = manifests.get(stack.last().map(|s| s.0).unwrap_or(root_id))
+            order.push_front(id.clone());
+            let manifest = manifests.get(stack.last().map(|s| &s.0).unwrap_or(&root_id.to_string()))
                 .or_else(|| manifests.get(&id));
             if let Some(manifest) = manifest {
                 for dep in &manifest.dependencies {
@@ -626,11 +626,14 @@ impl PluginMarketClient {
         if !new_manifest.is_compatible_with(&self.carpai_version) {
             return Err("New version is incompatible with current CarpAI".to_string());
         }
+        let install_path = current.install_path.clone();
+        let enabled = current.enabled;
+        let installed_at = current.installed_at;
         self.local_registry.unregister(plugin_id);
         let entry = InstalledPluginEntry {
-            install_path: current.install_path.clone(),
-            enabled: current.enabled,
-            installed_at: current.installed_at,
+            install_path,
+            enabled,
+            installed_at,
             manifest: new_manifest,
         };
         self.local_registry.register(entry);
@@ -791,7 +794,7 @@ mod tests {
         let mut client = PluginMarketClient::new(url, Version::new(0, 12, 0));
         client.install(make_test_manifest("rust-analyzer", "1.0.0")).ok();
         client.install(make_test_manifest("python-lsp", "1.0.0")).ok();
-        client.install(make_test_formatter-builder", "1.0.0")).ok();
+        client.install(make_test_manifest("formatter-builder", "1.0.0")).ok();
 
         let results = client.search_local("rust");
         assert_eq!(results.len(), 1);
@@ -806,7 +809,7 @@ mod tests {
         let verifier = PluginVerifier::new().block_plugin("evil-plugin");
         let manifest = make_test_manifest("evil-plugin", "1.0.0");
         let result = verifier.verify_manifest(&manifest);
-        assert_eq!(result, VerificationResult::Blocked("Plugin 'evil-plugin' is on the blocklist".to_string()));
+        assert_eq!(result, VerificationResult::Blocked("Plugin \"evil-plugin\" is on the blocklist".to_string()));
         assert!(!result.is_allowed());
 
         let good = make_test_manifest("good-plugin", "1.0.0");

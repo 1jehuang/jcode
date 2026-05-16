@@ -64,7 +64,7 @@ fn compact_plan_message_body(message: &str) -> String {
         && let Some((task_id, assignee)) = rest.split_once("' assigned to ")
     {
         return format!(
-            "Assigned {} → {}",
+            "Assigned {} -> {}",
             task_id.trim(),
             compact_swarm_session_label(assignee.trim_end_matches('.').trim())
         );
@@ -258,7 +258,7 @@ mod tests {
             compact_plan_message_body(
                 "Plan updated: task 'issue41-memory-headed' assigned to session_mouse_1774660180567.",
             ),
-            "Assigned issue41-memory-headed → mouse"
+            "Assigned issue41-memory-headed -> mouse"
         );
     }
 

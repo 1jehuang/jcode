@@ -137,7 +137,7 @@ impl App {
     }
 
     /// Check if the selected reload candidate is newer than startup.
-    /// Candidate selection matches `/reload` so the `cli↑` badge and reload target stay aligned.
+    /// Candidate selection matches `/reload` so the `cli^` badge and reload target stay aligned.
     pub(super) fn has_newer_binary(&self) -> bool {
         let Some(startup_mtime) = self.client_binary_mtime else {
             return false;

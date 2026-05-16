@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, Command};
 
-// ─── Global debug session state ────────────────────────────────
+// --- Global debug session state --------------------------------
 
 static DEBUG_SESSION: std::sync::OnceLock<Mutex<Option<RuntimeDebugSession>>> =
     std::sync::OnceLock::new();
@@ -35,7 +35,7 @@ struct RuntimeBreakpoint {
     line: u32,
 }
 
-// ─── DAP helpers ───────────────────────────────────────────────
+// --- DAP helpers -----------------------------------------------
 
 async fn dap_send(session: &mut RuntimeDebugSession, cmd: &str, args: Value) -> Result<Value> {
     session.request_seq += 1;
@@ -53,7 +53,7 @@ async fn dap_send(session: &mut RuntimeDebugSession, cmd: &str, args: Value) -> 
     Ok(Value::Null) // simplified — real impl would read response
 }
 
-// ─── Tool definition ───────────────────────────────────────────
+// --- Tool definition -------------------------------------------
 
 pub struct DebugEvaluateTool;
 
@@ -232,7 +232,7 @@ impl Tool for DebugEvaluateTool {
                 let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(ref _session) = *guard {
                     Ok(ToolOutput::new(
-                        "Variables view requires DAP stackTrace → scopes → variables chain.\n\
+                        "Variables view requires DAP stackTrace -> scopes -> variables chain.\n\
                          Use the `carpai debug variables` CLI command for full output.\n\
                          (Program must be stopped at a breakpoint.)"
                     ).with_title("debug: variables"))

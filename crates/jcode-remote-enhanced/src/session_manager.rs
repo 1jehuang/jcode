@@ -165,8 +165,8 @@ impl EnhancedRemoteSessionManager {
     ///
     /// # 流程
     /// 1. 解析消息类型 (SDKMessage vs ControlRequest)
-    /// 2. ControlRequest → 权限管理器
-    /// 3. SDKMessage → UUID 去重 → 回调
+    /// 2. ControlRequest -> 权限管理器
+    /// 3. SDKMessage -> UUID 去重 -> 回调
     pub async fn handle_incoming_message(&self, raw_msg: serde_json::Value) -> bool {
         use serde::Deserialize;
 
@@ -201,7 +201,7 @@ impl EnhancedRemoteSessionManager {
             }
         }
 
-        // 普通 SDK 消息 → 去重检查
+        // 普通 SDK 消息 -> 去重检查
         // Claude Code: `isSDKMessage()` 类型守卫
         
         // 提取消息 UUID (如果存在)
@@ -243,7 +243,7 @@ impl EnhancedRemoteSessionManager {
             }
         }
 
-        // 通过所有检查 → 转发给回调
+        // 通过所有检查 -> 转发给回调
         if let Some(cb) = &self.callbacks.on_message {
             cb(raw_msg);
         }

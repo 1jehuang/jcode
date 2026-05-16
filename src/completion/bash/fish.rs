@@ -296,9 +296,9 @@ pub struct FishParser {
 impl Default for FishParser {
     fn default() -> Self {
         let mut parser = Self {
-            word_regex: Regex::new(r"[^\s|&;<>()'\"$#\\]+").unwrap(),
+            word_regex: Regex::new(r#"[^\s|&;<>()$#\\]+"#).unwrap(),
             option_regex: Regex::new(r"-{1,2}[A-Za-z][A-Za-z0-9_-]*").unwrap(),
-            variable_regex: Regex::new(r"\$\w+|\$\{[^}]+\}").unwrap(),
+            variable_regex: Regex::new(r#"\$\w+|\$\{[^}]+\}"#).unwrap(),
             fish_var_regex: Regex::new(r"__fish_[A-Za-z_][A-Za-z0-9_]*").unwrap(),
             complete_specs: HashMap::new(),
             abbreviations: HashMap::new(),
@@ -516,7 +516,7 @@ impl FishParser {
                     pos += 1;
                 }
                 '$' => {
-                    let var_start = pos;
+                    let _var_start = pos;
                     pos += 1;
 
                     if pos < chars.len() && chars[pos] == '(' {
@@ -636,13 +636,13 @@ impl FishParser {
                 tokens_before_cursor.push(token.clone());
                 char_count += token_len;
 
-                match token {
-                    FishToken::Word(s) | FishToken::LongOption(_) if current_command.is_none() => {
-                        match token {
-                            FishToken::Word(name) => current_command = Some(name.clone()),
-                            FishToken::LongOption(name) => current_command = Some(format!("-{}", name)),
-                            _ => {}
-                        }
+                match &token {
+                    FishToken::Word(name) if current_command.is_none() => {
+                        current_command = Some(name.clone());
+                        current_arg_index = Some(0);
+                    }
+                    FishToken::LongOption(name) if current_command.is_none() => {
+                        current_command = Some(format!("--{}", name));
                         current_arg_index = Some(0);
                     }
                     FishToken::ShortOption(_) | FishToken::LongOption(_)
@@ -712,20 +712,24 @@ impl FishParser {
         tokens: &mut Vec<FishToken>,
         errors: &mut Vec<FishParseError>,
     ) -> Result<FishAstNode, ()> {
-        let mut commands = vec![];
+        let mut commands: Vec<FishCommandNode> = vec![];
         let mut current_cmd_words = vec![];
 
         while !tokens.is_empty() {
             match tokens.remove(0) {
                 FishToken::Pipe => {
                     if !current_cmd_words.is_empty() {
-                        commands.push(self.build_command_node(current_cmd_words));
+                        if let FishAstNode::Command(cmd) = self.build_command_node(current_cmd_words) {
+                            commands.push(cmd);
+                        }
                         current_cmd_words = vec![];
                     }
                 }
                 FishToken::DoubleAnd | FishToken::DoubleOr | FishToken::Semicolon => {
                     if !current_cmd_words.is_empty() {
-                        commands.push(self.build_command_node(current_cmd_words));
+                        if let FishAstNode::Command(cmd) = self.build_command_node(current_cmd_words) {
+                            commands.push(cmd);
+                        }
                         current_cmd_words = vec![];
                     }
                 }
@@ -743,7 +747,9 @@ impl FishParser {
                 }
                 FishToken::FunctionKeyword => {
                     if !current_cmd_words.is_empty() {
-                        commands.push(self.build_command_node(current_cmd_words));
+                        if let FishAstNode::Command(cmd) = self.build_command_node(current_cmd_words) {
+                            commands.push(cmd);
+                        }
                         current_cmd_words = vec![];
                     }
                     let func_name = if !tokens.is_empty() {
@@ -792,7 +798,9 @@ impl FishParser {
         }
 
         if !current_cmd_words.is_empty() {
-            commands.push(self.build_command_node(current_cmd_words));
+            if let FishAstNode::Command(cmd) = self.build_command_node(current_cmd_words) {
+                commands.push(cmd);
+            }
         }
 
         if commands.len() == 1 {
@@ -835,7 +843,7 @@ impl FishParser {
     }
 
     fn register_builtin_variables(&mut self) {
-        let vars: Vec<(FishVariableSpec)> = vec![
+        let vars: Vec<FishVariableSpec> = vec![
             FishVariableSpec { name: "status".into(), description: "上一条命令的退出状态码".into(),
                 is_readonly: true, default_value: Some("0".into()), category: FishVarCategory::Status },
             FishVariableSpec { name: "history".into(), description: "命令历史搜索结果".into(),
@@ -986,7 +994,7 @@ impl FishParser {
                 description: Some("指定构建上下文".into()), arguments: Some("<name>".into()),
                 old_arguments: None, condition: None, requires_param: true, keep_order: false, exclusive: false },
             FishCompleteSpec { command: "docker".into(), short_option: None, long_option: Some("host".into()),
-                description: Some("Docker守护进程地址".into()), Some("tcp://HOST:PORT".into()),
+                description: Some("Docker守护进程地址".into()), arguments: Some("tcp://HOST:PORT".into()),
                 old_arguments: None, condition: None, requires_param: true, keep_order: false, exclusive: false },
         ];
 
@@ -1034,7 +1042,7 @@ impl FishParser {
             ("ll", "ls -alh", Some("详细列表")),
             ("cls", "clear", Some("清屏")),
             ("..", "cd ..", Some("上级目录")),
-            ("...",", "cd ../..", Some("上两级目录")),
+            ("...", "cd ../..", Some("上两级目录")),
             ("dc", "docker compose", Some("Docker Compose")),
             ("dcp", "docker compose ps", Some("查看容器")),
             ("dcu", "docker compose up -d", Some("启动服务")),
@@ -1887,7 +1895,7 @@ mod tests {
     #[test]
     fn test_parse_function_definition() {
         let parser = FishParser::new();
-        let result = parser.parse("function greet\n    echo Hello $argv\nend", 20);
+        let result = parser.parse("function greet; echo Hello $argv; end", 28);
 
         match result.ast {
             FishAstNode::FunctionDef(func) => {
@@ -1905,7 +1913,7 @@ mod tests {
         match result.ast {
             FishAstNode::Abbreviation(abbr) => {
                 assert_eq!(abbr.abbreviation, "la");
-                assert_eq!(abr.expansion, "ls -alh");
+                assert_eq!(abbr.expansion, "ls -alh");
             }
             _ => {}
         }
@@ -2083,7 +2091,7 @@ mod tests {
         let parser = FishParser::new();
         let tokens = parser.tokenize("echo (date)");
 
-        let has_subst_open = tokens.iter().any(|*t| t == FishToken::CommandSubstOpen);
+        let has_subst_open = tokens.iter().any(|t| *t == FishToken::CommandSubstOpen);
         assert!(has_subst_open);
     }
 

@@ -706,7 +706,7 @@ impl Agent {
                         title: None,
                     }));
                     if print_output {
-                        println!("\n  → {}", error_msg);
+                        println!("\n  -> {}", error_msg);
                     }
                     self.add_message(
                         Role::User,
@@ -743,7 +743,7 @@ impl Agent {
                             );
                         }
                         if print_output {
-                            print!("\n  → ");
+                            print!("\n  -> ");
                             let preview = if sdk_content.len() > 200 {
                                 format!("{}...", crate::util::truncate_str(&sdk_content, 200))
                             } else {
@@ -780,7 +780,7 @@ impl Agent {
 
                 // SDK didn't execute this tool, run it locally
                 if print_output {
-                    print!("\n  → ");
+                    print!("\n  -> ");
                     io::stdout().flush()?;
                 }
 

@@ -18,8 +18,8 @@ fn test_side_diagram_uses_left_splitter_instead_of_rounded_box() {
         .expect("expected side diagram area after render");
     let buf = terminal.backend().buffer();
 
-    assert_eq!(buf[(diagram_area.x, diagram_area.y)].symbol(), "│");
-    assert_eq!(buf[(diagram_area.x, diagram_area.y + 1)].symbol(), "│");
+    assert_eq!(buf[(diagram_area.x, diagram_area.y)].symbol(), "|");
+    assert_eq!(buf[(diagram_area.x, diagram_area.y + 1)].symbol(), "|");
     assert!(text.contains("pinned 1/1"), "rendered text: {text}");
 
     crate::tui::mermaid::clear_active_diagrams();
@@ -762,7 +762,7 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
             provider: "auto".to_string(),
             api_method: "openrouter".to_string(),
             available: true,
-            detail: "→ Fireworks".to_string(),
+            detail: "-> Fireworks".to_string(),
             cheapness: None,
         },
         crate::provider::ModelRoute {

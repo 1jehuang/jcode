@@ -1100,7 +1100,7 @@ impl MemoryAgent {
             memory::pipeline_update(|p| {
                 p.maintain = StepStatus::Done;
                 p.maintain_result = Some(StepResult {
-                    summary: format!("{}L {}↑ {}↓ {}P", links, boosted, decayed, pruned),
+                    summary: format!("{}L {}^ {}v {}P", links, boosted, decayed, pruned),
                     latency_ms,
                 });
             });
@@ -1692,5 +1692,5 @@ pub fn stats() -> MemoryAgentStats {
 // Re-export constants for use in memory.rs
 
 #[cfg(test)]
-#[path = "memory_agent_tests.rs"]
+#[path = "../memory_agent_tests.rs"]
 mod tests;

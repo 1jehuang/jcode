@@ -2045,7 +2045,7 @@ mod tests {
         let dir = tempdir().expect("Failed to create temp dir");
         let manager = GitWorkflowManager::new(dir.path()).expect("Failed to create manager");
 
-        // 高相似度 → 低严重程度
+        // 高相似度 -> 低严重程度
         let severity_high_sim = manager.calculate_conflict_severity(
             &ConflictType::ContentModification,
             "let x = 1;\nlet y = 2;",
@@ -2053,7 +2053,7 @@ mod tests {
         );
         assert!(severity_high_sim <= 3);
 
-        // 低相似度 → 高严重程度
+        // 低相似度 -> 高严重程度
         let severity_low_sim = manager.calculate_conflict_severity(
             &ConflictType::ContentModification,
             "fn foo() { ... }",

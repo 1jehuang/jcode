@@ -441,9 +441,9 @@ impl EnhancedEmbeddingEngine {
     fn mock_embedding(&self, dimensions: usize) -> Vec<f32> {
         use rand::Rng;
         
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         (0..dimensions)
-            .map(|_| rng.gen_range(-1.0..1.0))
+            .map(|_| rng.random_range(-1.0..1.0))
             .collect()
     }
 

@@ -266,9 +266,10 @@ fn builtin_server_configs() -> Vec<ServerConfig> {
 /// 1. 根据文件路径路由到正确的 LSP Server
 /// 2. 懒加载启动（按需初始化）
 /// 3. 多实例生命周期管理
-/// 4. 扩展名 → 语言 → Server 映射
+/// 4. 扩展名 -> 语言 -> Server 映射
+#[allow(dead_code)]
 pub struct LspServerManager {
-    /// language_id → LspClient (Arc 共享)
+    /// language_id -> LspClient (Arc 共享)
     servers: RwLock<HashMap<String, Arc<RwLock<LspClient>>>>,
     
     /// 已知的 Server 配置
@@ -277,10 +278,10 @@ pub struct LspServerManager {
     /// workspace root URI
     workspace_root: String,
     
-    /// 扩展名 → language_id 映射 (快速查找)
+    /// 扩展名 -> language_id 映射 (快速查找)
     ext_to_lang: HashMap<String, String>,
     
-    /// language_id → config index 映射
+    /// language_id -> config index 映射
     lang_to_config: HashMap<String, usize>,
 }
 
@@ -439,7 +440,7 @@ impl LspServerManager {
         self.servers.read().await.len()
     }
 
-    // ─── 内部方法 ─────────────────────────
+    // --- 内部方法 -------------------------
 
     async fn find_config_for_language(&self, lang: &LanguageId) -> Option<&ServerConfig> {
         self.lang_to_config.get(lang.as_ref())
@@ -476,7 +477,7 @@ impl LspServerManager {
         }
     }
 
-    /// 静态扩展名 → 语言映射（避免每次创建实例）
+    /// 静态扩展名 -> 语言映射（避免每次创建实例）
     fn ext_to_lang_static(ext: &str) -> Option<LanguageId> {
         match ext {
             "rs" => Some(LanguageId::Rust),
@@ -563,7 +564,7 @@ impl super::LspOperations for LspServerManager {
         c.hover(file, line, character).await
     }
 
-    // ─── Advanced operations (Phase 2) ──────────────────
+    // --- Advanced operations (Phase 2) ------------------
 
     async fn document_symbol(
         &self,
@@ -612,5 +613,32 @@ impl super::LspOperations for LspServerManager {
             .ok_or(LspError::NoServer)?;
         let c = client.read().await;
         c.prepare_call_hierarchy(file, line, character).await
+    }
+
+    // --- New operations — LspOperations enhancement -----
+
+    async fn code_action(
+        &self,
+        file: &str,
+        range: Range,
+        context: CodeActionContext,
+    ) -> LspResult<Vec<CodeActionOrCommand>> {
+        let client = self.get_or_start_server_for_file(file).await
+            .ok_or(LspError::NoServer)?;
+        let c = client.read().await;
+        c.code_action(file, range, context).await
+    }
+
+    async fn rename_symbol_lsp(
+        &self,
+        file: &str,
+        line: u32,
+        character: u32,
+        new_name: &str,
+    ) -> LspResult<WorkspaceEdit> {
+        let client = self.get_or_start_server_for_file(file).await
+            .ok_or(LspError::NoServer)?;
+        let c = client.read().await;
+        c.rename_symbol(file, line, character, new_name).await
     }
 }

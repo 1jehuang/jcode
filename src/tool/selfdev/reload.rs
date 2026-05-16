@@ -105,7 +105,7 @@ impl ReloadContext {
             .map(|turns| format!(" Session restored with {} turns.", turns))
             .unwrap_or_default();
         format!(
-            "Reload succeeded ({} → {}).{}{}{} Continue immediately from where you left off. Do not ask the user what to do next. Do not summarize the reload.",
+            "Reload succeeded ({} -> {}).{}{}{} Continue immediately from where you left off. Do not ask the user what to do next. Do not summarize the reload.",
             self.version_before, self.version_after, task_info, background_task_note, turns_note
         )
     }

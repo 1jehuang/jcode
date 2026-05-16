@@ -93,6 +93,59 @@ impl TreeSitterAstAdapter {
         Ok(nodes)
     }
 
+    /// Parse TypeScript/TSX source using tree-sitter
+    #[cfg(feature = "multi-lang")]
+    fn parse_typescript(&self, code: &str, is_tsx: bool) -> anyhow::Result<Vec<AstNode>> {
+        let mut parser = tree_sitter::Parser::new();
+        let lang = if is_tsx {
+            tree_sitter_typescript::LANGUAGE_TSX.into()
+        } else {
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
+        };
+        parser.set_language(&lang)
+            .map_err(|e| anyhow::anyhow!("Failed to set TypeScript language: {}", e))?;
+
+        let tree = parser.parse(code, None)
+            .ok_or_else(|| anyhow::anyhow!("tree-sitter parse returned None"))?;
+
+        let root = tree.root_node();
+        let mut nodes = Vec::new();
+        self.walk_node(&root, code, &mut nodes);
+        Ok(nodes)
+    }
+
+    /// Parse Python source using tree-sitter
+    #[cfg(feature = "multi-lang")]
+    fn parse_python(&self, code: &str) -> anyhow::Result<Vec<AstNode>> {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&tree_sitter_python::LANGUAGE.into())
+            .map_err(|e| anyhow::anyhow!("Failed to set Python language: {}", e))?;
+
+        let tree = parser.parse(code, None)
+            .ok_or_else(|| anyhow::anyhow!("tree-sitter parse returned None"))?;
+
+        let root = tree.root_node();
+        let mut nodes = Vec::new();
+        self.walk_node(&root, code, &mut nodes);
+        Ok(nodes)
+    }
+
+    /// Parse Go source using tree-sitter
+    #[cfg(feature = "multi-lang")]
+    fn parse_go(&self, code: &str) -> anyhow::Result<Vec<AstNode>> {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&tree_sitter_go::LANGUAGE.into())
+            .map_err(|e| anyhow::anyhow!("Failed to set Go language: {}", e))?;
+
+        let tree = parser.parse(code, None)
+            .ok_or_else(|| anyhow::anyhow!("tree-sitter parse returned None"))?;
+
+        let root = tree.root_node();
+        let mut nodes = Vec::new();
+        self.walk_node(&root, code, &mut nodes);
+        Ok(nodes)
+    }
+
     /// Walk tree-sitter node tree and convert to our AstNode
     fn walk_node(&self, node: &tree_sitter::Node, source: &str, output: &mut Vec<AstNode>) {
         // Only collect top-level declarations
@@ -145,6 +198,7 @@ impl TreeSitterAstAdapter {
 
     fn extract_name(&self, node: &tree_sitter::Node, source: &str) -> Option<String> {
         match node.kind() {
+            // Rust
             "function_item" | "function_signature_item" => {
                 node.child_by_field_name("name")
                     .and_then(|n| n.utf8_text(source.as_bytes()).ok())
@@ -167,7 +221,6 @@ impl TreeSitterAstAdapter {
                     .map(|s| s.to_string())
             }
             "field_declaration" => {
-                // field_identifier child
                 let mut cursor = node.walk();
                 for child in node.children(&mut cursor) {
                     if child.kind() == "field_identifier" {
@@ -175,6 +228,30 @@ impl TreeSitterAstAdapter {
                     }
                 }
                 None
+            }
+            // TypeScript/JavaScript
+            "function_declaration" | "method_definition" | "class_declaration" |
+            "interface_declaration" | "type_alias_declaration" | "enum_declaration" => {
+                node.child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+                    .map(|s| s.to_string())
+            }
+            "variable_declarator" => {
+                node.child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+                    .map(|s| s.to_string())
+            }
+            // Python
+            "function_definition" | "class_definition" => {
+                node.child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+                    .map(|s| s.to_string())
+            }
+            // Go
+            "method_declaration" | "type_declaration" => {
+                node.child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+                    .map(|s| s.to_string())
             }
             _ => None,
         }
@@ -284,9 +361,39 @@ impl TreeSitterAstAdapter {
         let mut dependents = Vec::new();
 
         let mut parser = tree_sitter::Parser::new();
-        if parser.set_language(&tree_sitter_rust::LANGUAGE.into()).is_err() {
-            return dependents;
-        }
+        let lang_set = match self.language {
+            LanguageKind::Rust => {
+                if parser.set_language(&tree_sitter_rust::LANGUAGE.into()).is_err() {
+                    return dependents;
+                }
+                true
+            }
+            #[cfg(feature = "multi-lang")]
+            LanguageKind::TypeScript | LanguageKind::JavaScript => {
+                if parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).is_err() {
+                    return dependents;
+                }
+                true
+            }
+            #[cfg(feature = "multi-lang")]
+            LanguageKind::Python => {
+                if parser.set_language(&tree_sitter_python::LANGUAGE.into()).is_err() {
+                    return dependents;
+                }
+                true
+            }
+            #[cfg(feature = "multi-lang")]
+            LanguageKind::Go => {
+                if parser.set_language(&tree_sitter_go::LANGUAGE.into()).is_err() {
+                    return dependents;
+                }
+                true
+            }
+            _ => false,
+        };
+
+        if !lang_set { return dependents; }
+
         let tree = match parser.parse(code, None) {
             Some(t) => t,
             None => return dependents,
@@ -384,10 +491,25 @@ impl AstAdapter for TreeSitterAstAdapter {
     }
 
     async fn parse(&self, code: &str, path: &Path) -> anyhow::Result<Vec<AstNode>> {
-        match self.language {
+        // Use the configured language, or auto-detect from file path
+        let lang = if self.language == LanguageKind::Generic {
+            LanguageKind::from_path(path)
+        } else {
+            self.language
+        };
+
+        match lang {
             LanguageKind::Rust => self.parse_rust(code),
+            #[cfg(feature = "multi-lang")]
+            LanguageKind::TypeScript => self.parse_typescript(code, false),
+            #[cfg(feature = "multi-lang")]
+            LanguageKind::JavaScript => self.parse_typescript(code, true),
+            #[cfg(feature = "multi-lang")]
+            LanguageKind::Python => self.parse_python(code),
+            #[cfg(feature = "multi-lang")]
+            LanguageKind::Go => self.parse_go(code),
             _ => {
-                // Fallback: simple line-based parsing for non-Rust
+                // Fallback: simple line-based parsing for unsupported languages
                 let mut nodes = Vec::new();
                 for (i, line) in code.lines().enumerate() {
                     let trimmed = line.trim();
@@ -483,9 +605,13 @@ impl AstAdapter for TreeSitterAstAdapter {
 
     async fn find_dependents(&self, code: &str, symbol: &str) -> Vec<(usize, String)> {
         match self.language {
-            LanguageKind::Rust => self.find_dependents_ast(code, symbol),
+            LanguageKind::Rust
+            | LanguageKind::TypeScript
+            | LanguageKind::JavaScript
+            | LanguageKind::Python
+            | LanguageKind::Go => self.find_dependents_ast(code, symbol),
             _ => {
-                // Simple text search fallback
+                // Simple text search fallback for unsupported languages
                 let mut results = Vec::new();
                 for (i, line) in code.lines().enumerate() {
                     if line.contains(symbol) {

@@ -20,9 +20,9 @@ use tokio::sync::RwLock;
 /// 文件传输方向
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransferDirection {
-    /// 用户 → Agent (上传)
+    /// 用户 -> Agent (上传)
     UserToAgent,
-    /// Agent → 用户 (下载)
+    /// Agent -> 用户 (下载)
     AgentToUser,
 }
 
@@ -100,7 +100,7 @@ impl KairosFileTransfer {
         }
     }
 
-    /// 发送文件给用户 (Agent → User)
+    /// 发送文件给用户 (Agent -> User)
     ///
     /// # 示例
     ///
@@ -152,7 +152,7 @@ impl KairosFileTransfer {
         Ok(id)
     }
 
-    /// 从用户接收文件 (User → Agent)
+    /// 从用户接收文件 (User -> Agent)
     pub async fn receive_from_user(
         &self,
         file_id: &str,

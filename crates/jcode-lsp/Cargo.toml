@@ -13,11 +13,15 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+futures = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }
 lsp-types = { workspace = true }
 regex = "1"
+tokio-stream = "0.1"
+tungstenite = "0.24"
+tokio-tungstenite = { version = "0.24", features = ["connect", "rustls-tls-native-roots"] }
 parking_lot = "0.12"
 # Real tree-sitter integration
 tree-sitter = "0.24"

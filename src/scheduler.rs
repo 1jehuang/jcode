@@ -112,7 +112,7 @@ pub enum TaskStatus {
     Cancelled,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum SchedulerError {
     NoAvailableResources,
     TaskAnalysisFailed(String),

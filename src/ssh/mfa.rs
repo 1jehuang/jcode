@@ -53,7 +53,7 @@ impl Default for MfaConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AuthMethodType {
     Password,
     Totp,           // Time-based OTP (Google Authenticator)
@@ -203,6 +203,7 @@ impl TotpAuthenticator {
         secret: &str,
         account_name: &str,
         issuer: &str,
+        config: &TotpConfig,
     ) -> String {
         format!(
             "otpauth://totp/{}:{}?secret={}&issuer={}&algorithm={}&digits={}&period={}",
@@ -578,7 +579,7 @@ impl MfaManager {
             }
         }
 
-        let challenges = self.methods.iter()
+        let challenges: Vec<AuthChallenge> = self.methods.iter()
             .filter(|m| self.config.allowed_methods.contains(&m.method_type()))
             .map(|m| m.generate_challenge(user_id))
             .filter_map(|r| r.ok())
@@ -598,39 +599,50 @@ impl MfaManager {
         challenge_id: &str,
         response: &serde_json::Value,
     ) -> Result<AuthResult, MfaError> {
-        // Find the appropriate auth method
+        let mut method_type_opt = None;
+        let mut verify_result = None;
+        
         for method in &self.methods {
             if let Some(result) = method.verify_response(challenge_id, response)? {
-                if result.success {
-                    // Create or update session
-                    self._update_session_success(user_id, method.method_type())?;
-                    
-                    return Ok(AuthResult {
-                        success: true,
-                        method_type: method.method_type(),
-                        session_id: Some(self._get_or_create_session(user_id)),
-                        error: None,
-                        remaining_methods: vec![],
-                        metadata: HashMap::new(),
-                    });
-                } else {
-                    self._record_failed_attempt(user_id)?;
-                    
-                    return Ok(AuthResult {
-                        success: false,
-                        method_type: method.method_type(),
-                        session_id: None,
-                        error: result.error,
-                        remaining_methods: self._get_remaining_methods(method.method_type()),
-                        metadata: HashMap::new(),
-                    });
-                }
+                method_type_opt = Some(method.method_type());
+                verify_result = Some(result);
+                break;
             }
         }
 
-        Err(MfaError::ChallengeNotFound {
-            id: challenge_id.to_string(),
-        })
+        let method_type = match method_type_opt {
+            Some(t) => t,
+            None => return Err(MfaError::ChallengeNotFound {
+                id: challenge_id.to_string(),
+            }),
+        };
+        
+        let result = verify_result.unwrap();
+        let method_type_for_result = method_type.clone();
+        
+        if result.success {
+            self._update_session_success(user_id, method_type)?;
+            
+            Ok(AuthResult {
+                success: true,
+                method_type: method_type_for_result,
+                session_id: Some(self._get_or_create_session(user_id)),
+                error: None,
+                remaining_methods: vec![],
+                metadata: HashMap::new(),
+            })
+        } else {
+            self._record_failed_attempt(user_id)?;
+            
+            Ok(AuthResult {
+                success: false,
+                method_type: method_type_for_result,
+                session_id: None,
+                error: result.error,
+                remaining_methods: self._get_remaining_methods(method_type),
+                metadata: HashMap::new(),
+            })
+        }
     }
 
     /// Check if MFA is completed for a session
@@ -703,7 +715,7 @@ impl MfaManager {
                 session.locked_until = Some(SystemTime::now() + self.config.lockout_duration);
                 
                 return Err(MfaError::AccountLocked {
-                    until: session.locked_until.unwrap(),
+                    until: session.locked_until.expect("locked_until was just set"),
                     reason: format!("{} failed attempts", session.failed_attempts),
                 });
             }
@@ -763,14 +775,14 @@ impl AuthMethod for TotpMethod {
         })
     }
 
-    fn verify_response(&self, challenge_id: &str, response: &serde_json::Value) -> Result<Option<AuthResult>, MfaError> {
+    fn verify_response(&self, _challenge_id: &str, response: &serde_json::Value) -> Result<Option<AuthResult>, MfaError> {
         let code = response.get("code")
             .and_then(|v| v.as_str())
             .ok_or_else(|| MfaError::InvalidResponse {
                 message: "Missing 'code' field in response".to_string(),
             })?;
 
-        let secret = "";  // Would retrieve from stored challenge data
+        let _secret = "";  // Would retrieve from stored challenge data
         
         // In real implementation, retrieve the secret associated with this challenge_id
         // For demo, we'll accept any valid-looking 6-digit code
@@ -821,7 +833,7 @@ impl AuthMethod for U2fMethod {
             method_type: AuthMethodType::U2f,
             prompt: "Insert your security key and tap it".to_string(),
             data: Some(serde_json::json!({
-                "challenge_data": base64::encode(&challenge.challenge_data),
+                "challenge_data": base64::engine::general_purpose::STANDARD.encode(&challenge.challenge_data),
                 "app_id": self.config.app_id,
                 "timeout_ms": self.config.timeout_ms,
             })),

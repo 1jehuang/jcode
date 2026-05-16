@@ -285,7 +285,7 @@ async fn render_svg_pipeline(
     }
 
     eprintln!(
-        "  Rendering {} unique frames as SVG → PNG ({} total)...",
+        "  Rendering {} unique frames as SVG -> PNG ({} total)...",
         unique_frames.len(),
         frames.len()
     );
@@ -685,7 +685,7 @@ text.emoji {{ font-family: "Noto Color Emoji", "Symbols Nerd Font", "{}", sans-s
             let first_char = sym.chars().next().unwrap_or(' ');
             if is_box_drawing(first_char) {
                 let fg = color_to_hex(cell.fg);
-                if first_char == '─' || first_char == '━' {
+                if first_char == '-' || first_char == '━' {
                     let start_x = x;
                     let thick = first_char == '━';
                     while x < width && !should_skip_cell(x) {
@@ -826,17 +826,17 @@ fn box_drawing_to_svg(
     let t2 = 2.5_f64;
 
     let (left, right_seg, up, down, thick) = match ch {
-        '─' => (true, true, false, false, false),
-        '│' => (false, false, true, true, false),
-        '┌' => (false, true, false, true, false),
-        '┐' => (true, false, false, true, false),
-        '└' => (false, true, true, false, false),
-        '┘' => (true, false, true, false, false),
-        '├' => (false, true, true, true, false),
-        '┤' => (true, false, true, true, false),
-        '┬' => (true, true, false, true, false),
-        '┴' => (true, true, true, false, false),
-        '┼' => (true, true, true, true, false),
+        '-' => (true, true, false, false, false),
+        '|' => (false, false, true, true, false),
+        '+' => (false, true, false, true, false),
+        '+' => (true, false, false, true, false),
+        '+' => (false, true, true, false, false),
+        '+' => (true, false, true, false, false),
+        '+' => (false, true, true, true, false),
+        '+' => (true, false, true, true, false),
+        '+' => (true, true, false, true, false),
+        '+' => (true, true, true, false, false),
+        '+' => (true, true, true, true, false),
         '╭' => {
             let r = cw.min(ch_h) / 2;
             return Some(format!(

@@ -38,7 +38,7 @@ pub(super) async fn handle_workspace_navigation_key(
     let label = crate::id::extract_session_name(&target_session_id)
         .map(|name| name.to_string())
         .unwrap_or(target_session_id);
-    app.set_status_notice(format!("Workspace → {}", label));
+    app.set_status_notice(format!("Workspace -> {}", label));
     Ok(true)
 }
 

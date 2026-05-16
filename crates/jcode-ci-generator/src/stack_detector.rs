@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 
 /// 编程语言
 #[derive(Debug, Clone, PartialEq)]
@@ -165,7 +164,7 @@ impl StackDetector {
         }
     }
 
-    fn detect_build_tool(&self, files: &[String], lang: &Language) -> BuildTool {
+    fn detect_build_tool(&self, files: &[String], _lang: &Language) -> BuildTool {
         for f in files {
             match f.as_str() {
                 "Cargo.toml" => return BuildTool::Cargo,

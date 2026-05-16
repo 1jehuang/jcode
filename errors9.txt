@@ -1,0 +1,300 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Checking jcode-unified-scheduler v0.1.0 (D:\studying\Codecargo\CarpAI\crates\jcode-unified-scheduler)
+warning: unused import: `HashMap`
+  --> crates\jcode-unified-scheduler\src\goap_planner.rs:20:36
+   |
+20 | use std::collections::{BinaryHeap, HashMap, HashSet};
+   |                                    ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::cmp::Reverse`
+  --> crates\jcode-unified-scheduler\src\goap_planner.rs:21:5
+   |
+21 | use std::cmp::Reverse;
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `error`
+  --> crates\jcode-unified-scheduler\src\layer_allocator.rs:22:34
+   |
+22 | use tracing::{info, debug, warn, error};
+   |                                  ^^^^^
+
+warning: unused imports: `error`, `info`, and `warn`
+  --> crates\jcode-unified-scheduler\src\request_router.rs:18:15
+   |
+18 | use tracing::{info, debug, warn, error};
+   |               ^^^^         ^^^^  ^^^^^
+
+warning: unused import: `std::cmp::Ordering`
+  --> crates\jcode-unified-scheduler\src\unified_queue.rs:25:5
+   |
+25 | use std::cmp::Ordering;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+   --> crates\jcode-unified-scheduler\src\resource_node.rs:103:13
+    |
+103 |         let mut node_mut = Arc::make_mut(node);
+    |             ----^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates\jcode-unified-scheduler\src\lib.rs:401:17
+    |
+401 |             let mut planner = self.goap_planner.write().await;
+    |                 ----^^^^^^^
+    |                 |
+    |                 help: remove this `mut`
+
+error[E0596]: cannot borrow `*router` as mutable, as it is behind a `&` reference
+   --> crates\jcode-unified-scheduler\src\lib.rs:875:22
+    |
+875 |         let result = router.find_optimal_path(virtual_layers, &nodes.iter().map(|n| n.clone()).collect::<Vec<_>>())?;
+    |                      ^^^^^^ `router` is a `&` reference, so it cannot be borrowed as mutable
+    |
+help: consider specifying this binding's type
+    |
+870 |         let router: &mut RequestRouter = router_guard.as_ref().ok_or(SchedulerError::NotInitialized)?;
+    |                   ++++++++++++++++++++
+
+error[E0308]: mismatched types
+   --> crates\jcode-unified-scheduler\src\lib.rs:944:48
+    |
+944 |           let needs = allocator.should_rebalance(&{
+    |  _______________________________----------------_^
+    | |                               |
+    | |                               arguments to this method are incorrect
+945 | |             let mgr = self.node_manager.read().await; mgr.active_nodes()
+946 | |         })?;
+    | |_________^ expected `&[&NodeInfo]`, found `&Vec<NodeInfo>`
+    |
+    = note: expected reference `&[&types::NodeInfo]`
+               found reference `&Vec<types::NodeInfo>`
+note: method defined here
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:250:12
+    |
+250 |     pub fn should_rebalance(&self, nodes: &[&NodeInfo]) -> Result<bool, SchedulerError> {
+    |            ^^^^^^^^^^^^^^^^        -------------------
+
+error[E0597]: `mgr` does not live long enough
+   --> crates\jcode-unified-scheduler\src\lib.rs:987:13
+    |
+985 |         let new_node = {
+    |             -------- borrow later stored here
+986 |             let mgr = self.node_manager.read().await;
+    |                 --- binding `mgr` declared here
+987 |             mgr.last_registered_node()
+    |             ^^^ borrowed value does not live long enough
+988 |         };
+    |         - `mgr` dropped here while still borrowed
+
+error[E0283]: type annotations needed
+   --> crates\jcode-unified-scheduler\src\goap_planner.rs:494:39
+    |
+494 |             state.set("tests_written".into(), WorldStateValue::Bool(true));
+    |                   ---                 ^^^^
+    |                   |
+    |                   required by a bound introduced by this call
+    |
+    = note: cannot satisfy `_: Into<std::string::String>`
+note: required by a bound in `types::WorldState::set`
+   --> crates\jcode-unified-scheduler\src\types.rs:260:37
+    |
+260 |     pub fn set(&mut self, key: impl Into<String>, value: WorldStateValue) {
+    |                                     ^^^^^^^^^^^^ required by this bound in `WorldState::set`
+help: try using a fully qualified path to specify the expected types
+    |
+494 -             state.set("tests_written".into(), WorldStateValue::Bool(true));
+494 +             state.set(<&str as Into<T>>::into("tests_written"), WorldStateValue::Bool(true));
+    |
+help: consider removing this method call, as the receiver has type `&'static str` and `&'static str: Into<std::string::String>` trivially holds
+    |
+494 -             state.set("tests_written".into(), WorldStateValue::Bool(true));
+494 +             state.set("tests_written", WorldStateValue::Bool(true));
+    |
+
+error[E0308]: mismatched types
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:560:51
+    |
+560 |                 let r_after = open_residuals[j] - cap_i;
+    |                                                   ^^^^^ expected `i32`, found `i64`
+
+error[E0277]: cannot subtract `i64` from `i32`
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:560:49
+    |
+560 |                 let r_after = open_residuals[j] - cap_i;
+    |                                                 ^ no implementation for `i32 - i64`
+    |
+    = help: the trait `Sub<i64>` is not implemented for `i32`
+help: the following other types implement trait `Sub<Rhs>`
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\ops\arith.rs:212:9
+    |
+212 |         impl const Sub for $t {
+    |         ^^^^^^^^^^^^^^^^^^^^^ `i32` implements `Sub`
+...
+227 | sub_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f16 f32 f64 f128 }
+    | ---------------------------------------------------------------------------------- in this macro invocation
+    |
+   ::: C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\internal_macros.rs:22:9
+    |
+ 22 |         impl const $imp<$u> for &$t {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&i32` implements `Sub<i32>`
+...
+ 33 |         impl const $imp<&$u> for $t {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `i32` implements `Sub<&i32>`
+...
+ 44 |         impl const $imp<&$u> for &$t {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&i32` implements `Sub`
+    = note: this error originates in the macro `sub_impl` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:565:61
+    |
+565 |                     let r_after_close = open_residuals[j] - cap_close;
+    |                                                             ^^^^^^^^^ expected `i32`, found `i64`
+
+error[E0277]: cannot subtract `i64` from `i32`
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:565:59
+    |
+565 |                     let r_after_close = open_residuals[j] - cap_close;
+    |                                                           ^ no implementation for `i32 - i64`
+    |
+    = help: the trait `Sub<i64>` is not implemented for `i32`
+help: the following other types implement trait `Sub<Rhs>`
+   --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\ops\arith.rs:212:9
+    |
+212 |         impl const Sub for $t {
+    |         ^^^^^^^^^^^^^^^^^^^^^ `i32` implements `Sub`
+...
+227 | sub_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f16 f32 f64 f128 }
+    | ---------------------------------------------------------------------------------- in this macro invocation
+    |
+   ::: C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\internal_macros.rs:22:9
+    |
+ 22 |         impl const $imp<$u> for &$t {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&i32` implements `Sub<i32>`
+...
+ 33 |         impl const $imp<&$u> for $t {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `i32` implements `Sub<&i32>`
+...
+ 44 |         impl const $imp<&$u> for &$t {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&i32` implements `Sub`
+    = note: this error originates in the macro `sub_impl` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:647:40
+    |
+647 |             let action = path.get(&(i, key.0, key.1));
+    |                                        ^^^^^ expected `Vec<i32>`, found `Vec<i64>`
+    |
+    = note: expected struct `Vec<i32>`
+               found struct `Vec<i64>`
+
+error[E0618]: expected function, found `SchedulerError`
+    --> crates\jcode-unified-scheduler\src\layer_allocator.rs:856:20
+     |
+ 856 |             .ok_or(SchedulerError::NotInitialized(format!("Pipeline {} 不存在", pipeline_idx)))?;
+     |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^---------------------------------------------
+     |                    |
+     |                    call expression requires function
+     |
+    ::: crates\jcode-unified-scheduler\src\lib.rs:1144:5
+     |
+1144 |     NotInitialized,
+     |     -------------- `SchedulerError::NotInitialized` defined here
+
+error[E0277]: `(dyn request_router::RoutingStrategy + 'static)` doesn't implement `Debug`
+   --> crates\jcode-unified-scheduler\src\request_router.rs:38:5
+    |
+ 35 | #[derive(Debug)]
+    |          ----- in this derive macro expansion
+...
+ 38 |     strategy: Box<dyn RoutingStrategy>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Debug` is not implemented for `(dyn request_router::RoutingStrategy + 'static)`
+    |
+help: the following other types implement trait `Debug`
+   --> C:\Users\lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tracing-core-0.1.36\src\field.rs:680:1
+    |
+680 | impl fmt::Debug for dyn Value {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `dyn tracing::Value`
+    |
+   ::: C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\any.rs:149:1
+    |
+149 | impl fmt::Debug for dyn Any {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `dyn Any`
+...
+159 | impl fmt::Debug for dyn Any + Send {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `dyn Any + Send`
+...
+166 | impl fmt::Debug for dyn Any + Send + Sync {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `dyn Any + Send + Sync`
+
+error[E0277]: the trait bound `&f64: FloatCore` is not satisfied
+    --> crates\jcode-unified-scheduler\src\request_router.rs:420:10
+     |
+ 420 |         .min_by_key(|(_, cost)| ordered_float::OrderedFloat(*cost))
+     |          ^^^^^^^^^^ the trait `FloatCore` is not implemented for `&f64`
+     |
+help: the trait `FloatCore` is implemented for `f64`
+    --> C:\Users\lenovo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-traits-0.2.19\src\float.rs:863:1
+     |
+ 863 | impl FloatCore for f64 {
+     | ^^^^^^^^^^^^^^^^^^^^^^
+     = note: required for `OrderedFloat<&f64>` to implement `Ord`
+note: required by a bound in `std::iter::Iterator::min_by_key`
+    --> C:\Users\lenovo\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\iter\traits\iterator.rs:3299:22
+     |
+3299 |     fn min_by_key<B: Ord, F>(self, f: F) -> Option<Self::Item>
+     |                      ^^^ required by this bound in `Iterator::min_by_key`
+
+warning: unused variable: `task_registry`
+   --> crates\jcode-unified-scheduler\src\unified_queue.rs:125:9
+    |
+125 |         task_registry: &dashmap::DashMap<TaskId, ScheduledTask>,
+    |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_task_registry`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `priority_idx`
+   --> crates\jcode-unified-scheduler\src\unified_queue.rs:212:14
+    |
+212 |         for (priority_idx, queue) in self.queues.iter_mut().enumerate() {
+    |              ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_priority_idx`
+
+warning: variable does not need to be mutable
+   --> crates\jcode-unified-scheduler\src\water_filling.rs:168:13
+    |
+168 |         let mut raw_allocations: Vec<f64> = capacities
+    |             ----^^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+error[E0733]: recursion in an async fn requires boxing
+   --> crates\jcode-unified-scheduler\src\lib.rs:496:5
+    |
+495 |     #[instrument(skip(self))]
+    |     ------------------------- recursive call here
+496 |     pub async fn cancel_task(&self, task_id: &TaskId) -> Result<(), SchedulerError> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+note: which leads to this async block
+   --> crates\jcode-unified-scheduler\src\lib.rs:495:5
+    |
+495 |     #[instrument(skip(self))]
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+511 |             if let Err(e) = self.cancel_task(&dep_id).await {
+    |                             ------------------------------- ...leading to this recursive call
+    = note: a recursive `async fn` call must introduce indirection such as `Box::pin` to avoid an infinitely sized future
+    = note: this error originates in the attribute macro `instrument` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+Some errors have detailed explanations: E0277, E0283, E0308, E0596, E0597, E0618, E0733.
+For more information about an error, try `rustc --explain E0277`.
+warning: `jcode-unified-scheduler` (lib) generated 10 warnings
+error: could not compile `jcode-unified-scheduler` (lib) due to 13 previous errors; 10 warnings emitted

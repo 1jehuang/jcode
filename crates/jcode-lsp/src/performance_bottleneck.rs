@@ -573,7 +573,7 @@ impl MonitoringSession {
         self.memory_snapshots.read().await.iter().cloned().collect()
     }
 
-    // ─── 内部检测方法 ─────────────────────────
+    // --- 内部检测方法 -------------------------
 
     async fn detect_hotspot_operation(&self, op: &OperationRecord) {
         let severity = if op.duration_ms > 10_000.0 {
@@ -886,7 +886,7 @@ impl BottleneckDetector {
         }
     }
 
-    // ─── 内部方法 ─────────────────────────
+    // --- 内部方法 -------------------------
 
     async fn collect_all_bottlenecks(&self) -> Vec<Bottleneck> {
         let mut all_bottlenecks = Vec::new();
@@ -1009,7 +1009,7 @@ impl BottleneckDetector {
                         regression_percentage: response_time_regression,
                         severity,
                         description: format!(
-                            "Response time increased by {:.1}% from baseline ({:.0}ms → {:.0}ms)",
+                            "Response time increased by {:.1}% from baseline ({:.0}ms -> {:.0}ms)",
                             response_time_regression, baseline.avg_response_time_ms, current_avg
                         ),
                     });
@@ -1025,7 +1025,7 @@ impl BottleneckDetector {
                         regression_percentage: error_regression,
                         Severity: if error_regression > 10.0 { Severity::Critical } else { Severity::Warning },
                         description: format!(
-                            "Error rate increased by {:.1}% from baseline ({:.1}% → {:.1}%)",
+                            "Error rate increased by {:.1}% from baseline ({:.1}% -> {:.1}%)",
                             error_regression, baseline.error_rate, current_error_rate
                         ),
                     });

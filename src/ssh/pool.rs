@@ -101,8 +101,8 @@ impl SshConnectionPool {
 
         // Try to find an existing idle session
         {
-            let sessions = self.sessions.read().map_err(|e| e.to_string())?;
-            if let Some(pooled) = sessions.get(&key) {
+            let mut sessions = self.sessions.write().map_err(|e| e.to_string())?;
+            if let Some(pooled) = sessions.get_mut(&key) {
                 if !pooled.in_use && pooled.session.is_alive() {
                     drop(sessions);
                     return self._checkout_session(&key);
@@ -201,9 +201,10 @@ impl SshConnectionPool {
                     };
 
                     // Find or create session
-                    let pooled = match sess_map.get_mut(&key) {
-                        Some(p) if p.session.is_alive() && !p.in_use => p,
-                        _ => {
+                    let pooled = if let Some(p) = sess_map.get_mut(&key) {
+                        if p.session.is_alive() && !p.in_use {
+                            p
+                        } else {
                             // Need to create new session
                             if sess_map.len() >= cfg.max_connections {
                                 let _ = tx.send((host_str, Err("Pool exhausted".to_string())));
@@ -221,7 +222,7 @@ impl SshConnectionPool {
                                 }
                             }
 
-                            sess_map.entry(key).or_insert_with(|| PooledSession {
+                            sess_map.entry(key.clone()).or_insert_with(|| PooledSession {
                                 session,
                                 created_at: Instant::now(),
                                 last_used_at: Instant::now(),
@@ -229,6 +230,31 @@ impl SshConnectionPool {
                                 use_count: 0,
                             })
                         }
+                    } else {
+                        // Need to create new session
+                        if sess_map.len() >= cfg.max_connections {
+                            let _ = tx.send((host_str, Err("Pool exhausted".to_string())));
+                            return;
+                        }
+
+                        let ssh_config = default.unwrap_or_else(|| SshConfig::with_host(&key));
+                        let mut session = SshSession::new(ssh_config);
+                        
+                        match session.connect() {
+                            Ok(_) => {}
+                            Err(e) => {
+                                let _ = tx.send((host_str, Err(format!("Connection failed: {}", e))));
+                                return;
+                            }
+                        }
+
+                        sess_map.entry(key.clone()).or_insert_with(|| PooledSession {
+                            session,
+                            created_at: Instant::now(),
+                            last_used_at: Instant::now(),
+                            in_use: false,
+                            use_count: 0,
+                        })
                     };
 
                     pooled.in_use = true;
@@ -245,8 +271,9 @@ impl SshConnectionPool {
                 }
 
                 // Mark as available again
+                let key_for_cleanup = key.clone();
                 if let Ok(mut sess_map) = sessions.write() {
-                    if let Some(pooled) = sess_map.get_mut(&key) {
+                    if let Some(pooled) = sess_map.get_mut(&key_for_cleanup) {
                         pooled.in_use = false;
                     }
                 }
@@ -268,7 +295,7 @@ impl SshConnectionPool {
         let mut sessions = self.sessions.write().map_err(|e| e.to_string())?;
         let count = sessions.len();
 
-        for (_, pooled) in sessions.drain() {
+        for (_, mut pooled) in sessions.drain() {
             let _ = pooled.session.disconnect();
         }
 
@@ -418,8 +445,8 @@ impl SshConnectionPool {
             let mut idle_to_evict = vec![];
 
             {
-                if let Ok(sess_map) = sessions.read() {
-                    for (key, pooled) in sess_map.iter() {
+                if let Ok(mut sess_map) = sessions.write() {
+                    for (key, pooled) in sess_map.iter_mut() {
                         // Check if session is still alive
                         if !pooled.session.is_alive() {
                             dead_sessions.push(key.clone());

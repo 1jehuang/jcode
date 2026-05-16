@@ -1,5 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use uuid::Uuid;
 use super::node::{ClusterNode, NodeRole, NodeStatus};
 
 pub struct ClusterManager {

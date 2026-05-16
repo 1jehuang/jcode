@@ -881,7 +881,7 @@ async fn handle_remote_key_internal(
                         "Subagent model pinned to `{}` for this session.",
                         rest
                     )));
-                    app.set_status_notice(format!("Subagent model → {}", rest));
+                    app.set_status_notice(format!("Subagent model -> {}", rest));
                     return Ok(());
                 }
 
@@ -937,14 +937,14 @@ async fn handle_remote_key_internal(
                         .iter()
                         .map(|e| {
                             if Some(*e) == current {
-                                format!("**{}** ← current", app_mod::effort_display_label(e))
+                                format!("**{}** <- current", app_mod::effort_display_label(e))
                             } else {
                                 app_mod::effort_display_label(e).to_string()
                             }
                         })
                         .collect();
                     app.push_display_message(DisplayMessage::system(format!(
-                        "Reasoning effort: {}\nAvailable: {}\nUse `/effort <level>` or Alt+←/→ to change.",
+                        "Reasoning effort: {}\nAvailable: {}\nUse `/effort <level>` or Alt+<-/-> to change.",
                         label,
                         list.join(" · ")
                     )));
@@ -1084,7 +1084,7 @@ async fn handle_remote_key_internal(
                         .iter()
                         .map(|t| {
                             if Some(*t) == app.remote_transport.as_deref() {
-                                format!("**{}** ← current", t)
+                                format!("**{}** <- current", t)
                             } else {
                                 t.to_string()
                             }

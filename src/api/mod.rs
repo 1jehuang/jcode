@@ -42,16 +42,14 @@
 // Auto Mode 公共API
 // ══════════════════════════════
 
+pub use crate::auto_mode::engine::AutoModeEngine;
 pub use crate::auto_mode::{
-    AutoModeEngine,
     AutoModeConfig,
     AutoApprovalDecision,
     ActionType,
     ToolContext,
     AutoModeStats,
 };
-
-pub use crate::auto_mode::engine::AutoModeEngine as Engine;
 pub use crate::auto_mode::safety::{
     SafetyGuardrail,
     RiskLevel,

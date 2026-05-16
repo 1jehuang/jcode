@@ -588,13 +588,13 @@ fn render_side_panel_markdown_keeps_table_rows_intact() {
         .collect();
 
     assert!(
-        text.iter().any(|line| line.contains("─┼─")),
+        text.iter().any(|line| line.contains("-+-")),
         "expected separator line to remain intact: {:?}",
         text
     );
     assert!(
         text.iter()
-            .any(|line| line.matches('│').count() == 2 && line.contains("Cust")),
+            .any(|line| line.matches('|').count() == 2 && line.contains("Cust")),
         "expected a single intact table row line: {:?}",
         text
     );

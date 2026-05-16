@@ -207,20 +207,20 @@ pub struct TextEditOperation {
 ///
 /// ## 架构
 /// ```text
-/// ┌──────────────────────────────────────┐
-/// │         McpIdeBridge                 │
-/// ├──────────────────────────────────────┤
-/// │  ide_config: Option<McpIdeConfig>    │ ← 当前连接的 IDE
-/// │  mcp_config: DynamicMcpConfig       │ ← 完整 MCP 配置
-/// │  http_client: reqwest::Client       │ ← HTTP RPC 客户端
-/// │  available_methods: HashSet<Method> │ ← 能力集
-/// └──────────────────────────────────────┘
+/// +--------------------------------------+
+/// |         McpIdeBridge                 |
+/// +--------------------------------------+
+/// |  ide_config: Option<McpIdeConfig>    | <- 当前连接的 IDE
+/// |  mcp_config: DynamicMcpConfig       | <- 完整 MCP 配置
+/// |  http_client: reqwest::Client       | <- HTTP RPC 客户端
+/// |  available_methods: HashSet<Method> | <- 能力集
+/// +--------------------------------------+
 ///
 ///          ↕ MCP Protocol over HTTP/SSE
-/// ┌──────────────────────────────────────┐
-/// │     AI Agent (JCode Agent)          │
-/// │   → 通过 MCP Tool 调用 IDE 功能      │
-/// └──────────────────────────────────────┘
+/// +--------------------------------------+
+/// |     AI Agent (JCode Agent)          |
+/// |   -> 通过 MCP Tool 调用 IDE 功能      |
+/// +--------------------------------------+
 /// ```
 pub struct McpIdeBridge {
     /// 当前已桥接的 IDE 信息
@@ -473,9 +473,9 @@ impl McpIdeBridge {
     /// 将 IDE 功能导出为 MCP Tool 定义
     ///
     /// 这些工具可以被 JCode Agent 直接使用:
-    /// - `ide_get_open_files` → 获取打开的文件
-    /// - `ide_apply_edit` → 应用代码修改
-    /// - `ide_find_references` → 查找引用
+    /// - `ide_get_open_files` -> 获取打开的文件
+    /// - `ide_apply_edit` -> 应用代码修改
+    /// - `ide_find_references` -> 查找引用
     /// - etc.
     pub fn export_as_mcp_tools(&self) -> Vec<McpToolDefinition> {
         IdeRpcMethod::all()
@@ -501,7 +501,7 @@ impl McpIdeBridge {
             IdeRpcMethod::ShowErrorMessage => "Display an error message in the IDE",
             IdeRpcMethod::ShowInputBox => "Show an input box/prompt to the user in the IDE",
             IdeRpcMethod::OpenFileAtLocation => "Open a specific file and navigate to a line/column position",
-            IdeRpcMethod::ApplyEdit => "Apply a text edit (old_string → new_string) to a file",
+            IdeRpcMethod::ApplyEdit => "Apply a text edit (old_string -> new_string) to a file",
             IdeRpcMethod::ExecuteCommand => "Execute an IDE command (e.g., 'editor.action.formatDocument')",
             IdeRpcMethod::GetDiagnostics => "Get diagnostics (errors/warnings) for a specific file",
             IdeRpcMethod::FindReferences => "Find all references to a symbol at a given location",

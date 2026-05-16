@@ -2,7 +2,7 @@
 //!
 //! 源自 Claude Code 的 `toolResultStorage.ts`，提供更智能的工具结果上下文预算管理：
 //!
-//! - **全局聚合预算**：按消息聚合管理工具结果，替换超过预算的最大结果 → 文件路径
+//! - **全局聚合预算**：按消息聚合管理工具结果，替换超过预算的最大结果 -> 文件路径
 //! - **结果持久化**：大型结果写入磁盘，注入文件路径引用而非全文
 //! - **ContentReplacementState**：用于提示缓存的稳定状态
 //! - **空结果处理**：注入占位文本防止模型停止序列匹配
@@ -32,7 +32,7 @@ pub struct ToolResultEntry {
 /// 源自 Claude Code 的 `ContentReplacementState`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContentReplacementState {
-    /// 已替换的 tool_use_id → 替换信息
+    /// 已替换的 tool_use_id -> 替换信息
     pub replaced: HashMap<String, ReplacedResult>,
     /// 创建时间戳
     pub created_at: chrono::DateTime<chrono::Utc>,

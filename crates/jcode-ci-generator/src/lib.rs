@@ -1,5 +1,5 @@
 //! # jcode-ci-generator
-//! CI 配置生成器 — 自动检测技术栈 → 生成标准 CI 配置
+//! CI 配置生成器 — 自动检测技术栈 -> 生成标准 CI 配置
 //!
 //! ## 支持平台
 //! - GitLab CI (.gitlab-ci.yml)
@@ -7,7 +7,7 @@
 //! - GitHub Actions (.github/workflows/*.yml)
 //!
 //! ## 检测流程
-//! 扫描项目文件 → 识别语言/框架/构建工具 → 加载模板 → 生成配置
+//! 扫描项目文件 -> 识别语言/框架/构建工具 -> 加载模板 -> 生成配置
 
 mod stack_detector;
 mod templates;

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-use std::sync::{Arc, Mutex};
+
 
 /// File Transfer Progress Callback
 pub type ProgressCallback = Box<dyn Fn(u64, u64) + Send + Sync>;
@@ -412,7 +412,7 @@ impl FileTransfer {
         }
     }
 
-    fn _collect_files(&self, dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+    fn _collect_files(&self, dir: &Path) -> Result<Vec<PathBuf, PathBuf>, String> {
         let mut files = vec![];
         
         let entries = std::fs::read_dir(dir)
@@ -437,7 +437,7 @@ impl FileTransfer {
         Ok(files)
     }
 
-    fn _list_remote_directory(&self, remote_dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+    fn _list_remote_directory(&self, remote_dir: &Path) -> Result<Vec<PathBuf, PathBuf>, String> {
         // Use SSH to list directory contents
         let target = format!("{}@{}", self.ssh_user, self.ssh_host);
         let list_cmd = format!("find {} -type f", remote_dir.display());
@@ -464,7 +464,7 @@ impl FileTransfer {
         for line in stdout.lines() {
             let full_path = PathBuf::from(line.trim());
             if let Ok(relative) = full_path.strip_prefix(base_path) {
-                files.push((full_path, relative.to_path_buf()));
+                files.push((full_path.clone(), relative.to_path_buf()));
             }
         }
 
@@ -536,7 +536,7 @@ impl FileTransfer {
         let num_part: String = size_str.chars().take_while(|c| c.is_digit(10) || c == '.').collect();
         let unit_part: String = size_str.chars().skip_while(|c| c.is_digit(10) || c == '.').collect();
 
-        let num: f64 = num_str.parse().unwrap_or(0.0);
+        let num: f64 = num_part.parse().unwrap_or(0.0);
 
         match unit_part.to_lowercase().as_str() {
             "k" | "kb" => (num * 1024.0) as u64,

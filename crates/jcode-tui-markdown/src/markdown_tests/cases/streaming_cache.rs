@@ -147,7 +147,7 @@ fn test_centered_mode_keeps_blockquotes_left_aligned() {
         .filter(|line| !line.is_empty())
         .collect();
 
-    assert_eq!(rendered, vec!["│ quoted", "│ second line"]);
+    assert_eq!(rendered, vec!["| quoted", "| second line"]);
 }
 
 #[test]
@@ -190,7 +190,7 @@ fn test_compact_spacing_separates_code_block_from_following_heading_without_trai
 
     assert_eq!(
         rendered,
-        vec!["┌─ rust ", "│ fn main() {}", "└─", "", "Next"]
+        vec!["+- rust ", "| fn main() {}", "+-", "", "Next"]
     );
 }
 
@@ -205,7 +205,7 @@ fn test_document_spacing_keeps_table_single_spaced_between_blocks() {
 
     let table_start = rendered
         .iter()
-        .position(|line| line.contains('│') && line.contains('A') && line.contains('B'))
+        .position(|line| line.contains('|') && line.contains('A') && line.contains('B'))
         .expect("table header line");
     assert_eq!(rendered[table_start - 1], "");
     assert_eq!(rendered[table_start + 3], "");
@@ -287,11 +287,11 @@ fn test_incremental_renderer_streaming_display_math() {
     let rendered = lines_to_string(&lines);
 
     assert!(
-        rendered.contains("┌─ math"),
+        rendered.contains("+- math"),
         "expected display math block after closing delimiter: {}",
         rendered
     );
-    assert!(rendered.contains("│ A + B"), "expected math body");
+    assert!(rendered.contains("| A + B"), "expected math body");
     assert!(
         !rendered.contains("$$"),
         "expected raw $$ delimiters to be consumed: {}",
@@ -354,7 +354,7 @@ fn test_incremental_renderer_replaces_stale_prefix_chars() {
     let rendered = lines_to_string(&lines);
 
     assert!(
-        !rendered.contains("│ ["),
+        !rendered.contains("| ["),
         "Expected stale '[' to be replaced during streaming: {}",
         rendered
     );

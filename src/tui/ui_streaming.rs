@@ -1,4 +1,4 @@
-use std::time::Instant;
+﻿use std::time::Instant;
 use std::ops::{Range, RangeFrom};
 use uuid::Uuid;
 
@@ -283,7 +283,7 @@ impl StreamingBlockManager {
         self.active_blocks.contains_key(block_id)
     }
 
-    pub fn is_empty(&self) -> self.active_blocks.is_empty() {
+    pub fn is_empty(&self) -> bool {
         self.active_blocks.is_empty()
     }
 

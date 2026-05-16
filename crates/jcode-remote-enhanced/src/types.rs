@@ -8,7 +8,7 @@ use uuid::Uuid;
 // 权限协议类型 - 对应 Claude Code SDK Control Types
 // ============================================================================
 
-/// 远程控制请求 (CCR → Client)
+/// 远程控制请求 (CCR -> Client)
 /// 移植自 Claude Code: `SDKControlRequest`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -60,7 +60,7 @@ impl SdkControlRequestBody {
     }
 }
 
-/// 远程控制响应 (Client → CCR)
+/// 远程控制响应 (Client -> CCR)
 /// 移植自 Claude Code: `SDKControlResponse`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]

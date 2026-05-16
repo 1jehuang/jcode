@@ -284,7 +284,7 @@ fn render_memory_pipeline_lines(pipeline: &PipelineState, max_width: usize) -> V
             max_width,
         ),
         render_memory_step_line(
-            "├ ",
+            "+ ",
             "Check relevance",
             &pipeline.verify,
             memory_step_detail(
@@ -296,7 +296,7 @@ fn render_memory_pipeline_lines(pipeline: &PipelineState, max_width: usize) -> V
             max_width,
         ),
         render_memory_step_line(
-            "├ ",
+            "+ ",
             "Inject context",
             &pipeline.inject,
             memory_step_detail(
@@ -342,14 +342,14 @@ fn render_memory_pipeline_display_lines(
             max_width,
         ),
         render_memory_step_line(
-            "├ ",
+            "+ ",
             "Check relevance",
             &verify,
             memory_step_detail("verify", &verify, None, verify_progress),
             max_width,
         ),
         render_memory_step_line(
-            "├ ",
+            "+ ",
             "Inject context",
             &inject,
             memory_step_detail("inject", &inject, None, None),

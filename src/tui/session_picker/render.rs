@@ -355,7 +355,7 @@ impl SessionPicker {
         } else if self.search_active {
             " type to filter, Esc cancel "
         } else {
-            " Space select · Enter resume · s next filter · S prev · d debug · / search · h/l focus · ↑↓ · q "
+            " Space select · Enter resume · s next filter · S prev · d debug · / search · h/l focus · ^v · q "
         };
 
         let border_dim: Color = rgb(70, 70, 70);

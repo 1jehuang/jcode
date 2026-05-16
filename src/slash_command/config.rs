@@ -32,7 +32,7 @@ pub(crate) async fn register_config() {
                 let parts: Vec<&str> = a.trim().splitn(3, ' ').collect();
                 match parts.first().copied().unwrap_or("") {
                     "get" if parts.len() >= 2 => { let v = std::env::var(parts[1]).ok(); eprintln!("\n  {} = {}\n", parts[1], v.as_deref().unwrap_or("(not set)")); }
-                    "set" if parts.len() >= 3 => { std::env::set_var(parts[1], parts[2]); eprintln!("\n✅ {} = {}\n", parts[1], parts[2]); }
+                    "set" if parts.len() >= 3 => { unsafe { std::env::set_var(parts[1], parts[2]) }; eprintln!("\n✅ {} = {}\n", parts[1], parts[2]); }
                     _ => eprintln!("\nUsage: /config get <var> | /config set <var> <val>\n  /model <name> to switch model\n"),
                 }
             });

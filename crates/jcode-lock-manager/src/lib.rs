@@ -9,6 +9,7 @@ use tracing::{debug, warn};
 
 pub mod error;
 pub mod migration_guide;
+pub mod mvcc;
 pub use error::LockManagerError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -296,7 +297,7 @@ impl LockManager {
         report.push_str("═══════════════════════════════════════════════════════════════════════\n");
         report.push_str(format!("{:<10} {:<30} {:<40} {:<10} {:<10} {:<15} {:<10}\n",
             "Lock ID", "Name", "Type", "Reads", "Writes", "Contention", "Age (ms)").as_str());
-        report.push_str("───────────────────────────────────────────────────────────────────────\n");
+        report.push_str("-----------------------------------------------------------------------\n");
         
         for stat in &snapshot.stats {
             report.push_str(format!("{:<10} {:<30} {:<40} {:<10} {:<10} {:<15} {:<10}\n",

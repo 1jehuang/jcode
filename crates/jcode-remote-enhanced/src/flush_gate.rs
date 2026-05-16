@@ -10,9 +10,9 @@
 //!
 //! # 状态机
 //! ```text
-/// Open ──[start_flush]──→ Flushing(queue, future)
-///   ↑                        │
-///   └──────[flush_done]────────┘
+/// Open --[start_flush]---> Flushing(queue, future)
+///   ^                        |
+///   +------[flush_done]--------+
 //! ```
 //!
 //! # 使用模式

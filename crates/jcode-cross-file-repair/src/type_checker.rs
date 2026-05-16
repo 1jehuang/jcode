@@ -1,4 +1,4 @@
-/// Type-checker bridge — runs `cargo check` for Rust, delegates to LSP for others.
+/// Type-checker bridge -- runs `cargo check` for Rust, uses LSP for other languages.
 
 #[cfg(feature = "lsp-bridge")]
 use jcode_lsp::LspServerManager;
@@ -18,66 +18,93 @@ impl TypeChecker {
         }
     }
 
-    /// Create a TypeChecker with LSP support enabled.
     #[cfg(feature = "lsp-bridge")]
     pub fn with_lsp(manager: Arc<LspServerManager>) -> Self {
-        Self {
-            lsp_manager: Some(manager),
-        }
+        Self { lsp_manager: Some(manager) }
     }
 
-    /// Run a type check on the project. Returns errors if any.
+    /// Run type check: cargo check for Rust, LSP diagnostics for other languages
     pub async fn check(&self, workspace_root: &str) -> anyhow::Result<Vec<TypeError>> {
-        // For Rust: run `cargo check` and parse output
-        let output = tokio::process::Command::new("cargo")
+        let cargo_result = tokio::process::Command::new("cargo")
             .args(["check", "--message-format=short"])
             .current_dir(workspace_root)
             .output()
-            .await?;
+            .await;
 
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let mut errors = Vec::new();
-
-        for line in stderr.lines() {
-            if line.contains("error[E") || line.contains("error[") {
-                if let Some(err) = self.parse_error(line) {
-                    errors.push(err);
+        match cargo_result {
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let mut errors = Vec::new();
+                for line in stderr.lines() {
+                    if line.contains("error[E") || line.contains("error[") {
+                        if let Some(err) = self.parse_error(line) {
+                            errors.push(err);
+                        }
+                    }
                 }
+                Ok(errors)
+            }
+            Err(_) => {
+                // cargo not available or not a Rust project -- try LSP fallback
+                self.check_lsp_fallback(workspace_root).await
             }
         }
-        Ok(errors)
+    }
+
+    /// LSP-based fallback for non-Rust projects
+    async fn check_lsp_fallback(&self, _workspace_root: &str) -> anyhow::Result<Vec<TypeError>> {
+        #[cfg(feature = "lsp-bridge")]
+        {
+            if let Some(lsp) = &self.lsp_manager {
+                let mut all_errors = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(_workspace_root) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().map_or(false, |e| {
+                            matches!(e.to_str(), Some("ts"|"tsx"|"js"|"jsx"|"py"|"go"|"java"))
+                        }) {
+                            if let Some(file_str) = path.to_str() {
+                                if let Ok(diags) = lsp.get_diagnostics(file_str).await {
+                                    let errors: Vec<TypeError> = diags.into_iter()
+                                        .filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))
+                                        .map(|d| TypeError::from_lsp_diagnostic(d, file_str))
+                                        .collect();
+                                    all_errors.extend(errors);
+                                }
+                            }
+                        }
+                    }
+                }
+                return Ok(all_errors);
+            }
+        }
+        Ok(Vec::new())
     }
 
     /// Parse a single error line from cargo check output.
-    ///
-    /// Handles both Unix and Windows paths:
-    /// - Unix: `src/main.rs:42:18: error[E0308]: mismatched types`
-    /// - Windows: `src\main.rs:42:18: error[E0308]: mismatched types`
-    /// - Windows with drive: `C:\src\main.rs:42:18: error[E0308]: mismatched types`
+    /// Handles both Unix and Windows paths using rsplitn from the right.
     fn parse_error(&self, line: &str) -> Option<TypeError> {
         let error_idx = line.find("error[")?;
-
         let prefix = &line[..error_idx].trim_end();
 
+        // rsplitn(3, ':') splits from the right:
+        // "C:\path\file.rs:42:18" -> ["18", "42", "C:\path\file.rs"]
+        // Drive letter colon is NOT split (only 2 delimiters from right)
         let parts: Vec<&str> = prefix.rsplitn(3, ':').collect();
         if parts.len() >= 3 {
-            let column = parts[0].trim().parse().ok().unwrap_or(0);
+            let _column = parts[0].trim().parse().ok().unwrap_or(0);
             let line_num = parts[1].trim().parse().ok().unwrap_or(0);
             let file = parts[2].trim().to_string();
-
             Some(TypeError {
-                file,
-                line: line_num,
+                file, line: line_num,
                 message: line.to_string(),
                 error_code: self.extract_error_code(line),
             })
         } else if parts.len() == 2 {
             let line_num = parts[0].trim().parse().ok().unwrap_or(0);
             let file = parts[1].trim().to_string();
-
             Some(TypeError {
-                file,
-                line: line_num,
+                file, line: line_num,
                 message: line.to_string(),
                 error_code: self.extract_error_code(line),
             })
@@ -86,7 +113,6 @@ impl TypeChecker {
         }
     }
 
-    /// Extract error code like "E0308" from "error[E0308]"
     fn extract_error_code(&self, line: &str) -> String {
         if let Some(start) = line.find("error[E") {
             let bracket_start = start + 6;
@@ -105,18 +131,14 @@ impl TypeChecker {
         String::new()
     }
 
-    /// Check using LSP diagnostics (for non-Rust projects or enhanced Rust diagnostics).
-    ///
-    /// When the `lsp-bridge` feature is enabled and a LSP manager has been configured,
-    /// this queries the LSP server for diagnostics. Otherwise returns an empty list.
-    pub async fn check_with_lsp(&self, file: &str) -> anyhow::Result<Vec<TypeError>> {
+    /// Check using LSP diagnostics for a specific file (multi-language fallback)
+    pub async fn check_lsp_file(&self, _file: &str) -> anyhow::Result<Vec<TypeError>> {
         #[cfg(feature = "lsp-bridge")]
         {
             if let Some(lsp) = &self.lsp_manager {
                 let diags = lsp.get_diagnostics(file).await.map_err(|e| {
                     anyhow::anyhow!("LSP diagnostics failed: {}", e)
                 })?;
-
                 let errors = diags.into_iter()
                     .filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))
                     .map(|d| TypeError::from_lsp_diagnostic(d, file))
@@ -124,29 +146,20 @@ impl TypeChecker {
                 return Ok(errors);
             }
         }
-
-        // No LSP manager configured or feature disabled
         Ok(Vec::new())
     }
 }
 
 impl Default for TypeChecker {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
-/// A single type error from the compiler.
 #[derive(Debug, Clone)]
 pub struct TypeError {
-    pub file: String,
-    pub line: u32,
-    pub message: String,
-    pub error_code: String,
+    pub file: String, pub line: u32, pub message: String, pub error_code: String,
 }
 
 impl TypeError {
-    /// Convert an LSP Diagnostic into a TypeError.
     #[cfg(feature = "lsp-bridge")]
     fn from_lsp_diagnostic(diag: lsp_types::Diagnostic, file: &str) -> Self {
         Self {

@@ -138,7 +138,7 @@ def read_root():
     }
 
     fn generate_dockerfile(&self) -> String {
-        let (base_image, build_cmd, run_cmd) = match self.config.language.as_str() {
+        let (base_image, build_cmd, _run_base, run_cmd) = match self.config.language.as_str() {
             "rust" => ("rust:1.78-slim AS builder", "cargo build --release",
                        "debian:bookworm-slim", "./target/release/app"),
             "typescript" | "javascript" => ("node:20-alpine AS builder", "npm run build",

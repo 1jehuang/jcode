@@ -1,9 +1,9 @@
 //! 语义缓存与自动上下文注入 — 四层融合
 //!
-//! Layer 1: 文件级 — 打开的文件名 → 匹配相关记忆
-//! Layer 2: 符号级 — LSP documentSymbol → 函数/类型级检索
-//! Layer 3: 语义级 — 代码段 embedding → 余弦相似度检索
-//! Layer 4: 依赖级 — DependencyGraph → 关联文件变更历史
+//! Layer 1: 文件级 — 打开的文件名 -> 匹配相关记忆
+//! Layer 2: 符号级 — LSP documentSymbol -> 函数/类型级检索
+//! Layer 3: 语义级 — 代码段 embedding -> 余弦相似度检索
+//! Layer 4: 依赖级 — DependencyGraph -> 关联文件变更历史
 
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -50,7 +50,7 @@ pub struct ContextInjectResult {
 pub struct ContextFusion {
     cache: Arc<SemanticCache>,
     dep_graph: Arc<RwLock<HashMap<String, Vec<String>>>>,  // Layer 4: 依赖图
-    symbol_index: Arc<RwLock<HashMap<String, Vec<String>>>>, // Layer 2: 文件→符号
+    symbol_index: Arc<RwLock<HashMap<String, Vec<String>>>>, // Layer 2: 文件->符号
 }
 
 impl ContextFusion {
@@ -145,7 +145,7 @@ impl ContextFusion {
                                 results.push(SimilarityResult {
                                     key: entry.key.clone(),
                                     content: entry.content.clone(),
-                                    score: 0.95,  // 符号级匹配 → 高置信度
+                                    score: 0.95,  // 符号级匹配 -> 高置信度
                                     layer: 2,
                                 });
                             }
@@ -165,7 +165,7 @@ impl ContextFusion {
             .collect()
     }
 
-    /// Layer 4: 依赖级 — 当前文件依赖的文件 → 检索这些文件的历史记忆
+    /// Layer 4: 依赖级 — 当前文件依赖的文件 -> 检索这些文件的历史记忆
     fn layer4_dependency_match(&self, open_files: &[String]) -> Vec<SimilarityResult> {
         let mut results = Vec::new();
         let graph = self.dep_graph.read();
@@ -179,7 +179,7 @@ impl ContextFusion {
                                 results.push(SimilarityResult {
                                     key: entry.key.clone(),
                                     content: entry.content.clone(),
-                                    score: 0.85,  // 依赖级 → 较高置信度
+                                    score: 0.85,  // 依赖级 -> 较高置信度
                                     layer: 4,
                                 });
                             }

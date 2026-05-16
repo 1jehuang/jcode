@@ -276,7 +276,7 @@ impl EnhancedMcpHandle {
                             "MCP: Request failed (attempt {}/{}): {}",
                             attempt + 1,
                             max_retries + 1,
-                            last_error.as_ref().unwrap()
+                            last_error.as_ref().expect("last_error should be set after assignment")
                         );
                     }
                 }
@@ -750,7 +750,7 @@ impl EnhancedMcpClient {
     pub async fn disconnect(mut self) -> Result<()> {
         log::info!("MCP: Disconnecting from '{}'", self.handle.name);
 
-        // Graceful shutdown sequence: shutdown request → kill
+        // Graceful shutdown sequence: shutdown request -> kill
         if let Some(ref mut child) = self.child {
             // Step 1: Send shutdown notification
             let shutdown_msg = "{\"jsonrpc\":\"2.0\",\"method\":\"shutdown\"}\n";

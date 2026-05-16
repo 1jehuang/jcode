@@ -96,14 +96,14 @@ pub struct CompactionManager {
     /// Last compaction event (if any)
     last_compaction: Option<CompactionEvent>,
 
-    // ── Mode & strategy ────────────────────────────────────────────────────
+    // -- Mode & strategy ----------------------------------------------------
     /// Active compaction mode (set from config at construction)
     mode: crate::config::CompactionMode,
 
     /// Config snapshot for mode-specific parameters
     compaction_config: crate::config::CompactionConfig,
 
-    // ── Proactive mode state ───────────────────────────────────────────────
+    // -- Proactive mode state -----------------------------------------------
     /// Rolling window of observed token counts, one entry per turn snapshot.
     /// Used to compute EWMA growth rate for proactive compaction.
     token_history: VecDeque<u64>,
@@ -112,7 +112,7 @@ pub struct CompactionManager {
     /// Used as a cooldown anti-signal.
     turns_since_last_compact: usize,
 
-    // ── Semantic mode state ────────────────────────────────────────────────
+    // -- Semantic mode state ------------------------------------------------
     /// Per-turn embedding snapshots for topic-shift detection.
     /// Each entry is the L2-normalized embedding of the last assistant message
     /// of that turn (truncated to EMBED_MAX_CHARS_PER_MSG for speed).
@@ -349,7 +349,7 @@ impl CompactionManager {
         true
     }
 
-    // ── Token snapshot (proactive mode) ────────────────────────────────────
+    // -- Token snapshot (proactive mode) ------------------------------------
 
     /// Record the observed token count after a completed turn.
     ///
@@ -379,7 +379,7 @@ impl CompactionManager {
         }
     }
 
-    // ── Anti-signal guard (shared by proactive + semantic) ──────────────────
+    // -- Anti-signal guard (shared by proactive + semantic) ------------------
 
     /// Returns `true` when any anti-signal fires and we should NOT compact
     /// proactively right now.
@@ -430,7 +430,7 @@ impl CompactionManager {
         false
     }
 
-    // ── Proactive mode trigger ──────────────────────────────────────────────
+    // -- Proactive mode trigger ----------------------------------------------
 
     /// Returns `true` if the proactive strategy thinks we should compact now.
     ///
@@ -473,7 +473,7 @@ impl CompactionManager {
         projected >= threshold
     }
 
-    // ── Semantic mode trigger ───────────────────────────────────────────────
+    // -- Semantic mode trigger -----------------------------------------------
 
     /// Returns `true` if the semantic strategy detects a topic shift or
     /// predicts we should compact now.
@@ -1426,5 +1426,5 @@ pub async fn build_transfer_compaction_state(
 }
 
 #[cfg(test)]
-#[path = "compaction_tests.rs"]
+#[path = "../compaction_tests.rs"]
 mod tests;

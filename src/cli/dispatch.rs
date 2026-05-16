@@ -135,15 +135,6 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::SelfDev { build }) => {
             selfdev::run_self_dev(build, args.resume).await?;
         }
-        Some(Command::Debug {
-            command,
-            arg,
-            session,
-            socket,
-            wait,
-        }) => {
-            debug::run_debug_command(&command, &arg, session, socket, wait).await?;
-        }
         Some(Command::Auth(subcmd)) => match subcmd {
             AuthCommand::Status { json } => commands::run_auth_status_command(json)?,
             AuthCommand::Doctor {
@@ -416,7 +407,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             commands::run_debug_command(cmd).await?;
         }
 
-        // ── Expanded commands ─────────────────────────────────
+        // -- Expanded commands ---------------------------------
         Some(Command::Clear { all, cache }) => {
             commands::run_clear_command(all, cache).await?;
         }

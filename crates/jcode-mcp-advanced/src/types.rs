@@ -66,7 +66,7 @@ pub enum JsonRpcResponse {
     Error(JsonRpcErrorResponse),
 }
 
-// ─── MCP 核心类型 ────────────────────────────────────
+// --- MCP 核心类型 ------------------------------------
 
 /// MCP Server 信息
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,7 +114,7 @@ pub struct ClientCapabilities {
     pub experimental: Option<serde_json::Value>,
 }
 
-/// 初始化结果 (server → client)
+/// 初始化结果 (server -> client)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitializeResult {
     pub protocol_version: String,
@@ -122,7 +122,7 @@ pub struct InitializeResult {
     pub server_info: McpServerInfo,
 }
 
-// ─── Tool 类型 ─────────────────────────────────────
+// --- Tool 类型 -------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpTool {
@@ -151,7 +151,7 @@ pub struct ContentBlock {
     pub data: Option<serde_json::Value>,
 }
 
-// ─── Resource 类型 ──────────────────────────────────
+// --- Resource 类型 ----------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpResource {
@@ -176,7 +176,7 @@ pub struct ResourceContent {
     pub text: Option<String>,
 }
 
-// ─── Sampling 类型 ──────────────────────────────────
+// --- Sampling 类型 ----------------------------------
 
 /// Include context type for sampling requests
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,7 +227,7 @@ pub struct CreateMessageResult {
     pub stop_reason: Option<String>,
 }
 
-// ─── Transport 类型 ────────────────────────────────
+// --- Transport 类型 --------------------------------
 
 /// 传输协议类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

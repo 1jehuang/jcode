@@ -29,7 +29,7 @@ fn test_ambient_state_lifecycle() {
     assert_eq!(state.last_summary.as_deref(), Some("Gardened 3 memories"));
     assert_eq!(state.last_memories_modified, Some(3));
     assert_eq!(state.last_compactions, Some(0));
-    // No next_schedule → should be Idle
+    // No next_schedule -> should be Idle
     assert!(matches!(state.status, AmbientStatus::Idle));
 }
 
@@ -543,7 +543,7 @@ fn test_ambient_lock() {
 }
 
 /// Test full ambient cycle simulation with mock provider
-/// Simulates: agent receives prompt → uses tools → calls end_ambient_cycle
+/// Simulates: agent receives prompt -> uses tools -> calls end_ambient_cycle
 #[tokio::test]
 async fn test_full_ambient_cycle_simulation() -> Result<()> {
     let _env = setup_test_env()?;

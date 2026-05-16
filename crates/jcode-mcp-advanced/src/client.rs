@@ -2,7 +2,7 @@
 // MCP 客户端 — 核心客户端实现 (移植自 Claude Code client.ts ~2000行)
 //
 // 功能:
-//   1. 生命周期管理: initialize → ready → tools/list → call_tool
+//   1. 生命周期管理: initialize -> ready -> tools/list -> call_tool
 //   2. 自动重连 (指数退避)
 //   3. 工具发现 + 缓存 (TTL 过期自动刷新)
 //   4. 流式工具调用支持
@@ -13,11 +13,11 @@ use crate::connection_manager::{ConnectionManager, ReconnectPolicy};
 use crate::types::ConnectionState;
 use crate::sampling::SamplingHandler;
 use crate::tool_registry::MCPToolRegistry;
-use crate::transport::{McpTransport, TransportError, TransportEnum};
+use crate::transport::{TransportError, TransportEnum};
 use crate::types::*;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// MCP 客户端配置
 #[derive(Debug, Clone)]
@@ -82,7 +82,7 @@ impl MCPClient {
         *self.transport.write().await = Some(transport);
     }
 
-    // ─── 连接管理 ─────────────────────────────────
+    // --- 连接管理 ---------------------------------
 
     /// 建立连接并初始化
     ///
@@ -228,7 +228,7 @@ impl MCPClient {
         self.connect().await
     }
 
-    // ─── 工具操作 ─────────────────────────────────
+    // --- 工具操作 ---------------------------------
 
     /// 从 Server 刷新工具列表
     pub async fn fetch_tools(&self) -> Result<Vec<McpTool>, String> {
@@ -307,7 +307,7 @@ impl MCPClient {
         registry.is_expired()
     }
 
-    // ─── Resource 操作 ───────────────────────────────
+    // --- Resource 操作 -------------------------------
 
     /// 列出可用资源
     pub async fn list_resources(&self) -> Result<Vec<McpResource>, String> {
@@ -355,7 +355,7 @@ impl MCPClient {
         }
     }
 
-    // ─── 查询 ─────────────────────────────────────
+    // --- 查询 -------------------------------------
 
     /// 获取当前连接状态
     pub async fn state(&self) -> ConnectionState {
@@ -377,7 +377,7 @@ impl MCPClient {
         self.server_caps.read().await.clone()
     }
 
-    // ─── 内部方法 ─────────────────────────────────
+    // --- 内部方法 ---------------------------------
 
     async fn get_transport(&self) -> Result<TransportEnum, String> {
         let t = self.transport.read().await;

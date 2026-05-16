@@ -87,9 +87,9 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
                     let show_brief = request.show_brief;
                     app.begin_in_flight_catchup_resume(request);
                     app.set_status_notice(if show_brief {
-                        format!("Catch Up → {}", label)
+                        format!("Catch Up -> {}", label)
                     } else {
-                        format!("Back → {}", label)
+                        format!("Back -> {}", label)
                     });
                     return true;
                 }
@@ -110,7 +110,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
                     let label = crate::id::extract_session_name(&target_session)
                         .map(|name| name.to_string())
                         .unwrap_or(target_session);
-                    app.set_status_notice(format!("Workspace → {}", label));
+                    app.set_status_notice(format!("Workspace -> {}", label));
                     return true;
                 }
                 Err(err) => {

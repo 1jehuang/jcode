@@ -457,7 +457,7 @@ pub fn render_goal_detail(goal: &Goal) -> String {
         out.push_str("## Milestones\n");
         for milestone in &goal.milestones {
             let marker = if goal.current_milestone_id.as_deref() == Some(milestone.id.as_str()) {
-                "→"
+                "->"
             } else {
                 "-"
             };

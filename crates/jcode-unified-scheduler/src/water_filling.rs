@@ -28,8 +28,7 @@
 //! 2. **KV Cache 分配**: 按 TFLOPS 比例分配 KV Cache 内存预算
 //! 3. **请求分发**: 按节点吞吐能力比例分发请求
 
-use super::types::*;
-use super::SchedulerError;
+use super::*;
 
 // ============================================================================
 // WaterFilling 核心结构体
@@ -120,15 +119,15 @@ impl WaterFilling {
 
         // === 二分搜索 λ ===
         // 搜索范围: [0, max(C_i / P_i)]
-        let lo = 0.0f64;
-        let hi: f64 = capacities
+        let mut lo = 0.0f64;
+        let mut hi: f64 = capacities
             .iter()
             .zip(powers.iter())
             .map(|(&c, &p)| if p > 0.0 { c / p } else { f64::INFINITY })
             .fold(0.0f64, |a, b| a.max(b));
 
         if hi == 0.0 || !hi.is_finite() {
-            // 所有 powers 为 0 或异常 → 均匀分配
+            // 所有 powers 为 0 或异常 -> 均匀分配
             let uniform = target_total / n as f64;
             return Ok(WaterFillingResult {
                 allocations: vec![uniform; n],
@@ -159,14 +158,14 @@ impl WaterFilling {
             }
 
             if total_at_lam >= target_total {
-                hi = mid; // λ 太大 → 减小
+                hi = mid; // λ 太大 -> 减小
             } else {
-                lo = mid; // λ 太小 → 增大
+                lo = mid; // λ 太小 -> 增大
             }
         }
 
         // === 计算最终分配 ===
-        let mut raw_allocations: Vec<f64> = capacities
+        let raw_allocations: Vec<f64> = capacities
             .iter()
             .zip(powers.iter())
             .map(|(&c, &p)| c.min(lam * p))
@@ -227,10 +226,11 @@ impl WaterFilling {
             }
         }
 
+        let actual_total: u64 = int_allocs.iter().map(|&x| x as u64).sum();
         Ok(WaterFillingIntResult {
             allocations: int_allocs,
             lambda: result.lambda,
-            actual_total: int_allocs.iter().map(|&x| x as u64).sum(),
+            actual_total,
             iterations: result.iterations,
         })
     }
@@ -247,18 +247,16 @@ impl WaterFilling {
         &mut self,
         constraints: &[WaterFillingConstraint],
     ) -> Result<Vec<Vec<u64>>, SchedulerError>
-    where
-        WaterFillingConstraint: std::borrow::Borrow<WaterFillConstraintInner>,
     {
         let n = match constraints.first() {
-            Some(c) => c.borrow().capacities.len(),
+            Some(c) => c.0.capacities.len(),
             None => return Ok(vec![]),
         };
 
         let mut results: Vec<Vec<u64>> = vec![];
 
         for constraint in constraints {
-            let inner = constraint.borrow();
+            let inner = &constraint.0;
             let result =
                 self.allocate_integer(&inner.capacities, &inner.powers, inner.target)?;
             results.push(result.allocations.into_iter().map(|x| x as u64).collect());
@@ -398,7 +396,7 @@ mod tests {
     fn test_zero_power_node() {
         let mut wf = WaterFilling::new();
 
-        // 有一个零算力节点 → 不应分配任何东西给它
+        // 有一个零算力节点 -> 不应分配任何东西给它
         let caps = vec![50.0, 50.0];
         let powers = vec![1.0, 0.0];
 

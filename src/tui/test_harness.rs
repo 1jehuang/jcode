@@ -499,7 +499,7 @@ fn sanitize_filename(name: &str) -> String {
 
 /// A headless rendering backend for CI/testing.
 /// Renders to an in-memory buffer instead of a real terminal.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HeadlessBuffer {
     width: u16,
     height: u16,

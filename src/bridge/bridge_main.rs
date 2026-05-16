@@ -194,7 +194,7 @@ struct ActiveConnection {
 // ════════════════════════════════════════════════════════════════
 
 /// WebSocket Bridge 服务器
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BridgeServer {
     config: BridgeConfig,
     connections: Arc<RwLock<HashMap<String, ActiveConnection>>>,
@@ -359,7 +359,7 @@ impl BridgeServer {
             .map(|c| c.info.clone())
     }
 
-    // ─── 内部方法 ──────────────────────────────
+    // --- 内部方法 ------------------------------
 
     fn emit_event(&self, event_type: BridgeEventType, conn_id: Option<String>, data: serde_json::Value) {
         let event = BridgeEvent {

@@ -133,7 +133,7 @@ impl FeatureFlagService {
             }
         }
 
-        // 2. 缓存未命中或过期 → 尝试从 API 获取
+        // 2. 缓存未命中或过期 -> 尝试从 API 获取
         if self.config.enable_remote_fetch {
             if let Some(value) = self.fetch_from_api(name).await? {
                 // 写入缓存

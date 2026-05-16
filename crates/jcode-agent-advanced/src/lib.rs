@@ -3,7 +3,7 @@
 // 高级 Agent 循环引擎 - 移植自 Claude Code query.ts (1700+行)
 //
 // 核心能力:
-//   1. ReAct 循环增强版 — Thought→Action→Observation 多轮迭代
+//   1. ReAct 循环增强版 — Thought->Action->Observation 多轮迭代
 //   2. 并行工具调用 — 无依赖工具同时执行
 //   3. 流式中断与取消 — CancellationToken + AbortController
 //   4. 错误恢复策略 — 指数退避重试 + 模型降级 + 工具降级

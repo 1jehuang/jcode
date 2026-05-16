@@ -165,7 +165,7 @@ impl ReplExecutor {
         results
     }
 
-    // ─── 内部方法 ─────────────────────────────
+    // --- 内部方法 -----------------------------
 
     fn safety_precheck(&self, code: &str, _language: ReplLanguage) -> Option<String> {
         let lower = code.to_lowercase();

@@ -3,24 +3,24 @@
 //! ## 架构概览
 //!
 //! ```text
-//! ┌──────────────────────────────────────────────────────────┐
-//! │              UnifiedScheduler (统一调度器)                 │
-//! │                                                          │
-//! │  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐     │
-//! │  │ TaskScheduler│  │ ComputeScheduler│  │ StateManager  │     │
-//! │  │ (Ruflo GOAP) │  │(Parallax DP) │  │  (统一状态)    │     │
-//! │  └──────┬──────┘  └──────┬──────┘  └──────┬───────┘     │
-//! │         │                │                │              │
-//! │         └────────┬───────┴────────────────┘              │
-//! │                  ▼                                      │
-//! │  ┌───────────────────────────────────────────────┐      │
-//! │  │           UnifiedSchedulingQueue               │      │
-//! │  │  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐        │      │
-//! │  │  │TaskA │ │TaskB │ │TaskC │ │TaskD │ ...     │      │
-//! │  │  │7B/H  │ │3B/M  │ │1.5B/L│ │14B/H │        │      │
-//! │  │  └──────┘ └──────┘ └──────┘ └──────┘        │      │
-//! │  └───────────────────────────────────────────────┘      │
-//! └──────────────────────────────────────────────────────────┘
+//! +----------------------------------------------------------+
+//! |              UnifiedScheduler (统一调度器)                 |
+//! |                                                          |
+//! |  +-------------+  +-------------+  +--------------+     |
+//! |  | TaskScheduler|  | ComputeScheduler|  | StateManager  |     |
+//! |  | (Ruflo GOAP) |  |(Parallax DP) |  |  (统一状态)    |     |
+//! |  +------+------+  +------+------+  +------+-------+     |
+//! |         |                |                |              |
+//! |         +--------+-------+----------------+              |
+//! |                  ▼                                      |
+//! |  +-----------------------------------------------+      |
+//! |  |           UnifiedSchedulingQueue               |      |
+//! |  |  +------+ +------+ +------+ +------+        |      |
+//! |  |  |TaskA | |TaskB | |TaskC | |TaskD | ...     |      |
+//! |  |  |7B/H  | |3B/M  | |1.5B/L| |14B/H |        |      |
+//! |  |  +------+ +------+ +------+ +------+        |      |
+//! |  +-----------------------------------------------+      |
+//! +----------------------------------------------------------+
 //! ```
 //!
 //! ## 模块说明
@@ -49,6 +49,8 @@ pub use resource_node::*;
 pub use unified_queue::UnifiedQueue;
 
 use std::sync::Arc;
+use dashmap::DashMap;
+use indexmap::IndexMap;
 use tokio::sync::{RwLock, Notify};
 use tracing::{info, warn, debug, error, instrument};
 
@@ -149,8 +151,9 @@ pub struct SchedulerConfig {
     pub adaptive_scheduling: bool,
     /// 性能采样窗口 (秒)
     pub performance_window_secs: u64,
+}
 
-    /// 默认配置
+impl SchedulerConfig {
     pub fn default() -> Self {
         Self {
             max_concurrent_tasks: 16,
@@ -329,8 +332,13 @@ impl UnifiedScheduler {
         // 3. 初始化请求路由器
         {
             let mut router = self.request_router.write().await;
+            let routing_enum = match self.config.routing_strategy {
+                RoutingStrategy::DynamicProgramming => request_router::RoutingStrategyEnum::DynamicProgramming,
+                RoutingStrategy::Randomized => request_router::RoutingStrategyEnum::Randomized,
+                RoutingStrategy::RoundRobin => request_router::RoutingStrategyEnum::RoundRobin,
+            };
             *router = Some(request_router::RequestRouter::new(
-                self.config.routing_strategy,
+                routing_enum,
                 self.config.enable_warmup_trim,
             ));
         }
@@ -384,7 +392,7 @@ impl UnifiedScheduler {
         task.submitted_at = Some(chrono::Utc::now());
         task.status = TaskStatus::Queued;
 
-        // 如果是高层目标且启用了 GOAP → 进行自动分解
+        // 如果是高层目标且启用了 GOAP -> 进行自动分解
         if self.config.enable_goap && task.goal.is_some() && task.actions.is_empty() {
             debug!(
                 "[UnifiedScheduler] 任务 {} 是高层目标, 触发 GOAP 规划...",
@@ -392,12 +400,11 @@ impl UnifiedScheduler {
             );
             let mut planner = self.goap_planner.write().await;
             match planner.plan(&task).await {
-                Ok(plan) => {
-                    info!(
+                Ok(ref plan) => { info!(
                         "[UnifiedScheduler] GOAP 规划成功: {} 个步骤",
                         plan.steps.len()
                     );
-                    task.plan = Some(plan);
+                    task.plan = Some(plan.clone());
                     // 将计划步骤转为 actions
                     task.actions = plan
                         .steps
@@ -405,9 +412,13 @@ impl UnifiedScheduler {
                         .map(|s| Action {
                             id: uuid::Uuid::new_v4(),
                             name: s.action_name.clone(),
-                            params: s.params.clone(),
-                            preconditions: s.preconditions.clone(),
-                            effects: s.effects.clone(),
+                            parameters: s.params.clone(),
+                            preconditions: s.preconditions.iter().map(|pc| WorldStateCondition {
+                                key: pc.clone(), operator: ConditionOp::Exists, value: WorldStateValue::Bool(true)
+                            }).collect(),
+                            effects: s.effects.iter().map(|eff| WorldStateEffect {
+                                key: eff.clone(), operation: EffectOp::Set, value: WorldStateValue::Bool(true)
+                            }).collect(),
                             estimated_cost: s.estimated_cost,
                             status: ActionStatus::Pending,
                         })
@@ -426,7 +437,7 @@ impl UnifiedScheduler {
 
         // 更新依赖图
         if !task.dependencies.is_empty() {
-            let mut dep_graph = self.dependency_graph.write().await;
+            let mut dep_graph: tokio::sync::RwLockWriteGuard<'_, IndexMap<TaskId, Vec<TaskId>>> = self.dependency_graph.write().await;
             dep_graph.insert(task.id, task.dependencies.clone());
             debug!(
                 "[UnifiedScheduler] 任务 {} 有 {} 个依赖",
@@ -434,6 +445,12 @@ impl UnifiedScheduler {
                 task.dependencies.len()
             );
         }
+
+        // 提取 task.id 用于后续
+        let submitted_task_id = task.id;
+        let role = task.role.clone();
+        let priority = task.priority;
+        let required_model = task.required_model.clone();
 
         // 入队
         {
@@ -452,13 +469,13 @@ impl UnifiedScheduler {
 
         info!(
             "[UnifiedScheduler] 任务已提交: id={}, role={:?}, priority={:?}, model={}",
-            task.id, task.role, task.priority, task.required_model
+            submitted_task_id, role, priority, required_model
         );
 
         // 唤醒调度循环
         self.notify.notify_one();
 
-        Ok(task.id)
+        Ok(submitted_task_id)
     }
 
     /// 批量提交任务
@@ -530,6 +547,11 @@ impl UnifiedScheduler {
         &self,
         hardware: NodeHardwareInfo,
     ) -> Result<NodeId, SchedulerError> {
+        let gpu_name = hardware.gpu_name.clone();
+        let num_gpus = hardware.num_gpus;
+        let memory_gb = hardware.memory_gb;
+        let tflops = hardware.tflops_fp16;
+
         let mut manager = self.node_manager.write().await;
         let node_id = manager.register_node(hardware).await?;
 
@@ -542,10 +564,10 @@ impl UnifiedScheduler {
         info!(
             "[UnifiedScheduler] 节点已注册: id={}, gpu={}x{}, mem={}GB, tflops={:.1}",
             node_id,
-            hardware.num_gpus,
-            hardware.gpu_name,
-            hardware.memory_gb,
-            hardware.tflops_fp16
+            num_gpus,
+            gpu_name,
+            memory_gb,
+            tflops
         );
         Ok(node_id)
     }
@@ -747,7 +769,7 @@ impl UnifiedScheduler {
 
             match assignment {
                 Some((node_ids, estimated_latency)) => {
-                    // 匹配成功 → 分配任务到目标节点
+                    // 匹配成功 -> 分配任务到目标节点
                     debug!(
                         "[UnifiedScheduler] 任务 {} 分配到节点 {:?}, 预估延迟 {:.1}ms",
                         task.id, node_ids, estimated_latency
@@ -761,7 +783,7 @@ impl UnifiedScheduler {
                         let mut manager = self.node_manager.write().await;
                         for nid in &node_ids {
                             if let Some(node) = manager.get_node_mut(nid) {
-                                node.add_request();
+                                std::sync::Arc::make_mut(node).add_request();
                             }
                         }
                     }
@@ -776,7 +798,7 @@ impl UnifiedScheduler {
                     }
                 }
                 None => {
-                    // 无可用资源 → 放回队列 (优先级不变)
+                    // 无可用资源 -> 放回队列 (优先级不变)
                     debug!(
                         "[UnifiedScheduler] 任务 {} 暂无可用资源, 放回队列",
                         task.id
@@ -815,10 +837,9 @@ impl UnifiedScheduler {
         &self,
         task: &ScheduledTask,
     ) -> Result<Option<(Vec<NodeId>, f64)>, SchedulerError> {
-        let nodes = {
-            let manager = self.node_manager.read().await;
-            manager.active_node_list()
-        };
+        #[allow(unused_variables)]
+        let _ = task;
+        let nodes: Vec<Arc<NodeInfo>> = { let mgr = self.node_manager.read().await; mgr.active_nodes().into_iter().map(|n| Arc::new(n)).collect() };
 
         if nodes.is_empty() {
             return Ok(None); // 无可用节点
@@ -826,7 +847,7 @@ impl UnifiedScheduler {
 
         // 对于非推理类任务 (如代码生成/文件操作), 使用简化的资源匹配
         if !task.requires_inference {
-            return self.match_simple_task(&nodes, task).await;
+            return self.match_simple_task(&nodes.iter().map(|n| n.clone()).collect::<Vec<_>>(), task).await;
         }
 
         // ===== Parallax 两阶段调度 =====
@@ -836,22 +857,22 @@ impl UnifiedScheduler {
         let allocator = allocator_guard.as_ref().ok_or(SchedulerError::NotInitialized)?;
 
         // 检查是否需要重新分配
-        if allocator.should_rebalance(&nodes)? {
+        if allocator.should_rebalance(&nodes.iter().map(|n| n.as_ref()).collect::<Vec<_>>())? {
             drop(allocator_guard);
-            // 需要 → 执行全局重平衡
+            // 需要 -> 执行全局重平衡
             self.execute_global_rebalance().await?;
         } else {
             drop(allocator_guard);
         }
 
         // Phase 2: 请求路由 (动态, 每个请求独立计算最优路径)
-        let router_guard = self.request_router.read().await;
-        let router = router_guard.as_ref().ok_or(SchedulerError::NotInitialized)?;
+        let mut router_guard = self.request_router.write().await;
+        let router = router_guard.as_mut().ok_or(SchedulerError::NotInitialized)?;
 
         // 根据模型大小确定需要的 "层数" (这里抽象化: 大模型=多层数, 小模型=少层数)
         let virtual_layers = self.model_to_virtual_layers(&task.required_model);
 
-        let result = router.find_optimal_path(virtual_layers, &nodes)?;
+        let result = router.find_optimal_path(virtual_layers, &nodes.iter().map(|n| n.clone()).collect::<Vec<_>>())?;
 
         // 更新 Phase 1 计数
         {
@@ -866,7 +887,7 @@ impl UnifiedScheduler {
     async fn match_simple_task(
         &self,
         nodes: &[Arc<NodeInfo>],
-        task: &ScheduledTask,
+        _task: &ScheduledTask,
     ) -> Result<Option<(Vec<NodeId>, f64)>, SchedulerError> {
         // 简单策略: 选择负载最低的节点
         let best = nodes
@@ -921,9 +942,8 @@ impl UnifiedScheduler {
             None => return Ok(false),
         };
         let needs = allocator.should_rebalance(&{
-            let mgr = self.node_manager.read().await;
-            mgr.active_node_list()
-        })?;
+            let mgr = self.node_manager.read().await; mgr.active_nodes().iter().map(|n| n.clone()).collect::<Vec<_>>()
+        }).map(|v| &v[..])?;
         drop(allocator);
 
         if needs {
@@ -964,7 +984,7 @@ impl UnifiedScheduler {
     async fn trigger_incremental_rebalance(&self) -> Result<(), SchedulerError> {
         let new_node = {
             let mgr = self.node_manager.read().await;
-            mgr.last_registered_node()
+            mgr.last_registered_node().map(|n| n.clone())
         };
 
         if let Some(node) = new_node {
@@ -991,7 +1011,7 @@ impl UnifiedScheduler {
     async fn get_task_mut(
         &self,
         task_id: &TaskId,
-    ) -> Result<dashmap::ref_multi::RefMut<'_, TaskId, ScheduledTask>, SchedulerError> {
+    ) -> Result<dashmap::mapref::one::RefMut<'_, TaskId, ScheduledTask>, SchedulerError> {
         self.task_registry
             .get_mut(task_id)
             .ok_or(SchedulerError::TaskNotFound(*task_id))
@@ -1133,12 +1153,7 @@ pub enum SchedulerError {
     Serialization(#[from] serde_json::Error),
 }
 
-// 由于 SchedulerError 在 async context 中使用, 这里提供一个辅助函数来处理 metrics 写锁
-fn block_on_metrics() -> Result<std::sync::RwLockWriteGuard<'static, SchedulerMetrics>, SchedulerError> {
-    // 注意: 在真实实现中应该通过参数传递写锁引用
-    // 这里仅作为编译占位符 — 实际使用时 transition_task 方法会重构为传入 metrics 引用
-    Err(SchedulerError::NotInitialized)
-}
+
 
 // ============================================================================
 // 测试模块

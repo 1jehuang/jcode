@@ -50,7 +50,7 @@ pub fn create_completion_engine(provider: Arc<dyn Provider>) -> CompletionEngine
 fn register_lsp_if_available(lsp: &LspAstProvider, language: &str, cmd: &str, args: &[&str]) {
     if which::which(cmd).is_ok() {
         lsp.register_server(language, cmd, args.iter().map(|s| s.to_string()).collect());
-        tracing::info!("Registered LSP server: {} → {}", language, cmd);
+        tracing::info!("Registered LSP server: {} -> {}", language, cmd);
     } else {
         tracing::debug!("LSP server '{}' not found, skipping", cmd);
     }

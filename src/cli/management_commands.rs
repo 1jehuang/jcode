@@ -11,7 +11,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-// ─── Update Command ──────────────────────────
+// --- Update Command --------------------------
 
 /// 运行更新命令
 pub async fn run_update_command(check_only: bool) -> Result<String> {
@@ -32,7 +32,7 @@ pub async fn run_update_command(check_only: bool) -> Result<String> {
             current_version
         ))
     } else {
-        eprintln!("📦 发现新版本: {} → {}", current_version, latest_version);
+        eprintln!("📦 发现新版本: {} -> {}", current_version, latest_version);
         
         // TODO: 实际执行更新逻辑
         // 1. 下载新版本
@@ -41,7 +41,7 @@ pub async fn run_update_command(check_only: bool) -> Result<String> {
         // 4. 清理旧版本
         
         Ok(format!(
-            "✅ 更新完成: v{} → v{}\n\
+            "✅ 更新完成: v{} -> v{}\n\
              请重启CarpAI以使用新版本",
             current_version,
             latest_version
@@ -71,7 +71,7 @@ async fn fetch_latest_version() -> Result<String> {
     Ok(env!("JCODE_VERSION").to_string())
 }
 
-// ─── Agents Command ──────────────────────────
+// --- Agents Command --------------------------
 
 /// Agent配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,7 +210,7 @@ carpai agents
 "#.to_string()
 }
 
-// ─── MCP Command ─────────────────────────────
+// --- MCP Command -----------------------------
 
 /// MCP服务器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -351,7 +351,7 @@ carpai mcp list
 "#.to_string()
 }
 
-// ─── Auth Command ────────────────────────────
+// --- Auth Command ----------------------------
 
 /// 运行认证命令
 pub async fn run_auth_command(subcommand: Option<&str>) -> Result<String> {
@@ -457,7 +457,7 @@ carpai auth login --no-browser --print-url --json
 "#.to_string()
 }
 
-// ─── Project Purge Command ───────────────────
+// --- Project Purge Command -------------------
 
 /// 项目数据清理命令
 pub async fn run_project_purge_command(path: Option<&str>, dry_run: bool, yes: bool) -> Result<String> {

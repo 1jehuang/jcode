@@ -55,7 +55,7 @@ impl Default for AppState {
     }
 }
 
-// ── Sub-states ──
+// -- Sub-states --
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionState {
@@ -124,7 +124,7 @@ pub struct ToolsState {
     pub tool_configs: HashMap<String, serde_json::Value>,
 }
 
-// ── Selector Pattern ──
+// -- Selector Pattern --
 
 /// Trait for state selectors
 pub trait StateSelector<T>: Send + Sync {
@@ -198,7 +198,7 @@ where
     }
 }
 
-// ── Observer Pattern ──
+// -- Observer Pattern --
 
 type StateListener = Arc<dyn Fn(&AppState, &AppState) + Send + Sync>;
 
@@ -397,7 +397,7 @@ impl Default for AppStateManager {
     }
 }
 
-// ── Utility Functions ──
+// -- Utility Functions --
 
 /// Create a new state manager with common subscriptions
 pub async fn create_state_manager_with_defaults() -> AppStateManager {

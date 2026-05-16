@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::{info, warn};
 
-// ── Types ──
+// -- Types --
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitConfig {
@@ -85,7 +85,7 @@ impl DiffStatus {
             Self::Added => "+",
             Self::Modified => "~",
             Self::Deleted => "-",
-            Self::Renamed => "→",
+            Self::Renamed => "->",
         }
     }
 }
@@ -129,7 +129,7 @@ pub struct CommitResult {
     pub snapshot: GitSnapshot,
 }
 
-// ── Blame Info ──
+// -- Blame Info --
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlameInfo {
@@ -140,7 +140,7 @@ pub struct BlameInfo {
     pub content: String,
 }
 
-// ── Workflow Manager ──
+// -- Workflow Manager --
 
 pub struct GitWorkflow {
     config: GitConfig,
@@ -512,7 +512,7 @@ impl GitWorkflow {
     }
 }
 
-// ── Utils ──
+// -- Utils --
 
 pub fn git_init(dir: &Path) -> Result<()> {
     let output = Command::new("git")

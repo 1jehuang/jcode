@@ -6,7 +6,7 @@
 //! ## Design Philosophy
 //!
 //! **Cursor's Success Formula**:
-//! - Download → Install → Open VS Code → Works Immediately
+//! - Download -> Install -> Open VS Code -> Works Immediately
 //! - No config files needed for basic usage
 //! - Smart defaults that work for 80% of users
 //! - Progressive disclosure of advanced options

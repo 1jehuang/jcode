@@ -1,6 +1,6 @@
 //! # task_decomposer — 并行任务分解与依赖编排
 //!
-//! Claude Code 核心差异化：大任务 → 子任务 DAG + 拓扑排序 + 并行调度
+//! Claude Code 核心差异化：大任务 -> 子任务 DAG + 拓扑排序 + 并行调度
 //! - AST 感知拆分：理解代码结构后按模块/函数边界拆分
 //! - 依赖图构建：自动识别任务间的前序/后序/并行关系
 //! - 拓扑排序：保证依赖任务先执行，并行无依赖任务
@@ -15,7 +15,7 @@ use std::hash::Hash;
 use std::path::PathBuf;
 use tracing::warn;
 
-// ── Types ──
+// -- Types --
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub enum TaskPriority { Critical = 0, High = 1, Medium = 2, Low = 3 }
@@ -127,7 +127,7 @@ pub struct ExecutionPlan {
     pub bottlenecks: Vec<String>,
 }
 
-// ── Decomposer ──
+// -- Decomposer --
 
 pub struct TaskDecomposer {
     tasks: HashMap<String, DecomposedTask>,
@@ -288,7 +288,7 @@ impl TaskDecomposer {
     }
 }
 
-// ── Intelligent Splitter ──
+// -- Intelligent Splitter --
 
 pub fn decompose_by_module(
     goal: &str,

@@ -61,7 +61,7 @@ impl App {
         if now < pending.deadline {
             let remaining = pending.deadline.saturating_duration_since(now).as_secs() + 1;
             self.set_status_notice(format!(
-                "Provider auto-switch → {} in {}s (Esc to cancel)",
+                "Provider auto-switch -> {} in {}s (Esc to cancel)",
                 pending.prompt.to_label, remaining
             ));
             return true;
@@ -71,7 +71,7 @@ impl App {
         match self.apply_provider_switch_for_failover(&pending.prompt) {
             Ok(active_model) => {
                 self.push_display_message(DisplayMessage::system(format!(
-                    "⚡ **Auto-switched provider** after countdown: **{}** → **{}**.\n\nResending {} on model `{}`.\n\n{}",
+                    "⚡ **Auto-switched provider** after countdown: **{}** -> **{}**.\n\nResending {} on model `{}`.\n\n{}",
                     pending.prompt.from_label,
                     pending.prompt.to_label,
                     Self::format_failover_input_summary(&pending.prompt),
@@ -79,7 +79,7 @@ impl App {
                     Self::failover_config_hint(),
                 )));
                 self.set_status_notice(format!(
-                    "Provider → {} (retrying)",
+                    "Provider -> {} (retrying)",
                     pending.prompt.to_label
                 ));
                 self.pending_turn = true;
@@ -133,7 +133,7 @@ impl App {
                     Self::failover_config_hint(),
                 )));
                 self.set_status_notice(format!(
-                    "Provider auto-switch → {} in 3s (Esc to cancel)",
+                    "Provider auto-switch -> {} in 3s (Esc to cancel)",
                     prompt.to_label
                 ));
             }
@@ -184,7 +184,7 @@ impl App {
                     "✓ Switched to model: {}",
                     next_model
                 )));
-                self.set_status_notice(format!("Model → {}", next_model));
+                self.set_status_notice(format!("Model -> {}", next_model));
             }
             Err(e) => {
                 self.push_display_message(DisplayMessage::error(format!(
@@ -694,9 +694,9 @@ impl App {
             false,
         ));
         if results.is_empty() {
-            self.set_status_notice("Usage → no connected providers");
+            self.set_status_notice("Usage -> no connected providers");
         } else {
-            self.set_status_notice("Usage → updated");
+            self.set_status_notice("Usage -> updated");
         }
     }
 
@@ -716,20 +716,20 @@ impl App {
 
         if progress.done {
             if progress.results.is_empty() {
-                self.set_status_notice("Usage → no connected providers");
+                self.set_status_notice("Usage -> no connected providers");
             } else {
-                self.set_status_notice("Usage → updated");
+                self.set_status_notice("Usage -> updated");
             }
         } else if progress.from_cache && progress.total == 0 {
-            self.set_status_notice("Usage → showing cached data, refreshing");
+            self.set_status_notice("Usage -> showing cached data, refreshing");
         } else if progress.total > 0 {
             self.set_status_notice(format!(
-                "Usage → refreshing {}/{}",
+                "Usage -> refreshing {}/{}",
                 progress.completed.min(progress.total),
                 progress.total
             ));
         } else {
-            self.set_status_notice("Usage → refreshing");
+            self.set_status_notice("Usage -> refreshing");
         }
     }
 
@@ -1052,7 +1052,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
                     title: None,
                     tool_data: None,
                 });
-                app.set_status_notice(format!("Model → {}", model_name));
+                app.set_status_notice(format!("Model -> {}", model_name));
             }
             Err(e) => {
                 app.push_display_message(DisplayMessage::error(model_switch_failure_message(
@@ -1081,14 +1081,14 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
                 .iter()
                 .map(|e| {
                     if Some(e.to_string()) == current {
-                        format!("**{}** ← current", effort_display_label(e))
+                        format!("**{}** <- current", effort_display_label(e))
                     } else {
                         effort_display_label(e).to_string()
                     }
                 })
                 .collect();
             app.push_display_message(DisplayMessage::system(format!(
-                "Reasoning effort: {}\nAvailable: {}\nUse `/effort <level>` or Alt+←/→ to change.",
+                "Reasoning effort: {}\nAvailable: {}\nUse `/effort <level>` or Alt+<-/-> to change.",
                 current_label,
                 list.join(" · ")
             )));
@@ -1106,7 +1106,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
                     .map(effort_display_label)
                     .unwrap_or("default");
                 app.push_display_message(DisplayMessage::system(format!(
-                    "✓ Reasoning effort → {}",
+                    "✓ Reasoning effort -> {}",
                     label
                 )));
                 let efforts = app.provider.available_efforts();
@@ -1266,7 +1266,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
                 .iter()
                 .map(|t| {
                     if Some(*t) == current.as_deref() {
-                        format!("**{}** ← current", t)
+                        format!("**{}** <- current", t)
                     } else {
                         t.to_string()
                     }
@@ -1287,10 +1287,10 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
             Ok(()) => {
                 let new_transport = app.provider.transport().unwrap_or_else(|| mode.to_string());
                 app.push_display_message(DisplayMessage::system(format!(
-                    "✓ Transport → {}",
+                    "✓ Transport -> {}",
                     new_transport
                 )));
-                app.set_status_notice(format!("Transport → {}", new_transport));
+                app.set_status_notice(format!("Transport -> {}", new_transport));
             }
             Err(e) => {
                 app.push_display_message(DisplayMessage::error(format!(
@@ -1343,7 +1343,7 @@ pub(super) fn format_model_refresh_summary(
     summary: &crate::provider::ModelCatalogRefreshSummary,
 ) -> String {
     format!(
-        "**Model List Refresh Complete**\n\nModels: {} → {}  (+{} / -{})\nRoutes: {} → {}  (+{} / -{} / ~{})",
+        "**Model List Refresh Complete**\n\nModels: {} -> {}  (+{} / -{})\nRoutes: {} -> {}  (+{} / -{} / ~{})",
         summary.model_count_before,
         summary.model_count_after,
         summary.models_added,

@@ -403,7 +403,7 @@ fn test_prepare_messages_centers_meta_footer_in_centered_mode() {
             DisplayMessage::assistant("Done."),
             DisplayMessage {
                 role: "meta".to_string(),
-                content: "1.2s · ↑12 ↓34".to_string(),
+                content: "1.2s · ^12 v34".to_string(),
                 tool_calls: vec![],
                 duration_secs: None,
                 title: None,
@@ -417,7 +417,7 @@ fn test_prepare_messages_centers_meta_footer_in_centered_mode() {
     let prepared_lines = prepared.materialize_all_lines();
     let footer = prepared_lines
         .iter()
-        .find(|line| extract_line_text(line).contains("↑12 ↓34"))
+        .find(|line| extract_line_text(line).contains("^12 v34"))
         .expect("missing meta footer line");
 
     assert_eq!(

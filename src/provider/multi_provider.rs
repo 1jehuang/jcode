@@ -71,7 +71,7 @@ impl MultiProvider {
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(format!(
-                        "⚡ Auto-switched {} account: {} → {}. To turn this off, set `[provider].same_provider_account_failover = false` in `~/.jcode/config.toml` or export `JCODE_SAME_PROVIDER_ACCOUNT_FAILOVER=false`.",
+                        "⚡ Auto-switched {} account: {} -> {}. To turn this off, set `[provider].same_provider_account_failover = false` in `~/.jcode/config.toml` or export `JCODE_SAME_PROVIDER_ACCOUNT_FAILOVER=false`.",
                         provider_label, original_label, alternative_label
                     ));
                     return Ok(Some(stream));

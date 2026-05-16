@@ -477,7 +477,7 @@ impl ConflictResolver {
     pub fn resolve(
         &mut self,
         policy_id: &str,
-        resolver_id: &str,
+        _resolver_id: &str,
         override_strategy: Option<ConflictStrategy>,
     ) -> Result<SyncPolicy, SyncError> {
         let conflict = self
@@ -572,7 +572,7 @@ impl<K: Clone + Eq + std::hash::Hash, V: Clone> LruCache<K, V> {
                 self.map.remove(&evicted);
             }
         }
-        self.map.insert(key, value);
+        self.map.insert(key.clone(), value);
         self.order.push_back(key);
     }
 

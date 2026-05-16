@@ -1,7 +1,7 @@
 //! Diagnostics Manager — 智能诊断推送 + QuickFix 自动修复系统
 //!
 //! ## 核心能力 (对标 Cursor/Claude Code)
-//! - **实时推送**: Server → Client 的错误/警告/信息推送
+//! - **实时推送**: Server -> Client 的错误/警告/信息推送
 //! - **智能去重**: 避免重复显示相同的诊断
 //! - **优先级排序**: Error > Warning > Hint > Information
 //! - **文件关联**: 自动关联诊断到对应文件
@@ -10,19 +10,19 @@
 //!
 //! ## 诊断流程
 //! ```text
-//! LSP Server ──(publishDiagnostics)──▶ DiagnosticsManager
-//!                                          │
-//!                                    ┌─────┴─────┐
-//!                                    │           │
+//! LSP Server --(publishDiagnostics)--▶ DiagnosticsManager
+//!                                          |
+//!                                    +-----+-----+
+//!                                    |           |
 //!                              去重过滤    优先级排序
-//!                                    │           │
+//!                                    |           |
 //!                                    ▼           ▼
 //!                               缓存存储   推送通知
-//!                                          │
-//!                                    ┌─────▼─────┐
-//!                                    │  QuickFix  │ ← 自动修复引擎
-//!                                    │  Engine    │
-//!                                    └───────────┘
+//!                                          |
+//!                                    +-----▼-----+
+//!                                    |  QuickFix  | <- 自动修复引擎
+//!                                    |  Engine    |
+//!                                    +-----------+
 //! ```
 
 use lsp_types::*;
@@ -54,6 +54,7 @@ impl From<lsp_types::DiagnosticSeverity> for DiagnosticSeverity {
 }
 
 /// 增强的诊断信息
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct EnhancedDiagnostic {
     /// 原始诊断
@@ -142,6 +143,7 @@ pub struct DiagnosticsManager {
     config: DiagnosticsConfig,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 #[derive(Default)]
 struct GlobalStats {
@@ -154,6 +156,7 @@ struct GlobalStats {
 
 
 /// 配置选项
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct DiagnosticsConfig {
     /// 最大缓存文件数
@@ -368,7 +371,7 @@ impl DiagnosticsManager {
             .collect()
     }
 
-    // ─── 内部方法 ─────────────────────────
+    // --- 内部方法 -------------------------
 
     fn compute_diagnostic_hash(&self, uri: &Url, diag: &Diagnostic) -> u64 {
         use std::hash::{Hash, Hasher};

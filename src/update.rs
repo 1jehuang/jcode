@@ -348,7 +348,7 @@ fn prepare_stable_update_blocking() -> Result<PreparedUpdate> {
     let duration = estimate_release_update_duration(asset._size, metadata.last_release_update_secs);
     let size_mb = asset._size as f64 / (1024.0 * 1024.0);
     let summary = format!(
-        "Prebuilt update {} → {} (~{:.0} MB, {}). {}",
+        "Prebuilt update {} -> {} (~{:.0} MB, {}). {}",
         current_version,
         release.tag_name,
         size_mb,
@@ -420,7 +420,7 @@ fn prepare_main_update_blocking() -> Result<PreparedUpdate> {
             "initial clone + cargo build"
         };
         let summary = format!(
-            "Source update {} → main-{} requires {} ({}). Running in the background and will reload when it is ready.",
+            "Source update {} -> main-{} requires {} ({}). Running in the background and will reload when it is ready.",
             current_short,
             latest_sha,
             action,

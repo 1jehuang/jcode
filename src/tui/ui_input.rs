@@ -529,7 +529,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                 }
                 if input_tokens > 0 || output_tokens > 0 {
                     status_text = format!(
-                        "{} · ↑{} ↓{}",
+                        "{} · ^{} v{}",
                         status_text,
                         format_stream_tokens(input_tokens),
                         format_stream_tokens(output_tokens)
@@ -1301,7 +1301,7 @@ pub(super) fn draw_input(
             let mut spans = vec![Span::styled("  Tab: ", Style::default().fg(dim_color()))];
             for (i, (cmd, desc)) in limited.iter().enumerate() {
                 if i > 0 {
-                    spans.push(Span::styled(" │ ", Style::default().fg(dim_color())));
+                    spans.push(Span::styled(" | ", Style::default().fg(dim_color())));
                 }
                 spans.push(Span::styled(
                     cmd.to_string(),

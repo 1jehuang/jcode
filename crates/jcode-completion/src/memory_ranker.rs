@@ -25,7 +25,7 @@ pub trait MemoryRanker: Send + Sync {
 
 /// 用户使用模式追踪 (什么补全被接受过)
 pub struct UsageTracker {
-    /// (file_prefix, accepted_text) → count
+    /// (file_prefix, accepted_text) -> count
     patterns: RwLock<HashMap<String, u32>>,
     /// 总的完成次数
     total: RwLock<u64>,
@@ -72,7 +72,7 @@ impl UsageTracker {
 /// 默认记忆排序器
 pub struct DefaultMemoryRanker {
     tracker: Arc<UsageTracker>,
-    /// [item, field, ...] → score multiplier
+    /// [item, field, ...] -> score multiplier
     field_preferences: RwLock<HashMap<String, f64>>,
 }
 

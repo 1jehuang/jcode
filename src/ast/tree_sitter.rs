@@ -30,10 +30,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tree_sitter::{InputEdit, Language, Parser, Point, Range, Tree};
+use tree_sitter::{InputEdit, Language, Parser, Point, Tree};
 use tracing::{debug, info, warn};
 
-// ─── Language Support ────────────────────────────────
+// --- Language Support --------------------------------
 
 /// 支持的编程语言
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -43,6 +43,8 @@ pub enum SupportedLanguage {
     JavaScript,
     TypeScript,
     Go,
+    C,
+    Cpp,
     Json,
     Markdown,
 }
@@ -96,7 +98,7 @@ impl SupportedLanguage {
     }
 }
 
-// ─── AST Node Types ─────────────────────────────────
+// --- AST Node Types ---------------------------------
 
 /// AST 节点类型分类
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -169,7 +171,7 @@ impl std::fmt::Display for NodeType {
     }
 }
 
-// ─── Symbol Information ──────────────────────────────
+// --- Symbol Information ------------------------------
 
 /// 符号信息 (从AST提取)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,7 +212,7 @@ impl From<Point> for Position {
     fn from(point: Point) -> Self {
         Self {
             line: point.row + 1, // Tree-sitter使用0-based，我们用1-based
-            point: point.column + 1,
+            column: point.column + 1,
         }
     }
 }
@@ -226,14 +228,14 @@ pub enum Visibility {
     Unknown,
 }
 
-// ─── Core Parser ────────────────────────────────────
+// --- Core Parser ------------------------------------
 
 /// Tree-sitter AST 解析器
 pub struct AstParser {
     /// 各语言的解析器实例
     parsers: HashMap<SupportedLanguage, Parser>,
     
-    /// 缓存的AST树 (文件路径 → Tree)
+    /// 缓存的AST树 (文件路径 -> Tree)
     cache: Arc<RwLock<HashMap<String, CachedAst>>>,
     
     /// 配置
@@ -316,9 +318,11 @@ impl AstParser {
             SupportedLanguage::JavaScript,
             SupportedLanguage::TypeScript,
             SupportedLanguage::Go,
+            SupportedLanguage::C,
+            SupportedLanguage::Cpp,
         ] {
             if let Some(language) = lang.get_tree_sitter_language() {
-                let mut parser = Parser::new()?;
+                let mut parser = Parser::new();
                 parser.set_language(&language)?;
                 parsers.insert(*lang, parser);
             } else {
@@ -386,10 +390,13 @@ impl AstParser {
                         let mut tree = old_tree.clone();
                         tree.edit(&edit);
                         
-                        if let Ok(new_tree) = parser.parse(source, Some(&tree)) {
+                        let parse_result: Option<Tree> = parser.parse(source, Some(&tree));
+                        if let Some(new_tree) = parse_result {
                             // 更新缓存
-                            *cache.get_mut(file_path).unwrap() = CachedAst {
-                                tree: new_tree.clone(),
+                            if let Some(cached) = cache.get_mut(file_path) {
+                                let parsed_tree: Tree = new_tree.clone();
+                                *cached = CachedAst {
+                                tree: parsed_tree,
                                 source_code: source.to_string(),
                                 language,
                                 parsed_at: std::time::Instant::now(),
@@ -412,6 +419,7 @@ impl AstParser {
                             );
 
                             return Ok(new_tree);
+                            }
                         }
                     }
                 }
@@ -490,6 +498,7 @@ impl AstParser {
             new_end_byte: new_end_byte - start_byte,
             start_position: Point::new(0, 0), // 简化
             old_end_position: Point::new(0, 0),
+            new_end_position: Point::new(0, 0),
         }
     }
 
@@ -702,7 +711,7 @@ impl AstParser {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if child.kind() == "identifier" || child.kind() == "type_identifier" {
-                return Some(child.utf8_text(source).ok()?.to_string());
+                return Some(child.utf8_text(source.as_bytes()).ok()?.to_string());
             }
         }
         None
@@ -712,7 +721,7 @@ impl AstParser {
     fn detect_visibility(&self, node: &tree_sitter::Node, source: &str) -> Visibility {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            let text = child.utf8_text(source).unwrap_or("");
+            let text = child.utf8_text(source.as_bytes()).unwrap_or("");
             match text {
                 "pub" | "public" => return Visibility::Public,
                 "pub(crate)" => return Visibility::Crate,
@@ -729,6 +738,7 @@ impl AstParser {
     pub async fn find_symbol_at_position(
         &self,
         tree: &Tree,
+        source: &str,
         line: usize,
         column: usize,
     ) -> Option<SymbolInfo> {
@@ -752,7 +762,7 @@ impl AstParser {
             {
                 // 返回该节点的信息
                 return Some(SymbolInfo {
-                    name: self.get_node_name(&node, "")?,
+                    name: self.get_node_name(&node, source)?,
                     node_type: self.classify_node(kind, SupportedLanguage::Rust),
                     start_position: Position::from(node.start_position()),
                     end_position: Position::from(node.end_position()),
@@ -800,7 +810,7 @@ impl AstParser {
         // 发现函数调用
         if kind == "call_expression" {
             if let Some(callee) = self.get_callee_name(node, source) {
-                if let Some(ref caller) = current_function {
+                if let Some(caller) = &current_function {
                     call_graph
                         .entry(caller.clone())
                         .or_insert_with(Vec::new)
@@ -826,7 +836,7 @@ impl AstParser {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if child.kind() == "identifier" {
-                return Some(child.utf8_text(source).ok()?.to_string());
+                return Some(child.utf8_text(source.as_bytes()).ok()?.to_string());
             }
         }
         None
@@ -845,7 +855,7 @@ impl AstParser {
     }
 }
 
-// ─── High-Level API ─────────────────────────────────
+// --- High-Level API ---------------------------------
 
 /// 代码分析器 (高级接口)
 pub struct CodeAnalyzer {
@@ -896,7 +906,7 @@ impl CodeAnalyzer {
             SupportedLanguage::extensions().into_iter().collect();
 
         // 递归查找所有支持的语言文件
-        walkdir::WalkDir::new(project_dir)
+        for entry in walkdir::WalkDir::new(project_dir)
             .into_iter()
             .filter_entry(|e| {
                 // 跳过隐藏目录和vendor/target等
@@ -911,18 +921,19 @@ impl CodeAnalyzer {
                     .map(|ext| supported_extensions.contains(ext))
                     .unwrap_or(false)
             })
-            .for_each(|entry| {
-                if let Ok(analysis) = self.analyze_file(entry.path()) {
-                    total_symbols += analysis.symbols.len();
-                    total_loc += analysis.lines_of_code;
-                    files.push(analysis);
-                }
-            });
+        {
+            if let Ok(analysis) = self.analyze_file(entry.path()).await {
+                total_symbols += analysis.symbols.len();
+                total_loc += analysis.lines_of_code;
+                files.push(analysis);
+            }
+        }
 
+        let total_files = files.len();
         Ok(ProjectAnalysis {
             project_dir: project_dir.display().to_string(),
             files,
-            total_files: files.len(),
+            total_files,
             total_symbols,
             total_lines_of_code: total_loc,
         })
@@ -949,7 +960,7 @@ pub struct ProjectAnalysis {
     pub total_lines_of_code: usize,
 }
 
-// ─── Tests ────────────────────────────────────────────
+// --- Tests --------------------------------------------
 
 #[cfg(test)]
 mod tests {

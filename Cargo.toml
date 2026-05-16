@@ -102,6 +102,28 @@ members = [
     "crates/jcode-grpc",
     # CarpAI Unified Client SDK
     "crates/carpai-sdk",
+    # Enterprise Server (AI-as-a-Service for low-resource deployments)
+    "crates/jcode-enterprise-server",
+    # CPU Inference Engine (llama.cpp wrapper)
+    "crates/jcode-cpu-inference",
+    # 聚合类型 re-export crate
+    "crates/jcode-types",
+    # 高级 Agent 循环引擎
+    "crates/jcode-agent-advanced",
+    # 上下文管理与缓存系统
+    "crates/jcode-context-management",
+    # 性能监控与诊断系统
+    "crates/jcode-telemetry",
+    # 动态配置
+    "crates/jcode-config-dynamic",
+    # 默认配置和发现
+    "crates/jcode-defaults",
+    # IDE 集成
+    "crates/jcode-ide-integration",
+    # 远程增强
+    "crates/jcode-remote-enhanced",
+    # 统一调度器
+    "crates/jcode-unified-scheduler",
 ]
 
 # Workspace 包元数据 (供成员 crate 继承)
@@ -193,6 +215,7 @@ futures = "0.3"
 async-trait = "0.1"
 
 # HTTP client
+http = "1"
 reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
@@ -225,11 +248,14 @@ tree-sitter-rust = "0.23" # Rust语言支持
 tree-sitter-python = "0.23" # Python语言支持
 tree-sitter-javascript = "0.23" # JavaScript/TypeScript支持
 tree-sitter-go = "0.23"   # Go语言支持
+tree-sitter-c = "0.23"    # C语言支持
+tree-sitter-cpp = "0.23"  # C++语言支持
 urlencoding = "2"        # URL encoding for web search
 tracing = "0.1"          # Structured logging
 
 lsp-types = { workspace = true }
 uuid = { version = "1", features = ["v4", "v5"] }
+lazy_static = "1.4"
 proctitle = "0.1"
 which = "6"
 sysinfo = "0.32"         # System information (CPU, memory, etc.)
@@ -321,6 +347,7 @@ jcode-lsp = { path = "crates/jcode-lsp" }
 flate2 = "1"
 tar = "0.4"
 tempfile = "3"
+attohttpc = { workspace = true }
 agentgrep = { path = "crates/vendor-agentgrep" }
 # 注: 如果 crates/vendor-agentgrep 不存在，运行 scripts/vendor_agentgrep.sh 创建
 qrcode = { version = "0.14.1", default-features = false }

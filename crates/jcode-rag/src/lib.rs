@@ -852,7 +852,7 @@ impl RagToolchainOrchestrator {
         phases.push(phase4_result.clone());
         
         if !phase4_result.passed {
-            // 验证失败 → 自动回滚
+            // 验证失败 -> 自动回滚
             warn!(phase = "Validation", "Validation failed, initiating rollback");
             
             let rollback_result = self.editing_layer.rollback_changes(request, &phase3_result.output).await?;

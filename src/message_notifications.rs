@@ -1,4 +1,12 @@
 use super::*;
+use serde::{Serialize, Deserialize};
+use crate::bus::BackgroundTaskCompleted;
+use crate::background::BackgroundTaskInfo;
+use crate::message::compile_static_regex;
+use crate::message::Message;
+use jcode_background_types::BackgroundTaskStatus;
+use std::sync::OnceLock;
+use regex::Regex;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InputShellResult {

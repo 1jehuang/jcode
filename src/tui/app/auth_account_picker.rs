@@ -426,7 +426,7 @@ impl App {
         self.input.clear();
         self.cursor_pos = 0;
         self.set_status_notice(format!(
-            "Account → {} (↑↓ or j/k, Enter to select)",
+            "Account -> {} (^v or j/k, Enter to select)",
             provider_label
         ));
     }

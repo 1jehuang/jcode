@@ -34,8 +34,8 @@ pub fn render_rounded_box(
 
     let box_width = box_content_width + 4;
     let border_chars = box_width.saturating_sub(title_len + 2);
-    let left_border = "─".repeat(border_chars / 2);
-    let right_border = "─".repeat(border_chars - border_chars / 2);
+    let left_border = "-".repeat(border_chars / 2);
+    let right_border = "-".repeat(border_chars - border_chars / 2);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(Span::styled(
@@ -47,16 +47,16 @@ pub fn render_rounded_box(
         let truncated = truncate_line_to_width(&line, box_content_width);
         let padding = box_content_width.saturating_sub(truncated.width());
         let mut spans: Vec<Span<'static>> = Vec::new();
-        spans.push(Span::styled("│ ", border_style));
+        spans.push(Span::styled("| ", border_style));
         spans.extend(truncated.spans);
         if padding > 0 {
             spans.push(Span::raw(" ".repeat(padding)));
         }
-        spans.push(Span::styled(" │", border_style));
+        spans.push(Span::styled(" |", border_style));
         lines.push(Line::from(spans));
     }
 
-    let bottom_border = "─".repeat(box_width.saturating_sub(2));
+    let bottom_border = "-".repeat(box_width.saturating_sub(2));
     lines.push(Line::from(Span::styled(
         format!("╰{}╯", bottom_border),
         border_style,

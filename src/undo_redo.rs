@@ -133,12 +133,22 @@ impl UndoRedoManager {
             self.undo_stack.pop_front();
         }
 
-        self.undo_stack.back().unwrap()
+        self.undo_stack.back().expect("Undo stack should not be empty after push")
     }
 
-    pub fn execute_batch(&mut self, operations: Vec<Operation>) -> Vec<&Operation> {
+    pub fn execute_batch(&mut self, operations: Vec<Operation>) -> Vec<Operation> {
         eprintln!("[UNDO] Executing batch of {} operations", operations.len());
-        operations.into_iter().map(|op| self.execute(op)).collect()
+        operations.into_iter().map(|op| {
+            self.redo_stack.clear();
+            self.undo_stack.push_back(op.clone());
+            self.operation_count += 1;
+
+            while self.undo_stack.len() > self.max_history {
+                self.undo_stack.pop_front();
+            }
+
+            op
+        }).collect()
     }
 
     pub fn undo(&mut self) -> Result<Operation, String> {
@@ -165,7 +175,10 @@ impl UndoRedoManager {
 
         let mut undone = vec![];
         for _ in 0..count {
-            match self.undo()? { op => undone.push(op), Err(e) => return Err(e), }
+            match self.undo() {
+                Ok(op) => undone.push(op),
+                Err(e) => return Err(e),
+            }
         }
 
         Ok(undone)
@@ -189,7 +202,10 @@ impl UndoRedoManager {
 
         let mut redone = vec![];
         for _ in 0..count {
-            match self.redo()? { op => redone.push(op), Err(e) => return Err(e), }
+            match self.redo() {
+                Ok(op) => redone.push(op),
+                Err(e) => return Err(e),
+            }
         }
 
         Ok(redone)

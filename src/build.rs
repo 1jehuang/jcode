@@ -4,9 +4,9 @@
 //! with the multi-language `BuildExecutor` from `build_module` and the `jcode-build-engine` crate.
 //!
 //! The `run_build_command` in `cli/commands.rs` uses the types defined here
-//! to provide a unified CLI → BuildExecutor → MicroCi pipeline.
+//! to provide a unified CLI -> BuildExecutor -> MicroCi pipeline.
 
-// ── Re-export build-support utilities (binary management, selfdev, etc.) ──
+// -- Re-export build-support utilities (binary management, selfdev, etc.) --
 pub use jcode_build_support::{
     binary_name, binary_stem, build_log_path, build_progress_path, builds_dir,
     canary_binary_path, clear_build_progress, client_update_candidate,
@@ -32,14 +32,14 @@ pub use jcode_build_support::{
 
 pub use jcode_selfdev_types::SourceState;
 
-// ── Re-export the real multi-language build executor from build_module ──
+// -- Re-export the real multi-language build executor from build_module --
 pub use crate::build_module::{
     BuildExecutor, BuildProfile, BuildRequest, BuildResult, BuildTool, TestTool,
     WorkspaceBuildResult,
 };
 pub use crate::workspace_manager::{ProjectBuildConfig, ProjectType, WorkspaceManager};
 
-// ── CLI-facing configuration types ──
+// -- CLI-facing configuration types --
 
 /// High-level configuration for the CLI build command.
 pub struct BuildConfig {
@@ -128,7 +128,7 @@ impl std::fmt::Display for BuildReport {
             BuildStatus::InProgress => "⏳ IN PROGRESS",
             BuildStatus::Pending => "⏸ PENDING",
         };
-        writeln!(f, "─── Build Report ───")?;
+        writeln!(f, "--- Build Report ---")?;
         writeln!(f, "  Goal:        {}", self.message)?;
         writeln!(f, "  Status:      {}", status_str)?;
         writeln!(f, "  Build time:  {:.2}s", self.execution_time_ms as f64 / 1000.0)?;
@@ -154,7 +154,7 @@ impl std::fmt::Display for BuildReport {
     }
 }
 
-// ── Progress display ──
+// -- Progress display --
 
 /// Minimal progress bar for CLI display.
 pub struct ProgressBar {
@@ -193,7 +193,7 @@ impl ProgressBar {
     }
 }
 
-// ── Build engine wrapper ──
+// -- Build engine wrapper --
 
 /// Unified build engine wrapping the real `BuildExecutor`.
 pub struct BuildEngine {
@@ -247,7 +247,7 @@ impl BuildEngine {
     }
 }
 
-// ── Shared server update helper ──
+// -- Shared server update helper --
 
 pub fn shared_server_update_candidate(_is_selfdev_session: bool) -> Option<String> {
     None

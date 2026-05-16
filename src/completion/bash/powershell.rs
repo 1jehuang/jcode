@@ -1,4 +1,4 @@
-//! # PowerShell 补全引擎
+﻿//! # PowerShell 补全引擎
 //!
 //! 提供智能的 PowerShell 命令行补全功能：
 //! - **Cmdlet 解析器** - 完整的 PowerShell 语法分析 (Verb-Noun)
@@ -572,7 +572,7 @@ impl PowerShellParser {
         }
     }
 
-    fn build_ast(&self, tokens: &mut Vec<PsToken>, errors: &mut Vec<PsParseError>) -> Result<PsAstNode, ()> {
+    fn build_ast(&self, tokens: &mut Vec<PsToken>, _errors: &mut Vec<PsParseError>) -> Result<PsAstNode, ()> {
         let mut statements = vec![];
         let mut current_cmd_words = vec![];
 
@@ -2125,7 +2125,7 @@ mod tests {
         let tokens = parser.tokenize("Get-ChildItem -Recurse -Force | Select-Object -First 10");
 
         let has_cmdlet = tokens.iter().any(|t| matches!(t, PsToken::Cmdlet(c) if c == "Get-ChildItem"));
-        let has_pipe = tokens.iter().any(|*t| t == PsToken::Pipe);
+        let has_pipe = tokens.iter().any(|t| t == PsToken::Pipe);
         let has_switch_recurse = tokens.iter().any(|t| matches!(t, PsToken::Parameter(p) if p == "-Recurse"));
 
         assert!(has_cmdlet);

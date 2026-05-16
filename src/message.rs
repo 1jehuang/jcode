@@ -23,7 +23,7 @@ pub use notifications::{
     parse_background_task_progress_notification_markdown,
 };
 
-fn compile_static_regex(pattern: &str) -> Option<Regex> {
+pub fn compile_static_regex(pattern: &str) -> Option<Regex> {
     match Regex::new(pattern) {
         Ok(regex) => Some(regex),
         Err(err) => {
@@ -33,7 +33,7 @@ fn compile_static_regex(pattern: &str) -> Option<Regex> {
     }
 }
 
-fn compile_static_regexes(patterns: &[&str]) -> Vec<Regex> {
+pub fn compile_static_regexes(patterns: &[&str]) -> Vec<Regex> {
     patterns
         .iter()
         .filter_map(|pattern| compile_static_regex(pattern))

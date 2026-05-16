@@ -1,7 +1,7 @@
 //! LoRA 推理适配器 — 加载 LoRA 权重，Qwen 补全时使用
 //!
 //! 由 Python 训练脚本生成 adapter.safetensors + adapter_config.json
-//! 推理时: Qwen 加载基座 + LoRA 权重 → 高精度补全
+//! 推理时: Qwen 加载基座 + LoRA 权重 -> 高精度补全
 
 use std::collections::HashMap;
 use std::path::PathBuf;

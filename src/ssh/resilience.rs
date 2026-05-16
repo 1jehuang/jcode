@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
-use std::sync::Arc;
+
 use std::collections::VecDeque;
-use super::session::{SshSession, SshConfig, SessionState};
+use super::session::{SshSession, SshConfig};
 
 /// Reconnection Strategy Types
 #[derive(Debug, Clone)]
@@ -266,7 +266,7 @@ impl SmartRetryHandler {
                 Duration::from_secs_f64(delay_secs)
             }
             ReconnectStrategy::LinearBackoff { initial_delay, increment, max_delay } => {
-                let delay = initial_delay + *increment * attempt;
+                let delay = *initial_delay + *increment * attempt;
                 delay.min(*max_delay)
             }
             ReconnectStrategy::Custom(callback) => callback(attempt),
@@ -513,7 +513,7 @@ impl ResilientSshSession {
             auto_reconnect_enabled: self.auto_reconnect,
             health_check_interval: self.health_check_interval,
             last_health_check: self.last_health_check,
-            session_stats: *self.session.stats(),
+            session_stats: self.session.stats().clone(),
         }
     }
 }
@@ -575,7 +575,7 @@ impl ResilientConnectionPool {
     }
 
     /// Health check all sessions
-    pub fn health_check_all(&mut self) -> Vec<(String, HealthStatus)> {
+    pub fn health_check_all(&mut self) -> Vec<String, HealthStatus> {
         self.sessions.iter_mut()
             .map(|(k, s)| (k.clone(), s.health_check()))
             .collect()
@@ -583,9 +583,15 @@ impl ResilientConnectionPool {
 
     /// Remove dead sessions
     pub fn evict_dead_sessions(&mut self) -> Vec<String> {
-        let dead_keys: Vec<String> = self.sessions.iter()
-            .filter(|(_, s)| !s.session().is_alive())
-            .map(|(k, _)| k.clone())
+        let keys: Vec<String> = self.sessions.keys().cloned().collect();
+        let dead_keys: Vec<String> = keys.into_iter()
+            .filter(|k| {
+                if let Some(s) = self.sessions.get_mut(k) {
+                    !s.session_mut().is_alive()
+                } else {
+                    false
+                }
+            })
             .collect();
 
         for key in &dead_keys {
@@ -597,7 +603,7 @@ impl ResilientConnectionPool {
 
     /// Get pool statistics
     pub fn stats(&self) -> ResilientPoolStats {
-        let healthy = self.sessions.values().filter(|s| s.session().is_alive()).count();
+        let healthy = self.sessions.values().filter(|s| s.session().is_connected()).count();
         let unhealthy = self.sessions.len() - healthy;
 
         ResilientPoolStats {

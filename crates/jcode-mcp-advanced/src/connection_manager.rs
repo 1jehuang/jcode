@@ -47,8 +47,8 @@ impl ReconnectPolicy {
         let jitter_range = (capped as f64 * self.jitter_factor) as i64;
         let final_ms = if jitter_range > 0 {
             use rand::Rng;
-            let mut rng = rand::thread_rng();
-            let j: i64 = rng.gen_range(-jitter_range..=jitter_range);
+            let mut rng = rand::rng();
+            let j: i64 = rng.random_range(-jitter_range..=jitter_range);
             (capped as i64 + j).max(0) as u64
         } else {
             capped

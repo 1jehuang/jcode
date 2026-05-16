@@ -354,7 +354,7 @@ fn test_super_space_toggles_next_prompt_new_session_routing() {
     assert!(app.route_next_prompt_to_new_session);
     assert_eq!(
         app.status_notice(),
-        Some("Next prompt → new session".to_string())
+        Some("Next prompt -> new session".to_string())
     );
 
     app.handle_key(KeyCode::Char(' '), KeyModifiers::SUPER)

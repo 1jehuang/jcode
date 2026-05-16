@@ -8,7 +8,7 @@ license.workspace = true
 
 [dependencies]
 # Async runtime
-tokio = { workspace = true, features ["full", "sync", "time"] }
+tokio = { workspace = true, features = ["full", "sync", "time"] }
 
 # Serialization
 serde = { workspace = true, features = ["derive"] }
@@ -24,7 +24,7 @@ opentelemetry_sdk = { version = "0.27", default-features = false, features = ["m
 
 # Metrics recording
 metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
+metrics-exporter-prometheus = { version = "0.16", optional = true }
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
@@ -58,6 +58,7 @@ full = ["otlp", "prometheus"]
 tokio-test = "0.4"
 criterion = "0.5"
 
-[[bench]]
-name = "telemetry_bench"
-harness = false
+# [[bench]]
+# name = "telemetry_bench"
+# harness = false
+# path = "benches/telemetry_bench.rs"

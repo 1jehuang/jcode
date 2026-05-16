@@ -207,7 +207,7 @@ impl SessionAnalyzer {
                 } else {
                     StepOutcome::DeadEnd {
                         reason: "All tool calls failed".to_string(),
-                    },
+                    }
                 },
             })
             .collect()
@@ -966,7 +966,7 @@ impl SessionSummarizer {
             .iter()
             .map(|lo| {
                 format!(
-                    "{:?} → {:?} (urgency: {:?}, effort: {:.1}h)",
+                    "{:?} -> {:?} (urgency: {:?}, effort: {:.1}h)",
                     lo.topic, lo.target_proficiency, lo.urgency, lo.estimated_effort_hours
                 )
             })

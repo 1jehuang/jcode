@@ -3,7 +3,7 @@
 //
 // 核心思路:
 //
-//   传统方式: 会话恢复 = 重放全部历史消息 → O(n) 成本, 越长越慢
+//   传统方式: 会话恢复 = 重放全部历史消息 -> O(n) 成本, 越长越慢
 //   增量方式:
 //     1. 定期 Checkpoint: 每N轮保存完整状态快照
 //     2. 增量 Diff: 快照之间只保存变化部分
@@ -429,7 +429,7 @@ impl SessionRecoveryManager {
         }
     }
 
-    // ─── 内部方法 ─────────────────────────────
+    // --- 内部方法 -----------------------------
 
     async fn get_latest_snapshot(&self, session_id: &SessionId) -> Option<SessionSnapshot> {
         self.snapshots.read().await

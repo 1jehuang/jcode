@@ -1,28 +1,21 @@
 use super::openai_request::{build_responses_input, build_tools};
 use super::{EventStream, Provider};
 use crate::auth::codex::CodexCredentials;
-use crate::auth::oauth;
 #[cfg(test)]
 use crate::message::TOOL_OUTPUT_MISSING_TEXT;
 use crate::message::{Message as ChatMessage, StreamEvent, ToolDefinition};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use futures::{FutureExt, SinkExt, StreamExt as FuturesStreamExt};
-use reqwest::header::HeaderValue;
+use futures::StreamExt as FuturesStreamExt;
 use reqwest::{Client, StatusCode};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::panic::AssertUnwindSafe;
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, LazyLock, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock, mpsc};
-use tokio_stream::wrappers::ReceiverStream;
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
@@ -340,25 +333,29 @@ async fn ensure_persistent_ws_is_healthy(state: &mut PersistentWsState) -> Resul
         idle_for.as_millis()
     ));
 
-    state
+    let ping_result: Result<(), String> = state
         .ws_stream
         .send(WsMessage::Ping(Vec::new()))
         .await
-        .map_err(|err| format!("healthcheck ping send error: {}", err))?;
+        .map_err(|err| format!("healthcheck ping send error: {}", err));
+    ping_result?;
 
     let started_at = Instant::now();
     let timeout = Duration::from_millis(WEBSOCKET_PERSISTENT_HEALTHCHECK_TIMEOUT_MS);
 
     while started_at.elapsed() < timeout {
         let remaining = timeout.saturating_sub(started_at.elapsed());
-        let next_item = tokio::time::timeout(remaining, state.ws_stream.next())
-            .await
-            .map_err(|_| {
-                format!(
+        let timeout_result: Result<Result<Option<WsMessage>, WsMessage>, tokio::time::error::Elapsed> = tokio::time::timeout(remaining, state.ws_stream.next())
+            .await;
+        let next_item = match timeout_result {
+            Ok(inner) => inner,
+            Err(_) => {
+                return Err(format!(
                     "healthcheck pong timeout after {}ms",
                     WEBSOCKET_PERSISTENT_HEALTHCHECK_TIMEOUT_MS
-                )
-            })?;
+                ))
+            }
+        }?;
 
         match next_item {
             Some(Ok(WsMessage::Pong(_))) => {
@@ -370,11 +367,12 @@ async fn ensure_persistent_ws_is_healthy(state: &mut PersistentWsState) -> Resul
                 return Ok(true);
             }
             Some(Ok(WsMessage::Ping(payload))) => {
-                state
+                let pong_result: Result<(), String> = state
                     .ws_stream
                     .send(WsMessage::Pong(payload))
                     .await
-                    .map_err(|err| format!("healthcheck pong send error: {}", err))?;
+                    .map_err(|err| format!("healthcheck pong send error: {}", err));
+                pong_result?;
                 state.last_activity_at = Instant::now();
             }
             Some(Ok(WsMessage::Close(_))) => {

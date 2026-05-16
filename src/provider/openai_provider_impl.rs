@@ -314,10 +314,13 @@ impl Provider for OpenAIProvider {
                 }
             };
 
-            let result = AssertUnwindSafe(stream_task).catch_unwind().await;
+            let result: Result<
+                std::result::Result<(), Box<dyn std::any::Any + Send>>,
+                Box<dyn std::any::Any + Send>,
+            > = AssertUnwindSafe(stream_task).catch_unwind().await;
 
             if let Err(panic_payload) = result {
-                let msg = if let Some(text) = panic_payload.downcast_ref::<&str>() {
+                let msg: String = if let Some(text) = panic_payload.downcast_ref::<&str>() {
                     (*text).to_string()
                 } else if let Some(text) = panic_payload.downcast_ref::<String>() {
                     text.clone()

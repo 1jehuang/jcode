@@ -11,24 +11,24 @@
 //! ## 架构设计
 //!
 //! ```
-//! ┌─────────────────────────────────────┐
-//! │        AhoCorasickMatcher           │
-//! ├─────────────────────────────────────┤
-//! │  ┌───────────┐  ┌────────────────┐ │
-//! │  │ Trie构建器 │→│ 失败函数计算    │ │
-//! │  └───────────┘  └────────────────┘ │
-//! │         ↓              ↓            │
-//! │  ┌──────────────────────────────┐   │
-//! │  │     自动机状态机             │   │
-//! │  │  State0 → State1 → ...       │   │
-//! │  │     ↘          ↓            │   │
-//! │  │      Failure Links           │   │
-//! │  └──────────────────────────────┘   │
-//! ├─────────────────────────────────────┤
-//! │  LRU Cache (命中率 >90%)           │
-//! │  Pattern Normalization Layer      │
-//! │  Result Aggregation & Scoring     │
-//! └─────────────────────────────────────┘
+//! +-------------------------------------+
+//! |        AhoCorasickMatcher           |
+//! +-------------------------------------+
+//! |  +-----------+  +----------------+ |
+//! |  | Trie构建器 |->| 失败函数计算    | |
+//! |  +-----------+  +----------------+ |
+//! |         v              v            |
+//! |  +------------------------------+   |
+//! |  |     自动机状态机             |   |
+//! |  |  State0 -> State1 -> ...       |   |
+//! |  |     ↘          v            |   |
+//! |  |      Failure Links           |   |
+//! |  +------------------------------+   |
+//! +-------------------------------------+
+//! |  LRU Cache (命中率 >90%)           |
+//! |  Pattern Normalization Layer      |
+//! |  Result Aggregation & Scoring     |
+//! +-------------------------------------+
 //! ```
 
 use aho_corasick::AhoCorasick;
@@ -39,7 +39,7 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-// ─── Constants ─────────────────────────────────────────
+// --- Constants -----------------------------------------
 
 /// 默认缓存大小
 const DEFAULT_CACHE_SIZE: usize = 10000;
@@ -47,7 +47,7 @@ const DEFAULT_CACHE_SIZE: usize = 10000;
 /// 缓存TTL (秒)
 const CACHE_TTL_SECS: u64 = 300; // 5分钟
 
-// ─── Core Types ───────────────────────────────────────
+// --- Core Types ---------------------------------------
 
 /// 匹配结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,7 +72,7 @@ pub struct MatchResult {
 }
 
 /// 风险等级 (与safety.rs保持一致)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskLevel {
     Critical,
@@ -114,7 +114,7 @@ pub enum SecurityCategory {
     Other,
 }
 
-// ─── LRU Cache Implementation ─────────────────────────
+// --- LRU Cache Implementation -------------------------
 
 /// 缓存条目
 #[derive(Clone)]
@@ -196,14 +196,14 @@ impl<T: Clone> LruCache<T> {
     }
 }
 
-// ─── Aho-Corasick Matcher ─────────────────────────────
+// --- Aho-Corasick Matcher -----------------------------
 
 /// Aho-Corasick多模式匹配器
 pub struct AhoCorasickMatcher {
     /// Aho-Corasick自动机
     automaton: Arc<AhoCorasick>,
     
-    /// 模式元数据映射 (pattern_id → metadata)
+    /// 模式元数据映射 (pattern_id -> metadata)
     pattern_metadata: Vec<PatternMetadata>,
     
     /// 结果缓存
@@ -288,7 +288,7 @@ pub struct MatcherStats {
 impl AhoCorasickMatcher {
     /// 从模式列表创建新的匹配器
     pub fn new(
-        patterns: Vec<(String, RiskLevel, SecurityCategory)>,
+        patterns: Vec<String, RiskLevel, SecurityCategory>,
         config: Option<MatcherConfig>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let config = config.unwrap_or_default();
@@ -299,12 +299,12 @@ impl AhoCorasickMatcher {
             .collect();
         
         if filtered_patterns.is_empty() {
-            anyhow::bail!("No valid patterns provided");
+            return Err("No valid patterns provided".into());
         }
         
         if filtered_patterns.len() > config.max_patterns {
-            anyhow::bail!("Too many patterns: {} (max={})", 
-                          filtered_patterns.len(), config.max_patterns);
+            return Err(format!("Too many patterns: {} (max={})", 
+                          filtered_patterns.len(), config.max_patterns).into());
         }
         
         // 提取纯字符串模式
@@ -367,7 +367,7 @@ impl AhoCorasickMatcher {
     }
 
     /// 获取默认的敏感词库
-    fn get_default_sensitive_patterns() -> Vec<(String, RiskLevel, SecurityCategory)> {
+    fn get_default_sensitive_patterns() -> Vec<String, RiskLevel, SecurityCategory> {
         vec![
             // === 文件删除类 (Critical) ===
             ("rm -rf".to_string(), RiskLevel::Critical, SecurityCategory::FileDeletion),
@@ -691,7 +691,7 @@ impl AhoCorasickMatcher {
     }
 }
 
-// ─── Integration with Safety System ───────────────────
+// --- Integration with Safety System -------------------
 
 /// 将Aho-Corasick集成到现有安全系统的适配器
 pub struct SafetyAdapter {
@@ -781,7 +781,7 @@ pub struct SafetyCheckResult {
     pub confidence: f64,
 }
 
-// ─── Tests ─────────────────────────────────────────────
+// --- Tests ---------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -858,7 +858,7 @@ mod tests {
         
         // 缓存命中率应该很高 (>90%)
         assert!(stats.hit_rate > 0.9, 
-                format!("Cache hit rate should be >90%, got {:.2}%", stats.hit_rate * 100.0));
+                "Cache hit rate should be >90%, got {:.2}%", stats.hit_rate * 100.0);
     }
 
     #[tokio::test]

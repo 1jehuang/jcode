@@ -25,30 +25,30 @@
 //
 // ## 架构
 //
-// ┌──────────────────────────────┐
-// │        Tool Layer            │ ← src/tool/lsp.rs (AI Agent 入口)
-// └──────────────┬───────────────┘
-//                │
-// ┌──────────────▼───────────────┐
-// │      LspServerManager        │ ← server_manager.rs (多实例管理)
-// │  ┌────────┬────────┐        │
-// │  │rust-analyzer│tsserver│    │ ← 每个 LSP Server 进程
-// │  └────────┴────────┘        │
-// └──────────────┬───────────────┘
-//                │
-// ┌──────────────▼───────────────┐
-// │       LspClient              │ ← client.rs (JSON-RPC 通信)
-// │  · send_request / response   │
-// │  · send_notification         │
-// │  · process lifecycle         │
-// └──────────────┬───────────────┘
-//                │
-// ┌──────────────▼───────────────┐
-// │     Transport Layer          │ ← transport.rs (协议编解码)
-// │  · Content-Length parsing    │
-// │  · Async I/O (tokio)        │
-// │  · Request ID routing        │
-// └──────────────────────────────┘
+// +------------------------------+
+// |        Tool Layer            | <- src/tool/lsp.rs (AI Agent 入口)
+// +--------------+---------------+
+//                |
+// +--------------▼---------------+
+// |      LspServerManager        | <- server_manager.rs (多实例管理)
+// |  +--------+--------+        |
+// |  |rust-analyzer|tsserver|    | <- 每个 LSP Server 进程
+// |  +--------+--------+        |
+// +--------------+---------------+
+//                |
+// +--------------▼---------------+
+// |       LspClient              | <- client.rs (JSON-RPC 通信)
+// |  · send_request / response   |
+// |  · send_notification         |
+// |  · process lifecycle         |
+// +--------------+---------------+
+//                |
+// +--------------▼---------------+
+// |     Transport Layer          | <- transport.rs (协议编解码)
+// |  · Content-Length parsing    |
+// |  · Async I/O (tokio)        |
+// |  · Request ID routing        |
+// +------------------------------+
 // ════════════════════════════════════════════════════════════════
 
 
@@ -63,9 +63,11 @@ mod performance;
 mod ast_operations;
 mod multi_workspace;
 mod tree_sitter;
+mod remote_proxy;
+mod incremental_parser;
 
 pub use transport::{build_request, build_notification, parse_response, JsonRpcError};
-pub use client::{LspClient, LspError, LspResult};
+pub use client::{LspClient, LspError, LspResult, LspMetrics, NotificationHandler};
 pub use server_manager::{
     LspServerManager, 
     ServerConfig, 
@@ -107,6 +109,8 @@ pub use multi_workspace::{
     WorkspaceInstance,
     MultiWorkspaceStats,
 };
+pub use remote_proxy::RemoteLspProxy;
+pub use incremental_parser::{IncrementalParser, IncrementalStats, SourceEdit};
 pub use tree_sitter::{
     TreeSitterParserManager,
     TreeSitterRustParser,
@@ -154,7 +158,7 @@ pub trait LspOperations: Send + Sync {
     /// 获取悬停文档
     async fn hover(&self, file: &str, line: u32, character: u32) -> LspResult<Option<lsp_types::Hover>>;
 
-    // ─── Advanced operations (Phase 2) ──────────────────
+    // --- Advanced operations (Phase 2) ------------------
 
     /// 获取文档符号列表 (函数、类、变量等)
     async fn document_symbol(&self, file: &str) -> LspResult<Vec<lsp_types::DocumentSymbol>>;
@@ -167,4 +171,12 @@ pub trait LspOperations: Send + Sync {
 
     /// 准备调用层次 (获取调用树根节点)
     async fn prepare_call_hierarchy(&self, file: &str, line: u32, character: u32) -> LspResult<Vec<lsp_types::CallHierarchyItem>>;
+
+    // --- New operations — LSP tool enhanced -------------
+
+    /// 执行代码操作 (快速修复/重构)
+    async fn code_action(&self, file: &str, range: lsp_types::Range, context: lsp_types::CodeActionContext) -> LspResult<Vec<lsp_types::CodeActionOrCommand>>;
+
+    /// LSP 级重命名 (跨文件，需要 LSP 服务器支持)
+    async fn rename_symbol_lsp(&self, file: &str, line: u32, character: u32, new_name: &str) -> LspResult<lsp_types::WorkspaceEdit>;
 }

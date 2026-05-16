@@ -452,7 +452,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                     // Add header
                     lines.push(
                         Line::from(Span::styled(
-                            format!("┌─ {} ", lang_label),
+                            format!("+- {} ", lang_label),
                             Style::default().fg(md_dim_color()),
                         ))
                         .left_aligned(),
@@ -461,14 +461,14 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                     // Add code lines
                     for hl_line in highlighted {
                         let mut spans =
-                            vec![Span::styled("│ ", Style::default().fg(md_dim_color()))];
+                            vec![Span::styled("| ", Style::default().fg(md_dim_color()))];
                         spans.extend(hl_line.spans);
                         lines.push(Line::from(spans).left_aligned());
                     }
 
                     // Add footer
                     lines.push(
-                        Line::from(Span::styled("└─", Style::default().fg(md_dim_color())))
+                        Line::from(Span::styled("+-", Style::default().fg(md_dim_color())))
                             .left_aligned(),
                     );
                 }
@@ -632,7 +632,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                 );
                 let block_start = lines.len();
                 let width = rendered_rule_width(max_width);
-                let rule = Span::styled("─".repeat(width), Style::default().fg(md_dim_color()));
+                let rule = Span::styled("-".repeat(width), Style::default().fg(md_dim_color()));
                 lines.push(with_blockquote_prefix(
                     Line::from(rule).left_aligned(),
                     blockquote_depth,
@@ -892,24 +892,24 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
             } else {
                 // For mermaid, show "rendering..." placeholder while streaming
                 let dim = Style::default().fg(md_dim_color());
-                lines.push(Line::from(Span::styled("┌─ mermaid (streaming...) ", dim)));
+                lines.push(Line::from(Span::styled("+- mermaid (streaming...) ", dim)));
                 // Show first few lines of the diagram source
                 for source_line in code_block_content.lines().take(5) {
                     lines.push(Line::from(vec![
-                        Span::styled("│ ", dim),
+                        Span::styled("| ", dim),
                         Span::styled(source_line.to_string(), Style::default().fg(code_fg())),
                     ]));
                 }
                 if code_block_content.lines().count() > 5 {
-                    lines.push(Line::from(Span::styled("│ ...", dim)));
+                    lines.push(Line::from(Span::styled("| ...", dim)));
                 }
-                lines.push(Line::from(Span::styled("└─", dim)));
+                lines.push(Line::from(Span::styled("+-", dim)));
             }
         } else {
             // Regular code block - render what we have
             let lang_str = code_block_lang.as_deref().unwrap_or("");
             let header = format!(
-                "┌─ {} (streaming...)",
+                "+- {} (streaming...)",
                 if lang_str.is_empty() {
                     "code"
                 } else {
@@ -924,17 +924,17 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
             // Render code with syntax highlighting
             let highlighted = highlight_code(&code_block_content, code_block_lang.as_deref());
             for line in highlighted {
-                let mut prefixed = vec![Span::styled("│ ", Style::default().fg(md_dim_color()))];
+                let mut prefixed = vec![Span::styled("| ", Style::default().fg(md_dim_color()))];
                 prefixed.extend(line.spans);
                 lines.push(Line::from(prefixed));
             }
             // Show cursor to indicate more content coming
             lines.push(Line::from(Span::styled(
-                "│ ▌",
+                "| ▌",
                 Style::default().fg(md_dim_color()),
             )));
             lines.push(Line::from(Span::styled(
-                "└─",
+                "+-",
                 Style::default().fg(md_dim_color()),
             )));
         }

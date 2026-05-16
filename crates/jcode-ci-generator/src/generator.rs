@@ -2,7 +2,7 @@ use crate::stack_detector::TechStack;
 use crate::templates::{CiTemplate, Platform};
 use std::collections::HashMap;
 
-/// 生成的配置文件 (文件名 → 内容)
+/// 生成的配置文件 (文件名 -> 内容)
 #[derive(Debug, Clone)]
 pub struct GeneratedConfig {
     pub files: HashMap<String, String>,

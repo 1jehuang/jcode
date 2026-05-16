@@ -1,4 +1,4 @@
-use super::types::{MarketplacePlugin, SearchResult, Category, Review};
+use super::types::{MarketplacePlugin, SearchResult, Category, Review, PluginVersion};
 use super::registry::MarketplaceRegistry;
 
 pub struct MarketplaceClient {

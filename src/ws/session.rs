@@ -17,7 +17,7 @@ use uuid::Uuid;
 use tracing::{info};
 
 /// 客户端会话状态
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ClientSession {
     /// 唯一会话 ID
     pub id: String,

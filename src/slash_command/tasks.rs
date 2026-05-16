@@ -89,13 +89,13 @@ pub(crate) async fn register_workflows() {
                 let parts: Vec<&str> = a.trim().splitn(2, ' ').collect();
                 match parts.first().copied().unwrap_or("") {
                     "list"|"ls"|"" => {
-                        let t = crate::workflow::template::all();
+                        let t = crate::workflow::WorkflowTemplate::all();
                         eprintln!("\n📋 Workflows ({})\n", t.len());
                         for w in &t { eprintln!("  • {} — {}", w.name, w.description); }
                         eprintln!("\n  /workflows run <name>\n");
                     }
                     "run" if parts.len()>=2 => {
-                        match crate::workflow::template::to_config(parts[1]) {
+                        match crate::workflow::WorkflowTemplate::to_config(parts[1]) {
                             Some(cfg) => {
                                 let r = crate::workflow::runner::WorkflowRunner::new();
                                 let id = r.register(cfg).await;

@@ -950,7 +950,7 @@ export OPENAI_API_KEY=your-api-key-here
 
 - Press `Alt+\` to trigger inline completion
 - Press `Ctrl+Shift+J` to open chat panel
-- Select code and right-click → "Explain with jcode"
+- Select code and right-click -> "Explain with jcode"
 
 ## Keyboard Shortcuts
 

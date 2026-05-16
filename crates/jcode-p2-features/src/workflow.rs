@@ -45,7 +45,7 @@ pub struct WorkflowStep {
     pub name: String,
     pub action: ActionType,
     
-    // ── 动作参数 (根据 action 类型选择使用) ──
+    // -- 动作参数 (根据 action 类型选择使用) --
     /// Shell 命令
     pub command: Option<String>,
     /// 工具调用参数

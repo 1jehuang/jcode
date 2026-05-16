@@ -9,7 +9,7 @@
 //!
 //! Claude Code's approach:
 //! 1. Track `cache_read_input_tokens` from each API response
-//! 2. If cache read drops >5% from previous call → likely cache break
+//! 2. If cache read drops >5% from previous call -> likely cache break
 //! 3. Exclude expected drops: compaction, TTL expiration (>5min or >1h),
 //!    model switches, tool schema changes
 //! 4. Log detailed diagnostics when a break is detected
@@ -18,24 +18,24 @@
 //!
 //! ```text
 //! API response arrives
-//!     │
+//!     |
 //! check_cache_break(response)
-//!     │
-//! ┌────┴──────────────────────┐
-//! │ Compare cache_read vs     │
-//! │ previous baseline         │
-//! └────┬──────────────────────┘
-//!      │
+//!     |
+//! +----+----------------------+
+//! | Compare cache_read vs     |
+//! | previous baseline         |
+//! +----+----------------------+
+//!      |
 //!   drop > 5% AND > MIN_TOKENS?
-//!    ┌──┴──┐
+//!    +--+--+
 //!   YES   NO
-//!    │     │
+//!    |     |
 //!  Check exclusions:
-//!  - Compaction?      → Expected (reset baseline)
-//!  - TTL expired?      → Expected
-//!  - Model changed?    → Expected (new baseline)
-//!  - Tool schemas?     → Report with details
-//!  - Unknown?          → CACHE BREAK WARNING!
+//!  - Compaction?      -> Expected (reset baseline)
+//!  - TTL expired?      -> Expected
+//!  - Model changed?    -> Expected (new baseline)
+//!  - Tool schemas?     -> Report with details
+//!  - Unknown?          -> CACHE BREAK WARNING!
 //! ```
 
 use serde::{Deserialize, Serialize};

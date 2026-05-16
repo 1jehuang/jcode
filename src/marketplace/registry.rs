@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use super::types::{MarketplacePlugin, Category, Review};
+use super::types::{MarketplacePlugin, Category, Review, SearchResult};
 
 pub struct MarketplaceRegistry {
     plugins: HashMap<String, MarketplacePlugin>,
@@ -78,18 +78,19 @@ impl MarketplaceRegistry {
             page,
             per_page,
             query: query.map(|s| s.to_string()),
-            categories: if category.is_some() { vec![category.unwrap().clone()] } else { vec![] },
+            categories: category.clone().into_iter().collect(),
         }
     }
 
     pub fn get_by_category(&self, category: &Category) -> Vec<&MarketplacePlugin> {
-        match self.categories.get(category) {
+        let plugins: Vec<&MarketplacePlugin> = match self.categories.get(category) {
             Some(ids) => ids
                 .iter()
                 .filter_map(|id| self.plugins.get(id))
                 .collect(),
             None => vec![],
-        }
+        };
+        plugins
     }
 
     pub fn get_popular(&self, limit: usize) -> Vec<&MarketplacePlugin> {

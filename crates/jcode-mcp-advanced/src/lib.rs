@@ -9,7 +9,7 @@
 //   4. 流式工具调用 — 边执行边返回进度
 //   5. Sampling — MCP Server 通过 Client 请求 LLM 采样
 //   6. 权限协商 — 工具调用前的权限审批流程
-//   7. 进程生命周期管理 — SIGINT → SIGTERM → SIGKILL 升级
+//   7. 进程生命周期管理 — SIGINT -> SIGTERM -> SIGKILL 升级
 //
 // 对应 Claude Code 源码:
 //   - src/services/mcp/client.ts (~2000行) — 核心客户端

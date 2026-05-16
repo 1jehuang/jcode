@@ -47,7 +47,7 @@ use tokio::sync::broadcast;
 use tracing::info;
 
 /// Bridge 全局状态 (单例模式)
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BridgeRuntime {
     pub config: BridgeConfig,
     pub server: Arc<BridgeServer>,

@@ -135,7 +135,7 @@ pub enum NetworkError {
 /// 上下文预算错误
 #[derive(Error, Debug, Clone)]
 pub enum BudgetError {
-    #[error("Context window full ({0}%/{}k tokens)")]
+    #[error("Context window full ({0}%/{1}k tokens)")]
     ContextFull(f64, usize),
 
     #[error("Tool result too large ({0} chars, limit {1})")]
@@ -181,7 +181,7 @@ impl From<&str> for JcodeError {
     fn from(s: &str) -> Self { JcodeError::Other(s.to_string()) }
 }
 
-// ── 工具函数 ──
+// -- 工具函数 --
 
 /// 将任意错误转换为友好显示字符串
 /// 源自 Claude Code 的 `errorMessage()`
