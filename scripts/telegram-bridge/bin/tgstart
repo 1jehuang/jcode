@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""tgstart - Start the Jcode Telegram Bridge daemon."""
+import os, sys, signal
+
+DIR = os.path.expanduser("~/.jcode/telegram")
+PID_FILE = os.path.join(DIR, "bridge.pid")
+LOG_FILE = os.path.join(DIR, "bridge.log")
+BRIDGE_SCRIPT = os.path.join(DIR, "bridge.py")
+
+os.makedirs(DIR, exist_ok=True)
+
+# Check if already running
+if os.path.exists(PID_FILE):
+    pid = open(PID_FILE).read().strip()
+    try:
+        os.kill(int(pid), 0)
+        print(f"Bridge already running (PID {pid})")
+        sys.exit(0)
+    except:
+        os.remove(PID_FILE)
+
+# Check if bridge.py exists in data dir or in same dir as this script
+if not os.path.exists(BRIDGE_SCRIPT):
+    # Try same directory
+    same_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bridge.py")
+    if os.path.exists(same_dir):
+        BRIDGE_SCRIPT = os.path.abspath(same_dir)
+    else:
+        print("❌ bridge.py not found. Install the bridge first.")
+        print("   See: https://github.com/LAG-Yadav/jcode-telegram-bridge")
+        sys.exit(1)
+
+import subprocess
+proc = subprocess.Popen(
+    ["python3", "-u", BRIDGE_SCRIPT],
+    stdout=open(LOG_FILE, "a"),
+    stderr=subprocess.STDOUT,
+    env={**os.environ},
+    start_new_session=True
+)
+
+with open(PID_FILE, "w") as f:
+    f.write(str(proc.pid))
+
+print(f"✅ Bridge started (PID {proc.pid})")
+print(f"   Log: {LOG_FILE}")
+print(f"   Stop: kill {proc.pid}")

@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+"""tgstatus - Check if the Jcode Telegram Bridge is running."""
+import json, os, sys
+from datetime import datetime
+
+DIR = os.path.expanduser("~/.jcode/telegram")
+PID_FILE = os.path.join(DIR, "bridge.pid")
+LOG_FILE = os.path.join(DIR, "bridge.log")
+INBOX_FILE = os.path.join(DIR, "inbox.jsonl")
+SENT_FILE = os.path.join(DIR, "sent.jsonl")
+
+if os.path.exists(PID_FILE):
+    pid = open(PID_FILE).read().strip()
+    try:
+        os.kill(int(pid), 0)
+        print(f"✅ Bridge RUNNING (PID {pid})")
+    except:
+        print(f"❌ Bridge NOT running (stale PID {pid})")
+else:
+    print("❌ Bridge NOT running")
+
+# Message counts
+if os.path.exists(INBOX_FILE):
+    count = sum(1 for _ in open(INBOX_FILE))
+    print(f"📩 Messages received: {count}")
+if os.path.exists(SENT_FILE):
+    count = sum(1 for _ in open(SENT_FILE))
+    print(f"📤 Messages sent: {count}")
+
+# Last log line
+if os.path.exists(LOG_FILE):
+    lines = open(LOG_FILE).read().strip().split("\n")
+    if lines:
+        print(f"📋 Last log: {lines[-1][:100]}")

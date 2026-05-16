@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""tgsend - Send a message to a Telegram user via the bridge.
+
+Usage from terminal:
+  tgsend <chat_id> Your message here
+
+Usage from Jcode (via debug socket):
+  echo '{"chat_id": 12345, "text": "hello"}' | tgsend
+"""
+import json, os, sys, time, socket
+
+def find_socket():
+    env = os.environ.get("JCODE_DEBUG_SOCKET", "")
+    if env and os.path.exists(env):
+        return env
+    for c in ["/run/user/1000/jcode-debug.sock",
+              os.path.expanduser("~/.jcode/debug.sock"),
+              "/tmp/jcode-debug.sock"]:
+        if os.path.exists(c):
+            return c
+    return None
+
+def inject_msg(text):
+    """Inject a message into Jcode via debug socket, which triggers a bridge response."""
+    sock = find_socket()
+    if not sock:
+        print("❌ Jcode socket not found")
+        sys.exit(1)
+    
+    cmd = f"client:message:📤 {text}"
+    
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(5)
+    try:
+        s.connect(sock)
+        msg = json.dumps({"type": "debug_command", "id": int(time.time()*1000), "command": cmd}) + "\n"
+        s.sendall(msg.encode())
+        time.sleep(0.2)
+        data = b""
+        s.settimeout(3)
+        try:
+            while True:
+                chunk = s.recv(8192)
+                if not chunk: break
+                data += chunk
+        except socket.timeout:
+            pass
+        print(f"✅ Sent to Telegram via Jcode: {text[:50]}...")
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        sys.exit(1)
+    finally:
+        s.close()
+
+if __name__ == "__main__":
+    # Support piped JSON: {"chat_id": 123, "text": "hello"}
+    if not sys.stdin.isatty():
+        try:
+            piped = sys.stdin.read().strip()
+            if piped:
+                data = json.loads(piped)
+                chat_id = data.get("chat_id", "")
+                text = data.get("text", "")
+                if chat_id and text:
+                    inject_msg(f"[to {chat_id}] {text}")
+                    sys.exit(0)
+        except:
+            pass
+    
+    # CLI mode
+    if len(sys.argv) < 3:
+        print("Usage: tgsend <chat_id> <message>")
+        sys.exit(1)
+    
+    chat_id = sys.argv[1]
+    text = " ".join(sys.argv[2:])
+    inject_msg(f"[to {chat_id}] {text}")
