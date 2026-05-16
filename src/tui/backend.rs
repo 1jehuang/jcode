@@ -232,6 +232,7 @@ pub struct RemoteConnection {
     next_request_id: u64,
     tool_diff: RemoteDiffTracker,
     line_buffer: String,
+    line_bytes: Vec<u8>,
     has_loaded_history: bool,
     call_output_tokens_seen: u64,
 }
@@ -289,6 +290,7 @@ impl RemoteConnection {
             next_request_id: 1,
             tool_diff: RemoteDiffTracker::default(),
             line_buffer: String::new(),
+            line_bytes: Vec::new(),
             has_loaded_history: false,
             call_output_tokens_seen: 0,
         };
@@ -888,7 +890,13 @@ impl RemoteConnection {
     pub async fn next_event(&mut self) -> RemoteRead {
         loop {
             self.line_buffer.clear();
-            match self.reader.read_line(&mut self.line_buffer).await {
+            // `read_line` is not cancellation-safe when used inside the TUI
+            // `tokio::select!` loop. Large history/tool-output frames can be
+            // partially consumed if another branch wins the select, causing the
+            // next read to start in the middle of a JSON frame. `read_until` is
+            // cancellation-safe and appends into our retained buffer, so partial
+            // bytes survive until this future is polled again.
+            match self.reader.read_until(b'\n', &mut self.line_bytes).await {
                 Ok(0) => {
                     crate::logging::warn(&format!(
                         "RemoteConnection::next_event: peer closed (session_id={:?}, client_instance_id={:?})",
@@ -897,6 +905,23 @@ impl RemoteConnection {
                     return RemoteRead::Disconnected(RemoteDisconnectReason::PeerClosed);
                 }
                 Ok(_) => {
+                    let line_bytes = std::mem::take(&mut self.line_bytes);
+                    let line_len = line_bytes.len();
+                    self.line_buffer = match String::from_utf8(line_bytes) {
+                        Ok(line) => line,
+                        Err(error) => {
+                            crate::logging::warn(&format!(
+                                "RemoteConnection::next_event: invalid utf8={} bytes={} (session_id={:?}, client_instance_id={:?})",
+                                error,
+                                line_len,
+                                self.session_id,
+                                self.client_instance_id
+                            ));
+                            return RemoteRead::Disconnected(RemoteDisconnectReason::Protocol(
+                                error.to_string(),
+                            ));
+                        }
+                    };
                     if self.line_buffer.trim().is_empty() {
                         crate::logging::warn(&format!(
                             "RemoteConnection::next_event: skipping blank line (session_id={:?}, client_instance_id={:?})",
@@ -953,6 +978,7 @@ impl RemoteConnection {
             next_request_id: 1,
             tool_diff: RemoteDiffTracker::default(),
             line_buffer: String::new(),
+            line_bytes: Vec::new(),
             has_loaded_history: false,
             call_output_tokens_seen: 0,
         }
@@ -1105,6 +1131,7 @@ impl RemoteEventState for ReplayRemoteState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::ServerEvent;
     use std::time::Duration;
 
     #[tokio::test]
@@ -1177,5 +1204,51 @@ mod tests {
             serde_json::from_str::<Request>(&line).expect("clear request should deserialize"),
             Request::Clear { id: 1 }
         ));
+    }
+
+    #[tokio::test]
+    async fn next_event_preserves_partial_large_frame_after_cancelled_read() {
+        let mut remote = RemoteConnection::dummy();
+        let peer = remote
+            ._dummy_peer
+            .take()
+            .expect("dummy remote should retain peer stream");
+        let (_reader, mut writer) = peer.into_split();
+
+        let payload = "x".repeat(256 * 1024);
+        let event = ServerEvent::Error {
+            id: 42,
+            message: payload.clone(),
+            retry_after_secs: None,
+        };
+        let encoded = crate::protocol::encode_event(&event);
+        let split = encoded.len() / 2;
+
+        writer
+            .write_all(encoded[..split].as_bytes())
+            .await
+            .expect("first partial frame write should succeed");
+
+        let cancelled = tokio::time::timeout(Duration::from_millis(10), remote.next_event()).await;
+        assert!(
+            cancelled.is_err(),
+            "partial frame read should still be pending until newline arrives"
+        );
+
+        writer
+            .write_all(encoded[split..].as_bytes())
+            .await
+            .expect("second partial frame write should succeed");
+
+        match tokio::time::timeout(Duration::from_secs(1), remote.next_event())
+            .await
+            .expect("complete frame should be read before timeout")
+        {
+            RemoteRead::Event(ServerEvent::Error { id, message, .. }) => {
+                assert_eq!(id, 42);
+                assert_eq!(message, payload);
+            }
+            other => panic!("expected error event after completing partial frame, got {other:?}"),
+        }
     }
 }
