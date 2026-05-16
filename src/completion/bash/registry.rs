@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// 命令规格定义
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CommandSpec {
     /// 命令名称
     pub name: String,
@@ -38,7 +38,7 @@ pub struct CommandSpec {
 }
 
 /// 子命令规格
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SubcommandSpec {
     /// 子命令名
     pub name: String,
@@ -60,7 +60,7 @@ pub struct SubcommandSpec {
 }
 
 /// 参数规格
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ArgSpec {
     /// 参数名称
     pub name: String,
@@ -219,7 +219,8 @@ impl CommandRegistry {
                     name: "pathspec".to_string(),
                     arg_type: ArgType::File { glob: Some("*".to_string()), must_exist: false },
                     required: false,
-                    ..Default::default()
+                    default_value: None,
+                    description: None,
                 },
             ],
             options: vec!["-s".into(), "--short".into(), "-b".into(), "--branch".into(), 
@@ -235,6 +236,7 @@ impl CommandRegistry {
                     name: "message".to_string(),
                     arg_type: ArgType::String { default: None },
                     required: false,
+                    default_value: None,
                     description: Some("提交信息".to_string()),
                 },
             ],
@@ -254,12 +256,14 @@ impl CommandRegistry {
                     name: "repository".to_string(),
                     arg_type: ArgType::DynamicChoice { generator: "git_remotes".to_string(), cache_ttl_secs: 60 },
                     required: false,
+                    default_value: None,
                     description: Some("远程仓库名称".to_string()),
                 },
                 ArgSpec {
                     name: "refspec".to_string(),
                     arg_type: ArgType::DynamicChoice { generator: "git_branches_local".to_string(), cache_ttl_secs: 30 },
                     required: false,
+                    default_value: None,
                     description: Some("分支引用".to_string()),
                 },
             ],
@@ -279,16 +283,27 @@ impl CommandRegistry {
                     name: "repository".to_string(),
                     arg_type: ArgType::DynamicChoice { generator: "git_remotes".to_string(), cache_ttl_secs: 60 },
                     required: false,
+                        default_value: None,
+
+                        description: None,
+
                 },
                 ArgSpec {
                     name: "refspec".to_string(),
                     arg_type: ArgType::DynamicChoice { generator: "git_branches_remote".to_string(), cache_ttl_secs: 30 },
                     required: false,
+                        default_value: None,
+
+                        description: None,
+
                 },
             ],
             options: vec!["--rebase".into(), "--no-rebase".into(), "--ff-only".into(),
                         "--no-ff".into(), "--autostash".into()],
-        });
+                examples: None,
+
+        ..Default::default(),
+});
 
         git_subcommands.insert("checkout".to_string(), SubcommandSpec {
             name: "checkout".to_string(),
@@ -298,6 +313,7 @@ impl CommandRegistry {
                     name: "branch".to_string(),
                     arg_type: ArgType::DynamicChoice { generator: "git_branches_all".to_string(), cache_ttl_secs: 30 },
                     required: true,
+                    default_value: None,
                     description: Some("分支名或文件路径".to_string()),
                 },
             ],
@@ -317,11 +333,16 @@ impl CommandRegistry {
                 name: "name".to_string(),
                 arg_type: ArgType::String { default: None },
                 required: false,
+                default_value: None,
+                description: None,
             }],
             options: vec!["-a".into(), "--all".into(), "-d".into(), "--delete".into(),
                         "-D".into(), "-m".into(), "--move".into(), "-M".into(),
                         "--show-current".into()],
-        });
+                examples: None,
+
+        ..Default::default(),
+});
 
         git_subcommands.insert("merge".to_string(), SubcommandSpec {
             name: "merge".to_string(),
@@ -330,10 +351,15 @@ impl CommandRegistry {
                 name: "commit".to_string(),
                 arg_type: ArgType::DynamicChoice { generator: "git_branches_all".to_string(), cache_ttl_secs: 30 },
                 required: true,
+                default_value: None,
+                description: None,
             }],
             options: vec!["--no-ff".into(), "--ff-only".into(), "--squash".into(),
                         "-m".into(), "--no-commit".into()],
-        });
+                examples: None,
+
+        ..Default::default(),
+});
 
         git_subcommands.insert("log".to_string(), SubcommandSpec {
             name: "log".to_string(),
@@ -342,6 +368,8 @@ impl CommandRegistry {
                 name: "pathspec".to_string(),
                 arg_type: ArgType::File { glob: Some("*".to_string()), must_exist: false },
                 required: false,
+                default_value: None,
+                description: None,
             }],
             options: vec!["--oneline".into(), "--graph".into(), "-n".into(), "--max-count=".into(),
                         "--since=".into(), "--until=".into(), "--author=".into(),
@@ -356,12 +384,15 @@ impl CommandRegistry {
             name: "diff".to_string(),
             description: "显示更改差异".to_string(),
             args: vec![
-                ArgSpec { name: "commit".to_string(), arg_type: ArgType::DynamicChoice { generator: "git_commits".to_string(), cache_ttl_secs: 10 }, required: false },
-                ArgSpec { name: "file".to_string(), arg_type: ArgType::File { glob: Some("*.{rs,ts,py,go}".to_string()), must_exist: false }, required: false },
+                ArgSpec { name: "commit".to_string(), arg_type: ArgType::DynamicChoice { generator: "git_commits".to_string(), cache_ttl_secs: 10 }, default_value: None, description: None, required: false },
+                ArgSpec { name: "file".to_string(), arg_type: ArgType::File { glob: Some("*.{rs,ts,py,go}".to_string()), must_exist: false }, default_value: None, description: None, required: false },
             ],
             options: vec!["--staged".into(), "--cached".into(), "--stat".into(),
                         "--name-only".into(), "--color".into()],
-        });
+                examples: None,
+
+        ..Default::default(),
+});
 
         git_subcommands.insert("add".to_string(), SubcommandSpec {
             name: "add".to_string(),
@@ -370,6 +401,8 @@ impl CommandRegistry {
                 name: "pathspec".to_string(),
                 arg_type: ArgType::File { glob: Some("*".to_string()), must_exist: false },
                 required: true,
+                default_value: None,
+                description: None,
             }],
             options: vec!["-A".into(), "--all".into(), "-p".into(), "--patch".into(),
                         "-n".into(), "--dry-run".into()],
@@ -387,15 +420,20 @@ impl CommandRegistry {
                 name: "commit".to_string(),
                 arg_type: ArgType::DynamicChoice { generator: "git_commits".to_string(), cache_ttl_secs: 10 },
                 required: false,
+                default_value: None,
+                description: None,
             }],
             options: vec!["--hard".into(), "--soft".into(), "--mixed".into(),
                         "--merge".into(), "--keep".into()],
-        });
+                examples: None,
+
+        ..Default::default(),
+});
 
         // 更多Git子命令...
         for (name, desc) in [
             ("stash", "暂存更改"),
-            ("rebase",变基分支"),
+            ("rebase", "变基分支"),
             ("tag", "管理标签"),
             ("fetch", "从远程下载"),
             ("remote", "管理远程仓库"),
@@ -445,17 +483,20 @@ impl CommandRegistry {
         docker_subcommands.insert("images".to_string(), SubcommandSpec {
             name: "images".to_string(),
             description: "列出镜像".to_string(),
-            args: vec![ArgSpec { name: "repository".to_string(), arg_type: ArgType::String { default: None }, required: false }],
+            args: vec![ArgSpec { name: "repository".to_string(), arg_type: ArgType::String { default: None }, default_value: None, description: None, required: false }],
             options: vec!["-a".into(), "--all".into(), "-q".into(), "--quiet".into(),
                         "--filter=".into(), "--format=".into()],
-        });
+                examples: None,
+
+        ..Default::default(),
+});
 
         docker_subcommands.insert("run".to_string(), SubcommandSpec {
             name: "run".to_string(),
             description: "在新容器中运行命令".to_string(),
             args: vec![
-                ArgSpec { name: "image".to_string(), arg_type: ArgType::DynamicChoice { generator: "docker_images".to_string(), cache_ttl_secs: 60 }, required: true, description: Some("镜像名称".to_string()) },
-                ArgSpec { name: "command".to_string(), arg_type: ArgType::String { default: None }, required: false },
+                ArgSpec { name: "image".to_string(), arg_type: ArgType::DynamicChoice { generator: "docker_images".to_string(), cache_ttl_secs: 60 }, default_value: None, required: true, description: Some("镜像名称".to_string()) },
+                ArgSpec { name: "command".to_string(), arg_type: ArgType::String { default: None }, default_value: None, description: None, required: false },
             ],
             options: vec!["-d".into(), "--detach".into(), "-it".into(), "--interactive --tty".into(),
                         "--name=".to_string(), "-p".into(), "--publish=".to_string(),
@@ -472,8 +513,8 @@ impl CommandRegistry {
             name: "exec".to_string(),
             description: "在运行的容器中执行命令".to_string(),
             args: vec![
-                ArgSpec { name: "container".to_string(), arg_type: ArgType::DynamicChoice { generator: "docker_containers_running".to_string(), cache_ttl_secs: 10 }, required: true },
-                ArgSpec { name: "command".to_string(), arg_type: ArgType::String { default: None }, required: true },
+                ArgSpec { name: "container".to_string(), arg_type: ArgType::DynamicChoice { generator: "docker_containers_running".to_string(), cache_ttl_secs: 10 }, default_value: None, description: None, required: true },
+                ArgSpec { name: "command".to_string(), arg_type: ArgType::String { default: None }, default_value: None, description: None, required: true },
             ],
             options: vec!["-it".into(), "-d".into(), "--detach".into(),
                         "-e".into(), "--env=".to_string(), "-w".into(), "--workdir=".to_string()],
@@ -510,6 +551,7 @@ impl CommandRegistry {
         self.commands.insert("docker".to_string(), CommandSpec {
             name: "docker".to_string(),
             description: "容器管理平台".to_string(),
+            long_description: Some("Docker是一个开源的容器化平台，用于开发、部署和运行应用程序。".to_string()),
             subcommands: Some(docker_subcommands),
             global_options: vec![],
             category: CommandCategory::ContainerOrchestration,
@@ -529,7 +571,9 @@ impl CommandRegistry {
                 ArgSpec { 
                     name: "package".to_string(), 
                     arg_type: ArgType::DynamicChoice { generator: "npm_packages_popular".to_string(), cache_ttl_secs: 3600 }, 
-                    required: false 
+                    required: false,
+                    default_value: None,
+                    description: None,
                 },
             ],
             options: vec!["-g".into(), "--global".into(), "-D".into(), "--save-dev".into(),
@@ -549,6 +593,7 @@ impl CommandRegistry {
                 name: "script".to_string(),
                 arg_type: ArgType::DynamicChoice { generator: "npm_scripts".to_string(), cache_ttl_secs: 10 },
                 required: true,
+                default_value: None,
                 description: Some("package.json中的脚本名".to_string()),
             }],
             options: vec![],
@@ -561,16 +606,22 @@ impl CommandRegistry {
         npm_subcommands.insert("update".to_string(), SubcommandSpec {
             name: "update".to_string(),
             description: "更新依赖包".to_string(),
-            args: vec![ArgSpec { name: "package".to_string(), arg_type: ArgType::String { default: None }, required: false }],
+            args: vec![ArgSpec { name: "package".to_string(), arg_type: ArgType::String { default: None }, default_value: None, description: None, required: false }],
             options: vec!["-g".into(), "--global".into()],
-        });
+                examples: None,
+
+        ..Default::default(),
+});
 
         npm_subcommands.insert("test".to_string(), SubcommandSpec {
             name: "test".to_string(),
             description: "运行测试".to_string(),
             args: vec![],
             options: vec!["--watch".into(), "-w".into()],
-        });
+                examples: None,
+
+        ..Default::default(),
+});
 
         // 更多NPM子命令...
         for (name, desc) in [
@@ -590,12 +641,14 @@ impl CommandRegistry {
                 args: vec![],
                 options: vec!["--help".into()],
                 examples: None,
-            });
+            ..Default::default(),
+});
         }
 
         self.commands.insert("npm".to_string(), CommandSpec {
             name: "npm".to_string(),
             description: "JavaScript包管理器".to_string(),
+            long_description: Some("npm是Node.js的默认包管理器，用于安装和管理JavaScript模块。".to_string()),
             subcommands: Some(npm_subcommands),
             global_options: vec![],
             category: CommandCategory::PackageManagement,
@@ -619,9 +672,11 @@ impl CommandRegistry {
                                    "node".into(), "namespace".into(), "configmap".into(),
                                    "secret".into(), "ingress".into(), "pv".into(), "pvc".into()] 
                     }, 
-                    required: true 
+                    required: true,
+                    default_value: None,
+                    description: None,
                 },
-                ArgSpec { name: "name".to_string(), arg_type: ArgType::String { default: None }, required: false },
+                ArgSpec { name: "name".to_string(), arg_type: ArgType::String { default: None }, default_value: None, description: None, required: false },
             ],
             options: vec!["-n".into(), "--namespace=".into(), "-o".into(), "--output=".into(),
                         "-A".into(), "--all-namespaces".into(), "-w".into(), "--watch".into(),
@@ -637,11 +692,14 @@ impl CommandRegistry {
             name: "describe".to_string(),
             description: "显示资源详细信息".to_string(),
             args: vec![
-                ArgSpec { name: "resource".to_string(), arg_type: ArgType::String { default: None }, required: true },
-                ArgSpec { name: "name".to_string(), arg_type: ArgType::String { default: None }, required: true },
+                ArgSpec { name: "resource".to_string(), arg_type: ArgType::String { default: None }, default_value: None, description: None, required: true },
+                ArgSpec { name: "name".to_string(), arg_type: ArgType::String { default: None }, default_value: None, description: None, required: true },
             ],
             options: vec!["-n".into(), "--namespace=".into()],
-        });
+                examples: None,
+
+        ..Default::default(),
+});
 
         kubectl_subcommands.insert("apply".to_string(), SubcommandSpec {
             name: "apply".to_string(),
@@ -650,21 +708,29 @@ impl CommandRegistry {
                 name: "file".to_string(),
                 arg_type: ArgType::File { glob: Some("*.{yaml,yml,json}".to_string()), must_exist: true },
                 required: true,
+                default_value: None,
+                description: None,
             }],
             options: vec!["-f".into(), "--filename=".into(), "-k".into(), "--kustomize=".into(),
-                        "--dry-run=client".into_into()],
-        });
+                        "--dry-run=client".to_string()],
+                examples: None,
+
+        ..Default::default(),
+});
 
         kubectl_subcommands.insert("delete".to_string(), SubcommandSpec {
             name: "delete".to_string(),
             description: "通过文件名、stdin、资源和名称或选择器删除资源".to_string(),
             args: vec![
-                ArgSpec { name: "resource".to_string(), arg_type: ArgType::String { default: None }, required: true },
-                ArgSpec { name: "name".to_string(), arg_type: ArgType::String { default: None }, required: false },
+                ArgSpec { name: "resource".to_string(), arg_type: ArgType::String { default: None }, default_value: None, description: None, required: true },
+                ArgSpec { name: "name".to_string(), arg_type: ArgType::String { default: None }, default_value: None, description: None, required: false },
             ],
             options: vec!["-n".into(), "--namespace=".into(), "--all".into(),
                         "--force".into(), "--grace-period=".into()],
-        });
+                examples: None,
+
+        ..Default::default(),
+});
 
         // 更多Kubectl子命令...
         for (name, desc) in [
@@ -684,12 +750,14 @@ impl CommandRegistry {
                 args: vec![],
                 options: vec!["--help".into()],
                 examples: None,
-            });
+            ..Default::default(),
+});
         }
 
         self.commands.insert("kubectl".to_string(), CommandSpec {
             name: "kubectl".to_string(),
             description: "Kubernetes命令行工具".to_string(),
+            long_description: Some("kubectl是Kubernetes的命令行工具，用于对Kubernetes集群运行命令。".to_string()),
             subcommands: Some(kubectl_subcommands),
             global_options: vec![],
             category: CommandCategory::ContainerOrchestration,
@@ -748,6 +816,7 @@ impl CommandRegistry {
             self.commands.insert(cmd.to_string(), CommandSpec {
                 name: cmd.split('/').next().unwrap_or(cmd).to_string(),
                 description: desc.to_string(),
+                long_description: Some(desc.to_string()),
                 subcommands: None,
                 global_options: vec![OptionSpec { 
                     short: None, 
@@ -1115,6 +1184,7 @@ mod tests {
         let custom_cmd = CommandSpec {
             name: "mytool".to_string(),
             description: "自定义工具".to_string(),
+            long_description: Some("自定义工具".to_string()),
             subcommands: None,
             global_options: vec![],
             category: CommandCategory::Other,
