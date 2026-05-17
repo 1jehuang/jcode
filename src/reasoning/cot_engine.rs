@@ -69,7 +69,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::info;
 
 // --- Types -----------------------------------------
 
@@ -614,8 +614,6 @@ impl CotEngine {
         let mut correction_count = 0usize;
         let mut current_attempt = 1;
         let mut last_answer = String::new();
-        let mut last_confidence = 0.0f64;
-        
         while current_attempt <= self.config.max_attempts_per_step {
             let attempt_start = std::time::Instant::now();
             
@@ -674,7 +672,6 @@ impl CotEngine {
             
             // 准备下一次尝试
             last_answer = answer.clone();
-            last_confidence = confidence;
             correction_count += 1;
             current_attempt += 1;
         }

@@ -2,8 +2,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::process::{Command, Stdio};
 use std::fs;
-use std::io::{Read, Write};
-
 /// Enhanced SCP (Secure Copy) with Advanced Features
 /// 
 /// Extends basic SCP with enterprise-grade capabilities:

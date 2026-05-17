@@ -1,4 +1,3 @@
-use crate::nlp::types::*;
 use crate::nlp::{FuncInfo, ClassInfo, ClassType, CommentInfo, CommentType, ComplexityMetrics};
 
 pub fn count_functions(code: &str) -> usize {

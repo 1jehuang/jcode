@@ -6,9 +6,8 @@
 //! - **规格序列化** - 支持多种格式的导入导出
 
 use crate::completion::bash::{
-    CommandSpec, SubcommandSpec, ArgSpec, ArgType, OptionSpec, CommandCategory,
+    CommandSpec, SubcommandSpec, OptionSpec, CommandCategory,
 };
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
 

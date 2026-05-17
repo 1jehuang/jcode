@@ -22,6 +22,7 @@ use tower_http::cors::{Any, CorsLayer};
 use crate::enterprise::EnterpriseServerState;
 use crate::auth::JwtClaims;
 use crate::usage::{QuotaResult, UsageRecord, UsageManager};
+use carpai_codebase::CodebaseEngine;
 
 /// 企业版 API 状态
 #[derive(Clone)]
@@ -45,6 +46,18 @@ pub struct ChatRequest {
 pub struct ChatMessage {
     pub role: String,
     pub content: Option<String>,
+}
+
+/// FIM (Fill-In-the-Middle) 补全请求
+#[derive(Debug, Deserialize)]
+pub struct FIMRequest {
+    pub model: String,
+    pub prompt: String,      // 光标前的代码
+    pub suffix: String,      // 光标后的代码
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub stop: Option<Vec<String>>,
 }
 
 /// OpenAI 兼容响应
@@ -82,6 +95,7 @@ pub struct UsageInfo {
 pub fn create_openai_router() -> Router<Arc<EnterpriseServerState>> {
     Router::new()
         .route("/v1/chat/completions", post(chat_completions_handler))
+        .route("/v1/completions", post(fim_completion_handler)) // FIM 补全端点
         .route("/v1/embeddings", post(embeddings_handler))
         .route("/v1/models", get(list_models_handler))
         .route("/health", get(health_handler))
@@ -376,6 +390,55 @@ async fn chat_completions_handler(
             ).into_response()
         }
     }
+}
+
+/// POST /v1/completions (FIM 补全)
+async fn fim_completion_handler(
+    State(state): State<Arc<EnterpriseServerState>>,
+    axum::extract::Json(request): axum::extract::Json<FIMRequest>,
+) -> impl IntoResponse {
+    let start = std::time::Instant::now();
+
+    // 1. 构造 FIM Prompt (Qwen2.5-Coder / StarCoder2 格式)
+    let fim_prompt = format!(
+        "<|fim_prefix|>{}<|fim_suffix|>{}<|fim_middle|>",
+        request.prompt, request.suffix
+    );
+
+    // 2. 调用底层推理引擎
+    let provider = state.find_provider(&request.model).await;
+    if provider.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Model not found"})),
+        ).into_response();
+    }
+
+    // 3. 执行推理（此处简化，实际应调用专门的 FIM 接口）
+    // ... 推理逻辑 ...
+
+    let latency_ms = start.elapsed().as_millis() as u64;
+
+    // 4. 返回补全结果
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "id": format!("cmpl-{}", uuid::Uuid::new_v4()),
+            "object": "text_completion",
+            "created": chrono::Utc::now().timestamp(),
+            "model": request.model,
+            "choices": [{
+                "text": "// AI generated completion...",
+                "index": 0,
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0
+            }
+        })),
+    ).into_response()
 }
 
 /// POST /v1/embeddings

@@ -1,4 +1,4 @@
-﻿﻿//! # CarpAI Smart Hooks System
+﻿//! # CarpAI Smart Hooks System
 //!
 //! Inspired by Kiro's Agent Hooks, but with CarpAI-specific enhancements:
 //!

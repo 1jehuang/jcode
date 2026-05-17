@@ -259,7 +259,7 @@ impl SmartRetryHandler {
                         .unwrap_or_default()
                         .as_nanos();
                     let random_factor = (nanos % 1000) as f64 / 1000.0; // 0.0-1.0
-                    delay *= (0.5 + random_factor); // ±50% jitter
+                    delay *= 0.5 + random_factor; // ±50% jitter
                 }
 
                 let delay_secs = delay.min(max_delay.as_secs_f64());

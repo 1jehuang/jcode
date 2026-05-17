@@ -1,10 +1,7 @@
 use axum::Router;
 use axum::routing::get;
 use std::net::SocketAddr;
-use std::sync::Arc;
-
 use super::routes::DashboardRoutes;
-use super::routes::StatsQuery;
 
 pub struct DashboardServer {
     port: u16,

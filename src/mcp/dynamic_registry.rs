@@ -19,7 +19,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{debug, info, warn};
+use tracing::info;
 
 // --- Types --------------------------------------------------
 

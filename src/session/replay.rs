@@ -48,7 +48,7 @@ pub enum Value {
     Number(f64),
     Bool(bool),
     Null,
-    Object(serde_json::Map<String, Value>),
+    Object(Vec<(String, Value)>),
     Array(Vec<Value>),
 }
 
@@ -59,7 +59,7 @@ impl PartialEq for Value {
             (Value::Number(a), Value::Number(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
-            (Value::Object(a), Value::Object(b)) => a.len() == b.len() && a.iter().all(|(k, v)| b.get(k).map_or(false, |bv| v == bv)),
+            (Value::Object(a), Value::Object(b)) => a.len() == b.len() && a.iter().all(|(k, v)| b.iter().any(|(bk, bv)| k == bk && v == bv)),
             (Value::Array(a), Value::Array(b)) => a == b,
             _ => false,
         }
@@ -694,7 +694,7 @@ impl SessionReplayer {
                 if delta > 0 {
                     m.event_index += delta as usize;
                 } else {
-                    m.event_index = m.event_index.saturating_sub(delta.unsigned_abs());
+                    m.event_index = m.event_index.saturating_sub(delta.unsigned_abs() as usize);
                 }
             }
         }
@@ -704,7 +704,7 @@ impl SessionReplayer {
                     if delta > 0 {
                         m.event_index += delta as usize;
                     } else {
-                        m.event_index = m.event_index.saturating_sub(delta.unsigned_abs());
+                        m.event_index = m.event_index.saturating_sub(delta.unsigned_abs() as usize);
                     }
                 }
             }

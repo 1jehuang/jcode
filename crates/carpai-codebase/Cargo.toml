@@ -1,0 +1,26 @@
+[package]
+name = "carpai-codebase"
+version = "0.1.0"
+edition = "2024"
+description = "CarpAI Codebase Intelligence Engine - AST Parsing & Semantic Indexing"
+
+[dependencies]
+# AST Parsing
+tree-sitter = "0.24"
+tree-sitter-rust = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-cpp = "0.23"
+
+# Semantic Indexing (Search Engine)
+tantivy = "0.22"
+
+# Async & Utils
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+walkdir = "2.5"
+sha2 = "0.10"

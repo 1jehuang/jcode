@@ -55,6 +55,9 @@ jcode-unified-scheduler = { path = "../jcode-unified-scheduler" }
 # LLM Provider
 jcode-llm = { path = "../jcode-llm" }
 
+# Codebase Intelligence (Phase 3.1)
+carpai-codebase = { path = "../carpai-codebase" }
+
 # Optional: CPU inference
 jcode-cpu-inference = { path = "../jcode-cpu-inference", optional = true }
 

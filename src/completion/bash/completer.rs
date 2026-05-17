@@ -1,4 +1,4 @@
-﻿//! # 智能补全引擎
+//! # 智能补全引擎
 //!
 //! 提供上下文感知的命令行补全功能：
 //! - **上下文分析** - 理解当前输入状态
@@ -8,10 +8,9 @@
 
 use crate::completion::bash::{
     CommandRegistry, CompletionSuggestion, CompletionKind,
-    registry::CommandCategory,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// 补全请求
 #[derive(Debug, Clone)]

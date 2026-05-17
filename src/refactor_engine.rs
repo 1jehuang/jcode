@@ -14,17 +14,17 @@
 //!     -> 如果失败: CheckpointManager.rewind() (回滚)
 //! ```
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tracing::{info, warn};
 
 use super::atomic_edit_coordinator::{
-    AtomicEditCoordinator, CoordinationResult, TransactionStatus,
+    AtomicEditCoordinator, TransactionStatus,
 };
 use super::checkpoint::CheckpointManager;
-use super::precise_edit::{EditOperation, EditResult, PreciseEditEngine};
+use super::precise_edit::{EditOperation, EditResult};
 
 /// 重构操作结果
 #[derive(Debug, Clone, Serialize, Deserialize)]

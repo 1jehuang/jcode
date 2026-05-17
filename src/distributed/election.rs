@@ -1,5 +1,5 @@
 use std::time::{Duration, Instant};
-use super::node::{ClusterNode, NodeRole};
+use super::node::NodeRole;
 use super::cluster::ClusterManager;
 
 pub struct ElectionService {

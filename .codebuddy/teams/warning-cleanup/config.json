@@ -1,0 +1,43 @@
+{
+  "name": "warning-cleanup",
+  "leadAgentId": "de05d4d14af5452cb9e3749f38a16416",
+  "workspacePath": "d:/studying/Codecargo/CarpAI",
+  "createdAt": "2026-05-17T07:09:28.406Z",
+  "options": {
+    "workspacePath": "d:/studying/Codecargo/CarpAI",
+    "isAutoTeam": false
+  },
+  "members": [
+    {
+      "memberId": "team-lead@warning-cleanup",
+      "name": "team-lead",
+      "role": "Team Lead - coordinates the team and interacts with the user"
+    },
+    {
+      "memberId": "agent-lsp@warning-cleanup",
+      "name": "agent-lsp",
+      "role": "Fix jcode-lsp warnings"
+    },
+    {
+      "memberId": "agent-mcp@warning-cleanup",
+      "name": "agent-mcp",
+      "role": "Fix jcode-mcp-advanced warnings"
+    },
+    {
+      "memberId": "agent-tsc@warning-cleanup",
+      "name": "agent-tsc",
+      "role": "Fix jcode-tool-core+skills+completion warnings"
+    },
+    {
+      "memberId": "agent-small@warning-cleanup",
+      "name": "agent-small",
+      "role": "Fix remaining small crates warnings"
+    },
+    {
+      "memberId": "agent-src@warning-cleanup",
+      "name": "agent-src",
+      "role": "Fix src/ warnings"
+    }
+  ],
+  "isAutoTeam": false
+}

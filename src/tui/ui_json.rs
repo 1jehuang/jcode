@@ -1,9 +1,9 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
-    widgets::{Widget, Block as RBlock, Borders},
+    widgets::Widget,
 };
 use serde_json::Value;
 

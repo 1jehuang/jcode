@@ -13,10 +13,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::info;
 
 // ════════════════════════════════════════════════════════════════════
 // Global instance (thread-safe singleton)

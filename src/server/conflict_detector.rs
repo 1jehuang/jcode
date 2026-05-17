@@ -26,7 +26,7 @@
 use jcode_lsp::LspServerManager;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// A detected conflict between swarm tasks.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

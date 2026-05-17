@@ -25,7 +25,7 @@ use jcode_lsp::LspServerManager;
 use jcode_swarm_core::ChannelIndex;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn, debug};
+use tracing::{debug, info};
 
 /// Bridge that forwards LSP diagnostic events to Swarm channels.
 pub struct LspEventBridge {

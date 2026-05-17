@@ -43,7 +43,6 @@ impl UndoManager {
         if let Ok(mut mgr) = UNDO_MANAGER.lock() {
             let undo_dir = mgr.undo_dir.clone();
             let snapshot_data;
-            let stack_len;
             {
                 let stack = mgr.ensure_session(session_id, 20);
                 stack.redo_stack.clear();
@@ -52,7 +51,6 @@ impl UndoManager {
                     stack.undo_stack.remove(0);
                 }
                 let idx = stack.undo_stack.len();
-                stack_len = idx;
                 snapshot_data = stack.undo_stack[idx - 1].clone();
             }
             let _ = std::fs::create_dir_all(&undo_dir);

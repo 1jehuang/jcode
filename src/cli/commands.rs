@@ -9,7 +9,6 @@ use std::net::ToSocketAddrs;
 use crate::{browser, gateway, memory, session, storage, tui};
 
 use super::terminal::{cleanup_tui_runtime, init_tui_runtime};
-use jcode_tool_core::Tool;
 
 
 
@@ -857,7 +856,7 @@ struct NdjsonRunState {
     connection_type: Option<String>,
     connection_phase: Option<String>,
     status_detail: Option<String>,
-    et::TokenUsage,
+    usage: crate::agent::TokenUsage,
 }
 
 pub fn run_auth_status_command(emit_json: bool) -> Result<()> {
@@ -865,7 +864,7 @@ pub fn run_auth_status_command(emit_json: bool) -> Result<()> {
 }
 
 pub async fn run_auth_doctor_command(
-    ion<&str>,
+    provider_arg: Option<&str>,
     validate: bool,
     emit_json: bool,
 ) -> Result<()> {
@@ -877,7 +876,7 @@ pub fn run_provider_list_command(emit_json: bool) -> Result<()> {
 }
 
 pub async fn run_provider_current_command(
-    rovider_init::ProviderChoice,
+    choice: provider_init::ProviderChoice,
     model: Option<&str>,
     emit_json: bool,
 ) -> Result<()> {
@@ -2210,9 +2209,10 @@ pub async fn run_refactor_command(cmd: super::args::CodeRefactorCommand) -> Resu
             }
         }
         CodeRefactorCommand::Diagnostics { file, json } => {
-            let results = with_lsp_client(&file, move |client| {
+            let file_clone = file.clone();
+            let results = with_lsp_client(&file_clone, move |client| {
                 Box::pin(async move {
-                    client.get_diagnostics(&file).await
+                    client.get_diagnostics(&file_clone).await
                 })
             }).await?;
 

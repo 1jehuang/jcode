@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use super::session::{SshSession, SshConfig, SshOutput};
 use super::config::{ConfigParser, SshHostConfig};
-use super::tunnel::{PortForwarder, TunnelManager, JumpHostChain};
+use super::tunnel::{PortForwarder, TunnelManager};
 use super::transfer::FileTransfer;
 use super::pool::SshConnectionPool;
 use super::audit::{SshAuditLogger, SshAuditEvent, SshEventType, AuditDetails, EventSeverity};

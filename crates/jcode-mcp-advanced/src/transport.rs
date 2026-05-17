@@ -292,6 +292,7 @@ pub enum TransportEnum {
     Http(HttpTransport),
 }
 
+#[allow(dead_code)]
 impl TransportEnum {
     pub async fn connect(&self) -> TransportResult<()> {
         match self {
@@ -449,6 +450,7 @@ impl McpTransport for SseTransport {
 pub struct HttpTransport {
     base_url: String,
     client: reqwest::Client,
+    #[allow(dead_code)]
     session_id: Arc<tokio::sync::RwLock<Option<String>>>,
     connected: Arc<std::sync::atomic::AtomicBool>,
 }

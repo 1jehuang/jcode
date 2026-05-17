@@ -1,0 +1,11 @@
+[
+  {
+    "id": "msg-1779001804700-rcwcb8",
+    "from": "team-lead",
+    "to": "agent-mcp",
+    "type": "message",
+    "content": "Please report your progress. Which files have you fixed and how many warnings remain?",
+    "timestamp": "2026-05-17T07:10:04.700Z",
+    "read": true
+  }
+]

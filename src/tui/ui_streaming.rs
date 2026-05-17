@@ -1,5 +1,5 @@
 use std::time::Instant;
-use std::ops::{Range, RangeFrom};
+use std::ops::Range;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]

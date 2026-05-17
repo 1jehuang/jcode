@@ -683,7 +683,7 @@ impl PowerShellParser {
     }
 
     fn register_builtin_cmdlets(&mut self) {
-        let cmdlets: Vec<(PsCmdletSpec)> = vec![
+        let cmdlets: Vec<PsCmdletSpec> = vec![
             PsCmdletSpec {
                 name: "Get-ChildItem".into(), verb: "Get".into(), noun: "ChildItem".into(),
                 description: "获取目录/文件列表".into(), module: Some("Microsoft.PowerShell.Management".into()),

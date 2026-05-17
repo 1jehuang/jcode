@@ -62,6 +62,7 @@ pub struct McpAuthManager {
     /// 客户端信息存储
     clients: Arc<Mutex<HashMap<String, McpOAuthClientInfo>>>,
     /// 元数据缓存
+    #[allow(dead_code)]
     metadata_cache: Arc<Mutex<HashMap<String, AuthServerMetadata>>>,
     /// PKCE verifier 存储 (用于回调匹配)
     verifiers: Arc<Mutex<HashMap<String, PkceState>>>,

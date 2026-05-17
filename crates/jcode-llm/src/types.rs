@@ -31,6 +31,8 @@ pub enum MessageRole {
     User,
     Assistant,
     Tool,
+    FimPrefix,   // FIM 补全：光标前内容
+    FimSuffix,   // FIM 补全：光标后内容
 }
 
 impl std::fmt::Display for MessageRole {

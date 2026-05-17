@@ -11,7 +11,6 @@ use anyhow::Result;
 // Debug Adapter Protocol (DAP) — complete client implementation
 // ════════════════════════════════════════════════════════════════════
 
-use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// A single breakpoint in the debug session
@@ -506,7 +505,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
             let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
-                    let mut seq = session.request_seq;
+                    let seq = session.request_seq;
                     let tid = session.active_thread_id;
                     let resp = dap_request_internal(session, "continue",
                         Some(serde_json::json!({ "threadId": tid })),
@@ -527,7 +526,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
             let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
-                    let mut seq = session.request_seq;
+                    let seq = session.request_seq;
                     let tid = session.active_thread_id;
                     let _ = dap_request_internal(session, "next",
                         Some(serde_json::json!({ "threadId": tid })),
@@ -545,7 +544,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
             let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
-                    let mut seq = session.request_seq;
+                    let seq = session.request_seq;
                     let tid = session.active_thread_id;
                     let _ = dap_request_internal(session, "stepIn",
                         Some(serde_json::json!({ "threadId": tid })),
@@ -563,7 +562,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
             let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
-                    let mut seq = session.request_seq;
+                    let seq = session.request_seq;
                     let tid = session.active_thread_id;
                     let _ = dap_request_internal(session, "stepOut",
                         Some(serde_json::json!({ "threadId": tid })),
@@ -581,7 +580,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
             let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
-                    let mut seq = session.request_seq;
+                    let seq = session.request_seq;
                     let tid = session.active_thread_id;
                     let resp = dap_request_internal(session, "stackTrace",
                         Some(serde_json::json!({ "threadId": tid, "levels": 20 })),
@@ -613,7 +612,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
             let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
-                    let mut seq = session.request_seq;
+                    let seq = session.request_seq;
                     let tid = session.active_thread_id;
                     // First get stack to find top frame variables reference
                     let stack = dap_request_internal(session, "stackTrace",
@@ -665,7 +664,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
             let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
-                    let mut seq = session.request_seq;
+                    let seq = session.request_seq;
                     // Get top frame for evaluation context
                     let stack = dap_request_internal(session, "stackTrace",
                         Some(serde_json::json!({ "threadId": session.active_thread_id, "levels": 1 })),
@@ -702,7 +701,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
             let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
-                    let mut seq = session.request_seq;
+                    let seq = session.request_seq;
                     let _ = dap_request_internal(session, "restart", None,
                     ).await;
                     session.request_seq = seq;
@@ -718,7 +717,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
             let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
-                    let mut seq = session.request_seq;
+                    let seq = session.request_seq;
                     let _ = dap_request_internal(session, "disconnect",
                         Some(serde_json::json!({ "restart": false, "terminateDebuggee": false })),
                     ).await;
@@ -739,7 +738,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
             let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
-                    let mut seq = session.request_seq;
+                    let seq = session.request_seq;
                     let resp = dap_request_internal(session, "modules", None,
                     ).await?;
                     session.request_seq = seq;
@@ -763,7 +762,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
             let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
-                    let mut seq = session.request_seq;
+                    let seq = session.request_seq;
                     let resp = dap_request_internal(session, "threads", None,
                     ).await?;
                     session.request_seq = seq;
@@ -829,7 +828,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
             let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut session) = *guard {
                 if let Some(ref mut stdin) = session.stdin {
-                    let mut seq = session.request_seq;
+                    let seq = session.request_seq;
                     let filters = match filter.as_str() {
                         "all" => vec!["all"],
                         "uncaught" => vec!["uncaught"],
@@ -867,7 +866,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
             if let Some(ref mut session) = guard.take() {
                 // Send disconnect request
                 if let Some(ref mut stdin) = session.stdin {
-                    let mut seq = session.request_seq;
+                    let seq = session.request_seq;
                     let _ = dap_request_internal(session, "disconnect",
                         Some(serde_json::json!({ "restart": false, "terminateDebuggee": true })),
                     ).await;

@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use chrono::{DateTime, Utc};
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

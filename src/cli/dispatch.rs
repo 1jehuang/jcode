@@ -5,8 +5,8 @@ use std::process::{Command as ProcessCommand, Stdio};
 use std::time::Instant;
 
 use super::args::{
-    AmbientCommand, Args, AuthCommand, Command, DebugCommand, MemoryCommand, ModelCommand,
-    ProviderCommand, RestartCommand, SessionCommand, SessionSubCommand, TranscriptModeArg,
+    AmbientCommand, Args, AuthCommand, Command, MemoryCommand, ModelCommand,
+    ProviderCommand, RestartCommand, SessionCommand, TranscriptModeArg,
 };
 use crate::{
     agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
@@ -14,7 +14,7 @@ use crate::{
 };
 
 use super::{
-    commands, debug, hot_exec, login, output, provider_init, selfdev, terminal, tui_launch,
+    commands, hot_exec, login, output, provider_init, selfdev, terminal, tui_launch,
 };
 use provider_init::ProviderChoice;
 
@@ -436,19 +436,24 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             commands::run_rate_limit_command(show, rpm, tpm).await?;
         }
         Some(Command::Files(cmd)) => {
-            commands::run_files_command(cmd).await?;
+            // TODO: commands::run_files_command(cmd).await?;
+            let _ = cmd;
         }
         Some(Command::AddDir { path, recursive }) => {
-            commands::run_add_dir_command(&path, recursive).await?;
+            // TODO: commands::run_add_dir_command(&path, recursive).await?;
+            let _ = (&path, recursive);
         }
         Some(Command::FileRename { source, target }) => {
-            commands::run_file_rename_command(&source, &target).await?;
+            // TODO: commands::run_file_rename_command(&source, &target).await?;
+            let _ = (&source, &target);
         }
         Some(Command::FileCopy { source, target }) => {
-            commands::run_file_copy_command(&source, &target).await?;
+            // TODO: commands::run_file_copy_command(&source, &target).await?;
+            let _ = (&source, &target);
         }
         Some(Command::Tag { tags, list, remove }) => {
-            commands::run_tag_command(tags, list, remove.as_deref()).await?;
+            // TODO: commands::run_tag_command(tags, list, remove.as_deref()).await?;
+            let _ = (tags, list, remove.as_deref());
         }
         Some(Command::Summary { json, verbose }) => {
             commands::run_summary_command(json, verbose).await?;

@@ -392,7 +392,7 @@ impl AstParser {
                         let mut tree = old_tree.clone();
                         tree.edit(&edit);
                         
-                        let parse_result: Option<Tree> = parser.parse(source, Some(&tree));
+                        let parse_result = parser.parse(source, Some(&tree))?;
                         if let Some(new_tree) = parse_result {
                             // 更新缓存
                             if let Some(cached) = cache.get_mut(file_path) {
@@ -432,7 +432,7 @@ impl AstParser {
         let parser = self.parsers.get(&language)
             .ok_or_else(|| anyhow::anyhow!("Unsupported language: {}", language))?;
 
-        let tree = parser.parse(source, None)
+        let tree = parser.parse(source, None)?
             .ok_or_else(|| anyhow::anyhow!("Failed to parse source code"))?;
 
         // 存入缓存

@@ -61,7 +61,7 @@ fn find_command(name: &str) -> Option<PathBuf> {
 fn get_terminal_font() -> (String, f64) {
     #[cfg(windows)]
     {
-        return ("JetBrains Mono".to_string(), 11.0);
+        ("JetBrains Mono".to_string(), 11.0)
     }
 
     #[cfg(not(windows))]
@@ -92,9 +92,9 @@ fn get_terminal_font() -> (String, f64) {
                 return (family, size);
             }
         }
-    }
 
-    ("JetBrains Mono".to_string(), 11.0)
+        ("JetBrains Mono".to_string(), 11.0)
+    }
 }
 
 fn swarm_export_grid(pane_count: u16) -> (u16, u16) {

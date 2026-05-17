@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc, Duration};
 use ratatui::{
-    widgets::{Widget, Block as RBlock, Borders, List, ListItem, ListState},
+    widgets::{Widget, Block as RBlock, Borders},
     style::{Color, Style, Modifier},
     text::{Line, Span},
     layout::Rect,

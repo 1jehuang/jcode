@@ -84,5 +84,3 @@
 //!     println!("{} - {} bytes", session.id, session.size_bytes);
 //! }
 //! ```
-
-use serde::{Serialize, Deserialize};

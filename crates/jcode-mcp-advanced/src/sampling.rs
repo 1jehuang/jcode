@@ -50,6 +50,7 @@ impl SamplingHandler {
     }
 
     /// 执行采样请求
+    #[allow(private_interfaces)]
     pub async fn sample(&self, _request: CreateMessageRequest) -> Result<CreateResult, String> {
         if !self.is_available() {
             return Err("Sampling handler not configured".into());
@@ -82,7 +83,8 @@ impl SamplingHandler {
 }
 
 /// 采样结果 (内部使用)
-struct CreateResult {
+#[allow(dead_code)]
+pub struct CreateResult {
     role: String,
     content: ContentBlock,
     model: Option<String>,

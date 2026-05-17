@@ -234,6 +234,32 @@ impl LlmProvider for DeepseekProvider {
             request.stream = Some(false);
         }
 
+        // FIM 适配：如果消息中包含 FIM 角色，转换为 Qwen/StarCoder 格式
+        let has_fim = request.messages.iter().any(|m| 
+            m.role == MessageRole::FimPrefix || m.role == MessageRole::FimSuffix
+        );
+
+        if has_fim {
+            let prefix = request.messages.iter()
+                .find(|m| m.role == MessageRole::FimPrefix)
+                .and_then(|m| m.content.as_ref())
+                .unwrap_or(&String::new())
+                .clone();
+            
+            let suffix = request.messages.iter()
+                .find(|m| m.role == MessageRole::FimSuffix)
+                .and_then(|m| m.content.as_ref())
+                .unwrap_or(&String::new())
+                .clone();
+
+            // 构造 FIM Prompt
+            let fim_content = format!("<fim_prefix>{}<fim_suffix>{}<fim_middle>", prefix, suffix);
+            request.messages = vec![ChatMessage {
+                role: MessageRole::User,
+                content: Some(fim_content),
+            }];
+        }
+
         self.http.post("chat/completions", &request).await
     }
 

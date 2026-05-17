@@ -1,0 +1,11 @@
+[
+  {
+    "id": "msg-1779001806862-dopfeo",
+    "from": "team-lead",
+    "to": "agent-src",
+    "type": "message",
+    "content": "Please report your progress. Which files have you fixed and how many warnings remain?",
+    "timestamp": "2026-05-17T07:10:06.862Z",
+    "read": true
+  }
+]

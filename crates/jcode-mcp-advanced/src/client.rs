@@ -54,6 +54,7 @@ pub struct MCPClient {
     tool_registry: Arc<RwLock<MCPToolRegistry>>,
 
     /// Sampling 处理器
+    #[allow(dead_code)]
     sampling_handler: Arc<RwLock<Option<SamplingHandler>>>,
 
     /// Server 信息 (initialize 后填充)
@@ -95,7 +96,7 @@ impl MCPClient {
     /// 4. if auto_fetch_tools: send("tools/list")
     /// ```
     pub async fn connect(&self) -> Result<(), String> {
-        self.conn_manager.set_state(ConnectionState::Connecting);
+        self.conn_manager.set_state(ConnectionState::Connecting).await;
 
         let transport = {
             let t = self.transport.read().await;
@@ -111,7 +112,7 @@ impl MCPClient {
                 self.conn_manager.set_state(ConnectionState::Failed {
                     error: e.to_string(),
                     retryable: matches!(e, TransportError::Io(_)),
-                });
+                }).await;
                 return Err(format!("Transport connect failed: {}", e));
             }
         }
@@ -120,7 +121,7 @@ impl MCPClient {
         let init_result = self.initialize_protocol().await?;
 
         // Step 3: Send initialized notification
-        self.send_initialized_notification().await;
+        let _ = self.send_initialized_notification().await;
 
         // Step 4: Update state
         let server_info = init_result.server_info.clone();
@@ -203,7 +204,7 @@ impl MCPClient {
         
         self.conn_manager.set_state(ConnectionState::Disconnected {
             reason: "Client initiated disconnect".into(),
-        });
+        }).await;
         self.tool_registry.write().await.clear();
         *self.server_info.write().await = None;
         *self.server_caps.write().await = None;

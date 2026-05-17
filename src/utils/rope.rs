@@ -519,12 +519,13 @@ pub struct Lines<'a> {
 }
 
 impl<'a> Iterator for Lines<'a> {
-    type Item = &'a str;
+    type Item = String;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let line = self.rope.get_line(self.pos)?;
-        self.pos += 1;
-        Some(line)
+        self.rope.get_line(self.pos).map(|line| {
+            self.pos += 1;
+            line
+        })
     }
 }
 
@@ -772,8 +773,8 @@ mod tests {
     #[test]
     fn test_lines_iterator() {
         let r = Rope::from_str("a\nb\nc");
-        let lines: Vec<&str> = r.lines().collect();
-        assert_eq!(lines, vec!["a", "b", "c"]);
+        let lines: Vec<String> = r.lines().collect();
+        assert_eq!(lines, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
     }
 
     #[test]

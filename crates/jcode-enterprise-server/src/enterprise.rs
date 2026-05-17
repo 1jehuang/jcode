@@ -45,6 +45,8 @@ pub struct EnterpriseServerState {
     pub vm_manager: Option<Arc<VirtualMemoryManager>>,
     /// 数据库管理器
     pub db: Option<Arc<DatabaseManager>>,
+    /// 代码库索引引擎 (Phase 3.1)
+    pub codebase_engine: Arc<tokio::sync::Mutex<Option<carpai_codebase::CodebaseEngine>>>,
     /// 启动时间
     pub started_at: chrono::DateTime<chrono::Utc>,
 }
@@ -147,8 +149,34 @@ impl EnterpriseServer {
             priority_engine,
             vm_manager,
             db,
+            codebase_engine: Arc::new(tokio::sync::Mutex::new(None)),
             started_at: chrono::Utc::now(),
         });
+
+        // 启动后台代码库索引进程 (Phase 3.1)
+        if config.codebase.enable_indexing {
+            if let Some(workspace_path) = &config.codebase.workspace_path {
+                let engine_ref = state.codebase_engine.clone();
+                let workspace_clone = workspace_path.clone();
+                tokio::spawn(async move {
+                    match carpai_codebase::CodebaseEngine::new(
+                        std::path::PathBuf::from("./carpai_index")
+                    ) {
+                        Ok(mut engine) => {
+                            info!("🚀 启动后台代码库索引...");
+                            if let Err(e) = engine.index_workspace(&workspace_clone).await {
+                                tracing::error!("代码库索引失败: {:?}", e);
+                            } else {
+                                info!("✅ 代码库索引完成");
+                                let mut lock = engine_ref.lock().await;
+                                *lock = Some(engine);
+                            }
+                        }
+                        Err(e) => tracing::error!("创建代码库引擎失败: {:?}", e),
+                    }
+                });
+            }
+        }
 
         let server = Self {
             config,

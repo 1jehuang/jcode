@@ -13,7 +13,7 @@
 //! - Graceful shutdown notification handling
 
 use crate::tool::{Registry, ToolContext, ToolExecutionMode};
-use crate::mcp::dynamic_registry::{DynamicToolRegistry, DynamicTool, RegisterResult, UnregisterResult};
+use crate::mcp::dynamic_registry::{DynamicToolRegistry, DynamicTool};
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::io::{BufRead, Read, Write};

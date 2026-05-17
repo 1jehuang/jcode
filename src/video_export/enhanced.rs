@@ -760,6 +760,12 @@ pub struct RgbaColor { pub r: u8, pub g: u8, pub b: u8, pub a: u8 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Position { pub line: u16, pub column: u16 }
 
+impl Position {
+    pub fn new(line: u16, column: u16) -> Self {
+        Self { line, column }
+    }
+}
+
 #[cfg(test)]
 mod tests {
 

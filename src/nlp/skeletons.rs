@@ -110,8 +110,7 @@ pub fn generate_typescript_skeleton(analysis: &NlpAnalysisResult) -> String {
         concept_cap,
         concept_cap,
         concept,
-        requirements,
-        concept_cap
+        requirements
     )
 }
 
@@ -265,8 +264,7 @@ pub fn generate_python_skeleton(analysis: &NlpAnalysisResult) -> String {
         concept_cap,
         concept_cap,
         concept,
-        requirements,
-        concept_cap
+        requirements
     )
 }
 
@@ -338,9 +336,7 @@ pub fn generate_go_skeleton(analysis: &NlpAnalysisResult) -> String {
         concept_cap,
         concept_cap,
         concept_cap,
-        concept_cap,
         concept,
-        concept_cap,
         requirements
     )
 }

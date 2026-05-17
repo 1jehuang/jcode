@@ -1,0 +1,11 @@
+[
+  {
+    "id": "shutdown-1779004406196",
+    "from": "team-lead",
+    "to": "agent-simple-crates",
+    "type": "shutdown_request",
+    "content": "{\"type\":\"shutdown_request\",\"request_id\":\"shutdown-1779004406196\",\"reason\":\"Your work is done. Please shut down.\",\"from\":\"team-lead\",\"timestamp\":\"2026-05-17T07:53:26.196Z\"}",
+    "timestamp": "2026-05-17T07:53:26.196Z",
+    "read": true
+  }
+]

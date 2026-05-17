@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use std::process::{Command, Stdio};
-use std::io::{BufRead, BufReader, Write};
 
 /// SFTP Protocol Implementation using SSH-based commands
 /// Provides secure file transfer with advanced features:

@@ -24,6 +24,29 @@ pub struct EnterpriseConfig {
     pub audit: AuditConfig,
     /// 虚拟内存配置
     pub virtual_memory: VirtualMemoryConfig,
+    /// 代码库索引配置
+    pub codebase: CodebaseConfig,
+}
+
+/// 代码库索引配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodebaseConfig {
+    /// 是否启用自动索引
+    pub enable_indexing: bool,
+    /// 工作区路径
+    pub workspace_path: Option<String>,
+    /// 索引更新间隔（秒）
+    pub refresh_interval_secs: u64,
+}
+
+impl Default for CodebaseConfig {
+    fn default() -> Self {
+        Self {
+            enable_indexing: true,
+            workspace_path: None,
+            refresh_interval_secs: 300, // 5分钟
+        }
+    }
 }
 
 /// 服务器配置

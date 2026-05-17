@@ -1,6 +1,6 @@
 use std::process::{Command, Child, Stdio};
 use std::time::Duration;
-use std::io::{Read, Write, self};
+use std::io;
 
 /// PTY (Pseudo-Terminal) Session Manager
 /// 
@@ -163,7 +163,7 @@ impl PtySession {
 
     /// Create new PTY session with custom configuration
     pub fn with_config(config: PtyConfig) -> Self {
-        PtySession {
+        Self {
             child: None,
             pty_master: None,
             session_id: uuid::Uuid::new_v4().to_string(),
@@ -319,7 +319,7 @@ impl PtySession {
         self.child = Some(child);
         self.pty_master = Some(pty_master);
         self.state = PtyState::Running;
-        self.last_activity = Some(std::time::Instant::new());
+        self.last_activity = Some(std::time::Instant::now());
 
         Ok(())
     }
@@ -561,10 +561,6 @@ impl PtySession {
     pub fn handle_resize(&mut self, new_rows: u16, new_cols: u16) -> Result<(), PtyError> {
         self.set_dimensions(new_rows, new_cols);
 
-        if let Some(ref mut master) = self.pty_master {
-            self._resize_pty(master)?;
-        }
-
         // Forward SIGWINCH to child process group
         #[cfg(unix)]
         {
@@ -646,10 +642,10 @@ impl PtySession {
             use std::os::unix::io::AsRawFd;
             
             let winsize = libc::winsize {
-                ws_row: self.dimensions.rows,
-                ws_col: self.dimensions.cols,
-                ws_xpixel: self.dimensions.xpixel,
-                ws_ypixel: self.dimensions.ypixel,
+                ws_row: rows,
+                ws_col: cols,
+                ws_xpixel: xpixel,
+                ws_ypixel: ypixel,
             };
 
             let result = unsafe {
@@ -673,7 +669,7 @@ impl PtySession {
         }
     }
 
-    fn _send_signal(&mut self, signal_name: &str, _operation: &str) -> Result<(), PtyError> {
+    fn _send_signal(&mut self, signal_name: &str, _signal_desc: &str) -> Result<(), PtyError> {
         #[cfg(unix)]
         {
             if let Some(ref child) = self.child {

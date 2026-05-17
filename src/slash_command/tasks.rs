@@ -59,7 +59,7 @@ pub(crate) async fn register_skills() {
             let a = args.to_string();
             spawn(move || async move {
                 let parts: Vec<&str> = a.trim().splitn(2, ' ').collect();
-                let reg = crate::skill::SkillRegistry::shared_registry().read();
+                let reg = crate::skill::SkillRegistry::shared_registry().read().await;
                 match parts.first().copied().unwrap_or("") {
                     "list"|"ls"|"" => {
                         let skills = reg.list();

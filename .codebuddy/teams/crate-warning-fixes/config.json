@@ -1,0 +1,33 @@
+{
+  "name": "crate-warning-fixes",
+  "leadAgentId": "de05d4d14af5452cb9e3749f38a16416",
+  "workspacePath": "d:/studying/Codecargo/CarpAI",
+  "createdAt": "2026-05-17T07:52:04.659Z",
+  "options": {
+    "workspacePath": "d:/studying/Codecargo/CarpAI",
+    "isAutoTeam": false
+  },
+  "members": [
+    {
+      "memberId": "team-lead@crate-warning-fixes",
+      "name": "team-lead",
+      "role": "Team Lead - coordinates the team and interacts with the user"
+    },
+    {
+      "memberId": "agent-mcp-fix@crate-warning-fixes",
+      "name": "agent-mcp-fix",
+      "role": "Fix jcode-mcp-advanced warnings"
+    },
+    {
+      "memberId": "agent-lsp-fix@crate-warning-fixes",
+      "name": "agent-lsp-fix",
+      "role": "Fix jcode-lsp warnings"
+    },
+    {
+      "memberId": "agent-tsc-fix@crate-warning-fixes",
+      "name": "agent-tsc-fix",
+      "role": "Fix tool-core/skills/completion"
+    }
+  ],
+  "isAutoTeam": false
+}

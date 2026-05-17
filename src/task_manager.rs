@@ -61,7 +61,6 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 

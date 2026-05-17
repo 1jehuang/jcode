@@ -1,0 +1,11 @@
+[
+  {
+    "id": "msg-1779001805878-hdgawu",
+    "from": "team-lead",
+    "to": "agent-small",
+    "type": "message",
+    "content": "Please report your progress. Which files have you fixed and how many warnings remain?",
+    "timestamp": "2026-05-17T07:10:05.878Z",
+    "read": true
+  }
+]

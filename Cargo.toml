@@ -104,6 +104,7 @@ members = [
     "crates/carpai-sdk",
     # Enterprise Server (AI-as-a-Service for low-resource deployments)
     "crates/jcode-enterprise-server",
+    "crates/carpai-codebase",
     # CPU Inference Engine (llama.cpp wrapper)
     "crates/jcode-cpu-inference",
     # 聚合类型 re-export crate
@@ -391,6 +392,8 @@ jemalloc-prof = [
 ]
 embeddings = ["dep:jcode-embedding"]
 pdf = ["dep:jcode-pdf"]
+# Optional audit trail for auto-mode decisions (see src/auto_mode/engine.rs).
+audit = []
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }

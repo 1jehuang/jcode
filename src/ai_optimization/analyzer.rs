@@ -1,4 +1,4 @@
-use super::collector::{UsageEvent, AggregatedMetrics};
+use super::collector::UsageEvent;
 
 pub struct BehaviorAnalyzer {
     patterns: Vec<BehaviorPattern>,
