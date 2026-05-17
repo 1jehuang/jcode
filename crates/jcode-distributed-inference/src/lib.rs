@@ -11,6 +11,7 @@ pub mod worker;
 pub mod layer_executor;
 pub mod kv_cache_manager;
 pub mod coordinator_client;
+pub mod serialization;
 
 // 重导出 tonic 生成的 proto 代码
 pub mod proto {

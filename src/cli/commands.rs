@@ -2268,39 +2268,7 @@ pub use super::expanded_cmds::run_effort_command;
 pub use super::expanded_cmds::run_fast_command;
 pub use super::expanded_cmds::run_passes_command;
 pub use super::expanded_cmds::run_rate_limit_command;
-pub use super::expanded_cmds::run_files_command;
-pub use super::expanded_cmds::run_add_dir_command;
-pub use super::expanded_cmds::run_file_rename_command;
-pub use super::expanded_cmds::run_file_copy_command;
-pub use super::expanded_cmds::run_tag_command;
-pub use super::expanded_cmds::run_summary_command;
-pub use super::expanded_cmds::run_insights_command;
-pub use super::expanded_cmds::run_upgrade_command;
-pub use super::expanded_cmds::run_logout_command;
-pub use super::expanded_cmds::run_commit_push_pr_command;
-pub use super::expanded_cmds::run_pr_comments_command;
-pub use super::expanded_cmds::run_autofix_pr_command;
-pub use super::expanded_cmds::run_install_github_app_command;
-pub use super::expanded_cmds::run_buddy_command;
-pub use super::expanded_cmds::run_install_slack_app_command;
-pub use super::expanded_cmds::run_batch_edit_command;
 
-pub async fn run_mcp_command(cmd: Option<&str>) -> Result<()> {
-    super::management_commands::run_mcp_command(cmd, Vec::new()).await?;
-    Ok(())
-}
-
-pub async fn run_doctor_command(json: bool) -> Result<()> {
-    Ok(())
-}
-
-pub async fn run_init_command(project_type: Option<&str>, scaffold: bool) -> Result<()> {
-    Ok(())
-}
-
-pub fn run_completion_install_command(shell: &str) -> Result<()> {
-    Ok(())
-}
 
 
 fn human_size(bytes: u64) -> String {

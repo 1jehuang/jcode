@@ -326,6 +326,7 @@ impl CostCommands {
 }
 
 // Use parking_lot's RwLock for better performance
+#[cfg(test)]
 use parking_lot::RwLock;
 
 #[cfg(test)]

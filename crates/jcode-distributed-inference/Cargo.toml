@@ -23,9 +23,15 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Math & Tensor operations
-ndarray = "0.16"
-half = "2.4"
+# Math & Tensor operations (Candle for real inference)
+candle-core = "0.8"
+candle-nn = "0.8"
+candle-transformers = "0.8"
+safetensors = "0.4"
+
+# Zero-copy serialization
+bincode = "1.3"
+flatbuffers = "24.3"
 
 # System info
 sys-info = "0.9"
