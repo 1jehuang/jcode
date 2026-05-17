@@ -189,6 +189,28 @@ pub struct ContextEntry {
     pub tool_call_id: Option<String>,
 }
 
+impl Default for ContextEntry {
+    fn default() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            id: 0,
+            role: String::new(),
+            content: String::new(),
+            compressed_content: None,
+            token_count: 0,
+            importance: ImportanceLevel::default(),
+            tier: StorageTier::default(),
+            created_at: now,
+            last_accessed_at: now,
+            access_count: 0,
+            reference_count: 0,
+            tags: Vec::new(),
+            is_code_block: false,
+            tool_call_id: None,
+        }
+    }
+}
+
 /// 上下文管理结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextManagementResult {

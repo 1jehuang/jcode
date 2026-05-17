@@ -281,7 +281,7 @@ pub enum PackageManager {
     Pip,
     Maven,
     Nuget,
-    GoModules,
+    GoMod,
     Other(String),
 }
 

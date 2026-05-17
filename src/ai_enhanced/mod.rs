@@ -123,6 +123,16 @@ struct DataPoint {
     metadata: HashMap<String, String>,
 }
 
+impl Default for DataPoint {
+    fn default() -> Self {
+        Self {
+            timestamp: Instant::now(),
+            value: 0.0,
+            metadata: HashMap::new(),
+        }
+    }
+}
+
 /// AI Enhancement Engine
 pub struct AiEngine {
     context_history: RwLock<VecDeque<ContextFeatures>>,

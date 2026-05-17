@@ -570,7 +570,7 @@ impl UnifiedScheduler {
                     return Ok(Some(TaskResult {
                         success: false,
                         output: None,
-                        error: task.error_message.or_else(|| Some("Task failed".to_string())),
+                        error: Some("Task failed".to_string()),
                         duration_ms: task.started_at.and_then(|s| task.completed_at.map(|c| {
                             (c - s).num_milliseconds() as u64
                         })).unwrap_or(0),
@@ -1003,11 +1003,12 @@ impl UnifiedScheduler {
             Some(a) => a,
             None => return Ok(false),
         };
-        let active_nodes: Vec<&NodeInfo> = {
+        let active_nodes = {
             let mgr = self.node_manager.read().await;
-            mgr.active_nodes().iter().map(|n| n).collect()
+            mgr.active_nodes()
         };
-        let needs = allocator.should_rebalance(&active_nodes)?;
+        let active_nodes_refs: Vec<&NodeInfo> = active_nodes.iter().collect();
+        let needs = allocator.should_rebalance(&active_nodes_refs)?;
         drop(allocator);
 
         if needs {

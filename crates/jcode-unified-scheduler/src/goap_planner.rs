@@ -500,46 +500,46 @@ impl GoapPlanner {
 
         // === 重构相关 ===
         if lower.contains("重构") || lower.contains("refactor") {
-            state.set("analyzed".into(), WorldStateValue::Bool(true));
-            state.set("documented".into(), WorldStateValue::Bool(true));
-            state.set("tests_written".to_string(), WorldStateValue::Bool(true));
-            state.set("refactored".into(), WorldStateValue::Bool(true));
+            state.set("analyzed", WorldStateValue::Bool(true));
+            state.set("documented", WorldStateValue::Bool(true));
+            state.set("tests_written", WorldStateValue::Bool(true));
+            state.set("refactored", WorldStateValue::Bool(true));
 
             return Ok(state);
         }
 
         // === 修复 Bug 相关 ===
         if lower.contains("修复") || lower.contains("fix") || lower.contains("bug") {
-            state.set("diagnosed".into(), WorldStateValue::Bool(true));
-            state.set("root_cause_found".into(), WorldStateValue::Bool(true));
-            state.set("fix_applied".into(), WorldStateValue::Bool(true));
-            state.set("tests_updated".into(), WorldStateValue::Bool(true));
+            state.set("diagnosed", WorldStateValue::Bool(true));
+            state.set("root_cause_found", WorldStateValue::Bool(true));
+            state.set("fix_applied", WorldStateValue::Bool(true));
+            state.set("tests_updated", WorldStateValue::Bool(true));
 
             return Ok(state);
         }
 
         // === 创建新功能 ===
         if lower.contains("创建") || lower.contains("create") || lower.contains("新建") {
-            state.set("designed".into(), WorldStateValue::Bool(true));
-            state.set("implemented".into(), WorldStateValue::Bool(true));
-            state.set("tested".into(), WorldStateValue::Bool(true));
-            state.set("integrated".into(), WorldStateValue::Bool(true));
+            state.set("designed", WorldStateValue::Bool(true));
+            state.set("implemented", WorldStateValue::Bool(true));
+            state.set("tested", WorldStateValue::Bool(true));
+            state.set("integrated", WorldStateValue::Bool(true));
 
             return Ok(state);
         }
 
         // === 安全扫描 ===
         if lower.contains("安全") || lower.contains("security") || lower.contains("scan") {
-            state.set("scanned".into(), WorldStateValue::Bool(true));
-            state.set("vulnerabilities_fixed".into(), WorldStateValue::Bool(true));
-            state.set("compliant".into(), WorldStateValue::Bool(true));
+            state.set("scanned", WorldStateValue::Bool(true));
+            state.set("vulnerabilities_fixed", WorldStateValue::Bool(true));
+            state.set("compliant", WorldStateValue::Bool(true));
 
             return Ok(state);
         }
 
         // === 默认: 将整个目标作为一个单一条件 ===
-        state.set("goal_achieved".into(), WorldStateValue::Bool(true));
-        state.set("_goal_description".into(), WorldStateValue::String(goal.to_string()));
+        state.set("goal_achieved", WorldStateValue::Bool(true));
+        state.set("_goal_description", WorldStateValue::String(goal.to_string()));
 
         Ok(state)
     }
@@ -842,7 +842,7 @@ mod tests {
         rt.block_on(async {
             let mut state = WorldState::new();
             state.set("dependencies_installed", WorldStateValue::Bool(true));
-            state.set("built".into(), WorldStateValue::Bool(true));
+            state.set("built", WorldStateValue::Bool(true));
             // 还没写测试
 
             let mut goal = WorldState::new();

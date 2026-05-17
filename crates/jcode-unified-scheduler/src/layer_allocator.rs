@@ -549,7 +549,7 @@ impl LayerAllocator {
                 return f64::INFINITY;
             }
 
-            let cap_i = allocator.estimate_node_capacity(&allocator.active_nodes[i], /*is_start*/ true) as i64;
+            let cap_i = allocator.estimate_node_capacity(&allocator.active_nodes[i], /*is_start*/ true) as i32;
 
             // Option 1: 跳过此节点
             let mut best = solve(i + 1, open_residuals.clone(), finished, k_target, n, L, suffix_sum, allocator, memo);

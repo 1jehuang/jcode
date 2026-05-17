@@ -137,6 +137,22 @@ pub struct ReasoningEvent {
     pub confidence: Option<f64>,
 }
 
+impl Default for ReasoningEvent {
+    fn default() -> Self {
+        Self {
+            event_id: 0,
+            event_type: ReasoningEventType::default(),
+            timestamp: std::time::Instant::now(),
+            step_number: None,
+            step_type: None,
+            content: String::new(),
+            metadata: serde_json::Value::Null,
+            progress: 0.0,
+            confidence: None,
+        }
+    }
+}
+
 impl ReasoningEvent {
     /// 创建新事件
     pub fn new(

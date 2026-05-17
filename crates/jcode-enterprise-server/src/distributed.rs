@@ -216,6 +216,117 @@ impl DistributedInferenceScheduler {
     pub fn can_use_distributed(&self) -> bool {
         self.node_count() >= 2
     }
+
+    /// 动态负载均衡：根据实时负载重新分配任务
+    pub async fn dynamic_load_balance(&self, current_route: &InferenceRoute) -> anyhow::Result<Option<InferenceRoute>> {
+        let nodes = { let m = self.node_manager.read().await; m.active_node_list() };
+        
+        // 检查当前目标节点负载
+        if let Some(target_id) = current_route.target_node {
+            if let Some(target_node) = nodes.iter().find(|n| n.node_id == target_id) {
+                let load_ratio = target_node.current_requests as f64 / target_node.max_requests as f64;
+                
+                if load_ratio > 0.85 {
+                    // 节点过载，寻找更轻负载的节点
+                    tracing::warn!(
+                        "[LoadBalance] 节点{}负载过高({:.0}%)，寻找替代节点",
+                        target_id,
+                        load_ratio * 100.0
+                    );
+                    
+                    // 找到负载最低的节点
+                    if let Some(lightest) = nodes.iter()
+                        .filter(|n| !n.is_overloaded())
+                        .min_by(|a, b| {
+                            let load_a = a.current_requests as f64 / a.max_requests as f64;
+                            let load_b = b.current_requests as f64 / b.max_requests as f64;
+                            load_a.partial_cmp(&load_b).unwrap_or(std::cmp::Ordering::Equal)
+                        }) 
+                    {
+                        tracing::info!(
+                            "[LoadBalance] 切换到轻负载节点{} (负载{:.0}%)",
+                            lightest.node_id,
+                            lightest.current_requests as f64 / lightest.max_requests as f64 * 100.0
+                        );
+                        
+                        return Ok(Some(InferenceRoute {
+                            model_name: current_route.model_name.clone(),
+                            target_node: Some(lightest.node_id),
+                            layer_assignments: current_route.layer_assignments.clone(),
+                            total_layers: current_route.total_layers,
+                        }));
+                    }
+                }
+            }
+        }
+        
+        Ok(None) // 无需切换
+    }
+
+    /// 故障转移：当节点失效时自动切换到备用节点
+    pub async fn failover(&self, failed_node_id: jcode_unified_scheduler::NodeId) -> anyhow::Result<Option<InferenceRoute>> {
+        let nodes = { let m = self.node_manager.read().await; m.active_node_list() };
+        
+        // 排除故障节点，选择下一个最佳节点
+        let backup = nodes.iter()
+            .filter(|n| n.node_id != failed_node_id && !n.is_overloaded())
+            .max_by(|a, b| {
+                // 选择算力最强且负载最低的节点
+                let score_a = a.tflops_fp16 / (1.0 + a.current_requests as f64);
+                let score_b = b.tflops_fp16 / (1.0 + b.current_requests as f64);
+                score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        
+        match backup {
+            Some(node) => {
+                tracing::warn!(
+                    "[Failover] 从故障节点{}切换到备用节点{}",
+                    failed_node_id,
+                    node.node_id
+                );
+                
+                Ok(Some(InferenceRoute {
+                    model_name: "unknown".to_string(), // 需要调用方提供
+                    target_node: Some(node.node_id),
+                    layer_assignments: vec![],
+                    total_layers: 0,
+                }))
+            }
+            None => {
+                tracing::error!("[Failover] 无可用备用节点！");
+                Err(anyhow::anyhow!("无可用备用节点"))
+            }
+        }
+    }
+
+    /// 健康检查：定期检测节点状态
+    pub async fn health_check_nodes(&self) -> Vec<NodeHealthStatus> {
+        let nodes = { let m = self.node_manager.read().await; m.active_node_list() };
+        let now = chrono::Utc::now();
+        
+        nodes.iter().map(|node| {
+            let time_since_heartbeat = now.signed_duration_since(node.last_heartbeat);
+            let is_healthy = time_since_heartbeat.num_seconds() < 30; // 30秒超时
+            
+            NodeHealthStatus {
+                node_id: node.node_id,
+                is_healthy,
+                latency_ms: node.avg_latency_ms,
+                load_ratio: node.current_requests as f64 / node.max_requests as f64,
+                last_heartbeat: node.last_heartbeat,
+            }
+        }).collect()
+    }
+}
+
+/// 节点健康状态
+#[derive(Debug, Clone)]
+pub struct NodeHealthStatus {
+    pub node_id: jcode_unified_scheduler::NodeId,
+    pub is_healthy: bool,
+    pub latency_ms: f64,
+    pub load_ratio: f64,
+    pub last_heartbeat: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug,Clone)]

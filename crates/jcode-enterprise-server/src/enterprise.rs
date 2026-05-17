@@ -353,6 +353,104 @@ impl EnterpriseServerState {
     pub async fn node_count(&self) -> usize {
         self.discovery_manager.get_online_nodes().await.len()
     }
+
+    /// 评估本地资源是否足以运行指定模型
+    ///
+    /// 返回 (is_local_sufficient, reason)
+    /// - is_local_sufficient: true表示本地资源充足，false需要分布式推理
+    /// - reason: 决策原因说明
+    pub async fn evaluate_local_capacity(&self, model_name: &str) -> (bool, String) {
+        // 1. 获取模型需求
+        let model_entry = self.config.models.supported_models
+            .iter()
+            .find(|m| m.name == model_name);
+
+        let required_memory_gb = match model_entry {
+            Some(entry) => entry.min_memory_gb,
+            None => {
+                // 未知模型，使用默认估算
+                if model_name.contains("72b") || model_name.contains("70b") { 80.0 }
+                else if model_name.contains("32b") || model_name.contains("35b") { 40.0 }
+                else if model_name.contains("14b") || model_name.contains("13b") { 16.0 }
+                else if model_name.contains("7b") || model_name.contains("8b") { 8.0 }
+                else { 16.0 } // 默认
+            }
+        };
+
+        // 2. 检查本地可用内存
+        let mem_info = sys_info::mem_info();
+        let available_memory_gb = match mem_info {
+            Ok(info) => info.avail as f64 / 1024.0 / 1024.0, // KB to GB
+            Err(_) => 0.0,
+        };
+
+        // 3. 检查是否有预热的本地provider
+        let has_local_provider = self.find_provider(model_name).await.is_some();
+
+        // 4. 检查虚拟内存支持
+        let vm_enabled = self.vm_manager.is_some();
+        let vm_stats = if let Some(ref vm_mgr) = self.vm_manager {
+            let usage = vm_mgr.get_memory_usage().await;
+            usage.swap.available_gb + usage.physical.available_gb
+        } else {
+            0.0
+        };
+
+        // 5. 决策逻辑
+        let total_available_gb = available_memory_gb + vm_stats;
+        let memory_threshold = 1.2; // 需要20%余量
+
+        if has_local_provider && total_available_gb >= required_memory_gb * memory_threshold {
+            (true, format!(
+                "本地资源充足: 可用{:.1}GB >= 需要{:.1}GB (含VM)",
+                total_available_gb, required_memory_gb
+            ))
+        } else if !has_local_provider && required_memory_gb > 20.0 {
+            // 大模型且未预热，优先使用分布式
+            (false, format!(
+                "大模型未预热: 需要{:.1}GB，建议分布式推理",
+                required_memory_gb
+            ))
+        } else if total_available_gb < required_memory_gb {
+            (false, format!(
+                "本地内存不足: 可用{:.1}GB < 需要{:.1}GB",
+                total_available_gb, required_memory_gb
+            ))
+        } else {
+            // 资源紧张但勉强可用
+            (true, format!(
+                "本地资源紧张: 可用{:.1}GB ≈ 需要{:.1}GB，可能影响并发",
+                total_available_gb, required_memory_gb
+            ))
+        }
+    }
+
+    /// 获取集群资源概览
+    pub async fn get_cluster_resource_summary(&self) -> serde_json::Value {
+        let local_mem = sys_info::mem_info().ok();
+        let cluster_summary = self.scheduler.get_cluster_summary().await;
+
+        serde_json::json!({
+            "local": {
+                "available_memory_gb": local_mem.as_ref().map(|m| m.avail as f64 / 1024.0 / 1024.0).unwrap_or(0.0),
+                "total_memory_gb": local_mem.as_ref().map(|m| m.total as f64 / 1024.0 / 1024.0).unwrap_or(0.0),
+                "cpu_cores": num_cpus::get_physical(),
+                "vm_enabled": self.vm_manager.is_some(),
+            },
+            "cluster": {
+                "node_count": cluster_summary.node_count,
+                "total_vram_gb": cluster_summary.total_vram_gb,
+                "total_tflops": cluster_summary.total_tflops,
+                "avg_latency_ms": cluster_summary.avg_latency_ms,
+            },
+            "scheduler_metrics": {
+                "tasks_submitted": {
+                    "value": cluster_summary.node_count,
+                    "description": "当前活跃节点数"
+                }
+            }
+        })
+    }
 }
 
 /// 优雅关机信号

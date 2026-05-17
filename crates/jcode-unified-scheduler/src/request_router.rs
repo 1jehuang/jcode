@@ -31,7 +31,6 @@ pub trait RoutingStrategy: Send + Sync {
 }
 
 /// 请求路由器 — Phase 2 主入口
-#[derive(Debug)]
 pub struct RequestRouter {
     /// 当前路由策略
     strategy: Box<dyn RoutingStrategy>,
@@ -39,6 +38,15 @@ pub struct RequestRouter {
     enable_warmup_trim: bool,
     /// 统计
     pub routing_count: u64,
+}
+
+impl std::fmt::Debug for RequestRouter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestRouter")
+            .field("enable_warmup_trim", &self.enable_warmup_trim)
+            .field("routing_count", &self.routing_count)
+            .finish()
+    }
 }
 
 impl RequestRouter {

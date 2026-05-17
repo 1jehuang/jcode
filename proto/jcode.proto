@@ -2008,3 +2008,67 @@ message HealthCheckResponse {
   string version = 5;             // Provider/model version info
   map<string, string> capabilities = 6; // Supported capabilities
 }
+
+// ==================== Distributed Inference Service (Parallax) ====================
+
+service DistributedInferenceService {
+  // 执行模型层的前向传播（流水线并行）
+  rpc ExecuteLayer(LayerExecutionRequest) returns (LayerExecutionResponse);
+  
+  // 传输 KV Cache 状态（用于跨节点上下文同步）
+  rpc TransferKVCache(stream KVCacheChunk) returns (KVCacheAck);
+  
+  // 节点心跳与状态上报
+  rpc NodeHeartbeat(NodeStatus) returns (HeartbeatAck);
+}
+
+message LayerExecutionRequest {
+  string request_id = 1;
+  string model_name = 2;
+  int32 start_layer = 3;         // 起始层索引
+  int32 end_layer = 4;           // 结束层索引
+  bytes activations = 5;         // 输入激活值 (FP16/FP32 序列化数据)
+  map<string, string> metadata = 6; // 额外参数 (如 temperature, top_p)
+}
+
+message LayerExecutionResponse {
+  string request_id = 1;
+  bytes activations = 2;         // 输出激活值
+  KVCacheMeta kv_cache_meta = 3; // KV Cache 元数据
+  double execution_time_ms = 4;
+}
+
+message KVCacheMeta {
+  int32 seq_len = 1;
+  int32 num_heads = 2;
+  int32 head_dim = 3;
+  int32 num_layers = 4;
+}
+
+message KVCacheChunk {
+  string request_id = 1;
+  int32 layer_index = 2;
+  int32 chunk_index = 3;
+  bytes data = 4;                // 分片传输的 KV Cache 数据
+  bool is_last = 5;
+}
+
+message KVCacheAck {
+  string request_id = 1;
+  bool success = 2;
+  string error_message = 3;
+}
+
+message NodeStatus {
+  string node_id = 1;
+  double cpu_usage = 2;
+  double memory_usage_gb = 3;
+  double vram_usage_gb = 4;
+  int32 active_requests = 5;
+  repeated string loaded_models = 6;
+}
+
+message HeartbeatAck {
+  bool acknowledged = 1;
+  int64 server_timestamp = 2;
+}

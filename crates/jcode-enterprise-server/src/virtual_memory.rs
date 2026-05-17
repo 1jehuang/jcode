@@ -200,6 +200,114 @@ impl VirtualMemoryManager {
                 / 1024.0 / 1024.0 / 1024.0,
         }
     }
+
+    /// 智能KV Cache分层存储策略
+    ///
+    /// 根据模型大小和可用资源自动选择最优存储层级：
+    /// - L1 (物理内存): < 8GB模型，低延迟优先
+    /// - L2 (mmap文件): 8-40GB模型，平衡延迟与容量
+    /// - L3 (swap空间): > 40GB模型，容量优先
+    pub async fn intelligent_kv_placement(
+        &self,
+        model_name: &str,
+        estimated_kv_size_mb: u64,
+    ) -> anyhow::Result<KvPlacementStrategy> {
+        let mem_usage = self.get_memory_usage().await;
+        let kv_size_gb = estimated_kv_size_mb as f64 / 1024.0;
+
+        // 决策矩阵
+        let strategy = if kv_size_gb <= 8.0 && mem_usage.physical.available_gb >= kv_size_gb * 1.5 {
+            // L1: 小模型且有充足物理内存
+            KvPlacementStrategy::PhysicalMemory {
+                reason: format!("小模型({:.1}GB)，使用物理内存以获得最低延迟", kv_size_gb),
+            }
+        } else if kv_size_gb <= 40.0 && mem_usage.swap.available_gb >= kv_size_gb {
+            // L2: 中等模型，使用mmap
+            let _region = self.create_kv_cache_mmap(model_name, estimated_kv_size_mb).await?;
+            KvPlacementStrategy::MmapFile {
+                reason: format!("中等模型({:.1}GB)，使用mmap平衡性能与容量", kv_size_gb),
+            }
+        } else if mem_usage.swap.available_gb + mem_usage.physical.available_gb >= kv_size_gb * 1.2 {
+            // L3: 大模型，依赖swap
+            KvPlacementStrategy::SwapSpace {
+                reason: format!("大模型({:.1}GB)，使用swap空间扩展容量", kv_size_gb),
+            }
+        } else {
+            return Err(anyhow::anyhow!(
+                "资源不足: 需要{:.1}GB，仅可用{:.1}GB (物理+swap)",
+                kv_size_gb,
+                mem_usage.physical.available_gb + mem_usage.swap.available_gb
+            ));
+        };
+
+        tracing::info!(
+            "[KV Placement] model={}, strategy={:?}, {}",
+            model_name,
+            strategy,
+            strategy.reason()
+        );
+
+        Ok(strategy)
+    }
+
+    /// 清理过期KV Cache（LRU策略）
+    pub async fn evict_stale_kv_cache(&self, max_age_secs: u64) -> anyhow::Result<usize> {
+        let mut regions = self.regions.write().await;
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(max_age_secs as i64);
+        
+        let stale_keys: Vec<String> = regions.iter()
+            .filter(|(_, region)| region.created_at < cutoff)
+            .map(|(key, _)| key.clone())
+            .collect();
+
+        for key in &stale_keys {
+            if let Some(region) = regions.remove(key) {
+                self.used_bytes.fetch_sub(region.size, std::sync::atomic::Ordering::Relaxed);
+                let _ = std::fs::remove_file(&region.file_path);
+                
+                let mut stats = self.stats.write().await;
+                stats.total_munmaps += 1;
+                stats.used_gb = self.used_bytes.load(std::sync::atomic::Ordering::Relaxed) as f64 
+                    / 1024.0 / 1024.0 / 1024.0;
+                stats.region_count = regions.len();
+            }
+        }
+
+        if !stale_keys.is_empty() {
+            tracing::info!("[KV Eviction] 清理{}个过期KV Cache区域", stale_keys.len());
+        }
+
+        Ok(stale_keys.len())
+    }
+}
+
+/// KV Cache放置策略
+#[derive(Debug, Clone)]
+pub enum KvPlacementStrategy {
+    /// L1: 纯物理内存（最低延迟）
+    PhysicalMemory { reason: String },
+    /// L2: mmap文件映射（平衡性能与容量）
+    MmapFile { reason: String },
+    /// L3: swap空间（最大容量）
+    SwapSpace { reason: String },
+}
+
+impl KvPlacementStrategy {
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::PhysicalMemory { reason } => reason,
+            Self::MmapFile { reason } => reason,
+            Self::SwapSpace { reason } => reason,
+        }
+    }
+
+    pub fn tier(&self) -> u8 {
+        match self {
+            Self::PhysicalMemory { .. } => 1,
+            Self::MmapFile { .. } => 2,
+            Self::SwapSpace { .. } => 3,
+        }
+    }
 }
 
 /// 交换空间 / 内存信息
