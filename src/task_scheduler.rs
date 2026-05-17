@@ -40,7 +40,6 @@ pub struct TaskExecution {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone)]
 pub struct TaskScheduler {
     tasks: Arc<RwLock<HashMap<String, ScheduledTask>>>,
     runners: Arc<RwLock<HashMap<String, (JoinHandle<()>, AbortHandle)>>>,
@@ -48,6 +47,19 @@ pub struct TaskScheduler {
     rx: mpsc::Receiver<TaskExecution>,
     executor: Option<JoinHandle<()>>,
     is_running: Arc<RwLock<bool>>,
+}
+
+impl Clone for TaskScheduler {
+    fn clone(&self) -> Self {
+        Self {
+            tasks: self.tasks.clone(),
+            runners: self.runners.clone(),
+            tx: self.tx.clone(),
+            rx: self.rx.clone(),
+            executor: None,
+            is_running: self.is_running.clone(),
+        }
+    }
 }
 
 impl Default for TaskScheduler {

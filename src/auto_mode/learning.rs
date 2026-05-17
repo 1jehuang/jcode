@@ -289,9 +289,9 @@ impl LearningSystem {
                     .position(|p| p.id == *pattern_id);
                 
                 if let Some(idx) = pattern_idx {
-                    let was_correct = record.outcome == FeedbackOutcome::Approved;
+                    let was_correct = record.user_decision == UserDecision::Approved;
                     let pattern = &mut self.patterns[idx];
-                    let _ = self.update_confidence_internal(pattern, was_correct);
+                    let _ = Self::update_confidence_internal(&self.config, pattern, was_correct);
                 }
             }
 
@@ -373,8 +373,8 @@ impl LearningSystem {
         }
     }
 
-    fn update_confidence_internal(&mut self, pattern: &mut LearnedPattern, positive: bool) {
-        let lr = self.config.learning_rate;
+    fn update_confidence_internal(config: &LearningConfig, pattern: &mut LearnedPattern, positive: bool) {
+        let lr = config.learning_rate;
         
         if positive {
             // 正面反馈：向1.0移动
@@ -393,7 +393,7 @@ impl LearningSystem {
     
     /// 更新模式置信度
     fn update_confidence(&mut self, pattern: &mut LearnedPattern, positive: bool) {
-        self.update_confidence_internal(pattern, positive);
+        Self::update_confidence_internal(&self.config, pattern, positive);
     }
 
     /// 查找或创建模式

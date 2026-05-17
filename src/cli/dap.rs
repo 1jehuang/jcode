@@ -2,6 +2,8 @@
 //!
 //! Extracted from commands.rs for better modularity.
 
+use anyhow::Result;
+
 // Debug Commands — DAP (Debug Adapter Protocol) integration
 // ════════════════════════════════════════════════════════════════════
 

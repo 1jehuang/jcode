@@ -56,6 +56,12 @@ pub enum ProjectType {
     Monolith,
 }
 
+impl Default for ProjectType {
+    fn default() -> Self {
+        ProjectType::WebApp
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureRequirement {
     /// 功能ID
@@ -162,8 +168,23 @@ pub struct OutputOptions {
     pub comment_language: CommentLanguage,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+impl Default for OutputOptions {
+    fn default() -> Self {
+        Self {
+            generate_full_project: true,
+            include_tests: true,
+            generate_docs: true,
+            include_cicd: false,
+            include_docker: false,
+            code_style: CodeStyle::Idiomatic,
+            comment_language: CommentLanguage::English,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum CodeStyle {
+    #[default]
     Idiomatic,
     Functional,
     OOP,
@@ -171,8 +192,9 @@ pub enum CodeStyle {
     Verbose,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum CommentLanguage {
+    #[default]
     English,
     Chinese,
     Bilingual,

@@ -316,10 +316,10 @@ impl AhoCorasickMatcher {
         let mut builder = aho_corasick::AhoCorasickBuilder::new();
         
         if config.case_insensitive {
-            builder = builder.ascii_case_insensitive(true);
+            builder.ascii_case_insensitive(true);
         }
         
-        builder = builder.match_kind(aho_corasick::MatchKind::LeftmostFirst);
+        builder.match_kind(aho_corasick::MatchKind::LeftmostFirst);
         
         let automaton = Arc::new(builder.build(&pattern_strings)?);
         

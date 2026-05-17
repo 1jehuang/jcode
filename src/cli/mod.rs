@@ -12,6 +12,17 @@ pub mod selfdev;
 pub mod startup;
 pub mod terminal;
 pub mod tui_launch;
+pub mod build_cmd;
+pub mod completion_gen;
+pub mod code_nav;
+pub mod expanded_cmds;
+pub mod config_cmd;
+pub mod review_cmd;
+pub mod dap;
+pub mod enhanced;
+pub mod cost_tracker;
+pub mod task_manager;
+pub mod git_commands;
 
 // Claude Code CLI 兼容层 (Phase 1 - P0核心命令)
 pub mod claude_compat;

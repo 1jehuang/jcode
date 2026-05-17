@@ -42,21 +42,25 @@ pub struct RestAdapter {
 }
 
 impl RestAdapter {
-    pub fn new(base_url: String, api_key: Option<String>, timeout_secs: u64) -> Self {
+    pub fn new(base_url: String, api_key: Option<String>, timeout_secs: u64) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
-            .expect("Failed to build HTTP client");
+            .map_err(|e| CarpAiError::Connection {
+                message: format!("Failed to build HTTP client: {}", e),
+                endpoint: base_url.clone(),
+                source: Some(e.into()),
+            })?;
 
-        Self {
+        Ok(Self {
             client,
             base_url,
             api_key,
             timeout: std::time::Duration::from_secs(timeout_secs),
-        }
+        })
     }
 
-    fn build_headers(&self) -> reqwest::header::HeaderMap {
+    fn build_headers(&self) -> Result<reqwest::header::HeaderMap> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::CONTENT_TYPE,
@@ -64,14 +68,17 @@ impl RestAdapter {
         );
 
         if let Some(ref key) = self.api_key {
-            headers.insert(
-                reqwest::header::AUTHORIZATION,
-                reqwest::header::HeaderValue::from_str(&format!("Bearer {}", key))
-                    .expect("Invalid API key"),
-            );
+            let auth_value = format!("Bearer {}", key);
+            let header_value = reqwest::header::HeaderValue::from_str(&auth_value)
+                .map_err(|_| CarpAiError::Validation {
+                    message: "API key contains invalid characters".to_string(),
+                    field: Some("api_key".to_string()),
+                    suggestion: Some("Ensure API key only contains valid ASCII characters".to_string()),
+                })?;
+            headers.insert(reqwest::header::AUTHORIZATION, header_value);
         }
 
-        headers
+        Ok(headers)
     }
 }
 
@@ -81,10 +88,11 @@ impl ProtocolAdapter for RestAdapter {
         let url = format!("{}/v1/completions", self.base_url);
         let start = std::time::Instant::now();
 
+        let headers = self.build_headers()?;
         let response = self
             .client
             .post(&url)
-            .headers(self.build_headers())
+            .headers(headers)
             .json(&request)
             .send()
             .await
@@ -96,7 +104,7 @@ impl ProtocolAdapter for RestAdapter {
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
+            let body = response.text().await.unwrap_or_else(|_| String::from("Failed to read error body"));
             return Err(CarpAiError::Server {
                 status,
                 message: body,
@@ -105,7 +113,10 @@ impl ProtocolAdapter for RestAdapter {
             });
         }
 
-        let mut completion_response: CompletionResponse = response.json().await?;
+        let mut completion_response: CompletionResponse = response.json().await.map_err(|e| CarpAiError::InvalidResponse {
+            message: format!("Failed to parse response: {}", e),
+            raw_response: None,
+        })?;
         completion_response.latency_ms = start.elapsed().as_millis() as f64;
         completion_response.cached = false;
 
@@ -116,10 +127,11 @@ impl ProtocolAdapter for RestAdapter {
         let url = format!("{}/v1/chat/completions", self.base_url);
         let start = std::time::Instant::now();
 
+        let headers = self.build_headers()?;
         let response = self
             .client
             .post(&url)
-            .headers(self.build_headers())
+            .headers(headers)
             .json(&request)
             .send()
             .await
@@ -131,7 +143,7 @@ impl ProtocolAdapter for RestAdapter {
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
+            let body = response.text().await.unwrap_or_else(|_| String::from("Failed to read error body"));
             return Err(CarpAiError::Server {
                 status,
                 message: body,
@@ -140,7 +152,10 @@ impl ProtocolAdapter for RestAdapter {
             });
         }
 
-        let mut chat_response: ChatCompletionResponse = response.json().await?;
+        let mut chat_response: ChatCompletionResponse = response.json().await.map_err(|e| CarpAiError::InvalidResponse {
+            message: format!("Failed to parse response: {}", e),
+            raw_response: None,
+        })?;
         chat_response.latency_ms = start.elapsed().as_millis() as f64;
         chat_response.cached = false;
 
@@ -153,7 +168,7 @@ impl ProtocolAdapter for RestAdapter {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
         let url = format!("{}/v1/completions/stream", self.base_url);
         let client = self.client.clone();
-        let headers = self.build_headers();
+        let headers = self.build_headers()?;
 
         let stream = async_stream::stream! {
             let response = client
@@ -170,7 +185,7 @@ impl ProtocolAdapter for RestAdapter {
 
             if !response.status().is_success() {
                 let status = response.status().as_u16();
-                let body = response.text().await.unwrap_or_default();
+                let body = response.text().await.unwrap_or_else(|_| String::from("Failed to read error body"));
                 yield Err(CarpAiError::Server {
                     status,
                     message: body,

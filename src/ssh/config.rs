@@ -299,7 +299,7 @@ impl ConfigParser {
         Self::_match_helper(&pattern_chars, &text_chars, 0, 0)
     }
 
-    fn _match_helper(pattern: &[char], text: &[usize], p_idx: usize, t_idx: usize) -> bool {
+    fn _match_helper(pattern: &[char], text: &[char], p_idx: usize, t_idx: usize) -> bool {
         if p_idx == pattern.len() {
             return t_idx == text.len();
         }

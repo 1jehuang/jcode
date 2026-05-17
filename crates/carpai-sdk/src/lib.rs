@@ -37,6 +37,15 @@ pub mod protocol;
 pub mod streaming;
 pub mod types;
 
+#[cfg(test)]
+mod cache_tests;
+
+#[cfg(test)]
+mod types_tests;
+
+#[cfg(test)]
+mod error_tests;
+
 // Re-export main types for convenience
 pub use cache::{CacheConfig, CacheManager};
 pub use client::{CarpAiClient, ClientBuilder};

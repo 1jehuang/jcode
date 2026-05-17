@@ -376,11 +376,11 @@ impl TaskFilter {
     fn matches(&self, task: &Task) -> bool {
         if let Some(ref status) = self.status {
             // Simplified status matching - in production should be more sophisticated
-            let matches_status = matches!(task.status, 
-                TaskStatus::Pending if matches!(status, TaskStatus::Pending) |
-                TaskStatus::InProgress { .. } if matches!(status, TaskStatus::InProgress { .. }) |
+            let matches_status = match (&task.status, status) {
+                (TaskStatus::Pending, TaskStatus::Pending) => true,
+                (TaskStatus::InProgress { .. }, TaskStatus::InProgress { .. }) => true,
                 _ => false
-            );
+            };
             if !matches_status {
                 return false;
             }
@@ -465,7 +465,7 @@ impl TaskCommands {
         }
 
         println!("📋 Tasks ({})", tasks.len());
-        println!("═" .repeat(60));
+        println!("{}", "═".repeat(60));
 
         for task_arc in &tasks {
             let task = task_arc.read().await;
@@ -513,7 +513,7 @@ impl TaskCommands {
         let task = task_arc.read().await;
         
         println!("📋 Task Details");
-        println!("═" .repeat(60));
+        println!("{}", "═".repeat(60));
         println!("ID:          {}", task.id);
         println!("Title:       {}", task.title);
         println!("Status:      {:?}", task.status);
@@ -559,7 +559,7 @@ impl TaskCommands {
         let stats = self.manager.get_statistics().await;
         
         println!("📊 Task Statistics");
-        println!("═" .repeat(40));
+        println!("{}", "═".repeat(40));
         println!("Total Tasks:  {}", stats.total);
         println!("+- Pending:    {}", stats.pending);
         println!("+- In Progress: {}", stats.in_progress);

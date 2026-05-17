@@ -6,14 +6,12 @@
 //! - Task management and project planning
 //! - System diagnostics
 
-pub mod git_commands;
-pub mod cost_tracker;
-pub mod task_manager;
+use anyhow::Result;
 
 // Re-export main types for convenience
-pub use git_commands::{GitCommands, GitWorkflow, DefaultGitWorkflow, GitConfig, CommitInfo};
-pub use cost_tracker::{CostCommands, CostTracker, TokenUsage, ModelPricing};
-pub use task_manager::{TaskCommands, TaskManager, Task, TaskOptions};
+pub use super::git_commands::{GitCommands, GitWorkflow, DefaultGitWorkflow, GitConfig, CommitInfo};
+pub use super::cost_tracker::{CostCommands, CostTracker, TokenUsage, ModelPricing};
+pub use super::task_manager::{TaskCommands, TaskManager, Task, TaskOptions, TaskPriority, TaskUpdates};
 
 /// Enhanced CLI application state
 pub struct EnhancedCli {
@@ -34,14 +32,14 @@ impl EnhancedCli {
 
     /// Create with custom components
     pub fn with_components(
-        git_workflow: Box<dyn git_commands::GitWorkflow>,
-        cost_tracker: cost_tracker::CostTracker,
-        task_manager: std::sync::Arc<task_manager::TaskManager>,
+        git_workflow: Box<dyn super::git_commands::GitWorkflow>,
+        cost_tracker: super::cost_tracker::CostTracker,
+        task_manager: std::sync::Arc<super::task_manager::TaskManager>,
     ) -> Self {
         Self {
-            git: git_commands::GitCommands::new(git_workflow),
-            cost: cost_tracker::CostCommands::new(cost_tracker),
-            tasks: task_manager::TaskCommands::new(task_manager),
+            git: super::git_commands::GitCommands::new(git_workflow),
+            cost: super::cost_tracker::CostCommands::new(cost_tracker),
+            tasks: super::task_manager::TaskCommands::new(task_manager),
         }
     }
 
@@ -61,7 +59,7 @@ impl EnhancedCli {
     async fn handle_git_command(&self, args: &[String]) -> Result<()> {
         if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
             println!("🔀 Git Workflow Commands");
-            println!("═" .repeat(50));
+            println!("{}", "═".repeat(50));
             println!();
             println!("Usage: carpai git <command> [options]");
             println!();
@@ -126,7 +124,7 @@ impl EnhancedCli {
     async fn handle_cost_command(&self, args: &[String]) -> Result<()> {
         if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
             println!("💰 Cost Tracking Commands");
-            println!("═" .repeat(50));
+            println!("{}", "═".repeat(50));
             println!();
             println!("Usage: carpai cost <command> [options]");
             println!();
@@ -159,7 +157,7 @@ impl EnhancedCli {
                 let monthly_estimate = report.total_cost * 30.0; // Rough estimate
                 
                 println!("📈 Cost Forecast");
-                println!("═" .repeat(50));
+                println!("{}", "═".repeat(50));
                 println!("Current session: ${:.4}", report.total_cost);
                 println!("Estimated monthly: ${:.2}", monthly_estimate);
                 println!("Estimated yearly:  ${:.2}", monthly_estimate * 12.0);
@@ -188,7 +186,7 @@ impl EnhancedCli {
     async fn handle_task_command(&self, args: &[String]) -> Result<()> {
         if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
             println!("📋 Task Management Commands");
-            println!("═" .repeat(50));
+            println!("{}", "═".repeat(50));
             println!();
             println!("Usage: carpai task <command> [options]");
             println!();
@@ -283,7 +281,7 @@ impl EnhancedCli {
 
     async fn show_status(&self) -> Result<()> {
         println!("🚀 CarpAI Status Dashboard");
-        println!("═" .repeat(60));
+        println!("{}", "═".repeat(60));
 
         // Git status
         println!("\n📁 Repository:");
@@ -310,7 +308,7 @@ impl EnhancedCli {
 
     fn show_help(&self) -> Result<()> {
         println!("🚀 CarpAI Enhanced CLI");
-        println!("═" .repeat(60));
+        println!("{}", "═".repeat(60));
         println!();
         println!("Usage: carpai <category> <command> [options]");
         println!();

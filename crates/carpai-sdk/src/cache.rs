@@ -201,13 +201,24 @@ impl CacheManager {
         hasher.finish()
     }
 
-    /// Evict the oldest entries to make room
+    /// Evict the oldest entries to make room (batch eviction for efficiency)
     fn evict_oldest(&self) {
+        const EVICT_BATCH_SIZE: usize = 10;
+        
         if let Ok(mut lru) = self.lru_index.lock() {
-            while let Some((key, _)) = lru.pop_lru() {
-                if self.cache.remove(&key).is_some() {
-                    break; // Remove one at a time
+            let mut evicted = 0;
+            while evicted < EVICT_BATCH_SIZE {
+                match lru.pop_lru() {
+                    Some((key, _)) => {
+                        if self.cache.remove(&key).is_some() {
+                            evicted += 1;
+                        }
+                    }
+                    None => break, // No more entries to evict
                 }
+            }
+            if evicted > 0 {
+                tracing::debug!(evicted, "Batch eviction completed");
             }
         }
     }
@@ -228,16 +239,21 @@ impl CacheManager {
 
     /// Get cache statistics
     pub fn stats(&self) -> CacheStats {
+        let mut total_entries = 0usize;
+        let mut expired_entries = 0usize;
+        let mut total_accesses: u64 = 0;
         let now = Instant::now();
-        let total_entries = self.cache.len();
-        let expired_entries = self
-            .cache
-            .iter()
-            .filter(|entry| now >= entry.expires_at)
-        .count();
-        let valid_entries = total_entries - expired_entries;
 
-        let total_accesses: u64 = self.cache.iter().map(|e| e.access_count).sum();
+        // Single pass to collect all statistics atomically
+        for entry in self.cache.iter() {
+            total_entries += 1;
+            if now >= entry.expires_at {
+                expired_entries += 1;
+            }
+            total_accesses += entry.access_count;
+        }
+
+        let valid_entries = total_entries.saturating_sub(expired_entries);
 
         CacheStats {
             total_entries,

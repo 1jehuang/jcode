@@ -52,6 +52,9 @@ config = "0.14"
 # Retry logic
 backoff = "0.4"
 
+# Security - zeroize sensitive data
+zeroize = { version = "1", features = ["derive"] }
+
 [dev-dependencies]
 tokio-test = "0.4"
 wiremock = "0.6"

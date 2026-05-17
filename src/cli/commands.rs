@@ -11,9 +11,7 @@ use crate::{browser, gateway, memory, session, storage, tui};
 use super::terminal::{cleanup_tui_runtime, init_tui_runtime};
 use jcode_tool_core::Tool;
 
-mod provider_setup;
-mod report_info;
-mod restart;
+
 
 pub use super::auth_test::run_auth_test_command;
 pub(crate) use super::auth_test::run_post_login_validation;
@@ -188,6 +186,10 @@ pub(crate) use super::auth_test::{
     AuthTestChoicePlan, AuthTestTarget, ResolvedAuthTestTarget, auth_test_choice_plan,
     auth_test_error_is_retryable, configured_auth_test_targets, resolve_auth_test_targets,
 };
+mod provider_setup;
+mod report_info;
+mod restart;
+
 pub(crate) use provider_setup::{ProviderAddOptions, run_provider_add_command};
 pub use restart::{
     maybe_run_pending_restart_restore_on_startup, run_restart_clear_command,
@@ -855,15 +857,15 @@ struct NdjsonRunState {
     connection_type: Option<String>,
     connection_phase: Option<String>,
     status_detail: Option<String>,
-    usage: crate::agent::TokenUsage,
+    et::TokenUsage,
 }
 
 pub fn run_auth_status_command(emit_json: bool) -> Result<()> {
-    report_info::run_auth_status_command(emit_json)
+    super::commands::report_info::run_auth_status_command(emit_json)
 }
 
 pub async fn run_auth_doctor_command(
-    provider_arg: Option<&str>,
+    ion<&str>,
     validate: bool,
     emit_json: bool,
 ) -> Result<()> {
@@ -871,11 +873,11 @@ pub async fn run_auth_doctor_command(
 }
 
 pub fn run_provider_list_command(emit_json: bool) -> Result<()> {
-    report_info::run_provider_list_command(emit_json)
+    super::commands::report_info::run_provider_list_command(emit_json)
 }
 
 pub async fn run_provider_current_command(
-    choice: &super::provider_init::ProviderChoice,
+    rovider_init::ProviderChoice,
     model: Option<&str>,
     emit_json: bool,
 ) -> Result<()> {
@@ -887,7 +889,7 @@ pub fn run_version_command(emit_json: bool) -> Result<()> {
 }
 
 pub async fn run_usage_command(emit_json: bool) -> Result<()> {
-    report_info::run_usage_command(emit_json).await
+    super::commands::report_info::run_usage_command(emit_json).await
 }
 
 pub async fn run_single_message_command(
@@ -1519,8 +1521,7 @@ fn filter_cli_model_routes_for_choice(
 // Build command — plan -> execute -> verify
 // ════════════════════════════════════════════════════════════════════
 
-mod build_cmd;
-pub use build_cmd::run_build_command;
+pub use super::build_cmd::run_build_command;
 // Skills management commands
 // ════════════════════════════════════════════════════════════════════
 
@@ -1818,8 +1819,8 @@ pub async fn run_git_command(cmd: super::args::GitCommand) -> Result<()> {
     Ok(())
 }
 
-// ════════════════════════════════════════════════════════════════════mod config_cmd;
-pub use config_cmd::run_config_command;
+// ════════════════════════════════════════════════════════════════════
+pub use super::config_cmd::run_config_command;
 
 // Commit command
 // ════════════════════════════════════════════════════════════════════
@@ -2045,13 +2046,11 @@ pub async fn run_fork_command(name: Option<&str>, checkpoint: Option<&str>) -> R
 // Shell completion generator — multi-shell deep tree completion
 // ════════════════════════════════════════════════════════════════════
 
-mod completion_gen;
-pub use completion_gen::run_completion_command;
+pub use super::completion_gen::run_completion_command;
 // Code Navigation Commands — LSP-based go-to-def, find-refs, hover
 // ════════════════════════════════════════════════════════════════════
 
-mod code_nav;
-pub use code_nav::run_code_nav_command;
+pub use super::code_nav::run_code_nav_command;
 // Refactoring Commands — wraps jcode_lsp AstOperations
 // ════════════════════════════════════════════════════════════════════
 
@@ -2255,37 +2254,36 @@ pub async fn run_refactor_command(cmd: super::args::CodeRefactorCommand) -> Resu
     Ok(())
 }
 
-// ════════════════════════════════════════════════════════════════════mod review_cmd;
-pub use review_cmd::run_review_command;
+// ════════════════════════════════════════════════════════════════════
+pub use super::review_cmd::run_review_command;
 
-pub use dap::run_debug_command;
+pub use super::dap::run_debug_command;
 
 // Expanded commands — implementations for all new CLI commands
 
-mod expanded_cmds;
-pub use expanded_cmds::run_clear_command;
-pub use expanded_cmds::run_cost_command;
-pub use expanded_cmds::run_env_command;
-pub use expanded_cmds::run_effort_command;
-pub use expanded_cmds::run_fast_command;
-pub use expanded_cmds::run_passes_command;
-pub use expanded_cmds::run_rate_limit_command;
-pub use expanded_cmds::run_files_command;
-pub use expanded_cmds::run_add_dir_command;
-pub use expanded_cmds::run_file_rename_command;
-pub use expanded_cmds::run_file_copy_command;
-pub use expanded_cmds::run_tag_command;
-pub use expanded_cmds::run_summary_command;
-pub use expanded_cmds::run_insights_command;
-pub use expanded_cmds::run_upgrade_command;
-pub use expanded_cmds::run_logout_command;
-pub use expanded_cmds::run_commit_push_pr_command;
-pub use expanded_cmds::run_pr_comments_command;
-pub use expanded_cmds::run_autofix_pr_command;
-pub use expanded_cmds::run_install_github_app_command;
-pub use expanded_cmds::run_buddy_command;
-pub use expanded_cmds::run_install_slack_app_command;
-pub use expanded_cmds::run_batch_edit_command;
+pub use super::expanded_cmds::run_clear_command;
+pub use super::expanded_cmds::run_cost_command;
+pub use super::expanded_cmds::run_env_command;
+pub use super::expanded_cmds::run_effort_command;
+pub use super::expanded_cmds::run_fast_command;
+pub use super::expanded_cmds::run_passes_command;
+pub use super::expanded_cmds::run_rate_limit_command;
+pub use super::expanded_cmds::run_files_command;
+pub use super::expanded_cmds::run_add_dir_command;
+pub use super::expanded_cmds::run_file_rename_command;
+pub use super::expanded_cmds::run_file_copy_command;
+pub use super::expanded_cmds::run_tag_command;
+pub use super::expanded_cmds::run_summary_command;
+pub use super::expanded_cmds::run_insights_command;
+pub use super::expanded_cmds::run_upgrade_command;
+pub use super::expanded_cmds::run_logout_command;
+pub use super::expanded_cmds::run_commit_push_pr_command;
+pub use super::expanded_cmds::run_pr_comments_command;
+pub use super::expanded_cmds::run_autofix_pr_command;
+pub use super::expanded_cmds::run_install_github_app_command;
+pub use super::expanded_cmds::run_buddy_command;
+pub use super::expanded_cmds::run_install_slack_app_command;
+pub use super::expanded_cmds::run_batch_edit_command;
 
 
 fn human_size(bytes: u64) -> String {

@@ -178,7 +178,9 @@ impl FileTransfer {
         let remote_files = self._list_remote_directory(remote_dir)?;
         let total_files = remote_files.len();
 
-        for (i, (remote_file, relative_path)) in remote_files.iter().enumerate() {
+        for (i, remote_file) in remote_files.iter().enumerate() {
+            let relative_path = remote_file.strip_prefix(remote_dir)
+                .unwrap_or(remote_file);
             let local_file = local_dir.join(relative_path);
 
             // Create parent directories locally
@@ -250,6 +252,7 @@ impl FileTransfer {
                 files_transferred: stats.files_transferred,
                 bytes_transferred: stats.bytes_sent + stats.bytes_received,
                 duration,
+                error: None,
                 details: Some(stdout.to_string()),
             })
         } else {
@@ -300,6 +303,7 @@ impl FileTransfer {
                 files_transferred: stats.files_transferred,
                 bytes_transferred: stats.bytes_sent + stats.bytes_received,
                 duration,
+                error: None,
                 details: Some(stdout.to_string()),
             })
         } else {
@@ -437,7 +441,7 @@ impl FileTransfer {
         Ok(files)
     }
 
-    fn _list_remote_directory(&self, remote_dir: &Path) -> Result<Vec<PathBuf, PathBuf>, String> {
+    fn _list_remote_directory(&self, remote_dir: &Path) -> Result<Vec<PathBuf>, String> {
         // Use SSH to list directory contents
         let target = format!("{}@{}", self.ssh_user, self.ssh_host);
         let list_cmd = format!("find {} -type f", remote_dir.display());

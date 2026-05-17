@@ -274,6 +274,7 @@ impl ToolContext {
             tool_name: None,
             user_input: None,
             project_path: None,
+            working_dir: None,
             metadata: HashMap::new(),
         }
     }

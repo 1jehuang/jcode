@@ -71,7 +71,7 @@ impl SftpClient {
         let result = self._rsync_upload(local_path, remote_path, None)?;
         
         let duration = start.elapsed()
-            .map_err(|e| SftpError::InternalError(format!("Time error: {}", e)))?;
+            .map_err(|e| SftpError::InternalError { message: format!("Time error: {}", e) })?;
 
         Ok(SftpTransferResult {
             success: result.success,
@@ -104,7 +104,7 @@ impl SftpClient {
         let result = self._rsync_download(remote_path, local_path, None)?;
 
         let duration = start.elapsed()
-            .map_err(|e| SftpError::InternalError(format!("Time error: {}", e)))?;
+            .map_err(|e| SftpError::InternalError { message: format!("Time error: {}", e) })?;
 
         let downloaded_size = std::fs::metadata(local_path)
             .map(|m| m.len())
@@ -166,7 +166,16 @@ impl SftpClient {
         let result = if let Some(limit) = bandwidth_limit {
             self._rsync_upload_with_bandwidth(local_path, remote_path, limit)?
         } else {
-            self._rsync_upload(local_path, remote_path, None)?
+            let internal = self._rsync_upload(local_path, remote_path, None)?;
+            SftpTransferResult {
+                success: internal.success,
+                bytes_transferred: internal.bytes_transferred.unwrap_or(0),
+                duration: std::time::Duration::ZERO,
+                speed_bytes_per_sec: 0.0,
+                remote_path: remote_path.to_path_buf(),
+                checksum: None,
+                error: internal.error,
+            }
         };
 
         // Call final progress callback

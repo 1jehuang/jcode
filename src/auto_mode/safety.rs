@@ -601,7 +601,7 @@ impl SafetyGuardrail {
         let matched = self.get_matched_patterns(operation);
 
         let recommendation = match risk {
-            RiskLevel::Critical => SafetyRecommendation::BlockImmediately(
+            RiskLevel::Critical => SafetyRecommendation::BlockImmediate(
                 "此操作存在致命风险，已被安全护栏阻止。如确需执行，请联系管理员或使用特殊权限模式。".to_string(),
             ),
             RiskLevel::High => SafetyRecommendation::RequireConfirmation(

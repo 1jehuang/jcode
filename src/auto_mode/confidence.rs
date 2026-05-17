@@ -267,7 +267,7 @@ impl ConfidenceModel {
         }
 
         // 4. 时间上下文特征
-        let hour = chrono::Utc::now().hour() as f64;
+        let hour = chrono::Utc::now().time().hour() as f64;
         features.insert("time_context".to_string(),
             // 工作时间 (9-18点) 给予更高分数
             if hour >= 9.0 && hour <= 18.0 { 0.8 } else { 0.4 });

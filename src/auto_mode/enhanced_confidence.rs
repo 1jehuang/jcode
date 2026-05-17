@@ -442,7 +442,7 @@ impl OnlineFeatureSelector {
     pub fn select_important_features(&self) -> Vec<String> {
         self.feature_importance
             .iter()
-            .filter(|(name, importance)| {
+            .filter(|(name, &importance)| {
                 // 未达最小观察次数的特征暂时保留
                 let usage = self.feature_usage_count.get(name.as_str()).copied().unwrap_or(0);
                 if usage < self.min_observations {
@@ -459,8 +459,10 @@ impl OnlineFeatureSelector {
     
     /// 获取特征重要性排名
     pub fn get_feature_ranking(&self) -> Vec<(String, f64)> {
-        let mut ranked: Vec<_> = self.feature_importance.iter().collect();
-        ranked.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut ranked: Vec<_> = self.feature_importance.iter()
+            .map(|(name, &val)| (name.clone(), val))
+            .collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         ranked
     }
     
@@ -628,6 +630,9 @@ pub struct EnhancedConfig {
     
     /// 最大置信度
     pub max_confidence: f64,
+
+    /// Softmax温度参数（用于置信度校准）
+    pub temperature: f64,
 }
 
 impl Default for EnhancedConfig {
@@ -847,7 +852,7 @@ impl EnhancedConfidenceModel {
     fn calculate_time_risk(&self) -> f64 {
         use chrono::Local;
         let now = Local::now();
-        let hour = now.hour() as f64;
+        let hour = now.time().hour() as f64;
         
         // 工作时间 (9-18点): 低风险
         // 深夜 (0-6点): 高风险
@@ -934,7 +939,7 @@ impl EnhancedConfidenceModel {
     }
     
     /// 获取特征重要性排名
-    pub fn get_feature_importance(&self) -> Vec<String, f64> {
+    pub fn get_feature_importance(&self) -> Vec<(String, f64)> {
         self.feature_selector.get_feature_ranking()
     }
     

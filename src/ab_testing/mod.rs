@@ -344,6 +344,8 @@ impl AbTestManager {
             test_statistic: t_stat,
             confidence_interval: (ci_lower, ci_upper),
             effect_size,
+            winner: None,
+            confidence: None,
             power: Some(self.approx_power(t_stat.abs(), df, alpha)),
         }
     }
@@ -454,6 +456,8 @@ impl AbTestManager {
             test_statistic: chi_stat,
             confidence_interval: (0.0, chi_stat),
             effect_size,
+            winner: None,
+            confidence: None,
             power: None,
         }
     }
@@ -496,12 +500,12 @@ impl AbTestManager {
                     (control_metrics.conversions + treatment_metrics.conversions) as f64 /
                     (total_control + total_treatment);
                 let expected = vec![total_control * overall_rate, total_treatment * overall_rate];
-                self.chi_squared_test(&obs, &expected, exp.significance_level)
+                Ok(self.chi_squared_test(&obs, &expected, exp.significance_level))
             }
             _ => {
                 let control_vals = vec![control_metrics.average_value(); control_metrics.participant_count.min(100) as usize];
                 let treatment_vals = vec![treatment_metrics.average_value(); treatment_metrics.participant_count.min(100) as usize];
-                self.t_test_independent(&control_vals, &treatment_vals, exp.significance_level)
+                Ok(self.t_test_independent(&control_vals, &treatment_vals, exp.significance_level))
             }
         }
     }

@@ -95,7 +95,7 @@ impl SshCommand {
                     host: args[1].clone(),
                     ..Default::default()
                 };
-                let session = SshSession::new(config);
+                let mut session = SshSession::new(config);
                 match session.upload(
                     &std::path::PathBuf::from(&args[2]),
                     &std::path::PathBuf::from(&args[3]),
@@ -112,7 +112,7 @@ impl SshCommand {
                     host: args[1].clone(),
                     ..Default::default()
                 };
-                let session = SshSession::new(config);
+                let mut session = SshSession::new(config);
                 match session.download(
                     &std::path::PathBuf::from(&args[2]),
                     &std::path::PathBuf::from(&args[3]),

@@ -45,7 +45,7 @@ impl ClientBuilder {
     }
 
     pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
-        self.config.auth.api_key = Some(api_key.into());
+        self.config.auth.set_api_key(api_key.into());
         self
     }
 
@@ -110,7 +110,7 @@ impl CarpAiClient {
             base_url.to_string(),
             api_key,
             config.server.timeout_secs,
-        ));
+        )?);
 
         // Create rate limiter (semaphore-based)
         let permits = config.performance.rate_limit_per_second as usize;
@@ -139,8 +139,42 @@ impl CarpAiClient {
     }
 
     /// Send a completion request
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use carpai_sdk::{CarpAiClient, CarpAiConfig, CompletionRequest};
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let config = CarpAiConfig::default();
+    ///     let client = CarpAiClient::new(config).await?;
+    ///
+    ///     let request = CompletionRequest {
+    ///         prompt: "Explain Rust's ownership system".to_string(),
+    ///         max_tokens: Some(200),
+    ///         temperature: Some(0.7),
+    ///         ..Default::default()
+    ///     };
+    ///
+    ///     let response = client.complete(request).await?;
+    ///     println!("Response: {}", response.text);
+    ///     println!("Tokens used: {}", response.usage.total_tokens);
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CarpAiError::Validation`] if request parameters are invalid.
+    /// Returns [`CarpAiError::Connection`] if the server is unreachable.
+    /// Returns [`CarpAiError::Timeout`] if the request exceeds the timeout.
     #[instrument(skip(self), fields(prompt = %request.prompt))]
     pub async fn complete(&self, mut request: CompletionRequest) -> Result<CompletionResponse> {
+        // Validate request parameters
+        request.validate()?;
+
         if !self.is_online() && self.config.offline.enabled {
             return self.handle_offline_completion(request).await;
         }
@@ -192,6 +226,40 @@ impl CarpAiClient {
     }
 
     /// Send a chat completion request
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use carpai_sdk::{CarpAiClient, CarpAiConfig, ChatCompletionRequest, ChatMessage, Role};
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let client = CarpAiClient::new(CarpAiConfig::default()).await?;
+    ///
+    ///     let messages = vec![
+    ///         ChatMessage {
+    ///             role: Role::System,
+    ///             content: "You are a helpful assistant.".to_string(),
+    ///         },
+    ///         ChatMessage {
+    ///             role: Role::User,
+    ///             content: "What is async/await in Rust?".to_string(),
+    ///         },
+    ///     ];
+    ///
+    ///     let request = ChatCompletionRequest {
+    ///         messages,
+    ///         model: Some("gpt-4".to_string()),
+    ///         max_tokens: Some(300),
+    ///         ..Default::default()
+    ///     };
+    ///
+    ///     let response = client.chat_complete(request).await?;
+    ///     println!("Assistant: {}", response.choices[0].message.content);
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn chat_complete(&self, request: ChatCompletionRequest) -> Result<ChatCompletionResponse> {
         if !self.is_online() && self.config.offline.enabled {
             return Err(CarpAiError::Offline {
@@ -206,6 +274,39 @@ impl CarpAiClient {
     }
 
     /// Stream a completion response
+    ///
+    /// Returns a stream of chunks for real-time response display.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use carpai_sdk::{CarpAiClient, CarpAiConfig, CompletionRequest};
+    /// use futures::StreamExt;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let client = CarpAiClient::new(CarpAiConfig::default()).await?;
+    ///
+    ///     let request = CompletionRequest {
+    ///         prompt: "Write a Rust function to calculate factorial".to_string(),
+    ///         ..Default::default()
+    ///     };
+    ///
+    ///     let mut stream = client.stream_complete(request)?;
+    ///
+    ///     while let Some(chunk) = stream.next().await {
+    ///         match chunk {
+    ///             Ok(chunk) => {
+    ///                 print!("{}", chunk.text);
+    ///                 tokio::io::stdout().flush().await?;
+    ///             }
+    ///             Err(e) => eprintln!("Error: {}", e),
+    ///         }
+    ///     }
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
     #[allow(clippy::result_large_err)]
     pub fn stream_complete(
         &self,

@@ -3,6 +3,7 @@
 use super::cache::CacheConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Main configuration for CarpAI client
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -119,15 +120,17 @@ impl Default for ServerConfig {
 /// Authentication configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
-    /// API key for authentication
-    pub api_key: Option<String>,
+    /// API key for authentication (zeroized on drop)
+    #[serde(skip)]
+    pub api_key: Option<Zeroizing<String>>,
 
     /// Auto-detect API key from environment variables
     #[serde(default)]
     pub auto_detect_api_key: bool,
 
     /// Authentication token (for session-based auth)
-    pub token: Option<String>,
+    #[serde(skip)]
+    pub token: Option<Zeroizing<String>>,
 
     /// Token refresh interval in seconds
     #[serde(default = "default_token_refresh")]
@@ -148,10 +151,15 @@ impl Default for AuthConfig {
 }
 
 impl AuthConfig {
+    /// Set API key securely (zeroized on drop)
+    pub fn set_api_key(&mut self, key: String) {
+        self.api_key = Some(Zeroizing::new(key));
+    }
+
     /// Get API key (from config or environment)
     pub fn get_api_key(&self) -> Option<String> {
         if let Some(ref key) = self.api_key {
-            return Some(key.clone());
+            return Some(key.to_string());
         }
 
         if self.auto_detect_api_key {

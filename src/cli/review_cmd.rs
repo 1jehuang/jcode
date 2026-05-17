@@ -2,6 +2,8 @@
 //!
 //! Extracted from commands.rs for better modularity.
 
+use anyhow::Result;
+use serde::Serialize;
 
 // Review Command — git diff based code review
 // ════════════════════════════════════════════════════════════════════
@@ -204,4 +206,4 @@ fn find_security_issues(diff: &str) -> Vec<SecurityIssue> {
 // Debug Commands — DAP (Debug Adapter Protocol) integration
 // ════════════════════════════════════════════════════════════════════
 
-mod dap;
+// mod dap;  // 模块在上级目录

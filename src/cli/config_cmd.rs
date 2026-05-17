@@ -2,6 +2,7 @@
 //!
 //! Extracted from commands.rs for better modularity.
 
+use anyhow::Result;
 
 // Config management commands
 // ════════════════════════════════════════════════════════════════════

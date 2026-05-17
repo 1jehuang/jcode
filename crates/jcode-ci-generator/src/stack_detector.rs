@@ -64,6 +64,12 @@ pub struct TechStack {
 /// 技术栈检测器
 pub struct StackDetector;
 
+impl Default for StackDetector {
+    fn default() -> Self {
+        Self
+    }
+}
+
 impl StackDetector {
     pub fn new() -> Self { Self }
 
@@ -104,7 +110,7 @@ impl StackDetector {
             return match f.as_str() {
                 "Cargo.toml" => Language::Rust,
                 "package.json" if f.contains("package.json") => {
-                    if std::fs::read_to_string("package.json").ok().map_or(false, |c| c.contains("\"typescript\"")) 
+                    if std::fs::read_to_string("package.json").ok().is_some_and(|c| c.contains("\"typescript\"")) 
                     { Language::TypeScript } else { Language::JavaScript }
                 }
                 "pom.xml" => Language::Java,
@@ -114,7 +120,7 @@ impl StackDetector {
                 "requirements.txt" | "Pipfile" | "pyproject.toml" => Language::Python,
                 "Podfile" | "Cartfile" => Language::Swift,
                 _ if f.starts_with("package.json") => {
-                    if std::fs::read_to_string("package.json").ok().map_or(false, |c| c.contains("\"typescript\"")) 
+                    if std::fs::read_to_string("package.json").ok().is_some_and(|c| c.contains("\"typescript\"")) 
                     { Language::TypeScript } else { Language::JavaScript }
                 }
                 _ => continue,

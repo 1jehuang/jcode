@@ -94,7 +94,7 @@ pub fn get_model_pricing(model: &str) -> Option<ModelPricing> {
 pub struct CostTracker {
     total_input_tokens: AtomicU64,
     total_output_tokens: AtomicU64,
-    total_cost: std::sync::atomic::AtomicF64,
+    total_cost: Mutex<f64>,
     by_model: RwLock<HashMap<String, ModelUsage>>,
     session_start: std::time::Instant,
 }
@@ -127,7 +127,7 @@ impl CostTracker {
         Self {
             total_input_tokens: AtomicU64::new(0),
             total_output_tokens: AtomicU64::new(0),
-            total_cost: std::sync::atomic::AtomicF64::new(0.0),
+            total_cost: Mutex::new(0.0),
             by_model: RwLock::new(HashMap::new()),
             session_start: std::time::Instant::now(),
         }
@@ -145,8 +145,8 @@ impl CostTracker {
         } else {
             0.0 // Unknown model, cannot calculate cost
         };
-
-        self.total_cost.fetch_add(cost, Ordering::SeqCst);
+        
+        *self.total_cost.lock().unwrap_or_else(|e| e.into_inner()) += cost;
 
         // Update per-model stats
         {
@@ -174,7 +174,7 @@ impl CostTracker {
             total_output_tokens: self.total_output_tokens.load(Ordering::SeqCst),
             total_tokens: self.total_input_tokens.load(Ordering::SeqCst)
                 + self.total_output_tokens.load(Ordering::SeqCst),
-            total_cost: self.total_cost.load(Ordering::SeqCst),
+            total_cost: *self.total_cost.lock().unwrap_or_else(|e| e.into_inner()),
             duration_secs: duration.as_secs_f64(),
             by_model: self.by_model.read().unwrap_or_else(|e| e.into_inner()).values().cloned().collect(),
             timestamp: chrono::Utc::now(),
@@ -183,7 +183,7 @@ impl CostTracker {
 
     /// Get current budget status
     pub fn check_budget(&self, daily_limit: f64) -> BudgetStatus {
-        let current = self.total_cost.load(Ordering::SeqCst);
+        let current = *self.total_cost.lock().unwrap_or_else(|e| e.into_inner());
         let remaining = daily_limit - current;
         let percentage = if daily_limit > 0.0 {
             (current / daily_limit) * 100.0
@@ -211,7 +211,7 @@ impl CostTracker {
     pub fn reset(&self) {
         self.total_input_tokens.store(0, Ordering::SeqCst);
         self.total_output_tokens.store(0, Ordering::SeqCst);
-        self.total_cost.store(0.0, Ordering::SeqCst);
+        *self.total_cost.lock().unwrap_or_else(|e| e.into_inner()) = 0.0;
         
         let mut models = self.by_model.write().unwrap_or_else(|e| e.into_inner());
         models.clear();
@@ -270,7 +270,7 @@ impl CostCommands {
         let report = self.tracker.get_session_cost();
         
         println!("💰 Session Cost Summary");
-        println!("═" .repeat(50));
+        println!("{}", "═".repeat(50));
         println!("Total Tokens: {}", report.total_tokens);
         println!("  Input:  {}", report.total_input_tokens);
         println!("  Output: {}", report.total_output_tokens);
@@ -301,7 +301,7 @@ impl CostCommands {
             WarningLevel::Critical => println!("🚨 Budget Status: CRITICAL!"),
         }
         
-        println!("═" .repeat(50));
+        println!("{}", "═".repeat(50));
         println!("Daily Limit:  ${:.2}", status.daily_limit);
         println!("Spent:        ${:.4}", status.spent);
         println!("Remaining:    ${:.4}", status.remaining);

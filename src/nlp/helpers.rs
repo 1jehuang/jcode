@@ -167,7 +167,7 @@ pub fn calculate_code_complexity(code: &str) -> ComplexityMetrics {
     }
 }
 
-fn extract_func_name(signature: &str) -> &str {
+fn extract_func_name(signature: &str) -> String {
     signature
         .replace("pub ", "")
         .replace("async ", "")
@@ -178,4 +178,5 @@ fn extract_func_name(signature: &str) -> &str {
         .rev()
         .next()
         .unwrap_or("unknown")
+        .to_string()
 }

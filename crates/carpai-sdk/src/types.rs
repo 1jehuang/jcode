@@ -1,5 +1,6 @@
 //! Common types used across CarpAI SDK
 
+use crate::error::{CarpAiError, Result};
 use serde::{Deserialize, Serialize};
 
 /// Request ID wrapper
@@ -85,6 +86,55 @@ pub struct CompletionContext {
     /// Custom metadata
     #[serde(default)]
     pub metadata: std::collections::HashMap<String, String>,
+}
+
+impl CompletionRequest {
+    /// Validate request parameters
+    pub fn validate(&self) -> Result<()> {
+        // Prompt length limit (100K characters)
+        if self.prompt.len() > 100_000 {
+            return Err(CarpAiError::Validation {
+                message: "Prompt exceeds maximum length of 100,000 characters".to_string(),
+                field: Some("prompt".to_string()),
+                suggestion: Some("Consider splitting into smaller chunks or using file context".to_string()),
+            });
+        }
+
+        // Temperature range check (0.0 - 2.0)
+        if let Some(temp) = self.temperature {
+            if !(0.0..=2.0).contains(&temp) {
+                return Err(CarpAiError::Validation {
+                    message: format!("Temperature {} out of range [0.0, 2.0]", temp),
+                    field: Some("temperature".to_string()),
+                    suggestion: Some("Use a value between 0.0 and 2.0".to_string()),
+                });
+            }
+        }
+
+        // Max tokens sanity check
+        if let Some(tokens) = self.max_tokens {
+            if tokens == 0 || tokens > 100_000 {
+                return Err(CarpAiError::Validation {
+                    message: format!("Max tokens {} is unreasonable", tokens),
+                    field: Some("max_tokens".to_string()),
+                    suggestion: Some("Use a value between 1 and 100,000".to_string()),
+                });
+            }
+        }
+
+        // Top-p range check (0.0 - 1.0)
+        if let Some(top_p) = self.top_p {
+            if !(0.0..=1.0).contains(&top_p) {
+                return Err(CarpAiError::Validation {
+                    message: format!("Top-p {} out of range [0.0, 1.0]", top_p),
+                    field: Some("top_p".to_string()),
+                    suggestion: Some("Use a value between 0.0 and 1.0".to_string()),
+                });
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Completion response

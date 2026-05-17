@@ -287,16 +287,14 @@ impl TunnelManager {
 
     /// List active tunnels
     pub fn list_tunnels(&self) -> Vec<TunnelInfo> {
-        let tunnels_guard = match self.tunnels.lock() {
+        let mut tunnels_guard = match self.tunnels.lock() {
             Ok(g) => g,
             Err(_) => return Vec::new(),
         };
         tunnels_guard
-            .iter()
+            .iter_mut()
             .filter_map(|t| {
-                let is_running = t.child.as_mut().map_or(false, |c| {
-                    c.try_wait().map_or(true, |s| s.is_none())
-                });
+                let is_running = t.is_running();
                 if is_running {
                     Some(TunnelInfo {
                         id: t.id().to_string(),

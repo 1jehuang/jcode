@@ -11,6 +11,12 @@ pub struct GeneratedConfig {
 /// CI 配置生成器
 pub struct CiGenerator;
 
+impl Default for CiGenerator {
+    fn default() -> Self {
+        Self
+    }
+}
+
 impl CiGenerator {
     pub fn new() -> Self { Self }
 

@@ -116,6 +116,12 @@ pub enum ArgType {
     KeyValue { key_name: String, value_name: String },
 }
 
+impl Default for ArgType {
+    fn default() -> Self {
+        ArgType::Flag
+    }
+}
+
 /// 选项规格
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OptionSpec {
@@ -139,9 +145,11 @@ pub struct OptionSpec {
 }
 
 /// 命令分类
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandCategory {
+    #[default]
+    Other,
     VersionControl,
     BuildTools,
     ContainerOrchestration,
@@ -151,7 +159,6 @@ pub enum CommandCategory {
     SystemAdministration,
     DevelopmentTools,
     TextProcessing,
-    Other,
 }
 
 impl std::fmt::Display for CommandCategory {
@@ -1013,17 +1020,7 @@ pub struct RegistryStatistics {
     pub categories: usize,
 }
 
-impl Default for ArgSpec {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            arg_type: ArgType::String { default: None },
-            required: false,
-            default_value: None,
-            description: None,
-        }
-    }
-}
+
 
 // ==========================================
 // 单元测试

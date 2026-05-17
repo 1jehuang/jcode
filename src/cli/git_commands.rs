@@ -341,12 +341,14 @@ impl GitWorkflow for DefaultGitWorkflow {
         
         // Parse diff output into structured data
         let diffs = parse_diff_output(&output);
+        let diff_count = diffs.len();
+        let is_empty = diffs.is_empty();
 
         Ok(GitResult {
             success: true,
             data: Some(diffs),
-            message: format!("Found {} changed file(s)", diffs.len()),
-            ai_suggestion: if diffs.is_empty() {
+            message: format!("Found {} changed file(s)", diff_count),
+            ai_suggestion: if is_empty {
                 None
             } else {
                 Some("Review changes carefully before committing".to_string())
@@ -430,8 +432,8 @@ impl GitWorkflow for DefaultGitWorkflow {
         let output = self.exec_git(&["status", "--porcelain"]).await?;
 
         let mut staged = 0;
-        let modified = 0;
-        let untracked = 0;
+        let mut modified = 0;
+        let mut untracked = 0;
 
         for line in output.lines() {
             if line.is_empty() {
@@ -473,8 +475,8 @@ fn parse_diff_output(diff_output: &str) -> Vec<DiffInfo> {
     for line in diff_output.lines() {
         if line.starts_with("diff --git") {
             // Extract file path
-            if let Some(file) = line.split('').last() {
-                let cleaned = file.trim_start_matches('a/').trim_start_matches('b/');
+            if let Some(file) = line.split(' ').last() {
+                let cleaned = file.trim_start_matches("a/").trim_start_matches("b/");
                 current_file = Some(PathBuf::from(cleaned));
             }
         } else if line.starts_with("new file mode") {

@@ -107,7 +107,7 @@ impl SshManager {
             None
         };
         
-        if let (Ok(ref output), Some(ref preview)) = (&result, &output_preview) {
+        if let (Ok(output), Some(preview)) = (&result, &output_preview) {
             self.audit_logger.log_command_execution(
                 "",
                 command,
