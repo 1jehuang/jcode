@@ -233,6 +233,36 @@ impl EnterpriseServer {
                         .find(|m| &m.name == model_name)
                     {
                         info!("🔥 启动 CPU 推理引擎: {}", model_name);
+
+                        // 如果启用了虚拟内存管理，先为KV Cache创建mmap区域
+                        if let Some(ref vm_mgr) = state.vm_manager {
+                            // 根据模型参数量估算KV Cache大小
+                            // 7B模型约需8GB, 14B约需16GB, 72B约需80GB
+                            let kv_cache_mb = match model_entry.name.to_lowercase().as_str() {
+                                name if name.contains("72b") || name.contains("70b") => 80_000,
+                                name if name.contains("32b") || name.contains("35b") => 40_000,
+                                name if name.contains("14b") || name.contains("13b") => 16_000,
+                                name if name.contains("7b") || name.contains("8b") => 8_000,
+                                name if name.contains("3b") || name.contains("1.5b") => 4_000,
+                                _ => 8_000, // 默认8GB
+                            };
+
+                            match vm_mgr.create_kv_cache_mmap(model_name, kv_cache_mb).await {
+                                Ok(region) => {
+                                    info!(
+                                        "✅ [VirtualMemory] KV Cache mmap已创建: model={}, size={}MB",
+                                        model_name, kv_cache_mb
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "⚠️ [VirtualMemory] KV Cache mmap创建失败，将使用普通内存: {:?}",
+                                        e
+                                    );
+                                }
+                            }
+                        }
+
                         if let Some(ref engine) = state.cpu_engine {
                             match engine.start_model(model_entry).await {
                                 Ok(instance) => {

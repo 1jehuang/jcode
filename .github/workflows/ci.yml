@@ -68,6 +68,17 @@ jobs:
         shell: bash
         run: python3 scripts/check_swallowed_error_budget.py
 
+      - name: Run carpai-sdk unit tests
+        shell: bash
+        run: cargo test -p carpai-sdk --lib
+
+      - name: Run carpai-sdk benchmarks (regression check)
+        shell: bash
+        run: |
+          echo "Running performance benchmarks..."
+          cargo bench -p carpai-sdk --bench sdk_bench -- --save-baseline ci-${{ github.sha }}
+          echo "✅ Benchmarks completed successfully"
+
       - name: Check vendored dependencies are in sync
         shell: bash
         run: |

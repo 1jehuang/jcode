@@ -74,6 +74,11 @@ postgres = ["sqlx/postgres"]
 mdns = ["dep:mdns-sd"]
 cpu-inference = ["dep:jcode-cpu-inference"]
 
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+
 [lib]
 name = "jcode_enterprise_server"
 path = "src/lib.rs"

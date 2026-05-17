@@ -1,0 +1,80 @@
+name: VSCode Extension CI
+
+on:
+  push:
+    branches: [master, main]
+    paths: ['vscode-extension/**']
+  pull_request:
+    branches: [master, main]
+    paths: ['vscode-extension/**']
+
+jobs:
+  build-extension:
+    name: Build & Test VSCode Extension
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: ./vscode-extension
+        run: npm ci
+
+      - name: Compile TypeScript
+        working-directory: ./vscode-extension
+        run: npm run compile
+
+      - name: Lint extension
+        working-directory: ./vscode-extension
+        run: npm run lint || true
+
+      - name: Package extension
+        working-directory: ./vscode-extension
+        run: npx vsce package --no-dependencies --out carpai.vsix
+
+      - name: Upload VSIX package
+        uses: actions/upload-artifact@v3
+        with:
+          name: carpai-vscode-extension
+          path: vscode-extension/carpai.vsix
+
+  publish-marketplace:
+    name: Publish to Marketplace
+    runs-on: ubuntu-latest
+    needs: build-extension
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: ./vscode-extension
+        run: npm ci
+
+      - name: Compile
+        working-directory: ./vscode-extension
+        run: npm run compile
+
+      - name: Publish to VSCode Marketplace
+        working-directory: ./vscode-extension
+        run: npx vsce publish -p ${{ secrets.VSCE_PAT }}
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        continue-on-error: true
+
+      - name: Publish to OpenVSX
+        working-directory: ./vscode-extension
+        run: npx ovsx publish -p ${{ secrets.OVSX_PAT }}
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        continue-on-error: true

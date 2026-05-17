@@ -1,0 +1,123 @@
+{
+  "name": "carpai",
+  "displayName": "CarpAI Assistant",
+  "description": "AI coding assistant powered by CarpAI - Multi-agent collaboration, intelligent memory, and blazing fast performance",
+  "version": "0.1.0",
+  "publisher": "carpai-team",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "carpai.chat",
+        "title": "Chat with CarpAI",
+        "category": "CarpAI"
+      },
+      {
+        "command": "carpai.inlineChat",
+        "title": "Inline Chat",
+        "category": "CarpAI"
+      },
+      {
+        "command": "carpai.explainCode",
+        "title": "Explain This Code",
+        "category": "CarpAI"
+      },
+      {
+        "command": "carpai.refactorCode",
+        "title": "Refactor This Code",
+        "category": "CarpAI"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "carpai.inlineChat",
+        "key": "ctrl+k",
+        "mac": "cmd+k",
+        "when": "editorTextFocus"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "carpai-sidebar",
+          "title": "CarpAI",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "carpai-sidebar": [
+        {
+          "type": "webview",
+          "id": "carpai.chatView",
+          "name": "Chat"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "CarpAI",
+      "properties": {
+        "carpai.serverUrl": {
+          "type": "string",
+          "default": "http://localhost:8080",
+          "description": "CarpAI Server URL"
+        },
+        "carpai.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API Key for authentication"
+        },
+        "carpai.enableCache": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable response caching"
+        },
+        "carpai.model": {
+          "type": "string",
+          "default": "gpt-4",
+          "description": "Default model to use"
+        },
+        "carpai.useGrpc": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use gRPC instead of HTTP for better performance"
+        },
+        "carpai.grpcAddress": {
+          "type": "string",
+          "default": "localhost:50051",
+          "description": "gRPC server address"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.50.0"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.9.0",
+    "@grpc/proto-loader": "^0.7.0",
+    "ws": "^8.16.0"
+  }
+}

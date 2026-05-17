@@ -1,4 +1,4 @@
-//! # 智能补全引擎
+﻿//! # 智能补全引擎
 //!
 //! 提供上下文感知的命令行补全功能：
 //! - **上下文分析** - 理解当前输入状态
@@ -127,8 +127,10 @@ impl SmartCompleter {
                 suggestions.push(CompletionSuggestion {
                     text: hist.clone(),
                     display_text: format!("{} (history)", hist),
+                    description: "历史命令".to_string(),
                     kind: CompletionKind::Command,
                     priority: 50,
+                    metadata: HashMap::new(),
                 });
             }
         }
@@ -161,8 +163,10 @@ impl SmartCompleter {
             .map(|(cmd, count)| CompletionSuggestion {
                 text: cmd.clone(),
                 display_text: format!("{} ({} times)", cmd, count),
+                description: "常用命令".to_string(),
                 kind: CompletionKind::Command,
                 priority: (*count).min(100) as u8,
+                metadata: HashMap::new(),
             })
             .collect()
     }

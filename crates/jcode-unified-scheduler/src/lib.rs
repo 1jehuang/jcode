@@ -538,6 +538,64 @@ impl UnifiedScheduler {
         Ok(task.status)
     }
 
+    /// 等待任务完成并返回结果
+    ///
+    /// 这是一个阻塞方法，会轮询任务状态直到完成、失败或超时。
+    /// 用于同步API调用场景，需要等待推理完成后返回响应。
+    pub async fn wait_for_completion(
+        &self,
+        task_id: &TaskId,
+        timeout_ms: u64,
+    ) -> Result<Option<TaskResult>, SchedulerError> {
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+
+        loop {
+            // 检查超时
+            if start.elapsed() > timeout {
+                return Err(SchedulerError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("Task {} timed out after {}ms", task_id, timeout_ms),
+                )));
+            }
+
+            // 获取任务状态
+            let task = self.get_task(task_id).await?;
+
+            match task.status {
+                TaskStatus::Completed => {
+                    return Ok(task.result.clone());
+                }
+                TaskStatus::Failed => {
+                    return Ok(Some(TaskResult {
+                        success: false,
+                        output: None,
+                        error: task.error_message.or_else(|| Some("Task failed".to_string())),
+                        duration_ms: task.started_at.and_then(|s| task.completed_at.map(|c| {
+                            (c - s).num_milliseconds() as u64
+                        })).unwrap_or(0),
+                        assigned_nodes: vec![],
+                        actual_latency_ms: 0.0,
+                    }));
+                }
+                TaskStatus::Cancelled => {
+                    return Ok(Some(TaskResult {
+                        success: false,
+                        output: None,
+                        error: Some("Task cancelled".to_string()),
+                        duration_ms: 0,
+                        assigned_nodes: vec![],
+                        actual_latency_ms: 0.0,
+                    }));
+                }
+                _ => {
+                    // 仍在执行中，等待一小段时间后重试
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }
+        }
+    }
+
     // ========================================================================
     // 公开 API: 资源管理 (Parallax 接口)
     // ========================================================================

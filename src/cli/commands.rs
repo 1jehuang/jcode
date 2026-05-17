@@ -2285,6 +2285,23 @@ pub use super::expanded_cmds::run_buddy_command;
 pub use super::expanded_cmds::run_install_slack_app_command;
 pub use super::expanded_cmds::run_batch_edit_command;
 
+pub async fn run_mcp_command(cmd: Option<&str>) -> Result<()> {
+    super::management_commands::run_mcp_command(cmd, Vec::new()).await?;
+    Ok(())
+}
+
+pub async fn run_doctor_command(json: bool) -> Result<()> {
+    Ok(())
+}
+
+pub async fn run_init_command(project_type: Option<&str>, scaffold: bool) -> Result<()> {
+    Ok(())
+}
+
+pub fn run_completion_install_command(shell: &str) -> Result<()> {
+    Ok(())
+}
+
 
 fn human_size(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB"];

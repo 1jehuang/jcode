@@ -419,7 +419,7 @@ pub struct TaskStatistics {
 
 /// CLI command handler for task management
 pub struct TaskCommands {
-    manager: Arc<TaskManager>,
+    pub manager: Arc<TaskManager>,
 }
 
 impl TaskCommands {

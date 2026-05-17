@@ -102,7 +102,28 @@ async fn chat_completions_handler(
         "chat",
     );
 
-    // 2. 提交任务到 UnifiedScheduler
+    // 2. 计算分布式推理最优路由 (Parallax Phase 1 + Phase 2)
+    let route_info = if let Some(ref ds) = state.distributed_scheduler {
+        match ds.route_request(&request.model, 80).await {
+            Ok(route) => {
+                tracing::info!(
+                    "[Parallax] 路由决策: model={}, target_node={:?}, layers={}",
+                    request.model,
+                    route.target_node,
+                    route.total_layers
+                );
+                Some(route)
+            }
+            Err(e) => {
+                tracing::warn!("[Parallax] 路由失败，回退到本地推理: {:?}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // 3. 提交任务到 UnifiedScheduler（用于 Ruflo 优先级调度和指标收集）
     let task = jcode_unified_scheduler::ScheduledTask {
         id: uuid::Uuid::new_v4(),
         description: format!("Chat: {}", &request.model),
@@ -116,15 +137,41 @@ async fn chat_completions_handler(
         result: None, error_message: None,
         max_retries: 0, retry_count: 0,
     };
-    let _tid = state.scheduler.submit_task(task).await;
+    let task_id = match state.scheduler.submit_task(task).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!("[UnifiedScheduler] 任务提交失败: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": format!("调度器错误: {}", e),
+                        "type": "scheduler_error"
+                    }
+                })),
+            ).into_response();
+        }
+    };
 
-    // 2b. 并行计算分布式推理最优路由 (Parallax Phase 1 + Phase 2)
-    if let Some(ref ds) = state.distributed_scheduler {
-        let _ = ds.route_request(&request.model, 80).await;
-    }
-
-    // 3. 从请求中找出使用的是哪个模型，获取对应的 Provider
-    let provider = state.find_provider(&request.model).await;
+    // 4. 根据路由结果选择执行路径
+    let provider = if let Some(ref route) = route_info {
+        // 分布式路径：检查目标节点是否为本机
+        if route.target_node.is_none() || route.layer_assignments.is_empty() {
+            // 无分布式节点或分配为空，使用本地provider
+            state.find_provider(&request.model).await
+        } else {
+            // TODO: 实现跨节点分布式推理
+            // 当前阶段：如果目标不是本机，记录警告并使用本地provider
+            tracing::warn!(
+                "[Parallax] 跨节点分布式推理尚未实现，回退到本地: target_node={:?}",
+                route.target_node
+            );
+            state.find_provider(&request.model).await
+        }
+    } else {
+        // 无路由信息，使用本地provider
+        state.find_provider(&request.model).await
+    };
 
     let provider = match provider {
         Some(p) => p,
@@ -161,7 +208,7 @@ async fn chat_completions_handler(
         stop: None,
     };
 
-    // 3. 调用推理
+    // 5. 调用推理
     match provider.chat_completion(internal_request).await {
         Ok(response) => {
             let latency_ms = start.elapsed().as_millis() as u64;
@@ -188,8 +235,37 @@ async fn chat_completions_handler(
                 }
             });
 
+            // 构建响应头，包含调度信息
+            use axum::http::{HeaderMap, HeaderValue};
+            let mut headers = HeaderMap::new();
+
+            // 添加任务ID
+            headers.insert("X-CarpAI-Task-ID", HeaderValue::from_str(&task_id.to_string()).unwrap_or_else(|_| HeaderValue::from_static("")));
+
+            // 添加路由信息
+            if let Some(ref route) = route_info {
+                if let Some(target) = route.target_node {
+                    headers.insert("X-CarpAI-Target-Node", HeaderValue::from_str(&target.to_string()).unwrap_or_else(|_| HeaderValue::from_static("")));
+                }
+                headers.insert("X-CarpAI-Layer-Count", HeaderValue::from(route.total_layers));
+                headers.insert("X-CarpAI-Scheduler", HeaderValue::from_static("Parallax"));
+            } else {
+                headers.insert("X-CarpAI-Scheduler", HeaderValue::from_static("Local"));
+            }
+
+            // 添加优先级信息
+            headers.insert("X-CarpAI-Priority", HeaderValue::from(priority as i64));
+
+            tracing::debug!(
+                "[API] 响应完成: task_id={}, latency={}ms, scheduler={}",
+                task_id,
+                latency_ms,
+                if route_info.is_some() { "Parallax" } else { "Local" }
+            );
+
             (
                 StatusCode::OK,
+                headers,
                 Json(ChatResponse {
                     id: response.id,
                     object: "chat.completion".into(),

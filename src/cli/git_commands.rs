@@ -501,7 +501,7 @@ fn parse_diff_output(diff_output: &str) -> Vec<DiffInfo> {
 
 /// CLI command handler for git operations
 pub struct GitCommands {
-    workflow: Box<dyn GitWorkflow>,
+    pub workflow: Box<dyn GitWorkflow>,
 }
 
 impl GitCommands {

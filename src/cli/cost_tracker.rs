@@ -10,6 +10,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, RwLock};
 
 /// Token usage information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,7 +252,7 @@ pub enum WarningLevel {
 
 /// CLI command handler for cost tracking
 pub struct CostCommands {
-    tracker: CostTracker,
+    pub tracker: CostTracker,
 }
 
 impl CostCommands {

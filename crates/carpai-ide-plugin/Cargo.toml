@@ -1,0 +1,51 @@
+[package]
+name = "carpai-ide-plugin"
+version = "0.1.0"
+edition = "2021"
+description = "CarpAI IDE Plugin - Native Rust implementation for maximum performance"
+authors = ["CarpAI Team"]
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "carpai-ide"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# gRPC client
+tonic = "0.12"
+prost = "0.13"
+
+# TUI framework
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# LSP client
+lsp-types = "0.97"
+tower-lsp = "0.20"
+
+# Configuration
+config = "0.14"
+
+# UUID
+uuid = { version = "1", features = ["v4"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Workspace dependencies
+carpai-sdk = { path = "../carpai-sdk" }
