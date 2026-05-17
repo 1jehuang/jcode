@@ -287,13 +287,10 @@ def handle_message(user_name, text, chat_id):
         _active_chats.add(chat_id)
         before = _last_seen_response
     
-    # Send instant acknowledgment
-    send_message(chat_id, f"📩 Message received from <b>{user_name}</b> — Jcode is processing it now. Responses will appear here automatically.")
-    
-    # Inject into Jcode
+    # Inject into Jcode (no ack — responses auto-send via watcher)
     inject_into_jcode(user_name, text)
     
-    log(f"✅ Acknowledged to {chat_id}, watching for responses...")
+    log(f"✅ Registered {chat_id} for auto-delivery")
 
 # ─── OFFSET PERSISTENCE ──────────────────────────────────────
 
