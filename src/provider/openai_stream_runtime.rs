@@ -615,7 +615,7 @@ pub(super) async fn stream_response_websocket_persistent(
     let connect_result: Result<
         Result<(WebSocketStream<MaybeTlsStream<TcpStream>>, axum::body::Body), WsError>,
         tokio::time::error::Elapsed,
-    > = tokio::time::timeout(
+    > = tokio::time::timeout::<Result<(WebSocketStream<MaybeTlsStream<TcpStream>>, axum::body::Body), _>(
         Duration::from_secs(WEBSOCKET_CONNECT_TIMEOUT_SECS),
         connect_async(ws_request),
     )

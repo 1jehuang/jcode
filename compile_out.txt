@@ -1,0 +1,28 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Checking jcode-cpu-inference v0.1.0 (D:\studying\Codecargo\CarpAI\crates\jcode-cpu-inference)
+    Checking jcode-unified-scheduler v0.1.0 (D:\studying\Codecargo\CarpAI\crates\jcode-unified-scheduler)
+error: couldn't read `crates\jcode-unified-scheduler\src\goap_planner.rs`: stream did not contain valid UTF-8
+   --> crates\jcode-unified-scheduler\src\lib.rs:39:1
+    |
+ 39 | pub mod goap_planner;
+    | ^^^^^^^^^^^^^^^^^^^^^
+    |
+note: bytes `[229, 153]` are not valid utf-8
+   --> crates\jcode-unified-scheduler\src\types.rs:713:16
+    |
+713 |     /// 覆盖的层范围 [start, end)
+    |                      ^
+
+error: could not compile `jcode-unified-scheduler` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+warning: unused variable: `child`
+  --> crates\jcode-cpu-inference\src\lib.rs:78:13
+   |
+78 |         let child = cmd.spawn()
+   |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_child`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `jcode-cpu-inference` (lib) generated 1 warning (run `cargo fix --lib -p jcode-cpu-inference` to apply 1 suggestion)

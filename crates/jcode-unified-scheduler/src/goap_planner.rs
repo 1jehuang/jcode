@@ -1,4 +1,4 @@
-﻿//! **GOAP A* 规划器** — 移植自 Ruflo Goal Module
+//! **GOAP A* 规划器** — 移植自 Ruflo Goal Module
 //!
 //! ## 算法概述
 //!
@@ -491,9 +491,9 @@ impl GoapPlanner {
         if lower.contains("部署") || lower.contains("deploy") {
             state.set("dependencies_installed", WorldStateValue::Bool(true));
             state.set("tests_written".to_string(), WorldStateValue::Bool(true));
-            state.set("built".into(), WorldStateValue::Bool(true));
-            state.set("deployed".into(), WorldStateValue::Bool(true));
-            state.set("monitoring_active".into(), WorldStateValue::Bool(true));
+            state.set("built", WorldStateValue::Bool(true));
+            state.set("deployed", WorldStateValue::Bool(true));
+            state.set("monitoring_active", WorldStateValue::Bool(true));
 
             return Ok(state);
         }

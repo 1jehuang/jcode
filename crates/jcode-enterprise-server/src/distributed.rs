@@ -197,7 +197,31 @@ impl DistributedInferenceScheduler {
     }
 
     /// 判断是否可以使用分布式推理
+    pub async fn route_request(&self, model: &str, layers: u32) -> anyhow::Result<InferenceRoute> {
+        let a = self.allocate_model_layers(model, layers).await?;
+        let nodes = { let m = self.node_manager.read().await; m.active_node_list() };
+        let r = self.request_router.read().await;
+        let target = match r.as_ref() {
+            Some(rr) => {
+                let memo = rr.build_cost_table(&nodes, layers as usize);
+                rr.backtrack_optimal_path(&memo, &nodes, layers as usize)
+                    .map(|p| p.last().copied()).flatten()
+                    .or_else(|| nodes.first().map(|n| n.node_id))
+            }
+            None => nodes.first().map(|n| n.node_id),
+        };
+        Ok(InferenceRoute { model_name: model.into(), target_node: target, layer_assignments: a, total_layers: layers })
+    }
+
     pub fn can_use_distributed(&self) -> bool {
         self.node_count() >= 2
     }
+}
+
+#[derive(Debug,Clone)]
+pub struct InferenceRoute {
+    pub model_name: String,
+    pub target_node: Option<jcode_unified_scheduler::NodeId>,
+    pub layer_assignments: Vec<(jcode_unified_scheduler::NodeId, u32)>,
+    pub total_layers: u32,
 }

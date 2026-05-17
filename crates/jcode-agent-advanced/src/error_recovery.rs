@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use rand::Rng;
 
+use super::types::TerminalState;
+
 /// 错误分类 — 冶定恢复策略
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ErrorCategory {
@@ -154,7 +156,7 @@ impl ErrorClassifier {
     fn suggest_actions(&self, category: &ErrorCategory) -> Vec<RecoveryAction> {
         match category {
             ErrorCategory::NetworkTimeout | ErrorCategory::RateLimited { .. } 
-                | ErrorCategory::ModelErrorOverloaded | ErrorCategory::ServerError(_) => {
+                | ErrorCategory::ModelOverloaded | ErrorCategory::ServerError(_) => {
                 vec![RecoveryAction::RetryWithBackoff(
                     Duration::from_millis(BACKOFF_INITIAL_MS)
                 )]

@@ -129,7 +129,7 @@ pub async fn run_print_mode(config: PrintModeConfig) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else if config.ndjson {
         // NDJSON流式输出模式
-        let mut stream = agent.query_stream(&full_query).await?;
+        let mut stream: tokio_stream::StreamMap<u64, crate::agent::Event> = agent.query_stream(&full_query).await?;
         
         while let Some(event) = stream.next().await {
             let json_event = serde_json::to_string(&event)?;

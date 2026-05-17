@@ -668,6 +668,17 @@ pub enum ProficiencyLevel {
     Master,
 }
 
+fn proficiency_to_f64(level: &ProficiencyLevel) -> f64 {
+    match level {
+        ProficiencyLevel::Novice => 0.0,
+        ProficiencyLevel::Beginner => 1.0,
+        ProficiencyLevel::Intermediate => 2.0,
+        ProficiencyLevel::Advanced => 3.0,
+        ProficiencyLevel::Expert => 4.0,
+        ProficiencyLevel::Master => 5.0,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceRef {
     pub title: String,
@@ -1259,8 +1270,8 @@ impl InsightGenerator {
                         relevant_resource: lo.recommended_resources.first().cloned(),
                         expected_improvement: ImprovementEstimate {
                             metric: format!("{:?}", lo.topic),
-                            current_value: lo.current_proficiency as u8 as f64,
-                            expected_value: lo.target_proficiency as u8 as f64,
+                            current_value: proficiency_to_f64(&lo.current_proficiency),
+                            expected_value: proficiency_to_f64(&lo.target_proficiency),
                             unit: "proficiency_level".to_string(),
                         },
                     }),

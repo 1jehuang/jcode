@@ -1,4 +1,4 @@
-﻿use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 const LEAF_MIN: usize = 64;
 const LEAF_MAX: usize = 512;

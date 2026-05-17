@@ -50,12 +50,12 @@ impl SamplingHandler {
     }
 
     /// 执行采样请求
-    pub async fn sample(&self, request: CreateMessageRequest) -> Result<CreateResult, String> {
+    pub async fn sample(&self, _request: CreateMessageRequest) -> Result<CreateResult, String> {
         if !self.is_available() {
             return Err("Sampling handler not configured".into());
         }
 
-        let cb = self.callback.as_ref().unwrap();
+        let _cb = self.callback.as_ref().unwrap();
         
         // TODO: Fix the async trait issue with the callback signature.
         // For now return a placeholder result.

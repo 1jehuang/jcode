@@ -458,7 +458,7 @@ impl OnlineFeatureSelector {
     }
     
     /// 获取特征重要性排名
-    pub fn get_feature_ranking(&self) -> Vec<String, f64> {
+    pub fn get_feature_ranking(&self) -> Vec<(String, f64)> {
         let mut ranked: Vec<_> = self.feature_importance.iter().collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
         ranked

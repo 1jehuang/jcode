@@ -1,4 +1,4 @@
-﻿use std::sync::Arc;
+use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use super::proto;
 use super::proto::plugin_service_server::PluginService;

@@ -58,7 +58,7 @@ pub(crate) async fn register_review() {
                         let ci = jcode_micro_ci::MicroCi::new(jcode_micro_ci::CiConfig { workspace_root: cwd.to_string_lossy().to_string(), ..Default::default() });
                         let r = ci.run().await;
                         let issues = r.issues;
-                        if !issues.is_empty() { eprintln!("  Issues: {}", issues.len()); for i in issues.iter().take(10) { eprintln!("    [{}] {}:{}", i.severity, i.file, i.line); } }
+                        if !issues.is_empty() { eprintln!("  Issues: {}", issues.len()); for i in issues.iter().take(10) { eprintln!("    [{}] {}:{}", i.severity, i.file.as_deref().unwrap_or("unknown"), i.line.unwrap_or(0)); } }
                         else { eprintln!("  ✅ No issues.\n"); }
                     }
                     _ => eprintln!("  No uncommitted changes.\n"),

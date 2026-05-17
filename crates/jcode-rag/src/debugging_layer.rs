@@ -1,4 +1,4 @@
-﻿//! Layer 5: Debugging Layer - Log Injection + Breakpoint Management
+//! Layer 5: Debugging Layer - Log Injection + Breakpoint Management
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

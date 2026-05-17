@@ -57,6 +57,8 @@ impl std::fmt::Display for SupportedLanguage {
             Self::JavaScript => write!(f, "javascript"),
             Self::TypeScript => write!(f, "typescript"),
             Self::Go => write!(f, "go"),
+            Self::C => write!(f, "c"),
+            Self::Cpp => write!(f, "cpp"),
             Self::Json => write!(f, "json"),
             Self::Markdown => write!(f, "markdown"),
         }
@@ -430,7 +432,7 @@ impl AstParser {
         let parser = self.parsers.get(&language)
             .ok_or_else(|| anyhow::anyhow!("Unsupported language: {}", language))?;
 
-        let tree = parser.parse(source, None)?
+        let tree = parser.parse(source, None)
             .ok_or_else(|| anyhow::anyhow!("Failed to parse source code"))?;
 
         // 存入缓存

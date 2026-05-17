@@ -1,4 +1,4 @@
-﻿//! # PowerShell 补全引擎
+//! # PowerShell 补全引擎
 //!
 //! 提供智能的 PowerShell 命令行补全功能：
 //! - **Cmdlet 解析器** - 完整的 PowerShell 语法分析 (Verb-Noun)

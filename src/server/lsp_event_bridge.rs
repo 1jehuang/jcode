@@ -114,7 +114,7 @@ impl LspEventBridge {
         for file in files.iter() {
             match self.lsp_manager.get_diagnostics(file).await {
                 Ok(diagnostics) if !diagnostics.is_empty() => {
-                    let diagnostics: Vec<lsp_types::Diagnostic> = diagnostics;
+                    let diagnostics: Vec<lsp_types::Diagnostic> = diagnostics.into_iter().collect();
                     let error_count = diagnostics
                         .iter()
                         .filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))

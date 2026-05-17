@@ -1,4 +1,4 @@
-﻿//! **层分配器 (Phase 1)** — 移植自 Parallax `layer_allocation.py`
+//! **层分配器 (Phase 1)** — 移植自 Parallax `layer_allocation.py`
 //!
 //! ## 算法概述
 //!

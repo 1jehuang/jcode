@@ -120,6 +120,7 @@ pub trait AstOperations: Send + Sync {
 /// ⚠️ **已废弃** — 请使用 `TreeSitterAstOperations`（基于真实 AST，精度更高）。
 /// 仅在 LSP 不可用或 tree-sitter 不支持目标语言时作为后备。
 #[deprecated(since = "0.2.0", note = "Use TreeSitterAstOperations instead — regex-based operations lack scope awareness and may incorrectly match comments/strings")]
+#[allow(deprecated)]
 pub struct RegexAstOperations;
 
 impl Default for RegexAstOperations {

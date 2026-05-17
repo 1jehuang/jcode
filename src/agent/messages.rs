@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 impl Agent {
     pub(crate) fn add_message(&mut self, role: Role, content: Vec<ContentBlock>) -> String {

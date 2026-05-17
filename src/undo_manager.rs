@@ -41,16 +41,22 @@ impl UndoManager {
 
     pub fn save_checkpoint(session_id: &str, data: Vec<u8>) {
         if let Ok(mut mgr) = UNDO_MANAGER.lock() {
-            let stack = mgr.ensure_session(session_id, 20);
-            stack.redo_stack.clear();
-            stack.undo_stack.push(data);
-            while stack.undo_stack.len() > stack.max_depth {
-                stack.undo_stack.remove(0);
+            let undo_dir = mgr.undo_dir.clone();
+            let snapshot_data;
+            let stack_len;
+            {
+                let stack = mgr.ensure_session(session_id, 20);
+                stack.redo_stack.clear();
+                stack.undo_stack.push(data.clone());
+                while stack.undo_stack.len() > stack.max_depth {
+                    stack.undo_stack.remove(0);
+                }
+                let idx = stack.undo_stack.len();
+                stack_len = idx;
+                snapshot_data = stack.undo_stack[idx - 1].clone();
             }
-            let dir = mgr.undo_dir.join(session_id);
-            let _ = std::fs::create_dir_all(&dir);
-            let idx = stack.undo_stack.len();
-            let _ = std::fs::write(dir.join(format!("{}.snap", idx)), &stack.undo_stack[idx - 1]);
+            let _ = std::fs::create_dir_all(&undo_dir);
+            let _ = std::fs::write(undo_dir.join(format!("{}.snap", snapshot_data.len())), &data);
         }
     }
 

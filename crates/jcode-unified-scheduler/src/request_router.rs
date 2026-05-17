@@ -1,4 +1,4 @@
-﻿//! **请求路由器 (Phase 2)** — 移植自 Parallax `request_routing.py`
+//! **请求路由器 (Phase 2)** — 移植自 Parallax `request_routing.py`
 //!
 //! ## 算法概述
 //!
@@ -416,7 +416,7 @@ pub fn find_turning_points(nodes: &[Arc<NodeInfo>], num_layers: u32) -> Vec<(Nod
 
     let end_i = last_dp
         .iter()
-        .min_by_key(|(_, cost)| ordered_float::OrderedFloat(*cost))
+        .min_by_key(|(_, cost)| ordered_float::OrderedFloat(**cost))
         .map(|(&i, _)| i);
 
     let end_i = match end_i {

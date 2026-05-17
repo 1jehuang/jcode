@@ -1,4 +1,4 @@
-﻿use crate::id::{extract_session_name, new_id, new_memorable_session_id};
+use crate::id::{extract_session_name, new_id, new_memorable_session_id};
 use crate::message::{ContentBlock, Message, Role};
 use crate::storage;
 use chrono::{DateTime, Utc};

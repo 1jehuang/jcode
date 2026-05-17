@@ -14,6 +14,7 @@ use axum::{
     Router,
 };
 use futures::StreamExt;
+use jcode_unified_scheduler::{ScheduledTask, AgentRole, TaskPriority};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -94,7 +95,35 @@ async fn chat_completions_handler(
 ) -> impl IntoResponse {
     let start = std::time::Instant::now();
 
-    // 1. 从请求中找出使用的是哪个模型，获取对应的 Provider
+    // 1. 评估优先级 (Ruflo)
+    let priority = state.priority_engine.evaluate(
+        &jcode_unified_scheduler::AgentRole::Developer,
+        &request.model,
+        "chat",
+    );
+
+    // 2. 提交任务到 UnifiedScheduler
+    let task = jcode_unified_scheduler::ScheduledTask {
+        id: uuid::Uuid::new_v4(),
+        description: format!("Chat: {}", &request.model),
+        role: jcode_unified_scheduler::AgentRole::Developer,
+        priority: jcode_unified_scheduler::TaskPriority::from(priority),
+        required_model: request.model.clone(),
+        dependencies: vec![],
+        goal: None, actions: vec![], plan: None,
+        submitted_at: None, started_at: None, completed_at: None,
+        status: jcode_unified_scheduler::TaskStatus::Pending,
+        result: None, error_message: None,
+        max_retries: 0, retry_count: 0,
+    };
+    let _tid = state.scheduler.submit_task(task).await;
+
+    // 2b. 并行计算分布式推理最优路由 (Parallax Phase 1 + Phase 2)
+    if let Some(ref ds) = state.distributed_scheduler {
+        let _ = ds.route_request(&request.model, 80).await;
+    }
+
+    // 3. 从请求中找出使用的是哪个模型，获取对应的 Provider
     let provider = state.find_provider(&request.model).await;
 
     let provider = match provider {

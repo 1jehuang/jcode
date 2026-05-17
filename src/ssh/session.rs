@@ -537,8 +537,8 @@ impl SshSession {
                   .arg(cmd)
                   .output()
                   .await
-                  .map(|o| o.status.code().unwrap_or(-1))
-                  .unwrap_or(-1)
+                  .map(|o| o.status.code().unwrap_or(-1) as u32)
+                  .unwrap_or(0)
         }).await
         .map_err(|e| format!("Async execution failed: {}", e))
     }
@@ -959,14 +959,15 @@ impl SshConnectionPool {
             if session.is_alive() {
                 return Ok(session.id().to_string());
             }
-            sessions.remove(&key);
         }
+        sessions.remove(&key);
 
         if sessions.len() >= self.max_connections {
-            if let Some((id, _)) = sessions.iter()
+            let oldest_id = sessions.iter()
                 .min_by_key(|(_, s)| s.idle_time().unwrap_or(Duration::MAX))
-            {
-                sessions.remove(id);
+                .map(|(id, _)| id.clone());
+            if let Some(id) = oldest_id {
+                sessions.remove(&id);
             }
         }
 

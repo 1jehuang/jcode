@@ -1,4 +1,4 @@
-﻿//! **资源节点管理器** — 移植自 Parallax `node.py` + `node_management.py`
+//! **资源节点管理器** — 移植自 Parallax `node.py` + `node_management.py`
 //!
 //! ## 功能
 //!

@@ -88,7 +88,7 @@ pub struct RustBestPractice {
     pub related_rules: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum PracticeCategory {
     ModuleSystem,
     NamingConventions,
@@ -685,12 +685,12 @@ my-project-bad/
         let id = rule.id.clone();
         let category = rule.category;
         
-        self.rules.insert(id, rule);
-        
         self.category_index
             .entry(category)
             .or_insert_with(Vec::new)
-            .push(id);
+            .push(id.clone());
+        
+        self.rules.insert(id, rule);
     }
     
     /// 获取所有规则
@@ -702,7 +702,7 @@ my-project-bad/
     pub fn get_rules_by_category(&self, category: PracticeCategory) -> Vec<&RustBestPractice> {
         let rules: Vec<&RustBestPractice> = self.category_index
             .get(&category)
-            .map(|ids| {
+            .map(|ids: &Vec<String>| {
                 ids.iter()
                     .filter_map(|id| self.rules.get(id))
                     .collect()
@@ -719,23 +719,24 @@ my-project-bad/
     /// 验证代码是否符合最佳实践
     pub fn validate_code(&self, code: &str) -> ValidationReport {
         let mut violations = Vec::new();
-        let mut suggestions = Vec::new();
+        let mut suggestions: Vec<RustBestPractice> = Vec::new();
         
         for rule in self.rules.values() {
             if let Some(violation) = self.check_rule(code, &rule) {
                 if violation.is_violation {
                     violations.push(violation);
                 } else {
-                    suggestions.push(rule);
+                    suggestions.push(rule.clone());
                 }
             }
         }
         
+        let score = self.calculate_score(&violations);
         ValidationReport {
             total_rules_checked: self.rules.len(),
             violations,
             suggestions,
-            score: self.calculate_score(&violations),
+            score,
         }
     }
     
@@ -767,8 +768,9 @@ my-project-bad/
                 severity: rule.severity,
                 description: rule.description.clone(),
                 suggestion: rule.correct_example.clone(),
-                location: None, // 需要AST分析才能定位
+                location: None,
                 auto_fix_available: rule.auto_fixable,
+                is_violation: true,
             })
         } else {
             None

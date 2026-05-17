@@ -16,7 +16,7 @@ use crate::nlp::engine::FileType;
 // --- Types ---------------------------------
 
 /// 原型配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PrototypeConfig {
     /// 项目名称
     pub project_name: String,
@@ -581,7 +581,7 @@ pub struct Money {
     pub currency: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CostBreakdown {
     pub development: f64,
     pub testing: f64,
@@ -1440,11 +1440,11 @@ fn get_prerequisites(_architecture: &ArchitectureOverview) -> Vec<String> {
     vec![]
 }
 
-fn get_common_pitfalls(_project_type: &ProjectType) -> Vec<String> {
+fn get_common_pitfalls(_project_type: &ProjectType) -> Vec<Pitfall> {
     vec![]
 }
 
-fn get_best_practices(_pattern: &ArchitecturePattern) -> Vec<String> {
+fn get_best_practices(_pattern: &ArchitecturePattern) -> Vec<BestPractice> {
     vec![]
 }
 

@@ -514,12 +514,9 @@ impl SshAuditLogger {
                     .map_err(|e| format!("JSON serialization failed: {}", e))?
             }
             LogFormat::Text => {
-                let event_type_str = match &event.event_type {
-                    SshEventType::Custom(s) => s.as_str(),
-                    other => {
-                        let formatted = format!("{:?}", other);
-                        Box::leak(formatted.into_boxed_str())
-                    }
+                let event_type_str: String = match &event.event_type {
+                    SshEventType::Custom(s) => s.as_str().to_string(),
+                    other => format!("{:?}", other),
                 };
                 format!(
                     "[{}] [{}] {} - {} | User: {} | Host: {} | {}",

@@ -113,7 +113,8 @@ pub struct LspClient {
     server_name: String,
     
     /// Workspace root URI
-    root_uri: Arc<RwLock<Url>>,
+    #[allow(dead_code)]
+    root_uri: Option<Url>,
     
     /// Whether initialization is complete
     initialized: Arc<RwLock<bool>>,
@@ -168,7 +169,7 @@ impl LspClient {
             stdin: Arc::new(RwLock::new(None)),
             stdout: Arc::new(RwLock::new(None)),
             server_name,
-            root_uri: Arc::new(RwLock::new(Url::parse("file:///workspace").unwrap())),
+            root_uri: None,
             initialized: Arc::new(RwLock::new(false)),
             capabilities: Arc::new(RwLock::new(None)),
             open_documents: Arc::new(RwLock::new(HashMap::new())),
@@ -334,14 +335,13 @@ impl LspClient {
     }
 
     /// Send initialize request
-    pub async fn initialize(&self, root_uri: Option<Url>) -> LspResult<InitializeResult> {
+    pub async fn initialize(&self) -> LspResult<InitializeResult> {
         self.check_start_failed().await?;
         
         info!("Initializing LSP server: {}", self.server_name);
         
         let params = InitializeParams {
             process_id: Some(std::process::id()),
-            root_uri: root_uri.or_else(|| Url::from_file_path(std::env::current_dir().unwrap_or_default()).ok()),
             initialization_options: None,
             capabilities: ClientCapabilities {
                 text_document: Some(TextDocumentClientCapabilities {

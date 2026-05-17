@@ -97,18 +97,23 @@ impl SshManager {
 
         let duration = start.elapsed();
 
-        if let Ok(ref output) = result {
-            let output_preview = if output.stdout.len() > 1024 { 
+        let output_preview: Option<String> = if let Ok(ref output) = result {
+            Some(if output.stdout.len() > 1024 { 
                 format!("{}... (truncated)", &output.stdout[..1024])
             } else { 
                 output.stdout.clone()
-            };
+            })
+        } else {
+            None
+        };
+        
+        if let (Ok(ref output), Some(ref preview)) = (&result, &output_preview) {
             self.audit_logger.log_command_execution(
                 "",
                 command,
                 output.exit_code,
                 duration.as_millis() as u64,
-                Some(&output_preview),
+                Some(preview),
             );
         }
 

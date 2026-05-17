@@ -337,7 +337,7 @@ async fn ensure_persistent_ws_is_healthy(state: &mut PersistentWsState) -> Resul
         .ws_stream
         .send(WsMessage::Ping(Vec::new()))
         .await
-        .map_err(|err| format!("healthcheck ping send error: {}", err));
+        .map_err(|err: tokio_tungstenite::tungstenite::error::Error| format!("healthcheck ping send error: {}", err));
     ping_result?;
 
     let started_at = Instant::now();
@@ -371,7 +371,7 @@ async fn ensure_persistent_ws_is_healthy(state: &mut PersistentWsState) -> Resul
                     .ws_stream
                     .send(WsMessage::Pong(payload))
                     .await
-                    .map_err(|err| format!("healthcheck pong send error: {}", err));
+                    .map_err(|err: tokio_tungstenite::tungstenite::error::Error| format!("healthcheck pong send error: {}", err));
                 pong_result?;
                 state.last_activity_at = Instant::now();
             }

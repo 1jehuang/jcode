@@ -6,6 +6,7 @@ use std::time::SystemTime;
 /// 单个检查结果
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CheckResult {
     pub phase: &'static str,
     pub passed: bool,
@@ -40,7 +41,8 @@ pub struct IncrementalCache {
 }
 
 impl IncrementalCache {
-    pub fn new() -> Self { Self::default() }
+    #[allow(dead_code)]
+pub fn new() -> Self { Self::default() }
 
     pub fn needs_check(&mut self, path: &Path) -> bool {
         let metadata = match path.metadata() {
@@ -62,7 +64,8 @@ impl IncrementalCache {
         true
     }
 
-    pub fn clear(&mut self) {
+    #[allow(dead_code)]
+pub fn clear(&mut self) {
         self.timestamps.clear();
     }
 }
@@ -144,7 +147,8 @@ impl Default for RegexAstCheck {
 }
 
 impl RegexAstCheck {
-    pub fn new() -> Self { Self::default() }
+    #[allow(dead_code)]
+pub fn new() -> Self { Self::default() }
 
     fn check_file_ast(path: &Path, content: &str) -> Vec<crate::Issue> {
         let mut issues = Vec::new();
@@ -278,11 +282,13 @@ impl AstCheck for RegexAstCheck {
 
 /// 基于 git diff 的增量检查
 #[allow(dead_code)]
+#[allow(dead_code)]
 pub struct GitDiffAstCheck;
 
 #[allow(dead_code)]
 impl GitDiffAstCheck {
-    pub fn new() -> Self { Self }
+    #[allow(dead_code)]
+pub fn new() -> Self { Self }
 }
 
 #[async_trait]
@@ -332,7 +338,8 @@ impl Default for CargoTypeCheck {
 }
 
 impl CargoTypeCheck {
-    pub fn new() -> Self { Self::default() }
+    #[allow(dead_code)]
+pub fn new() -> Self { Self::default() }
 
     fn parse_cargo_line(line: &str) -> Option<crate::Issue> {
         if line.contains("error[") {
@@ -420,7 +427,8 @@ impl Default for RuleBasedAiCheck {
 }
 
 impl RuleBasedAiCheck {
-    pub fn new() -> Self { Self::default() }
+    #[allow(dead_code)]
+pub fn new() -> Self { Self::default() }
 
     fn patterns_to_check() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
         vec![

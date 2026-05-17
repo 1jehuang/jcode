@@ -366,11 +366,16 @@ impl AutoModeEngine {
     where
         F: FnOnce(&mut AutoModeConfig),
     {
-        let mut cfg = self.config.write().unwrap_or_else(|e| e.into_inner());
-        updater(&mut cfg);
+        let cfg = {
+            let mut cfg = self.config.write().unwrap_or_else(|e| e.into_inner());
+            updater(&mut cfg);
+            cfg.clone()
+        };
+        
+        drop(cfg);
         
         // 重新初始化安全护栏（如果配置变更）
-        self.safety_guard.refresh_config(&cfg);
+        self.safety_guard.refresh_config(&self.get_config());
     }
 
     /// 启用/禁用Auto Mode

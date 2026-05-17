@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 impl Server {
     pub fn new(provider: Arc<dyn Provider>) -> Self {

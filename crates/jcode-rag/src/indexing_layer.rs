@@ -1,4 +1,4 @@
-﻿//! Layer 1: Indexing Layer - Global Symbol Index
+//! Layer 1: Indexing Layer - Global Symbol Index
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

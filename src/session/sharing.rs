@@ -1151,12 +1151,12 @@ impl ShareAnalytics {
         let map = self.views.read().await;
         match map.get(&key) {
             Some(record) => {
-                let top_referrers: Vec<String, u64> = record
+                let top_referrers: Vec<(String, u64)> = record
                     .referrers
                     .iter()
                     .map(|(k, v)| (k.clone(), *v))
                     .collect();
-                let views_over_time: Vec<DateTime<Utc>, u64> = record
+                let views_over_time: Vec<(DateTime<Utc>, u64)> = record
                     .timestamps
                     .iter()
                     .map(|t| (*t, 1))
@@ -1398,10 +1398,10 @@ pub struct ShareAnalyticsData {
     pub total_views: u64,
     pub unique_viewers: u64,
     pub avg_view_duration: Option<ChronoDuration>,
-    pub top_referrers: Vec<String, u64>,
-    pub views_over_time: Vec<DateTime<Utc>, u64>,
+    pub top_referrers: Vec<(String, u64)>,
+    pub views_over_time: Vec<(DateTime<Utc>, u64)>,
     pub clone_count: u64,
-    pub geographic_distribution: Vec<String, u64>,
+    pub geographic_distribution: Vec<(String, u64)>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

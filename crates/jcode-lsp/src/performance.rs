@@ -646,6 +646,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// LRU 缓存 - 用于缓存 LSP 响应结果
 #[allow(dead_code)]
+#[allow(dead_code)]
 pub struct LruCache<K, V> where K: Eq + std::hash::Hash + Clone, V: Clone {
     capacity: usize,
     map: HashMap<K, (V, Instant)>,
@@ -721,6 +722,7 @@ where K: Eq + std::hash::Hash + Clone,
 
 /// 请求批处理器 - 将多个小请求合并为批量请求
 #[allow(dead_code)]
+#[allow(dead_code)]
 pub struct RequestBatcher<T> {
     batch_size: usize,
     batch_timeout: Duration,
@@ -769,6 +771,7 @@ impl<T> RequestBatcher<T> {
 
 /// 轻量级内存池 - 复用缓冲区减少分配
 #[allow(dead_code)]
+#[allow(dead_code)]
 pub struct BufferPool<T> {
     pool: Vec<Vec<T>>,
     default_capacity: usize,
@@ -803,6 +806,7 @@ impl<T: Default + Clone> BufferPool<T> {
 }
 
 /// 并发限制器 - 控制最大并发数
+#[allow(dead_code)]
 pub struct ConcurrencyLimiter {
     max_concurrent: usize,
     current: Arc<tokio::sync::Semaphore>,

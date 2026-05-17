@@ -288,7 +288,7 @@ pub struct MatcherStats {
 impl AhoCorasickMatcher {
     /// 从模式列表创建新的匹配器
     pub fn new(
-        patterns: Vec<String, RiskLevel, SecurityCategory>,
+        patterns: Vec<(String, RiskLevel, SecurityCategory)>,
         config: Option<MatcherConfig>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let config = config.unwrap_or_default();
@@ -367,7 +367,7 @@ impl AhoCorasickMatcher {
     }
 
     /// 获取默认的敏感词库
-    fn get_default_sensitive_patterns() -> Vec<String, RiskLevel, SecurityCategory> {
+    fn get_default_sensitive_patterns() -> Vec<(String, RiskLevel, SecurityCategory)> {
         vec![
             // === 文件删除类 (Critical) ===
             ("rm -rf".to_string(), RiskLevel::Critical, SecurityCategory::FileDeletion),

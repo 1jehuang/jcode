@@ -412,7 +412,7 @@ impl FileTransfer {
         }
     }
 
-    fn _collect_files(&self, dir: &Path) -> Result<Vec<PathBuf, PathBuf>, String> {
+    fn _collect_files(&self, dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>, String> {
         let mut files = vec![];
         
         let entries = std::fs::read_dir(dir)

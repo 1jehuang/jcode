@@ -375,7 +375,8 @@ impl CotEngine {
             
             // 保持历史记录在合理范围内 (最多1000条)
             if history.len() > 1000 {
-                history.drain(..history.len() - 1000);
+                let to_remove = history.len() - 1000;
+                history.drain(..to_remove);
             }
         }
         
@@ -488,6 +489,7 @@ impl CotEngine {
         // Step 6: 综合结论
         self.emit_step_event(chain.len()+1, StepType::Synthesis, "综合得出最终答案...", 0.92).await;
         let final_step = self.step_synthesis(problem, context, &chain).await?;
+        let final_answer = final_step.output.clone().unwrap_or_default();
         self.emit_step_reasoning(&final_step, 0.98).await;
         chain.push(final_step);
         
@@ -497,7 +499,7 @@ impl CotEngine {
         let reasoning_content = self.generate_reasoning_content(&chain);
         
         Ok(ReasoningResult {
-            answer: final_step.output.clone().unwrap_or_default(),
+            answer: final_answer,
             chain,
             confidence,
             total_duration_ms: total_duration,
@@ -542,7 +544,7 @@ impl CotEngine {
         step = ReasoningStep {
             step_number: 2,
             step_type: StepType::Verification,
-            description: "评估各候选方案的可行性",
+            description: "评估各候选方案的可行性".to_string(),
             input: candidates.join("\n"),
             reasoning: evaluations.iter()
                 .map(|(score, reason)| format!("- 方案得分: {:.2}, 理由: {}", score, reason))
@@ -742,6 +744,7 @@ impl CotEngine {
         
         // 综合各视角意见
         let synthesis_step = self.synthesize_perspectives(problem, &perspectives).await?;
+        let synthesis_output = synthesis_step.output.clone().unwrap_or_default();
         chain.push(synthesis_step);
         
         let confidence = self.calculate_overall_confidence(&chain);
@@ -749,7 +752,7 @@ impl CotEngine {
         let reasoning_content = self.generate_reasoning_content(&chain);
         
         Ok(ReasoningResult {
-            answer: synthesis_step.output.clone().unwrap_or_default(),
+            answer: synthesis_output,
             chain,
             confidence,
             total_duration_ms: total_duration,
@@ -782,10 +785,10 @@ impl CotEngine {
         Ok(ReasoningStep {
             step_number: 1,
             step_type: StepType::Understanding,
-            description: "深度理解问题",
+            description: "深度理解问题".to_string(),
             input: problem.to_string(),
             reasoning: understanding,
-            output: Some(self.classify_problem_type(problem)),
+            output: Some(self.classify_problem_type(problem).to_string()),
             confidence: 0.9,
             duration_ms: start.elapsed().as_millis() as u64,
             sub_steps: Vec::new(),
@@ -822,7 +825,7 @@ impl CotEngine {
         Ok(ReasoningStep {
             step_number: 2,
             step_type: StepType::InformationGathering,
-            description: "收集相关信息",
+            description: "收集相关信息".to_string(),
             input: problem.to_string(),
             reasoning: relevant_info,
             output: Some(relevant_info),
@@ -853,7 +856,7 @@ impl CotEngine {
         Ok(ReasoningStep {
             step_number: 3,
             step_type: StepType::HypothesisGeneration,
-            description: "生成解决假设",
+            description: "生成解决假设".to_string(),
             input: problem.to_string(),
             reasoning: hypotheses,
             output: None,
@@ -883,13 +886,14 @@ impl CotEngine {
              **初步结论**: ...",
             previous_steps.last()
                 .and_then(|s| s.output.as_ref())
+                .map(|s| s.as_str())
                 .unwrap_or("无前序输出")
         );
         
         Ok(ReasoningStep {
             step_number: 4,
             step_type: StepType::LogicalDeduction,
-            description: "逻辑推导",
+            description: "逻辑推导".to_string(),
             input: problem.to_string(),
             reasoning: deduction,
             output: None,
@@ -914,7 +918,7 @@ impl CotEngine {
              ✅ 一致性检查: 通过\n\
              ✅ 边界情况检查: 通过\n\
              ✅ 约束满足检查: 通过\n\n\
-             **验证结论**: 推导合理可信",
+             **验证结论**: 推导合理可信\n基于: {}",
             previous_steps.last()
                 .map(|s| s.description.as_str())
                 .unwrap_or("无")
@@ -923,7 +927,7 @@ impl CotEngine {
         Ok(ReasoningStep {
             step_number: 5,
             step_type: StepType::Verification,
-            description: "验证结论",
+            description: "验证结论".to_string(),
             input: problem.to_string(),
             reasoning: verification,
             output: Some("✅ 验证通过".to_string()),
@@ -993,7 +997,7 @@ impl CotEngine {
         Ok(ReasoningStep {
             step_number: chain.len() + 1,
             step_type: StepType::Synthesis,
-            description: "综合得出最终答案",
+            description: "综合得出最终答案".to_string(),
             input: problem.to_string(),
             reasoning: final_answer.clone(),
             output: Some(final_answer),
@@ -1193,7 +1197,7 @@ impl CotEngine {
                     let sum: f64 = parts.iter().sum();
                     format!("计算结果: {}", sum)
                 } else {
-                    "[数学推理完成] 经过逐步计算和分析..."
+                    "[数学推理完成] 经过逐步计算和分析...".to_string()
                 }
             }
             "代码生成" => "[代码生成] 已生成符合要求的代码实现...",
@@ -1336,7 +1340,7 @@ impl CotEngine {
         Ok(ReasoningStep {
             step_number: perspectives.len() + 1,
             step_type: StepType::Synthesis,
-            description: "综合多视角意见",
+            description: "综合多视角意见".to_string(),
             input: problem.to_string(),
             reasoning: synthesis,
             output: Some(synthesis),
@@ -1383,9 +1387,9 @@ struct SelfReflectionResult {
 impl SelfReflectionResult {
     fn as_step(self) -> ReasoningStep {
         ReasoningStep {
-            step_number: 0, // 将由调用者设置
+            step_number: 0,
             step_type: StepType::SelfReflection,
-            description: "自我反思与纠错",
+            description: "自我反思与纠错".to_string(),
             input: String::new(),
             reasoning: self.reflection,
             output: Some(if self.corrections.is_empty() {

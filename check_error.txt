@@ -1,0 +1,5 @@
+error: unexpected argument '2>&1' found
+
+Usage: cargo.exe check [OPTIONS]
+
+For more information, try '--help'.

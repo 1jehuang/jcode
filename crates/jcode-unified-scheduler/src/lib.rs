@@ -505,12 +505,16 @@ impl UnifiedScheduler {
             }
         }
 
-        // 递归取消所有下游任务
+        // 迭代取消所有下游任务（避免 async fn 递归导致的 E0733）
         let downstream = self.get_downstream_tasks(task_id).await?;
-        for dep_id in downstream {
-            if let Err(e) = self.cancel_task(&dep_id).await {
-                warn!("[UnifiedScheduler] 取消下游任务 {} 失败: {:?}", dep_id, e);
+        let mut to_cancel = downstream;
+        while let Some(dep_id) = to_cancel.pop() {
+            if let Ok(mut task) = self.get_task_mut(&dep_id).await {
+                task.status = TaskStatus::Cancelled;
+                task.completed_at = Some(chrono::Utc::now());
             }
+            let mut queue = self.queue.write().await;
+            queue.remove(&dep_id);
         }
 
         // 从队列移除
@@ -941,9 +945,11 @@ impl UnifiedScheduler {
             Some(a) => a,
             None => return Ok(false),
         };
-        let needs = allocator.should_rebalance(&{
-            let mgr = self.node_manager.read().await; mgr.active_nodes().iter().map(|n| n.clone()).collect::<Vec<_>>()
-        }).map(|v| &v[..])?;
+        let active_nodes: Vec<&NodeInfo> = {
+            let mgr = self.node_manager.read().await;
+            mgr.active_nodes().iter().map(|n| n).collect()
+        };
+        let needs = allocator.should_rebalance(&active_nodes)?;
         drop(allocator);
 
         if needs {

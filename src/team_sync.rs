@@ -1281,13 +1281,6 @@ impl TeamSyncManager {
     }
 
     async fn queue_offline_operation(&self, op: SyncOperation) -> Result<(), SyncError> {
-        let mut queue = self.offline_queue.lock().await;
-        if queue.len() >= self.local_config.offline_queue_size {
-            return Err(SyncError::OfflineQueued(
-                "Offline queue is full".to_string(),
-            ));
-        }
-        queue.push_back(op);
         let desc = match &op {
             SyncOperation::CreatePolicy { policy } => {
                 format!("Create policy {}", policy.id)
@@ -1299,6 +1292,13 @@ impl TeamSyncManager {
                 format!("Delete policy {}", policy_id)
             }
         };
+        let mut queue = self.offline_queue.lock().await;
+        if queue.len() >= self.local_config.offline_queue_size {
+            return Err(SyncError::OfflineQueued(
+                "Offline queue is full".to_string(),
+            ));
+        }
+        queue.push_back(op);
         self.log_audit(
             &self.local_config.member_id,
             AuditAction::OfflineQueued,

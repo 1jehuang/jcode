@@ -14,7 +14,7 @@ pub(crate) async fn register_export() {
                         let mut f = match std::fs::File::create(&out) { Ok(f)=>f, Err(e)=>{eprintln!("❌ {}",e); return; }};
                         let _ = writeln!(f, "# Session Export\n**ID:** {}\n**Messages:** {}\n", s.id, s.messages.len());
                         for msg in &s.messages {
-                            let _ = writeln!(f, "## {} ({})", msg.role, msg.timestamp);
+                            let _ = writeln!(f, "## {:?} ({})", msg.role, msg.timestamp);
                             let _ = writeln!(f, "ID: {}", msg.id);
                             let _ = writeln!(f);
                         }
@@ -40,7 +40,7 @@ pub(crate) async fn register_resume() {
                         if e.is_empty() { eprintln!("  No sessions.\n"); return; }
                         eprintln!("\n📋 Sessions\n");
                         for entry in e.iter().rev().take(20) {
-                            let name = entry.path().file_stem().map(|n| n.to_string_lossy()).unwrap_or_default();
+                            let name = entry.path().file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                             if let Ok(s) = crate::session::Session::load_from_path(&entry.path()) {
                                 eprintln!("  [{:.8}] {} — {} msgs", name, s.display_title_or_name(), s.messages.len());
                             }

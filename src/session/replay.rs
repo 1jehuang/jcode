@@ -413,12 +413,17 @@ impl SessionReplayer {
     }
 
     pub fn merge_branch(&mut self, branch_id: Uuid) -> Result<MergeResult, MergeError> {
-        let source = self.find_branch(branch_id).ok_or(MergeError::BranchNotFound)?;
-        if self.would_create_cycle(branch_id) {
+        let branch_id_clone = branch_id;
+        let source_events = {
+            let source = self.find_branch(branch_id_clone).ok_or(MergeError::BranchNotFound)?;
+            source.modified_events.clone()
+        };
+        let source_event_count = source_events.len();
+        if self.would_create_cycle(branch_id_clone) {
             return Err(MergeError::CircularDependency);
         }
         let mut conflicts = vec![];
-        for mod_event in &source.modified_events {
+        for mod_event in &source_events {
             if let Some(existing) = self
                 .current_branch
                 .modified_events
@@ -440,7 +445,7 @@ impl SessionReplayer {
             Ok(MergeResult {
                 success: true,
                 conflicts: vec![],
-                merged_event_count: source.modified_events.len(),
+                merged_event_count: source_event_count,
             })
         } else {
             Err(MergeError::Conflicts(conflicts))
@@ -535,13 +540,12 @@ impl SessionReplayer {
         self.current_branch.modified_events.clear();
     }
 
-    pub fn current_event(&self) -> Option<&RecordedEvent> {
+    pub fn current_event(&self) -> Option<RecordedEvent> {
         self.get_event(self.playback_state.current_event_index)
     }
 
-    pub fn get_event(&self, index: usize) -> Option<&RecordedEvent> {
-        let effective_events = self.effective_events();
-        effective_events.get(index)
+    pub fn get_event(&self, index: usize) -> Option<RecordedEvent> {
+        self.effective_events().get(index).cloned()
     }
 
     pub fn events_count(&self) -> usize {

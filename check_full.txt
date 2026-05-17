@@ -1,0 +1,1 @@
+﻿error: could not compile `carpai` (lib) due to 6 previous errors

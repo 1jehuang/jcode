@@ -1,4 +1,4 @@
-//! P1 高频使用命令实现
+﻿//! P1 高频使用命令实现
 //!
 //! Claude Code兼容的高频命令:
 //! - `/review [target]` : 代码审查
@@ -18,7 +18,7 @@ use anyhow::Result;
 /// 处理 /review 命令
 pub async fn handle_review_command(target: Option<&str>, options: ReviewOptions) -> Result<String> {
     let target_info = target.unwrap_or("当前工作目录");
-    
+
     match options.mode {
         ReviewMode::Quick => quick_review(target_info).await,
         ReviewMode::Full => full_review(target_info).await,
@@ -56,7 +56,7 @@ impl Default for ReviewOptions {
 
 async fn quick_review(target: &str) -> Result<String> {
     Ok(format!(
-        r#"# 🔍 快速代码审查: {}
+        r##"# 🔍 快速代码审查: {}
 
 ## 审查范围
 - 📁 目标: {}
@@ -79,15 +79,15 @@ async fn quick_review(target: &str) -> Result<String> {
 | 建议 | 17 |
 
 ## 结论
-✅ 代码质量良好，无严重问题。建议处理警告项。
-"#,
+代码质量良好，无严重问题。建议处理警告项。
+"##,
         target, target
     ))
 }
 
 async fn full_review(target: &str) -> Result<String> {
     Ok(format!(
-        r#"# 🔬 完整代码审查: {}
+        r##"# 🔬 完整代码审查: {}
 
 ## 审查详情
 
@@ -118,15 +118,15 @@ async fn full_review(target: &str) -> Result<String> {
 ## 详细问题列表
 [... 完整报告 ...]
 
-## 总体评分: 8.0/10 ✅
-"#,
+## 总体评分: 8.0/10
+"##,
         target
     ))
 }
 
 async fn security_review(_target: &str) -> Result<String> {
     Ok(
-        r#"# 🛡️ 安全审查报告
+        r##"# 🛡️ 安全审查报告
 
 ## 扫描结果
 | 类别 | 发现 | 严重程度 |
@@ -153,19 +153,19 @@ async fn security_review(_target: &str) -> Result<String> {
 - **位置**: `src/web/forms.rs:78`
 - 建议: 添加CSRF Token验证
 
-## 安全评分: 85/100 ✅ (良好)
+## 安全评分: 85/100 (良好)
 
 ## 建议
 1. 🔴 立即修复高危问题
 2. 🟡 本周内处理中危问题
 3. 🟠 下个迭代优化低危项
-"#.to_string()
+"##.to_string()
     )
 }
 
 async fn performance_review(_target: &str) -> Result<String> {
     Ok(
-        r#"# ⚡ 性能分析报告
+        r##"# ⚡ 性能分析报告
 
 ## 基准测试结果
 | 操作 | 当前 | 优化后 | 提升 |
@@ -195,7 +195,7 @@ async fn performance_review(_target: &str) -> Result<String> {
 - 🚀 吞吐量提升: +180%
 - 💰 成本降低: -45%
 - ⚡ 响应时间减少: -64%
-"#.to_string()
+"##.to_string()
     )
 }
 
@@ -204,11 +204,11 @@ async fn performance_review(_target: &str) -> Result<String> {
 /// 处理 /init 命令
 pub async fn handle_init_command(project_type: Option<&str>) -> Result<String> {
     let ptype = project_type.unwrap_or("auto-detect");
-    
+
     // TODO: 自动检测项目类型并生成配置
-    
+
     Ok(format!(
-        r#"# 🎯 项目初始化: {}
+        r##"# 🎯 项目初始化: {}
 
 ## 检测到的项目信息
 - 类型: {}
@@ -273,11 +273,11 @@ cargo fmt            # 格式化
 ```
 
 ## 下一步
-1. ✅ 配置已生成
-2. 📝 编辑 `.carpai/config.toml` 自定义设置
-3. 🧪 运行 `/review` 检查代码质量
-4. 🚀 开始开发!
-"#,
+1. 配置已生成
+2. 编辑 `.carpai/config.toml` 自定义设置
+3. 运行 `/review` 检查代码质量
+4. 开始开发!
+"##,
         ptype, ptype
     ))
 }
@@ -297,7 +297,7 @@ pub async fn handle_memory_command(action: Option<&str>) -> Result<String> {
 
 async fn edit_memory() -> Result<String> {
     Ok(
-        r#"# 🧠 编辑记忆文件
+        r##"# 🧠 编辑记忆文件
 
 ## 当前记忆内容
 ```yaml
@@ -306,13 +306,13 @@ preferences:
   language: Rust
   style: functional
   testing: TDD
-  
+
 # 项目知识
 project:
   architecture: microservices
   database: PostgreSQL
   cache: Redis
-  
+
 # 常见模式
 patterns:
   error_handling: Result<T, E>
@@ -329,13 +329,13 @@ patterns:
 - **全局记忆** (`~/.carpai/memory.yaml`): 跨项目共享
 - **项目记忆** (`.carpai/memory.yaml`): 项目特定
 - **会话记忆**: 仅当前会话有效
-"#.to_string()
+"##.to_string()
     )
 }
 
 async fn show_memory() -> Result<String> {
     Ok(
-        r#"# 🧠 记忆内容
+        r##"# 🧠 记忆内容
 
 ## 全局记忆 (3条)
 1. **偏好**: 喜欢函数式编程风格
@@ -352,7 +352,7 @@ async fn show_memory() -> Result<String> {
 ## 会话记忆 (2条)
 1. **当前任务**: 实现CLI命令移植
 2. **上下文**: 正在追平Claude Code功能
-"#.to_string()
+"##.to_string()
     )
 }
 
@@ -375,10 +375,10 @@ async fn clear_memory() -> Result<String> {
 
 1. 清除会话记忆 (推荐)
    - 仅影响当前会话
-   
+
 2. 清除项目记忆
    - 影响当前项目的所有会话
-   
+
 3. 清除全局记忆
    - 影响所有项目 (谨慎!)
 
@@ -387,8 +387,8 @@ async fn clear_memory() -> Result<String> {
     )
 }
 
-fn memory_help() -> String {
-    r#"# 🧠 Memory 命令帮助
+fn memory_help() -> Result<String> {
+    Ok(r##"# 🧠 Memory 命令帮助
 
 ## 子命令
 | 命令 | 描述 |
@@ -413,7 +413,7 @@ fn memory_help() -> String {
 # 编辑记忆
 /memory edit
 ```
-"#.to_string()
+"##.to_string())
 }
 
 // --- Permissions Command ----------------------
@@ -430,11 +430,11 @@ pub async fn handle_permissions_command(action: Option<&str>) -> Result<String> 
 
 async fn show_permissions() -> Result<String> {
     Ok(
-        r#"# 🔐 权限设置
+        r##"# 🔐 权限设置
 
 ## 当前权限状态
 
-### ✅ 自动批准 (无需确认)
+## ✅ 自动批准 (无需确认)
 | 工具 | 模式 | 说明 |
 |------|------|------|
 | Read | * | 读取任何文件 |
@@ -442,7 +442,7 @@ async fn show_permissions() -> Result<String> {
 | Grep | * | 内容搜索 |
 | ListFiles | * | 列出文件 |
 
-### ⚠️ 需要确认 (首次询问)
+## ⚠️ 需要确认 (首次询问)
 | 工具 | 模式 | 说明 |
 |------|------|------|
 | Write | *.rs,*.toml | 写入源码 |
@@ -450,24 +450,24 @@ async fn show_permissions() -> Result<String> {
 | Bash(git *) | * | Git操作 |
 | Bash(cargo *) | * | Cargo操作 |
 
-### ❌ 禁止执行
+## ❌ 禁止执行
 | 工具 | 模式 | 说明 |
 |------|------|------|
 | Bash(rm -rf *) | 危险 | 强制删除 |
 | Bash(sudo *) | 危险 | 提权操作 |
-| Write ~/.ssh/* | 敏感 | SSH配置 |
+| Write ~/.ssh/[path] | 敏感 | SSH配置 |
 
 ## 统计
 - 自动批准: 4 个工具类别
 - 需要确认: 3 个工具类别
 - 禁止: 3 个危险操作
-"#.to_string()
+"##.to_string()
     )
 }
 
 async fn set_permissions() -> Result<String> {
     Ok(
-        r#"# ⚙️ 设置权限
+        r##"# ⚙️ 设置权限
 
 ## 语法
 ```
@@ -479,13 +479,8 @@ async fn set_permissions() -> Result<String> {
 
 ## 示例
 ```bash
-# 允许npm命令自动执行
 /permissions allow "Bash(npm *)"
-
-# 禁止删除操作
 /permissions deny "Bash(rm *)"
-
-# 要求写入前确认
 /permissions require "Write"
 ```
 
@@ -494,7 +489,7 @@ async fn set_permissions() -> Result<String> {
 - `Write *.rs` - 匹配Rust文件
 - `Read` - 匹配所有读取操作
 - `*` - 通配符
-"#.to_string()
+"##.to_string()
     )
 }
 
@@ -512,15 +507,15 @@ async fn reset_permissions() -> Result<String> {
     )
 }
 
-fn permissions_help() -> String {
-    r#"# 🔐 Permissions 命令帮助
+fn permissions_help() -> Result<String> {
+    Ok(r##"# 🔐 Permissions 命令帮助
 
 ## 子命令
 | 命令 | 描述 |
 |------|------|
-| `show` | 显示当前权限设置 |
-| `set` | 修改权限规则 |
-| `reset` | 重置为默认值 |
+| show | 显示当前权限设置 |
+| set | 修改权限规则 |
+| reset | 重置为默认值 |
 
 ## 权限级别
 1. **自动批准**: 直接执行不询问
@@ -530,8 +525,8 @@ fn permissions_help() -> String {
 ## 最佳实践
 - 开发环境: 放宽限制提高效率
 - 生产环境: 收紧限制确保安全
-- CI/CD: 使用 `--dangerously-skip-permissions`
-"#.to_string()
+- CI/CD: 使用 --dangerously-skip-permissions
+"##.to_string())
 }
 
 // --- Vim Mode Command -----------------------
@@ -539,7 +534,7 @@ fn permissions_help() -> String {
 /// 处理 /vim 命令
 pub async fn handle_vim_command() -> Result<String> {
     Ok(
-        r#"# 🎯 Vim 模式已启用
+        r##"# 🎯 Vim 模式已启用
 
 ## 模式切换
 - **Insert Mode (i)**: 正常输入文本
@@ -549,7 +544,7 @@ pub async fn handle_vim_command() -> Result<String> {
 
 ### 导航
 ```
-h/j/k/l      <-v->-> 移动光标
+h/j/k/l      左下上右移动光标
 w/b          词首/词尾跳转
 gg/G         文件头/尾
 {/}          段落跳转
@@ -574,8 +569,8 @@ n/N          下/上一个匹配
 ```
 
 ## 退出Vim模式
-按 `Esc` 或输入 `/vim off`
-"#.to_string()
+按 Esc 或输入 /vim off
+"##.to_string()
     )
 }
 
@@ -584,7 +579,7 @@ n/N          下/上一个匹配
 /// 处理 /bug 命令
 pub async fn handle_bug_command() -> Result<String> {
     Ok(
-        r#"🐛 Bug报告向导
+        r##"# 🐛 Bug报告向导
 
 ## 请描述问题
 
@@ -606,16 +601,16 @@ pub async fn handle_bug_command() -> Result<String> {
 - 实际:
 
 ### 4. 环境信息
-- CarpAI版本: 
-- 操作系统: 
-- Node/Rust版本: 
+- CarpAI版本:
+- 操作系统:
+- Node/Rust版本:
 
 ### 5. 日志/截图
 [粘贴相关日志或截图]
 
 ---
 提交后将发送给CarpAI团队进行诊断
-"#.to_string()
+"##.to_string()
     )
 }
 
@@ -632,7 +627,7 @@ pub async fn handle_statusline_command(content: Option<&str>) -> Result<String> 
             }
         }
         None => Ok(
-            r#"# 📍 Status Line 设置
+            r##"# 📍 Status Line 设置
 
 ## 显示格式
 支持变量和Shell命令:
@@ -650,7 +645,7 @@ pub async fn handle_statusline_command(content: Option<&str>) -> Result<String> 
 
 ## 当前状态栏
 显示: 🟢 main | claude-opus-4-6 | 78K tokens
-"#.to_string()
+"##.to_string()
         ),
     }
 }
@@ -669,7 +664,7 @@ pub async fn handle_bashes_command(action: Option<&str>) -> Result<String> {
 
 async fn list_bashes() -> Result<String> {
     Ok(
-        r#"# 💻 后台进程列表
+        r##"# 💻 后台进程列表
 
 | ID | 命令 | 状态 | 运行时间 | PID |
 |----|------|------|---------|-----|
@@ -686,26 +681,26 @@ async fn list_bashes() -> Result<String> {
 - 运行中: 3 个进程
 - 总计CPU: 12%
 - 内存占用: 245MB
-"#.to_string()
+"##.to_string()
     )
 }
 
-fn bashes_help() -> String {
-    r#"# 💻 Bashes 命令帮助
+fn bashes_help() -> Result<String> {
+    Ok(r##"# 💻 Bashes 命令帮助
 
 ## 子命令
 | 命令 | 描述 |
 |------|------|
-| `list` | 列出后台进程 |
-| `output <id>` | 查看进程输出 |
-| `kill <id>` | 停止进程 |
+| "list" | 列出后台进程 |
+| "output <id>" | 查看进程输出 |
+| "kill <id>" | 停止进程 |
 
 ## 后台运行
-在命令末尾加 `&` 即可后台运行:
+在命令末尾加 "&" 即可后台运行:
 ```bash
 npm run dev &
 cargo test --watch &
 python server.py &
 ```
-"#.to_string()
+"##.to_string())
 }

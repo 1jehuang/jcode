@@ -1,4 +1,4 @@
-﻿//! Symbol-level conflict detection for Swarm task scheduling.
+//! Symbol-level conflict detection for Swarm task scheduling.
 //!
 //! Uses LSP `textDocument/references` and `textDocument/definition` to build
 //! a symbol dependency graph, then checks whether multiple swarm tasks would

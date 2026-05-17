@@ -632,7 +632,8 @@ impl ExtendedContextManager {
         
         // 如果Warm层也满了，继续降级到Cold层
         if warm.len() > self.config.warm_layer_size {
-            if let Some(old_entry) = warm.remove(0) {
+            if warm.len() > 0 {
+                let old_entry = warm.remove(0);
                 self.demote_to_cold_layer(old_entry).await?;
             }
         }
@@ -676,8 +677,8 @@ impl ExtendedContextManager {
             Last: {}\n\
             Key points:\n{}",
             lines.len(),
-            lines.first().map(|s| s.as_str()).unwrap_or(""),
-            lines.last().map(|s| s.as_str()).unwrap_or(""),
+            lines.first().copied().unwrap_or(""),
+            lines.last().copied().unwrap_or(""),
             lines.iter()
                 .filter(|l| l.contains("fn ") || l.contains("class ") || l.contains("=> ") || l.contains("error"))
                 .take(3)
@@ -729,12 +730,12 @@ impl ExtendedContextManager {
 impl ExtendedContextManager {
     /// 快速添加用户消息
     pub async fn add_user_message(&self, content: &str) -> Result<u64> {
-        self.add_message("user", content, vec!["user_input"], false, None).await
+        self.add_message("user", content, vec!["user_input".to_string()], false, None).await
     }
 
     /// 快速添加助手消息
     pub async fn add_assistant_message(&self, content: &str) -> Result<u64> {
-        self.add_message("assistant", content, vec!["assistant_reply"], false, None).await
+        self.add_message("assistant", content, vec!["assistant_reply".to_string()], false, None).await
     }
 
     /// 快速添加工具结果
@@ -742,7 +743,7 @@ impl ExtendedContextManager {
         self.add_message(
             "tool",
             result,
-            vec!["tool_result", tool_name],
+            vec!["tool_result".to_string(), tool_name.to_string()],
             true,
             Some(call_id),
         ).await

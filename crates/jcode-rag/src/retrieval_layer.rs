@@ -1,4 +1,4 @@
-﻿//! Layer 2: Retrieval Layer - Multi-Engine Fusion Search
+//! Layer 2: Retrieval Layer - Multi-Engine Fusion Search
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 impl App {
     pub(super) fn ensure_provider_messages_hydrated(&mut self) {

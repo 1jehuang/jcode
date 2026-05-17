@@ -152,7 +152,7 @@ impl McpAuthManager {
     pub fn complete_pkce_flow(
         &self,
         server_name: &str,
-        auth_code: &str,
+        _auth_code: &str,
         received_state: &str,
     ) -> anyhow::Result<()> {
         let mut verifiers = self.verifiers.lock().unwrap_or_else(|e| e.into_inner());

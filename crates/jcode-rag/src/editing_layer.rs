@@ -1,4 +1,4 @@
-﻿//! Layer 3: Editing Layer - Safe Editor with Diff/SearchReplace
+//! Layer 3: Editing Layer - Safe Editor with Diff/SearchReplace
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

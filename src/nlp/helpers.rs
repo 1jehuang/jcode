@@ -163,7 +163,7 @@ pub fn calculate_code_complexity(code: &str) -> ComplexityMetrics {
     ComplexityMetrics {
         cyclomatic,
         cognitive,
-        loc_per_func,
+        loc_per_function: loc_per_func,
     }
 }
 
@@ -174,7 +174,8 @@ fn extract_func_name(signature: &str) -> &str {
         .split('(')
         .next()
         .unwrap_or("unknown")
-        .rsplit_whitespace()
+        .split_whitespace()
+        .rev()
         .next()
         .unwrap_or("unknown")
 }

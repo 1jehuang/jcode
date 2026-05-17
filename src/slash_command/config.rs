@@ -7,19 +7,19 @@ fn s<F, Fut>(f: F) where F: FnOnce() -> Fut + Send + 'static, Fut: std::future::
 pub(crate) async fn register_model() {
     register("model", "Show or switch AI model", "/model [model-name]",
         std::sync::Arc::new(|args: &str| {
-            let a = args.to_string();
+            let a = args.trim().to_string();
             s(move || async move {
                 let cfg = crate::config::Config::load();
-                if a.trim().is_empty() {
+                if a.is_empty() {
                     eprintln!("\n📋 Model\n  Provider: {}\n  Model:    {}\n", cfg.provider.default_provider.as_deref().unwrap_or("not set"), cfg.provider.default_model.as_deref().unwrap_or("not set"));
                 } else {
-                    match crate::config::Config::set_default_model_only(Some(a.trim())) {
+                    match crate::config::Config::set_default_model_only(Some(a.trim().to_string())) {
                         Ok(_) => eprintln!("\n✅ Model changed to: {}\n", a.trim()),
                         Err(e) => eprintln!("\n❌ {}\n", e),
                     }
                 }
             });
-            if a.trim().is_empty() { SlashResult::Ok("Showing model config.".into()) } else { SlashResult::Ok(format!("Setting model to: {}", a.trim())) }
+            if a.is_empty() { SlashResult::Ok("Showing model config.".into()) } else { SlashResult::Ok(format!("Setting model to: {}", a.trim())) }
         }),
     ).await;
 }

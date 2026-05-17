@@ -22,7 +22,7 @@ fn get_debug_session() -> &'static Mutex<Option<RuntimeDebugSession>> {
 }
 
 struct RuntimeDebugSession {
-    child: Child,
+    child: Option<Child>,
     stdin: ChildStdin,
     request_seq: u64,
     active_thread_id: u64,
@@ -142,7 +142,7 @@ impl Tool for DebugEvaluateTool {
                     ).with_title("debug: unsupported project"));
                 };
 
-                let child = match Command::new(adapter)
+                let mut child = match Command::new(adapter)
                     .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
@@ -154,9 +154,9 @@ impl Tool for DebugEvaluateTool {
                     ).with_title("debug: start failed")),
                 };
 
-                let stdin = child.stdin.unwrap();
+                let stdin = child.stdin.take().unwrap();
                 let session = RuntimeDebugSession {
-                    child,
+                    child: Some(child),
                     stdin,
                     request_seq: 1,
                     active_thread_id: 1,
@@ -193,10 +193,12 @@ impl Tool for DebugEvaluateTool {
             }
 
             "continue" => {
-                let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(ref mut session) = *guard {
+                let guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(ref session) = *guard {
+                    let thread_id = session.active_thread_id;
+                    drop(guard);
                     let _ = dap_send(session, "continue",
-                        json!({ "threadId": session.active_thread_id })).await;
+                        json!({ "threadId": thread_id })).await;
                     Ok(ToolOutput::new("Execution continued. (Waiting for next breakpoint...)")
                         .with_title("debug: continued"))
                 } else {
@@ -244,10 +246,11 @@ impl Tool for DebugEvaluateTool {
 
             "stop" => {
                 let mut guard = session_lock.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(session) = guard.take() {
-                    let mut child = session.child;
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
+                if let Some(mut session) = guard.take() {
+                    if let Some(mut child) = session.child.take() {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                    }
                     Ok(ToolOutput::new("Debug session ended.")
                         .with_title("debug: stopped"))
                 } else {

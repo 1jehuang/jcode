@@ -442,12 +442,13 @@ impl EnhancedVideoExporter {
         }
 
         let elapsed = start.elapsed();
+        let data_len = data.len();
         Ok(GifExport {
             data,
             dimensions: (config.width, config.height),
             duration_secs: recording.duration().as_secs_f64(),
             frame_count: exported_frames,
-            file_size_bytes: data.len(),
+            file_size_bytes: data_len,
             optimized: config.optimize,
         })
     }
@@ -462,11 +463,12 @@ impl EnhancedVideoExporter {
         }
 
         let elapsed = start.elapsed();
+        let data_len = data.len();
         Ok(VideoExport {
             data,
             format: OutputFormat::Mp4 { codec: config.codec.clone(), crf: self.encoder.quality.crf },
             duration_secs: recording.duration().as_secs_f64(),
-            file_size_bytes: data.len(),
+            file_size_bytes: data_len,
             has_audio: config.include_audio,
         })
     }

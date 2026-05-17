@@ -100,7 +100,8 @@ pub struct SubAgentResult {
     pub output: String,
 
     /// 消耗的总轮次
-    pub turns_used: u32,
+    #[allow(dead_code)]
+pub turns_used: u32,
 
     /// 耗时 (毫秒)
     pub elapsed_ms: u64,

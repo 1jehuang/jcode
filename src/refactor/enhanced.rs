@@ -718,7 +718,7 @@ impl DotNetMigrator {
                     ConfigItemChange {
                         key: "connectionStrings".to_string(),
                         action: ConfigChangeAction::MoveToAppSettingsJson,
-                        new_location: "appsettings.json".to_string(),
+                        new_location: Some("appsettings.json".to_string()),
                         notes: ".NET Core/6+ 使用 appsettings.json 替代 web.config".to_string(),
                     },
                 ],

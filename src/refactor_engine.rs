@@ -97,12 +97,12 @@ impl RefactorEngine {
     }
 
     /// 执行单个编辑操作 (最常用的入口)
-    pub async fn execute_edit(&self, op: EditOperation) -> RefactorResult {
+    pub async fn execute_edit(&mut self, op: EditOperation) -> RefactorResult {
         self.execute_edits(vec![op]).await
     }
 
     /// 执行多个编辑操作 (原子事务)
-    pub async fn execute_edits(&self, ops: Vec<EditOperation>) -> RefactorResult {
+    pub async fn execute_edits(&mut self, ops: Vec<EditOperation>) -> RefactorResult {
         let start = std::time::Instant::now();
 
         if ops.is_empty() {
@@ -201,7 +201,7 @@ impl RefactorEngine {
 
     /// 两阶段提交执行
     async fn execute_with_two_phase_commit(
-        &self,
+        &mut self,
         ops: Vec<EditOperation>,
         start: std::time::Instant,
         snapshot_created: bool,

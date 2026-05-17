@@ -297,7 +297,7 @@ impl TransportEnum {
         match self {
             Self::Stdio(t) => t.connect().await,
             Self::Sse(t) => { t.connect().await?; Ok(()) }
-            Self::Http(t) => { t.initialize(crate::types::ClientCapabilities::default()).await?; Ok(()) }
+            Self::Http(_) => Ok(()),
         }
     }
 
@@ -467,7 +467,10 @@ impl HttpTransport {
     }
 
     /// 初始化连接 (POST /initialize)
-    pub async fn initialize(&self, client_caps: crate::types::ClientCapabilities) -> TransportResult<crate::types::InitializeResult> {
+    pub async fn initialize(
+        &self,
+        client_caps: serde_json::Value,
+    ) -> TransportResult<crate::types::InitializeResult> {
         let url = format!("{}/initialize", self.base_url.trim_end_matches('/'));
 
         let request = serde_json::json!({

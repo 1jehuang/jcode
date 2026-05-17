@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 impl MemoryManager {
     pub fn new() -> Self {

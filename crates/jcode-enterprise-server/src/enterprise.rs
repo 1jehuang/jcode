@@ -13,6 +13,7 @@ use crate::{
     virtual_memory::VirtualMemoryManager,
 };
 use jcode_llm::{LlmProvider, LlmProviderFactory, OpenAiCompatibleProvider, config::LlmConfig};
+use jcode_unified_scheduler::{UnifiedScheduler, SchedulerConfig, NodeHardwareInfo};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -36,6 +37,8 @@ pub struct EnterpriseServerState {
     pub discovery_manager: Arc<NodeDiscoveryManager>,
     /// 用量管理器
     pub usage_manager: Arc<RwLock<UsageManager>>,
+    /// Ruflo-Parallax 统一调度器
+    pub scheduler: Arc<UnifiedScheduler>,
     /// 优先级规则引擎
     pub priority_engine: PriorityRuleEngine,
     /// 虚拟内存管理器
@@ -100,8 +103,22 @@ impl EnterpriseServer {
         // 初始化用量管理器
         let usage_manager = Arc::new(RwLock::new(UsageManager::new()));
 
+        // 初始化 Ruflo-Parallax 统一调度器
+        let scheduler_config = SchedulerConfig {
+            min_bootstrap_nodes: 1,
+            enable_goap: true,
+            adaptive_scheduling: true,
+            ..SchedulerConfig::default()
+        };
+        let scheduler = Arc::new(UnifiedScheduler::new(scheduler_config).await?);
+        info!("✅ Ruflo-Parallax 统一调度器已初始化");
+
         // 初始化优先级规则引擎
         let priority_engine = PriorityRuleEngine::default();
+
+        // 初始化 CPU 推理引擎
+        let cpu_engine = Arc::new(CpuInferenceEngine::new(config.clone()));
+        info!("✅ CPU 推理引擎已就绪");
 
         // 初始化分布式推理调度器（默认启用）
         let distributed_scheduler = Some(Arc::new(
@@ -121,8 +138,9 @@ impl EnterpriseServer {
             config: config.clone(),
             auth_manager,
             users: Arc::new(RwLock::new(HashMap::new())),
-            cpu_engine: None, // 按需启动
+            cpu_engine: Some(cpu_engine.clone()),
             providers: Arc::new(RwLock::new(HashMap::new())),
+            scheduler: scheduler.clone(),
             distributed_scheduler,
             discovery_manager: discovery_manager.clone(),
             usage_manager,
@@ -137,26 +155,31 @@ impl EnterpriseServer {
             state: state.clone(),
         };
 
-        // 连接已注册的固定节点
-        info!("🏗️ 注册本地节点（内存: {}GB, CPU: {}核）",
-            crate::cpu_inference::CpuMemoryStatus::map_or(0.0, |s| s.total_gb),
-            num_cpus::get_physical()
-        );
+        // 注册本机到 Ruflo-Parallax 统一调度器
+        let total_mem = sys_info::mem_info()
+            .map(|m| m.total as f64 / 1024.0 / 1024.0)
+            .unwrap_or(16.0);
+        let cpu_cores = num_cpus::get_physical() as u32;
+        let node_hw = jcode_unified_scheduler::NodeHardwareInfo {
+            node_id: uuid::Uuid::new_v4(),
+            num_gpus: 0,
+            gpu_name: "CPU-only".into(),
+            memory_gb: total_mem,
+            cpu_cores,
+            tflops_fp16: 0.0,
+            tflops_fp32: 0.0,
+            gpu_bandwidth_gbps: 0.0,
+            pcie_bandwidth_gbps: 0.0,
+            has_gpu: false,
+            vram_gb: 0.0,
+            cpu_arch: std::env::consts::ARCH.to_string(),
+        };
+        let _ = state.scheduler.register_node(node_hw).await;
+        info!("✅ 本机已注册到调度器（内存: {:.1}GB, CPU: {}核）", total_mem, cpu_cores);
 
-        // 注册本机作为第一个节点
-        if let Some(scheduler) = &state.distributed_scheduler {
-            let total_mem = sys_info::mem_info()
-                .map(|m| m.total as f64 / 1024.0 / 1024.0)
-                .unwrap_or(16.0);
-            let cpu_cores = num_cpus::get_physical() as u32;
-
-            let _ = scheduler.register_node(
-                "本机服务器",
-                total_mem,
-                cpu_cores,
-                false,
-                0.0,
-            ).await;
+        // 也注册到旧分布式调度器（保持兼容）
+        if let Some(sched) = &state.distributed_scheduler {
+            let _ = sched.register_node("本机服务器", total_mem, cpu_cores, false, 0.0).await;
         }
 
         info!("✅ CarpAI Enterprise Server 初始化完成");
@@ -184,13 +207,22 @@ impl EnterpriseServer {
         let admin_addr = format!("{}:{}", config.server.bind, config.server.admin_port)
             .parse::<std::net::SocketAddr>()?;
 
-        // 2. 启动心跳检测循环
+        // 2. 启动 Ruflo-Parallax 调度循环
+        let scheduler = state.scheduler.clone();
+        tokio::spawn(async move {
+            if let Err(e) = scheduler.run().await {
+                error!("[UnifiedScheduler] 调度循环异常退出: {:?}", e);
+            }
+        });
+        info!("✅ Ruflo-Parallax 调度循环已启动");
+
+        // 3. 启动心跳检测循环
         let discovery = state.discovery_manager.clone();
         tokio::spawn(async move {
             discovery.heartbeat_check_loop().await;
         });
 
-        // 3. 按需加载预热模型
+        // 4. 按需加载预热模型 (CPU 推理引擎)
         if !config.models.warm_up_models.is_empty() {
             info!("🔥 预热模型: {:?}", config.models.warm_up_models);
             let state = state.clone();
@@ -200,16 +232,21 @@ impl EnterpriseServer {
                         .iter()
                         .find(|m| &m.name == model_name)
                     {
-                        info!("加载模型: {}", model_name);
-                        // 创建 LLM Provider
-                        let provider = LlmProviderFactory::local_llamacpp(
-                            model_entry.name.clone(),
-                            18000, // 默认端口
-                        );
-                        state.providers.write().await.insert(
-                            model_entry.name.clone(),
-                            provider,
-                        );
+                        info!("🔥 启动 CPU 推理引擎: {}", model_name);
+                        if let Some(ref engine) = state.cpu_engine {
+                            match engine.start_model(model_entry).await {
+                                Ok(instance) => {
+                                    info!("✅ 模型 {} 已启动 (port={})", model_name, instance.port);
+                                    let provider = LlmProviderFactory::local_llamacpp(
+                                        model_entry.name.clone(), instance.port,
+                                    );
+                                    state.providers.write().await.insert(
+                                        model_entry.name.clone(), provider,
+                                    );
+                                }
+                                Err(e) => warn!("⚠️ 模型 {} 启动失败: {}", model_name, e),
+                            }
+                        }
                     }
                 }
                 info!("✅ 模型预热完成");

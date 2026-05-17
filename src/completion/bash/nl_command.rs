@@ -1,4 +1,4 @@
-﻿use crate::completion::bash::{CompletionContext, CompletionKind, CompletionSuggestion};
+use crate::completion::bash::{CompletionContext, CompletionKind, CompletionSuggestion};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use uuid::Uuid;

@@ -575,7 +575,7 @@ impl ResilientConnectionPool {
     }
 
     /// Health check all sessions
-    pub fn health_check_all(&mut self) -> Vec<String, HealthStatus> {
+    pub fn health_check_all(&mut self) -> Vec<(String, HealthStatus)> {
         self.sessions.iter_mut()
             .map(|(k, s)| (k.clone(), s.health_check()))
             .collect()

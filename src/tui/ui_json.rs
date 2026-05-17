@@ -1,4 +1,4 @@
-﻿use ratatui::{
+use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
