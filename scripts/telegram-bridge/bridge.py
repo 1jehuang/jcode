@@ -210,21 +210,36 @@ def inject_into_jcode(user_name, text):
     return result
 
 def get_last_response():
-    """Get the last assistant response from the Jcode session."""
-    result = jcode_cmd("last_response", timeout_sec=3)
+    """Get the last assistant response from the Jcode session by parsing client history."""
+    result = jcode_cmd("client:history", timeout_sec=3)
     try:
         data = json.loads(result)
-        if data.get("ok") and data.get("output"):
-            output = data["output"].strip()
-            # Remove JSON wrapping if present
-            if output.startswith('"') and output.endswith('"'):
+        if not isinstance(data, dict):
+            return None
+        output = data.get("output", data)
+        if isinstance(output, str):
+            try:
                 output = json.loads(output)
-            return output
-    except (json.JSONDecodeError, KeyError):
+            except:
+                pass
+        if isinstance(output, list):
+            # Walk backwards through display messages to find last assistant text
+            for msg in reversed(output):
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                if role == "assistant" and content and isinstance(content, str):
+                    # Skip tool calls (JSON wrapped in {})
+                    if content.strip().startswith("{"):
+                        continue
+                    return content
+                # Also check nested content arrays
+                if isinstance(content, list):
+                    texts = [c.get("text", "") for c in content if c.get("type") == "text"]
+                    text = " ".join(texts).strip()
+                    if text:
+                        return text
+    except (json.JSONDecodeError, Exception):
         pass
-    # Raw fallback
-    if result and result != '""':
-        return result.strip()
     return None
 
 # ─── RESPONSE WATCHER ────────────────────────────────────────
