@@ -6,6 +6,31 @@ use std::path::PathBuf;
 use zeroize::{Zeroize, Zeroizing};
 
 /// Main configuration for CarpAI client
+///
+/// # Examples
+///
+/// ```
+/// use carpai_sdk::CarpAiConfig;
+///
+/// // Default configuration (auto-detects API key from env)
+/// let config = CarpAiConfig::default();
+///
+/// // Custom configuration
+/// let config = CarpAiConfig {
+///     server: carpai_sdk::ServerConfig {
+///         url: Some("http://localhost:8080".to_string()),
+///         timeout_secs: 60,
+///         ..Default::default()
+///     },
+///     cache: carpai_sdk::CacheConfig {
+///         enabled: true,
+///         max_size: 1000,
+///         ttl_secs: 7200,
+///         ..Default::default()
+///     },
+///     ..Default::default()
+/// };
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CarpAiConfig {
     /// Server connection settings

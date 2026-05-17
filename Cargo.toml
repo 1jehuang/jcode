@@ -143,7 +143,7 @@ thiserror = "1"
 tracing = "0.1"
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
 regex = "1"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 url = "2"
@@ -240,7 +240,7 @@ dirs = "5"               # home directory
 anyhow = "1"
 thiserror = "1"
 libc = "0.2"             # Unix system calls (flock)
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
 regex = "1"
 aho-corasick = "1"       # Aho-Corasick多模式匹配算法 (性能优化100x)
 tree-sitter = "0.24"      # Tree-sitter AST解析器 (代码智能基础)

@@ -36,6 +36,33 @@ impl Default for SessionId {
 }
 
 /// Completion request
+///
+/// # Examples
+///
+/// ```
+/// use carpai_sdk::CompletionRequest;
+///
+/// // Simple completion
+/// let request = CompletionRequest {
+///     prompt: "Explain Rust ownership".to_string(),
+///     max_tokens: Some(200),
+///     temperature: Some(0.7),
+///     ..Default::default()
+/// };
+///
+/// // With context
+/// use carpai_sdk::CompletionContext;
+/// let request_with_context = CompletionRequest {
+///     prompt: "Complete this function".to_string(),
+///     context: CompletionContext {
+///         file_path: Some("src/main.rs".to_string()),
+///         language: Some("rust".to_string()),
+///         surrounding_code: Some("fn main() {".to_string()),
+///         ..Default::default()
+///     },
+///     ..Default::default()
+/// };
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionRequest {
     /// The prompt text

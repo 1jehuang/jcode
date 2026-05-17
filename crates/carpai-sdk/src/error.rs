@@ -121,6 +121,29 @@ pub enum CarpAiError {
 
 impl CarpAiError {
     /// Check if this error is recoverable (can be retried)
+    ///
+    /// Returns `true` for transient errors (network, timeout, rate limit, 5xx).
+    /// Returns `false` for permanent errors (auth, validation, 4xx).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use carpai_sdk::CarpAiError;
+    ///
+    /// // Transient errors are recoverable
+    /// let timeout = CarpAiError::Timeout {
+    ///     timeout_secs: 30,
+    ///     operation: "completion".to_string(),
+    /// };
+    /// assert!(timeout.is_recoverable());
+    ///
+    /// // Auth errors need user intervention
+    /// let auth = CarpAiError::Auth {
+    ///     message: "Invalid API key".to_string(),
+    ///     suggestion: None,
+    /// };
+    /// assert!(!auth.is_recoverable());
+    /// ```
     pub fn is_recoverable(&self) -> bool {
         matches!(
             self,
@@ -133,6 +156,23 @@ impl CarpAiError {
     }
 
     /// Get user-friendly recovery suggestion
+    ///
+    /// Provides actionable advice for resolving the error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use carpai_sdk::CarpAiError;
+    ///
+    /// let err = CarpAiError::RateLimit {
+    ///     retry_after_secs: 60,
+    ///     current_limit: Some(100),
+    /// };
+    ///
+    /// let suggestion = err.recovery_suggestion();
+    /// assert!(suggestion.is_some());
+    /// assert!(suggestion.unwrap().contains("Wait"));
+    /// ```
     pub fn recovery_suggestion(&self) -> Option<String> {
         match self {
             Self::Auth { suggestion, .. } => suggestion.clone(),

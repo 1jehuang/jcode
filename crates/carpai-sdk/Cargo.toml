@@ -59,6 +59,11 @@ zeroize = { version = "1", features = ["derive"] }
 tokio-test = "0.4"
 wiremock = "0.6"
 tempfile = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "sdk_bench"
+harness = false
 
 [[example]]
 name = "basic_usage"

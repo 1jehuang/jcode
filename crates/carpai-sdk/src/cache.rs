@@ -125,6 +125,24 @@ impl CacheManager {
     }
 
     /// Try to get a cached response for the given request
+    ///
+    /// Returns `None` if cache is disabled, no entry exists, or entry has expired.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use carpai_sdk::{CacheManager, CacheConfig, CompletionRequest};
+    ///
+    /// let config = CacheConfig::default();
+    /// let cache = CacheManager::new(config).unwrap();
+    /// let request = CompletionRequest {
+    ///     prompt: "Test prompt".to_string(),
+    ///     ..Default::default()
+    /// };
+    ///
+    /// // Cache miss returns None
+    /// assert!(cache.get(&request).is_none());
+    /// ```
     pub fn get(&self, request: &CompletionRequest) -> Option<CompletionResponse> {
         if !self.config.enabled {
             return None;
@@ -156,6 +174,44 @@ impl CacheManager {
     }
 
     /// Store a response in the cache
+    ///
+    /// Automatically evicts oldest entries if cache is at capacity.
+    /// Expired entries are lazily removed on access.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if cache storage fails (e.g., disk full if persist enabled).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use carpai_sdk::{CacheManager, CacheConfig, CompletionRequest, CompletionResponse, RequestId, TokenUsage};
+    ///
+    /// let config = CacheConfig::default();
+    /// let cache = CacheManager::new(config).unwrap();
+    ///
+    /// let request = CompletionRequest {
+    ///     prompt: "What is Rust?".to_string(),
+    ///     ..Default::default()
+    /// };
+    ///
+    /// let response = CompletionResponse {
+    ///     text: "Rust is a systems programming language.".to_string(),
+    ///     request_id: RequestId::new(),
+    ///     session_id: None,
+    ///     model: "test".to_string(),
+    ///     usage: TokenUsage { prompt_tokens: 5, completion_tokens: 10, total_tokens: 15 },
+    ///     latency_ms: 50.0,
+    ///     cached: false,
+    ///     finish_reason: Some("stop".to_string()),
+    /// };
+    ///
+    /// cache.put(&request, response.clone()).unwrap();
+    ///
+    /// // Subsequent get returns the cached response
+    /// let cached = cache.get(&request);
+    /// assert!(cached.is_some());
+    /// ```
     #[allow(clippy::result_large_err)]
     pub fn put(&self, request: &CompletionRequest, response: CompletionResponse) -> Result<()> {
         if !self.config.enabled {
