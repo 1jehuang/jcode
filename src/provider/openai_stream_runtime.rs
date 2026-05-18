@@ -628,10 +628,7 @@ pub(super) async fn stream_response_websocket_persistent(
     emit_connection_phase(&tx, ConnectionPhase::Connecting).await;
     let connect_start = std::time::Instant::now();
 
-    let connect_result: Result<
-        Result<(WebSocketStream<MaybeTlsStream<TcpStream>>, axum::body::Body), WsError>,
-        tokio::time::error::Elapsed,
-    > = tokio::time::timeout(
+    let connect_result = tokio::time::timeout(
         Duration::from_secs(WEBSOCKET_CONNECT_TIMEOUT_SECS),
         connect_async(ws_request),
     )
@@ -641,32 +638,12 @@ pub(super) async fn stream_response_websocket_persistent(
             "WebSocket connect timed out after {}s",
             WEBSOCKET_CONNECT_TIMEOUT_SECS
         ))
-    })?;
+    })??;
 
     let (mut ws_stream, _response): (
         WebSocketStream<MaybeTlsStream<TcpStream>>,
         axum::body::Body,
-    ) = match connect_result {
-        Ok((stream, response)) => {
-            let connect_ms = connect_start.elapsed().as_millis();
-            crate::logging::info(&format!(
-                "WebSocket connection established in {}ms (persistent mode)",
-                connect_ms
-            ));
-            (stream, response)
-        }
-        Err(err) if is_ws_upgrade_required(&err) => {
-            return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
-                "Falling back from websockets to HTTPS transport"
-            )));
-        }
-        Err(err) => {
-            return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
-                "Failed to connect websocket stream: {}",
-                err
-            )));
-        }
-    };
+    ) = connect_result;
 
     let _ = tx
         .send(Ok(StreamEvent::ConnectionType {
