@@ -133,6 +133,11 @@ impl AmbientManager {
         Ok(())
     }
 
+    /// Cancel a queued scheduled item by ID.
+    pub fn cancel_schedule(&mut self, id: &str) -> Result<Option<ScheduledItem>> {
+        self.queue.remove_by_id(id)
+    }
+
     pub fn state(&self) -> &AmbientState {
         &self.state
     }

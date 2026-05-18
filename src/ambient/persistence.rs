@@ -101,6 +101,17 @@ impl ScheduledQueue {
         let _ = self.save();
     }
 
+    /// Remove a scheduled item by ID, persisting the queue when found.
+    pub fn remove_by_id(&mut self, id: &str) -> Result<Option<ScheduledItem>> {
+        let Some(index) = self.items.iter().position(|item| item.id == id) else {
+            return Ok(None);
+        };
+
+        let item = self.items.remove(index);
+        self.save()?;
+        Ok(Some(item))
+    }
+
     /// Pop items whose `scheduled_for` is in the past, sorted by priority
     /// (highest first) then by time (earliest first).
     pub fn pop_ready(&mut self) -> Vec<ScheduledItem> {
