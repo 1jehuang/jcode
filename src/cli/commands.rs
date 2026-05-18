@@ -16,7 +16,7 @@ use super::terminal::{cleanup_tui_runtime, init_tui_runtime};
 fn lsp_manager() -> &'static Mutex<Option<Arc<jcode_lsp::LspServerManager>>> {
     static MGR: LazyLock<Mutex<Option<Arc<jcode_lsp::LspServerManager>>>> =
         LazyLock::new(|| Mutex::new(None));
-    MGR
+    &*MGR
 }
 
 async fn ensure_lsp_manager() -> Result<Arc<jcode_lsp::LspServerManager>> {

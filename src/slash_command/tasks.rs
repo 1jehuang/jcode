@@ -9,7 +9,7 @@ pub(crate) async fn register_tasks() {
                 match parts.first().copied().unwrap_or("") {
                     "create" if parts.len() >= 2 => {
                         let desc = parts[1];
-                        let planner = crate::task_planner::TaskPlanner::new();
+                        let mut planner = crate::task_planner::TaskPlanner::new();
                         let plan_id = planner.create_plan("default", "Slash task", desc);
                         let task = crate::task_planner::EnhancedTask::new(desc);
                         match planner.add_task(&plan_id, task) {

@@ -143,7 +143,7 @@ pub(super) async fn handle_cycle_model(
 
     let result = {
         let mut agent_guard = agent.lock().await;
-        let result = Agent::set_model(&mut agent_guard, &next_model);
+        let result = Agent::set_model_provider(&mut agent_guard, &next_model);
         if result.is_ok() {
             agent_guard.reset_provider_session();
         }
@@ -217,7 +217,7 @@ pub(super) async fn handle_set_model(
     };
     let result = {
         let mut agent_guard = agent.lock().await;
-        let result = Agent::set_model(&mut agent_guard, &model);
+        let result = Agent::set_model_provider(&mut agent_guard, &model);
         if result.is_ok() {
             agent_guard.reset_provider_session();
         }

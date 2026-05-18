@@ -8,6 +8,7 @@ pub(crate) async fn register_model() {
     register("model", "Show or switch AI model", "/model [model-name]",
         std::sync::Arc::new(|args: &str| {
             let a = args.trim().to_string();
+            let a_display = a.clone();
             s(move || async move {
                 let cfg = crate::config::Config::load();
                 if a.is_empty() {
@@ -19,7 +20,7 @@ pub(crate) async fn register_model() {
                     }
                 }
             });
-            if a.is_empty() { SlashResult::Ok("Showing model config.".into()) } else { SlashResult::Ok(format!("Setting model to: {}", a.trim())) }
+            if a_display.is_empty() { SlashResult::Ok("Showing model config.".into()) } else { SlashResult::Ok(format!("Setting model to: {}", a_display.trim())) }
         }),
     ).await;
 }

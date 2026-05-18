@@ -105,7 +105,7 @@ pub async fn run_print_mode(config: PrintModeConfig) -> Result<()> {
     }
     
     if let Some(model) = &config.model {
-        agent.set_model(model)?;
+        agent.set_model_provider(model)?;
     }
     
     if let Some(prompt) = &config.system_prompt {
