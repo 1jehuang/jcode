@@ -431,7 +431,8 @@ impl ActionBarManager {
             let sep = Span::styled(" ", Style::default());
             vec![icon_span, sep]
         }).collect();
-        buf.set_line(area.x, area.y, &Line::from(spans), area.width.min(x - area.x + spans.iter().map(|s| s.width() as u16).sum::<u16>()));
+        let width = spans.iter().map(|s| s.width() as u16).sum::<u16>();
+        buf.set_line(area.x, area.y, &Line::from(spans), area.width.min(x - area.x + width));
     }
 
     pub fn registry(&self) -> &ActionRegistry {

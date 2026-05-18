@@ -106,6 +106,12 @@ impl std::fmt::Display for ReasoningEventType {
     }
 }
 
+impl Default for ReasoningEventType {
+    fn default() -> Self {
+        Self::Started
+    }
+}
+
 /// 推理事件
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReasoningEvent {

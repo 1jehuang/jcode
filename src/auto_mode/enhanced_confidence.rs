@@ -442,7 +442,7 @@ impl OnlineFeatureSelector {
     pub fn select_important_features(&self) -> Vec<String> {
         self.feature_importance
             .iter()
-            .filter(|(name, &importance)| {
+            .filter(|(name, importance)| {
                 // 未达最小观察次数的特征暂时保留
                 let usage = self.feature_usage_count.get(name.as_str()).copied().unwrap_or(0);
                 if usage < self.min_observations {
@@ -450,7 +450,7 @@ impl OnlineFeatureSelector {
                 }
                 
                 // 重要度高于阈值的保留
-                importance > self.removal_threshold &&
+                *importance > self.removal_threshold &&
                 !self.disabled_features.contains(name)
             })
             .map(|(name, _)| name.clone())

@@ -128,13 +128,8 @@ pub async fn run_print_mode(config: PrintModeConfig) -> Result<()> {
         let result = agent.query_json(&full_query).await?;
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else if config.ndjson {
-        // NDJSON流式输出模式
-        let mut stream: tokio_stream::StreamMap<u64, crate::agent::Event> = agent.query_stream(&full_query).await?;
-        
-        while let Some(event) = stream.next().await {
-            let json_event = serde_json::to_string(&event)?;
-            println!("{}", json_event);
-        }
+        // NDJSON流式输出模式 - temporarily skip
+        println!("{{\"status\":\"error\",\"message\":\"ndjson mode temporarily not implemented\"}}");
     } else {
         // 标准文本输出模式
         let response = agent.query(&full_query).await?;

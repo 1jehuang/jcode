@@ -28,7 +28,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 use tree_sitter::{InputEdit, Language, Parser, Point, Tree};
 use tracing::{debug, info, warn};
@@ -235,7 +235,7 @@ pub enum Visibility {
 /// Tree-sitter AST 解析器
 pub struct AstParser {
     /// 各语言的解析器实例
-    parsers: HashMap<SupportedLanguage, Parser>,
+    parsers: Arc<Mutex<HashMap<SupportedLanguage, Parser>>>,
     
     /// 缓存的AST树 (文件路径 -> Tree)
     cache: Arc<RwLock<HashMap<String, CachedAst>>>,
@@ -388,11 +388,11 @@ impl AstParser {
                     let edit = self.compute_edit(&cached.source_code, source);
                     let old_tree = &cached.tree;
                     
-                    if let Some(parser) = self.parsers.get(&language) {
+                    if let Some(parser) = self.parsers.lock().unwrap().get(&language) {
                         let mut tree = old_tree.clone();
                         tree.edit(&edit);
                         
-                        let parse_result = parser.parse(source, Some(&tree))?;
+                        let parse_result = parser.parse(source, Some(&tree));
                         if let Some(new_tree) = parse_result {
                             // 更新缓存
                             if let Some(cached) = cache.get_mut(file_path) {
@@ -429,10 +429,10 @@ impl AstParser {
         }
 
         // 全量解析
-        let parser = self.parsers.get(&language)
+        let parser = self.parsers.lock().unwrap().get(&language)
             .ok_or_else(|| anyhow::anyhow!("Unsupported language: {}", language))?;
 
-        let tree = parser.parse(source, None)?
+        let tree = parser.parse(source, None)
             .ok_or_else(|| anyhow::anyhow!("Failed to parse source code"))?;
 
         // 存入缓存

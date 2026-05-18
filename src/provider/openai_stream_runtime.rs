@@ -1,6 +1,9 @@
 use super::*;
 use http::HeaderValue;
 use tokio_tungstenite::tungstenite::error::Error as WsError;
+use tokio_tungstenite::{connect_async, StreamExt};
+use futures::SinkExt;
+use std::collections::{HashSet, VecDeque};
 
 pub(super) async fn openai_access_token(
     credentials: &Arc<RwLock<CodexCredentials>>,
@@ -33,7 +36,7 @@ pub(super) async fn openai_access_token(
         return Ok(access_token);
     }
 
-    let refreshed = oauth::refresh_openai_tokens(&refresh_token).await?;
+    let refreshed = crate::auth::oauth::refresh_openai_tokens(&refresh_token).await?;
     let mut tokens = credentials.write().await;
     let account_id = tokens.account_id.clone();
     let id_token = refreshed

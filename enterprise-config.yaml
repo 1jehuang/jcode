@@ -1,0 +1,70 @@
+# CarpAI Enterprise 配置文件
+server:
+  bind: "0.0.0.0"
+  api_port: 8000
+  admin_port: 8001
+  node_port: 8002
+  log_level: "info"
+  json_log: false
+  max_body_mb: 32
+  request_timeout_secs: 300
+
+database:
+  url: "sqlite://./carpai_enterprise.db?mode=rwc"
+  max_connections: 10
+  connect_timeout_secs: 30
+  auto_migrate: true
+
+models:
+  supported_models: []
+  default_model: "qwen-7b"
+  model_cache_dir: "./models"
+  warm_up_models: []
+
+scheduling:
+  max_concurrent_tasks: 16
+  max_queue_size: 1024
+  heartbeat_timeout_secs: 30
+  min_bootstrap_nodes: 1
+  allocation_strategy: "dp"
+  routing_strategy: "dp"
+  enable_goap: true
+  enable_dynamic_nodes: true
+  enable_virtual_memory: true
+  vm_large_file_threshold_mb: 4096
+
+auth:
+  jwt_secret_env: "CARPAI_JWT_SECRET"
+  jwt_expiry_hours: 24
+  api_key_hash: "sha256"
+  allow_signup: true
+  require_email_verification: false
+  session_timeout_minutes: 120
+
+limits:
+  free_org_max_users: 5
+  free_org_daily_token_limit: 100000
+  free_org_concurrent_limit: 2
+  enterprise_org_max_users: 100
+  enterprise_org_daily_token_limit: 0
+  enterprise_org_concurrent_limit: 0
+  max_tokens_per_request: 16384
+  rate_limit_per_minute: 60
+
+audit:
+  enabled: true
+  retention_days: 90
+  log_request_body: true
+  log_response_body: false
+
+virtual_memory:
+  enabled: true
+  mmap_dir: "./kv_cache_mmap"
+  max_mmap_file_gb: 64
+  preallocate_mb: 1024
+  swap_latency_tolerance_ms: 100
+
+codebase:
+  enable_indexing: true
+  workspace_path: "d:/studying/Codecargo/CarpAI"
+  refresh_interval_secs: 300

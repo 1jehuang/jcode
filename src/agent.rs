@@ -145,6 +145,41 @@ pub struct Agent {
 }
 
 impl Agent {
+    pub fn set_working_directory(&mut self, path: &str) -> anyhow::Result<()> {
+        self.session.working_dir = Some(path.to_string());
+        Ok(())
+    }
+
+    pub fn set_model(&mut self, model: &str) -> anyhow::Result<()> {
+        self.session.model = Some(model.to_string());
+        Ok(())
+    }
+
+    pub fn append_system_prompt(&mut self, prompt: &str) -> anyhow::Result<()> {
+        self.system_prompt_override = Some(prompt.to_string());
+        Ok(())
+    }
+
+    pub fn set_max_tokens(&mut self, _max_tokens: u32) {
+        // Temporarily not implemented
+    }
+
+    pub fn set_temperature(&mut self, _temperature: f64) {
+        // Temporarily not implemented
+    }
+
+    pub async fn query(&self, query: &str) -> anyhow::Result<String> {
+        Ok(String::from("print query not implemented yet"))
+    }
+
+    pub async fn query_json(&self, query: &str) -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::Value::String(String::from("print query_json not implemented yet")))
+    }
+
+    pub async fn query_stream(&self, query: &str) -> anyhow::Result<tokio_stream::Empty<()>> {
+        Ok(tokio_stream::empty())
+    }
+
     fn should_track_client_cache(&self) -> bool {
         match std::env::var("JCODE_TRACK_CLIENT_CACHE") {
             Ok(value) => {

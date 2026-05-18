@@ -130,6 +130,12 @@ impl ImportanceLevel {
     }
 }
 
+impl Default for ImportanceLevel {
+    fn default() -> Self {
+        Self::Medium
+    }
+}
+
 /// 存储层级
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StorageTier {
@@ -141,6 +147,12 @@ pub enum StorageTier {
     
     /// 冷层 - 高度压缩, <10ms延迟
     Cold,
+}
+
+impl Default for StorageTier {
+    fn default() -> Self {
+        Self::Warm
+    }
 }
 
 /// 上下文条目

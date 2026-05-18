@@ -6,7 +6,7 @@ use crate::message::TOOL_OUTPUT_MISSING_TEXT;
 use crate::message::{Message as ChatMessage, StreamEvent, ToolDefinition};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use futures::StreamExt as FuturesStreamExt;
+use futures::{StreamExt as FuturesStreamExt, SinkExt};
 use reqwest::{Client, StatusCode};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, StreamExt};
 
 const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
 const CHATGPT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";

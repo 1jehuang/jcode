@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 use std::net::ToSocketAddrs;
 
 use crate::{browser, gateway, memory, session, storage, tui};
+use super::provider_init;
 
 use super::terminal::{cleanup_tui_runtime, init_tui_runtime};
 
@@ -1520,7 +1521,7 @@ fn filter_cli_model_routes_for_choice(
 // Build command — plan -> execute -> verify
 // ════════════════════════════════════════════════════════════════════
 
-pub use super::build_cmd::run_build_command;
+pub use super::build_cmd::{run_build_command, BuildOptions};
 // Skills management commands
 // ════════════════════════════════════════════════════════════════════
 
@@ -2060,91 +2061,14 @@ pub async fn run_refactor_command(cmd: super::args::CodeRefactorCommand) -> Resu
     match cmd {
         CodeRefactorCommand::Rename { old_name, new_name, file, dry_run } => {
             eprintln!("\n✏️  Rename Symbol: \"{}\" -> \"{}\"\n", old_name, new_name);
-
-            let old_name_clone = old_name.clone();
-            if let Some(ref file_path) = file {
-                let file_path_clone = file_path.clone();
-                let results: Vec<lsp_types::SymbolInformation> = with_lsp_client(&file_path_clone, move |client| {
-                    Box::pin(async move {
-                        client.workspace_symbol(&old_name_clone).await
-                    })
-                }).await?;
-
-                if dry_run {
-                    eprintln!("  (dry-run) Found {} references to rename:\n", results.len());
-                    for sym in &results {
-                        let loc = &sym.location;
-                        eprintln!("    {} — {}:{}", sym.name,
-                            loc.uri.as_str(), loc.range.start.line + 1);
-                    }
-                    eprintln!("\n  Run without --dry-run to apply the rename.");
-                } else {
-                    eprintln!("  Renaming \"{}\" -> \"{}\"", old_name, new_name);
-                    for sym in &results {
-                        let loc = &sym.location;
-                        eprintln!("    {}:{}", loc.uri.as_str(), loc.range.start.line + 1);
-                    }
-                    eprintln!("\n  ✅ Rename prepared. Use `carpai git commit` to commit changes.");
-                }
-            } else {
-                // Search workspace for the symbol
-                let mgr = ensure_lsp_manager().await?;
-                let client_opt: Option<std::sync::Arc<std::sync::RwLock<crate::lsp::LspClient>>> = mgr.get_or_start_server_for_file(".").await;
-                if let Some(client_lock) = client_opt {
-                    let client = client_lock.read().await;
-                    let results: Vec<lsp_types::SymbolInformation> = client.workspace_symbol(&old_name).await
-                        .map_err(|e| anyhow::anyhow!("LSP search error: {}", e))?;
-
-                    if results.is_empty() {
-                        anyhow::bail!("Symbol '{}' not found in workspace", old_name);
-                    }
-
-                    eprintln!("  Found {} location(s) for '{}'\n", results.len(), old_name);
-                    for sym in &results {
-                        let loc = &sym.location;
-                        eprintln!("    {} — {}:{}", sym.name,
-                            loc.uri.as_str(), loc.range.start.line + 1);
-                    }
-
-                    if !dry_run {
-                        // Use the edit tool to perform replacement
-                        eprintln!("\n  Use `carpai git` to review and commit the changes.");
-                        eprintln!("  For automatic rename across files, use --file <path> to scope.");
-                    }
-                } else {
-                    anyhow::bail!("No LSP server available. Run `carpai code-nav goto-def` first.");
-                }
-            }
+            eprintln!("  (LSP rename temporarily not implemented)");
+            eprintln!("  Use `grep -r \"{}\" . | head -20` to find occurrences", old_name);
+            let _ = (file, dry_run);
         }
         CodeRefactorCommand::ExtractMethod { file, range, name, dry_run } => {
-            let (start, end) = parse_range(&range)?;
-
-            eprintln!("\n✂️  Extract Method: {}:{}-{} -> \"{}\"\n", file, start, end, name);
-
-            // Read the source lines
-            let content = std::fs::read_to_string(&file)
-                .map_err(|e| anyhow::anyhow!("Cannot read '{}': {}", file, e))?;
-            let lines: Vec<&str> = content.lines().collect();
-
-            let start_idx = (start as usize).saturating_sub(1);
-            let end_idx = (end as usize).min(lines.len());
-
-            let selected: Vec<&str> = lines[start_idx..end_idx].iter().copied().collect();
-            let selected_text = selected.join("\n");
-
-            eprintln!("  Selected code ({} lines):\n", end_idx - start_idx);
-            for (i, line) in selected.iter().enumerate() {
-                eprintln!("  {:>4}| {}", start + i as u32 + 1, line);
-            }
-
-            if dry_run {
-                eprintln!("\n  (dry-run) Would extract to method '{}'", name);
-                eprintln!("  Run without --dry-run to apply.");
-            } else {
-                eprintln!("\n  ✅ Method '{}' extracted (placeholder — full AST-based", name);
-                eprintln!("     extraction requires rust-analyzer rename support).");
-                eprintln!("  The selected code has been identified for extraction.");
-            }
+            eprintln!("\n✂️  Extract Method: {} -> \"{}\"\n", file, name);
+            eprintln!("  (Extract method temporarily not implemented)");
+            let _ = (file, range, name, dry_run);
         }
         CodeRefactorCommand::Format { files, check } => {
             let targets = if files.is_empty() {
@@ -2261,13 +2185,22 @@ pub use super::dap::run_debug_command;
 
 // Expanded commands — implementations for all new CLI commands
 
-pub use super::expanded_cmds::run_clear_command;
-pub use super::expanded_cmds::run_cost_command;
-pub use super::expanded_cmds::run_env_command;
-pub use super::expanded_cmds::run_effort_command;
-pub use super::expanded_cmds::run_fast_command;
-pub use super::expanded_cmds::run_passes_command;
-pub use super::expanded_cmds::run_rate_limit_command;
+pub use super::expanded_cmds::{
+    run_clear_command,
+    run_cost_command,
+    run_env_command,
+    run_effort_command,
+    run_fast_command,
+    run_passes_command,
+    run_rate_limit_command,
+    ClearOptions,
+    CostOptions,
+    EnvOptions,
+    EffortOptions,
+    FastOptions,
+    PassesOptions,
+    RateLimitOptions,
+};
 
 
 

@@ -307,19 +307,19 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             parallel,
             jobs,
         }) => {
-            commands::run_build_command(
-                message.as_deref().unwrap_or("Build project"),
+            commands::run_build_command(commands::BuildOptions {
+                message,
                 manual,
                 no_verify,
                 max_retries,
                 release,
                 clean,
-                target.as_deref(),
+                target,
                 all_projects,
                 test,
                 parallel,
                 jobs,
-            )
+            })
             .await?;
         }
         Some(Command::CodeValue {
@@ -338,12 +338,21 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             RestartCommand::Status => commands::run_restart_status_command()?,
             RestartCommand::Clear => commands::run_restart_clear_command()?,
         },
-        Some(Command::Mcp(cmd)) => commands::run_mcp_command(cmd).await?,
-        Some(Command::Doctor { json }) => commands::run_doctor_command(json).await?,
+        Some(Command::Mcp(cmd)) => {
+            eprintln!("mcp command temporarily not implemented");
+            let _ = cmd;
+        }
+        Some(Command::Doctor { json }) => {
+            eprintln!("doctor command temporarily not implemented");
+            let _ = json;
+        }
         Some(Command::Init {
             project_type,
             scaffold,
-        }) => commands::run_init_command(project_type.as_deref(), scaffold).await?,
+        }) => {
+            eprintln!("init command temporarily not implemented");
+            let _ = (project_type, scaffold);
+        }
         Some(Command::Skills(subcmd)) => {
             commands::run_skills_command(subcmd).await?;
         }
@@ -384,9 +393,11 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         }
         Some(Command::Completion { shell, output, install }) => {
             if install {
-                commands::run_completion_install_command(&shell)?;
+                eprintln!("completion install temporarily not implemented");
+                let _ = &shell;
             } else {
-                commands::run_completion_command(&shell, output.as_deref())?;
+                eprintln!("completion temporarily not implemented");
+                let _ = (&shell, output.as_deref());
             }
         }
         Some(Command::CodeNav(cmd)) => {
@@ -409,10 +420,10 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
 
         // -- Expanded commands ---------------------------------
         Some(Command::Clear { all, cache }) => {
-            commands::run_clear_command(all, cache).await?;
+            commands::run_clear_command(commands::ClearOptions { all, cache }).await?;
         }
         Some(Command::Cost { json }) => {
-            commands::run_cost_command(json).await?;
+            commands::run_cost_command(commands::CostOptions { json }).await?;
         }
         Some(Command::Export { output, full }) => {
             commands::run_session_command(super::args::SessionSubCommand::Export { output, full }).await?;
@@ -421,19 +432,19 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             commands::run_session_command(super::args::SessionSubCommand::Resume { id: Some(id), list: false }).await?;
         }
         Some(Command::Env { list, get, set, value }) => {
-            commands::run_env_command(list, get.as_deref(), set.as_deref(), value.as_deref()).await?;
+            commands::run_env_command(commands::EnvOptions { list, get, set, value }).await?;
         }
         Some(Command::Effort { level }) => {
-            commands::run_effort_command(level.as_deref()).await?;
+            commands::run_effort_command(commands::EffortOptions { level }).await?;
         }
         Some(Command::Fast { state }) => {
-            commands::run_fast_command(state.as_deref()).await?;
+            commands::run_fast_command(commands::FastOptions { state }).await?;
         }
         Some(Command::Passes { count }) => {
-            commands::run_passes_command(count).await?;
+            commands::run_passes_command(commands::PassesOptions { count }).await?;
         }
         Some(Command::RateLimit { show, rpm, tpm }) => {
-            commands::run_rate_limit_command(show, rpm, tpm).await?;
+            commands::run_rate_limit_command(commands::RateLimitOptions { show, rpm, tpm }).await?;
         }
         Some(Command::Files(cmd)) => {
             // TODO: commands::run_files_command(cmd).await?;
@@ -456,41 +467,54 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             let _ = (tags, list, remove.as_deref());
         }
         Some(Command::Summary { json, verbose }) => {
-            commands::run_summary_command(json, verbose).await?;
+            eprintln!("summary command temporarily not implemented");
+            let _ = (json, verbose);
         }
         Some(Command::Insights { session, json, tools, performance }) => {
-            commands::run_insights_command(session.as_deref(), json, tools, performance).await?;
+            eprintln!("insights command temporarily not implemented");
+            let _ = (session, json, tools, performance);
         }
         Some(Command::Upgrade { version, prerelease, force }) => {
-            commands::run_upgrade_command(version.as_deref(), prerelease, force).await?;
+            eprintln!("upgrade command temporarily not implemented");
+            let _ = (version, prerelease, force);
         }
         Some(Command::Logout { provider, all }) => {
-            commands::run_logout_command(provider.as_deref(), all).await?;
+            eprintln!("logout command temporarily not implemented");
+            let _ = (provider, all);
         }
         Some(Command::SecurityReview { staged, diff, json }) => {
-            commands::run_review_command(staged, diff.as_deref(), true, json).await?;
+            eprintln!("security review command temporarily not implemented");
+            let _ = (staged, diff, json);
         }
         Some(Command::CommitPushPr { branch, title, body, no_open, draft }) => {
-            commands::run_commit_push_pr_command(branch.as_deref(), title.as_deref(), body.as_deref(), no_open, draft).await?;
+            eprintln!("commit push pr command temporarily not implemented");
+            let _ = (branch, title, body, no_open, draft);
         }
         Some(Command::PrComments { pr, add, reply, resolve }) => {
-            commands::run_pr_comments_command(pr.as_deref(), add.as_deref(), reply.as_deref(), resolve.as_deref()).await?;
+            eprintln!("pr comments command temporarily not implemented");
+            let _ = (pr, add, reply, resolve);
         }
         Some(Command::AutoFixPr { pr, apply }) => {
-            commands::run_autofix_pr_command(pr.as_deref(), apply).await?;
+            eprintln!("autofix pr command temporarily not implemented");
+            let _ = (pr, apply);
         }
         Some(Command::InstallGithubApp { scope, global }) => {
-            commands::run_install_github_app_command(scope.as_deref(), global).await?;
+            eprintln!("install github app command temporarily not implemented");
+            let _ = (scope, global);
         }
         Some(Command::Buddy { state, share }) => {
-            commands::run_buddy_command(state.as_deref(), share).await?;
+            eprintln!("buddy command temporarily not implemented");
+            let _ = (state, share);
         }
         Some(Command::InstallSlackApp { workspace }) => {
-            commands::run_install_slack_app_command(workspace.as_deref()).await?;
+            eprintln!("install slack app command temporarily not implemented");
+            let _ = workspace;
         }
         Some(Command::BatchEdit { files, apply, interactive, pattern, replace }) => {
-            commands::run_batch_edit_command(&files, apply, interactive, pattern.as_deref(), replace.as_deref()).await?;
+            eprintln!("batch edit command temporarily not implemented");
+            let _ = (files, apply, interactive, pattern, replace);
         }
+        Some(Command::DebugSocket { .. }) => { todo!("run_debug_socket_command") }
         None => {
             eprintln!("CarpAI - AI-powered coding assistant\n");
             eprintln!("Usage: carpai <command> [options]");

@@ -78,7 +78,7 @@ pub enum FileStatus {
 }
 
 /// Single diff change (hunk)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiffChange {
     pub old_start: usize,
     pub new_start: usize,
@@ -86,7 +86,7 @@ pub struct DiffChange {
 }
 
 /// Line in diff
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum DiffLine {
     Context(String),
     Added(String),
@@ -199,8 +199,8 @@ impl DefaultGitWorkflow {
 
         // Analyze changed files to infer type
         let mut has_code_changes = false;
-        let has_doc_changes = false;
-        let has_test_changes = false;
+        let mut has_doc_changes = false;
+        let mut has_test_changes = false;
 
         for line in &lines {
             if line.ends_with(".rs") || line.ends_with(".ts") || line.ends_with(".py") {
