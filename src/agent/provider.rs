@@ -52,10 +52,10 @@ impl Agent {
         self.session.messages_for_provider()
     }
 
-    pub fn set_model(&mut self, model: &str) -> Result<()> {
+    pub fn set_model_provider(&mut self, model: &str) -> Result<()> {
         crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), model)?;
         self.session.model = Some(self.provider.model());
-        self.log_env_snapshot("set_model");
+        self.log_env_snapshot("set_model_provider");
         Ok(())
     }
 

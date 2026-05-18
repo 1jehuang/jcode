@@ -7,7 +7,6 @@
 //! - Priority and status management
 
 use anyhow::Result;
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -30,13 +29,13 @@ pub enum TaskPriority {
 pub enum TaskStatus {
     Pending,
     InProgress { progress: f64 },
-    Blocked(Vec<TaskId>),
-    Completed(Result<TaskOutput>),
+    Blocked(Vec<String>),
+    Completed(TaskOutput),
     Failed(String),
 }
 
 /// Task output when completed
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TaskOutput {
     pub result: String,
     pub artifacts: Vec<String>,
@@ -110,11 +109,11 @@ impl Task {
             TaskStatus::InProgress { progress: p } => {
                 *p = clamped_progress;
                 if clamped_progress >= 1.0 {
-                    self.status = TaskStatus::Completed(Ok(TaskOutput {
+                    self.status = TaskStatus::Completed(TaskOutput {
                         result: "Task completed".to_string(),
                         artifacts: Vec::new(),
                         duration_secs: 0.0,
-                    }));
+                    });
                 }
                 Ok(())
             }
@@ -126,7 +125,7 @@ impl Task {
     pub fn complete(&mut self, output: TaskOutput) -> Result<()> {
         match &self.status {
             TaskStatus::InProgress { .. } | TaskStatus::Pending => {
-                self.status = TaskStatus::Completed(Ok(output));
+                self.status = TaskStatus::Completed(output);
                 self.updated_at = chrono::Utc::now();
                 Ok(())
             }
@@ -470,10 +469,14 @@ impl TaskCommands {
         for task_arc in &tasks {
             let task = task_arc.read().await;
             
+            let status_text = match &task.status {
+                TaskStatus::InProgress { progress } => format!("🔄 {:.0}%", progress * 100.0),
+                _ => String::new(),
+            };
+
             let status_icon = match &task.status {
                 TaskStatus::Pending => "⏳",
-                TaskStatus::InProgress { progress } => 
-                    format!("🔄 {:.0}%", *progress * 100.0),
+                TaskStatus::InProgress { .. } => "🔄",
                 TaskStatus::Blocked(_) => "🚫",
                 TaskStatus::Completed(_) => "✅",
                 TaskStatus::Failed(_) => "❌",

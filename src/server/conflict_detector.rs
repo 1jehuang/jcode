@@ -23,7 +23,7 @@
 //! }
 //! ```
 
-use jcode_lsp::LspServerManager;
+use jcode_lsp::{LspOperations, LspServerManager};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{info, warn};

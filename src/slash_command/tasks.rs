@@ -23,7 +23,7 @@ pub(crate) async fn register_tasks() {
                         eprintln!("\n📋 Tasks\n");
                         if plans.is_empty() { eprintln!("  No tasks.\n"); return; }
                         for plan_id in &plans {
-                            if let Some(plan) = planner.get_plan(plan_id) {
+                            if let Some(plan) = planner.get_plan(&plan_id.id) {
                                 eprintln!("  Plan: {} ({} tasks)", plan.name, plan.tasks.len());
                                 for task_id in &plan.tasks {
                                     if let Some(t) = planner.get_task(task_id) {
@@ -59,7 +59,8 @@ pub(crate) async fn register_skills() {
             let a = args.to_string();
             spawn(move || async move {
                 let parts: Vec<&str> = a.trim().splitn(2, ' ').collect();
-                let reg = crate::skill::SkillRegistry::shared_registry().read().await;
+                let reg_arc = crate::skill::SkillRegistry::shared_registry();
+                let reg = reg_arc.read().await;
                 match parts.first().copied().unwrap_or("") {
                     "list"|"ls"|"" => {
                         let skills = reg.list();

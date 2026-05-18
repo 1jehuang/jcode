@@ -9,7 +9,7 @@
 //! 4. 大文件流式处理
 
 use anyhow::Result;
-use std::io::{self, Read};
+use std::io::{self, IsTerminal, Read};
 
 /// 管道输入配置
 #[derive(Debug, Clone)]

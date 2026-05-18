@@ -6,7 +6,6 @@ use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::net::ToSocketAddrs;
 use std::sync::{Arc, LazyLock, Mutex};
-use tokio::sync::RwLock;
 
 use crate::{browser, gateway, memory, session, storage, tui};
 use super::provider_init;
@@ -2239,9 +2238,8 @@ pub async fn run_refactor_command(cmd: super::args::CodeRefactorCommand) -> Resu
         }
         CodeRefactorCommand::Diagnostics { file, json } => {
             let file_display = file.clone();
-            let file_for_lsp = file.clone();
-            let results = with_lsp_client(&file_for_lsp, move |client| {
-                let inner_file = file_for_lsp.clone();
+            let results = with_lsp_client(&file.clone(), move |client| {
+                let inner_file = file.clone();
                 Box::pin(async move {
                     client.get_diagnostics(&inner_file).await.map_err(|e| anyhow::anyhow!("LSP error: {}", e))
                 })

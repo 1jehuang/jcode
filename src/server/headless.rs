@@ -65,7 +65,7 @@ pub(super) async fn create_headless_session(
     let client_session_id = new_agent.session_id().to_string();
 
     if let Some(model) = model_override
-        && let Err(e) = new_agent.set_model(&model)
+        && let Err(e) = Agent::set_model(&mut new_agent, &model)
     {
         crate::logging::warn(&format!(
             "Failed to set headless session model override '{}': {}",

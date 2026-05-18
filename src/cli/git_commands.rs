@@ -484,7 +484,7 @@ fn parse_diff_output(diff_output: &str) -> Vec<DiffInfo> {
         } else if line.starts_with("deleted file mode") {
             current_status = FileStatus::Deleted;
         } else if let Some(ref file) = current_file {
-            if !diffs.iter().any(|d| d.file_path == *file) {
+            if !diffs.iter().any(|d: &DiffInfo| d.file_path == *file) {
                 diffs.push(DiffInfo {
                     file_path: file.clone(),
                     status: current_status.clone(),

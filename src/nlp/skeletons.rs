@@ -1,6 +1,5 @@
 use super::types::*;
 use super::engine::{DependencyInfo, PackageManager};
-use std::collections::HashMap;
 
 fn capitalize(s: &str) -> String {
     let mut chars = s.chars();

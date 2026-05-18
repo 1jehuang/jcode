@@ -85,14 +85,14 @@ impl EnhancedCli {
             "commit" => {
                 let message = if args.len() > 1 { Some(&args[1]) } else { None };
                 let amend = args.contains(&"--amend".to_string());
-                self.git.handle_commit(message, amend).await?;
+                self.git.handle_commit(message.map(|s| s.as_str()), amend).await?;
             }
             "branch" | "create-branch" => {
                 if args.len() < 2 {
                     anyhow::bail!("Branch name required. Usage: carpai git branch <name> [base]");
                 }
                 let base = if args.len() > 2 { Some(&args[2]) } else { None };
-                self.git.handle_create_branch(&args[1], base).await?;
+                self.git.handle_create_branch(&args[1], base.map(|s| s.as_str())).await?;
             }
             "branches" | "branch-list" => {
                 let remote = args.contains(&"-r".to_string()) || args.contains(&"--remote".to_string());

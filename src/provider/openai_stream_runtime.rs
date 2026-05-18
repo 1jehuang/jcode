@@ -4,7 +4,6 @@ use tokio_tungstenite::tungstenite::error::Error as WsError;
 use tokio_tungstenite::connect_async;
 use futures::{SinkExt, StreamExt};
 use std::collections::{HashSet, VecDeque};
-use crate::message::ConnectionPhase;
 
 pub(super) async fn openai_access_token(
     credentials: &Arc<RwLock<CodexCredentials>>,
@@ -638,11 +637,12 @@ pub(super) async fn stream_response_websocket_persistent(
             "WebSocket connect timed out after {}s",
             WEBSOCKET_CONNECT_TIMEOUT_SECS
         ))
-    })??;
+    })?
+    .map_err(|e| OpenAIStreamFailure::Other(anyhow::anyhow!("{}", e)))?;
 
     let (mut ws_stream, _response): (
         WebSocketStream<MaybeTlsStream<TcpStream>>,
-        axum::body::Body,
+        http::Response<Option<Vec<u8>>>,
     ) = connect_result;
 
     let _ = tx

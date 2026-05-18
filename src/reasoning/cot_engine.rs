@@ -497,6 +497,7 @@ impl CotEngine {
         let confidence = self.calculate_overall_confidence(&chain);
         let total_duration: u64 = chain.iter().map(|s| s.duration_ms).sum();
         let reasoning_content = self.generate_reasoning_content(&chain);
+        let findings = self.extract_findings(&chain);
         
         Ok(ReasoningResult {
             answer: final_answer,
@@ -505,7 +506,7 @@ impl CotEngine {
             total_duration_ms: total_duration,
             strategy_used: ReasoningStrategy::Standard,
             correction_count,
-            findings: self.extract_findings(&chain),
+            findings,
             reasoning_content,
         })
     }
@@ -513,7 +514,6 @@ impl CotEngine {
     /// Tree of Thoughts (思维树) 推理
     async fn tree_of_thoughts(&self, problem: &str, context: &str) -> Result<ReasoningResult> {
         let mut chain = Vec::new();
-        let mut correction_count = 0usize;
         
         // ToT: 生成多个候选方案并评估
         let candidates = self.generate_candidate_solutions(problem, context).await?;
@@ -595,6 +595,7 @@ impl CotEngine {
         let total_duration: u64 = chain.iter().map(|s| s.duration_ms).sum();
         let confidence = self.calculate_overall_confidence(&chain);
         let reasoning_content = self.generate_reasoning_content(&chain);
+        let findings = self.extract_findings(&chain);
         
         Ok(ReasoningResult {
             answer: deep_result.answer,
@@ -603,7 +604,7 @@ impl CotEngine {
             total_duration_ms: total_duration,
             strategy_used: ReasoningStrategy::TreeOfThoughts,
             correction_count,
-            findings: self.extract_findings(&chain),
+            findings,
             reasoning_content,
         })
     }
@@ -684,6 +685,7 @@ impl CotEngine {
         let confidence = self.calculate_overall_confidence(&chain);
         let total_duration: u64 = chain.iter().map(|s| s.duration_ms).sum();
         let reasoning_content = self.generate_reasoning_content(&chain);
+        let findings = self.extract_findings(&chain);
         
         Ok(ReasoningResult {
             answer: final_answer,
@@ -692,7 +694,7 @@ impl CotEngine {
             total_duration_ms: total_duration,
             strategy_used: ReasoningStrategy::TryAndCorrect,
             correction_count,
-            findings: self.extract_findings(&chain),
+            findings,
             reasoning_content,
         })
     }
@@ -748,6 +750,8 @@ impl CotEngine {
         let total_duration: u64 = chain.iter().map(|s| s.duration_ms).sum();
         let reasoning_content = self.generate_reasoning_content(&chain);
         
+        let findings = self.extract_findings(&chain);
+        
         Ok(ReasoningResult {
             answer: synthesis_output,
             chain,
@@ -755,7 +759,7 @@ impl CotEngine {
             total_duration_ms: total_duration,
             strategy_used: ReasoningStrategy::RolePlaying,
             correction_count: 0,
-            findings: self.extract_findings(&chain),
+            findings,
             reasoning_content,
         })
     }

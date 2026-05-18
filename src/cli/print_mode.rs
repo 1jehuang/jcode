@@ -11,12 +11,10 @@
 //! ```
 
 use anyhow::Result;
-use futures::StreamExt;
-use std::io::{self, Read};
+use std::io::{self, IsTerminal, Read};
 
 use crate::agent::Agent;
 use crate::cli::provider_init::{init_provider_and_registry, ProviderChoice};
-use crate::message::StreamEvent;
 
 /// Print模式配置
 #[derive(Debug, Clone)]
@@ -115,7 +113,7 @@ pub async fn run_print_mode(config: PrintModeConfig) -> Result<()> {
     }
     
     if let Some(max_tokens) = config.max_tokens {
-        agent.set_max_tokens(max_tokens);
+        agent.set_max_tokens(max_tokens as u32);
     }
     
     if let Some(temp) = config.temperature {

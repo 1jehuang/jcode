@@ -9,6 +9,8 @@ use std::sync::Arc;
 use url::Url;
 use uuid::Uuid;
 
+use base64::Engine;
+
 use super::replay::{RecordedEvent, RecordedSession};
 
 pub struct SessionSharingService {

@@ -9,7 +9,7 @@
 use crate::ws::protocol::{WsRequest, WsResponse, CompletionItem, DiagnosticInfo, CursorPosition, MessageType};
 use crate::ws::session::SessionManager;
 use anyhow::Result;
-use jcode_lsp::LspServerManager;
+use jcode_lsp::{LspOperations, LspServerManager};
 use std::sync::Arc;
 use tracing::{info, warn};
 

@@ -21,7 +21,7 @@
 //! bridge.start().await;  // runs in background
 //! ```
 
-use jcode_lsp::LspServerManager;
+use jcode_lsp::{LspOperations, LspServerManager};
 use jcode_swarm_core::ChannelIndex;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -46,7 +46,7 @@ pub struct LspDiagnosticEvent {
 }
 
 /// Summary of a single diagnostic for swarm broadcast.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DiagnosticSummary {
     severity: String,
     line: u32,
@@ -169,7 +169,7 @@ impl LspEventBridge {
             return;
         }
 
-        let message = if event.error_count > 0 {
+        let _message = if event.error_count > 0 {
             format!(
                 "🔴 LSP: {} has {} error(s) and {} warning(s)",
                 event.file, event.error_count, event.warning_count

@@ -13,7 +13,7 @@ pub(crate) async fn register_model() {
                 if a.is_empty() {
                     eprintln!("\n📋 Model\n  Provider: {}\n  Model:    {}\n", cfg.provider.default_provider.as_deref().unwrap_or("not set"), cfg.provider.default_model.as_deref().unwrap_or("not set"));
                 } else {
-                    match crate::config::Config::set_default_model_only(Some(a.trim().to_string())) {
+                    match crate::config::Config::set_default_model_only(Some(a.trim())) {
                         Ok(_) => eprintln!("\n✅ Model changed to: {}\n", a.trim()),
                         Err(e) => eprintln!("\n❌ {}\n", e),
                     }

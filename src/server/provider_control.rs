@@ -143,7 +143,7 @@ pub(super) async fn handle_cycle_model(
 
     let result = {
         let mut agent_guard = agent.lock().await;
-        let result = agent_guard.set_model(&next_model);
+        let result = Agent::set_model(&mut agent_guard, &next_model);
         if result.is_ok() {
             agent_guard.reset_provider_session();
         }
@@ -165,7 +165,7 @@ pub(super) async fn handle_cycle_model(
                 id,
                 model: current,
                 provider_name: None,
-                error: Some(e.to_string()),
+                error: Some(format!("{}", e)),
             });
         }
     }
@@ -217,7 +217,7 @@ pub(super) async fn handle_set_model(
     };
     let result = {
         let mut agent_guard = agent.lock().await;
-        let result = agent_guard.set_model(&model);
+        let result = Agent::set_model(&mut agent_guard, &model);
         if result.is_ok() {
             agent_guard.reset_provider_session();
         }
@@ -239,7 +239,7 @@ pub(super) async fn handle_set_model(
                 id,
                 model: current,
                 provider_name: None,
-                error: Some(e.to_string()),
+                error: Some(format!("{}", e)),
             });
         }
     }

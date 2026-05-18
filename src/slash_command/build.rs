@@ -1,5 +1,6 @@
 use super::{register, SlashResult};
 use crate::build::ProjectType;
+use crate::cli::build_cmd::BuildOptions;
 
 fn s<F, Fut>(f: F) where F: FnOnce() -> Fut + Send + 'static, Fut: std::future::Future<Output = ()> + Send + 'static {
     if let Ok(h) = tokio::runtime::Handle::try_current() { h.spawn(f()); }
@@ -14,8 +15,20 @@ pub(crate) async fn register_build() {
                 let clean = a.contains("--clean");
                 let test = a.contains("--test");
                 let msg = a.replace("--release","").replace("--clean","").replace("--test","").trim().to_string();
-                let msg = if msg.is_empty() { "Build project".to_string() } else { msg };
-                let _ = crate::cli::commands::run_build_command(&msg, false, false, 3, release, clean, None, false, test, false, None).await;
+                let msg = if msg.is_empty() { None } else { Some(msg) };
+                let _ = crate::cli::build_cmd::run_build_command(BuildOptions {
+                    message: msg,
+                    manual: false,
+                    no_verify: false,
+                    max_retries: 3,
+                    release,
+                    clean,
+                    target: None,
+                    all_projects: false,
+                    test,
+                    parallel: false,
+                    jobs: None,
+                }).await;
             });
             SlashResult::Ok("Starting build...".into())
         }),

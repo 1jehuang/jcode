@@ -109,53 +109,6 @@ impl PluginLoader {
         Ok(manifest)
     }
 
-    pub fn install_from_url(url: &str, target_dir: &std::path::Path) -> Result<PluginManifest, String> {
-        eprintln!("  📥 Downloading plugin from: {}", url);
-
-        let temp_dir = std::env::temp_dir().join("carpai-plugin-download");
-        std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
-
-        let archive_path = temp_dir.join("plugin-archive.tar.gz");
-
-        let response = attohttpc::get(url)
-            .map_err(|e| format!("Failed to download: {}", e))?;
-
-        if !response.is_success() {
-            return Err(format!("HTTP error: {}", response.status()));
-        }
-
-        let bytes = response.bytes()
-            .map_err(|e| format!("Failed to read response: {}", e))?;
-
-        std::fs::write(&archive_path, &bytes)
-            .map_err(|e| format!("Failed to write archive: {}", e))?;
-
-        eprintln!("  📦 Extracting archive...");
-        let extract_dir = temp_dir.join("extracted");
-        std::fs::create_dir_all(&extract_dir).ok();
-
-        let file = std::fs::File::open(&archive_path)
-            .map_err(|e| format!("Failed to open archive: {}", e))?;
-        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
-        archive.unpack(&extract_dir)
-            .map_err(|e| format!("Failed to extract: {}", e))?;
-
-        let manifest_path = extract_dir.join("plugin.json");
-        if !manifest_path.exists() {
-            let alt_manifest = extract_dir.join("manifest.json");
-            if alt_manifest.exists() {
-                std::fs::rename(&alt_manifest, &manifest_path).ok();
-            }
-        }
-
-        let manifest = Self::install_from_local(&extract_dir, target_dir)?;
-
-        std::fs::remove_dir_all(&temp_dir).ok();
-
-        eprintln!("  ✅ Plugin '{}' installed from URL successfully", manifest.name);
-        Ok(manifest)
-    }
-
     pub fn uninstall(plugin_name: &str, plugins_dir: &std::path::Path) -> Result<(), String> {
         let path = plugins_dir.join(plugin_name);
         if path.exists() {

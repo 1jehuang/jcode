@@ -344,7 +344,7 @@ async fn ensure_persistent_ws_is_healthy(state: &mut PersistentWsState) -> Resul
 
     while started_at.elapsed() < timeout {
         let remaining = timeout.saturating_sub(started_at.elapsed());
-        let timeout_result: Result<Result<Option<WsMessage>, WsMessage>, tokio::time::error::Elapsed> = tokio::time::timeout(remaining, state.ws_stream.next())
+        let timeout_result = tokio::time::timeout(remaining, state.ws_stream.next())
             .await;
         let next_item = match timeout_result {
             Ok(inner) => inner,

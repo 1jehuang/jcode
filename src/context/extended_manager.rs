@@ -425,6 +425,7 @@ impl ExtendedContextManager {
         };
         
         // 添加到Hot层
+        let entry_importance = entry.importance;
         {
             let mut hot = self.hot_layer.write().await;
             hot.push_back(entry);
@@ -440,7 +441,7 @@ impl ExtendedContextManager {
         debug!(
             entry_id = id,
             tokens = token_count,
-            importance = ?(entry.importance as u8),
+            importance = ?(entry_importance as u8),
             tier = ?(StorageTier::Hot as u8),
             "Message added to context"
         );

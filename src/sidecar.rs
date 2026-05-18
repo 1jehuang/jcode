@@ -4,13 +4,20 @@
 //! need the full Agent SDK infrastructure.
 //!
 //! Automatically selects the best available backend:
-//! - OpenAI (gpt-5.3-codex-spark) if Codex credentials are available
-//! - Claude (claude-haiku-4-5-20241022) if Claude credentials are available
+//! 1. Domestic Chinese models (Qwen3.6, GLM5.1, DeepSeek-V4-Flash) if CARPAI_DOMESTIC_API_KEY is set
+//! 2. OpenAI (gpt-5.3-codex-spark) if Codex credentials are available
+//! 3. Claude (claude-haiku-4-5-20241022) if Claude credentials are available
 
 use crate::auth;
 use anyhow::{Context, Result};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
+
+/// Domestic model names (use CARPAI_DOMESTIC_MODEL to select, defaults to DeepSeek-V4-Flash)
+pub const SIDECAR_DOMESTIC_DEFAULT_MODEL: &str = "DeepSeek-V4-Flash";
+pub const SIDECAR_DOMESTIC_MODEL_QWEN: &str = "Qwen3.6";
+pub const SIDECAR_DOMESTIC_MODEL_GLM: &str = "GLM5.1";
+pub const SIDECAR_DOMESTIC_MODEL_DEEPSEEK: &str = "DeepSeek-V4-Flash";
 
 /// Fast/cheap OpenAI model used when Codex credentials are available.
 pub const SIDECAR_OPENAI_MODEL: &str = "gpt-5.3-codex-spark";
@@ -19,6 +26,12 @@ const SIDECAR_OPENAI_OAUTH_FALLBACK_REASONING: &str = "low";
 
 /// Fast/cheap Claude model used when only Claude credentials are available.
 const SIDECAR_CLAUDE_MODEL: &str = "claude-haiku-4-5-20241022";
+
+/// Domestic API (OpenAI-compatible) — configure via env vars
+const DOMESTIC_API_BASE_ENV: &str = "CARPAI_DOMESTIC_API_BASE";
+const DOMESTIC_API_KEY_ENV: &str = "CARPAI_DOMESTIC_API_KEY";
+const DOMESTIC_MODEL_ENV: &str = "CARPAI_DOMESTIC_MODEL";
+const DOMESTIC_DEFAULT_API_BASE: &str = "https://api.deepseek.com/v1";
 
 /// OpenAI Responses API
 const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
@@ -45,6 +58,8 @@ const DEFAULT_MAX_TOKENS: u32 = 1024;
 /// Which backend the sidecar is using
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum SidecarBackend {
+    /// Domestic Chinese models (Qwen3.6, GLM5.1, DeepSeek-V4-Flash)
+    Domestic,
     OpenAI,
     Claude,
 }
@@ -60,13 +75,31 @@ pub struct Sidecar {
 
 impl Sidecar {
     /// Create a new sidecar client, auto-selecting the best available backend.
-    /// Prefers OpenAI (codex-spark) if creds exist, falls back to Claude.
+    /// Priority: domestic models > OpenAI > Claude.
     pub fn new() -> Self {
         let configured_model = crate::config::config().agents.memory_model.clone();
         Self::with_configured_model(configured_model)
     }
 
     fn with_configured_model(configured_model: Option<String>) -> Self {
+        // 1. Check for domestic model API key (highest priority)
+        if let Ok(api_key) = std::env::var(DOMESTIC_API_KEY_ENV) {
+            if !api_key.is_empty() {
+                let model = std::env::var(DOMESTIC_MODEL_ENV)
+                    .unwrap_or_else(|_| SIDECAR_DOMESTIC_DEFAULT_MODEL.to_string());
+                crate::logging::info(&format!(
+                    "Sidecar using domestic model: {} (backend=domestic)",
+                    model
+                ));
+                return Self {
+                    client: crate::provider::shared_http_client(),
+                    model,
+                    max_tokens: DEFAULT_MAX_TOKENS,
+                    backend: SidecarBackend::Domestic,
+                };
+            }
+        }
+
         let (backend, model) = if let Some(model) = configured_model {
             match crate::provider::provider_for_model(&model) {
                 Some("openai") => (SidecarBackend::OpenAI, model),
@@ -108,6 +141,7 @@ impl Sidecar {
     /// Return the currently selected backend label.
     pub fn backend_name(&self) -> &'static str {
         match self.backend {
+            SidecarBackend::Domestic => "domestic",
             SidecarBackend::OpenAI => "openai",
             SidecarBackend::Claude => "claude",
         }
@@ -117,9 +151,88 @@ impl Sidecar {
     /// Routes to the correct API based on the detected backend.
     pub async fn complete(&self, system: &str, user_message: &str) -> Result<String> {
         match self.backend {
+            SidecarBackend::Domestic => self.complete_domestic(system, user_message).await,
             SidecarBackend::OpenAI => self.complete_openai(system, user_message).await,
             SidecarBackend::Claude => self.complete_claude(system, user_message).await,
         }
+    }
+
+    /// Complete via domestic models (OpenAI-compatible Chat Completions API).
+    ///
+    /// Supported models: Qwen3.6, GLM5.1, DeepSeek-V4-Flash
+    /// Configure via environment variables:
+    /// - `CARPAI_DOMESTIC_API_KEY` — API key (required)
+    /// - `CARPAI_DOMESTIC_API_BASE` — API base URL (default: https://api.deepseek.com/v1)
+    /// - `CARPAI_DOMESTIC_MODEL` — Model name (default: DeepSeek-V4-Flash)
+    async fn complete_domestic(&self, system: &str, user_message: &str) -> Result<String> {
+        let api_key = std::env::var(DOMESTIC_API_KEY_ENV)
+            .context("CARPAI_DOMESTIC_API_KEY not set")?;
+        let base_url = std::env::var(DOMESTIC_API_BASE_ENV)
+            .unwrap_or_else(|_| DOMESTIC_DEFAULT_API_BASE.to_string());
+        let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+        let model = &self.model;
+
+        let request = serde_json::json!({
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_message}
+            ],
+            "max_tokens": self.max_tokens,
+            "stream": false,
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to send request to domestic model API")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Domestic model API error ({}): {}", status, body);
+        }
+
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .context("Failed to parse domestic model API response")?;
+
+        // Extract text from OpenAI-compatible Chat Completions format
+        let text = result
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("message"))
+            .and_then(|msg| msg.get("content"))
+            .and_then(|content| content.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if text.is_empty() {
+            // Fallback: try to extract from delta if present (some APIs return streaming-like format)
+            if let Some(text_fallback) = result
+                .get("choices")
+                .and_then(|c| c.as_array())
+                .and_then(|choices| choices.first())
+                .and_then(|choice| choice.get("delta"))
+                .and_then(|delta| delta.get("content"))
+                .and_then(|c| c.as_str())
+            {
+                return Ok(text_fallback.to_string());
+            }
+            anyhow::bail!(
+                "Empty response from domestic model '{}' (url={})",
+                model, url
+            );
+        }
+
+        Ok(text)
     }
 
     /// Complete via OpenAI Responses API.

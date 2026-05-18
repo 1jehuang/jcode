@@ -1,6 +1,5 @@
 use std::process::{Command, Child, Stdio};
 use std::time::Duration;
-use std::io;
 
 /// PTY (Pseudo-Terminal) Session Manager
 /// 

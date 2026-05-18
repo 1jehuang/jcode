@@ -512,7 +512,7 @@ pub(super) async fn execute_debug_command(
             return Err(anyhow::anyhow!("set_model: requires a model name"));
         }
         let mut agent = agent.lock().await;
-        agent.set_model(model)?;
+        Agent::set_model(&mut agent, model)?;
         let payload = serde_json::json!({
             "model": agent.provider_model(),
             "provider": agent.provider_name(),
@@ -551,7 +551,7 @@ pub(super) async fn execute_debug_command(
             }
         };
         let mut agent = agent.lock().await;
-        agent.set_model(default_model)?;
+        Agent::set_model(&mut agent, default_model)?;
         crate::telemetry::record_provider_switch();
         let payload = serde_json::json!({
             "model": agent.provider_model(),

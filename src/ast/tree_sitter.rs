@@ -342,7 +342,7 @@ impl AstParser {
         );
 
         Ok(Self {
-            parsers,
+            parsers: Arc::new(Mutex::new(parsers)),
             cache: Arc::new(RwLock::new(HashMap::new())),
             config,
             stats: Arc::new(RwLock::new(ParserStats::default())),

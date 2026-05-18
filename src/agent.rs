@@ -150,11 +150,6 @@ impl Agent {
         Ok(())
     }
 
-    pub fn set_model(&mut self, model: &str) -> anyhow::Result<()> {
-        self.session.model = Some(model.to_string());
-        Ok(())
-    }
-
     pub fn append_system_prompt(&mut self, prompt: &str) -> anyhow::Result<()> {
         self.system_prompt_override = Some(prompt.to_string());
         Ok(())

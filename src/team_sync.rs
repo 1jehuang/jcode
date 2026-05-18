@@ -843,7 +843,7 @@ impl TeamSyncManager {
         mut policy: SyncPolicy,
     ) -> Result<SyncPolicy, SyncError> {
         self.check_permission(TeamRole::Editor)?;
-        if self.is_offline().await {
+        if !self.is_online().await {
             self.queue_offline_operation(SyncOperation::CreatePolicy {
                 policy: policy.clone(),
             })
@@ -895,7 +895,7 @@ impl TeamSyncManager {
         expected_version: u64,
     ) -> Result<SyncPolicy, SyncError> {
         self.check_permission(TeamRole::Editor)?;
-        if self.is_offline().await {
+        if !self.is_online().await {
             self.queue_offline_operation(SyncOperation::UpdatePolicy {
                 policy: policy.clone(),
                 expected_version,
@@ -958,7 +958,7 @@ impl TeamSyncManager {
         expected_version: u64,
     ) -> Result<(), SyncError> {
         self.check_permission(TeamRole::Admin)?;
-        if self.is_offline().await {
+        if !self.is_online().await {
             self.queue_offline_operation(SyncOperation::DeletePolicy {
                 policy_id: policy_id.to_string(),
                 expected_version,

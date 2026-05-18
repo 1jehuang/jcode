@@ -148,7 +148,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 commands::run_provider_list_command(json)?;
             }
             ProviderCommand::Current { json } => {
-                commands::run_provider_current_command(&args.provider, args.model.as_deref(), json)
+                commands::run_provider_current_command(args.provider.clone(), args.model.as_deref(), json)
                     .await?;
             }
             ProviderCommand::Add {
@@ -311,7 +311,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 message,
                 manual,
                 no_verify,
-                max_retries,
+                max_retries: max_retries as usize,
                 release,
                 clean,
                 target,
@@ -401,7 +401,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             }
         }
         Some(Command::CodeNav(cmd)) => {
-            commands::run_code_nav_command(cmd).await?;
+            commands::run_code_nav_command().await?;
         }
         Some(Command::CodeRefactor(cmd)) => {
             commands::run_refactor_command(cmd).await?;
@@ -441,10 +441,10 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             commands::run_fast_command(commands::FastOptions { state }).await?;
         }
         Some(Command::Passes { count }) => {
-            commands::run_passes_command(commands::PassesOptions { count }).await?;
+            commands::run_passes_command(commands::PassesOptions { count: count.map(|c| c as usize) }).await?;
         }
         Some(Command::RateLimit { show, rpm, tpm }) => {
-            commands::run_rate_limit_command(commands::RateLimitOptions { show, rpm, tpm }).await?;
+            commands::run_rate_limit_command(commands::RateLimitOptions { show, rpm: rpm.map(|r| r as usize), tpm: tpm.map(|t| t as usize) }).await?;
         }
         Some(Command::Files(cmd)) => {
             // TODO: commands::run_files_command(cmd).await?;

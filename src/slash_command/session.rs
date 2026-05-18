@@ -14,7 +14,8 @@ pub(crate) async fn register_export() {
                         let mut f = match std::fs::File::create(&out) { Ok(f)=>f, Err(e)=>{eprintln!("❌ {}",e); return; }};
                         let _ = writeln!(f, "# Session Export\n**ID:** {}\n**Messages:** {}\n", s.id, s.messages.len());
                         for msg in &s.messages {
-                            let _ = writeln!(f, "## {:?} ({})", msg.role, msg.timestamp);
+                            let ts = msg.timestamp.as_ref().map(|t| t.to_string()).unwrap_or_else(|| "N/A".to_string());
+                            let _ = writeln!(f, "## {:?} ({})", msg.role, ts);
                             let _ = writeln!(f, "ID: {}", msg.id);
                             let _ = writeln!(f);
                         }
