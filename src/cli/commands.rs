@@ -2238,9 +2238,11 @@ pub async fn run_refactor_command(cmd: super::args::CodeRefactorCommand) -> Resu
             }
         }
         CodeRefactorCommand::Diagnostics { file, json } => {
+            let file_clone = file.clone();
             let results = with_lsp_client(&file, move |client| {
+                let file_inner = file.clone();
                 Box::pin(async move {
-                    client.get_diagnostics(&file).await.map_err(|e| anyhow::anyhow!("LSP error: {}", e))
+                    client.get_diagnostics(&file_inner).await.map_err(|e| anyhow::anyhow!("LSP error: {}", e))
                 })
             }).await?;
 
@@ -2248,7 +2250,7 @@ pub async fn run_refactor_command(cmd: super::args::CodeRefactorCommand) -> Resu
                 let json_out = serde_json::to_string_pretty(&results)?;
                 println!("{}", json_out);
             } else {
-                eprintln!("\n🔍 Diagnostics for {}\n", file);
+                eprintln!("\n🔍 Diagnostics for {}\n", file_clone);
                 if results.is_empty() {
                     eprintln!("  ✅ No diagnostics.");
                 } else {

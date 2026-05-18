@@ -883,7 +883,7 @@ impl std::error::Error for SftpError {}
 /// High-level SFTP session manager with connection pooling
 pub struct SftpSessionManager {
     clients: std::collections::HashMap<String, SftpClient>,
-    default_config: Option<String, String, u16>,  // (user, host, port)
+    default_config: Option<(String, String, u16)>,  // (user, host, port)
 }
 
 impl SftpSessionManager {

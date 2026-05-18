@@ -284,6 +284,7 @@ impl SshAgentManager {
         )?;
 
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
             Err(AgentError::RequestFailed {
                 operation: "remove_identity".to_string(),
                 message: stderr.to_string(),
@@ -303,6 +304,7 @@ impl SshAgentManager {
         let output = self._execute_ssh_add_command("-D", socket)?;
 
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
             Err(AgentError::RequestFailed {
                 operation: "remove_all_identities".to_string(),
                 message: stderr.to_string(),
@@ -328,6 +330,7 @@ impl SshAgentManager {
         let output = self._execute_ssh_add_command(&cmd_args, socket)?;
 
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
             Err(AgentError::RequestFailed {
                 operation: "lock_agent".to_string(),
                 message: stderr.to_string(),
@@ -374,6 +377,7 @@ impl SshAgentManager {
         let _ = std::fs::remove_file(&temp_file);
 
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
             Err(AgentError::SigningFailed {
                 key_fingerprint: key_fingerprint.to_string(),
                 message: stderr.to_string(),

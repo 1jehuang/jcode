@@ -384,7 +384,7 @@ impl SshSession {
         
         let start = Instant::now();
         let result = self._execute_sync(command)?;
-        let _duration = start.elapsed();
+        let duration = start.elapsed();
 
         // Update stats
         self.stats.commands_executed += 1;
