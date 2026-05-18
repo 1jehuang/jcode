@@ -31,6 +31,7 @@ fn test_provider_choice_arg_values() {
     assert_eq!(ProviderChoice::Opencode.as_arg_value(), "opencode");
     assert_eq!(ProviderChoice::OpencodeGo.as_arg_value(), "opencode-go");
     assert_eq!(ProviderChoice::Zai.as_arg_value(), "zai");
+    assert_eq!(ProviderChoice::Bigmodel.as_arg_value(), "bigmodel");
     assert_eq!(ProviderChoice::Groq.as_arg_value(), "groq");
     assert_eq!(ProviderChoice::Mistral.as_arg_value(), "mistral");
     assert_eq!(ProviderChoice::Perplexity.as_arg_value(), "perplexity");

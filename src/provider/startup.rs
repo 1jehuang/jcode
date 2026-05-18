@@ -281,14 +281,15 @@ impl MultiProvider {
                             .unwrap_or_else(|| selection.display_label())
                     ));
                 } else {
+                    active = preferred;
                     crate::logging::warn(&format!(
-                        "Preferred provider '{}' is not configured, using auto-detected default",
+                        "Preferred provider '{}' is not configured; keeping it selected so requests fail instead of falling back to another provider",
                         pref
                     ));
                 }
             } else {
                 crate::logging::warn(&format!(
-                    "Unknown default_provider '{}' in config (expected: claude|openai|copilot|antigravity|gemini|cursor|bedrock|openrouter or an OpenAI-compatible profile such as deepseek|comtegra|zai|openai-compatible)",
+                    "Unknown default_provider '{}' in config (expected: claude|openai|copilot|antigravity|gemini|cursor|bedrock|openrouter or an OpenAI-compatible profile such as deepseek|comtegra|zai|bigmodel|openai-compatible)",
                     pref
                 ));
             }

@@ -6,6 +6,9 @@ fn test_provider_choice_aliases_parse() {
     let args = Args::try_parse_from(["jcode", "--provider", "z.ai", "run", "smoke"]).unwrap();
     assert_eq!(args.provider, ProviderChoice::Zai);
 
+    let args = Args::try_parse_from(["jcode", "--provider", "zhipu-cn", "run", "smoke"]).unwrap();
+    assert_eq!(args.provider, ProviderChoice::Bigmodel);
+
     let args =
         Args::try_parse_from(["jcode", "--provider", "kimi-for-coding", "run", "smoke"]).unwrap();
     assert_eq!(args.provider, ProviderChoice::Kimi);

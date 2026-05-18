@@ -568,6 +568,7 @@ pub(super) fn list_cli_providers() -> Vec<ProviderListEntry> {
         ProviderChoice::Opencode,
         ProviderChoice::OpencodeGo,
         ProviderChoice::Zai,
+        ProviderChoice::Bigmodel,
         ProviderChoice::Kimi,
         ProviderChoice::Groq,
         ProviderChoice::Mistral,

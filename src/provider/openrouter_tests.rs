@@ -895,6 +895,60 @@ fn built_in_openai_compatible_static_models_drop_out_after_live_catalog() {
 }
 
 #[test]
+fn bigmodel_static_models_remain_visible_when_live_catalog_is_incomplete() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let temp = TempDir::new().expect("create temp home");
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _namespace = EnvVarGuard::set(
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "test-bigmodel-live-catalog-keeps-static-fallbacks",
+    );
+    let (api_base, _request_rx) = spawn_single_response_models_server(
+        r#"{
+            "object": "list",
+            "data": [
+                {"id": "glm-4.5", "object": "model"}
+            ]
+        }"#,
+    );
+    let provider = OpenRouterProvider {
+        api_base,
+        auth: ProviderAuth::AuthorizationBearer {
+            token: "sk-live-catalog".to_string(),
+            label: "ZHIPU_API_KEY".to_string(),
+        },
+        supports_provider_features: false,
+        supports_model_catalog: true,
+        profile_id: Some("bigmodel".to_string()),
+        static_models: vec![
+            "glm-4.5".to_string(),
+            "glm-5".to_string(),
+            "glm-5.1".to_string(),
+        ],
+        send_openrouter_headers: false,
+        ..make_custom_compatible_provider()
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(provider.refresh_models())
+        .expect("refresh fake model catalog");
+
+    let display = provider.available_models_display();
+    assert!(
+        display.iter().any(|model| model == "glm-4.5"),
+        "live BigModel catalog model should remain visible: {display:?}"
+    );
+    assert!(
+        display.iter().any(|model| model == "glm-5.1"),
+        "BigModel documented chat models should remain visible even when /models is incomplete: {display:?}"
+    );
+}
+
+#[test]
 fn direct_openai_compatible_static_models_are_marked_as_fallback_before_live_catalog() {
     let provider = OpenRouterProvider {
         supports_provider_features: false,
@@ -1003,6 +1057,33 @@ fn named_openai_compatible_loads_api_key_from_env_file() {
 
     OpenRouterProvider::new_named_openai_compatible("custom", &config)
         .expect("provider should load key from env file");
+}
+
+#[test]
+fn named_builtin_profile_without_env_file_uses_builtin_env_file() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let temp = TempDir::new().expect("create temp dir");
+    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let _api_key = EnvVarGuard::remove("ZHIPU_API_KEY");
+    write_test_api_key(
+        &temp,
+        "bigmodel.env",
+        "ZHIPU_API_KEY",
+        "from-builtin-env-file",
+    );
+
+    let config = crate::config::NamedProviderConfig {
+        base_url: "https://open.bigmodel.cn/api/paas/v4".to_string(),
+        api_key_env: Some("ZHIPU_API_KEY".to_string()),
+        default_model: Some("glm-5.1".to_string()),
+        ..Default::default()
+    };
+
+    OpenRouterProvider::new_named_openai_compatible("bigmodel", &config)
+        .expect("built-in profile override should still load the built-in env file");
 }
 
 #[test]
@@ -1123,8 +1204,8 @@ fn test_kimi_coding_header_detection_matches_endpoint_and_model() {
         "https://coding-intl.dashscope.aliyuncs.com/v1",
         None,
     ));
-    assert!(should_send_kimi_coding_agent_headers(
-        "https://api.z.ai/api/coding/paas/v4",
+    assert!(!should_send_kimi_coding_agent_headers(
+        "https://open.bigmodel.cn/api/paas/v4",
         None,
     ));
     assert!(should_send_kimi_coding_agent_headers(

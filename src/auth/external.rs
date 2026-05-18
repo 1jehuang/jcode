@@ -372,7 +372,7 @@ fn provider_keys_for_env(env_key: &str) -> &'static [&'static str] {
         "XAI_API_KEY" => &["xai"],
         "OPENROUTER_API_KEY" => &["openrouter"],
         "AI_GATEWAY_API_KEY" => &["vercel-ai-gateway"],
-        "ZHIPU_API_KEY" | "ZAI_API_KEY" => &["zai"],
+        "ZHIPU_API_KEY" | "ZAI_API_KEY" => &["bigmodel", "zai"],
         "OPENCODE_API_KEY" => &["opencode"],
         "OPENCODE_GO_API_KEY" => &["opencode-go", "opencode"],
         "HF_TOKEN" => &["huggingface"],

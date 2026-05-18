@@ -252,7 +252,9 @@ impl MultiProvider {
         } else {
             detected_active
         };
-        let sequence = Self::fallback_sequence_for(active, self.forced_provider);
+        let config_provider_lock = Self::config_default_provider_lock_for_active(active);
+        let sequence =
+            Self::fallback_sequence_for(active, self.forced_provider.or(config_provider_lock));
         let mut notes: Vec<String> = Vec::new();
         let mut failover_reason: Option<String> = None;
         let (estimated_input_chars, estimated_input_tokens) =
@@ -797,6 +799,20 @@ impl MultiProvider {
         }
 
         self.set_model(model)
+    }
+
+    pub(super) fn config_default_provider_lock_for_active(
+        active: ActiveProvider,
+    ) -> Option<ActiveProvider> {
+        let cfg = crate::config::config();
+        let pref = cfg
+            .provider
+            .default_provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        let selection = Self::resolve_config_provider_selection(pref, cfg)?;
+        (selection.active_provider() == active).then_some(active)
     }
 }
 

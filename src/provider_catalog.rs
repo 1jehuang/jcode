@@ -212,6 +212,14 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
             push("glm-4.7-flash");
             push("glm-4.7-flashx");
         }
+        "bigmodel" => {
+            push("glm-5.1");
+            push("glm-5");
+            push("glm-4.7");
+            push("glm-4.7-flash");
+            push("glm-4.7-flashx");
+            push("glm-4.5");
+        }
         "302ai" => {
             push("qwen3-235b-a22b-instruct-2507");
             push("glm-4.7");

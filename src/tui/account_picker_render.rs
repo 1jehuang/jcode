@@ -246,6 +246,7 @@ pub(super) fn provider_style(provider_id: &str) -> Style {
         | "opencode"
         | "opencode-go"
         | "zai"
+        | "bigmodel"
         | "chutes"
         | "cerebras"
         | "alibaba-coding-plan"
