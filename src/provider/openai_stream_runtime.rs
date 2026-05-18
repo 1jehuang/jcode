@@ -1,8 +1,8 @@
 use super::*;
 use http::HeaderValue;
 use tokio_tungstenite::tungstenite::error::Error as WsError;
-use tokio_tungstenite::{connect_async, StreamExt};
-use futures::SinkExt;
+use tokio_tungstenite::connect_async;
+use futures::{SinkExt, StreamExt};
 use std::collections::{HashSet, VecDeque};
 
 pub(super) async fn openai_access_token(
