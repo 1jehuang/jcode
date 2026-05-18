@@ -583,12 +583,18 @@ pub(super) async fn stream_response_websocket_persistent(
             err
         ))
     })?;
-    let mut ws_request = url.into_client_request().map_err(|err| {
-        OpenAIStreamFailure::Other(anyhow::anyhow!(
-            "Failed to build websocket request: {}",
-            err
-        ))
+    let host = url.host_str().ok_or_else(|| {
+        OpenAIStreamFailure::Other(anyhow::anyhow!("WebSocket URL has no host"))
     })?;
+    let mut ws_request = http::Request::get(url.as_str())
+        .header("Host", host)
+        .body(())
+        .map_err(|err| {
+            OpenAIStreamFailure::Other(anyhow::anyhow!(
+                "Failed to build websocket request: {}",
+                err
+            ))
+        })?;
 
     let auth_header =
         HeaderValue::from_str(&format!("Bearer {}", access_token)).map_err(|err| {
@@ -759,7 +765,7 @@ pub(super) async fn stream_response_websocket_persistent(
                 }
             ))
         })?;
-        let next_item = tokio::time::timeout(
+        let next_item: Option<Result<WsMessage, WsError>> = tokio::time::timeout(
             Duration::from_secs(timeout_secs),
             ws_stream.next(),
         )
@@ -770,7 +776,7 @@ pub(super) async fn stream_response_websocket_persistent(
                 websocket_activity_timeout_kind(saw_api_activity),
                 timeout_secs
             ))
-        })??;
+        })?;
 
         let Some(result) = next_item else {
             if saw_response_completed {
