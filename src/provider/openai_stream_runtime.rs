@@ -4,6 +4,7 @@ use tokio_tungstenite::tungstenite::error::Error as WsError;
 use tokio_tungstenite::connect_async;
 use futures::{SinkExt, StreamExt};
 use std::collections::{HashSet, VecDeque};
+use crate::message::ConnectionPhase;
 
 pub(super) async fn openai_access_token(
     credentials: &Arc<RwLock<CodexCredentials>>,
@@ -576,7 +577,13 @@ pub(super) async fn stream_response_websocket_persistent(
     let creds = credentials.read().await;
     let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
     let ws_url = OpenAIProvider::responses_ws_url(&creds);
-    let mut ws_request = ws_url.into_client_request().map_err(|err| {
+    let url = url::Url::parse(&ws_url).map_err(|err| {
+        OpenAIStreamFailure::Other(anyhow::anyhow!(
+            "Failed to parse websocket URL: {}",
+            err
+        ))
+    })?;
+    let mut ws_request = url.into_client_request().map_err(|err| {
         OpenAIStreamFailure::Other(anyhow::anyhow!(
             "Failed to build websocket request: {}",
             err
@@ -752,7 +759,7 @@ pub(super) async fn stream_response_websocket_persistent(
                 }
             ))
         })?;
-        let next_item: Result<Option<WsMessage>, WsError> = tokio::time::timeout(
+        let next_item = tokio::time::timeout(
             Duration::from_secs(timeout_secs),
             ws_stream.next(),
         )
@@ -763,7 +770,7 @@ pub(super) async fn stream_response_websocket_persistent(
                 websocket_activity_timeout_kind(saw_api_activity),
                 timeout_secs
             ))
-        })?;
+        })??;
 
         let Some(result) = next_item else {
             if saw_response_completed {

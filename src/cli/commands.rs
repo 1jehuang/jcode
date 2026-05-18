@@ -2239,10 +2239,10 @@ pub async fn run_refactor_command(cmd: super::args::CodeRefactorCommand) -> Resu
         }
         CodeRefactorCommand::Diagnostics { file, json } => {
             let file_clone = file.clone();
-            let results = with_lsp_client(&file, move |client| {
-                let file_inner = file.clone();
+            let file_for_lsp = file_clone.clone();
+            let results = with_lsp_client(&file_clone, move |client| {
                 Box::pin(async move {
-                    client.get_diagnostics(&file_inner).await.map_err(|e| anyhow::anyhow!("LSP error: {}", e))
+                    client.get_diagnostics(&file_for_lsp).await.map_err(|e| anyhow::anyhow!("LSP error: {}", e))
                 })
             }).await?;
 
