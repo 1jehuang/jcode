@@ -33,14 +33,14 @@ async fn ensure_lsp_manager() -> Result<Arc<jcode_lsp::LspServerManager>> {
 
 async fn with_lsp_client<F, Fut, R>(file_path: &str, f: F) -> Result<R>
 where
-    F: Fn(jcode_lsp::LspClient) -> Fut,
+    F: Fn(&jcode_lsp::LspClient) -> Fut,
     Fut: std::future::Future<Output = Result<R>>,
 {
     let mgr = ensure_lsp_manager().await?;
     let client_lock = mgr.get_or_start_server_for_file(file_path).await
         .ok_or_else(|| anyhow::anyhow!("Could not start LSP server for '{}'", file_path))?;
     let client = client_lock.read().await;
-    f(client.clone()).await
+    f(&*client).await
 }
 
 fn parse_range(range_str: &str) -> Result<(u32, u32)> {
@@ -2238,10 +2238,9 @@ pub async fn run_refactor_command(cmd: super::args::CodeRefactorCommand) -> Resu
             }
         }
         CodeRefactorCommand::Diagnostics { file, json } => {
-            let file_clone = file.clone();
-            let results = with_lsp_client(&file_clone, move |client| {
+            let results = with_lsp_client(&file, move |client| {
                 Box::pin(async move {
-                    client.get_diagnostics(&file_clone).await
+                    client.get_diagnostics(&file).await.map_err(|e| anyhow::anyhow!("LSP error: {}", e))
                 })
             }).await?;
 

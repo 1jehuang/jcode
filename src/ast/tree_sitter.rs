@@ -388,7 +388,7 @@ impl AstParser {
                     let edit = self.compute_edit(&cached.source_code, source);
                     let old_tree = &cached.tree;
                     
-                    if let Some(parser) = self.parsers.lock().unwrap().get(&language) {
+                    if let Some(parser) = self.parsers.lock().unwrap().get_mut(&language) {
                         let mut tree = old_tree.clone();
                         tree.edit(&edit);
                         
@@ -429,7 +429,8 @@ impl AstParser {
         }
 
         // 全量解析
-        let parser = self.parsers.lock().unwrap().get(&language)
+        let mut parsers = self.parsers.lock().unwrap();
+        let parser = parsers.get_mut(&language)
             .ok_or_else(|| anyhow::anyhow!("Unsupported language: {}", language))?;
 
         let tree = parser.parse(source, None)
