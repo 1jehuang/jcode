@@ -1555,11 +1555,12 @@ impl PatternDetector {
                 *all_tools.entry(tool.clone()).or_insert(0) += count;
             }
         }
-        let mut common_tool_sequence: Vec<String> =
+        let mut common_tool_sequence: Vec<(String, usize)> =
             all_tools.into_iter().collect::<Vec<_>>();
         common_tool_sequence.sort_by_key(|&(_, c)| std::cmp::Reverse(c));
         common_tool_sequence.truncate(5);
-        common_tool_sequence = common_tool_sequence.into_iter().map(|(t, _)| t).collect();
+        let common_tool_sequence: Vec<String> =
+            common_tool_sequence.into_iter().map(|(t, _)| t).collect();
 
         let avg_dur = if analyses.is_empty() {
             Duration::zero()

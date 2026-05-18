@@ -71,7 +71,7 @@ pub struct WatermarkConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WatermarkPosition { TopLeft, TopRight, BottomLeft, BottomRight, Center }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Resolution { pub width: u16, pub height: u16 }
 
 impl Resolution {

@@ -677,7 +677,7 @@ impl PowerShellParser {
             || name.eq_ignore_ascii_case("echo")
             || name.eq_ignore_ascii_case("cd")
             || name.eq_ignore_ascii_case("cat")
-            || name.eq_ignore_ascii_error("type")
+            || name.eq_ignore_ascii_case("type")
             || name.eq_ignore_ascii_case("%")
             || name.eq_ignore_ascii_case("?")
     }

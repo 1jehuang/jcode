@@ -44,7 +44,7 @@ pub struct TaskScheduler {
     tasks: Arc<RwLock<HashMap<String, ScheduledTask>>>,
     runners: Arc<RwLock<HashMap<String, (JoinHandle<()>, AbortHandle)>>>,
     tx: mpsc::Sender<TaskExecution>,
-    rx: mpsc::Receiver<TaskExecution>,
+    rx: Arc<tokio::sync::Mutex<mpsc::Receiver<TaskExecution>>>,
     executor: Option<JoinHandle<()>>,
     is_running: Arc<RwLock<bool>>,
 }
@@ -75,7 +75,7 @@ impl TaskScheduler {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             runners: Arc::new(RwLock::new(HashMap::new())),
             tx,
-            rx,
+            rx: Arc::new(tokio::sync::Mutex::new(rx)),
             executor: None,
             is_running: Arc::new(RwLock::new(false)),
         }

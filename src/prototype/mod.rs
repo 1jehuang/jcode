@@ -822,9 +822,9 @@ impl PrototypeEngine {
         config: &PrototypeConfig
     ) -> ArchitectureOverview {
         let pattern = select_architecture_pattern(&config.project_type, &config.constraints.team_size);
-        let layers = design_layers(pattern, tech_stack);
-        let data_flow = design_data_flow(pattern, &config.project_type);
-        let api_design = design_api(&config.project_type, pattern);
+        let layers = design_layers(&pattern, tech_stack);
+        let data_flow = design_data_flow(&pattern, &config.project_type);
+        let api_design = design_api(&config.project_type, &pattern);
         let security_model = design_security_model(&config.constraints.security_level);
         
         ArchitectureOverview {

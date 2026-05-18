@@ -354,7 +354,7 @@ async fn ensure_persistent_ws_is_healthy(state: &mut PersistentWsState) -> Resul
                     WEBSOCKET_PERSISTENT_HEALTHCHECK_TIMEOUT_MS
                 ))
             }
-        }?;
+        };
 
         match next_item {
             Some(Ok(WsMessage::Pong(_))) => {

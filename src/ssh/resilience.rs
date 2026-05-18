@@ -4,7 +4,6 @@ use std::collections::VecDeque;
 use super::session::{SshSession, SshConfig};
 
 /// Reconnection Strategy Types
-#[derive(Debug, Clone)]
 pub enum ReconnectStrategy {
     /// Fixed interval between retries
     FixedInterval(Duration),
@@ -23,6 +22,56 @@ pub enum ReconnectStrategy {
     },
     /// Custom strategy with callback
     Custom(Box<dyn Fn(u32) -> Duration + Send + Sync>),
+}
+
+impl std::fmt::Debug for ReconnectStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReconnectStrategy::FixedInterval(d) => f.debug_tuple("FixedInterval").field(d).finish(),
+            ReconnectStrategy::ExponentialBackoff { initial_delay, max_delay, multiplier, jitter } => {
+                f.debug_struct("ExponentialBackoff")
+                    .field("initial_delay", initial_delay)
+                    .field("max_delay", max_delay)
+                    .field("multiplier", multiplier)
+                    .field("jitter", jitter)
+                    .finish()
+            }
+            ReconnectStrategy::LinearBackoff { initial_delay, increment, max_delay } => {
+                f.debug_struct("LinearBackoff")
+                    .field("initial_delay", initial_delay)
+                    .field("increment", increment)
+                    .field("max_delay", max_delay)
+                    .finish()
+            }
+            ReconnectStrategy::Custom(_) => f.debug_tuple("Custom").field(&"<closure>").finish(),
+        }
+    }
+}
+
+impl Clone for ReconnectStrategy {
+    fn clone(&self) -> Self {
+        match self {
+            ReconnectStrategy::FixedInterval(d) => ReconnectStrategy::FixedInterval(*d),
+            ReconnectStrategy::ExponentialBackoff { initial_delay, max_delay, multiplier, jitter } => {
+                ReconnectStrategy::ExponentialBackoff {
+                    initial_delay: *initial_delay,
+                    max_delay: *max_delay,
+                    multiplier: *multiplier,
+                    jitter: *jitter,
+                }
+            }
+            ReconnectStrategy::LinearBackoff { initial_delay, increment, max_delay } => {
+                ReconnectStrategy::LinearBackoff {
+                    initial_delay: *initial_delay,
+                    increment: *increment,
+                    max_delay: *max_delay,
+                }
+            }
+            ReconnectStrategy::Custom(_) => {
+                ReconnectStrategy::FixedInterval(Duration::from_secs(1))
+            }
+        }
+    }
 }
 
 impl Default for ReconnectStrategy {

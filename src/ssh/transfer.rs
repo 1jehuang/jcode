@@ -537,8 +537,8 @@ impl FileTransfer {
 
     fn _parse_size(size_str: &str) -> u64 {
         let size_str = size_str.trim().trim_end_matches(',');
-        let num_part: String = size_str.chars().take_while(|c| c.is_digit(10) || c == '.').collect();
-        let unit_part: String = size_str.chars().skip_while(|c| c.is_digit(10) || c == '.').collect();
+        let num_part: String = size_str.chars().take_while(|c| (*c).is_digit(10) || *c == '.').collect();
+        let unit_part: String = size_str.chars().skip_while(|c| (*c).is_digit(10) || *c == '.').collect();
 
         let num: f64 = num_part.parse().unwrap_or(0.0);
 

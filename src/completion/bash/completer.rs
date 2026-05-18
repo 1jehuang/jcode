@@ -108,16 +108,14 @@ impl SmartCompleter {
         let mut suggestions = Vec::new();
 
         // 1. 命令名补全
-        if let Some(cmds) = self.registry.get_command_suggestions(&word) {
-            suggestions.extend(cmds);
-        }
+        let cmds = self.registry.search_commands(&word);
+        suggestions.extend(cmds);
 
         // 2. 子命令补全（如果已有命令名）
         let parts: Vec<&str> = request.input[..request.cursor_position].split_whitespace().collect();
         if parts.len() >= 1 {
-            if let Some(subcmds) = self.registry.get_subcommand_suggestions(parts[0], &word) {
-                suggestions.extend(subcmds);
-            }
+            let subcmds = self.registry.get_subcommand_suggestions(parts[0], &word);
+            suggestions.extend(subcmds);
         }
 
         // 3. 历史匹配

@@ -273,7 +273,7 @@ pub struct MessageList {
     pub result_size_estimate: Option<u32>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MessageRef {
     pub id: String,
     #[serde(rename = "threadId")]

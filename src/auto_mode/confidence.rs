@@ -19,6 +19,7 @@
 //! - sigmoid: S形函数，输出[0,1]
 
 use crate::auto_mode::{ActionType, ToolContext};
+use chrono::Timelike;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -372,7 +373,7 @@ impl ConfidenceModel {
     fn prune_insignificant_features(&mut self) {
         let threshold = self.config.feature_importance_threshold;
         
-        self.weights.retain(|_: &String, &w: &f64| w.abs() > threshold);
+        self.weights.retain(|_, w| w.abs() > threshold);
     }
 
     /// 估算当前模型准确率
@@ -483,7 +484,7 @@ impl ConfidenceModel {
         }
 
         // 归一化到[0,1]
-        (score / 2.0).min(1.0)
+        (score / 2.0_f64).min(1.0_f64)
     }
 
     /// 计算用户历史得分（基于过去行为）

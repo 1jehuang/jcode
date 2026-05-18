@@ -56,11 +56,11 @@ pub struct DynamicTool {
     pub enabled: bool,
     
     /// 创建时间戳
-    #[serde(skip)]
+    #[serde(skip, default = "std::time::Instant::now")]
     pub created_at: std::time::Instant,
     
     /// 最后更新时间戳
-    #[serde(skip)]
+    #[serde(skip, default = "std::time::SystemTime::now")]
     pub updated_at: std::time::SystemTime,
     
     /// 自定义元数据 (扩展字段)

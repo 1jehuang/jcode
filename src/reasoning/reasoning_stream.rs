@@ -121,7 +121,7 @@ pub struct ReasoningEvent {
     /// 事件类型
     pub event_type: ReasoningEventType,
     
-    #[serde(skip)]
+    #[serde(skip, default = "std::time::Instant::now")]
     pub timestamp: std::time::Instant,
     
     /// 步骤序号 (如果是步骤相关事件)
@@ -349,7 +349,8 @@ impl ReasoningStream {
     /// 添加监听器
     pub async fn add_listener(&self, listener: Arc<dyn ReasoningEventListener>) {
         let mut listeners = self.listeners.write().await;
-        listeners.push(listener);
+        let listener_clone = listener.clone();
+        listeners.push(listener_clone);
         info!(
             listener_name = listener.name(),
             total_listeners = listeners.len(),

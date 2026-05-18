@@ -100,6 +100,7 @@ pub struct PathWithContext {
     pub context: String,
 }
 
+#[derive(Debug, Clone)]
 pub struct UrlWithContext {
     pub url: url::Url,
     pub context: String,
@@ -118,6 +119,7 @@ pub struct GitRefWithContext {
 #[derive(Debug, Clone, PartialEq)]
 pub enum GitRefType { CommitHash, BranchName, TagName, RemoteUrl }
 
+#[derive(Debug, Clone)]
 pub struct ErrorWithContext {
     pub pattern: String,
     pub error_type: ErrorType,
@@ -132,6 +134,7 @@ pub enum ErrorType { CompilationError, RuntimeError, NetworkError, PermissionErr
 #[derive(Debug, Clone, PartialEq)]
 pub enum ErrorSeverity { Critical, Warning, Info }
 
+#[derive(Debug, Clone)]
 pub struct SuggestedFix {
     pub command: Option<String>,
     pub description: String,
@@ -197,7 +200,7 @@ pub struct SuggestedAction {
     pub shortcut_hint: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Ord, Eq)]
 pub enum ActionSource { PatternMatch, LlmGenerated, HistoryBased, CommunityPopular }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -397,11 +400,11 @@ impl ContextActionGenerator {
                     if !seen.contains(&raw) && raw.len() < 1024 {
                         let path = PathBuf::from(&raw);
                         let exists = path.exists();
-                        let conf = if exists { base_conf + 0.04 } else { base_conf };
+                        let conf: f64 = if exists { base_conf + 0.04 } else { base_conf };
                         results.push(PathWithContext {
                             path,
                             exists,
-                            confidence: (conf).min(1.0),
+                            confidence: (conf).min(1.0_f64),
                             context: "mentioned in content".to_string(),
                         });
                     }
@@ -723,7 +726,7 @@ impl ContextActionGenerator {
                         ErrorSeverity::Info => 0.9,
                     },
                     source: ActionSource::PatternMatch,
-                    reason: format!("Error: {} ({:?})", err.error_type, err.severity),
+                    reason: format!("Error: {:?} ({:?})", err.error_type, err.severity),
                     group: ActionGroup::FixActions,
                     shortcut_hint: None,
                 });
@@ -823,7 +826,7 @@ impl ContextActionGenerator {
                 action: ActionType::Search,
                 confidence: if sym.is_defined { 0.78 } else { 0.65 },
                 source: ActionSource::PatternMatch,
-                reason: format!("{:?} symbol in {:?}", sym.kind, sym.language.unwrap_or_default()),
+                reason: format!("{:?} symbol in {:?}", sym.kind, sym.language.clone().unwrap_or_default()),
                 group: ActionGroup::SearchActions,
                 shortcut_hint: Some("Ctrl+F".to_string()),
             }

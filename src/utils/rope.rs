@@ -55,7 +55,7 @@ impl Rope {
             let mid = s.char_indices().nth(s.chars().count() / 2).map_or(s.len(), |(i, _)| i);
             let left = Self::from_str(&s[..mid]);
             let right = Self::from_str(&s[mid..]);
-            left.concat_nodes(&right.root)
+            Rope::concat_nodes(&left.root, &right.root)
         }
     }
 
@@ -156,7 +156,7 @@ impl Rope {
     }
 
     pub fn chars(&self) -> Chars<'_> {
-        Chars { rope: self, node_stack: Vec::new(), leaf_pos: 0, initialized: false }
+        Chars { rope: self, node_stack: Vec::new(), leaf_pos: 0, leaf_data: None, initialized: false }
     }
 
     pub fn rebalance(&self) -> Rope {

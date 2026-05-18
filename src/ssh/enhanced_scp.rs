@@ -228,7 +228,7 @@ impl EnhancedScp {
         let duration = start.elapsed();
 
         // Post-transfer verification
-        let checksum_after = if self.verify_checksum && result.success() {
+        let checksum_after = if self.verify_checksum && result.success {
             match self._calculate_remote_checksum(remote_path) {
                 Ok(cksum) => Some(cksum),
                 Err(_) => None,  // Don't fail transfer just because checksum failed
@@ -318,7 +318,7 @@ impl EnhancedScp {
             // Call progress callback
             if let Some(ref cb) = progress_callback {
                 cb(i as u64, files_to_transfer.len() as u64, 
-                   local_file.file_name().to_string_lossy().to_string());
+                   local_file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
             }
 
             // Ensure parent directory exists on remote
@@ -476,7 +476,7 @@ impl EnhancedScp {
 
             if let Some(ref cb) = progress_callback {
                 cb(i as u64, remote_files.len() as u64, 
-                   remote_file.file_name().to_string_lossy().to_string());
+                   remote_file.file_name().map(|n| n.to_string_lossy()).unwrap_or_default().to_string());
             }
 
             if let Some(parent) = local_file.parent() {
@@ -711,7 +711,7 @@ impl EnhancedScp {
                     } else if metadata.is_dir() {
                         let sub_files = self._collect_files_for_transfer(&path)?;
                         for (sub_path, sub_rel) in sub_files {
-                            files.push((sub_path, name.join(sub_rel)));
+                            files.push((sub_path, Path::new(&name).join(sub_rel)));
                         }
                     }
                     // Skip other types (sockets, devices, etc.)

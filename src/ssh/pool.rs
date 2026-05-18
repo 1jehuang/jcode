@@ -46,7 +46,7 @@ pub struct SshConnectionPool {
     shutdown_flag: Arc<Mutex<bool>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct PoolStats {
     pub total_created: u64,
     pub total_destroyed: u64,

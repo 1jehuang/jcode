@@ -398,7 +398,7 @@ impl ActionBarManager {
     }
 
     pub fn update_hover(&mut self, mouse_x: u16, mouse_y: u16, area: Rect) {
-        if !area.contains(mouse_x, mouse_y) {
+        if !area.contains(ratatui::layout::Position::new(mouse_x, mouse_y)) {
             self.hover_state.clear();
             return;
         }

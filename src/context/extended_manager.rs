@@ -179,10 +179,10 @@ pub struct ContextEntry {
     /// 存储层级
     pub tier: StorageTier,
     
-    #[serde(skip)]
+    #[serde(skip, default = "std::time::Instant::now")]
     pub created_at: std::time::Instant,
-    
-    #[serde(skip)]
+
+    #[serde(skip, default = "std::time::Instant::now")]
     pub last_accessed_at: std::time::Instant,
     
     /// 访问次数

@@ -5,6 +5,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::net::ToSocketAddrs;
+use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::{browser, gateway, memory, session, storage, tui};
@@ -30,10 +31,9 @@ async fn ensure_lsp_manager() -> Result<Arc<jcode_lsp::LspServerManager>> {
     Ok(mgr)
 }
 
-async fn with_lsp_client<F, Fut, R>(file_path: &str, f: F) -> Result<R>
+async fn with_lsp_client<F, R>(file_path: &str, f: F) -> Result<R>
 where
-    F: Fn(&jcode_lsp::LspClient) -> Fut,
-    Fut: std::future::Future<Output = Result<R>>,
+    F: for<'a> Fn(&'a jcode_lsp::LspClient) -> Pin<Box<dyn std::future::Future<Output = Result<R>> + Send + 'a>>,
 {
     let mgr = ensure_lsp_manager().await?;
     let client_lock = mgr.get_or_start_server_for_file(file_path).await

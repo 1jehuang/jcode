@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc, Duration};
+use chrono::{DateTime, Utc, Duration, Datelike};
 use ratatui::{
     widgets::{Widget, Block as RBlock, Borders},
     style::{Color, Style, Modifier},
@@ -10,15 +10,16 @@ use uuid::Uuid;
 use std::collections::{HashSet, HashMap};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TimelineTag {
     pub icon: char,
     pub label: String,
+    #[serde(skip)]
     pub color: Color,
     pub category: TagCategory,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum TagCategory {
     Success,
     Warning,
@@ -29,7 +30,7 @@ pub enum TagCategory {
     Experiment,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub enum OutcomeType {
     SuccessWithNotes,
     PartialFailure,
@@ -37,7 +38,7 @@ pub enum OutcomeType {
     NeedsFollowUp,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionSummary {
     pub title: String,
     pub description: String,
@@ -46,7 +47,7 @@ pub struct SessionSummary {
     pub outcome: OutcomeType,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub enum SnapshotType {
     CommandExecuted { cmd: String },
     ErrorOccurred { error: String },
@@ -55,7 +56,7 @@ pub enum SnapshotType {
     MilestoneReached { message: String },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub enum SnapshotContent {
     Text(String),
     Diff(DiffPreview),
@@ -63,13 +64,13 @@ pub enum SnapshotContent {
     Image(Vec<u8>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct DiffPreview {
     pub old_lines: Vec<String>,
     pub new_lines: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TestSummary {
     pub total: usize,
     pub passed: usize,
@@ -77,14 +78,14 @@ pub struct TestSummary {
     pub skipped: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TimelineSnapshot {
     pub timestamp: DateTime<Utc>,
     pub snapshot_type: SnapshotType,
     pub content: SnapshotContent,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TimelineSession {
     pub id: Uuid,
     pub project_path: PathBuf,
@@ -217,7 +218,7 @@ impl ZoomLevel {
             ZoomLevel::Year => dt.format("%Y").to_string(),
             ZoomLevel::Month => dt.format("%Y-%m").to_string(),
             ZoomLevel::Week => {
-                let iso_week = dt.isoweek();
+                let iso_week = dt.iso_week();
                 format!("{}-W{:02}", dt.year(), iso_week.week())
             }
             ZoomLevel::Day => dt.format("%Y-%m-%d").to_string(),
@@ -697,7 +698,7 @@ impl TimelineManager {
         let new_idx = if delta >= 0 {
             current.saturating_add(delta as usize)
         } else {
-            current.saturating_sub(delta.unsigned_abs())
+            current.saturating_sub(delta.unsigned_abs() as usize)
         };
         let clamped = new_idx.min(filtered.len().saturating_sub(1));
         self.view_state.selected_session = Some(clamped);
@@ -1111,7 +1112,7 @@ fn generate_sample_sessions(count: usize, now: DateTime<Utc>) -> Vec<TimelineSes
         TagCategory::Warning,
         TagCategory::Error,
     ];
-    let tag_icons = ["✨", "🐛", "♻️", "🧪", "✅", "⚠️", "❌"];
+    let tag_icons = ['✨', '🐛', '♻', '🧪', '✅', '⚠', '❌'];
     let tag_labels = [
         "feature", "bugfix", "refactor", "experiment", "success", "warning", "error",
     ];

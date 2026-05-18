@@ -205,7 +205,10 @@ impl SftpClient {
         }
 
         let mut files = vec![];
-        for line in output.stdout.lines() {
+        let stdout_str = std::str::from_utf8(&output.stdout).map_err(|e| SftpError::ParseError {
+            message: format!("Invalid UTF-8 in output: {}", e),
+        })?;
+        for line in stdout_str.lines() {
             if let Some(info) = self._parse_ls_line(line.trim()) {
                 files.push(info);
             }

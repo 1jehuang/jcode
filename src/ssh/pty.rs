@@ -419,6 +419,7 @@ impl PtySession {
             // Fallback for non-Unix systems
             if let Some(ref mut child) = self.child {
                 if let Some(stdin) = child.stdin.as_mut() {
+                    use std::io::Write;
                     stdin.write(data).map_err(|e| PtyError::IoError {
                         operation: "write".to_string(),
                         details: e.to_string(),
@@ -486,6 +487,7 @@ impl PtySession {
         {
             if let Some(ref mut child) = self.child {
                 if let Some(stdout) = child.stdout.as_mut() {
+                    use std::io::Read;
                     stdout.read(buf).map_err(|e| PtyError::IoError {
                         operation: "read".to_string(),
                         details: e.to_string(),
@@ -777,17 +779,12 @@ impl PtySessionManager {
 
     /// Close all sessions
     pub fn close_all(&mut self) -> Vec<(String, Result<i32, PtyError>)> {
-        let results: Vec<_> = self.sessions.drain()
+        self.sessions.drain()
             .map(|(id, mut session)| {
                 let result = session.stop();
-                match result {
-                    Ok(code) => (id, Ok(code), PtyError::NotRunning),  // Dummy error variant
-                    Err(e) => (id, Err(-1), e),
-                }
+                (id, result)
             })
-            .collect();
-        
-        results
+            .collect()
     }
 
     /// List all active session IDs

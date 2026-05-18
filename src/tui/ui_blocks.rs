@@ -27,6 +27,7 @@ pub enum ActionType {
     Dismiss,
     Edit,
     Run,
+    Search,
     Custom(String),
 }
 
@@ -78,7 +79,6 @@ pub enum BlockContent {
 
 pub struct TextSegment {
     pub text: String,
-    String,
     pub style: Style,
 }
 
@@ -245,12 +245,10 @@ impl CommandBlock {
                 Self::text_line_count(summary, inner_width) + 1
             }
         };
-        let actions_height = header_height + content_height + actions_height;
+        let actions_height = if self.actions.is_empty() { 0 } else { 1 };
         (header_height + content_height + actions_height) as u16 + 2
     }
 
-    /// Returns the number of lines needed to render `text` in a box of `width` columns.
-    /// A return value of 0 means invisible; at least 1 is returned for empty/zero-width.
     fn text_line_count(text: &str, width: u16) -> usize {
         if text.is_empty() || width == 0 {
             return 1;
@@ -258,15 +256,14 @@ impl CommandBlock {
         text.lines()
             .map(|line| {
                 let len = line.chars().count();
-                if len == 0  {
-                    1usize
+                if len == 0 {
+                    1_usize
                 } else {
                     ((len as u16 + width - 1) / width) as usize
                 }
             })
-            .sum()
-    .sum()
-        }
+            .sum::<usize>()
+    }
 
     fn json_tree_height(value: &Value, indent: usize, width: u16) -> usize {
         let prefix_len = indent * 2;
@@ -278,14 +275,14 @@ impl CommandBlock {
                 .iter()
                 .map(|v| Self::json_tree_height(v, indent + 1, width))
                 .sum::<usize>()
-                + 1,
+                + 1_usize,
             Value::Object(map) => map
                 .iter()
                 .map(|(k, v)| {
-                    1 + Self::json_tree_height(v, indent + 1, width)
+                    1_usize + Self::json_tree_height(v, indent + 1, width)
                 })
                 .sum::<usize>()
-                + 1,
+                + 1_usize,
         }
     }
 
@@ -371,7 +368,7 @@ impl CommandBlock {
         if self.is_collapsed {
             let collapse_indicator =
                 Span::styled("▶ collapsed", Style::default().fg(Color::DarkGray));
-            Line::from(collapse_indicator).render(Rect::new(y + 1, x, inner.width, 1), buf);
+            Line::from(collapse_indicator).render(Rect::new(x, y + 1, inner.width, 1), buf);
         }
     }
 
@@ -404,7 +401,7 @@ impl CommandBlock {
                         if y >= inner.y + inner.height {
                             break;
                         }
-                        Line::from(Span::styled(line.to_string(), seg.style.deref()))
+                        Line::from(Span::styled(line.to_string(), seg.style))
                             .render(Rect::new(x, y, inner.width, 1), buf);
                         y += 1;
                     }
@@ -522,7 +519,7 @@ impl CommandBlock {
                 self.put_line(&format!("{}}}", prefix), base_x, y, area, buf, Color::White);
                 if *y <= area.y + area.height && *y > 0 {
                     Line::from(Span::styled("}", Style::default().fg(Color::White)))
-                        .render(Rect::new(base_x + prefix.len() as u16, *y - 1, height: 1, 1), buf);
+                        .render(Rect::new(base_x + prefix.len() as u16, *y - 1, 1, 1), buf);
                 }
             }
         }
@@ -566,14 +563,16 @@ impl CommandBlock {
                         .add_modifier(Modifier::BOLD),
                 )
             })
-            .collect();if *y < area.y + area.height {
+            .collect();
+
+        if *y < area.y + area.height {
             Line::from(header_spans).render(Rect::new(base_x, *y, area.width, 1), buf);
             *y += 1;
         }
         if *y < area.y + area.height {
             let sep: String = "-".repeat(area.width as usize);
             Line::from(Span::styled(sep, Style::default().fg(Color::DarkGray)))
-                .render(Rect::new(base_x *y, area.width, 1), buf);
+                .render(Rect::new(base_x, *y, area.width, 1), buf);
             *y += 1;
         }
         for row in &table.rows {
@@ -595,7 +594,8 @@ impl CommandBlock {
     }
 
     fn render_diff(
-        &sel        diff: &DiffContent,
+        &self,
+        diff: &DiffContent,
         base_x: u16,
         y: &mut u16,
         area: Rect,
@@ -702,11 +702,8 @@ impl CommandBlock {
 
         let next_y = y + 1;
         if next_y < area.y + area.height {
-            let padded = format!("{                    let s = "░".repeat(bar_width);
-                    format!("{:<width$}", s, width = area.width as usize)
-                };
             Line::from(Span::styled(
-                padded,
+                format!("{:<width$}", "░".repeat(bar_width), width = area.width as usize),
                 Style::default().fg(progress.bar_color),
             ))
             .render(Rect::new(base_x, next_y, area.width, 1), buf);
@@ -790,7 +787,7 @@ mod tests {
     #[test]
     fn test_new_block_default_status_is_pending() {
         let block = CommandBlock::new(BlockType::UserInput, "test");
-        assert_eq!(block.status, BlockStatus, BlockStatus::Pending);
+        assert_eq!(block.status, BlockStatus::Pending);
     }
 
     #[test]
@@ -812,7 +809,7 @@ mod tests {
 
     #[test]
     fn test_tool_call_icon_is_wrench() {
-        &self = CommandBlock::new(
+        let block = CommandBlock::new(
             BlockType::ToolCall {
                 tool_name: "edit".to_string(),
             },
@@ -986,7 +983,7 @@ mod tests {
             }));
         let mut buf = Buffer::empty(Rect::new(0, 0, 60, 10));
         block.clone().render(Rect::new(0, 0, 60, 10), &mut buf);
-        let has_content = buf.buffer().any(|c| c.symbol() != ' ');
+        let has_content = buf.buffer.iter().any(|c| c.symbol() != ' ');
         assert!(has_content);
     }
 
@@ -1080,4 +1077,95 @@ mod tests {
 
     #[test]
     fn test_multiple_actions_in_block() {
-        let block = CommandBlock::new(BlockType::UserInput,
+        let block = CommandBlock::new(BlockType::UserInput, "multi-action")
+            .with_action(BlockAction {
+                icon: 'c',
+                label: "copy".to_string(),
+                shortcut: None,
+                action_type: ActionType::Copy,
+            })
+            .with_action(BlockAction {
+                icon: 'r',
+                label: "retry".to_string(),
+                shortcut: Some(KeyBinding {
+                    key: 'r',
+                    modifiers: vec![KeyModifier::Ctrl],
+                }),
+                action_type: ActionType::Retry,
+            })
+            .with_action(BlockAction {
+                icon: 'x',
+                label: "dismiss".to_string(),
+                shortcut: None,
+                action_type: ActionType::Dismiss,
+            });
+        assert_eq!(block.actions.len(), 3);
+        assert_eq!(block.get_action_by_index(1).unwrap().label, "retry");
+        assert!(block.get_action_by_index(3).is_none());
+    }
+
+    #[test]
+    fn test_duration_ms_display() {
+        let mut block = CommandBlock::new(BlockType::UserInput, "timed");
+        block.duration_ms = Some(1234);
+        assert_eq!(block.duration_ms, Some(1234));
+    }
+
+    #[test]
+    fn test_collapsible_content_summary() {
+        let collapsible = BlockContent::Collapsible {
+            summary: "3 files changed".to_string(),
+            detail: Box::new(BlockContent::PlainText("detail content".to_string())),
+        };
+        let block = CommandBlock::new(BlockType::UserInput, "collapsible")
+            .with_content(collapsible);
+        let height = block.estimate_height(60);
+        assert!(height >= 4);
+    }
+
+    #[test]
+    fn test_formatted_text_segments() {
+        let segments = vec![
+            TextSegment {
+                text: "bold part".to_string(),
+                style: Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            },
+            TextSegment {
+                text: " normal part".to_string(),
+                style: Style::default().fg(Color::Gray),
+            },
+        ];
+        let block = CommandBlock::new(BlockType::UserInput, "formatted")
+            .with_content(BlockContent::FormattedText(segments));
+        let mut buf = Buffer::empty(Rect::new(0, 0, 60, 8));
+        block.clone().render(Rect::new(0, 0, 60, 8), &mut buf);
+        let has_content = buf.buffer.iter().any(|c| c.symbol() != ' ');
+        assert!(has_content);
+    }
+
+    #[test]
+    fn test_multi_line_output_block_type() {
+        let bltype = BlockType::MultiLineOutput { line_count: 42 };
+        assert_eq!(
+            bltype,
+            BlockType::MultiLineOutput { line_count: 42 }
+        );
+    }
+
+    #[test]
+    fn test_estimate_height_zero_width_does_not_panic() {
+        let block = CommandBlock::new(BlockType::UserInput, "test")
+            .with_content(BlockContent::PlainText("some text here".to_string()));
+        let _height = block.estimate_height(0);
+    }
+
+    #[test]
+    fn test_empty_actions_no_crash_on_render() {
+        let block = CommandBlock::new(BlockType::UserInput, "no-actions")
+            .with_content(BlockContent::PlainText("just text".to_string()));
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 6));
+        block.clone().render(Rect::new(0, 0, 40, 6), &mut buf);
+    }
+}

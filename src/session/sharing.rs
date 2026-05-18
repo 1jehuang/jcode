@@ -781,8 +781,8 @@ impl ShareEncoder {
             format_user_name(&session.metadata.created_by),
             session.metadata.created_at.format("%Y-%m-%d %H:%M UTC")
         ));
-        if let Some(ref desc) = session.metadata.description {
-            html.push_str(&format!("<p>{}</p>", desc));
+        if !session.metadata.description.is_empty() {
+            html.push_str(&format!("<p>{}</p>", session.metadata.description));
         }
         html.push_str("</div>\n");
         if !session.metadata.tags.is_empty() {
@@ -868,8 +868,8 @@ impl ShareEncoder {
             format_user_name(&session.metadata.created_by),
             session.metadata.created_at.format("%Y-%m-%d %H:%M UTC")
         ));
-        if let Some(ref desc) = session.metadata.description {
-            md.push_str(desc);
+        if !session.metadata.description.is_empty() {
+            md.push_str(&session.metadata.description);
             md.push_str("\n\n");
         }
         if !session.metadata.tags.is_empty() {
@@ -1380,6 +1380,7 @@ pub struct ShareSearchResult {
     pub preview: String,
 }
 
+#[derive(Clone)]
 pub struct ShareMeta {
     pub id: ShareId,
     pub title: String,

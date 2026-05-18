@@ -78,7 +78,7 @@ impl MarketplaceRegistry {
             page,
             per_page,
             query: query.map(|s| s.to_string()),
-            categories: category.clone().into_iter().collect(),
+            categories: category.cloned().into_iter().collect(),
         }
     }
 

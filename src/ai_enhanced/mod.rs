@@ -117,7 +117,7 @@ impl std::fmt::Display for AnomalyType {
 /// Historical data point for trend analysis
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DataPoint {
-    #[serde(skip)]
+    #[serde(skip, default = "Instant::now")]
     timestamp: Instant,
     value: f64,
     metadata: HashMap<String, String>,

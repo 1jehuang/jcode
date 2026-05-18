@@ -73,7 +73,20 @@ impl NlpEngine {
         
         tracing::info!(
             elapsed_ms = elapsed.as_millis(),
-            classification = ?(std::mem::discriminant(&classification) as u8),
+            classification = match &classification {
+                TextClassification::Question => 0u8,
+                TextClassification::Task => 1,
+                TextClassification::Requirement => 2,
+                TextClassification::BugReport => 3,
+                TextClassification::FeatureRequest => 4,
+                TextClassification::ArchitectureDesign => 5,
+                TextClassification::CodeReview => 6,
+                TextClassification::Documentation => 7,
+                TextClassification::MigrationRefactoring => 8,
+                TextClassification::PerformanceOptimization => 9,
+                TextClassification::SecurityRelated => 10,
+                TextClassification::Other(_) => 11,
+            },
             entity_count = entities.len(),
             task_count = task_breakdown.len(),
             confidence = confidence,

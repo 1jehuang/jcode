@@ -20,7 +20,7 @@ pub struct MarketplacePlugin {
     pub homepage_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Category {
     Development,
     Productivity,

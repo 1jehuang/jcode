@@ -514,6 +514,7 @@ impl CotEngine {
     /// Tree of Thoughts (思维树) 推理
     async fn tree_of_thoughts(&self, problem: &str, context: &str) -> Result<ReasoningResult> {
         let mut chain = Vec::new();
+        let mut correction_count = 0usize;
         
         // ToT: 生成多个候选方案并评估
         let candidates = self.generate_candidate_solutions(problem, context).await?;
@@ -823,13 +824,15 @@ impl CotEngine {
             "无额外上下文信息".to_string()
         };
         
+        let info_clone = relevant_info.clone();
+        
         Ok(ReasoningStep {
             step_number: 2,
             step_type: StepType::InformationGathering,
             description: "收集相关信息".to_string(),
             input: problem.to_string(),
             reasoning: relevant_info,
-            output: Some(relevant_info),
+            output: Some(info_clone),
             confidence: 0.8,
             duration_ms: start.elapsed().as_millis() as u64,
             sub_steps: Vec::new(),
@@ -1201,9 +1204,9 @@ impl CotEngine {
                     "[数学推理完成] 经过逐步计算和分析...".to_string()
                 }
             }
-            "代码生成" => "[代码生成] 已生成符合要求的代码实现...",
-            "Bug诊断" => "[诊断完成] 定位到可能的根因并给出修复建议...",
-            _ => "[推理完成] 经过分析和推导，得出以下结论...",
+            "代码生成" => "[代码生成] 已生成符合要求的代码实现...".to_string(),
+            "Bug诊断" => "[诊断完成] 定位到可能的根因并给出修复建议...".to_string(),
+            _ => "[推理完成] 经过分析和推导，得出以下结论...".to_string(),
         };
         
         let refinement = if let Some(prev) = previous_answer {
@@ -1338,13 +1341,15 @@ impl CotEngine {
                 .join("\n")
         );
         
+        let synth_clone = synthesis.clone();
+        
         Ok(ReasoningStep {
             step_number: perspectives.len() + 1,
             step_type: StepType::Synthesis,
             description: "综合多视角意见".to_string(),
             input: problem.to_string(),
             reasoning: synthesis,
-            output: Some(synthesis),
+            output: Some(synth_clone),
             confidence: perspectives.iter()
                 .map(|(_, _, c)| c)
                 .sum::<f64>() / perspectives.len() as f64,

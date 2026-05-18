@@ -1,5 +1,6 @@
 use std::time::{SystemTime, Duration, UNIX_EPOCH};
 use std::collections::HashMap;
+use base64::Engine;
 use serde::{Serialize, Deserialize};
 
 /// Multi-Factor Authentication (MFA) Framework

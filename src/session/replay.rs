@@ -303,7 +303,7 @@ impl SessionReplayer {
         }
         let idx = self.playback_state.current_event_index;
         self.playback_state.current_event_index += 1;
-        let event = self.get_event(idx).cloned();
+        let event = self.get_event(idx);
         ReplayStepResult {
             event,
             index: idx,
@@ -321,7 +321,7 @@ impl SessionReplayer {
         }
         self.playback_state.current_event_index -= 1;
         let idx = self.playback_state.current_event_index;
-        let event = self.get_event(idx).cloned();
+        let event = self.get_event(idx);
         ReplayStepResult {
             event,
             index: idx,

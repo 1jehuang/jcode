@@ -24,6 +24,7 @@
 //! | 特征利用率 | 60% | 95% | **+35%** |
 
 use jcode_tool_core::ToolContext;
+use chrono::Timelike;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -709,7 +710,10 @@ impl EnhancedConfidenceModel {
         let confidence = if use_pretrained {
             // 冷启动: 结合预训练嵌入与当前特征
             let combined = self.pretrained.quick_confidence_estimate(action_type) * 0.6
-                + self.compute_weighted_sum(&features) * 0.4;
+                + features.iter()
+                    .zip(self.multi_task_heads.shared_weights.iter())
+                    .map(|(f, w)| f * w)
+                    .sum::<f64>() * 0.4;
             self.stats.pretrained_used_count += 1;
             combined
         } else {
@@ -898,7 +902,7 @@ impl EnhancedConfidenceModel {
             working_dir: None,
             stdin_request_tx: None,
             graceful_shutdown_signal: None,
-            execution_mode: Default::default(),
+            execution_mode: jcode_tool_core::ToolExecutionMode::Direct,
         });
         
         let target: f64 = if was_correct { 0.95 } else { 0.05 };
@@ -911,7 +915,7 @@ impl EnhancedConfidenceModel {
         
         // 获取对应任务类型的权重并更新
         let task_type = MultiTaskHeads::infer_task_type(action_type);
-        if let Some((task_key, weights)) = self.multi_task_heads.task_weights.get_mut(&task_type) {
+        if let Some(weights) = self.multi_task_heads.task_weights.get_mut(&task_type) {
             self.optimizer.step(weights, &gradient);
         }
         
@@ -1011,7 +1015,7 @@ mod tests {
             working_dir: Some(std::path::PathBuf::from("/project")),
             stdin_request_tx: None,
             graceful_shutdown_signal: None,
-            execution_mode: Default::default(),
+            execution_mode: jcode_tool_core::ToolExecutionMode::Direct,
         };
         
         // 测试不同操作的置信度

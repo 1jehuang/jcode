@@ -184,7 +184,7 @@ impl JsonRenderer {
                 let lines = self.renderer.render_value(self.json, &JsonPath::Root, 0);
                 for (i, line) in lines.into_iter().enumerate() {
                     if i < area.height as usize {
-                        buf.set_line(area.x, area.y + i as u16, line, area.width);
+                        buf.set_line(area.x, area.y + i as u16, &line, area.width);
                     }
                 }
             }
@@ -325,7 +325,7 @@ impl JsonRenderer {
                 }
                 Value::Object(_) | Value::Array(_) => {
                     let child_path =
-                        JsonPath::Key(key.clone(), Box::new(path.clone()));
+                        JsonPath::Key((*key).clone(), Box::new(path.clone()));
                     let mut child_lines =
                         self.render_value(val, &child_path, depth + 1);
                     if let Some(first) = child_lines.first_mut() {

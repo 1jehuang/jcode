@@ -954,7 +954,7 @@ impl CommandRegistry {
                         })
                     })
                     .unwrap_or_default();
-                scripts.into()
+                Ok(scripts)
             }
             _ => Err(format!("Unknown generator: {}", generator)),
         };

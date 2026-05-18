@@ -705,7 +705,10 @@ impl AesEncryptor {
                 "Data too short".to_string(),
             ));
         }
-        let (&nonce, ciphertext) = data.split_at(AES_NONCE_SIZE);
+        let (nonce_slice, ciphertext) = data.split_at(AES_NONCE_SIZE);
+        let nonce: [u8; AES_NONCE_SIZE] = nonce_slice.try_into().map_err(|_| {
+            SyncError::DecryptionError("Invalid nonce length".to_string())
+        })?;
         xor_decrypt(ciphertext, &self.key, &nonce)
     }
 

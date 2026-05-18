@@ -24,6 +24,22 @@ pub struct PortForwarder {
     config: PortForwardConfig,
 }
 
+impl Clone for PortForwarder {
+    fn clone(&self) -> Self {
+        PortForwarder {
+            id: self.id.clone(),
+            forward_type: self.forward_type,
+            local_port: self.local_port,
+            remote_host: self.remote_host.clone(),
+            remote_port: self.remote_port,
+            bind_address: self.bind_address.clone(),
+            ssh_target: self.ssh_target.clone(),
+            child: None,
+            config: self.config.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PortForwardConfig {
     pub identity_file: Option<PathBuf>,

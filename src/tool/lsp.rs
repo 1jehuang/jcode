@@ -18,7 +18,7 @@
 use super::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
-use jcode_lsp::{LspServerManager, LspOperations};
+use jcode_lsp::{LspServerManager, LspOperations, AstOperations, RenameSymbolParams};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -302,7 +302,7 @@ impl Tool for LspTool {
 
                 // Use TreeSitterAstOperations for precise rename
                 let ast_ops = jcode_lsp::TreeSitterAstOperations::new();
-                let result = ast_ops.rename_symbol(jcode_lsp::RenameSymbolParams {
+                let result = ast_ops.rename_symbol(RenameSymbolParams {
                     file_path: file_path_str.clone(),
                     line: params.line,
                     character: params.character,
