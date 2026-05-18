@@ -281,8 +281,9 @@ impl MultiProvider {
                             .unwrap_or_else(|| selection.display_label())
                     ));
                 } else {
+                    active = preferred;
                     crate::logging::warn(&format!(
-                        "Preferred provider '{}' is not configured, using auto-detected default",
+                        "Preferred provider '{}' is not configured; keeping it selected so requests fail instead of falling back to another provider",
                         pref
                     ));
                 }

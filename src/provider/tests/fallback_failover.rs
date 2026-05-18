@@ -167,6 +167,60 @@ fn test_forced_provider_disables_cross_provider_fallback_sequence() {
 }
 
 #[test]
+fn test_config_default_provider_locks_cross_provider_fallback() {
+    with_clean_provider_test_env(|| {
+        let mut cfg = crate::config::Config::default();
+        cfg.provider.default_provider = Some("zai".to_string());
+        cfg.save().expect("save test config");
+
+        assert_eq!(
+            MultiProvider::config_default_provider_lock_for_active(ActiveProvider::OpenRouter),
+            Some(ActiveProvider::OpenRouter)
+        );
+        assert_eq!(
+            MultiProvider::config_default_provider_lock_for_active(ActiveProvider::OpenAI),
+            None
+        );
+    });
+}
+
+#[test]
+fn test_unconfigured_config_default_profile_stays_active_instead_of_using_other_profile_key() {
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        let _enter = runtime.enter();
+
+        let mut cfg = crate::config::Config::default();
+        cfg.provider.default_provider = Some("zai".to_string());
+        cfg.provider.default_model = Some("glm-5.1".to_string());
+        cfg.save().expect("save test config");
+
+        crate::env::set_var("KIMI_API_KEY", "test-kimi-key");
+        crate::auth::AuthStatus::invalidate_cache();
+
+        let provider = MultiProvider::from_auth_status(crate::auth::AuthStatus::check_fast());
+
+        assert_eq!(provider.active_provider(), ActiveProvider::OpenRouter);
+        assert!(
+            provider.openrouter_provider().is_none(),
+            "missing Z.AI credentials must not initialize an OpenRouter/Kimi provider"
+        );
+        assert_eq!(
+            std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
+                .ok()
+                .as_deref(),
+            Some("ZHIPU_API_KEY")
+        );
+        assert_eq!(
+            std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
+                .ok()
+                .as_deref(),
+            Some("zai")
+        );
+    });
+}
+
+#[test]
 fn test_set_model_rejects_cross_provider_without_creds() {
     let _guard = crate::storage::lock_test_env();
     let runtime = enter_test_runtime();

@@ -178,6 +178,7 @@ fn configured_env_file_name() -> String {
 }
 
 fn load_named_profile_api_key(
+    profile_name: &str,
     env_key: &str,
     profile: &crate::config::NamedProviderConfig,
 ) -> Option<String> {
@@ -188,6 +189,13 @@ fn load_named_profile_api_key(
         .filter(|value| !value.is_empty())
     {
         return load_api_key_from_env_or_config(env_key, env_file);
+    }
+
+    if let Some(builtin_profile) = openai_compatible_profile_by_id(profile_name) {
+        let resolved = resolve_openai_compatible_profile(builtin_profile);
+        if resolved.api_key_env == env_key {
+            return load_api_key_from_env_or_config(env_key, &resolved.env_file);
+        }
     }
 
     std::env::var(env_key)
@@ -309,11 +317,9 @@ fn is_coding_agent_api_base(api_base: &str) -> bool {
         return false;
     };
     let host = url.host_str().unwrap_or_default();
-    let path = url.path().trim_end_matches('/');
     is_kimi_coding_api_base(api_base)
         || host == "coding.dashscope.aliyuncs.com"
         || host == "coding-intl.dashscope.aliyuncs.com"
-        || (host == "api.z.ai" && path.starts_with("/api/coding/paas"))
 }
 
 fn is_kimi_model_name(model: &str) -> bool {
@@ -715,7 +721,7 @@ impl OpenRouterProvider {
             .filter(|v| !v.is_empty());
         let key_label = key_env.unwrap_or("inline api_key").to_string();
         let key = key_env
-            .and_then(|name| load_named_profile_api_key(name, profile))
+            .and_then(|name| load_named_profile_api_key(profile_name, name, profile))
             .or_else(|| profile.api_key.clone());
         let auth = match profile.auth {
             crate::config::NamedProviderAuth::None => ProviderAuth::None {
@@ -930,6 +936,10 @@ impl OpenRouterProvider {
     }
 
     pub(crate) fn should_merge_static_models_with_live_catalog(&self) -> bool {
+        if matches!(self.profile_id.as_deref(), Some("zai")) {
+            return true;
+        }
+
         // Built-in OpenAI-compatible provider profiles use `static_models` as a
         // startup/pre-catalog fallback so `/model` is useful immediately after
         // login. Once a live `/models` catalog has been fetched, the live catalog
