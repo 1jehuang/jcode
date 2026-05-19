@@ -9,6 +9,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use crate::nlp::types::Priority;
 
@@ -311,16 +312,32 @@ pub struct ProjectMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectFile {
     pub path: String,
-    pub content: String,
+    #[serde(serialize_with = "serialize_content", deserialize_with = "deserialize_content")]
+    pub content: Cow<'static, str>,
     pub file_type: FileType,
     pub purpose: String,
     pub is_entry_point: bool,
     pub dependencies: Vec<String>,
 }
 
+fn serialize_content<S>(content: &Cow<'static, str>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&content)
+}
+
+fn deserialize_content<'de, D>(deserializer: D) -> Result<Cow<'static, str>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    Ok(Cow::Owned(s))
+}
+
 impl ProjectFile {
     /// Create a new ProjectFile with source type
-    pub fn source(path: &str, content: impl Into<String>, purpose: &str) -> Self {
+    pub fn source(path: &str, content: impl Into<Cow<'static, str>>, purpose: &str) -> Self {
         Self {
             path: path.to_string(),
             content: content.into(),
@@ -332,7 +349,7 @@ impl ProjectFile {
     }
 
     /// Create a new ProjectFile with config type
-    pub fn config(path: &str, content: impl Into<String>, purpose: &str) -> Self {
+    pub fn config(path: &str, content: impl Into<Cow<'static, str>>, purpose: &str) -> Self {
         Self {
             path: path.to_string(),
             content: content.into(),
@@ -344,7 +361,7 @@ impl ProjectFile {
     }
 
     /// Create a new ProjectFile with documentation type
-    pub fn doc(path: &str, content: impl Into<String>, purpose: &str) -> Self {
+    pub fn doc(path: &str, content: impl Into<Cow<'static, str>>, purpose: &str) -> Self {
         Self {
             path: path.to_string(),
             content: content.into(),
@@ -356,7 +373,7 @@ impl ProjectFile {
     }
 
     /// Create a new ProjectFile with test type
-    pub fn test(path: &str, content: impl Into<String>, purpose: &str) -> Self {
+    pub fn test(path: &str, content: impl Into<Cow<'static, str>>, purpose: &str) -> Self {
         Self {
             path: path.to_string(),
             content: content.into(),
@@ -368,7 +385,7 @@ impl ProjectFile {
     }
 
     /// Create a new ProjectFile with entry point
-    pub fn entry_point(path: &str, content: impl Into<String>, purpose: &str, deps: Vec<String>) -> Self {
+    pub fn entry_point(path: &str, content: impl Into<Cow<'static, str>>, purpose: &str, deps: Vec<String>) -> Self {
         Self {
             path: path.to_string(),
             content: content.into(),
@@ -1582,7 +1599,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
     
     Ok(())
 }}
-"#),
+"#).into(),
             file_type: FileType::Source,
             purpose: "Main entry point".to_string(),
             is_entry_point: true,
@@ -1620,7 +1637,7 @@ async fn get_item() -> String {
         "name": "Item"
     }).to_string()
 }
-"#,
+"#.into(),
             file_type: FileType::Source,
             purpose: "Application router setup".to_string(),
             is_entry_point: false,
@@ -1636,7 +1653,7 @@ pub use app::create_app;
 /// 
 /// This crate provides the core functionality for the {project_name} service.
 pub const VERSION: &str = "0.1.0";
-"#),
+"#).into(),
             file_type: FileType::Source,
             purpose: "Library entry point".to_string(),
             is_entry_point: false,
@@ -1656,7 +1673,7 @@ serde = {{ version = "1.0", features = ["derive"] }}
 serde_json = "1.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-"#),
+"#).into(),
             file_type: FileType::Configuration,
             purpose: "Cargo package configuration".to_string(),
             is_entry_point: false,
@@ -1687,7 +1704,7 @@ app.get('/health', (req, res) => {{
 app.listen(PORT, () => {{
     console.log(`{project_name} API running on port ${{PORT}}`);
 }});
-"#, project_name = project_name),
+"#, project_name = project_name).into(),
             file_type: FileType::Source,
             purpose: "Main entry point".to_string(),
             is_entry_point: true,
@@ -1703,7 +1720,7 @@ export const router = Router();
 router.get('/items', listItems);
 router.post('/items', createItem);
 router.get('/items/:id', getItem);
-"#,
+"#.into(),
             file_type: FileType::Source,
             purpose: "API routes definition".to_string(),
             is_entry_point: false,
@@ -1732,7 +1749,7 @@ export const getItem = (req: Request, res: Response) => {
         name: 'Item',
     });
 };
-"#,
+"#.into(),
             file_type: FileType::Source,
             purpose: "Item controller with CRUD operations".to_string(),
             is_entry_point: false,
@@ -1761,7 +1778,7 @@ export const getItem = (req: Request, res: Response) => {
     "jest": "^29.0.0"
   }
 }
-"#,
+"#.into(),
             file_type: FileType::Configuration,
             purpose: "npm package configuration".to_string(),
             is_entry_point: false,
@@ -1783,7 +1800,7 @@ export const getItem = (req: Request, res: Response) => {
   "include": ["src/**/*"],
   "exclude": ["node_modules"]
 }
-"#,
+"#.into(),
             file_type: FileType::Configuration,
             purpose: "TypeScript configuration".to_string(),
             is_entry_point: false,
@@ -1821,7 +1838,7 @@ fn main() {
     
     println!("Count: {}", cli.count);
 }
-"#,
+"#.into(),
             file_type: FileType::Source,
             purpose: "CLI main entry point".to_string(),
             is_entry_point: true,
@@ -1836,7 +1853,7 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }
-"#,
+"#.into(),
             file_type: FileType::Configuration,
             purpose: "Cargo package configuration".to_string(),
             is_entry_point: false,
@@ -1882,7 +1899,7 @@ mod tests {{
         assert_eq!(2 + 2, 4);
     }}
 }}
-"#),
+"#).into(),
             file_type: FileType::Source,
             purpose: "Library entry point".to_string(),
             is_entry_point: true,
@@ -1916,7 +1933,7 @@ impl Core {
         format!("processed: {}", self.value)
     }
 }
-"#,
+"#.into(),
             file_type: FileType::Source,
             purpose: "Core module implementation".to_string(),
             is_entry_point: false,
@@ -1939,7 +1956,7 @@ pub fn validate_input(s: &str) -> Result<(), String> {
         Ok(())
     }
 }
-"#,
+"#.into(),
             file_type: FileType::Source,
             purpose: "Utility functions".to_string(),
             is_entry_point: false,
@@ -1957,7 +1974,7 @@ license = "MIT"
 [dependencies]
 
 [dev-dependencies]
-"#),
+"#).into(),
             file_type: FileType::Configuration,
             purpose: "Cargo package configuration".to_string(),
             is_entry_point: false,
@@ -1981,7 +1998,7 @@ fn generic_project_files(_architecture: &ArchitectureOverview, tech_stack: &Tech
             content: r#"fn main() {
     println!("Hello, World!");
 }
-"#,
+"#.into(),
             file_type: FileType::Source,
             purpose: "Main entry point".to_string(),
             is_entry_point: true,
@@ -1995,7 +2012,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-"#,
+"#.into(),
             file_type: FileType::Configuration,
             purpose: "Cargo package configuration".to_string(),
             is_entry_point: false,
@@ -2026,7 +2043,7 @@ mod tests {
         assert_eq!(2 + 2, 4);
     }
 }
-"#,
+"#.into(),
             file_type: FileType::Source,
             purpose: "Test suite".to_string(),
             is_entry_point: false,
@@ -2064,7 +2081,7 @@ describe('Item Controller', () => {
         expect(res.status).toHaveBeenCalledWith(201);
     });
 });
-"#,
+"#.into(),
             file_type: FileType::Source,
             purpose: "Item controller tests".to_string(),
             is_entry_point: false,
@@ -2130,7 +2147,7 @@ cargo test
 ## License
 
 MIT
-"#, config.project_name, config.description),
+"#, config.project_name, config.description).into(),
             file_type: FileType::Documentation,
             purpose: "Project README".to_string(),
             is_entry_point: false,
@@ -2180,7 +2197,7 @@ MIT
     "name": "string"
 }
 ```
-"#,
+"#.into(),
             file_type: FileType::Documentation,
             purpose: "API documentation".to_string(),
             is_entry_point: false,
@@ -2219,7 +2236,7 @@ jobs:
       
     - name: Lint
       run: cargo clippy
-"#,
+"#.into(),
             file_type: FileType::Configuration,
             purpose: "GitHub Actions CI/CD workflow".to_string(),
             is_entry_point: false,
@@ -2250,7 +2267,7 @@ COPY --from=builder /app/target/release/app .
 EXPOSE 8080
 
 CMD ["./app"]
-"#,
+"#.into(),
             file_type: FileType::Configuration,
             purpose: "Docker container configuration".to_string(),
             is_entry_point: false,
@@ -2283,7 +2300,7 @@ services:
 
 volumes:
   postgres_data:
-"#,
+"#.into(),
             file_type: FileType::Configuration,
             purpose: "Docker Compose configuration".to_string(),
             is_entry_point: false,
@@ -2322,7 +2339,7 @@ Thumbs.db
 # Coverage
 coverage/
 .nyc_output/
-"#,
+"#.into(),
             file_type: FileType::Configuration,
             purpose: "Git ignore rules".to_string(),
             is_entry_point: false,
@@ -2334,7 +2351,7 @@ coverage/
 PORT=8080
 DATABASE_URL=postgres://user:password@localhost:5432/db
 API_KEY=your-api-key
-"#,
+"#.into(),
             file_type: FileType::Configuration,
             purpose: "Environment variables template".to_string(),
             is_entry_point: false,
@@ -2621,6 +2638,7 @@ fn estimate_project_costs(config: &PrototypeConfig) -> CostEstimate {
     let team_size = match config.constraints.team_size {
         TeamSize::Solo => 1,
         TeamSize::Small(n) => n,
+        TeamSize::Medium(n) => n,
         TeamSize::Large(n) => n,
         TeamSize::Enterprise(n) => n,
     };
@@ -2629,6 +2647,7 @@ fn estimate_project_costs(config: &PrototypeConfig) -> CostEstimate {
     let hourly_rate = match config.constraints.budget_tier {
         BudgetTier::Bootstrap => 50.0,
         BudgetTier::Startup => 100.0,
+        BudgetTier::MidMarket => 125.0,
         BudgetTier::Enterprise => 150.0,
         BudgetTier::EnterprisePlus => 200.0,
     };
@@ -2639,13 +2658,14 @@ fn estimate_project_costs(config: &PrototypeConfig) -> CostEstimate {
     let infrastructure_monthly = match config.constraints.budget_tier {
         BudgetTier::Bootstrap => 100.0,
         BudgetTier::Startup => 500.0,
+        BudgetTier::MidMarket => 1000.0,
         BudgetTier::Enterprise => 2000.0,
         BudgetTier::EnterprisePlus => 5000.0,
     };
     
     let testing_cost = development_cost * 0.2;
     let deployment_cost = 2000.0;
-    let monitoring_cost = infrastructure_monthly * 12;
+    let monitoring_cost = infrastructure_monthly * 12.0;
     let maintenance_annual = development_cost * 0.15;
     
     CostEstimate {
