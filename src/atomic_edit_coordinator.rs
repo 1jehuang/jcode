@@ -107,7 +107,7 @@ impl AtomicEditCoordinator {
 
             // Read current content and apply edit
             let current_content = std::fs::read_to_string(&op.file_path)?;
-            let edited_content = self.engine.apply_edit(op, &current_content)?;
+            let edited_content = self.engine.apply_operation(op, &current_content)?;
 
             // Write to temp file
             std::fs::write(&temp_path, &edited_content)

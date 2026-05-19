@@ -11,9 +11,78 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::nlp::types::Priority;
-use crate::nlp::engine::FileType;
+
+/// File type for generated project files
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum FileType {
+    Source,
+    Test,
+    Configuration,
+    Documentation,
+    Script,
+    Asset,
+    Other,
+}
 
 // --- Types ---------------------------------
+
+/// Helper macro to create a ProjectFile with String content
+macro_rules! project_file {
+    (source: $path:expr, $content:literal, $purpose:expr) => {
+        ProjectFile {
+            path: $path.to_string(),
+            content: $content.to_string(),
+            file_type: FileType::Source,
+            purpose: $purpose.to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        }
+    };
+    (config: $path:expr, $content:literal, $purpose:expr) => {
+        ProjectFile {
+            path: $path.to_string(),
+            content: $content.to_string(),
+            file_type: FileType::Configuration,
+            purpose: $purpose.to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        }
+    };
+    (doc: $path:expr, $content:literal, $purpose:expr) => {
+        ProjectFile {
+            path: $path.to_string(),
+            content: $content.to_string(),
+            file_type: FileType::Documentation,
+            purpose: $purpose.to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        }
+    };
+    (test: $path:expr, $content:literal, $purpose:expr) => {
+        ProjectFile {
+            path: $path.to_string(),
+            content: $content.to_string(),
+            file_type: FileType::Test,
+            purpose: $purpose.to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        }
+    };
+}
+
+impl From<&'static str> for FileType {
+    fn from(s: &'static str) -> Self {
+        match s {
+            "Source" => FileType::Source,
+            "Test" => FileType::Test,
+            "Configuration" => FileType::Configuration,
+            "Documentation" => FileType::Documentation,
+            "Script" => FileType::Script,
+            "Asset" => FileType::Asset,
+            _ => FileType::Other,
+        }
+    }
+}
 
 /// 原型配置
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -133,6 +202,7 @@ pub enum BudgetTier {
     Startup,
     MidMarket,
     Enterprise,
+    EnterprisePlus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -246,6 +316,68 @@ pub struct ProjectFile {
     pub purpose: String,
     pub is_entry_point: bool,
     pub dependencies: Vec<String>,
+}
+
+impl ProjectFile {
+    /// Create a new ProjectFile with source type
+    pub fn source(path: &str, content: impl Into<String>, purpose: &str) -> Self {
+        Self {
+            path: path.to_string(),
+            content: content.into(),
+            file_type: FileType::Source,
+            purpose: purpose.to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        }
+    }
+
+    /// Create a new ProjectFile with config type
+    pub fn config(path: &str, content: impl Into<String>, purpose: &str) -> Self {
+        Self {
+            path: path.to_string(),
+            content: content.into(),
+            file_type: FileType::Configuration,
+            purpose: purpose.to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        }
+    }
+
+    /// Create a new ProjectFile with documentation type
+    pub fn doc(path: &str, content: impl Into<String>, purpose: &str) -> Self {
+        Self {
+            path: path.to_string(),
+            content: content.into(),
+            file_type: FileType::Documentation,
+            purpose: purpose.to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        }
+    }
+
+    /// Create a new ProjectFile with test type
+    pub fn test(path: &str, content: impl Into<String>, purpose: &str) -> Self {
+        Self {
+            path: path.to_string(),
+            content: content.into(),
+            file_type: FileType::Test,
+            purpose: purpose.to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        }
+    }
+
+    /// Create a new ProjectFile with entry point
+    pub fn entry_point(path: &str, content: impl Into<String>, purpose: &str, deps: Vec<String>) -> Self {
+        Self {
+            path: path.to_string(),
+            content: content.into(),
+            file_type: FileType::Source,
+            purpose: purpose.to_string(),
+            is_entry_point: true,
+            dependencies: deps,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1540,7 +1672,7 @@ fn generate_typescript_web_api_files(_architecture: &ArchitectureOverview, _tech
         ProjectFile {
             path: "src/index.ts".to_string(),
             content: format!(r#"import express from 'express';
-import { router } from './routes';
+import {{ router }} from './routes';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1548,14 +1680,14 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use('/api/v1', router);
 
-app.get('/health', (req, res) => {
-    res.json({ status: 'ok' });
-});
+app.get('/health', (req, res) => {{
+    res.json({{ status: 'ok' }});
+}});
 
-app.listen(PORT, () => {
+app.listen(PORT, () => {{
     console.log(`{project_name} API running on port ${{PORT}}`);
-});
-"#),
+}});
+"#, project_name = project_name),
             file_type: FileType::Source,
             purpose: "Main entry point".to_string(),
             is_entry_point: true,
@@ -1744,12 +1876,12 @@ pub mod utils;
 pub const VERSION: &str = "0.1.0";
 
 #[cfg(test)]
-mod tests {
+mod tests {{
     #[test]
-    fn it_works() {
+    fn it_works() {{
         assert_eq!(2 + 2, 4);
-    }
-}
+    }}
+}}
 "#),
             file_type: FileType::Source,
             purpose: "Library entry point".to_string(),
@@ -1943,7 +2075,7 @@ describe('Item Controller', () => {
     files
 }
 
-fn generate_documentation_files(_config: &PrototypeConfig) -> Vec<ProjectFile> {
+fn generate_documentation_files(config: &PrototypeConfig) -> Vec<ProjectFile> {
     vec![
         ProjectFile {
             path: "README.md".to_string(),
@@ -2387,7 +2519,8 @@ fn get_best_practices(_pattern: &ArchitecturePattern) -> Vec<BestPractice> {
 fn identify_risks(config: &PrototypeConfig) -> Vec<RiskItem> {
     let mut risks = Vec::new();
     
-    if config.constraints.security_level >= SecurityLevel::High {
+    if matches!(config.constraints.security_level, 
+        SecurityLevel::High | SecurityLevel::Enterprise | SecurityLevel::Government) {
         risks.push(RiskItem {
             id: "SEC-001".to_string(),
             category: RiskCategory::Security,

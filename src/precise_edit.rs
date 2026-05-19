@@ -338,6 +338,23 @@ impl PreciseEditEngine {
         out.join("\n") + "\n"
     }
 
+    /// Apply an edit operation to a file, returning the edited content
+    pub fn apply_operation(&self, op: &EditOperation, content: &str) -> Result<String> {
+        let lines: Vec<&str> = content.lines().collect();
+        let target_style = IndentStyle::detect_from(content);
+        let search_norm = self.normalize_block(&op.search_block, &target_style);
+        
+        let candidates = self.find_candidates(&lines, &search_norm, op.strategy)?;
+        if candidates.is_empty() {
+            bail!("Search block not found in file");
+        }
+        
+        let (start, end, _score) = self.select_best_candidate(&candidates, &lines, &search_norm);
+        let replace_norm = self.normalize_block(&op.replace_block, &target_style);
+        
+        Ok(self.apply_edit(content, start, end, &replace_norm))
+    }
+
     pub fn preview_diff(&self, op: &EditOperation) -> Result<String> {
         let content = std::fs::read_to_string(&op.file_path)?;
         let lines: Vec<&str> = content.lines().collect();
