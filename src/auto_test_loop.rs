@@ -136,7 +136,6 @@ pub struct FailureDiagnosis {
 pub struct TestLoopEngine {
     config: TestLoopConfig,
     cancelled: Arc<AtomicBool>,
-    #[allow(dead_code)]
     round_count: Arc<AtomicUsize>,
 }
 
@@ -154,6 +153,21 @@ impl TestLoopEngine {
         info!("Test loop cancelled");
     }
 
+    /// Get current round number
+    pub fn current_round(&self) -> usize {
+        self.round_count.load(Ordering::SeqCst)
+    }
+
+    /// Check if the engine is cancelled
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Get configuration reference
+    pub fn config(&self) -> &TestLoopConfig {
+        &self.config
+    }
+
     pub async fn run_loop(
         &self,
         on_test_result: Option<Box<dyn Fn(&TestResult) + Send + Sync>>,
@@ -167,6 +181,9 @@ impl TestLoopEngine {
                 info!("Test loop cancelled at round {}", round);
                 break;
             }
+
+            // Update round counter
+            self.round_count.store(round, Ordering::SeqCst);
 
             let round_start = Instant::now();
             info!("=== Test Loop Round {}/{} ===", round, self.config.max_rounds);
