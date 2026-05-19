@@ -21,14 +21,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-#[path = "memory/activity.rs"]
-mod activity;
-mod cache;
-#[path = "memory/pending.rs"]
-mod pending;
-#[path = "memory/session_intelligence.rs"]
-mod session_intelligence;
-#[path = "memory_prompt.rs"]
+pub mod activity;
+pub mod analysis;
+pub mod cache;
+pub mod insights;
+pub mod manager_impl;
+pub mod pending;
+pub mod patterns;
+pub mod session_intelligence;
+
+#[path = "../memory_prompt.rs"]
 mod prompt_support;
 
 pub use crate::memory_types::{
@@ -55,6 +57,12 @@ pub use pending::{
 };
 use pending::{begin_memory_check, finish_memory_check};
 pub(crate) use prompt_support::{format_context_for_extraction, format_context_for_relevance};
+
+// Re-export from submodules
+pub use session_intelligence::SessionIntelligenceEngine;
+pub use analysis::*;
+pub use insights::*;
+pub use patterns::*;
 
 const LEGACY_NOTE_CATEGORY: &str = "note";
 const MEMORY_RELEVANCE_MAX_CANDIDATES: usize = 30;
@@ -121,11 +129,8 @@ pub struct MemoryManager {
     include_skills: bool,
 }
 
-mod manager_impl;
-
 pub use manager_impl::{EMBEDDING_MAX_HITS, EMBEDDING_SIMILARITY_THRESHOLD};
 
-
 #[cfg(test)]
-#[path = "memory_tests.rs"]
+#[path = "../memory_tests.rs"]
 mod tests;

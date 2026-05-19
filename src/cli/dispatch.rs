@@ -514,6 +514,11 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             eprintln!("batch edit command temporarily not implemented");
             let _ = (files, apply, interactive, pattern, replace);
         }
+        Some(Command::Cluster(cluster_cmd)) => {
+            crate::distributed::execute_cluster_command(
+                crate::distributed::cli::ClusterArgs { command: cluster_cmd }
+            ).await?;
+        }
         Some(Command::DebugSocket { .. }) => { todo!("run_debug_socket_command") }
         None => {
             eprintln!("CarpAI - AI-powered coding assistant\n");

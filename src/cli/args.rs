@@ -900,6 +900,10 @@ pub(crate) enum Command {
         #[arg(long)]
         json: bool,
     },
+
+    /// Distributed cluster management commands
+    #[command(subcommand)]
+    Cluster(crate::distributed::cli::ClusterCommand),
 }
 
 #[derive(Subcommand, Debug)]

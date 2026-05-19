@@ -486,7 +486,34 @@ impl Server {
                 if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
                     sigterm.recv().await;
                     crate::logging::info("Server received SIGTERM, shutting down gracefully");
+
+                    // Shutdown cluster service
+                    if let Err(e) = crate::distributed::shutdown_cluster_service().await {
+                        crate::logging::warn(&format!("Cluster shutdown error: {}", e));
+                    }
+
                     let _ = crate::registry::unregister_server(&sigterm_server_name).await;
+                    std::process::exit(0);
+                }
+            });
+        }
+
+        // Cross-platform Ctrl+C handler for graceful shutdown
+        {
+            tokio::spawn(async move {
+                if let Ok(()) = tokio::signal::ctrl_c().await {
+                    crate::logging::info("Server received Ctrl+C, shutting down gracefully");
+
+                    // Shutdown cluster service
+                    if let Err(e) = crate::distributed::shutdown_cluster_service().await {
+                        crate::logging::warn(&format!("Cluster shutdown error: {}", e));
+                    }
+
+                    #[cfg(unix)]
+                    {
+                        let _ = crate::registry::unregister_server("").await;
+                    }
+
                     std::process::exit(0);
                 }
             });
@@ -1287,6 +1314,13 @@ impl Server {
         ));
         crate::logging::info(&format!("Server listening on {:?}", self.socket_path));
         crate::logging::info(&format!("Debug socket on {:?}", self.debug_socket_path));
+
+        // Initialize distributed cluster service (if enabled)
+        if let Err(e) = crate::distributed::init_cluster_service(None).await {
+            crate::logging::warn(&format!("Cluster service initialization failed: {}", e));
+        } else {
+            crate::logging::info("Cluster service initialized");
+        }
 
         let temporary_server_policy = lifecycle::temporary_server_policy_from_env();
         if let Some(policy) = temporary_server_policy.as_ref() {

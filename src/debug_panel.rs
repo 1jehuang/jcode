@@ -120,12 +120,62 @@ impl TreeNode {
         1 + self.children.iter().map(|c| c.total_nodes()).sum::<usize>()
     }
 
-    #[allow(dead_code)]
-    fn set_depth(&mut self, depth: usize) {
+    /// Recursively set depth for this node and all children
+    pub fn set_depth(&mut self, depth: usize) {
         self.depth = depth;
         for child in &mut self.children {
             child.set_depth(depth + 1);
         }
+    }
+
+    /// Render tree as ASCII with proper indentation
+    pub fn render_ascii(&self, prefix: &str, is_last: bool) -> String {
+        let mut output = String::new();
+        let connector = if is_last { "└── " } else { "├── " };
+        let expansion = if self.expanded && !self.children.is_empty() { "▼ " } else { "▶ " };
+        
+        writeln!(output, "{}{}{}{}", prefix, connector, expansion, self.label).unwrap();
+        
+        if self.expanded {
+            let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+            for (i, child) in self.children.iter().enumerate() {
+                let is_last_child = i == self.children.len() - 1;
+                output.push_str(&child.render_ascii(&new_prefix, is_last_child));
+            }
+        }
+        
+        output
+    }
+
+    /// Toggle expanded state
+    pub fn toggle_expanded(&mut self) {
+        self.expanded = !self.expanded;
+    }
+
+    /// Find node by ID
+    pub fn find_node(&self, id: &str) -> Option<&TreeNode> {
+        if self.id == id {
+            return Some(self);
+        }
+        for child in &self.children {
+            if let Some(found) = child.find_node(id) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// Find mutable node by ID
+    pub fn find_node_mut(&mut self, id: &str) -> Option<&mut TreeNode> {
+        if self.id == id {
+            return Some(self);
+        }
+        for child in &mut self.children {
+            if let Some(found) = child.find_node_mut(id) {
+                return Some(found);
+            }
+        }
+        None
     }
 }
 

@@ -1,11 +1,37 @@
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 
-#[allow(dead_code)]
-const LEAF_MIN: usize = 64;
-const LEAF_MAX: usize = 512;
+/// Minimum leaf size for rope balancing (optimized for large file performance)
+pub const LEAF_MIN: usize = 64;
+
+/// Maximum leaf size before splitting
+pub const LEAF_MAX: usize = 512;
+
+/// Maximum tree depth before rebalancing
 const MAX_DEPTH: u8 = 12;
+
+/// Threshold for consolidating small leaves
 const CONSOLIDATE_THRESHOLD: usize = 512;
+
+/// Rope configuration for performance tuning
+#[derive(Debug, Clone, Copy)]
+pub struct RopeConfig {
+    pub leaf_min: usize,
+    pub leaf_max: usize,
+    pub max_depth: u8,
+    pub consolidate_threshold: usize,
+}
+
+impl Default for RopeConfig {
+    fn default() -> Self {
+        Self {
+            leaf_min: LEAF_MIN,
+            leaf_max: LEAF_MAX,
+            max_depth: MAX_DEPTH,
+            consolidate_threshold: CONSOLIDATE_THRESHOLD,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Rope {
@@ -245,6 +271,45 @@ impl Rope {
         match node {
             RopeNode::Leaf(_) => 0,
             RopeNode::Branch(b) => b.depth,
+        }
+    }
+
+    /// Get current configuration
+    pub fn config() -> RopeConfig {
+        RopeConfig::default()
+    }
+
+    /// Get performance statistics
+    pub fn stats(&self) -> RopeStats {
+        let (leaf_count, branch_count, max_leaf_size, min_leaf_size) = self.collect_stats(&self.root);
+        RopeStats {
+            total_chars: self.length,
+            total_bytes: self.byte_length,
+            tree_depth: self.depth(),
+            leaf_count,
+            branch_count,
+            max_leaf_size,
+            min_leaf_size,
+            avg_leaf_size: if leaf_count > 0 { self.length / leaf_count } else { 0 },
+        }
+    }
+
+    fn collect_stats(&self, node: &RopeNode) -> (usize, usize, usize, usize) {
+        match node {
+            RopeNode::Leaf(leaf) => {
+                let size = leaf.char_len;
+                (1, 0, size, size)
+            }
+            RopeNode::Branch(branch) => {
+                let (left_leaves, left_branches, left_max, left_min) = self.collect_stats(&branch.left);
+                let (right_leaves, right_branches, right_max, right_min) = self.collect_stats(&branch.right);
+                (
+                    left_leaves + right_leaves,
+                    left_branches + right_branches + 1,
+                    left_max.max(right_max),
+                    left_min.min(right_min),
+                )
+            }
         }
     }
 }
@@ -543,6 +608,33 @@ impl<'de> Deserialize<'de> for Rope {
     where D: serde::Deserializer<'de> {
         let s = String::deserialize(deserializer)?;
         Ok(Rope::from_str(&s))
+    }
+}
+
+/// Statistics about rope structure for performance analysis
+#[derive(Debug, Clone)]
+pub struct RopeStats {
+    pub total_chars: usize,
+    pub total_bytes: usize,
+    pub tree_depth: u8,
+    pub leaf_count: usize,
+    pub branch_count: usize,
+    pub max_leaf_size: usize,
+    pub min_leaf_size: usize,
+    pub avg_leaf_size: usize,
+}
+
+impl std::fmt::Display for RopeStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Rope Statistics:")?;
+        writeln!(f, "  Total chars: {}", self.total_chars)?;
+        writeln!(f, "  Total bytes: {}", self.total_bytes)?;
+        writeln!(f, "  Tree depth: {}", self.tree_depth)?;
+        writeln!(f, "  Leaf count: {}", self.leaf_count)?;
+        writeln!(f, "  Branch count: {}", self.branch_count)?;
+        writeln!(f, "  Max leaf size: {}", self.max_leaf_size)?;
+        writeln!(f, "  Min leaf size: {}", self.min_leaf_size)?;
+        writeln!(f, "  Avg leaf size: {}", self.avg_leaf_size)
     }
 }
 

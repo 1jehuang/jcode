@@ -25,14 +25,37 @@
 //! - HTTP/REST for external API
 //! ```
 
+pub mod config;
 pub mod node;
 pub mod cluster;
 pub mod election;
 pub mod sync;
 pub mod load_balancer;
+pub mod service;
+pub mod cli;
+pub mod integration;
+pub mod metrics;
+pub mod dashboard_api;
 
+#[cfg(test)]
+mod integration_tests;
+
+pub use config::ClusterConfig;
 pub use node::ClusterNode;
 pub use cluster::ClusterManager;
 pub use election::ElectionService;
 pub use sync::{StateSync, CrdtType};
 pub use load_balancer::LoadBalancer;
+pub use service::ClusterService;
+pub use cli::{ClusterArgs, execute_cluster_command};
+pub use integration::{
+    init_cluster_service,
+    shutdown_cluster_service,
+    is_cluster_enabled,
+    is_local_node_leader,
+    get_cluster_status,
+    ClusterStatusInfo,
+    execute_if_leader,
+};
+pub use metrics::{get_metrics, structured_log};
+pub use dashboard_api::{DashboardServer, DashboardConfig};
