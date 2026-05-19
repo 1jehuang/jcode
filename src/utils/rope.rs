@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 
+#[allow(dead_code)]
 const LEAF_MIN: usize = 64;
 const LEAF_MAX: usize = 512;
 const MAX_DEPTH: u8 = 12;

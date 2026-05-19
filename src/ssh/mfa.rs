@@ -412,7 +412,7 @@ impl U2fAuthenticator {
     /// Verify U2F registration response
     pub fn verify_registration(
         challenge: &U2fChallenge,
-        response: &U2fResponse,
+        _response: &U2fResponse,
     ) -> Result<U2fCredential, U2fError> {
         // In production, this would verify the cryptographic signature
         // using the U2F protocol specification

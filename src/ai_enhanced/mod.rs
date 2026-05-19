@@ -118,6 +118,7 @@ impl std::fmt::Display for AnomalyType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DataPoint {
     #[serde(skip, default = "Instant::now")]
+    #[allow(dead_code)]
     timestamp: Instant,
     value: f64,
     metadata: HashMap<String, String>,

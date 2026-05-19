@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_TARGET_RATIO: f64 = 0.85;
 const ANCHOR_USER_MESSAGES: usize = 3;
+#[allow(dead_code)]
 const MIN_TOOL_RESULTS_TO_KEEP: usize = 5;
 const ESTIMATED_CHARS_PER_TOKEN: f64 = 4.0;
 

@@ -770,6 +770,7 @@ pub struct TeamSyncManager {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum SyncOperation {
     CreatePolicy { policy: SyncPolicy },
     UpdatePolicy { policy: SyncPolicy, expected_version: u64 },

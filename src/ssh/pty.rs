@@ -141,6 +141,7 @@ struct PtyMaster {
 #[cfg(windows)]
 struct PtyMaster {
     // Windows ConPTY handles
+    #[allow(dead_code)]
     input_handle: Option<isize>,
     output_handle: Option<isize>,
 }

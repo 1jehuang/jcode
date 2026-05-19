@@ -136,6 +136,7 @@ pub struct FailureDiagnosis {
 pub struct TestLoopEngine {
     config: TestLoopConfig,
     cancelled: Arc<AtomicBool>,
+    #[allow(dead_code)]
     round_count: Arc<AtomicUsize>,
 }
 

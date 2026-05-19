@@ -237,6 +237,7 @@ pub struct VerifySkill {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct VerificationCheck {
     name: String,
     description: String,
@@ -400,6 +401,7 @@ pub struct SimplifySkill {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct SimplificationRule {
     name: String,
     pattern: &'static str,

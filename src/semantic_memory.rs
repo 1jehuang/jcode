@@ -16,6 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_DECAY_HALFLIFE_SECS: u64 = 86400 * 7;
 const MAX_GRAPH_NODES: usize = 10000;
+#[allow(dead_code)]
 const MAX_SEARCH_DEPTH: usize = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]

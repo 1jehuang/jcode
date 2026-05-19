@@ -937,6 +937,7 @@ enum ScalabilityRequirement {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 enum ExperienceLevel {
     Junior,
     Intermediate,

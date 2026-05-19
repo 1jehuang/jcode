@@ -31,6 +31,7 @@ impl Default for PoolConfig {
 /// Pooled Session with metadata
 struct PooledSession {
     session: SshSession,
+    #[allow(dead_code)]
     created_at: Instant,
     last_used_at: Instant,
     in_use: bool,

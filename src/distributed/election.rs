@@ -4,6 +4,7 @@ use super::cluster::ClusterManager;
 
 pub struct ElectionService {
     election_timeout: Duration,
+    #[allow(dead_code)]
     heartbeat_interval: Duration,
     current_term: u64,
     voted_for: Option<String>,

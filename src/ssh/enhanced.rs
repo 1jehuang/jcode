@@ -464,6 +464,7 @@ impl SshCommandBuilder {
 /// Batch Operations Executor - Execute commands across multiple hosts
 pub struct BatchExecutor {
     manager: Arc<SshManager>,
+    #[allow(dead_code)]
     results: Arc<Mutex<Vec<BatchResult>>>,
 }
 

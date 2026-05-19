@@ -48,6 +48,7 @@ pub struct CoordinationResult {
 
 pub struct AtomicEditCoordinator {
     engine: PreciseEditEngine,
+    #[allow(dead_code)]
     temp_dir: PathBuf,
     transactions: Vec<AtomicTransaction>,
 }

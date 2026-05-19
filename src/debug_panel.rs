@@ -120,6 +120,7 @@ impl TreeNode {
         1 + self.children.iter().map(|c| c.total_nodes()).sum::<usize>()
     }
 
+    #[allow(dead_code)]
     fn set_depth(&mut self, depth: usize) {
         self.depth = depth;
         for child in &mut self.children {

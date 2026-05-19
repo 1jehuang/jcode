@@ -18,7 +18,7 @@ impl ClusterManager {
             cluster_id: Uuid::new_v4().to_string(),
             self_id: self_node.id.clone(),
         };
-        manager.register_node(self_node.clone());
+        let _ = manager.register_node(self_node.clone());
         manager
     }
 
