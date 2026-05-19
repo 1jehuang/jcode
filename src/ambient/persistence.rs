@@ -112,18 +112,6 @@ impl ScheduledQueue {
         Ok(Some(item))
     }
 
-    /// Put an already-created item back in the queue after a delivery failure.
-    ///
-    /// Ready direct-delivery items are removed before delivery so one broken live
-    /// session or transient server problem does not block the rest of the queue.
-    /// Requeueing failed items avoids silently losing scheduled checks, which is
-    /// especially important for visible overnight/PR-monitor tasks.
-    pub fn requeue_after(&mut self, mut item: ScheduledItem, delay: chrono::Duration) {
-        item.scheduled_for = Utc::now() + delay;
-        self.items.push(item);
-        let _ = self.save();
-    }
-
     /// Pop items whose `scheduled_for` is in the past, sorted by priority
     /// (highest first) then by time (earliest first).
     pub fn pop_ready(&mut self) -> Vec<ScheduledItem> {

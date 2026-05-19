@@ -138,14 +138,6 @@ impl AmbientManager {
         self.queue.remove_by_id(id)
     }
 
-    /// Requeue a scheduled item that was popped as ready but could not be
-    /// delivered. This keeps transient delivery failures from permanently
-    /// dropping scheduled session wakeups.
-    pub fn requeue_after(&mut self, item: ScheduledItem, delay: chrono::Duration) -> Result<()> {
-        self.queue.requeue_after(item, delay);
-        Ok(())
-    }
-
     pub fn state(&self) -> &AmbientState {
         &self.state
     }
