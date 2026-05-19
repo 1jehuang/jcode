@@ -551,10 +551,11 @@ impl SshAgentManager {
 
         // Determine actual key type from bits
         let actual_key_type = match bits {
-            "256" | "25519" => "ed25519".to_string(),
+            "25519" => "ed25519".to_string(),
+            "256" if key_type.contains("ECDSA") => "ecdsa-sha2-nistp256".to_string(),
+            "256" => "ed25519".to_string(),
             "521" => "ecdsa-sha2-nistp521".to_string(),
             "384" => "ecdsa-sha2-nistp384".to_string(),
-            "256" if key_type.contains("ECDSA") => "ecdsa-sha2-nistp256".to_string(),
             _ if key_type.to_lowercase().contains("rsa") => "rsa".to_string(),
             _ => key_type.to_lowercase(),
         };

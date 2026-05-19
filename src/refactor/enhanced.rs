@@ -608,7 +608,7 @@ impl DotNetMigrator {
         })
     }
     
-    async fn create_migration_plan(&self, analysis: &DotNetProjectAnalysis) -> Result<MigrationPlan> {
+    async fn create_migration_plan(&self, _analysis: &DotNetProjectAnalysis) -> Result<MigrationPlan> {
         Ok(MigrationPlan {
             phases: vec![
                 MigrationPhase {
@@ -1102,7 +1102,7 @@ enum ProjectComplexity {
     VeryHigh,
 }
 
-struct DotNetMigrationResult {
+pub(crate) struct DotNetMigrationResult {
     metadata: DotNetMigrationMetadata,
     migration_plan: MigrationPlan,
     converted_files: Vec<ConvertedFile>,
@@ -1311,7 +1311,7 @@ struct ExecutorConfiguration {
     use_case_examples: Vec<String>,
 }
 
-struct JavaVtMigrationResult {
+pub(crate) struct JavaVtMigrationResult {
     metadata: JavaVtMetadata,
     thread_analysis: ThreadUsageAnalysis,
     parallelism_opportunities: Vec<ParallelismOpportunity>,

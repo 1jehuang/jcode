@@ -123,28 +123,59 @@ pub trait AstOperations: Send + Sync {
 #[allow(deprecated)]
 pub struct RegexAstOperations;
 
+#[allow(deprecated)]
 impl Default for RegexAstOperations {
     fn default() -> Self {
         Self::new()
     }
 }
 
+/// 从内容中提取指定行范围
+fn extract_lines(content: &str, start_line: u32, end_line: u32) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let start = start_line.saturating_sub(1) as usize;
+    let end = (end_line as usize).min(lines.len());
+    
+    if start >= end {
+        return String::new();
+    }
+    
+    lines[start..end].join("\n")
+}
+
+/// 提取函数体内容（去掉签名和末尾大括号）
+fn extract_function_body(content: &str, start_line: u32, end_line: u32) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let start = start_line.saturating_sub(1) as usize;
+    let end = (end_line as usize).min(lines.len());
+
+    if start >= end {
+        return String::new();
+    }
+
+    let body_lines: Vec<&str> = lines[start..end]
+        .iter()
+        .skip(1)
+        .take(end.saturating_sub(start).saturating_sub(2)).copied()
+        .collect();
+
+    body_lines
+        .into_iter()
+        .map(|line| {
+            if line.starts_with("    ") {
+                &line[4..]
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[allow(deprecated)]
 impl RegexAstOperations {
     pub fn new() -> Self {
         Self
-    }
-
-    /// 从内容中提取指定行范围
-    fn extract_lines(content: &str, start_line: u32, end_line: u32) -> String {
-        let lines: Vec<&str> = content.lines().collect();
-        let start = start_line.saturating_sub(1) as usize;
-        let end = (end_line as usize).min(lines.len());
-        
-        if start >= end {
-            return String::new();
-        }
-        
-        lines[start..end].join("\n")
     }
 
     /// 分析选中代码的变量依赖
@@ -224,39 +255,9 @@ impl RegexAstOperations {
             _ => None,
         }
     }
-
-    /// 提取函数体（不含签名和花括号）
-    fn extract_function_body(&self, content: &str, start_line: u32, end_line: u32) -> String {
-        let lines: Vec<&str> = content.lines().collect();
-        let start = start_line.saturating_sub(1) as usize;
-        let end = (end_line as usize).min(lines.len());
-
-        if start >= end {
-            return String::new();
-        }
-
-        // 去掉第一行的签名和最后一行的 }
-        let body_lines: Vec<&str> = lines[start..end]
-            .iter()
-            .skip(1) // 跳过签名行
-            .take(end.saturating_sub(start).saturating_sub(2)).copied()
-            .collect();
-
-        // 缩进减少一层
-        body_lines
-            .into_iter()
-            .map(|line| {
-                if line.starts_with("    ") {
-                    &line[4..]
-                } else {
-                    line
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
 }
 
+#[allow(deprecated)]
 #[async_trait::async_trait]
 impl AstOperations for RegexAstOperations {
     async fn extract_method(&self, params: ExtractMethodParams) -> CodeEditResult {
@@ -279,7 +280,7 @@ impl AstOperations for RegexAstOperations {
         };
 
         // 提取选中的代码
-        let selected_code = Self::extract_lines(&content, params.start_line, params.end_line);
+        let selected_code = extract_lines(&content, params.start_line, params.end_line);
         
         if selected_code.trim().is_empty() {
             return CodeEditResult {
@@ -410,7 +411,7 @@ impl AstOperations for RegexAstOperations {
         };
 
         // 提取函数体
-        let function_body = self.extract_function_body(&content, func_start, func_end);
+        let function_body = extract_function_body(&content, func_start, func_end);
 
         // 找到调用点并替换
         let lines: Vec<&str> = content.lines().collect();
@@ -732,7 +733,7 @@ impl AstOperations for RegexAstOperations {
             };
 
         // 提取符号定义
-        let symbol_def = Self::extract_lines(&source_content, symbol_start, symbol_end);
+        let symbol_def = extract_lines(&source_content, symbol_start, symbol_end);
 
         // 从源文件中删除符号
         let source_lines: Vec<&str> = source_content.lines().collect();
@@ -1054,7 +1055,7 @@ impl AstOperations for TreeSitterAstOperations {
             }
         };
 
-        let selected_code = RegexAstOperations::extract_lines(&content, params.start_line, params.end_line);
+        let selected_code = extract_lines(&content, params.start_line, params.end_line);
         if selected_code.trim().is_empty() {
             return CodeEditResult {
                 success: false, new_content: String::new(), edits: vec![],
@@ -1145,7 +1146,7 @@ impl AstOperations for TreeSitterAstOperations {
 
         // Use AST to find the function definition precisely
         if let Some((func_start, func_end, _sig)) = self.extract_function_signature_ast(&content, &params.function_name) {
-            let function_body = RegexAstOperations::new().extract_function_body(&content, func_start, func_end);
+            let function_body = extract_function_body(&content, func_start, func_end);
 
             let lines: Vec<&str> = content.lines().collect();
             let call_line_idx = params.call_site_line.saturating_sub(1) as usize;
@@ -1282,12 +1283,14 @@ impl AstOperations for TreeSitterAstOperations {
         let mut parser = tree_sitter::Parser::new();
         if parser.set_language(&tree_sitter_rust::LANGUAGE.into()).is_err() {
             // Fallback to regex implementation
+            #[allow(deprecated)]
             return RegexAstOperations::new().encapsulate_field(params).await;
         }
 
         let tree = match parser.parse(&content, None) {
             Some(t) => t,
             None => {
+                #[allow(deprecated)]
                 return RegexAstOperations::new().encapsulate_field(params).await;
             }
         };
@@ -1421,7 +1424,7 @@ impl AstOperations for TreeSitterAstOperations {
 
         // Use AST to find symbol definition precisely
         if let Some((start, end, _sig)) = self.extract_function_signature_ast(&source_content, symbol_name) {
-            let symbol_def = RegexAstOperations::extract_lines(&source_content, start, end);
+            let symbol_def = extract_lines(&source_content, start, end);
 
             // Remove from source file
             let source_lines: Vec<&str> = source_content.lines().collect();
@@ -1458,6 +1461,7 @@ impl AstOperations for TreeSitterAstOperations {
             }
         } else {
             // Fallback to regex for non-function symbols
+            #[allow(deprecated)]
             RegexAstOperations::new().move_symbol(file_path, symbol_name, target_path).await
         }
     }

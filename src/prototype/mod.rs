@@ -620,7 +620,7 @@ pub struct PrototypeEngine {
 }
 
 #[derive(Debug, Clone)]
-struct PrototypeEngineConfig {
+pub(crate) struct PrototypeEngineConfig {
     max_files_per_project: usize,
     max_lines_per_file: usize,
     include_examples: bool,

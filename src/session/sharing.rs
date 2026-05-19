@@ -73,8 +73,8 @@ impl SessionSharingService {
         if opts.anonymize {
             metadata.created_by = UserId::Anonymous;
         }
-        let env_info = EnvironmentInfo::detect();
-        let insights = SessionInsights::generate_from_session(&session);
+        let _env_info = EnvironmentInfo::detect();
+        let _insights = SessionInsights::generate_from_session(&session);
         let shareable = ShareableSession {
             version: ShareFormatVersion::Latest,
             metadata,
@@ -522,7 +522,7 @@ pub enum SharedContent {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct ImageRef {
+pub(crate) struct ImageRef {
     url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     alt_text: Option<String>,
@@ -592,14 +592,14 @@ struct CargoDep {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct NpmDep {
+pub(crate) struct NpmDep {
     name: String,
     version: String,
     dev: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct PythonDep {
+pub(crate) struct PythonDep {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     version: Option<String>,
@@ -1287,7 +1287,7 @@ pub enum ValidationIssue {
     MissingFields,
 }
 
-struct CompatibilityReport {
+pub(crate) struct CompatibilityReport {
     format_version_ok: bool,
     tool_compat: Vec<String>,
 }

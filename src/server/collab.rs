@@ -389,7 +389,7 @@ impl OperationLog {
 }
 
 #[derive(Clone)]
-struct LoggedOperation {
+pub(crate) struct LoggedOperation {
     id: u64,
     operation: TextOperation,
     vector_clock: VectorClock,
@@ -623,7 +623,7 @@ impl CollaborationServer {
             .collect()
     }
 
-    pub async fn handle_reconnect(&self, participant_id: &ParticipantId, missed_ops: &[ServerPushMessage]) -> Result<SyncState, String> {
+    pub async fn handle_reconnect(&self, _participant_id: &ParticipantId, missed_ops: &[ServerPushMessage]) -> Result<SyncState, String> {
         let sessions = self.sessions.read().await;
         let session = sessions.values().next().ok_or("No sessions")?;
 

@@ -678,8 +678,8 @@ impl AhoCorasickMatcher {
     pub async fn add_pattern(
         &self,
         pattern: String,
-        risk_level: RiskLevel,
-        category: SecurityCategory,
+        _risk_level: RiskLevel,
+        _category: SecurityCategory,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // 注意：实际实现需要重建automaton，这里简化处理
         warn!(

@@ -215,7 +215,7 @@ impl TaskManager {
         }
 
         // Sort by priority (descending), then by created date
-        result.sort_by(|a, b| {
+        result.sort_by(|_a, _b| {
             // This is a simplified sort - in production would need async
             // For now, just return unsorted
             std::cmp::Ordering::Equal
@@ -297,7 +297,7 @@ impl TaskManager {
             
             if task.is_actionable() {
                 // Check if all dependencies are completed
-                let deps_completed = task.dependencies.iter().all(|dep_id| {
+                let deps_completed = task.dependencies.iter().all(|_dep_id| {
                     // Note: This synchronous check inside async is simplified
                     // In production, should use proper async iteration
                     true // Simplified for now

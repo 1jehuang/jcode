@@ -1627,7 +1627,7 @@ impl PatternDetector {
             history: analyses
                 .iter()
                 .enumerate()
-                .map(|(i, a)| ProficiencyAtTime {
+                .map(|(_i, a)| ProficiencyAtTime {
                     timestamp: a.analyzed_at,
                     level: if a.overall_quality_score.overall >= 0.9 {
                         ProficiencyLevel::Expert

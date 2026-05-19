@@ -801,7 +801,7 @@ impl EnhancedConfidenceModel {
         }
     }
     
-    fn calculate_complexity(&self, context: &ToolContext) -> f64 {
+    fn calculate_complexity(&self, _context: &ToolContext) -> f64 {
         // 基于参数数量估算复杂度 (简化版)
         0.3 // 默认中等复杂度
     }

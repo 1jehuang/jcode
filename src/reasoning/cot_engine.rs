@@ -514,7 +514,7 @@ impl CotEngine {
     /// Tree of Thoughts (思维树) 推理
     async fn tree_of_thoughts(&self, problem: &str, context: &str) -> Result<ReasoningResult> {
         let mut chain = Vec::new();
-        let mut correction_count = 0usize;
+        let correction_count = 0usize;
         
         // ToT: 生成多个候选方案并评估
         let candidates = self.generate_candidate_solutions(problem, context).await?;

@@ -278,7 +278,7 @@ impl CommandBlock {
                 + 1_usize,
             Value::Object(map) => map
                 .iter()
-                .map(|(k, v)| {
+                .map(|(_k, v)| {
                     1_usize + Self::json_tree_height(v, indent + 1, width)
                 })
                 .sum::<usize>()

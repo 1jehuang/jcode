@@ -525,7 +525,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
         DebugCommand::Next => {
             let mut guard = session_lock.lock().await;
             if let Some(ref mut session) = *guard {
-                if let Some(ref mut stdin) = session.stdin {
+                if let Some(ref mut din) = session.stdin {
                     let seq = session.request_seq;
                     let tid = session.active_thread_id;
                     let _ = dap_request_internal(session, "next",
@@ -543,7 +543,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
         DebugCommand::StepIn => {
             let mut guard = session_lock.lock().await;
             if let Some(ref mut session) = *guard {
-                if let Some(ref mut stdin) = session.stdin {
+                if let Some(ref mut _stdin) = session.stdin {
                     let seq = session.request_seq;
                     let tid = session.active_thread_id;
                     let _ = dap_request_internal(session, "stepIn",
@@ -561,7 +561,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
         DebugCommand::StepOut => {
             let mut guard = session_lock.lock().await;
             if let Some(ref mut session) = *guard {
-                if let Some(ref mut stdin) = session.stdin {
+                if let Some(ref mut _stdin) = session.stdin {
                     let seq = session.request_seq;
                     let tid = session.active_thread_id;
                     let _ = dap_request_internal(session, "stepOut",
@@ -579,7 +579,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
         DebugCommand::Stack => {
             let mut guard = session_lock.lock().await;
             if let Some(ref mut session) = *guard {
-                if let Some(ref mut stdin) = session.stdin {
+                if let Some(ref mut _stdin) = session.stdin {
                     let seq = session.request_seq;
                     let tid = session.active_thread_id;
                     let resp = dap_request_internal(session, "stackTrace",
@@ -611,7 +611,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
         DebugCommand::Variables => {
             let mut guard = session_lock.lock().await;
             if let Some(ref mut session) = *guard {
-                if let Some(ref mut stdin) = session.stdin {
+                if let Some(ref mut _stdin) = session.stdin {
                     let seq = session.request_seq;
                     let tid = session.active_thread_id;
                     // First get stack to find top frame variables reference
@@ -663,7 +663,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
         DebugCommand::Evaluate { expression } => {
             let mut guard = session_lock.lock().await;
             if let Some(ref mut session) = *guard {
-                if let Some(ref mut stdin) = session.stdin {
+                if let Some(ref mut _stdin) = session.stdin {
                     let seq = session.request_seq;
                     // Get top frame for evaluation context
                     let stack = dap_request_internal(session, "stackTrace",
@@ -700,7 +700,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
         DebugCommand::Restart => {
             let mut guard = session_lock.lock().await;
             if let Some(ref mut session) = *guard {
-                if let Some(ref mut stdin) = session.stdin {
+                if let Some(ref mut _stdin) = session.stdin {
                     let seq = session.request_seq;
                     let _ = dap_request_internal(session, "restart", None,
                     ).await;
@@ -716,7 +716,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
         DebugCommand::Disconnect => {
             let mut guard = session_lock.lock().await;
             if let Some(ref mut session) = *guard {
-                if let Some(ref mut stdin) = session.stdin {
+                if let Some(ref mut _stdin) = session.stdin {
                     let seq = session.request_seq;
                     let _ = dap_request_internal(session, "disconnect",
                         Some(serde_json::json!({ "restart": false, "terminateDebuggee": false })),
@@ -737,7 +737,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
         DebugCommand::Modules => {
             let mut guard = session_lock.lock().await;
             if let Some(ref mut session) = *guard {
-                if let Some(ref mut stdin) = session.stdin {
+                if let Some(ref mut _stdin) = session.stdin {
                     let seq = session.request_seq;
                     let resp = dap_request_internal(session, "modules", None,
                     ).await?;
@@ -761,7 +761,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
         DebugCommand::Threads => {
             let mut guard = session_lock.lock().await;
             if let Some(ref mut session) = *guard {
-                if let Some(ref mut stdin) = session.stdin {
+                if let Some(ref mut _stdin) = session.stdin {
                     let seq = session.request_seq;
                     let resp = dap_request_internal(session, "threads", None,
                     ).await?;
@@ -865,8 +865,8 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
             let mut guard = session_lock.lock().await;
             if let Some(ref mut session) = guard.take() {
                 // Send disconnect request
-                if let Some(ref mut stdin) = session.stdin {
-                    let seq = session.request_seq;
+                if let Some(ref mut _stdin) = session.stdin {
+                    let _seq = session.request_seq;
                     let _ = dap_request_internal(session, "disconnect",
                         Some(serde_json::json!({ "restart": false, "terminateDebuggee": true })),
                     ).await;

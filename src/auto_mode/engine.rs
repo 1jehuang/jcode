@@ -142,7 +142,7 @@ impl AutoModeEngine {
             let mut learning = self.learning_system.lock().await;
             if let Some(pattern) = learning.match_pattern(action_type, description) {
                 // 计算置信度
-                let mut model = self.confidence_model.lock().await;
+                let model = self.confidence_model.lock().await;
                 let confidence = model.calculate(&pattern, context);
 
                 drop(model); // 释放锁

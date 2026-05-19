@@ -316,7 +316,7 @@ impl McpServer {
 
         let mut resources = Vec::new();
 
-        if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(_cwd) = std::env::current_dir() {
             resources.push(json!({
                 "uri": "workspace://root",
                 "name": "Workspace Root",

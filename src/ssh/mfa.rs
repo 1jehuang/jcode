@@ -153,7 +153,7 @@ impl TotpAuthenticator {
             .unwrap_or_default()
             .as_nanos();
         
-        let mut seed = [0u8; 32];
+        let seed = [0u8; 32];
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         timestamp.hash(&mut hasher);
         let hash = hasher.finish().to_be_bytes();
@@ -433,9 +433,9 @@ impl U2fAuthenticator {
 
     /// Authenticate with existing U2F credential
     pub fn authenticate(
-        credential: &U2fCredential,
+        _credential: &U2fCredential,
         challenge: &U2fChallenge,
-        response: &U2fResponse,
+        _response: &U2fResponse,
     ) -> Result<bool, U2fError> {
         // Verify authentication signature
         if challenge.is_expired() {

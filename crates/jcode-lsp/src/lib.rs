@@ -90,7 +90,6 @@ pub use performance::{
 };
 pub use ast_operations::{
     AstOperations,
-    RegexAstOperations,
     TreeSitterAstOperations,
     CodeEditResult,
     ExtractMethodParams,

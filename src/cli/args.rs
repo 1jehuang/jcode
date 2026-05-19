@@ -919,7 +919,7 @@ pub(crate) enum RestartCommand {
 }
 
 #[derive(Subcommand, Debug)]
-pub(crate) enum SessionSubCommand {
+pub enum SessionSubCommand {
     /// Show current session info
     Info,
 
@@ -1338,7 +1338,7 @@ pub(crate) enum TasksCommand {
 
 /// Git operations commands.
 #[derive(Subcommand, Debug)]
-pub(crate) enum GitCommand {
+pub enum GitCommand {
     /// Show current branch info
     Branch,
     /// Show git diff
@@ -1354,7 +1354,7 @@ pub(crate) enum GitCommand {
 
 /// Configuration management commands.
 #[derive(Subcommand, Debug)]
-pub(crate) enum ConfigCommand {
+pub enum ConfigCommand {
     /// Get a configuration value
     Get {
         /// Config key
@@ -1466,7 +1466,7 @@ pub(crate) enum CodeRefactorCommand {
 
 /// Debugger subcommands (DAP protocol)
 #[derive(Subcommand, Debug)]
-pub(crate) enum DebugCommand {
+pub enum DebugCommand {
     /// Start a debug session for the current project
     Start {
         /// Debug configuration name (as defined in .vscode/launch.json or similar)

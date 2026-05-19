@@ -441,7 +441,7 @@ impl EnhancedVideoExporter {
             }
         }
 
-        let elapsed = start.elapsed();
+        let _elapsed = start.elapsed();
         let data_len = data.len();
         Ok(GifExport {
             data,
@@ -462,7 +462,7 @@ impl EnhancedVideoExporter {
             data.extend_from_slice(&rendered);
         }
 
-        let elapsed = start.elapsed();
+        let _elapsed = start.elapsed();
         let data_len = data.len();
         Ok(VideoExport {
             data,

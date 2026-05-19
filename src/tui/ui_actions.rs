@@ -418,7 +418,7 @@ impl ActionBarManager {
 
     pub fn render_action_bar(&self, actions: &[RenderableAction], area: Rect, buf: &mut Buffer) {
         if area.width == 0 || area.height == 0 { return; }
-        let mut x = area.x;
+        let x = area.x;
         let spans: Vec<Span<'_>> = actions.iter().flat_map(|action| {
             let style = if action.is_hovered {
                 Style::default().fg(Color::White).bg(Color::Blue).add_modifier(Modifier::BOLD)

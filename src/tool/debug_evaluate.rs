@@ -219,7 +219,7 @@ impl Tool for DebugEvaluateTool {
                         .with_title("debug: missing expression"));
                 }
 
-                let mut guard = session_lock.lock().await;
+                let guard = session_lock.lock().await;
                 if let Some(ref _session) = *guard {
                     // Simplified evaluation — in full DAP would send evaluate request
                     let result = json!({
@@ -236,7 +236,7 @@ impl Tool for DebugEvaluateTool {
             }
 
             "variables" => {
-                let mut guard = session_lock.lock().await;
+                let guard = session_lock.lock().await;
                 if let Some(ref _session) = *guard {
                     Ok(ToolOutput::new(
                         "Variables view requires DAP stackTrace -> scopes -> variables chain.\n\

@@ -414,7 +414,7 @@ impl CodeReviewSkill {
         issues
     }
 
-    async fn check_best_practices(&self, code: &str, file_path: &str, language: &str) -> Vec<BestPracticeSuggestion> {
+    async fn check_best_practices(&self, code: &str, _file_path: &str, language: &str) -> Vec<BestPracticeSuggestion> {
         let mut suggestions = Vec::new();
         
         if language == "rust" {

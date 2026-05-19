@@ -637,7 +637,7 @@ impl PtySession {
         }
     }
 
-    fn _resize_pty_static(master: &PtyMaster, rows: u16, cols: u16, xpixel: u16, ypixel: u16) -> Result<(), PtyError> {
+    fn _resize_pty_static(_master: &PtyMaster, _rows: u16, _cols: u16, _xpixel: u16, _ypixel: u16) -> Result<(), PtyError> {
         #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;

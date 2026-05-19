@@ -247,7 +247,7 @@ impl GitWorkflow for DefaultGitWorkflow {
         args.push("-m");
         args.push(&msg);
 
-        let output = self.exec_git(&args).await?;
+        let _output = self.exec_git(&args).await?;
         
         // Get commit info
         let log_output = self.exec_git(&["log", "-1", "--format=%H|%s|%an|%ci"]).await?;
@@ -280,7 +280,7 @@ impl GitWorkflow for DefaultGitWorkflow {
 
         self.exec_git(&args).await?;
 
-        let current = self.current_branch().await?;
+        let _current = self.current_branch().await?;
         
         Ok(GitResult {
             success: true,

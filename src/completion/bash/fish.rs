@@ -710,7 +710,7 @@ impl FishParser {
     fn build_ast(
         &self,
         tokens: &mut Vec<FishToken>,
-        errors: &mut Vec<FishParseError>,
+        _errors: &mut Vec<FishParseError>,
     ) -> Result<FishAstNode, ()> {
         let mut commands: Vec<FishCommandNode> = vec![];
         let mut current_cmd_words = vec![];
