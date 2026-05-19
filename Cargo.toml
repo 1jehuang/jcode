@@ -396,7 +396,13 @@ pdf = ["dep:jcode-pdf"]
 audit = []
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+    "Win32_Storage_FileSystem",
+    "Win32_System_ProcessStatus"
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.7"

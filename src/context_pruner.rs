@@ -12,8 +12,11 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_TARGET_RATIO: f64 = 0.85;
 const ANCHOR_USER_MESSAGES: usize = 3;
-#[allow(dead_code)]
-const MIN_TOOL_RESULTS_TO_KEEP: usize = 5;
+
+/// Minimum number of tool result messages to retain during pruning.
+/// Tool results are critical for understanding conversation context and errors.
+pub const MIN_TOOL_RESULTS_TO_KEEP: usize = 5;
+
 const ESTIMATED_CHARS_PER_TOKEN: f64 = 4.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,6 +143,8 @@ impl ContextPruner {
 
     fn find_anchor_positions(&self, messages: &[ContextMessage]) -> Vec<usize> {
         let mut anchors = Vec::new();
+        
+        // Preserve recent user messages
         let mut user_indices: Vec<(usize, u64)> = messages.iter().enumerate()
             .filter(|(_, m)| m.role == MessageRole::User)
             .map(|(i, m)| (i, m.created_at_ms))
@@ -150,18 +155,36 @@ impl ContextPruner {
             anchors.push(idx);
         }
 
+        // Preserve last assistant message
         if let Some(last_assistant) = messages.iter().rposition(|m| m.role == MessageRole::Assistant)
             && !anchors.contains(&last_assistant) {
                 anchors.push(last_assistant);
             }
 
+        // Preserve active edit messages
         for (i, m) in messages.iter().enumerate().rev() {
             if m.is_active_edit && !anchors.contains(&i) {
                 anchors.push(i);
                 break;
             }
         }
-        anchors.sort(); anchors.dedup();
+
+        // Preserve recent tool results (at least MIN_TOOL_RESULTS_TO_KEEP)
+        let mut tool_indices: Vec<usize> = messages.iter().enumerate()
+            .filter(|(_, m)| m.role == MessageRole::Tool)
+            .map(|(i, _)| i)
+            .collect();
+        tool_indices.reverse(); // Most recent first
+        
+        let tools_to_keep = tool_indices.len().min(MIN_TOOL_RESULTS_TO_KEEP);
+        for idx in tool_indices.into_iter().take(tools_to_keep) {
+            if !anchors.contains(&idx) {
+                anchors.push(idx);
+            }
+        }
+
+        anchors.sort(); 
+        anchors.dedup();
         anchors
     }
 
@@ -289,6 +312,30 @@ mod tests {
         msgs[49] = ContextMessage::new(MessageRole::Assistant, "final response");
         let result = pruner.prune(msgs);
         assert!(!result.preserved_anchors.is_empty());
+    }
+
+    #[test]
+    fn test_tool_results_anchor() {
+        // Create messages with tool results
+        let mut msgs = Vec::new();
+        for i in 0..20 {
+            if i % 3 == 0 {
+                msgs.push(ContextMessage::new(MessageRole::Tool, format!("tool result {}", i)));
+            } else if i % 3 == 1 {
+                msgs.push(ContextMessage::new(MessageRole::User, format!("user msg {}", i)));
+            } else {
+                msgs.push(ContextMessage::new(MessageRole::Assistant, format!("assistant msg {}", i)));
+            }
+        }
+        
+        let pruner = ContextPruner::new(300);
+        let result = pruner.prune(msgs);
+        
+        // Verify that tool results are preserved as anchors
+        let tool_count_in_result = result.messages.iter()
+            .filter(|m| m.role == MessageRole::Tool)
+            .count();
+        assert!(tool_count_in_result >= MIN_TOOL_RESULTS_TO_KEEP.min(result.original_count / 3));
     }
 
     #[test]

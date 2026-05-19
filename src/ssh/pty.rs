@@ -132,15 +132,18 @@ impl std::fmt::Display for PtyError {
 impl std::error::Error for PtyError {}
 
 // Platform-specific PTY master handle
-#[cfg(unix)]
-struct PtyMaster {
-    master_fd: std::os::unix::io::RawFd,
-    slave_name: String,
-}
-
-#[cfg(windows)]
-struct PtyMaster {
-    _placeholder: u8,
+enum PtyMaster {
+    #[cfg(unix)]
+    Unix {
+        master_fd: std::os::unix::io::RawFd,
+        slave_name: String,
+    },
+    #[cfg(windows)]
+    Windows {
+        process: std::process::Child,
+    },
+    #[cfg(not(any(unix, windows)))]
+    Unsupported,
 }
 
 impl PtySession {
@@ -230,9 +233,6 @@ impl PtySession {
             return Err(PtyError::AlreadyRunning);
         }
 
-        // Allocate PTY
-        let pty_master = self._allocate_pty()?;
-        
         // Build SSH command with PTY allocation
         let mut cmd = Command::new("ssh");
         cmd.arg("-t")  // Force PTY allocation
@@ -244,37 +244,64 @@ impl PtySession {
             cmd.arg(command);
         }
 
-        // Configure stdin/stdout/stderr to use PTY
+        // Configure stdin/stdout/stderr based on platform
         #[cfg(unix)]
         {
-            use std::os::unix::io::{FromRawFd, IntoRawFd};
-            
-            unsafe {
-                cmd.stdin(Stdio::from_raw_fd(pty_master.master_fd));
-                cmd.stdout(Stdio::from_raw_fd(pty_master.master_fd));
-                cmd.stderr(Stdio::from_raw_fd(pty_master.master_fd));
+            // For Unix, we need to allocate PTY first and use it
+            let pty_master = self._allocate_pty()?;
+            if let PtyMaster::Unix { master_fd, .. } = &pty_master {
+                use std::os::unix::io::{FromRawFd, IntoRawFd};
+                unsafe {
+                    cmd.stdin(Stdio::from_raw_fd(*master_fd));
+                    cmd.stdout(Stdio::from_raw_fd(*master_fd));
+                    cmd.stderr(Stdio::from_raw_fd(*master_fd));
+                }
             }
+            
+            // Spawn the process
+            let child = cmd.spawn().map_err(|e| PtyError::ProcessSpawnFailed {
+                command: format!("ssh {}", ssh_target),
+                message: e.to_string(),
+            })?;
+
+            self.child = Some(child);
+            self.pty_master = Some(pty_master);
+            self.state = PtyState::Running;
+            self.last_activity = Some(std::time::Instant::now());
+
+            Ok(())
         }
 
         #[cfg(windows)]
         {
+            // For Windows, SSH handles PTY internally
             cmd.stdin(Stdio::piped());
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
+
+            // Spawn the process
+            let child = cmd.spawn().map_err(|e| PtyError::ProcessSpawnFailed {
+                command: format!("ssh {}", ssh_target),
+                message: e.to_string(),
+            })?;
+
+            // Allocate placeholder PTY master for Windows
+            let pty_master = self._allocate_pty()?;
+
+            self.child = Some(child);
+            self.pty_master = Some(pty_master);
+            self.state = PtyState::Running;
+            self.last_activity = Some(std::time::Instant::now());
+
+            Ok(())
         }
 
-        // Spawn the process
-        let child = cmd.spawn().map_err(|e| PtyError::ProcessSpawnFailed {
-            command: format!("ssh {}", ssh_target),
-            message: e.to_string(),
-        })?;
-
-        self.child = Some(child);
-        self.pty_master = Some(pty_master);
-        self.state = PtyState::Running;
-        self.last_activity = Some(std::time::Instant::now());
-
-        Ok(())
+        #[cfg(not(any(unix, windows)))]
+        {
+            Err(PtyError::AllocationFailed {
+                message: "PTY not supported on this platform".to_string(),
+            })
+        }
     }
 
     /// Start a generic command in PTY (for local commands like vim, top)
@@ -287,38 +314,72 @@ impl PtySession {
             return Err(PtyError::AlreadyRunning);
         }
 
-        let pty_master = self._allocate_pty()?;
-
-        let mut cmd = Command::new(program);
-        cmd.args(args)
-           .env("TERM", &self.config.term_type);
-
-        if self.config.raw_mode {
-            cmd.env("COLUMNS", self.config.cols.to_string())
-               .env("LINES", self.config.rows.to_string());
-        }
-
         #[cfg(unix)]
         {
-            use std::os::unix::io::{FromRawFd, IntoRawFd};
-            unsafe {
-                cmd.stdin(Stdio::from_raw_fd(pty_master.master_fd));
-                cmd.stdout(Stdio::from_raw_fd(pty_master.master_fd));
-                cmd.stderr(Stdio::from_raw_fd(pty_master.master_fd));
+            let pty_master = self._allocate_pty()?;
+
+            let mut cmd = Command::new(program);
+            cmd.args(args)
+               .env("TERM", &self.config.term_type);
+
+            if self.config.raw_mode {
+                cmd.env("COLUMNS", self.config.cols.to_string())
+                   .env("LINES", self.config.rows.to_string());
             }
+
+            if let PtyMaster::Unix { master_fd, .. } = &pty_master {
+                use std::os::unix::io::{FromRawFd, IntoRawFd};
+                unsafe {
+                    cmd.stdin(Stdio::from_raw_fd(*master_fd));
+                    cmd.stdout(Stdio::from_raw_fd(*master_fd));
+                    cmd.stderr(Stdio::from_raw_fd(*master_fd));
+                }
+            }
+
+            let child = cmd.spawn().map_err(|e| PtyError::ProcessSpawnFailed {
+                command: format!("{} {}", program, args.join(" ")),
+                message: e.to_string(),
+            })?;
+
+            self.child = Some(child);
+            self.pty_master = Some(pty_master);
+            self.state = PtyState::Running;
+            self.last_activity = Some(std::time::Instant::now());
+
+            Ok(())
         }
 
-        let child = cmd.spawn().map_err(|e| PtyError::ProcessSpawnFailed {
-            command: format!("{} {}", program, args.join(" ")),
-            message: e.to_string(),
-        })?;
+        #[cfg(windows)]
+        {
+            let pty_master = self._allocate_pty()?;
 
-        self.child = Some(child);
-        self.pty_master = Some(pty_master);
-        self.state = PtyState::Running;
-        self.last_activity = Some(std::time::Instant::now());
+            let mut cmd = Command::new(program);
+            cmd.args(args)
+               .env("TERM", &self.config.term_type);
 
-        Ok(())
+            cmd.stdin(Stdio::piped())
+               .stdout(Stdio::piped())
+               .stderr(Stdio::piped());
+
+            let child = cmd.spawn().map_err(|e| PtyError::ProcessSpawnFailed {
+                command: format!("{} {}", program, args.join(" ")),
+                message: e.to_string(),
+            })?;
+
+            self.child = Some(child);
+            self.pty_master = Some(pty_master);
+            self.state = PtyState::Running;
+            self.last_activity = Some(std::time::Instant::now());
+
+            Ok(())
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            Err(PtyError::AllocationFailed {
+                message: "PTY not supported on this platform".to_string(),
+            })
+        }
     }
 
     /// Stop/kill the running session
@@ -393,28 +454,32 @@ impl PtySession {
         #[cfg(unix)]
         {
             if let Some(ref master) = self.pty_master {
-                use std::os::unix::io::AsRawFd;
-                let written = unsafe {
-                    libc::write(master.master_fd, data.as_ptr(), data.len())
-                };
+                if let PtyMaster::Unix { master_fd, .. } = master {
+                    use std::os::unix::io::AsRawFd;
+                    let written = unsafe {
+                        libc::write(*master_fd, data.as_ptr(), data.len())
+                    };
 
-                if written < 0 {
-                    Err(PtyError::IoError {
-                        operation: "write".to_string(),
-                        details: format!("Write error: {}", 
-                            io::Error::last_os_error()),
-                    })
+                    if written < 0 {
+                        Err(PtyError::IoError {
+                            operation: "write".to_string(),
+                            details: format!("Write error: {}", 
+                                io::Error::last_os_error()),
+                        })
+                    } else {
+                        Ok(written as usize)
+                    }
                 } else {
-                    Ok(written as usize)
+                    Err(PtyError::NotRunning)
                 }
             } else {
                 Err(PtyError::NotRunning)
             }
         }
 
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            // Fallback for non-Unix systems
+            // For Windows, use piped I/O through child stdin
             if let Some(ref mut child) = self.child {
                 if let Some(stdin) = child.stdin.as_mut() {
                     use std::io::Write;
@@ -428,6 +493,11 @@ impl PtySession {
             } else {
                 Err(PtyError::NotRunning)
             }
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            Err(PtyError::NotRunning)
         }
     }
 
@@ -445,57 +515,71 @@ impl PtySession {
         #[cfg(unix)]
         {
             if let Some(ref master) = self.pty_master {
-                use std::os::unix::io::AsRawFd;
-                
-                // Check if data is available (non-blocking read)
-                let mut fds = [libc::pollfd {
-                    fd: master.master_fd,
-                    events: libc::POLLIN,
-                    revents: 0,
-                }];
+                if let PtyMaster::Unix { master_fd, .. } = master {
+                    use std::os::unix::io::AsRawFd;
+                    
+                    // Check if data is available (non-blocking read)
+                    let mut fds = [libc::pollfd {
+                        fd: *master_fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    }];
 
-                let ready = unsafe {
-                    libc::poll(fds.as_mut_ptr(), 1, 0)  // Immediate timeout
-                };
-
-                if ready > 0 && (fds[0].revents & libc::POLLIN) != 0 {
-                    let bytes_read = unsafe {
-                        libc::read(master.master_fd, buf.as_mut_ptr(), buf.len())
+                    let ready = unsafe {
+                        libc::poll(fds.as_mut_ptr(), 1, 0)  // Immediate timeout
                     };
 
-                    if bytes_read < 0 {
-                        Err(PtyError::IoError {
-                            operation: "read".to_string(),
-                            details: format!("Read error: {}", 
-                                io::Error::last_os_error()),
-                        })
-                    } else {
-                        self.last_activity = Some(std::time::Instant::now());
-                        Ok(bytes_read as usize)
-                    }
-                } else {
-                    Ok(0)  // No data available
-                }
-            } else {
-                Err(PtyError::NotRunning)
-            }
-        }
+                    if ready > 0 && (fds[0].revents & libc::POLLIN) != 0 {
+                        let bytes_read = unsafe {
+                            libc::read(*master_fd, buf.as_mut_ptr(), buf.len())
+                        };
 
-        #[cfg(not(unix))]
-        {
-            if let Some(ref mut child) = self.child {
-                if let Some(stdout) = child.stdout.as_mut() {
-                    use std::io::Read;
-                    stdout.read(buf).map_err(|e| PtyError::IoError {
-                        operation: "read".to_string(),
-                        details: e.to_string(),
-                    })
+                        if bytes_read < 0 {
+                            Err(PtyError::IoError {
+                                operation: "read".to_string(),
+                                details: format!("Read error: {}", 
+                                    io::Error::last_os_error()),
+                            })
+                        } else {
+                            self.last_activity = Some(std::time::Instant::now());
+                            Ok(bytes_read as usize)
+                        }
+                    } else {
+                        Ok(0)  // No data available
+                    }
                 } else {
                     Err(PtyError::NotRunning)
                 }
             } else {
                 Err(PtyError::NotRunning)
             }
+        }
+
+        #[cfg(windows)]
+        {
+            // For Windows, use piped I/O through child stdout
+            if let Some(ref mut child) = self.child {
+                if let Some(stdout) = child.stdout.as_mut() {
+                    use std::io::Read;
+                    let bytes_read = stdout.read(buf).map_err(|e| PtyError::IoError {
+                        operation: "read".to_string(),
+                        details: e.to_string(),
+                    })?;
+                    if bytes_read > 0 {
+                        self.last_activity = Some(std::time::Instant::now());
+                    }
+                    Ok(bytes_read)
+                } else {
+                    Err(PtyError::NotRunning)
+                }
+            } else {
+                Err(PtyError::NotRunning)
+            }
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            Err(PtyError::NotRunning)
         }
     }
 
@@ -615,7 +699,7 @@ impl PtySession {
                     .into_owned()
             };
 
-            Ok(PtyMaster {
+            Ok(PtyMaster::Unix {
                 master_fd,
                 slave_name: name_str,
             })
@@ -623,18 +707,15 @@ impl PtySession {
 
         #[cfg(windows)]
         {
-            #[cfg(feature = "winpty")]
-            {
-                return Err(PtyError::AllocationFailed {
-                    message: "PTY support requires the winpty feature".to_string(),
-                });
-            }
-            #[cfg(not(feature = "winpty"))]
-            {
-                return Err(PtyError::AllocationFailed {
-                    message: "PTY not supported on Windows without winpty feature".to_string(),
-                });
-            }
+            // On Windows, we just return a placeholder PtyMaster
+            // The actual PTY handling is done via SSH command spawning
+            Ok(PtyMaster::Windows {
+                process: std::process::Command::new("cmd.exe")
+                    .spawn()
+                    .map_err(|e| PtyError::AllocationFailed {
+                        message: format!("Failed to create Windows session: {}", e),
+                    })?,
+            })
         }
 
         #[cfg(not(any(unix, windows)))]
@@ -645,35 +726,40 @@ impl PtySession {
         }
     }
 
-    fn _resize_pty_static(_master: &PtyMaster, _rows: u16, _cols: u16, _xpixel: u16, _ypixel: u16) -> Result<(), PtyError> {
+    fn _resize_pty_static(master: &PtyMaster, rows: u16, cols: u16, xpixel: u16, ypixel: u16) -> Result<(), PtyError> {
         #[cfg(unix)]
         {
-            use std::os::unix::io::AsRawFd;
-            
-            let winsize = libc::winsize {
-                ws_row: rows,
-                ws_col: cols,
-                ws_xpixel: xpixel,
-                ws_ypixel: ypixel,
-            };
+            if let PtyMaster::Unix { master_fd, .. } = master {
+                use std::os::unix::io::AsRawFd;
+                
+                let winsize = libc::winsize {
+                    ws_row: rows,
+                    ws_col: cols,
+                    ws_xpixel: xpixel,
+                    ws_ypixel: ypixel,
+                };
 
-            let result = unsafe {
-                libc::ioctl(master.master_fd, libc::TIOCSWINSZ, &winsize)
-            };
+                let result = unsafe {
+                    libc::ioctl(*master_fd, libc::TIOCSWINSZ, &winsize)
+                };
 
-            if result < 0 {
-                Err(PtyError::ResizeFailed {
-                    message: format!("ioctl TIOCSWINSZ failed: {}", 
-                        io::Error::last_os_error()),
-                })
+                if result < 0 {
+                    Err(PtyError::ResizeFailed {
+                        message: format!("ioctl TIOCSWINSZ failed: {}", 
+                            io::Error::last_os_error()),
+                    })
+                } else {
+                    Ok(())
+                }
             } else {
-                Ok(())
+                Ok(()) // Unix PtyMaster variant required
             }
         }
 
         #[cfg(not(unix))]
         {
             // Cannot resize on non-Unix without proper ConPTY support
+            let _ = (master, rows, cols, xpixel, ypixel);
             Ok(())
         }
     }
