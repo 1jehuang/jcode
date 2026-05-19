@@ -1415,79 +1415,1125 @@ fn design_security_model(security_level: &SecurityLevel) -> SecurityModel {
     }
 }
 
-fn generate_web_api_files(_architecture: &ArchitectureOverview, _tech_stack: &TechStackDecision, _config: &PrototypeConfig) -> Vec<ProjectFile> {
-    vec![]
+fn generate_web_api_files(architecture: &ArchitectureOverview, tech_stack: &TechStackDecision, config: &PrototypeConfig) -> Vec<ProjectFile> {
+    let mut files = Vec::new();
+    
+    if tech_stack.language.name == "Rust" {
+        files.extend(generate_rust_web_api_files(architecture, tech_stack, config));
+    } else if tech_stack.language.name.to_lowercase() == "typescript" {
+        files.extend(generate_typescript_web_api_files(architecture, tech_stack, config));
+    }
+    
+    files
 }
 
-fn generate_cli_files(_architecture: &ArchitectureOverview, _tech_stack: &TechStackDecision, _config: &PrototypeConfig) -> Vec<ProjectFile> {
-    vec![]
+fn generate_rust_web_api_files(_architecture: &ArchitectureOverview, tech_stack: &TechStackDecision, config: &PrototypeConfig) -> Vec<ProjectFile> {
+    let project_name = &config.project_name;
+    let snake_name = project_name.replace("-", "_").to_lowercase();
+    
+    vec![
+        ProjectFile {
+            path: "src/main.rs".to_string(),
+            content: format!(r#"use {snake_name}::app::create_app;
+use std::net::SocketAddr;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {{
+    let app = create_app().await;
+    
+    let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+    println!("Server listening on {{}}", addr);
+    
+    axum::Server::bind(&addr)
+        .serve(app.into_make_service())
+        .await?;
+    
+    Ok(())
+}}
+"#),
+            file_type: FileType::Source,
+            purpose: "Main entry point".to_string(),
+            is_entry_point: true,
+            dependencies: vec!["axum".to_string(), "tokio".to_string()],
+        },
+        ProjectFile {
+            path: "src/app.rs".to_string(),
+            content: r#"use axum::{routing::get, Router};
+
+pub async fn create_app() -> Router {
+    Router::new()
+        .route("/health", get(health_check))
+        .route("/api/v1/items", get(list_items).post(create_item))
+        .route("/api/v1/items/:id", get(get_item))
 }
 
-fn generate_library_files(_architecture: &ArchitectureOverview, _tech_stack: &TechStackDecision, _config: &PrototypeConfig) -> Vec<ProjectFile> {
-    vec![]
+async fn health_check() -> &'static str {
+    "OK"
+}
+
+async fn list_items() -> String {
+    serde_json::json!([]).to_string()
+}
+
+async fn create_item() -> String {
+    serde_json::json!({
+        "id": "1",
+        "name": "New Item"
+    }).to_string()
+}
+
+async fn get_item() -> String {
+    serde_json::json!({
+        "id": "1",
+        "name": "Item"
+    }).to_string()
+}
+"#,
+            file_type: FileType::Source,
+            purpose: "Application router setup".to_string(),
+            is_entry_point: false,
+            dependencies: vec!["axum".to_string(), "serde_json".to_string()],
+        },
+        ProjectFile {
+            path: "src/lib.rs".to_string(),
+            content: format!(r#"pub mod app;
+
+pub use app::create_app;
+
+/// {project_name} API Library
+/// 
+/// This crate provides the core functionality for the {project_name} service.
+pub const VERSION: &str = "0.1.0";
+"#),
+            file_type: FileType::Source,
+            purpose: "Library entry point".to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        },
+        ProjectFile {
+            path: "Cargo.toml".to_string(),
+            content: format!(r#"[package]
+name = "{snake_name}"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7"
+tokio = {{ version = "1.0", features = ["full"] }}
+serde = {{ version = "1.0", features = ["derive"] }}
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+"#),
+            file_type: FileType::Configuration,
+            purpose: "Cargo package configuration".to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        },
+    ]
+}
+
+fn generate_typescript_web_api_files(_architecture: &ArchitectureOverview, _tech_stack: &TechStackDecision, config: &PrototypeConfig) -> Vec<ProjectFile> {
+    let project_name = &config.project_name;
+    
+    vec![
+        ProjectFile {
+            path: "src/index.ts".to_string(),
+            content: format!(r#"import express from 'express';
+import { router } from './routes';
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(express.json());
+app.use('/api/v1', router);
+
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok' });
+});
+
+app.listen(PORT, () => {
+    console.log(`{project_name} API running on port ${{PORT}}`);
+});
+"#),
+            file_type: FileType::Source,
+            purpose: "Main entry point".to_string(),
+            is_entry_point: true,
+            dependencies: vec!["express".to_string(), "@types/express".to_string()],
+        },
+        ProjectFile {
+            path: "src/routes/index.ts".to_string(),
+            content: r#"import { Router } from 'express';
+import { listItems, createItem, getItem } from '../controllers/itemController';
+
+export const router = Router();
+
+router.get('/items', listItems);
+router.post('/items', createItem);
+router.get('/items/:id', getItem);
+"#,
+            file_type: FileType::Source,
+            purpose: "API routes definition".to_string(),
+            is_entry_point: false,
+            dependencies: vec!["express".to_string()],
+        },
+        ProjectFile {
+            path: "src/controllers/itemController.ts".to_string(),
+            content: r#"import { Request, Response } from 'express';
+
+export const listItems = (req: Request, res: Response) => {
+    res.json([]);
+};
+
+export const createItem = (req: Request, res: Response) => {
+    const item = req.body;
+    res.status(201).json({
+        id: '1',
+        ...item,
+    });
+};
+
+export const getItem = (req: Request, res: Response) => {
+    const { id } = req.params;
+    res.json({
+        id,
+        name: 'Item',
+    });
+};
+"#,
+            file_type: FileType::Source,
+            purpose: "Item controller with CRUD operations".to_string(),
+            is_entry_point: false,
+            dependencies: vec!["express".to_string()],
+        },
+        ProjectFile {
+            path: "package.json".to_string(),
+            content: r#"{
+  "name": "api-service",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "node dist/index.js",
+    "build": "tsc",
+    "dev": "ts-node src/index.ts",
+    "test": "jest"
+  },
+  "dependencies": {
+    "express": "^4.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "ts-node": "^10.9.0",
+    "jest": "^29.0.0"
+  }
+}
+"#,
+            file_type: FileType::Configuration,
+            purpose: "npm package configuration".to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        },
+        ProjectFile {
+            path: "tsconfig.json".to_string(),
+            content: r#"{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules"]
+}
+"#,
+            file_type: FileType::Configuration,
+            purpose: "TypeScript configuration".to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        },
+    ]
+}
+
+fn generate_cli_files(_architecture: &ArchitectureOverview, tech_stack: &TechStackDecision, _config: &PrototypeConfig) -> Vec<ProjectFile> {
+    let mut files = Vec::new();
+    
+    if tech_stack.language.name == "Rust" {
+        files.push(ProjectFile {
+            path: "src/main.rs".to_string(),
+            content: r#"use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    #[arg(short, long)]
+    name: Option<String>,
+    
+    #[arg(short, long, default_value_t = 10)]
+    count: u32,
+}
+
+fn main() {
+    let cli = Cli::parse();
+    
+    if let Some(name) = cli.name {
+        println!("Hello, {}!", name);
+    } else {
+        println!("Hello, World!");
+    }
+    
+    println!("Count: {}", cli.count);
+}
+"#,
+            file_type: FileType::Source,
+            purpose: "CLI main entry point".to_string(),
+            is_entry_point: true,
+            dependencies: vec!["clap".to_string()],
+        });
+        files.push(ProjectFile {
+            path: "Cargo.toml".to_string(),
+            content: r#"[package]
+name = "cli-tool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.0", features = ["derive"] }
+"#,
+            file_type: FileType::Configuration,
+            purpose: "Cargo package configuration".to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        });
+    }
+    
+    files
+}
+
+fn generate_library_files(_architecture: &ArchitectureOverview, tech_stack: &TechStackDecision, config: &PrototypeConfig) -> Vec<ProjectFile> {
+    let mut files = Vec::new();
+    let project_name = &config.project_name;
+    let snake_name = project_name.replace("-", "_").to_lowercase();
+    
+    if tech_stack.language.name == "Rust" {
+        files.push(ProjectFile {
+            path: "src/lib.rs".to_string(),
+            content: format!(r#"//! {project_name}
+//! 
+//! A Rust library providing core functionality for {project_name}.
+//! 
+//! # Features
+//! 
+//! - Feature 1 description
+//! - Feature 2 description
+
+#![warn(missing_docs)]
+
+/// Main module
+pub mod core;
+
+/// Utilities module
+pub mod utils;
+
+/// Version of the library
+pub const VERSION: &str = "0.1.0";
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn it_works() {
+        assert_eq!(2 + 2, 4);
+    }
+}
+"#),
+            file_type: FileType::Source,
+            purpose: "Library entry point".to_string(),
+            is_entry_point: true,
+            dependencies: vec![],
+        });
+        files.push(ProjectFile {
+            path: "src/core.rs".to_string(),
+            content: r#"//! Core functionality module
+
+/// Core struct
+#[derive(Debug, Clone)]
+pub struct Core {
+    value: String,
+}
+
+impl Core {
+    /// Create a new Core instance
+    pub fn new(value: &str) -> Self {
+        Self {
+            value: value.to_string(),
+        }
+    }
+    
+    /// Get the value
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+    
+    /// Process the value
+    pub fn process(&self) -> String {
+        format!("processed: {}", self.value)
+    }
+}
+"#,
+            file_type: FileType::Source,
+            purpose: "Core module implementation".to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        });
+        files.push(ProjectFile {
+            path: "src/utils.rs".to_string(),
+            content: r#"//! Utility functions
+
+/// Format a string
+pub fn format_string(s: &str) -> String {
+    format!("[{}]", s)
+}
+
+/// Validate input
+pub fn validate_input(s: &str) -> Result<(), String> {
+    if s.is_empty() {
+        Err("Input cannot be empty".to_string())
+    } else {
+        Ok(())
+    }
+}
+"#,
+            file_type: FileType::Source,
+            purpose: "Utility functions".to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        });
+        files.push(ProjectFile {
+            path: "Cargo.toml".to_string(),
+            content: format!(r#"[package]
+name = "{snake_name}"
+version = "0.1.0"
+edition = "2021"
+description = "{project_name} library"
+license = "MIT"
+
+[dependencies]
+
+[dev-dependencies]
+"#),
+            file_type: FileType::Configuration,
+            purpose: "Cargo package configuration".to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        });
+    }
+    
+    files
 }
 
 fn generate_microservice_files(_architecture: &ArchitectureOverview, _tech_stack: &TechStackDecision, _config: &PrototypeConfig) -> Vec<ProjectFile> {
     vec![]
 }
 
-fn generic_project_files(_architecture: &ArchitectureOverview, _tech_stack: &TechStackDecision, _config: &PrototypeConfig) -> Vec<ProjectFile> {
-    vec![]
+fn generic_project_files(_architecture: &ArchitectureOverview, tech_stack: &TechStackDecision, _config: &PrototypeConfig) -> Vec<ProjectFile> {
+    let mut files = Vec::new();
+    
+    if tech_stack.language.name == "Rust" {
+        files.push(ProjectFile {
+            path: "src/main.rs".to_string(),
+            content: r#"fn main() {
+    println!("Hello, World!");
+}
+"#,
+            file_type: FileType::Source,
+            purpose: "Main entry point".to_string(),
+            is_entry_point: true,
+            dependencies: vec![],
+        });
+        files.push(ProjectFile {
+            path: "Cargo.toml".to_string(),
+            content: r#"[package]
+name = "generic-project"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+"#,
+            file_type: FileType::Configuration,
+            purpose: "Cargo package configuration".to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        });
+    }
+    
+    files
 }
 
 fn generate_test_files(_tech_stack: &TechStackDecision, _config: &PrototypeConfig) -> Vec<ProjectFile> {
-    vec![]
+    let mut files = Vec::new();
+    
+    if _tech_stack.language.name == "Rust" {
+        files.push(ProjectFile {
+            path: "src/tests.rs".to_string(),
+            content: r#"#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_basic_functionality() {
+        assert!(true);
+    }
+    
+    #[test]
+    fn test_edge_cases() {
+        assert_eq!(2 + 2, 4);
+    }
+}
+"#,
+            file_type: FileType::Source,
+            purpose: "Test suite".to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        });
+    } else if _tech_stack.language.name.to_lowercase() == "typescript" {
+        files.push(ProjectFile {
+            path: "tests/itemController.test.ts".to_string(),
+            content: r#"import { listItems, createItem, getItem } from '../src/controllers/itemController';
+import { Request, Response } from 'express';
+
+describe('Item Controller', () => {
+    it('should list items', () => {
+        const req = {} as Request;
+        const res = {
+            json: jest.fn()
+        } as unknown as Response;
+        
+        listItems(req, res);
+        
+        expect(res.json).toHaveBeenCalledWith([]);
+    });
+    
+    it('should create item', () => {
+        const req = {
+            body: { name: 'Test' }
+        } as unknown as Request;
+        const res = {
+            status: jest.fn().mockReturnThis(),
+            json: jest.fn()
+        } as unknown as Response;
+        
+        createItem(req, res);
+        
+        expect(res.status).toHaveBeenCalledWith(201);
+    });
+});
+"#,
+            file_type: FileType::Source,
+            purpose: "Item controller tests".to_string(),
+            is_entry_point: false,
+            dependencies: vec!["jest".to_string(), "@types/jest".to_string()],
+        });
+    }
+    
+    files
 }
 
 fn generate_documentation_files(_config: &PrototypeConfig) -> Vec<ProjectFile> {
-    vec![]
+    vec![
+        ProjectFile {
+            path: "README.md".to_string(),
+            content: format!(r#"# {}
+
+{}
+
+## Features
+
+- Feature 1
+- Feature 2
+- Feature 3
+
+## Getting Started
+
+### Prerequisites
+
+- Rust 1.75+ / Node.js 20+
+
+### Installation
+
+```bash
+# Install dependencies
+npm install
+# or
+cargo build
+```
+
+### Running
+
+```bash
+npm start
+# or
+cargo run
+```
+
+## Usage
+
+```typescript
+// Example usage
+const result = await api.call();
+```
+
+## Testing
+
+```bash
+npm test
+# or
+cargo test
+```
+
+## License
+
+MIT
+"#, config.project_name, config.description),
+            file_type: FileType::Documentation,
+            purpose: "Project README".to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        },
+        ProjectFile {
+            path: "docs/api.md".to_string(),
+            content: r#"# API Documentation
+
+## Endpoints
+
+### GET /health
+
+**Description**: Health check endpoint
+
+**Response**:
+```json
+{
+    "status": "ok"
+}
+```
+
+### GET /api/v1/items
+
+**Description**: List all items
+
+**Response**:
+```json
+[]
+```
+
+### POST /api/v1/items
+
+**Description**: Create new item
+
+**Request**:
+```json
+{
+    "name": "string"
+}
+```
+
+**Response**:
+```json
+{
+    "id": "uuid",
+    "name": "string"
+}
+```
+"#,
+            file_type: FileType::Documentation,
+            purpose: "API documentation".to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        },
+    ]
 }
 
 fn generate_ci_cd_files(_tech_stack: &TechStackDecision) -> Vec<ProjectFile> {
-    vec![]
+    vec![
+        ProjectFile {
+            path: ".github/workflows/ci.yml".to_string(),
+            content: r#"name: CI/CD
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+      
+    - name: Build
+      run: cargo build --release
+      
+    - name: Test
+      run: cargo test
+      
+    - name: Lint
+      run: cargo clippy
+"#,
+            file_type: FileType::Configuration,
+            purpose: "GitHub Actions CI/CD workflow".to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        },
+    ]
 }
 
 fn generate_docker_files() -> Vec<ProjectFile> {
-    vec![]
+    vec![
+        ProjectFile {
+            path: "Dockerfile".to_string(),
+            content: r#"FROM rust:1.75-slim as builder
+
+WORKDIR /app
+
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+
+RUN cargo build --release
+
+FROM debian:bookworm-slim
+
+WORKDIR /app
+
+COPY --from=builder /app/target/release/app .
+
+EXPOSE 8080
+
+CMD ["./app"]
+"#,
+            file_type: FileType::Configuration,
+            purpose: "Docker container configuration".to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        },
+        ProjectFile {
+            path: "docker-compose.yml".to_string(),
+            content: r#"version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - NODE_ENV=production
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: appdb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
+"#,
+            file_type: FileType::Configuration,
+            purpose: "Docker Compose configuration".to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        },
+    ]
 }
 
 fn generate_config_files(_tech_stack: &TechStackDecision, _config: &PrototypeConfig) -> Vec<ProjectFile> {
-    vec![]
+    vec![
+        ProjectFile {
+            path: ".gitignore".to_string(),
+            content: r#"# Dependencies
+node_modules/
+target/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+
+# Coverage
+coverage/
+.nyc_output/
+"#,
+            file_type: FileType::Configuration,
+            purpose: "Git ignore rules".to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        },
+        ProjectFile {
+            path: ".env.example".to_string(),
+            content: r#"# Environment Variables
+PORT=8080
+DATABASE_URL=postgres://user:password@localhost:5432/db
+API_KEY=your-api-key
+"#,
+            file_type: FileType::Configuration,
+            purpose: "Environment variables template".to_string(),
+            is_entry_point: false,
+            dependencies: vec![],
+        },
+    ]
 }
 
-fn create_phases(_architecture: &ArchitectureOverview, _config: &PrototypeConfig) -> Vec<ImplementationPhase> {
-    vec![]
+fn create_phases(_architecture: &ArchitectureOverview, config: &PrototypeConfig) -> Vec<ImplementationPhase> {
+    let duration = config.constraints.time_constraint_weeks.unwrap_or(8);
+    
+    vec![
+        ImplementationPhase {
+            id: 1,
+            name: "需求分析与设计".to_string(),
+            duration_days: (duration * 7 / 4) as u32,
+            tasks: vec![
+                TaskDescription {
+                    title: "需求收集和分析".to_string(),
+                    description: "收集用户需求，进行需求分析".to_string(),
+                    estimated_hours: 24.0,
+                    dependencies: vec![],
+                    resources_needed: vec!["业务分析师".to_string()],
+                },
+                TaskDescription {
+                    title: "架构设计".to_string(),
+                    description: "设计系统架构和技术方案".to_string(),
+                    estimated_hours: 32.0,
+                    dependencies: vec![1],
+                    resources_needed: vec!["架构师".to_string()],
+                },
+                TaskDescription {
+                    title: "数据库设计".to_string(),
+                    description: "设计数据库 schema".to_string(),
+                    estimated_hours: 16.0,
+                    dependencies: vec![2],
+                    resources_needed: vec!["开发人员".to_string()],
+                },
+            ],
+            deliverables: vec![
+                "需求文档".to_string(),
+                "架构设计文档".to_string(),
+                "数据库设计文档".to_string(),
+            ],
+            acceptance_criteria: vec![
+                "需求文档评审通过".to_string(),
+                "架构方案确认".to_string(),
+            ],
+        },
+        ImplementationPhase {
+            id: 2,
+            name: "核心功能开发".to_string(),
+            duration_days: (duration * 7 / 2) as u32,
+            tasks: vec![
+                TaskDescription {
+                    title: "基础框架搭建".to_string(),
+                    description: "搭建项目基础框架和配置".to_string(),
+                    estimated_hours: 16.0,
+                    dependencies: vec![],
+                    resources_needed: vec!["开发人员".to_string()],
+                },
+                TaskDescription {
+                    title: "核心业务逻辑实现".to_string(),
+                    description: "实现核心业务功能".to_string(),
+                    estimated_hours: 80.0,
+                    dependencies: vec![1],
+                    resources_needed: vec!["开发人员".to_string()],
+                },
+                TaskDescription {
+                    title: "API 接口开发".to_string(),
+                    description: "开发 RESTful API 接口".to_string(),
+                    estimated_hours: 40.0,
+                    dependencies: vec![2],
+                    resources_needed: vec!["开发人员".to_string()],
+                },
+            ],
+            deliverables: vec![
+                "基础框架代码".to_string(),
+                "核心功能代码".to_string(),
+                "API 接口文档".to_string(),
+            ],
+            acceptance_criteria: vec![
+                "框架搭建完成".to_string(),
+                "核心功能开发完成".to_string(),
+            ],
+        },
+        ImplementationPhase {
+            id: 3,
+            name: "测试与上线".to_string(),
+            duration_days: (duration * 7 / 4) as u32,
+            tasks: vec![
+                TaskDescription {
+                    title: "单元测试".to_string(),
+                    description: "编写单元测试用例".to_string(),
+                    estimated_hours: 24.0,
+                    dependencies: vec![],
+                    resources_needed: vec!["测试人员".to_string()],
+                },
+                TaskDescription {
+                    title: "集成测试".to_string(),
+                    description: "进行集成测试".to_string(),
+                    estimated_hours: 32.0,
+                    dependencies: vec![1],
+                    resources_needed: vec!["测试人员".to_string()],
+                },
+                TaskDescription {
+                    title: "部署上线".to_string(),
+                    description: "部署到生产环境".to_string(),
+                    estimated_hours: 16.0,
+                    dependencies: vec![2],
+                    resources_needed: vec!["运维人员".to_string()],
+                },
+            ],
+            deliverables: vec![
+                "测试报告".to_string(),
+                "部署脚本".to_string(),
+                "上线文档".to_string(),
+            ],
+            acceptance_criteria: vec![
+                "测试覆盖率达标".to_string(),
+                "系统稳定运行".to_string(),
+            ],
+        },
+    ]
 }
 
 fn get_prerequisites(_architecture: &ArchitectureOverview) -> Vec<String> {
-    vec![]
+    vec![
+        "开发环境已配置".to_string(),
+        "代码仓库已创建".to_string(),
+        "依赖包已安装".to_string(),
+        "数据库服务可用".to_string(),
+        "CI/CD 流水线已配置".to_string(),
+    ]
 }
 
 fn get_common_pitfalls(_project_type: &ProjectType) -> Vec<Pitfall> {
-    vec![]
+    vec![
+        Pitfall {
+            scenario: "数据库连接泄漏".to_string(),
+            impact: "系统性能下降，连接池耗尽".to_string(),
+            prevention: "使用连接池，确保及时释放连接".to_string(),
+        },
+        Pitfall {
+            scenario: "未处理异常".to_string(),
+            impact: "系统崩溃，用户体验差".to_string(),
+            prevention: "完善异常处理机制，添加日志记录".to_string(),
+        },
+        Pitfall {
+            scenario: "并发数据竞争".to_string(),
+            impact: "数据不一致，业务逻辑错误".to_string(),
+            prevention: "使用锁机制或乐观锁，设计幂等接口".to_string(),
+        },
+    ]
 }
 
 fn get_best_practices(_pattern: &ArchitecturePattern) -> Vec<BestPractice> {
-    vec![]
+    vec![
+        BestPractice {
+            category: "代码质量".to_string(),
+            practice: "遵循 SOLID 原则".to_string(),
+            rationale: "提高代码可维护性和可扩展性".to_string(),
+        },
+        BestPractice {
+            category: "测试".to_string(),
+            practice: "测试驱动开发".to_string(),
+            rationale: "保证代码质量，便于重构".to_string(),
+        },
+        BestPractice {
+            category: "安全".to_string(),
+            practice: "输入验证和参数校验".to_string(),
+            rationale: "防止注入攻击和数据泄露".to_string(),
+        },
+        BestPractice {
+            category: "性能".to_string(),
+            practice: "合理使用缓存".to_string(),
+            rationale: "减少数据库压力，提高响应速度".to_string(),
+        },
+    ]
 }
 
-fn identify_risks(_config: &PrototypeConfig) -> Vec<RiskItem> {
-    vec![]
+fn identify_risks(config: &PrototypeConfig) -> Vec<RiskItem> {
+    let mut risks = Vec::new();
+    
+    if config.constraints.security_level >= SecurityLevel::High {
+        risks.push(RiskItem {
+            id: "SEC-001".to_string(),
+            category: RiskCategory::Security,
+            description: "安全漏洞风险".to_string(),
+            probability: ProbabilityLevel::Medium,
+            impact: ImpactLevel::Critical,
+            score: 0.75,
+        });
+    }
+    
+    if config.constraints.concurrent_users.map_or(false, |n| n > 10000) {
+        risks.push(RiskItem {
+            id: "PERF-001".to_string(),
+            category: RiskCategory::Technical,
+            description: "高并发性能风险".to_string(),
+            probability: ProbabilityLevel::High,
+            impact: ImpactLevel::Major,
+            score: 0.8,
+        });
+    }
+    
+    if config.constraints.time_constraint_weeks.map_or(false, |w| w < 4) {
+        risks.push(RiskItem {
+            id: "SCHED-001".to_string(),
+            category: RiskCategory::Operational,
+            description: "项目进度风险".to_string(),
+            probability: ProbabilityLevel::High,
+            impact: ImpactLevel::Moderate,
+            score: 0.6,
+        });
+    }
+    
+    risks.push(RiskItem {
+        id: "TECH-001".to_string(),
+        category: RiskCategory::Technical,
+        description: "技术选型风险".to_string(),
+        probability: ProbabilityLevel::Medium,
+        impact: ImpactLevel::Moderate,
+        score: 0.45,
+    });
+    
+    risks
 }
 
-fn create_mitigation_strategies(_risks: &[RiskItem]) -> HashMap<String, MitigationStrategy> {
-    HashMap::new()
+fn create_mitigation_strategies(risks: &[RiskItem]) -> HashMap<String, MitigationStrategy> {
+    let mut strategies = HashMap::new();
+    
+    for risk in risks {
+        let strategy = match risk.category {
+            RiskCategory::Security => MitigationStrategy {
+                strategy: "进行安全审计，使用安全编码规范，定期漏洞扫描".to_string(),
+                owner: "安全工程师".to_string(),
+                timeline: "持续进行".to_string(),
+                cost: Some(10000.0),
+            },
+            RiskCategory::Technical => MitigationStrategy {
+                strategy: "进行性能测试，优化关键路径，考虑水平扩展".to_string(),
+                owner: "架构师".to_string(),
+                timeline: "开发阶段".to_string(),
+                cost: Some(5000.0),
+            },
+            RiskCategory::Operational => MitigationStrategy {
+                strategy: "制定详细计划，设置里程碑，定期进度检查".to_string(),
+                owner: "项目经理".to_string(),
+                timeline: "整个项目周期".to_string(),
+                cost: None,
+            },
+            _ => MitigationStrategy {
+                strategy: "持续监控，及时响应".to_string(),
+                owner: "团队负责人".to_string(),
+                timeline: "持续进行".to_string(),
+                cost: None,
+            },
+        };
+        
+        strategies.insert(risk.id.clone(), strategy);
+    }
+    
+    strategies
 }
 
-fn calculate_overall_risk_level(_risks: &[RiskItem]) -> RiskLevel {
-    RiskLevel::Low
+fn calculate_overall_risk_level(risks: &[RiskItem]) -> RiskLevel {
+    if risks.is_empty() {
+        return RiskLevel::Low;
+    }
+    
+    let avg_score: f64 = risks.iter().map(|r| r.score).sum::<f64>() / risks.len() as f64;
+    
+    match avg_score {
+        s if s >= 0.7 => RiskLevel::Critical,
+        s if s >= 0.5 => RiskLevel::High,
+        s if s >= 0.3 => RiskLevel::Medium,
+        _ => RiskLevel::Low,
+    }
 }
 
-fn estimate_project_costs(_config: &PrototypeConfig) -> CostEstimate {
+fn estimate_project_costs(config: &PrototypeConfig) -> CostEstimate {
+    let team_size = match config.constraints.team_size {
+        TeamSize::Solo => 1,
+        TeamSize::Small(n) => n,
+        TeamSize::Large(n) => n,
+        TeamSize::Enterprise(n) => n,
+    };
+    
+    let duration_weeks = config.constraints.time_constraint_weeks.unwrap_or(8);
+    let hourly_rate = match config.constraints.budget_tier {
+        BudgetTier::Bootstrap => 50.0,
+        BudgetTier::Startup => 100.0,
+        BudgetTier::Enterprise => 150.0,
+        BudgetTier::EnterprisePlus => 200.0,
+    };
+    
+    let development_hours = team_size as f64 * duration_weeks as f64 * 40.0;
+    let development_cost = development_hours * hourly_rate;
+    
+    let infrastructure_monthly = match config.constraints.budget_tier {
+        BudgetTier::Bootstrap => 100.0,
+        BudgetTier::Startup => 500.0,
+        BudgetTier::Enterprise => 2000.0,
+        BudgetTier::EnterprisePlus => 5000.0,
+    };
+    
+    let testing_cost = development_cost * 0.2;
+    let deployment_cost = 2000.0;
+    let monitoring_cost = infrastructure_monthly * 12;
+    let maintenance_annual = development_cost * 0.15;
+    
     CostEstimate {
-        development_cost: Money { amount: 0.0, currency: "USD".to_string() },
-        infrastructure_monthly: Money { amount: 0.0, currency: "USD".to_string() },
-        total_first_year: Money { amount: 0.0, currency: "USD".to_string() },
-        breakdown: CostBreakdown::default(),
+        development_cost: Money {
+            amount: development_cost + testing_cost + deployment_cost,
+            currency: "USD".to_string(),
+        },
+        infrastructure_monthly: Money {
+            amount: infrastructure_monthly,
+            currency: "USD".to_string(),
+        },
+        total_first_year: Money {
+            amount: development_cost + testing_cost + deployment_cost + monitoring_cost + maintenance_annual,
+            currency: "USD".to_string(),
+        },
+        breakdown: CostBreakdown {
+            development: development_cost,
+            testing: testing_cost,
+            deployment: deployment_cost,
+            monitoring: monitoring_cost,
+            maintenance_annual,
+        },
     }
 }

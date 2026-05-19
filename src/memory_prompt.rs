@@ -1,10 +1,14 @@
 const MEMORY_CONTEXT_MAX_CHARS: usize = 8_000;
 const MEMORY_CONTEXT_MAX_MESSAGES: usize = 12;
 const MEMORY_CONTEXT_MAX_BLOCK_CHARS: usize = 1_200;
-#[allow(dead_code)]
-const EXTRACTION_CONTEXT_MAX_MESSAGES: usize = 40;
-#[allow(dead_code)]
-const EXTRACTION_CONTEXT_MAX_CHARS: usize = 24_000;
+
+/// Maximum number of messages to include in extraction context.
+/// Larger than relevance checking (40 vs 12) since extraction needs broader context.
+pub const EXTRACTION_CONTEXT_MAX_MESSAGES: usize = 40;
+
+/// Maximum characters for extraction context.
+/// Larger than relevance checking (24,000 vs 8,000) to capture full conversation patterns.
+pub const EXTRACTION_CONTEXT_MAX_CHARS: usize = 24_000;
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
@@ -44,8 +48,9 @@ fn format_content_block_for_relevance(block: &crate::message::ContentBlock) -> O
     }
 }
 
-#[allow(dead_code)]
-fn format_content_block_for_extraction(block: &crate::message::ContentBlock) -> Option<String> {
+/// Format a content block for memory extraction.
+/// Includes more detail than relevance checking (e.g., tool inputs and full results).
+pub fn format_content_block_for_extraction(block: &crate::message::ContentBlock) -> Option<String> {
     match block {
         crate::message::ContentBlock::Text { text, .. } => {
             let trimmed = text.trim();
@@ -132,11 +137,10 @@ pub fn format_context_for_relevance(messages: &[crate::message::Message]) -> Str
     chunks.join("\n").trim().to_string()
 }
 
-/// Format messages into a wider context string for extraction.
-/// Uses a larger window than relevance checking since extraction needs to
-/// capture learnings from a broader portion of the conversation.
-#[allow(dead_code)]
-pub(crate) fn format_context_for_extraction(messages: &[crate::message::Message]) -> String {
+/// Format messages into a wider context string for memory extraction.
+/// Uses a larger window than relevance checking (40 messages / 24K chars vs 12 messages / 8K chars)
+/// since extraction needs to capture learnings from a broader portion of the conversation.
+pub fn format_context_for_extraction(messages: &[crate::message::Message]) -> String {
     let mut chunks: Vec<String> = Vec::new();
     let mut total_chars = 0usize;
 

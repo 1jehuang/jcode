@@ -140,11 +140,7 @@ struct PtyMaster {
 
 #[cfg(windows)]
 struct PtyMaster {
-    // Windows ConPTY handles
-    input_handle: windows_sys::Win32::Foundation::HANDLE,
-    output_handle: windows_sys::Win32::Foundation::HANDLE,
-    process_handle: windows_sys::Win32::Foundation::HANDLE,
-    thread_handle: windows_sys::Win32::Foundation::HANDLE,
+    _placeholder: u8,
 }
 
 impl PtySession {
@@ -627,94 +623,18 @@ impl PtySession {
 
         #[cfg(windows)]
         {
-            use windows_sys::Win32::System::Console::{
-                CreatePseudoConsole, COORD, PseudoConsole, ResizePseudoConsole,
-            };
-            use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
-            use windows_sys::Win32::System::Threading::{
-                CreateProcessW, STARTUPINFOW, PROCESS_INFORMATION,
-            };
-            use windows_sys::Win32::Storage::FileSystem::CreatePipe;
-
-            let mut input_read: HANDLE = INVALID_HANDLE_VALUE;
-            let mut input_write: HANDLE = INVALID_HANDLE_VALUE;
-            let mut output_read: HANDLE = INVALID_HANDLE_VALUE;
-            let mut output_write: HANDLE = INVALID_HANDLE_VALUE;
-
-            unsafe {
-                if CreatePipe(&mut input_read, &mut input_write, std::ptr::null_mut(), 0) == 0 {
-                    return Err(PtyError::AllocationFailed {
-                        message: "Failed to create input pipe".to_string(),
-                    });
-                }
-
-                if CreatePipe(&mut output_read, &mut output_write, std::ptr::null_mut(), 0) == 0 {
-                    return Err(PtyError::AllocationFailed {
-                        message: "Failed to create output pipe".to_string(),
-                    });
-                }
+            #[cfg(feature = "winpty")]
+            {
+                return Err(PtyError::AllocationFailed {
+                    message: "PTY support requires the winpty feature".to_string(),
+                });
             }
-
-            let size = COORD {
-                X: self.config.cols as i16,
-                Y: self.config.rows as i16,
-            };
-
-            let mut pty_handle: PseudoConsole = std::ptr::null_mut();
-
-            unsafe {
-                if CreatePseudoConsole(
-                    size,
-                    input_read,
-                    output_write,
-                    0,
-                    &mut pty_handle,
-                ) != 0 {
-                    return Err(PtyError::AllocationFailed {
-                        message: "Failed to create ConPTY".to_string(),
-                    });
-                }
+            #[cfg(not(feature = "winpty"))]
+            {
+                return Err(PtyError::AllocationFailed {
+                    message: "PTY not supported on Windows without winpty feature".to_string(),
+                });
             }
-
-            let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
-            si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-            si.dwFlags = windows_sys::Win32::ProcessThread::STARTF_USESTDHANDLES
-                | windows_sys::Win32::ProcessThread::STARTF_USESIZE;
-            si.hStdInput = input_read;
-            si.hStdOutput = output_write;
-            si.hStdError = output_write;
-            si.dwXSize = self.config.cols as u32;
-            si.dwYSize = self.config.rows as u32;
-
-            let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
-
-            let cmd: Vec<u16> = "powershell.exe".encode_utf16().chain(std::iter::once(0)).collect();
-
-            unsafe {
-                if CreateProcessW(
-                    std::ptr::null(),
-                    cmd.as_ptr() as *mut u16,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    1,
-                    windows_sys::Win32::ProcessThread::CREATE_NEW_CONSOLE,
-                    std::ptr::null_mut(),
-                    std::ptr::null(),
-                    &si,
-                    &mut pi,
-                ) == 0 {
-                    return Err(PtyError::AllocationFailed {
-                        message: "Failed to create process".to_string(),
-                    });
-                }
-            }
-
-            Ok(PtyMaster {
-                input_handle: input_write,
-                output_handle: output_read,
-                process_handle: pi.hProcess,
-                thread_handle: pi.hThread,
-            })
         }
 
         #[cfg(not(any(unix, windows)))]

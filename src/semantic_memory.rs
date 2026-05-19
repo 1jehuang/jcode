@@ -16,8 +16,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_DECAY_HALFLIFE_SECS: u64 = 86400 * 7;
 const MAX_GRAPH_NODES: usize = 10000;
-#[allow(dead_code)]
-const MAX_SEARCH_DEPTH: usize = 3;
+
+/// Maximum depth for graph traversal during related node search.
+/// Limits BFS expansion to prevent exponential blowup in dense graphs.
+pub const MAX_SEARCH_DEPTH: usize = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct MemoryNode {
@@ -219,6 +221,8 @@ impl MemoryGraph {
         }).collect()
     }
 
+    /// Get nodes related to the given node up to specified depth.
+    /// Uses BFS traversal along graph edges.
     pub fn get_related(&self, node_id: &str, depth: usize) -> Vec<(MemoryNode, EdgeRelation)> {
         let mut results = Vec::new();
         let mut visited = HashSet::new();
@@ -240,6 +244,13 @@ impl MemoryGraph {
             }
         }
         results
+    }
+
+    /// Get related nodes using default MAX_SEARCH_DEPTH limit.
+    /// This is the common case for most queries where we want nearby context
+    /// without exploring the entire graph.
+    pub fn get_related_default(&self, node_id: &str) -> Vec<(MemoryNode, EdgeRelation)> {
+        self.get_related(node_id, MAX_SEARCH_DEPTH)
     }
 
     pub fn evict_lru(&mut self) -> Result<()> {
@@ -323,6 +334,31 @@ mod tests {
 
         let related = graph.get_related("a", 2);
         assert_eq!(related.len(), 2);
+    }
+
+    #[test]
+    fn test_get_related_default_depth() {
+        let mut graph = MemoryGraph::new();
+        // Create a chain: n1 -> n2 -> n3 -> n4 -> n5
+        for i in 1..=5 {
+            graph.add_node(MemoryNode {
+                id: format!("n{}", i),
+                content: format!("node {}", i),
+                node_type: MemoryNodeType::Fact,
+                ..Default::default()
+            }).unwrap();
+        }
+        graph.add_edge("n1", "n2", EdgeRelation::RelatedTo, 1.0);
+        graph.add_edge("n2", "n3", EdgeRelation::RelatedTo, 1.0);
+        graph.add_edge("n3", "n4", EdgeRelation::RelatedTo, 1.0);
+        graph.add_edge("n4", "n5", EdgeRelation::RelatedTo, 1.0);
+
+        // Default depth is MAX_SEARCH_DEPTH (3), so should reach n2, n3, n4
+        let related = graph.get_related_default("n1");
+        assert_eq!(related.len(), 3);
+        assert_eq!(related[0].0.id, "n2");
+        assert_eq!(related[1].0.id, "n3");
+        assert_eq!(related[2].0.id, "n4");
     }
 
     #[test]

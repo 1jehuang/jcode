@@ -323,7 +323,7 @@ impl PreciseEditEngine {
             .unwrap_or((0, 0, 0.0))
     }
 
-    fn apply_edit(&self, content: &str, start: usize, end: usize, replacement: &[String]) -> String {
+    pub fn apply_edit(&self, content: &str, start: usize, end: usize, replacement: &[String]) -> String {
         let lines: Vec<&str> = content.lines().collect();
         let mut out = Vec::with_capacity(lines.len() + replacement.len());
         for (i, line) in lines.iter().enumerate() {

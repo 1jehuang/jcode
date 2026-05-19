@@ -153,7 +153,7 @@ impl RefactorEngine {
         };
 
         // Commit
-        let result = match self.coordinator.commit(&tx_id) {
+        let result = match self.coordinator.commit(&tx_id).await {
             Ok(coord_result) => {
                 if coord_result.status == TransactionStatus::Committed {
                     RefactorResult {
@@ -168,7 +168,7 @@ impl RefactorEngine {
                 } else {
                     // Partial failure — auto rollback if configured
                     if self.config.auto_rollback {
-                        if let Err(e) = self.coordinator.rollback(&tx_id) {
+                        if let Err(e) = self.coordinator.rollback(&tx_id).await {
                             warn!("Auto-rollback failed: {}", e);
                         }
                     }
@@ -185,7 +185,7 @@ impl RefactorEngine {
             }
             Err(e) => {
                 if self.config.auto_rollback {
-                    let _ = self.coordinator.rollback(&tx_id);
+                    let _ = self.coordinator.rollback(&tx_id).await;
                 }
                 RefactorResult {
                     success: false, files_modified: 0, edit_results: vec![],
@@ -275,7 +275,7 @@ impl RefactorEngine {
 
     /// 回滚到指定事务
     pub async fn rollback(&mut self, transaction_id: &str) -> Result<usize> {
-        self.coordinator.rollback(transaction_id)
+        self.coordinator.rollback(transaction_id).await
             .map_err(|e| anyhow::anyhow!("Rollback failed: {}", e))
     }
 
