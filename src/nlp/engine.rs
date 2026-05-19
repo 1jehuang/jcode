@@ -1298,18 +1298,18 @@ pub struct CodeStructure {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FuncInfo {
-    name: String,
-    signature: String,
-    description: Option<String>,
-    parameters: Option<Vec<String>>,
+    pub name: String,
+    pub signature: String,
+    pub description: Option<String>,
+    pub parameters: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClassInfo {
-    name: String,
-    class_type: ClassType,
-    methods: Vec<String>,
-    properties: Vec<String>,
+    pub name: String,
+    pub class_type: ClassType,
+    pub methods: Vec<String>,
+    pub properties: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1324,9 +1324,9 @@ pub enum ClassType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommentInfo {
-    line: usize,
-    content: String,
-    comment_type: CommentType,
+    pub line: usize,
+    pub content: String,
+    pub comment_type: CommentType,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1338,9 +1338,9 @@ pub enum CommentType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComplexityMetrics {
-    cyclomatic: f64,
-    cognitive: f64,
-    loc_per_function: f64,
+    pub cyclomatic: f64,
+    pub cognitive: f64,
+    pub loc_per_function: f64,
 }
 
 // Helper functions (simplified implementations)

@@ -189,7 +189,7 @@ impl PtySession {
         
         // If running, try to resize immediately
         if let Some(ref mut master) = self.pty_master {
-            let _ = Self::_resize_pty_static(master, rows, cols);
+            let _ = Self::_resize_pty_static(master, rows, cols, self.dimensions.xpixel, self.dimensions.ypixel);
         }
     }
 

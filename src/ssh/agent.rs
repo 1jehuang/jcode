@@ -252,7 +252,7 @@ impl SshAgentManager {
         }
 
         let output = self._execute_ssh_add_command_with_args(
-            key_path.display().to_string(), 
+            &key_path.display().to_string(), 
             &args, 
             socket
         )?;
@@ -386,7 +386,7 @@ impl SshAgentManager {
             // Parse signature output (would be base64 encoded)
             let signature = String::from_utf8_lossy(&output.stdout);
             // In real implementation, this would decode the signature format
-            Ok(signature.into_bytes())
+            Ok(signature.into_owned().into_bytes())
         }
     }
 
@@ -537,7 +537,8 @@ impl SshAgentManager {
 
         let bits = parts[0];         // Key size (1024, 2048, 256, etc.)
         let hash_type_and_value = parts[1];  // SHA256:value or MD5:value
-        let comment_parts: Vec<&str> = parts[2..parts.len()-1].join(" ").split('(').collect();
+        let joined = parts[2..parts.len()-1].join(" ");
+        let comment_parts: Vec<&str> = joined.split('(').collect();
         let comment = comment_parts.first().unwrap_or(&"").trim().to_string();
         let key_type_raw = parts.last()?.trim_end_matches(')');
         let key_type = key_type_raw.trim_start_matches('[').trim_end_matches(']');

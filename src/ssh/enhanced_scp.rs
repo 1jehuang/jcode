@@ -254,7 +254,7 @@ impl EnhancedScp {
             },
             checksum_verified: self.verify_checksum && checksum_after.is_some(),
             checksum_match: checksum_matches,
-            error: result.error,
+            error: result.error.clone(),
             details: vec![FileTransferDetail {
                 local_path: local_path.to_path_buf(),
                 remote_path: remote_path.to_path_buf(),
@@ -403,7 +403,7 @@ impl EnhancedScp {
             .unwrap_or(0);
 
         // Verify downloaded file
-        let checksum_after = if self.verify_checksum && result.success() {
+        let checksum_after = if self.verify_checksum && result.success {
             match self._calculate_local_checksum(local_path) {
                 Ok(cksum) => Some(cksum),
                 Err(_) => None,
@@ -429,7 +429,7 @@ impl EnhancedScp {
             },
             checksum_verified: self.verify_checksum && checksum_after.is_some(),
             checksum_match: checksum_matches,
-            error: result.error,
+            error: result.error.clone(),
             details: vec![FileTransferDetail {
                 local_path: local_path.to_path_buf(),
                 remote_path: remote_path.to_path_buf(),
@@ -693,7 +693,7 @@ impl EnhancedScp {
                         // Recurse into directories
                         let sub_files = self._collect_files_for_transfer(&path)?;
                         for (sub_path, sub_rel) in sub_files {
-                            files.push((sub_path, name.join(sub_rel)));
+                            files.push((sub_path, PathBuf::from(name.clone()).join(sub_rel)));
                         }
                     }
                 }

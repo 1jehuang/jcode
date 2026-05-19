@@ -1,5 +1,6 @@
 use std::time::{SystemTime, Duration, UNIX_EPOCH};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use base64::Engine;
 use serde::{Serialize, Deserialize};
 
@@ -326,7 +327,7 @@ impl TotpAuthenticator {
         }
 
         ipad.extend_from_slice(data);
-        opad.extend_from_slice(Self::_simple_sha1(&ipad));
+        opad.extend_from_slice(&Self::_simple_sha1(&ipad));
 
         Self::_simple_sha1(&opad)
     }
@@ -759,7 +760,7 @@ impl AuthMethod for TotpMethod {
 
     fn generate_challenge(&self, user_id: &str) -> Result<AuthChallenge, MfaError> {
         let secret = TotpAuthenticator::generate_secret(32);
-        let uri = TotpAuthenticator::get_qr_code_uri(&secret, user_id, &self.config.issuer);
+        let uri = TotpAuthenticator::get_qr_code_uri(&secret, user_id, &self.config.issuer, &self.config);
 
         Ok(AuthChallenge {
             challenge_id: uuid::Uuid::new_v4().to_string(),

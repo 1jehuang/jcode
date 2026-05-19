@@ -451,7 +451,7 @@ impl OnlineFeatureSelector {
                 }
                 
                 // 重要度高于阈值的保留
-                *importance > self.removal_threshold &&
+                **importance > self.removal_threshold &&
                 !self.disabled_features.contains(name)
             })
             .map(|(name, _)| name.clone())

@@ -163,7 +163,7 @@ impl SftpClient {
 
         // Build rsync command with progress tracking
         let result = if let Some(limit) = bandwidth_limit {
-            self._rsync_upload_with_bandwidth(local_path, remote_path, limit)?
+            self._rsync_upload_with_bandwidth::<F>(local_path, remote_path, limit)?
         } else {
             let internal = self._rsync_upload(local_path, remote_path, None)?;
             SftpTransferResult {
