@@ -6,6 +6,8 @@
 //! 3. Java传统线程 -> 虚拟线程 (Virtual Threads) 迁移
 //! 4. 架构现代化和性能优化
 
+#![allow(dead_code)]
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

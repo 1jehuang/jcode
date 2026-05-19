@@ -387,41 +387,44 @@ impl AstParser {
                 if self.config.enable_incremental {
                     let edit = self.compute_edit(&cached.source_code, source);
                     let old_tree = &cached.tree;
-                    
-                    if let Some(parser) = self.parsers.lock().unwrap().get_mut(&language) {
-                        let mut tree = old_tree.clone();
-                        tree.edit(&edit);
-                        
-                        let parse_result = parser.parse(source, Some(&tree));
-                        if let Some(new_tree) = parse_result {
-                            // 更新缓存
-                            if let Some(cached) = cache.get_mut(file_path) {
-                                let parsed_tree: Tree = new_tree.clone();
-                                *cached = CachedAst {
-                                tree: parsed_tree,
-                                source_code: source.to_string(),
-                                language,
-                                parsed_at: std::time::Instant::now(),
-                            };
 
-                            let mut stats = self.stats.write().await;
-                            stats.total_parses += 1;
-                            stats.incremental_parses += 1;
-                            stats.last_parse_time = Some(std::time::SystemTime::now());
-                            
-                            let elapsed = start.elapsed().as_micros() as f64;
-                            stats.avg_parse_time_us =
-                                (stats.avg_parse_time_us * (stats.total_parses - 1) as f64 + elapsed)
-                                / stats.total_parses as f64;
+                    let parse_result = {
+                        let mut parsers = self.parsers.lock().unwrap();
+                        parsers.get_mut(&language).and_then(|parser| {
+                            let mut tree = old_tree.clone();
+                            tree.edit(&edit);
+                            parser.parse(source, Some(&tree))
+                        })
+                    };
 
-                            debug!(
-                                incremental = true,
-                                time_us = start.elapsed().as_micros(),
-                                "Incremental parse completed"
-                            );
+                    if let Some(new_tree) = parse_result {
+                        // 更新缓存
+                        if let Some(cached) = cache.get_mut(file_path) {
+                            let parsed_tree: Tree = new_tree.clone();
+                            *cached = CachedAst {
+                            tree: parsed_tree,
+                            source_code: source.to_string(),
+                            language,
+                            parsed_at: std::time::Instant::now(),
+                        };
 
-                            return Ok(new_tree);
-                            }
+                        let mut stats = self.stats.write().await;
+                        stats.total_parses += 1;
+                        stats.incremental_parses += 1;
+                        stats.last_parse_time = Some(std::time::SystemTime::now());
+
+                        let elapsed = start.elapsed().as_micros() as f64;
+                        stats.avg_parse_time_us =
+                            (stats.avg_parse_time_us * (stats.total_parses - 1) as f64 + elapsed)
+                            / stats.total_parses as f64;
+
+                        debug!(
+                            incremental = true,
+                            time_us = start.elapsed().as_micros(),
+                            "Incremental parse completed"
+                        );
+
+                        return Ok(new_tree);
                         }
                     }
                 }
@@ -429,12 +432,13 @@ impl AstParser {
         }
 
         // 全量解析
-        let mut parsers = self.parsers.lock().unwrap();
-        let parser = parsers.get_mut(&language)
-            .ok_or_else(|| anyhow::anyhow!("Unsupported language: {}", language))?;
-
-        let tree = parser.parse(source, None)
-            .ok_or_else(|| anyhow::anyhow!("Failed to parse source code"))?;
+        let tree = {
+            let mut parsers = self.parsers.lock().unwrap();
+            let parser = parsers.get_mut(&language)
+                .ok_or_else(|| anyhow::anyhow!("Unsupported language: {}", language))?;
+            parser.parse(source, None)
+                .ok_or_else(|| anyhow::anyhow!("Failed to parse source code"))?
+        };
 
         // 存入缓存
         if self.config.enable_cache {

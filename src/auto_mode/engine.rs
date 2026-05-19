@@ -394,16 +394,14 @@ impl AutoModeEngine {
         learning.provide_feedback(action_type, description, was_correct);
 
         // 如果开启学习，更新置信度模型
-        {
-            let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
-            if cfg.enable_learning {
-                let mut model = self.confidence_model.lock().await;
-                model.record_decision(
-                    action_type,
-                    &ToolContext::new(action_type.clone(), description),
-                    was_correct,
-                );
-            }
+        let enable_learning = self.config.read().unwrap_or_else(|e| e.into_inner()).enable_learning;
+        if enable_learning {
+            let mut model = self.confidence_model.lock().await;
+            model.record_decision(
+                action_type,
+                &ToolContext::new(action_type.clone(), description),
+                was_correct,
+            );
         }
     }
 

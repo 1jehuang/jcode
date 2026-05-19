@@ -248,33 +248,39 @@ impl UnifiedScheduler {
 
             self.notify.notified().await;
 
-            let mut queue = self.task_queue.write();
             let mut ready_tasks = Vec::new();
-
             let mut remaining = Vec::new();
-            while let Some(queued_task) = queue.pop() {
-                let deps_resolved = if queued_task.dependencies_resolved {
-                    true
-                } else {
-                    self.check_dependencies(&queued_task.task).await
-                };
 
-                if deps_resolved {
-                    ready_tasks.push(queued_task);
+            {
+                let mut queue = self.task_queue.write();
+                while let Some(queued_task) = queue.pop() {
+                    if queued_task.dependencies_resolved {
+                        ready_tasks.push(queued_task);
+                    } else {
+                        remaining.push(queued_task);
+                    }
+                }
+            }
+
+            let mut still_pending = Vec::new();
+            for qt in remaining {
+                if self.check_dependencies(&qt.task).await {
+                    ready_tasks.push(qt);
                 } else {
-                    remaining.push(QueuedTask {
-                        task: queued_task.task,
-                        priority: queued_task.priority,
+                    still_pending.push(QueuedTask {
+                        task: qt.task,
+                        priority: qt.priority,
                         dependencies_resolved: false,
                     });
                 }
             }
 
-            for task in remaining {
-                queue.push(task);
+            {
+                let mut queue = self.task_queue.write();
+                for task in still_pending {
+                    queue.push(task);
+                }
             }
-
-            drop(queue);
 
             for queued_task in ready_tasks {
                 let task = queued_task.task;
@@ -496,10 +502,17 @@ impl ResourceManager {
     }
 
     pub async fn update_resource_loads(&self) {
-        let mut resources = self.resources.write();
-        for resource in resources.iter_mut() {
-            if let Some(monitor) = self.monitors.read().get(&resource.id) {
-                resource.current_load = monitor.get_load().await;
+        let resource_ids: Vec<ResourceId> = {
+            let resources = self.resources.read();
+            resources.iter().map(|r| r.id).collect()
+        };
+
+        for &id in &resource_ids {
+            let monitor = ResourceMonitor::new(id);
+            let current_load = monitor.get_load().await;
+            let mut resources = self.resources.write();
+            if let Some(resource) = resources.iter_mut().find(|r| r.id == id) {
+                resource.current_load = current_load;
             }
         }
     }
