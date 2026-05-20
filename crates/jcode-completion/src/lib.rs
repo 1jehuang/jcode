@@ -30,6 +30,12 @@ mod unified_provider;
 mod streaming_prefetch;
 mod incremental_index;
 mod behavior_learner;
+mod multiline_completion;
+mod semantic_search;
+mod collab_aware_completion;
+mod metrics;
+mod ast_parser;
+mod embedding_model;
 
 pub use ast_context::{AstContextProvider, CompletionContext, ScopeKind, RegexAstProvider};
 pub use llm_candidate::{CandidateGenerator, CompletionCandidate, CandidateKind, CompletionProvider, ProviderCandidateGenerator};
@@ -38,8 +44,17 @@ pub use lsp_provider::{LspAstProvider, LspConnection};
 pub use treesitter_provider::TreeSitterAstProvider;
 pub use unified_provider::UnifiedContextProvider;
 pub use streaming_prefetch::{StreamingPrefetcher, PrefetchStatistics};
-pub use incremental_index::{IncrementalIndex, SymbolEntry, SymbolKind, FileChangeEvent, ChangeType, IndexStatistics};
+pub use incremental_index::{IncrementalIndex, SymbolEntry, SymbolKind as IndexSymbolKind, FileChangeEvent, ChangeType, IndexStatistics};
 pub use behavior_learner::{BehaviorLearner, CompletionEvent, CompletionContextSnapshot, UserPreferences, LearningStatistics};
+pub use multiline_completion::{MultilineCompleter, MultilineSnippet, Placeholder};
+pub use semantic_search::{SemanticCompleter, CodeSnippet, Embedding, SemanticConfig, SemanticStats};
+pub use collab_aware_completion::{CollabAwareCompleter, MemberEditingContext, CollabStats};
+pub use metrics::{CompletionMetrics, get_metrics};
+pub use ast_parser::{AstTree, AstParserCache, Language as ParserLanguage, SymbolInfo, SymbolKind as AstSymbolKind};
+pub use embedding_model::{
+    EmbeddingBackend, EmbeddingModelConfig, create_embedding_model,
+    presets, CandleEmbeddingModel, FallbackEmbeddingModel,
+};
 
 use std::sync::Arc;
 use std::path::PathBuf;
@@ -89,6 +104,12 @@ impl CompletionEngine {
         cursor_line: usize,
         cursor_column: usize,
     ) -> Vec<RankedCandidate> {
+        let start_time = std::time::Instant::now();
+        let metrics = crate::metrics::get_metrics();
+
+        // Record request
+        metrics.record_request();
+
         // Layer 0: 检查预取缓存 (0-5ms if hit)
         let temp_context = CompletionContext {
             file_path: file_path.to_string(),
@@ -100,12 +121,21 @@ impl CompletionEngine {
         };
 
         if let Some(cached) = self.prefetcher.get_cached(&temp_context).await {
+            metrics.record_cache_hit();
             let context = match self.ast.resolve_context(content, cursor_line, cursor_column).await {
                 Some(ctx) => CompletionContext { file_path: file_path.to_string(), ..ctx },
                 None => return vec![],
             };
-            return self.memory.rank_and_filter(cached, &context).await;
+            let ranked = self.memory.rank_and_filter(cached, &context).await;
+
+            // Record latency for cache hits
+            let elapsed_ms = start_time.elapsed().as_millis() as u64;
+            metrics.record_latency(elapsed_ms);
+
+            return ranked;
         }
+
+        metrics.record_cache_miss();
 
         // Layer 1: LSP 获取精准上下文 (0.1-50ms)
         let context = match self.ast.resolve_context(content, cursor_line, cursor_column).await {
@@ -140,7 +170,10 @@ impl CompletionEngine {
                     score: 0.95,
                 }]
             }
-            Err(_) => vec![],
+            Err(_) => {
+                metrics.record_error();
+                vec![]
+            }
         };
 
         // Store in prefetch cache for future use
@@ -168,6 +201,7 @@ impl CompletionEngine {
         // Record interaction for learning (assume first candidate would be accepted)
         if let Some(first) = ranked.first() {
             self.prefetcher.record_completion_accepted(file_path, &first.candidate.label);
+            metrics.record_acceptance();
 
             // Record detailed event for behavior learning
             let event = CompletionEvent {
@@ -185,7 +219,17 @@ impl CompletionEngine {
                 time_to_decision_ms: 500, // Placeholder
             };
             self.behavior_learner.record_completion_event(event).await;
+        } else if !ranked.is_empty() {
+            metrics.record_rejection();
         }
+
+        // Record final latency
+        let elapsed_ms = start_time.elapsed().as_millis() as u64;
+        metrics.record_latency(elapsed_ms);
+
+        // Update cache size metric
+        let cache_stats = self.prefetcher.get_stats();
+        metrics.update_cache_size(cache_stats.cache_size);
 
         ranked
     }

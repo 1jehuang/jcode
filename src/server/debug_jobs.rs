@@ -92,7 +92,7 @@ pub(super) async fn maybe_start_async_debug_job(
         tokio::spawn(async move {
             mark_job_running(&jobs, &job_id_inner).await;
 
-            let result = super::run_swarm_message(agent.clone(), &msg).await;
+            let result = super::run_swarm_message(agent.clone(), &msg, None).await;
             let partial_output = if result.is_err() {
                 let agent = agent.lock().await;
                 agent.last_assistant_text()

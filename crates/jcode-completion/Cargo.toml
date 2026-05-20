@@ -18,3 +18,19 @@ reqwest = { version = "0.12", features = ["json"] }
 tokio-util = "0.7"
 lru = "0.12"
 chrono = { version = "0.4", features = ["serde"] }
+once_cell = "1.19"
+
+# Tree-sitter for AST parsing and semantic analysis
+tree-sitter = "0.20"
+tree-sitter-rust = "0.20"
+tree-sitter-typescript = "0.20"
+tree-sitter-python = "0.20"
+
+# Candle for ML embeddings (optional feature)
+candle-core = { version = "0.3", optional = true }
+candle-transformers = { version = "0.3", optional = true }
+tokenizers = { version = "0.13", optional = true }
+
+[features]
+default = []
+embeddings = ["candle-core", "candle-transformers", "tokenizers"]

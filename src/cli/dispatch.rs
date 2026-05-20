@@ -49,8 +49,20 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 provider_init::init_provider(&args.provider, args.model.as_deref()).await?;
             let provider_ms = provider_start.elapsed().as_millis();
             let server_new_start = Instant::now();
-            let server = server::Server::new(provider);
+            let mut server = server::Server::new(provider);
             let server_new_ms = server_new_start.elapsed().as_millis();
+            
+            // Enable LSP features globally at server startup (P0 optimization)
+            let lsp_start = Instant::now();
+            if let Err(e) = server.enable_lsp_globally().await {
+                crate::logging::info(&format!("[WARN] LSP bridge initialization failed: {}", e));
+            } else {
+                crate::logging::info(&format!(
+                    "[TIMING] LSP bridge enabled in {}ms",
+                    lsp_start.elapsed().as_millis()
+                ));
+            }
+            
             crate::logging::info(&format!(
                 "[TIMING] serve bootstrap: provider_init={}ms, server_new={}ms, before_run={}ms",
                 provider_ms,

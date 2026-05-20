@@ -38,12 +38,16 @@ impl Server {
         // Initialize collaboration server for real-time multi-user editing
         let collab_server = Arc::new(collab::CollaborationServer::new(collab::CollabConfig::default()));
 
-        // Initialize LSP manager and bridge (optional, only if LSP features are needed)
-        // For now, we create the manager but don't start the bridge automatically.
-        // The bridge can be started on-demand when a swarm session needs it.
-        let lsp_manager: Option<Arc<jcode_lsp::LspServerManager>> = None;
-        let lsp_event_bridge: Option<Arc<LspEventBridge>> = None;
-        let conflict_detector: Option<Arc<SymbolConflictDetector>> = None;
+        // Initialize LSP manager, bridge, and conflict detector
+        // We create the conflict detector immediately for symbol-level conflict detection,
+        // LSP manager will be initialized on-demand when needed
+        let (lsp_manager, lsp_event_bridge, conflict_detector) = {
+            // Try to create LSP manager if we can
+            let manager = Arc::new(jcode_lsp::LspServerManager::new());
+            let lsp_manager = Some(Arc::clone(&manager));
+            let conflict_detector = Some(Arc::new(SymbolConflictDetector::new(manager)));
+            (lsp_manager, None, conflict_detector)
+        };
 
         Self {
             provider,

@@ -135,7 +135,7 @@ pub(super) async fn execute_debug_command(
             return Err(anyhow::anyhow!("swarm_message: requires content"));
         }
 
-        let final_text = super::run_swarm_message(agent.clone(), msg).await?;
+        let final_text = super::run_swarm_message(agent.clone(), msg, None).await?;
         return Ok(final_text);
     }
 

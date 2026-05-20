@@ -829,11 +829,8 @@ pub(super) async fn update_member_status_with_report(
 /// The caller should decide whether to execute tasks sequentially instead.
 async fn check_task_conflicts(
     tasks: &[SwarmTaskSpec],
+    conflict_detector: Option<Arc<crate::server::SymbolConflictDetector>>,
 ) -> Option<Vec<crate::server::ConflictReport>> {
-    // For now, we perform a simple file-level conflict check based on task descriptions.
-    // A full implementation would use LSP to detect symbol-level conflicts.
-    // This is a placeholder that can be enhanced when LSP integration is available.
-    
     if tasks.len() < 2 {
         return None; // No conflicts possible with a single task
     }
@@ -848,41 +845,49 @@ async fn check_task_conflicts(
         })
         .collect();
 
-    // Simple heuristic: if multiple tasks mention the same file, flag it
-    let mut conflicts = Vec::new();
-    for i in 0..task_info.len() {
-        for j in (i + 1)..task_info.len() {
-            let (desc_a, files_a, _) = &task_info[i];
-            let (desc_b, files_b, _) = &task_info[j];
+    // If we have a symbol conflict detector, use it for detailed symbol-level conflict detection
+    if let Some(detector) = conflict_detector {
+        let conflicts = detector.detect_conflicts(&task_info).await;
+        if !conflicts.is_empty() {
+            return Some(conflicts);
+        }
+    } else {
+        // Fall back to simple heuristic: if multiple tasks mention the same file, flag it
+        let mut conflicts = Vec::new();
+        for i in 0..task_info.len() {
+            for j in (i + 1)..task_info.len() {
+                let (desc_a, files_a, _) = &task_info[i];
+                let (desc_b, files_b, _) = &task_info[j];
 
-            let overlapping: Vec<&String> = files_a.iter()
-                .filter(|f| files_b.contains(f))
-                .collect();
+                let overlapping: Vec<&String> = files_a.iter()
+                    .filter(|f| files_b.contains(f))
+                    .collect();
 
-            if !overlapping.is_empty() {
-                conflicts.push(crate::server::ConflictReport::new(
-                    desc_a.clone(),
-                    desc_b.clone(),
-                    crate::server::ConflictType::SameFile,
-                    format!(
-                        "Tasks may modify overlapping files: {}",
-                        overlapping.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
-                    ),
-                    overlapping.iter().map(|s| s.to_string()).collect(),
-                ));
+                if !overlapping.is_empty() {
+                    conflicts.push(crate::server::ConflictReport::new(
+                        desc_a.clone(),
+                        desc_b.clone(),
+                        crate::server::ConflictType::SameFile,
+                        format!(
+                            "Tasks may modify overlapping files: {}",
+                            overlapping.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                        ),
+                        overlapping.iter().map(|s| s.to_string()).collect(),
+                    ));
+                }
             }
+        }
+
+        if !conflicts.is_empty() {
+            warn!(
+                conflict_count = conflicts.len(),
+                "Task conflict detection found potential conflicts"
+            );
+            return Some(conflicts);
         }
     }
 
-    if conflicts.is_empty() {
-        None
-    } else {
-        warn!(
-            conflict_count = conflicts.len(),
-            "Task conflict detection found potential conflicts"
-        );
-        Some(conflicts)
-    }
+    None
 }
 
 /// Extract file path references from text (simple heuristic).
@@ -949,7 +954,11 @@ pub(super) async fn run_swarm_task(
     Ok(output)
 }
 
-pub(super) async fn run_swarm_message(agent: Arc<Mutex<Agent>>, message: &str) -> Result<String> {
+pub(super) async fn run_swarm_message(
+    agent: Arc<Mutex<Agent>>, 
+    message: &str, 
+    conflict_detector: Option<Arc<crate::server::SymbolConflictDetector>>
+) -> Result<String> {
     let working_dir = {
         let agent = agent.lock().await;
         agent.working_dir().map(|dir| dir.to_string())
@@ -980,7 +989,7 @@ No extra text.\n\nRequest:\n{message}"
     }
 
     // Check for conflicts before parallel execution
-    if let Some(conflicts) = check_task_conflicts(&tasks).await {
+    if let Some(conflicts) = check_task_conflicts(&tasks, conflict_detector).await {
         warn!(
             conflict_count = conflicts.len(),
             "Running conflicting tasks sequentially instead of in parallel"
