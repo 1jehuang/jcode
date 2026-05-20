@@ -146,12 +146,12 @@ pub struct DiagnosticsManager {
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 #[derive(Default)]
-struct GlobalStats {
-    total_files: usize,
-    total_errors: usize,
-    total_warnings: usize,
-    total_hints: usize,
-    total_info: usize,
+pub struct GlobalStats {
+    pub total_files: usize,
+    pub total_errors: usize,
+    pub total_warnings: usize,
+    pub total_hints: usize,
+    pub total_info: usize,
 }
 
 
@@ -570,7 +570,7 @@ impl QuickFixEngine {
             fix_patterns: Arc::new(RwLock::new(Vec::new())),
         };
         
-        engine.register_builtin_patterns();
+        let _ = engine.register_builtin_patterns();
         engine
     }
 

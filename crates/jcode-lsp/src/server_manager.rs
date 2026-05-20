@@ -386,7 +386,7 @@ impl LspServerManager {
             ).await.map_err(|e| e.to_string())?;
             
             // 初始化 LSP 协议
-            let root_uri = Url::from_file_path(&self.workspace_root).ok();
+            let _root_uri = Url::from_file_path(&self.workspace_root).ok();
             c.initialize().await.map_err(|e| e.to_string())?;
         }
         

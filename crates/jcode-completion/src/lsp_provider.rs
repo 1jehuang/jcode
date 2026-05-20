@@ -18,6 +18,7 @@ use std::sync::Arc;
 /// LSP 服务器连接
 pub struct LspConnection {
     child: Mutex<Option<std::process::Child>>,
+    #[allow(dead_code)]
     server_name: String,
     command: String,
     args: Vec<String>,

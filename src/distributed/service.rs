@@ -212,7 +212,7 @@ impl ClusterService {
                 .map_err(|e| format!("Invalid peer address {}: {}", peer_config.address, e))?;
 
             let peer = ClusterNode::new(addr.ip().to_string().as_str(), addr.port());
-            let mut manager = self.manager.write().await;
+            let manager = self.manager.write().await;
             manager.register_node(peer)?;
 
             info!("Registered peer node: {}", peer_config.address);
@@ -335,7 +335,7 @@ impl ClusterService {
                 drop(election);
 
                 // Set ourselves as leader
-                let mut manager = self.manager.write().await;
+                let manager = self.manager.write().await;
                 manager.set_leader(&node_id)?;
 
                 info!("This node ({}) became LEADER", node_id);

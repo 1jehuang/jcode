@@ -3,7 +3,7 @@ use super::openai_stream_runtime::{
 };
 use super::*;
 use std::panic::AssertUnwindSafe;
-use futures::{future::FutureExt, stream::StreamExt};
+use futures::future::FutureExt;
 use tokio_stream::wrappers::ReceiverStream;
 
 #[async_trait]

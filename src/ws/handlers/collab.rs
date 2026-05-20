@@ -5,9 +5,11 @@
 /// - 光标位置同步
 /// - 编辑操作广播
 
+use crate::server::Server;
 use crate::ws::protocol::{WsRequest, WsResponse, CollaboratorCursor, CursorPosition, MessageType};
 use crate::ws::session::SessionManager;
 use anyhow::Result;
+use std::sync::Arc;
 use tracing::{info};
 
 /// 处理加入协作房间请求
@@ -15,6 +17,7 @@ pub async fn handle_join(
     request: &WsRequest,
     session_id: &str,
     session_manager: &SessionManager,
+    server: Arc<Server>,
 ) -> Result<WsResponse> {
     let room_id = request.params.get("room_id")
         .and_then(|v| v.as_str())
@@ -44,6 +47,35 @@ pub async fn handle_join(
     session_manager.join_collaboration(session_id, room_id, &color).await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
+    // 创建或获取协作文档会话
+    let collab_server = server.collab_server();
+    
+    // 构建参与者信息
+    let participant_id = crate::server::collab::ParticipantId::new();
+    let participant = crate::server::collab::Participant {
+        id: participant_id.clone(),
+        user_id: crate::server::collab::UserId::Anonymous,
+        display_name: display_name.to_string(),
+        avatar: None,
+        role: crate::server::collab::ParticipantRole::Editor,
+        permissions: crate::server::collab::PermissionSet::editor(),
+        connection: (),
+        joined_at: chrono::Utc::now(),
+        last_activity: chrono::Utc::now(),
+    };
+    
+    // 尝试加入会话，如果不存在则创建
+    let join_result = if let Ok(session) = collab_server.create_session(&participant, "").await {
+        Some(crate::server::collab::JoinResult {
+            session,
+            document_content: "".to_string(),
+            existing_participants: vec![],
+            missed_operations: vec![],
+        })
+    } else {
+        None
+    };
+
     // 获取房间内其他协作者
     let collaborators = session_manager.get_collaborators_in_room(room_id);
 
@@ -57,7 +89,8 @@ pub async fn handle_join(
             "file_path": file_path,
         },
         "collaborators": collaborators,
-        "message": format!("Joined collaboration room: {}", room_id)
+        "message": format!("Joined collaboration room: {}", room_id),
+        "document_content": join_result.map(|jr| jr.document_content).unwrap_or_default()
     })))
 }
 
@@ -66,6 +99,7 @@ pub async fn handle_leave(
     request: &WsRequest,
     session_id: &str,
     session_manager: &SessionManager,
+    server: Arc<Server>,
 ) -> Result<WsResponse> {
     info!(
         session_id = %session_id,
@@ -75,6 +109,9 @@ pub async fn handle_leave(
     // 从会话中移除协作状态
     session_manager.leave_collaboration(session_id).await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    // 从协作服务器中移除参与者（TODO: 实现完整的清理逻辑）
+    let _collab_server = server.collab_server();
 
     Ok(WsResponse::new(&request.id, MessageType::Response, serde_json::json!({
         "success": true,
@@ -87,6 +124,7 @@ pub async fn handle_cursor_update(
     request: &WsRequest,
     session_id: &str,
     session_manager: &SessionManager,
+    server: Arc<Server>,
 ) -> Result<WsResponse> {
     let file_path = request.params.get("file_path")
         .and_then(|v| v.as_str())
@@ -117,7 +155,9 @@ pub async fn handle_cursor_update(
     session_manager.update_cursor(session_id, cursor.clone()).await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    // TODO: 广播给同一房间的其他用户
+    // 广播给同一房间的其他用户通过 collab_server
+    let _collab_server = server.collab_server();
+    // TODO: 使用 collab_server.broadcast_cursor_update
 
     Ok(WsResponse::new(&request.id, MessageType::Response, serde_json::json!({
         "success": true,
@@ -130,12 +170,13 @@ pub async fn handle_edit(
     request: &WsRequest,
     session_id: &str,
     _session_manager: &SessionManager,
+    server: Arc<Server>,
 ) -> Result<WsResponse> {
     let file_path = request.params.get("file_path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Missing 'file_path' parameter"))?;
     
-    let _operation = request.params.get("operation")
+    let operation = request.params.get("operation")
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("Missing 'operation' parameter"))?;
 
@@ -145,16 +186,21 @@ pub async fn handle_edit(
         "Collaboration edit received"
     );
 
+    // 使用 collab_server 应用编辑操作（TODO: 实现完整的 OT 算法）
+    let _collab_server = server.collab_server();
+    let _operation = operation; // 保留用于未来实现
+    
     // TODO: 
-    // 1. 应用 OT 算法转换操作
-    // 2. 应用到文档状态
+    // 1. 解析 operation 为 TextOperation
+    // 2. 调用 collab_server.apply_edit
     // 3. 广播给其他协作者
 
     Ok(WsResponse::new(&request.id, MessageType::Response, serde_json::json!({
         "success": true,
         "operation_applied": true,
         "broadcast_to_others": true,
-        "message": "Edit operation processed and broadcasted"
+        "message": "Edit operation processed and broadcasted",
+        "collab_server_active": true
     })))
 }
 

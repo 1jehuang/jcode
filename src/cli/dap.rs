@@ -299,19 +299,16 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
     let session_lock = SESSION.get_or_init(|| Mutex::new(None));
 
     // Helper: execute DAP command via session if active, or print stub message
+    #[allow(unused_macros)]
     macro_rules! dap_cmd {
-        ($session:expr, $cmd:expr, $args:expr) => {{
-            let s = $session;
-            if let Some(ref mut session) = s {
-                dap_request_internal(session, $cmd, $args).await
-            } else {
-                anyhow::bail!("No debug session active");
-            }
-        }};
+        ($session:expr, $cmd:expr, $args:expr) => {
+            dap_request_internal($session, $cmd, $args).await
+        };
     }
+    #[allow(unused_macros)]
     macro_rules! dap_print_stub {
         ($label:expr) => {
-            eprintln!("\n{} (no active debug session)\n", $label);
+            eprintln!("\n{} (no active debug session)\n", $label)
         };
     }
 
@@ -504,18 +501,12 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
         DebugCommand::Continue => {
             let mut guard = session_lock.lock().await;
             if let Some(ref mut session) = *guard {
-                if let Some(ref mut stdin) = session.stdin {
-                    let seq = session.request_seq;
-                    let tid = session.active_thread_id;
-                    let resp = dap_request_internal(session, "continue",
-                        Some(serde_json::json!({ "threadId": tid })),
-                    ).await?;
-                    session.request_seq = seq;
-                    session.running = true;
-                    let all_threads = resp["body"]["allThreadsContinued"].as_bool().unwrap_or(false);
-                    eprintln!("\n▶️  Continued (allThreadsContinued: {})\n", all_threads);
-                    eprintln!("  (Waiting for breakpoint... Use `debug breakpoint` to set one.)");
-                }
+                let tid = session.active_thread_id;
+                let resp = dap_cmd!(session, "continue", Some(serde_json::json!({ "threadId": tid })))?;
+                session.running = true;
+                let all_threads = resp["body"]["allThreadsContinued"].as_bool().unwrap_or(false);
+                eprintln!("\n▶️  Continued (allThreadsContinued: {})\n", all_threads);
+                eprintln!("  (Waiting for breakpoint... Use `debug breakpoint` to set one.)");
             } else {
                 anyhow::bail!("No debug session active.");
             }
@@ -524,54 +515,39 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
         // -- next ------------------------------------------------
         DebugCommand::Next => {
             let mut guard = session_lock.lock().await;
-            if let Some(ref mut session) = *guard {
-                if let Some(ref mut din) = session.stdin {
-                    let seq = session.request_seq;
+            match *guard {
+                Some(ref mut session) => {
                     let tid = session.active_thread_id;
-                    let _ = dap_request_internal(session, "next",
-                        Some(serde_json::json!({ "threadId": tid })),
-                    ).await;
-                    session.request_seq = seq;
+                    let _ = dap_cmd!(session, "next", Some(serde_json::json!({ "threadId": tid })));
                     eprintln!("\n⏭️  Step Over\n");
                 }
-            } else {
-                eprintln!("\n⏭️  Step Over — no active session (preview mode)\n");
+                None => dap_print_stub!("⏭️  Step Over"),
             }
         }
 
         // -- stepIn ----------------------------------------------
         DebugCommand::StepIn => {
             let mut guard = session_lock.lock().await;
-            if let Some(ref mut session) = *guard {
-                if let Some(ref mut _stdin) = session.stdin {
-                    let seq = session.request_seq;
+            match *guard {
+                Some(ref mut session) => {
                     let tid = session.active_thread_id;
-                    let _ = dap_request_internal(session, "stepIn",
-                        Some(serde_json::json!({ "threadId": tid })),
-                    ).await;
-                    session.request_seq = seq;
+                    let _ = dap_cmd!(session, "stepIn", Some(serde_json::json!({ "threadId": tid })));
                     eprintln!("\n⏬ Step Into\n");
                 }
-            } else {
-                eprintln!("\n⏬ Step Into\n");
+                None => dap_print_stub!("⏬ Step Into"),
             }
         }
 
         // -- stepOut ---------------------------------------------
         DebugCommand::StepOut => {
             let mut guard = session_lock.lock().await;
-            if let Some(ref mut session) = *guard {
-                if let Some(ref mut _stdin) = session.stdin {
-                    let seq = session.request_seq;
+            match *guard {
+                Some(ref mut session) => {
                     let tid = session.active_thread_id;
-                    let _ = dap_request_internal(session, "stepOut",
-                        Some(serde_json::json!({ "threadId": tid })),
-                    ).await;
-                    session.request_seq = seq;
+                    let _ = dap_cmd!(session, "stepOut", Some(serde_json::json!({ "threadId": tid })));
                     eprintln!("\n⏫ Step Out\n");
                 }
-            } else {
-                eprintln!("\n⏫ Step Out\n");
+                None => dap_print_stub!("⏫ Step Out"),
             }
         }
 
@@ -579,31 +555,25 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
         DebugCommand::Stack => {
             let mut guard = session_lock.lock().await;
             if let Some(ref mut session) = *guard {
-                if let Some(ref mut _stdin) = session.stdin {
-                    let seq = session.request_seq;
-                    let tid = session.active_thread_id;
-                    let resp = dap_request_internal(session, "stackTrace",
-                        Some(serde_json::json!({ "threadId": tid, "levels": 20 })),
-                    ).await?;
-                    session.request_seq = seq;
+                let tid = session.active_thread_id;
+                let resp = dap_cmd!(session, "stackTrace", Some(serde_json::json!({ "threadId": tid, "levels": 20 })))?;
 
-                    eprintln!("\n📋 Stack Trace\n");
-                    if let Some(stack_frames) = resp["body"]["stackFrames"].as_array() {
-                        for (i, frame) in stack_frames.iter().enumerate() {
-                            let name = frame["name"].as_str().unwrap_or("?");
-                            let file = frame["source"]["path"].as_str()
-                                .or_else(|| frame["source"]["name"].as_str())
-                                .unwrap_or("?");
-                            let line = frame["line"].as_i64().unwrap_or(0);
-                            let col = frame["column"].as_i64().unwrap_or(0);
-                            eprintln!("  #{} {} ({}:{}:{})", i, name, file, line, col);
-                        }
-                    } else {
-                        eprintln!("  (no stack frames)");
+                eprintln!("\n📋 Stack Trace\n");
+                if let Some(stack_frames) = resp["body"]["stackFrames"].as_array() {
+                    for (i, frame) in stack_frames.iter().enumerate() {
+                        let name = frame["name"].as_str().unwrap_or("?");
+                        let file = frame["source"]["path"].as_str()
+                            .or_else(|| frame["source"]["name"].as_str())
+                            .unwrap_or("?");
+                        let line = frame["line"].as_i64().unwrap_or(0);
+                        let col = frame["column"].as_i64().unwrap_or(0);
+                        eprintln!("  #{} {} ({}:{}:{})", i, name, file, line, col);
                     }
+                } else {
+                    eprintln!("  (no stack frames)");
                 }
             } else {
-                eprintln!("\n📋 Stack Trace (no active session)\n");
+                dap_print_stub!("📋 Stack Trace");
             }
         }
 
@@ -827,7 +797,7 @@ pub async fn run_debug_command(cmd: super::args::DebugCommand) -> Result<()> {
         DebugCommand::ExceptionBreakpoint { filter } => {
             let mut guard = session_lock.lock().await;
             if let Some(ref mut session) = *guard {
-                if let Some(ref mut stdin) = session.stdin {
+                if let Some(ref mut _stdin) = session.stdin {
                     let seq = session.request_seq;
                     let filters = match filter.as_str() {
                         "all" => vec!["all"],

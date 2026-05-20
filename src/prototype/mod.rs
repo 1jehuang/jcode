@@ -28,6 +28,7 @@ pub enum FileType {
 // --- Types ---------------------------------
 
 /// Helper macro to create a ProjectFile with String content
+#[allow(unused_macros)]
 macro_rules! project_file {
     (source: $path:expr, $content:literal, $purpose:expr) => {
         ProjectFile {
@@ -769,11 +770,11 @@ pub struct PrototypeEngine {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PrototypeEngineConfig {
-    max_files_per_project: usize,
-    max_lines_per_file: usize,
-    include_examples: bool,
-    include_comments: bool,
+pub struct PrototypeEngineConfig {
+    pub max_files_per_project: usize,
+    pub max_lines_per_file: usize,
+    pub include_examples: bool,
+    pub include_comments: bool,
 }
 
 impl Default for PrototypeEngineConfig {
@@ -1576,7 +1577,7 @@ fn generate_web_api_files(architecture: &ArchitectureOverview, tech_stack: &Tech
     files
 }
 
-fn generate_rust_web_api_files(_architecture: &ArchitectureOverview, tech_stack: &TechStackDecision, config: &PrototypeConfig) -> Vec<ProjectFile> {
+fn generate_rust_web_api_files(_architecture: &ArchitectureOverview, _tech_stack: &TechStackDecision, config: &PrototypeConfig) -> Vec<ProjectFile> {
     let project_name = &config.project_name;
     let snake_name = project_name.replace("-", "_").to_lowercase();
     

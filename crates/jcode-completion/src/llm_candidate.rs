@@ -79,8 +79,10 @@ impl CandidateGenerator for ProviderCandidateGenerator {
 }
 
 /// 默认实现: 基于上下文的模板生成 + 规则匹配 (保底)
+#[allow(dead_code)]
 pub struct DefaultCandidateGenerator;
 
+#[allow(dead_code)]
 impl DefaultCandidateGenerator {
     pub fn new() -> Self { Self }
 

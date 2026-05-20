@@ -43,6 +43,24 @@ pub struct ConflictReport {
     conflicting_symbols: Vec<String>,
 }
 
+impl ConflictReport {
+    pub fn new(
+        task_a: String,
+        task_b: String,
+        conflict_type: ConflictType,
+        description: String,
+        conflicting_symbols: Vec<String>,
+    ) -> Self {
+        Self {
+            task_a,
+            task_b,
+            conflict_type,
+            description,
+            conflicting_symbols,
+        }
+    }
+}
+
 /// Type of conflict between tasks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ConflictType {
@@ -60,7 +78,7 @@ pub struct SymbolConflictDetector {
 }
 
 impl SymbolConflictDetector {
-    fn new(lsp_manager: Arc<LspServerManager>) -> Self {
+    pub fn new(lsp_manager: Arc<LspServerManager>) -> Self {
         Self { lsp_manager }
     }
 
@@ -68,7 +86,7 @@ impl SymbolConflictDetector {
     ///
     /// Each task is represented as a (task_id, files_to_modify, symbols_in_context) tuple.
     /// Returns a list of conflict reports for any pairs that conflict.
-    async fn detect_conflicts(
+    pub async fn detect_conflicts(
         &self,
         tasks: &[(String, Vec<String>, Vec<String>)],
     ) -> Vec<ConflictReport> {

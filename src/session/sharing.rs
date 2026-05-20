@@ -529,7 +529,7 @@ pub(crate) struct ImageRef {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct MessageMetadata {
+pub(crate) struct MessageMetadata {
     tool_calls: Vec<ToolCallInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     token_usage: Option<TokenUsageInfo>,
@@ -562,12 +562,12 @@ pub struct SharedProjectContext {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct FileTreeSnapshot {
+pub(crate) struct FileTreeSnapshot {
     root: FileTreeNode,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct FileTreeNode {
+pub(crate) struct FileTreeNode {
     name: String,
     children: Vec<FileTreeNode>,
     is_file: bool,
@@ -586,7 +586,7 @@ pub struct DependencyManifest {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct CargoDep {
+pub(crate) struct CargoDep {
     name: String,
     version: String,
 }

@@ -16,6 +16,7 @@ pub mod oauth;
 pub mod refresh_state;
 mod status_types;
 pub mod validation;
+pub mod sso;
 
 pub(crate) use commands::command_exists;
 #[cfg(test)]

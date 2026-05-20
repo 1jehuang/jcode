@@ -36,7 +36,7 @@ pub(crate) async fn register_tasks() {
                     }
                     "status" | "get" if parts.len() >= 2 => {
                         let planner = crate::task_planner::TaskPlanner::new();
-                        if let Some(pid) = planner.find_plan_for_task(parts[1]) {
+                        if let Some(_pid) = planner.find_plan_for_task(parts[1]) {
                             if let Some(task) = planner.get_task(&parts[1]) {
                                 let status = match task.status { crate::task_planner::TaskStatus::Completed => "✅", _ => "⏳" };
                                 eprintln!("\n📋 {} — {}\n  Status: {}\n  Priority: {}\n", task.id, task.description, status, task.priority.label());

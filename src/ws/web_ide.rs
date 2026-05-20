@@ -16,6 +16,7 @@ use parking_lot::RwLock;
 use super::protocol::{WsMessage, WsRequest, WsResponse, MessageType};
 use super::session::SessionManager;
 use super::handlers;
+use crate::server::Server;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
@@ -65,6 +66,9 @@ pub struct WebIdeWebSocketServer {
     
     /// 活跃连接计数
     active_connections: Arc<RwLock<usize>>,
+    
+    /// Reference to the main server for collaboration features
+    server: Option<Arc<Server>>,
 }
 
 impl WebIdeWebSocketServer {
@@ -77,7 +81,14 @@ impl WebIdeWebSocketServer {
             session_manager: Arc::new(SessionManager::new()),
             broadcast_tx,
             active_connections: Arc::new(RwLock::new(0)),
+            server: None,
         }
+    }
+
+    /// Attach the main server for collaboration features
+    pub fn with_server(mut self, server: Arc<Server>) -> Self {
+        self.server = Some(server);
+        self
     }
 
     /// 使用默认配置创建服务器
@@ -142,6 +153,7 @@ impl WebIdeWebSocketServer {
             let active_connections = self.active_connections.clone();
             let active_connections_for_handle = active_connections.clone();
             let config = self.config.clone();
+            let server = self.server.clone();
 
             tokio::spawn(async move {
                 if let Err(e) = Self::handle_connection(
@@ -151,6 +163,7 @@ impl WebIdeWebSocketServer {
                     broadcast_tx,
                     active_connections_for_handle,
                     config,
+                    server,
                 ).await {
                     error!(addr = %peer_addr, error = %e, "Connection error");
                 }
@@ -171,6 +184,7 @@ impl WebIdeWebSocketServer {
         broadcast_tx: broadcast::Sender<WsMessage>,
         _active_connections: Arc<RwLock<usize>>,
         config: WebSocketConfig,
+        server: Option<Arc<Server>>,
     ) -> Result<()> {
         info!(addr = %peer_addr, "New WebSocket connection");
 
@@ -241,7 +255,7 @@ impl WebIdeWebSocketServer {
                             match msg {
                                 Message::Text(text) => {
                                     // 解析并处理请求
-                                    match Self::process_client_message(&text, &session_id, &session_manager, &config).await {
+                                    match Self::process_client_message(&text, &session_id, &session_manager, &config, &server).await {
                                         Ok(response) => {
                                             if let Some(resp) = response {
                                                 ws_write.send(Message::Text(serde_json::to_string(&resp)?)).await?;
@@ -301,6 +315,7 @@ impl WebIdeWebSocketServer {
         session_id: &str,
         session_manager: &Arc<SessionManager>,
         config: &WebSocketConfig,
+        server: &Option<Arc<Server>>,
     ) -> Result<Option<WsResponse>> {
         // 解析 JSON-RPC 风格的请求
         let request: WsRequest = serde_json::from_str(message_text)
@@ -369,16 +384,32 @@ impl WebIdeWebSocketServer {
             
             // === 协作编辑 ===
             "collaboration.join" if config.enable_collaboration => {
-                handlers::collab::handle_join(&request, session_id, session_manager).await
+                if let Some(srv) = server {
+                    handlers::collab::handle_join(&request, session_id, session_manager, srv.clone()).await
+                } else {
+                    Ok(WsResponse::error(&request.id, "Collaboration server not initialized"))
+                }
             }
             "collaboration.leave" if config.enable_collaboration => {
-                handlers::collab::handle_leave(&request, session_id, session_manager).await
+                if let Some(srv) = server {
+                    handlers::collab::handle_leave(&request, session_id, session_manager, srv.clone()).await
+                } else {
+                    Ok(WsResponse::error(&request.id, "Collaboration server not initialized"))
+                }
             }
             "collaboration.cursor" if config.enable_collaboration => {
-                handlers::collab::handle_cursor_update(&request, session_id, session_manager).await
+                if let Some(srv) = server {
+                    handlers::collab::handle_cursor_update(&request, session_id, session_manager, srv.clone()).await
+                } else {
+                    Ok(WsResponse::error(&request.id, "Collaboration server not initialized"))
+                }
             }
             "collaboration.edit" if config.enable_collaboration => {
-                handlers::collab::handle_edit(&request, session_id, session_manager).await
+                if let Some(srv) = server {
+                    handlers::collab::handle_edit(&request, session_id, session_manager, srv.clone()).await
+                } else {
+                    Ok(WsResponse::error(&request.id, "Collaboration server not initialized"))
+                }
             }
             
             // === 项目管理 ===

@@ -1,9 +1,17 @@
 pub mod account_picker;
 mod app;
-mod ui_blocks;
-mod ui_context_actions;
-mod ui_actions;
-mod ui_streaming;
+pub mod ui_blocks;
+pub mod ui_context_actions;
+pub mod ui_actions;
+pub mod ui_streaming;
+pub mod ui_blocks_integration;
+pub mod ui_actions_integration;
+
+pub use ui_blocks::CommandBlock;
+pub use ui_actions::{ActionRegistry, ActionDefinition, KeyBinding};
+pub use ui_context_actions::{ContextActionGenerator, AnalyzedContext};
+pub use ui_actions_integration::ActionSystem;
+pub use ui_blocks_integration::{SimpleMessage, ToolCallInfo, message_to_command_blocks};
 mod ui_timeline;
 pub mod backend;
 pub(crate) mod color_support;

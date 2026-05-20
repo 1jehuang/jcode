@@ -163,15 +163,15 @@ impl Agent {
         // Temporarily not implemented
     }
 
-    pub async fn query(&self, query: &str) -> anyhow::Result<String> {
+    pub async fn query(&self, _query: &str) -> anyhow::Result<String> {
         Ok(String::from("print query not implemented yet"))
     }
 
-    pub async fn query_json(&self, query: &str) -> anyhow::Result<serde_json::Value> {
+    pub async fn query_json(&self, _query: &str) -> anyhow::Result<serde_json::Value> {
         Ok(serde_json::Value::String(String::from("print query_json not implemented yet")))
     }
 
-    pub async fn query_stream(&self, query: &str) -> anyhow::Result<tokio_stream::Empty<()>> {
+    pub async fn query_stream(&self, _query: &str) -> anyhow::Result<tokio_stream::Empty<()>> {
         Ok(tokio_stream::empty())
     }
 

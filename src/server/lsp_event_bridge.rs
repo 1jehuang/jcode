@@ -54,7 +54,7 @@ pub struct DiagnosticSummary {
 }
 
 impl LspEventBridge {
-    fn new(
+    pub fn new(
         lsp_manager: Arc<LspServerManager>,
         swarm_channel: Arc<RwLock<ChannelIndex>>,
         swarm_id: impl Into<String>,
@@ -68,12 +68,12 @@ impl LspEventBridge {
     }
 
     /// Add a file to the monitored set.
-    async fn monitor_file(&self, file: String) {
+    pub async fn monitor_file(&self, file: String) {
         self.monitored_files.write().await.push(file);
     }
 
     /// Remove a file from the monitored set.
-    async fn unmonitor_file(&self, file: &str) {
+    pub async fn unmonitor_file(&self, file: &str) {
         let mut files = self.monitored_files.write().await;
         files.retain(|f| f != file);
     }
@@ -82,7 +82,7 @@ impl LspEventBridge {
     ///
     /// This spawns a tokio task that periodically polls LSP diagnostics
     /// for all monitored files and broadcasts changes to the swarm channel.
-    fn start(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+    pub fn start(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let bridge = Arc::clone(self);
         tokio::spawn(async move {
             info!("LspEventBridge started for swarm {}", bridge.swarm_id);

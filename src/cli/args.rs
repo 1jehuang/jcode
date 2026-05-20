@@ -1260,7 +1260,7 @@ pub(crate) enum MemoryCommand {
 
 /// Skills management commands.
 #[derive(Subcommand, Debug)]
-pub(crate) enum SkillsCommand {
+pub enum SkillsCommand {
     /// List available skills
     List {
         /// Emit JSON instead of plain text
@@ -1279,7 +1279,7 @@ pub(crate) enum SkillsCommand {
 
 /// Workflow management commands.
 #[derive(Subcommand, Debug)]
-pub(crate) enum WorkflowsCommand {
+pub enum WorkflowsCommand {
     /// List available workflow templates
     List {
         /// Emit JSON instead of plain text
@@ -1300,7 +1300,7 @@ pub(crate) enum WorkflowsCommand {
 
 /// Task management commands.
 #[derive(Subcommand, Debug)]
-pub(crate) enum TasksCommand {
+pub enum TasksCommand {
     /// List tasks
     List {
         /// Filter by status
@@ -1423,7 +1423,7 @@ pub(crate) enum CodeNavCommand {
 
 /// Refactoring subcommands
 #[derive(Subcommand, Debug)]
-pub(crate) enum CodeRefactorCommand {
+pub enum CodeRefactorCommand {
     /// Rename a symbol across all files
     Rename {
         /// Current symbol name

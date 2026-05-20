@@ -28,9 +28,13 @@ pub struct AstNode {
 pub struct TreeSitterAstProvider {
     fn_re: Regex,
     struct_re: Regex,
+    #[allow(dead_code)]
     let_re: Regex,
+    #[allow(dead_code)]
     import_re: Regex,
+    #[allow(dead_code)]
     generic_re: Regex,
+    #[allow(dead_code)]
     lambda_re: Regex,
 }
 

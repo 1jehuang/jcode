@@ -16,3 +16,5 @@ async-trait = "0.1"
 lsp-types = "0.95"
 reqwest = { version = "0.12", features = ["json"] }
 tokio-util = "0.7"
+lru = "0.12"
+chrono = { version = "0.4", features = ["serde"] }

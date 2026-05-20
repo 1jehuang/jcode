@@ -400,7 +400,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 let _ = (&shell, output.as_deref());
             }
         }
-        Some(Command::CodeNav(cmd)) => {
+        Some(Command::CodeNav(_cmd)) => {
             commands::run_code_nav_command().await?;
         }
         Some(Command::CodeRefactor(cmd)) => {
@@ -521,11 +521,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         }
         Some(Command::DebugSocket { .. }) => { todo!("run_debug_socket_command") }
         None => {
-            eprintln!("CarpAI - AI-powered coding assistant\n");
-            eprintln!("Usage: carpai <command> [options]");
-            eprintln!();
-            eprintln!("Run `carpai --help` for more information.");
-            eprintln!("Run `carpai <command> --help` for command-specific help.");
+            run_default_command(args).await?;
         }
     }
 

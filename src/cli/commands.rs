@@ -1811,7 +1811,7 @@ pub async fn run_git_command(cmd: super::args::GitCommand) -> Result<()> {
                 eprintln!("\n📝 Git Diff (+{}/-{})", added, removed);
                 if full_diff.len() > 4000 {
                     eprintln!("{}", &full_diff[..4000]);
-                    eprintln!("... [truncated, total {} bytes]", full_diff.len());
+                    eprintln!("... [truncated, total {}]", human_size(full_diff.len() as u64));
                 } else {
                     println!("{}", full_diff);
                 }
@@ -2158,7 +2158,7 @@ pub async fn run_refactor_command(cmd: super::args::CodeRefactorCommand) -> Resu
             }
 
             let selected: Vec<&str> = lines[start_idx..end_idx].iter().copied().collect();
-            let selected_text = selected.join("\n");
+            let _selected_text = selected.join("\n");
 
             eprintln!("  Selected code ({} lines):\n", end_idx - start_idx);
             for (i, line) in selected.iter().enumerate() {
@@ -2309,7 +2309,7 @@ pub use super::expanded_cmds::{
 
 
 
-fn human_size(bytes: u64) -> String {
+pub fn human_size(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
     let mut size = bytes as f64;
     let mut unit_idx = 0;

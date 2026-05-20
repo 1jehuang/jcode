@@ -625,7 +625,7 @@ pub(super) async fn stream_response_websocket_persistent(
     drop(creds);
 
     emit_connection_phase(&tx, ConnectionPhase::Connecting).await;
-    let connect_start = std::time::Instant::now();
+    let _connect_start = std::time::Instant::now();
 
     let connect_result = tokio::time::timeout(
         Duration::from_secs(WEBSOCKET_CONNECT_TIMEOUT_SECS),

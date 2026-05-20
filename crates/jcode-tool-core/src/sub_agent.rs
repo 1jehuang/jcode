@@ -131,7 +131,7 @@ pub enum ArtifactType {
 
 /// 子 Agent 内部状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-enum SubAgentStatus {
+pub enum SubAgentStatus {
     Idle,
     Running,
     Completed,

@@ -98,6 +98,7 @@ pub struct ReplayBranch {
     pub divergence_point: usize,
     pub modified_events: Vec<EventModification>,
     pub created_at: DateTime<Utc>,
+    #[allow(dead_code)]
     pub description: Option<String>,
 }
 
@@ -131,15 +132,20 @@ pub struct PlaybackState {
 #[derive(Clone)]
 pub enum PlaybackSpeed {
     RealTime,
+    #[allow(dead_code)]
     Fast { factor: u8 },
+    #[allow(dead_code)]
     StepByStep,
+    #[allow(dead_code)]
     Auto,
 }
 
 #[derive(Clone)]
 pub enum ReplayMode {
     ViewOnly,
+    #[allow(dead_code)]
     Interactive,
+    #[allow(dead_code)]
     Compare,
 }
 
@@ -865,6 +871,7 @@ render();
     }
 }
 
+#[cfg(test)]
 fn make_test_session(event_count: usize) -> RecordedSession {
     let events: Vec<RecordedEvent> = (0..event_count)
         .map(|i| RecordedEvent::UserInput {

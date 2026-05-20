@@ -469,7 +469,7 @@ impl TaskCommands {
         for task_arc in &tasks {
             let task = task_arc.read().await;
             
-            let status_text = match &task.status {
+            let _status_text = match &task.status {
                 TaskStatus::InProgress { progress } => format!("🔄 {:.0}%", progress * 100.0),
                 _ => String::new(),
             };

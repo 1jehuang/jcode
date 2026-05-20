@@ -72,7 +72,7 @@ impl UsageTracker {
 /// 默认记忆排序器
 pub struct DefaultMemoryRanker {
     tracker: Arc<UsageTracker>,
-    /// [item, field, ...] -> score multiplier
+    #[allow(dead_code)]
     field_preferences: RwLock<HashMap<String, f64>>,
 }
 
@@ -84,6 +84,7 @@ impl DefaultMemoryRanker {
         }
     }
 
+    #[allow(dead_code)]
     pub fn tracker(&self) -> Arc<UsageTracker> { self.tracker.clone() }
 }
 

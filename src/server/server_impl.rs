@@ -35,6 +35,16 @@ impl Server {
             swarms_by_id: restored_swarms_by_id,
         } = load_persisted_swarm_runtime_state();
 
+        // Initialize collaboration server for real-time multi-user editing
+        let collab_server = Arc::new(collab::CollaborationServer::new(collab::CollabConfig::default()));
+
+        // Initialize LSP manager and bridge (optional, only if LSP features are needed)
+        // For now, we create the manager but don't start the bridge automatically.
+        // The bridge can be started on-demand when a swarm session needs it.
+        let lsp_manager: Option<Arc<jcode_lsp::LspServerManager>> = None;
+        let lsp_event_bridge: Option<Arc<LspEventBridge>> = None;
+        let conflict_detector: Option<Arc<SymbolConflictDetector>> = None;
+
         Self {
             provider,
             socket_path: socket_path(),
@@ -70,6 +80,10 @@ impl Server {
             soft_interrupt_queues: Arc::new(RwLock::new(HashMap::new())),
             await_members_runtime: AwaitMembersRuntime::default(),
             swarm_mutation_runtime: SwarmMutationRuntime::default(),
+            collab_server,
+            lsp_manager,
+            lsp_event_bridge,
+            conflict_detector,
         }
     }
 
@@ -92,6 +106,70 @@ impl Server {
     /// Get the server identity
     pub fn identity(&self) -> &ServerIdentity {
         &self.identity
+    }
+
+    /// Get the collaboration server for real-time editing
+    pub fn collab_server(&self) -> Arc<collab::CollaborationServer> {
+        self.collab_server.clone()
+    }
+
+    /// Get the LSP server manager if available
+    pub fn lsp_manager(&self) -> Option<Arc<jcode_lsp::LspServerManager>> {
+        self.lsp_manager.clone()
+    }
+
+    /// Get the LSP event bridge if available
+    pub fn lsp_event_bridge(&self) -> Option<Arc<LspEventBridge>> {
+        self.lsp_event_bridge.clone()
+    }
+
+    /// Get the symbol conflict detector if available
+    pub fn conflict_detector(&self) -> Option<Arc<SymbolConflictDetector>> {
+        self.conflict_detector.clone()
+    }
+
+    /// Enable LSP features for this server instance.
+    ///
+    /// This initializes the LSP manager and optionally starts the event bridge
+    /// for a specific swarm session. Call this when a swarm session needs LSP support.
+    pub async fn enable_lsp_features(
+        &mut self,
+        swarm_channel: Arc<RwLock<jcode_swarm_core::ChannelIndex>>,
+        swarm_id: String,
+    ) -> Result<(), anyhow::Error> {
+        use tracing::info;
+
+        // Create LSP manager if not already present
+        if self.lsp_manager.is_none() {
+            info!("Initializing LSP server manager");
+            let manager = Arc::new(jcode_lsp::LspServerManager::new());
+            self.lsp_manager = Some(manager);
+        }
+
+        // Create and start LSP event bridge if we have a manager
+        if let Some(ref manager) = self.lsp_manager {
+            // Create bridge
+            let bridge = Arc::new(LspEventBridge::new(
+                manager.clone(),
+                swarm_channel,
+                swarm_id.clone(),
+            ));
+
+            // Start the bridge in background
+            info!("Starting LSP event bridge for swarm {}", swarm_id);
+            bridge.start();
+
+            // Store the bridge
+            self.lsp_event_bridge = Some(bridge);
+
+            // Create conflict detector
+            let detector = Arc::new(SymbolConflictDetector::new(manager.clone()));
+            self.conflict_detector = Some(detector);
+
+            info!("LSP features enabled successfully for swarm {}", swarm_id);
+        }
+
+        Ok(())
     }
 
     fn runtime(&self) -> ServerRuntime {

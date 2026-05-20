@@ -1,8 +1,8 @@
 use super::state::{MAX_EVENT_HISTORY, fanout_session_event};
-use super::{FileAccess, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan};
+use super::{FileAccess, SwarmEvent, SwarmEventType, SwarmMember, SwarmState};
 use super::{persist_swarm_state_for, remove_persisted_swarm_state_for};
 use crate::agent::Agent;
-use crate::plan::{PlanItem, newly_ready_item_ids};
+use crate::plan::{PlanItem, newly_ready_item_ids, VersionedPlan};
 use crate::protocol::{NotificationType, ServerEvent};
 use crate::session::Session;
 use anyhow::Result;
@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock, broadcast};
+use tracing::{info, warn};
 
 fn status_age_secs(last_status_change: Instant) -> u64 {
     last_status_change.elapsed().as_secs()
@@ -822,6 +823,96 @@ pub(super) async fn update_member_status_with_report(
     }
 }
 
+/// Check for symbol-level conflicts between tasks before parallel execution.
+///
+/// If conflicts are detected, returns a report describing the conflicts.
+/// The caller should decide whether to execute tasks sequentially instead.
+async fn check_task_conflicts(
+    tasks: &[SwarmTaskSpec],
+) -> Option<Vec<crate::server::ConflictReport>> {
+    // For now, we perform a simple file-level conflict check based on task descriptions.
+    // A full implementation would use LSP to detect symbol-level conflicts.
+    // This is a placeholder that can be enhanced when LSP integration is available.
+    
+    if tasks.len() < 2 {
+        return None; // No conflicts possible with a single task
+    }
+
+    // Extract potential file references from task descriptions/prompts
+    let task_info: Vec<(String, Vec<String>, Vec<String>)> = tasks
+        .iter()
+        .map(|task| {
+            let files = extract_file_references(&task.prompt);
+            let symbols = extract_symbol_hints(&task.description);
+            (task.description.clone(), files, symbols)
+        })
+        .collect();
+
+    // Simple heuristic: if multiple tasks mention the same file, flag it
+    let mut conflicts = Vec::new();
+    for i in 0..task_info.len() {
+        for j in (i + 1)..task_info.len() {
+            let (desc_a, files_a, _) = &task_info[i];
+            let (desc_b, files_b, _) = &task_info[j];
+
+            let overlapping: Vec<&String> = files_a.iter()
+                .filter(|f| files_b.contains(f))
+                .collect();
+
+            if !overlapping.is_empty() {
+                conflicts.push(crate::server::ConflictReport::new(
+                    desc_a.clone(),
+                    desc_b.clone(),
+                    crate::server::ConflictType::SameFile,
+                    format!(
+                        "Tasks may modify overlapping files: {}",
+                        overlapping.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                    ),
+                    overlapping.iter().map(|s| s.to_string()).collect(),
+                ));
+            }
+        }
+    }
+
+    if conflicts.is_empty() {
+        None
+    } else {
+        warn!(
+            conflict_count = conflicts.len(),
+            "Task conflict detection found potential conflicts"
+        );
+        Some(conflicts)
+    }
+}
+
+/// Extract file path references from text (simple heuristic).
+fn extract_file_references(text: &str) -> Vec<String> {
+    // Look for common file patterns: *.rs, *.toml, src/..., etc.
+    let mut files = Vec::new();
+    for word in text.split_whitespace() {
+        // Remove trailing punctuation
+        let cleaned = word.trim_end_matches(|c: char| c == '.' || c == ',' || c == ':' || c == ')');
+        if cleaned.contains('/') || cleaned.contains('\\') || cleaned.ends_with(".rs") || 
+           cleaned.ends_with(".toml") || cleaned.ends_with(".md") || cleaned.ends_with(".json") {
+            files.push(cleaned.to_string());
+        }
+    }
+    files
+}
+
+/// Extract potential symbol names from task description.
+fn extract_symbol_hints(description: &str) -> Vec<String> {
+    // Simple heuristic: look for quoted strings or camelCase/PascalCase words
+    let mut symbols = Vec::new();
+    for word in description.split_whitespace() {
+        let cleaned = word.trim_matches(|c: char| c == '"' || c == '`' || c == '\'');
+        if cleaned.len() > 2 && cleaned.chars().any(|c| c.is_uppercase()) {
+            symbols.push(cleaned.to_string());
+        }
+    }
+    symbols
+}
+
 pub(super) async fn run_swarm_task(
     agent: Arc<Mutex<Agent>>,
     description: &str,
@@ -888,6 +979,52 @@ No extra text.\n\nRequest:\n{message}"
         });
     }
 
+    // Check for conflicts before parallel execution
+    if let Some(conflicts) = check_task_conflicts(&tasks).await {
+        warn!(
+            conflict_count = conflicts.len(),
+            "Running conflicting tasks sequentially instead of in parallel"
+        );
+        
+        // Execute tasks sequentially when conflicts are detected
+        let mut task_outputs = Vec::new();
+        for task in &tasks {
+            let working_dir_hint = working_dir_hint.clone();
+            let description = task.description.clone();
+            let prompt = format!("{working_dir_hint}{}", task.prompt);
+            let subagent_type = task
+                .subagent_type
+                .clone()
+                .unwrap_or_else(|| "general".to_string());
+            
+            info!("Executing task sequentially: {}", description);
+            let output = run_swarm_task(agent.clone(), &description, &subagent_type, &prompt).await?;
+            task_outputs.push((description, output));
+        }
+        
+        // Continue with integration...
+        let mut integration_prompt = String::new();
+        integration_prompt.push_str(
+            "You are the coordinator. Complete the original request using the subagent outputs below. ",
+        );
+        integration_prompt.push_str("Do not stop early; run any requested tests and fix failures.\n\n");
+        integration_prompt.push_str("Original request:\n");
+        integration_prompt.push_str(message);
+        integration_prompt.push_str("\n\nSubagent outputs:\n");
+        for (desc, output) in &task_outputs {
+            integration_prompt.push_str(&format!("\n--- {} ---\n{}\n", desc, output));
+        }
+        integration_prompt.push_str("\nNow complete the task.\n");
+
+        let final_output = {
+            let mut agent = agent.lock().await;
+            agent.run_once_capture(&integration_prompt).await?
+        };
+
+        return Ok(final_output);
+    }
+
+    // No conflicts detected, execute in parallel as normal
     let task_futures = tasks.iter().map(|task| {
         let agent = agent.clone();
         let working_dir_hint = working_dir_hint.clone();

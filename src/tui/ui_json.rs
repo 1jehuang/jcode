@@ -373,7 +373,7 @@ impl JsonRenderer {
             return vec![self.styled_line("[]", self.color_theme.bracket_color)];
         }
         let is_expanded = self.is_expanded(path, value_byte_size(&Value::Array(arr.to_vec())));
-        let indent = "  ".repeat(depth);
+        let _indent = "  ".repeat(depth);
         let child_indent = "  ".repeat(depth + 1);
 
         let mut lines = Vec::new();

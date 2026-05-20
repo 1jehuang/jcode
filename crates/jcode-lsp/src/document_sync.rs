@@ -63,11 +63,11 @@ struct DocumentChange {
 }
 
 #[derive(Debug, Clone, Default)]
-struct DocumentStats {
-    total_changes: u64,
-    incremental_changes: u64,
-    full_syncs: u64,
-    bytes_saved: u64, // 通过增量同步节省的字节数
+pub struct DocumentStats {
+    pub total_changes: u64,
+    pub incremental_changes: u64,
+    pub full_syncs: u64,
+    pub bytes_saved: u64, // 通过增量同步节省的字节数
 }
 
 /// 增量同步管理器

@@ -153,7 +153,7 @@ impl TotpAuthenticator {
             .unwrap_or_default()
             .as_nanos();
         
-        let seed = [0u8; 32];
+        let _seed = [0u8; 32];
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         timestamp.hash(&mut hasher);
         let hash = hasher.finish().to_be_bytes();

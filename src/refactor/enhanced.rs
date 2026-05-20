@@ -1102,16 +1102,16 @@ enum ProjectComplexity {
     VeryHigh,
 }
 
-pub(crate) struct DotNetMigrationResult {
-    metadata: DotNetMigrationMetadata,
-    migration_plan: MigrationPlan,
-    converted_files: Vec<ConvertedFile>,
-    updated_project_files: Vec<ProjectFileUpdate>,
-    config_changes: Vec<ConfigChange>,
-    test_strategy: TestStrategy,
-    breaking_changes: Vec<BreakingChange>,
-    compatibility_notes: Vec<String>,
-    next_steps: Vec<String>,
+pub struct DotNetMigrationResult {
+    pub metadata: DotNetMigrationMetadata,
+    pub migration_plan: MigrationPlan,
+    pub converted_files: Vec<ConvertedFile>,
+    pub updated_project_files: Vec<ProjectFileUpdate>,
+    pub config_changes: Vec<ConfigChange>,
+    pub test_strategy: TestStrategy,
+    pub breaking_changes: Vec<BreakingChange>,
+    pub compatibility_notes: Vec<String>,
+    pub next_steps: Vec<String>,
 }
 
 struct DotNetMigrationMetadata {
@@ -1311,16 +1311,16 @@ struct ExecutorConfiguration {
     use_case_examples: Vec<String>,
 }
 
-pub(crate) struct JavaVtMigrationResult {
-    metadata: JavaVtMetadata,
-    thread_analysis: ThreadUsageAnalysis,
-    parallelism_opportunities: Vec<ParallelismOpportunity>,
-    migrated_files: Vec<VtConvertedFile>,
-    executor_configs: Vec<ExecutorConfiguration>,
-    performance_baseline: PerformanceBaseline,
-    best_practices: Vec<String>,
-    common_pitfalls: Vec<String>,
-    monitoring_recommendations: Vec<String>,
+pub struct JavaVtMigrationResult {
+    pub metadata: JavaVtMetadata,
+    pub thread_analysis: ThreadUsageAnalysis,
+    pub parallelism_opportunities: Vec<ParallelismOpportunity>,
+    pub migrated_files: Vec<VtConvertedFile>,
+    pub executor_configs: Vec<ExecutorConfiguration>,
+    pub performance_baseline: PerformanceBaseline,
+    pub best_practices: Vec<String>,
+    pub common_pitfalls: Vec<String>,
+    pub monitoring_recommendations: Vec<String>,
 }
 
 struct JavaVtMetadata {

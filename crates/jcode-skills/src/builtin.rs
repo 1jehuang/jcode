@@ -172,6 +172,7 @@ struct SecurityRule {
     id: &'static str,
     name: &'static str,
     severity: SeverityLevel,
+    #[allow(dead_code)]
     category: &'static str,
     pattern: regex::Regex,
     description: &'static str,
@@ -179,6 +180,7 @@ struct SecurityRule {
 }
 
 struct PerformanceRule {
+    #[allow(dead_code)]
     id: &'static str,
     name: &'static str,
     severity: SeverityLevel,
@@ -289,22 +291,17 @@ impl CodeReviewSkill {
     ) -> CodeReviewResult {
         info!("Starting code review for {}", file_path);
         
-        let mut security_issues = Vec::new();
-        let mut performance_issues = Vec::new();
-        let mut style_issues = Vec::new();
-        let mut best_practices = Vec::new();
-        
         // 1. 安全审查
-        security_issues = self.perform_security_review(code, file_path).await;
+        let security_issues = self.perform_security_review(code, file_path).await;
         
         // 2. 性能审查
-        performance_issues = self.perform_performance_review(code, file_path).await;
+        let performance_issues = self.perform_performance_review(code, file_path).await;
         
         // 3. 风格检查
-        style_issues = self.perform_style_check(code, file_path).await;
+        let style_issues = self.perform_style_check(code, file_path).await;
         
         // 4. 最佳实践检查
-        best_practices = self.check_best_practices(code, file_path, language).await;
+        let best_practices = self.check_best_practices(code, file_path, language).await;
         
         // 计算总体评分
         let summary = self.calculate_summary(

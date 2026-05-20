@@ -130,7 +130,7 @@ impl MCPClient {
         *self.server_info.write().await = Some(server_info.clone());
         *self.server_caps.write().await = Some(caps.clone());
 
-        self.conn_manager.set_state(ConnectionState::Connected {
+        let _ = self.conn_manager.set_state(ConnectionState::Connected {
             capabilities: init_result.capabilities,
             server_info: Some(init_result.server_info),
         });

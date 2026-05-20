@@ -189,7 +189,7 @@ impl ElectionService {
 async fn simulate_rpc_call(
     node_id: &str,
     request: &VoteRequest,
-    timeout: Duration,
+    _timeout: Duration,
 ) -> Result<VoteResponse, ElectionError> {
     let _ = tokio::time::sleep(Duration::from_millis(rand::random::<u64>() % 100)).await;
     

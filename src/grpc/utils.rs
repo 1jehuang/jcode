@@ -344,7 +344,6 @@ pub fn parse_all_symbols(content: &str, file_path: &str) -> Vec<proto::SymbolInf
 fn analyze_project_directory(project_path: &str) -> (Vec<proto::FileInfo>, proto::ProjectAnalysis, proto::DependencyGraph) {
     let mut files = Vec::new();
     let mut line_count = 0;
-    let mut symbol_count = 0;
     let mut dependencies = Vec::new();
     
     let project_dir = std::path::Path::new(project_path);
@@ -366,7 +365,6 @@ fn analyze_project_directory(project_path: &str) -> (Vec<proto::FileInfo>, proto
                             let imports = extract_imports(&content, &ext_str);
                             let file_symbols = parse_all_symbols(&content, path.to_string_lossy().as_ref());
                             let file_symbol_count = file_symbols.len() as i32;
-                            symbol_count += file_symbol_count;
 
                             dependencies.extend(imports.clone());
 

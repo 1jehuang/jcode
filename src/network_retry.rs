@@ -119,7 +119,7 @@ async fn wait_for_platform_change_or_delay(delay: Duration) {
     sleep(delay).await;
 }
 
-async fn command_exists(command: &str) -> bool {
+pub async fn command_exists(command: &str) -> bool {
     Command::new("sh")
         .arg("-c")
         .arg(format!(
@@ -132,11 +132,11 @@ async fn command_exists(command: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn shell_escape(value: &str) -> String {
+pub fn shell_escape(value: &str) -> String {
     value.replace('\'', "'\\''")
 }
 
-async fn wait_for_command_output(command: &str, args: &[&str]) {
+pub async fn wait_for_command_output(command: &str, args: &[&str]) {
     let mut command_builder = Command::new(command);
     command_builder
         .args(args)

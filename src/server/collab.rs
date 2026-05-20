@@ -13,7 +13,9 @@ pub struct CollaborationServer {
     participants: RwLock<HashMap<ParticipantId, Participant>>,
     document_store: Arc<DocumentStore>,
     change_broadcast: broadcast::Sender<ServerPushMessage>,
+    #[allow(dead_code)]
     presence: PresenceManager,
+    #[allow(dead_code)]
     conflict_resolver: ConflictResolver,
     config: CollabConfig,
 }
@@ -78,12 +80,16 @@ impl CrdtDocument {
 }
 
 #[derive(Clone)]
-struct CursorState {
-    participant_id: ParticipantId,
-    position: Position,
-    anchor: Position,
-    last_updated: DateTime<Utc>,
-    selection_mode: SelectionMode,
+pub struct CursorState {
+    #[allow(dead_code)]
+    pub participant_id: ParticipantId,
+    pub position: Position,
+    #[allow(dead_code)]
+    pub anchor: Position,
+    #[allow(dead_code)]
+    pub last_updated: DateTime<Utc>,
+    #[allow(dead_code)]
+    pub selection_mode: SelectionMode,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -389,11 +395,11 @@ impl OperationLog {
 }
 
 #[derive(Clone)]
-pub(crate) struct LoggedOperation {
-    id: u64,
-    operation: TextOperation,
-    vector_clock: VectorClock,
-    timestamp: DateTime<Utc>,
+pub struct LoggedOperation {
+    pub id: u64,
+    pub operation: TextOperation,
+    pub vector_clock: VectorClock,
+    pub timestamp: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]

@@ -39,9 +39,11 @@ mod swarm;
 mod swarm_channels;
 mod swarm_mutation_state;
 mod swarm_persistence;
-mod lsp_event_bridge;
-mod conflict_detector;
-mod collab;
+pub mod lsp_event_bridge;
+pub mod conflict_detector;
+pub mod collab;
+pub use lsp_event_bridge::{LspEventBridge, LspDiagnosticEvent, DiagnosticSummary};
+pub use conflict_detector::{SymbolConflictDetector, ConflictReport, ConflictType};
 mod util;
 
 pub(super) use self::await_members_state::AwaitMembersRuntime;
@@ -437,6 +439,14 @@ pub struct Server {
     await_members_runtime: AwaitMembersRuntime,
     /// Persisted dedupe registry for mutating swarm coordinator operations.
     swarm_mutation_runtime: SwarmMutationRuntime,
+    /// Real-time collaboration server for multi-user editing sessions.
+    collab_server: Arc<collab::CollaborationServer>,
+    /// Optional LSP server manager for language intelligence features.
+    lsp_manager: Option<Arc<jcode_lsp::LspServerManager>>,
+    /// Optional LSP event bridge that forwards diagnostics to Swarm channels.
+    lsp_event_bridge: Option<Arc<LspEventBridge>>,
+    /// Optional symbol conflict detector for Swarm task scheduling.
+    conflict_detector: Option<Arc<SymbolConflictDetector>>,
 }
 
 mod server_impl;

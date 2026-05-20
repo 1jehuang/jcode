@@ -656,6 +656,7 @@ pub struct LruCache<K, V> where K: Eq + std::hash::Hash + Clone, V: Clone {
     misses: AtomicU64,
 }
 
+#[allow(dead_code)]
 impl<K, V> LruCache<K, V>
 where K: Eq + std::hash::Hash + Clone,
       V: Clone,
@@ -730,6 +731,7 @@ pub struct RequestBatcher<T> {
     last_batch_time: Instant,
 }
 
+#[allow(dead_code)]
 impl<T> RequestBatcher<T> {
     pub fn new(batch_size: usize, batch_timeout: Duration) -> Self {
         Self {
@@ -778,6 +780,7 @@ pub struct BufferPool<T> {
     max_pool_size: usize,
 }
 
+#[allow(dead_code)]
 impl<T: Default + Clone> BufferPool<T> {
     pub fn new(default_capacity: usize, max_pool_size: usize) -> Self {
         Self {
@@ -812,6 +815,7 @@ pub struct ConcurrencyLimiter {
     current: Arc<tokio::sync::Semaphore>,
 }
 
+#[allow(dead_code)]
 impl ConcurrencyLimiter {
     pub fn new(max_concurrent: usize) -> Self {
         Self {

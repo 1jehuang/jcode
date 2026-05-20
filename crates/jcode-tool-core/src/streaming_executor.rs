@@ -354,6 +354,7 @@ impl StreamingToolExecutor {
     }
 
     /// Process the queued tools: start executing when conditions allow.
+    #[allow(dead_code)]
     async fn exec_loop(me: &mut Self, cancel_token: &CancellationToken) {
         loop {
             // Check if we're done
@@ -499,6 +500,7 @@ impl StreamingToolExecutor {
     }
 
     /// Check if all tools are done (completed or yielded, nothing executing/queued).
+    #[allow(dead_code)]
     fn all_done(&self) -> bool {
         self.tools
             .iter()

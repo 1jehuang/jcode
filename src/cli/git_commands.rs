@@ -304,7 +304,7 @@ impl GitWorkflow for DefaultGitWorkflow {
         }
 
         let output = self.exec_git(&args).await?;
-        let current_branch = self.current_branch().await.ok();
+        let _current_branch = self.current_branch().await.ok();
 
         let branches: Vec<BranchInfo> = output
             .lines()
