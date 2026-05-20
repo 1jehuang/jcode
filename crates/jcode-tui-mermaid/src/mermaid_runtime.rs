@@ -165,8 +165,7 @@ pub fn is_video_export_mode() -> bool {
 /// Look up a cached PNG for the given mermaid content hash.
 /// Returns (path, width, height) if a cached render exists on disk.
 pub fn get_cached_png(hash: u64) -> Option<(PathBuf, u32, u32)> {
-    let mut cache = RENDER_CACHE.lock().ok()?;
-    let diagram = cache.get(hash, None)?;
+    let diagram = get_cached_diagram(hash, None)?;
     Some((diagram.path, diagram.width, diagram.height))
 }
 
@@ -182,6 +181,7 @@ pub fn register_external_image(path: &Path, width: u32, height: u32) -> u64 {
     if let Ok(mut cache) = RENDER_CACHE.lock() {
         cache.insert(
             hash,
+            RenderProfile::default(),
             CachedDiagram {
                 path: path.to_path_buf(),
                 width,
@@ -205,7 +205,7 @@ pub fn register_inline_image(media_type: &str, data_b64: &str) -> Option<(u64, u
     let hash = hasher.finish();
 
     if let Ok(mut cache) = RENDER_CACHE.lock() {
-        if let Some(existing) = cache.get(hash, None) {
+        if let Some(existing) = cache.get(hash, None, Some(RenderProfile::default())) {
             return Some((hash, existing.width, existing.height));
         }
 
@@ -220,6 +220,7 @@ pub fn register_inline_image(media_type: &str, data_b64: &str) -> Option<(u64, u
         }
         cache.insert(
             hash,
+            RenderProfile::default(),
             CachedDiagram {
                 path,
                 width,

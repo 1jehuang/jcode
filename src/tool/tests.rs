@@ -55,6 +55,13 @@ async fn test_tool_definitions_are_sorted() {
     );
 }
 
+#[test]
+fn test_resolve_skill_aliases_to_skill_manage() {
+    assert_eq!(Registry::resolve_tool_name("skill"), "skill_manage");
+    assert_eq!(Registry::resolve_tool_name("Skill"), "skill_manage");
+    assert_eq!(Registry::resolve_tool_name("skill_manage"), "skill_manage");
+}
+
 struct BareSchemaTool;
 
 #[async_trait]

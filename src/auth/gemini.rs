@@ -236,7 +236,7 @@ pub async fn refresh_tokens(tokens: &GeminiTokens) -> Result<GeminiTokens> {
     let result: Result<GeminiTokens> = async {
         let client_id = gemini_client_id();
         let client_secret = gemini_client_secret();
-        let client = reqwest::Client::new();
+        let client = crate::provider::shared_http_client();
         let resp = client
             .post(GOOGLE_TOKEN_URL)
             .form(&vec![
@@ -443,7 +443,7 @@ async fn exchange_authorization_code(
 ) -> Result<GeminiTokens> {
     let client_id = gemini_client_id();
     let client_secret = gemini_client_secret();
-    let client = reqwest::Client::new();
+    let client = crate::provider::shared_http_client();
     let mut form = vec![
         ("grant_type", "authorization_code".to_string()),
         ("client_id", client_id),
@@ -487,7 +487,7 @@ async fn exchange_authorization_code(
 }
 
 pub async fn fetch_email(access_token: &str) -> Result<String> {
-    let client = reqwest::Client::new();
+    let client = crate::provider::shared_http_client();
     let resp = client
         .get(GOOGLE_USERINFO_URL)
         .bearer_auth(access_token)

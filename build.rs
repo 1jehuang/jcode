@@ -319,12 +319,30 @@ fn git_output<const N: usize>(args: [&str; N]) -> Option<String> {
 fn metadata_value(key: &str) -> Option<String> {
     let path = std::env::var("JCODE_BUILD_METADATA_FILE").ok()?;
     let data = fs::read_to_string(path).ok()?;
-    data.lines().find_map(|line| {
-        let (entry_key, entry_value) = line.split_once('=')?;
-        if entry_key == key {
-            Some(entry_value.to_string())
-        } else {
-            None
+    let mut lines = data.lines();
+    while let Some(line) = lines.next() {
+        if let Some((entry_key, marker)) = line.split_once("<<") {
+            if entry_key == key {
+                let mut value = String::new();
+                for value_line in lines.by_ref() {
+                    if value_line == marker {
+                        return Some(value);
+                    }
+                    if !value.is_empty() {
+                        value.push('\n');
+                    }
+                    value.push_str(value_line);
+                }
+                return Some(value);
+            }
+            continue;
         }
-    })
+
+        if let Some((entry_key, entry_value)) = line.split_once('=')
+            && entry_key == key
+        {
+            return Some(entry_value.to_string());
+        }
+    }
+    None
 }

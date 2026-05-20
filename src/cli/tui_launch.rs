@@ -444,17 +444,26 @@ pub fn spawn_resume_in_new_terminal(
     session_id: &str,
     cwd: &std::path::Path,
 ) -> Result<bool> {
+    spawn_resume_in_new_terminal_with_provider(exe, session_id, cwd, None)
+}
+
+#[cfg(unix)]
+pub fn spawn_resume_in_new_terminal_with_provider(
+    exe: &std::path::Path,
+    session_id: &str,
+    cwd: &std::path::Path,
+    provider_key: Option<&str>,
+) -> Result<bool> {
     let title = resumed_window_title(session_id);
-    let command = crate::terminal_launch::TerminalCommand::new(
-        exe,
-        vec![
-            "--fresh-spawn".to_string(),
-            "--resume".to_string(),
-            session_id.to_string(),
-        ],
-    )
-    .title(title)
-    .fresh_spawn();
+    let mut args = vec!["--fresh-spawn".to_string()];
+    if let Some(provider_key) = provider_key.filter(|value| !value.trim().is_empty()) {
+        args.push("--provider".to_string());
+        args.push(provider_key.to_string());
+    }
+    args.extend(["--resume".to_string(), session_id.to_string()]);
+    let command = crate::terminal_launch::TerminalCommand::new(exe, args)
+        .title(title)
+        .fresh_spawn();
     crate::terminal_launch::spawn_command_in_new_terminal(&command, cwd)
 }
 
@@ -464,18 +473,30 @@ pub fn spawn_selfdev_in_new_terminal(
     session_id: &str,
     cwd: &std::path::Path,
 ) -> Result<bool> {
+    spawn_selfdev_in_new_terminal_with_provider(exe, session_id, cwd, None)
+}
+
+#[cfg(unix)]
+pub fn spawn_selfdev_in_new_terminal_with_provider(
+    exe: &std::path::Path,
+    session_id: &str,
+    cwd: &std::path::Path,
+    provider_key: Option<&str>,
+) -> Result<bool> {
     let selfdev_title = format!("{} [self-dev]", resumed_window_title(session_id));
-    let command = crate::terminal_launch::TerminalCommand::new(
-        exe,
-        vec![
-            "--fresh-spawn".to_string(),
-            "--resume".to_string(),
-            session_id.to_string(),
-            "self-dev".to_string(),
-        ],
-    )
-    .title(selfdev_title.clone())
-    .fresh_spawn();
+    let mut args = vec!["--fresh-spawn".to_string()];
+    if let Some(provider_key) = provider_key.filter(|value| !value.trim().is_empty()) {
+        args.push("--provider".to_string());
+        args.push(provider_key.to_string());
+    }
+    args.extend([
+        "--resume".to_string(),
+        session_id.to_string(),
+        "self-dev".to_string(),
+    ]);
+    let command = crate::terminal_launch::TerminalCommand::new(exe, args)
+        .title(selfdev_title.clone())
+        .fresh_spawn();
     let spawned = crate::terminal_launch::spawn_command_in_new_terminal(&command, cwd)?;
     if spawned {
         focus_title_best_effort(&selfdev_title);
@@ -563,7 +584,25 @@ pub fn spawn_resume_in_new_terminal(
     session_id: &str,
     cwd: &std::path::Path,
 ) -> Result<bool> {
+    spawn_resume_in_new_terminal_with_provider(exe, session_id, cwd, None)
+}
+
+#[cfg(not(unix))]
+pub fn spawn_resume_in_new_terminal_with_provider(
+    exe: &std::path::Path,
+    session_id: &str,
+    cwd: &std::path::Path,
+    provider_key: Option<&str>,
+) -> Result<bool> {
     use std::process::{Command, Stdio};
+
+    let mut jcode_args: Vec<String> = Vec::new();
+    if let Some(provider_key) = provider_key.filter(|value| !value.trim().is_empty()) {
+        jcode_args.push("--provider".to_string());
+        jcode_args.push(provider_key.to_string());
+    }
+    jcode_args.push("--resume".to_string());
+    jcode_args.push(session_id.to_string());
 
     let wezterm_gui = find_wezterm_gui_binary();
     let alacritty_available = Command::new("where")
@@ -589,18 +628,13 @@ pub fn spawn_resume_in_new_terminal(
                     continue;
                 };
                 let mut cmd = Command::new(wezterm_bin);
-                cmd.args([
-                    "start",
-                    "--always-new-process",
-                    "--",
-                    &exe.to_string_lossy(),
-                    "--resume",
-                    session_id,
-                ])
-                .current_dir(cwd)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
+                cmd.args(["start", "--always-new-process", "--"])
+                    .arg(exe)
+                    .args(&jcode_args)
+                    .current_dir(cwd)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
                 crate::platform::spawn_detached(&mut cmd)
             }
             "wt" | "windows-terminal" => {
@@ -608,17 +642,13 @@ pub fn spawn_resume_in_new_terminal(
                     continue;
                 }
                 let mut cmd = Command::new("wt.exe");
-                cmd.args([
-                    "-p",
-                    "Command Prompt",
-                    &exe.to_string_lossy(),
-                    "--resume",
-                    session_id,
-                ])
-                .current_dir(cwd)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
+                cmd.args(["-p", "Command Prompt"])
+                    .arg(exe)
+                    .args(&jcode_args)
+                    .current_dir(cwd)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
                 crate::platform::spawn_detached(&mut cmd)
             }
             "alacritty" => {
@@ -628,8 +658,7 @@ pub fn spawn_resume_in_new_terminal(
                 let mut cmd = Command::new("alacritty");
                 cmd.args(["-e"])
                     .arg(exe)
-                    .arg("--resume")
-                    .arg(session_id)
+                    .args(&jcode_args)
                     .current_dir(cwd)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
@@ -653,7 +682,28 @@ pub fn spawn_selfdev_in_new_terminal(
     session_id: &str,
     cwd: &std::path::Path,
 ) -> Result<bool> {
+    spawn_selfdev_in_new_terminal_with_provider(exe, session_id, cwd, None)
+}
+
+#[cfg(not(unix))]
+pub fn spawn_selfdev_in_new_terminal_with_provider(
+    exe: &std::path::Path,
+    session_id: &str,
+    cwd: &std::path::Path,
+    provider_key: Option<&str>,
+) -> Result<bool> {
     use std::process::{Command, Stdio};
+
+    let mut jcode_args: Vec<String> = Vec::new();
+    if let Some(provider_key) = provider_key.filter(|value| !value.trim().is_empty()) {
+        jcode_args.push("--provider".to_string());
+        jcode_args.push(provider_key.to_string());
+    }
+    jcode_args.extend([
+        "--resume".to_string(),
+        session_id.to_string(),
+        "self-dev".to_string(),
+    ]);
 
     let wezterm_gui = find_wezterm_gui_binary();
     let alacritty_available = Command::new("where")
@@ -679,19 +729,13 @@ pub fn spawn_selfdev_in_new_terminal(
                     continue;
                 };
                 let mut cmd = Command::new(wezterm_bin);
-                cmd.args([
-                    "start",
-                    "--always-new-process",
-                    "--",
-                    &exe.to_string_lossy(),
-                    "--resume",
-                    session_id,
-                    "self-dev",
-                ])
-                .current_dir(cwd)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
+                cmd.args(["start", "--always-new-process", "--"])
+                    .arg(exe)
+                    .args(&jcode_args)
+                    .current_dir(cwd)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
                 crate::platform::spawn_detached(&mut cmd)
             }
             "wt" | "windows-terminal" => {
@@ -699,18 +743,13 @@ pub fn spawn_selfdev_in_new_terminal(
                     continue;
                 }
                 let mut cmd = Command::new("wt.exe");
-                cmd.args([
-                    "-p",
-                    "Command Prompt",
-                    &exe.to_string_lossy(),
-                    "--resume",
-                    session_id,
-                    "self-dev",
-                ])
-                .current_dir(cwd)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
+                cmd.args(["-p", "Command Prompt"])
+                    .arg(exe)
+                    .args(&jcode_args)
+                    .current_dir(cwd)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
                 crate::platform::spawn_detached(&mut cmd)
             }
             "alacritty" => {
@@ -720,9 +759,7 @@ pub fn spawn_selfdev_in_new_terminal(
                 let mut cmd = Command::new("alacritty");
                 cmd.args(["-e"])
                     .arg(exe)
-                    .arg("--resume")
-                    .arg(session_id)
-                    .arg("self-dev")
+                    .args(&jcode_args)
                     .current_dir(cwd)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
@@ -954,15 +991,15 @@ pub fn list_sessions() -> Result<()> {
 
             Ok(())
         }
-        Some(tui::session_picker::PickerResult::RestoreAllCrashed) => {
-            let recovered = session::recover_crashed_sessions()?;
+        Some(tui::session_picker::PickerResult::RestoreCrashedGroup(session_ids)) => {
+            let recovered = session::recover_crashed_sessions_by_ids(&session_ids)?;
             if recovered.is_empty() {
-                eprintln!("No crashed sessions found.");
+                eprintln!("No crashed sessions found in the selected restore group.");
                 return Ok(());
             }
 
             eprintln!(
-                "Recovered {} crashed session(s) from the last crash window.",
+                "Recovered {} crashed session(s) from the selected restore group.",
                 recovered.len()
             );
 

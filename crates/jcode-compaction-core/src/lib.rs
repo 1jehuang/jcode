@@ -216,10 +216,10 @@ pub fn safe_compaction_cutoff(messages: &[Message], initial_cutoff: usize) -> us
                     available_tool_ids.insert(id.clone());
                     missing_tool_ids.remove(id);
                 }
-                ContentBlock::ToolResult { tool_use_id, .. } => {
-                    if !available_tool_ids.contains(tool_use_id) {
-                        missing_tool_ids.insert(tool_use_id.clone());
-                    }
+                ContentBlock::ToolResult { tool_use_id, .. }
+                    if !available_tool_ids.contains(tool_use_id) =>
+                {
+                    missing_tool_ids.insert(tool_use_id.clone());
                 }
                 _ => {}
             }
@@ -239,10 +239,10 @@ pub fn safe_compaction_cutoff(messages: &[Message], initial_cutoff: usize) -> us
                     available_tool_ids.insert(id.clone());
                     missing_tool_ids.remove(id);
                 }
-                ContentBlock::ToolResult { tool_use_id, .. } => {
-                    if !available_tool_ids.contains(tool_use_id) {
-                        missing_tool_ids.insert(tool_use_id.clone());
-                    }
+                ContentBlock::ToolResult { tool_use_id, .. }
+                    if !available_tool_ids.contains(tool_use_id) =>
+                {
+                    missing_tool_ids.insert(tool_use_id.clone());
                 }
                 _ => {}
             }
@@ -451,11 +451,12 @@ pub fn emergency_truncate_tool_results(messages: &mut [Message], max_chars: usiz
 
     for msg in messages.iter_mut() {
         for block in msg.content.iter_mut() {
-            if let ContentBlock::ToolResult { content, .. } = block
-                && content.len() > max_chars
-            {
-                *content = emergency_truncated_tool_result(content, max_chars);
-                truncated += 1;
+            match block {
+                ContentBlock::ToolResult { content, .. } if content.len() > max_chars => {
+                    *content = emergency_truncated_tool_result(content, max_chars);
+                    truncated += 1;
+                }
+                _ => {}
             }
         }
     }

@@ -56,9 +56,9 @@ workspace_down = "alt+j"
 workspace_up = "alt+k"
 workspace_right = "alt+l"
 
-# /resume picker behavior. Options: "new-terminal" or "current-terminal".
+# /resume picker behavior. Options: "current-terminal" or "new-terminal".
 # Ctrl+Enter performs the alternate action.
-session_picker_enter = "new-terminal"
+session_picker_enter = "current-terminal"
 
 [dictation]
 # External speech-to-text command.
@@ -148,6 +148,18 @@ message_timestamps = true
 # Set to "main" for bleeding edge updates every time code is pushed
 update_channel = "stable"
 
+[websearch]
+# Preferred websearch engine: "duckduckgo" or "bing".
+engine = "duckduckgo"
+# Keyless HTML engines to try if the preferred engine fails. Default falls back to Bing HTML.
+fallback_engines = ["bing"]
+# Bring your own Bing Search API key for primary Bing searches. Prefer using an env var.
+# Fallback Bing searches intentionally use keyless HTML search.
+# bing_api_key_env = "JCODE_BING_API_KEY"
+# bing_api_key = ""
+# Bing market/region, for example "en-US" or "zh-CN".
+bing_market = "en-US"
+
 [provider]
 # Default model (optional, uses provider default if not set)
 # Set via /model picker with Ctrl+D to save as default
@@ -160,8 +172,9 @@ openai_reasoning_effort = "low"
 # OpenAI transport mode (auto|websocket|https)
 # openai_transport = "auto"
 # OpenAI service tier override (priority|flex)
-# Set `priority` to match Codex /fast behavior (higher speed, higher usage)
-# openai_service_tier = "priority"
+# Defaults to `priority` to match Codex /fast behavior for OpenAI OAuth
+# (higher speed, higher usage). Set to "off" to disable.
+openai_service_tier = "priority"
 # Cross-provider failover when the same prompt would be resent elsewhere.
 # countdown = 3-second countdown before retrying on another provider; press Esc to cancel (default)
 # manual = show a notice and let you switch yourself

@@ -144,6 +144,68 @@ pub(super) async fn handle_get_history(
     Ok(())
 }
 
+pub(super) async fn handle_get_model_catalog(
+    id: u64,
+    session_id: &str,
+    agent: &Arc<Mutex<Agent>>,
+    writer: &Arc<Mutex<WriteHalf>>,
+) -> Result<()> {
+    let started = Instant::now();
+    let (provider_name, provider_model, available_models, available_model_routes) = {
+        let agent_guard = agent.lock().await;
+        (
+            Some(agent_guard.provider_name()),
+            Some(agent_guard.provider_model()),
+            agent_guard.available_models_display(),
+            agent_guard.model_routes(),
+        )
+    };
+
+    let event = ServerEvent::History {
+        id,
+        session_id: session_id.to_string(),
+        messages: Vec::new(),
+        images: Vec::new(),
+        provider_name,
+        provider_model,
+        available_models,
+        available_model_routes,
+        mcp_servers: Vec::new(),
+        skills: Vec::new(),
+        total_tokens: None,
+        all_sessions: Vec::new(),
+        client_count: None,
+        is_canary: None,
+        server_version: None,
+        server_name: None,
+        server_icon: None,
+        server_has_update: None,
+        was_interrupted: None,
+        reload_recovery: None,
+        connection_type: None,
+        status_detail: None,
+        upstream_provider: None,
+        reasoning_effort: None,
+        service_tier: None,
+        subagent_model: None,
+        autoreview_enabled: None,
+        autojudge_enabled: None,
+        compaction_mode: Default::default(),
+        activity: None,
+        side_panel: Default::default(),
+    };
+    let json = encode_event(&event);
+    let mut writer_guard = writer.lock().await;
+    writer_guard.write_all(json.as_bytes()).await?;
+    crate::logging::info(&format!(
+        "[TIMING] handle_get_model_catalog: session={}, bytes={}, total={}ms",
+        session_id,
+        json.len(),
+        started.elapsed().as_millis()
+    ));
+    Ok(())
+}
+
 pub(super) async fn handle_get_compacted_history(
     id: u64,
     session_id: &str,

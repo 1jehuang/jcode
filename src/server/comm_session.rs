@@ -12,6 +12,7 @@ use super::{
     update_member_status, update_member_status_with_report,
 };
 use crate::agent::Agent;
+use crate::config::SwarmSpawnMode;
 use crate::protocol::{NotificationType, ServerEvent};
 use crate::provider::Provider;
 use crate::session::Session;
@@ -27,6 +28,7 @@ type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<S
 fn create_visible_spawn_session(
     working_dir: Option<&str>,
     model_override: Option<&str>,
+    provider_key_override: Option<&str>,
     selfdev_requested: bool,
 ) -> anyhow::Result<(String, PathBuf)> {
     let cwd = working_dir
@@ -37,6 +39,9 @@ fn create_visible_spawn_session(
     session.working_dir = Some(cwd.display().to_string());
     if let Some(model) = model_override {
         session.model = Some(model.to_string());
+    }
+    if let Some(provider_key) = provider_key_override {
+        session.provider_key = Some(provider_key.to_string());
     }
     if selfdev_requested {
         session.set_canary("self-dev");
@@ -67,10 +72,9 @@ async fn resolve_spawn_working_dir(
                 .ok()
                 .and_then(|agent_guard| agent_guard.working_dir().map(str::to_string))
         })
-    } {
-        if !agent_dir.trim().is_empty() {
-            return Some(agent_dir);
-        }
+    } && !agent_dir.trim().is_empty()
+    {
+        return Some(agent_dir);
     }
 
     swarm_members
@@ -86,16 +90,57 @@ fn spawn_visible_session_window(
     session_id: &str,
     cwd: &std::path::Path,
     selfdev_requested: bool,
+    provider_key: Option<&str>,
 ) -> anyhow::Result<bool> {
     let exe = crate::build::client_update_candidate(selfdev_requested)
         .map(|(path, _label)| path)
         .or_else(|| std::env::current_exe().ok())
         .unwrap_or_else(|| PathBuf::from("jcode"));
     if selfdev_requested {
-        crate::cli::tui_launch::spawn_selfdev_in_new_terminal(&exe, session_id, cwd)
+        crate::cli::tui_launch::spawn_selfdev_in_new_terminal_with_provider(
+            &exe,
+            session_id,
+            cwd,
+            provider_key,
+        )
     } else {
-        crate::cli::tui_launch::spawn_resume_in_new_terminal(&exe, session_id, cwd)
+        crate::cli::tui_launch::spawn_resume_in_new_terminal_with_provider(
+            &exe,
+            session_id,
+            cwd,
+            provider_key,
+        )
     }
+}
+
+fn provider_key_for_spawn_model(
+    model: Option<&str>,
+    provider_key_override: Option<&str>,
+) -> Option<String> {
+    if let Some(provider_key) = provider_key_override
+        .map(str::trim)
+        .filter(|provider_key| !provider_key.is_empty())
+    {
+        return Some(provider_key.to_string());
+    }
+
+    let model = model?.trim();
+    if model.is_empty() {
+        return None;
+    }
+
+    if let Some((prefix, _rest)) = model.split_once(':') {
+        let prefix = prefix.trim();
+        if crate::provider::provider_from_model_key(prefix).is_some()
+            || crate::provider_catalog::resolve_openai_compatible_profile_selection(prefix)
+                .is_some()
+            || crate::config::config().providers.contains_key(prefix)
+        {
+            return Some(prefix.to_string());
+        }
+    }
+
+    crate::provider::provider_for_model(model).map(str::to_string)
 }
 
 fn persist_headed_startup_message(session_id: &str, message: &str) {
@@ -126,21 +171,32 @@ fn cleanup_prepared_visible_spawn_session(session_id: &str) {
 fn prepare_visible_spawn_session<F>(
     working_dir: Option<&str>,
     model_override: Option<&str>,
+    provider_key_override: Option<&str>,
     selfdev_requested: bool,
     startup_message: Option<&str>,
     launch_visible: F,
 ) -> anyhow::Result<(String, bool)>
 where
-    F: FnOnce(&str, &std::path::Path, bool) -> anyhow::Result<bool>,
+    F: FnOnce(&str, &std::path::Path, bool, Option<&str>) -> anyhow::Result<bool>,
 {
-    let (new_session_id, cwd) =
-        create_visible_spawn_session(working_dir, model_override, selfdev_requested)?;
+    let provider_key = provider_key_for_spawn_model(model_override, provider_key_override);
+    let (new_session_id, cwd) = create_visible_spawn_session(
+        working_dir,
+        model_override,
+        provider_key.as_deref(),
+        selfdev_requested,
+    )?;
 
     if let Some(message) = startup_message {
         persist_headed_startup_message(&new_session_id, message);
     }
 
-    match launch_visible(&new_session_id, &cwd, selfdev_requested) {
+    match launch_visible(
+        &new_session_id,
+        &cwd,
+        selfdev_requested,
+        provider_key.as_deref(),
+    ) {
         Ok(launched) => {
             if !launched {
                 cleanup_prepared_visible_spawn_session(&new_session_id);
@@ -236,6 +292,7 @@ pub(super) async fn spawn_swarm_agent(
     swarm_id: &str,
     working_dir: Option<String>,
     initial_message: Option<String>,
+    spawn_mode: Option<SwarmSpawnMode>,
     sessions: &SessionAgents,
     global_session_id: &Arc<RwLock<String>>,
     provider_template: &Arc<dyn Provider>,
@@ -251,44 +308,43 @@ pub(super) async fn spawn_swarm_agent(
 ) -> anyhow::Result<String> {
     let resolved_working_dir =
         resolve_spawn_working_dir(working_dir, req_session_id, sessions, swarm_members).await;
-    let coordinator_model = {
-        let agent_sessions = sessions.read().await;
-        agent_sessions.get(req_session_id).and_then(|agent| {
-            agent
-                .try_lock()
-                .ok()
-                .map(|agent_guard| agent_guard.provider_model())
-        })
-    };
-    let spawn_model = crate::config::config()
-        .agents
-        .swarm_model
-        .clone()
-        .or(coordinator_model.clone());
-    let coordinator_is_canary = {
+    let (coordinator_model, coordinator_provider_key, coordinator_is_canary) = {
         let agent_sessions = sessions.read().await;
         agent_sessions
             .get(req_session_id)
             .and_then(|agent| {
-                agent
-                    .try_lock()
-                    .ok()
-                    .map(|agent_guard| agent_guard.is_canary())
+                agent.try_lock().ok().map(|agent_guard| {
+                    (
+                        Some(agent_guard.provider_model()),
+                        agent_guard.session_provider_key(),
+                        agent_guard.is_canary(),
+                    )
+                })
             })
-            .unwrap_or(false)
+            .unwrap_or((None, None, false))
     };
+    let agents_config = &crate::config::config().agents;
+    let configured_swarm_model = agents_config.swarm_model.clone();
+    let resolved_spawn_mode = spawn_mode.unwrap_or(agents_config.swarm_spawn_mode);
+    let spawn_model = coordinator_model.or(configured_swarm_model);
+    let spawn_provider_key = coordinator_provider_key
+        .or_else(|| provider_key_for_spawn_model(spawn_model.as_deref(), None));
 
     let startup_message = initial_message
         .as_deref()
         .map(append_swarm_completion_report_instructions);
 
-    let visible_spawn = prepare_visible_spawn_session(
-        resolved_working_dir.as_deref(),
-        spawn_model.as_deref(),
-        coordinator_is_canary,
-        startup_message.as_deref(),
-        spawn_visible_session_window,
-    );
+    let visible_spawn = match resolved_spawn_mode {
+        SwarmSpawnMode::Headless => Err(anyhow::anyhow!("headless spawn requested")),
+        SwarmSpawnMode::Visible | SwarmSpawnMode::Auto => prepare_visible_spawn_session(
+            resolved_working_dir.as_deref(),
+            spawn_model.as_deref(),
+            spawn_provider_key.as_deref(),
+            coordinator_is_canary,
+            startup_message.as_deref(),
+            spawn_visible_session_window,
+        ),
+    };
 
     let (new_session_id, is_headless_fallback) = match visible_spawn {
         Ok((new_session_id, true)) => Ok((new_session_id, false)),
@@ -310,6 +366,7 @@ pub(super) async fn spawn_swarm_agent(
                 soft_interrupt_queues,
                 coordinator_is_canary,
                 spawn_model.clone(),
+                spawn_provider_key.clone(),
                 Some(Arc::clone(mcp_pool)),
                 Some(req_session_id.to_string()),
             )
@@ -461,6 +518,7 @@ pub(super) async fn handle_comm_spawn(
     working_dir: Option<String>,
     initial_message: Option<String>,
     request_nonce: Option<String>,
+    spawn_mode: Option<SwarmSpawnMode>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     sessions: &SessionAgents,
     global_session_id: &Arc<RwLock<String>>,
@@ -502,6 +560,9 @@ pub(super) async fn handle_comm_spawn(
             working_dir.clone().unwrap_or_default(),
             initial_message.clone().unwrap_or_default(),
             request_nonce.clone().unwrap_or_default(),
+            spawn_mode
+                .map(|mode| format!("{mode:?}"))
+                .unwrap_or_default(),
         ],
     );
     let Some(mutation_state) = begin_or_replay(
@@ -522,6 +583,7 @@ pub(super) async fn handle_comm_spawn(
         &swarm_id,
         working_dir,
         initial_message,
+        spawn_mode,
         sessions,
         global_session_id,
         provider_template,
@@ -917,17 +979,18 @@ async fn require_coordinator_swarm(
         (swarm_id, is_coordinator, coordinator_is_stale)
     };
 
-    if !is_coordinator && coordinator_is_stale {
-        if let Some(ref swarm_id) = swarm_id {
-            let mut coordinators = swarm_coordinators.write().await;
-            coordinators.insert(swarm_id.clone(), req_session_id.to_string());
-            drop(coordinators);
-            let mut members = swarm_members.write().await;
-            if let Some(member) = members.get_mut(req_session_id) {
-                member.role = "coordinator".to_string();
-            }
-            return Some(swarm_id.clone());
-        };
+    if !is_coordinator
+        && coordinator_is_stale
+        && let Some(ref swarm_id) = swarm_id
+    {
+        let mut coordinators = swarm_coordinators.write().await;
+        coordinators.insert(swarm_id.clone(), req_session_id.to_string());
+        drop(coordinators);
+        let mut members = swarm_members.write().await;
+        if let Some(member) = members.get_mut(req_session_id) {
+            member.role = "coordinator".to_string();
+        }
+        return Some(swarm_id.clone());
     }
 
     if !is_coordinator {

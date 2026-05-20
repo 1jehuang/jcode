@@ -52,12 +52,41 @@ pub struct ModelInfo {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelPricing {
+    #[serde(default, deserialize_with = "deserialize_optional_string_or_number")]
     pub prompt: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_string_or_number")]
     pub completion: Option<String>,
-    #[serde(default, rename = "input_cache_read")]
+    #[serde(
+        default,
+        rename = "input_cache_read",
+        deserialize_with = "deserialize_optional_string_or_number"
+    )]
     pub input_cache_read: Option<String>,
-    #[serde(default, rename = "input_cache_write")]
+    #[serde(
+        default,
+        rename = "input_cache_write",
+        deserialize_with = "deserialize_optional_string_or_number"
+    )]
     pub input_cache_write: Option<String>,
+}
+
+fn deserialize_optional_string_or_number<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::String(value)) => Some(value),
+        Some(serde_json::Value::Number(value)) => Some(value.to_string()),
+        Some(serde_json::Value::Null) | None => None,
+        Some(other) => {
+            return Err(serde::de::Error::custom(format!(
+                "expected string, number, or null for pricing value, got {other}"
+            )));
+        }
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,6 +177,8 @@ impl EndpointInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskCache {
     pub cached_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_api_base: Option<String>,
     pub models: Vec<ModelInfo>,
 }
 
@@ -288,12 +319,7 @@ pub fn current_unix_secs() -> Option<u64> {
         .map(|d| d.as_secs())
 }
 
-fn configured_cache_namespace() -> String {
-    let raw = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| DEFAULT_CACHE_NAMESPACE.to_string());
+fn sanitize_cache_namespace(raw: &str) -> String {
     let sanitized: String = raw
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
@@ -305,13 +331,33 @@ fn configured_cache_namespace() -> String {
     }
 }
 
-fn cache_path() -> PathBuf {
-    let namespace = configured_cache_namespace();
+fn configured_cache_namespace() -> String {
+    let raw = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_CACHE_NAMESPACE.to_string());
+
+    sanitize_cache_namespace(&raw)
+}
+
+fn cache_path_for_namespace(namespace: &str) -> PathBuf {
+    let namespace = sanitize_cache_namespace(namespace);
+    if let Ok(path) = std::env::var("JCODE_HOME") {
+        return PathBuf::from(path)
+            .join("cache")
+            .join(format!("{}_models.json", namespace));
+    }
+
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".jcode")
         .join("cache")
         .join(format!("{}_models.json", namespace))
+}
+
+fn cache_path() -> PathBuf {
+    cache_path_for_namespace(&configured_cache_namespace())
 }
 
 fn disk_cache_modified_at(path: &PathBuf) -> Option<SystemTime> {
@@ -328,8 +374,7 @@ fn fresh_disk_cache(cache: Option<DiskCache>) -> Option<DiskCache> {
     }
 }
 
-pub fn load_disk_cache_entry() -> Option<DiskCache> {
-    let path = cache_path();
+fn load_disk_cache_entry_from_path(path: PathBuf) -> Option<DiskCache> {
     let modified_at = disk_cache_modified_at(&path);
 
     if let Ok(memo) = DISK_CACHE_MEMO.lock()
@@ -354,6 +399,14 @@ pub fn load_disk_cache_entry() -> Option<DiskCache> {
     }
 
     fresh_disk_cache(loaded)
+}
+
+pub fn load_disk_cache_entry() -> Option<DiskCache> {
+    load_disk_cache_entry_from_path(cache_path())
+}
+
+pub fn load_disk_cache_entry_for_namespace(namespace: &str) -> Option<DiskCache> {
+    load_disk_cache_entry_from_path(cache_path_for_namespace(namespace))
 }
 
 pub fn load_disk_cache() -> Option<Vec<ModelInfo>> {
@@ -425,7 +478,30 @@ pub fn all_model_timestamps() -> Vec<(String, u64)> {
 }
 
 pub fn save_disk_cache(models: &[ModelInfo]) {
-    let path = cache_path();
+    save_disk_cache_with_source(models, None);
+}
+
+pub fn save_disk_cache_with_source(models: &[ModelInfo], source_api_base: Option<&str>) {
+    save_disk_cache_with_source_to_path(cache_path(), models, source_api_base);
+}
+
+pub fn save_disk_cache_with_source_for_namespace(
+    namespace: &str,
+    models: &[ModelInfo],
+    source_api_base: Option<&str>,
+) {
+    save_disk_cache_with_source_to_path(
+        cache_path_for_namespace(namespace),
+        models,
+        source_api_base,
+    );
+}
+
+fn save_disk_cache_with_source_to_path(
+    path: PathBuf,
+    models: &[ModelInfo],
+    source_api_base: Option<&str>,
+) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -437,6 +513,7 @@ pub fn save_disk_cache(models: &[ModelInfo]) {
 
     let cache = DiskCache {
         cached_at: now,
+        source_api_base: source_api_base.map(ToString::to_string),
         models: models.to_vec(),
     };
 

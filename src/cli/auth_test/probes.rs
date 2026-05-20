@@ -48,15 +48,15 @@ fn probe_generic_provider_auth(
     // auth-test should never be delayed or wedged by an unrelated Cursor/Gemini
     // external auth probe.
     let status = crate::auth::AuthStatus::check_fast();
-    let state = status.state_for_provider(provider);
-    let detail = status.method_detail_for_provider(provider);
+    let assessment = status.assessment_for_provider(provider);
     report.push_step(
         "credential_probe",
-        state == crate::auth::AuthState::Available,
+        assessment.is_available(),
         format!(
-            "{} auth status is {} ({detail}).",
+            "{} auth status is {} ({}).",
             provider.display_name,
-            auth_state_label(state),
+            auth_state_label(assessment.state),
+            assessment.method_detail,
         ),
     );
     report.push_step(
@@ -228,7 +228,7 @@ async fn probe_copilot_auth(report: &mut AuthTestProviderReport) {
             )
         },
     ) {
-        let client = reqwest::Client::new();
+        let client = crate::provider::shared_http_client();
         push_result_step(
             report,
             "refresh_probe",

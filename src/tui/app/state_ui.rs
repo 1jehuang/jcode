@@ -507,11 +507,14 @@ impl App {
         } else {
             snapshot
         };
-        let snapshot = if self.observe_mode_enabled {
+        let mut snapshot = if self.observe_mode_enabled {
             self.decorate_side_panel_with_observe(snapshot, focus_observe)
         } else {
             snapshot
         };
+        if self.side_panel_user_hidden && snapshot.focused_page_id.is_some() {
+            snapshot.focused_page_id = None;
+        }
         self.apply_side_panel_snapshot(snapshot);
     }
 
@@ -837,12 +840,45 @@ fn push_cache_signature(
             label, signature.messages_hash
         ));
         lines.push(format!(
+            "- {}.message_hashes_len: **{}**",
+            label,
+            signature.message_hashes.len()
+        ));
+        lines.push(format!(
             "- {}.message_count: **{}**",
             label, signature.message_count
         ));
         lines.push(format!(
             "- {}.tool_count: **{}**",
             label, signature.tool_count
+        ));
+        lines.push(format!(
+            "- {}.system_static_chars: **{}**",
+            label, signature.system_static_chars
+        ));
+        lines.push(format!(
+            "- {}.tools_json_chars: **{}**",
+            label, signature.tools_json_chars
+        ));
+        lines.push(format!(
+            "- {}.messages_json_chars: **{}**",
+            label, signature.messages_json_chars
+        ));
+        lines.push(format!(
+            "- {}.ephemeral_hash: {}",
+            label,
+            signature
+                .ephemeral_hash
+                .map(|hash| format!("`{:016x}`", hash))
+                .unwrap_or_else(|| "None".to_string())
+        ));
+        lines.push(format!(
+            "- {}.ephemeral_chars: **{}**",
+            label, signature.ephemeral_chars
+        ));
+        lines.push(format!(
+            "- {}.ephemeral_message_count: **{}**",
+            label, signature.ephemeral_message_count
         ));
     } else {
         lines.push(format!("- {}: None", label));
@@ -1197,6 +1233,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
 
     if trimmed == "/changelog" {
         app.changelog_scroll = Some(0);
+        app.set_status_notice("Changelog");
         return true;
     }
 
@@ -1345,7 +1382,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             .unwrap_or(app.session.id.as_str())
             .to_string();
         let context = app.context_info();
-        let todos = super::helpers::gather_todos_for_session(Some(active_session_id.as_str()));
+        let todos = crate::todo::load_todos(active_session_id.as_str()).unwrap_or_default();
 
         let (provider_name, model_name, reasoning_effort, service_tier, transport, total_tokens) =
             if app.is_remote {

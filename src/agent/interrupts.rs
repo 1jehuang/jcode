@@ -120,12 +120,34 @@ impl Agent {
     /// Queue a soft interrupt message to be injected at the next safe point.
     /// This method can be called even while the agent is processing (uses separate lock).
     pub fn queue_soft_interrupt(&self, content: String, urgent: bool, source: SoftInterruptSource) {
+        let content_bytes = content.len();
+        let content_chars = content.chars().count();
         if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
+            let pending_before = queue.len();
             queue.push(SoftInterruptMessage {
                 content,
                 urgent,
                 source,
             });
+            logging::info(&format!(
+                "AGENT_SOFT_INTERRUPT_QUEUE_PUSH session={} source={:?} urgent={} content_bytes={} content_chars={} pending_before={} pending_after={}",
+                self.session_id(),
+                source,
+                urgent,
+                content_bytes,
+                content_chars,
+                pending_before,
+                queue.len()
+            ));
+        } else {
+            logging::warn(&format!(
+                "AGENT_SOFT_INTERRUPT_QUEUE_PUSH_FAILED session={} source={:?} urgent={} content_bytes={} content_chars={} reason=queue_lock_poisoned",
+                self.session_id(),
+                source,
+                urgent,
+                content_bytes,
+                content_chars
+            ));
         }
     }
 
@@ -297,11 +319,27 @@ impl Agent {
         let messages: Vec<SoftInterruptMessage> = {
             let mut queue = match self.soft_interrupt_queue.lock() {
                 Ok(queue) => queue,
-                Err(_) => return Vec::new(),
+                Err(_) => {
+                    logging::warn(&format!(
+                        "AGENT_SOFT_INTERRUPT_INJECT_LOCK_FAILED session={}",
+                        self.session_id()
+                    ));
+                    return Vec::new();
+                }
             };
             if queue.is_empty() {
                 return Vec::new();
             }
+            logging::info(&format!(
+                "AGENT_SOFT_INTERRUPT_INJECT_DRAIN session={} pending_count={} urgent_count={} total_content_bytes={}",
+                self.session_id(),
+                queue.len(),
+                queue.iter().filter(|message| message.urgent).count(),
+                queue
+                    .iter()
+                    .map(|message| message.content.len())
+                    .sum::<usize>()
+            ));
             queue.drain(..).collect()
         };
 
@@ -346,6 +384,15 @@ impl Agent {
         }
 
         self.persist_session_best_effort("soft interrupt injection");
+        logging::info(&format!(
+            "AGENT_SOFT_INTERRUPT_INJECT_COMMIT session={} groups={} total_content_bytes={}",
+            self.session_id(),
+            injected.len(),
+            injected
+                .iter()
+                .map(|interrupt| interrupt.content.len())
+                .sum::<usize>()
+        ));
         injected
     }
 
@@ -385,6 +432,16 @@ impl Agent {
         point: &'static str,
         tools_skipped: Option<usize>,
     ) -> Vec<ServerEvent> {
+        logging::info(&format!(
+            "AGENT_SOFT_INTERRUPT_EVENTS_BUILD groups={} point={} tools_skipped={:?} total_content_bytes={}",
+            injected.len(),
+            point,
+            tools_skipped,
+            injected
+                .iter()
+                .map(|interrupt| interrupt.content.len())
+                .sum::<usize>()
+        ));
         injected
             .into_iter()
             .enumerate()

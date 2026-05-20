@@ -107,6 +107,11 @@ jcode is built to be as performant and resource efficient as possible. Every met
             <td align="right"><strong>386.6 MB</strong></td>
             <td align="right"><strong>13.9× more RAM</strong></td>
           </tr>
+          <tr>
+            <td><strong>Antigravity CLI</strong></td>
+            <td align="right"><strong>243.7 MB</strong></td>
+            <td align="right"><strong>8.8× more RAM</strong></td>
+          </tr>
         </tbody>
       </table>
     </td>
@@ -162,6 +167,11 @@ jcode is built to be as performant and resource efficient as possible. Every met
             <td align="right"><strong>2300.6 MB</strong></td>
             <td align="right"><strong>19.7× more RAM</strong></td>
           </tr>
+          <tr>
+            <td><strong>Antigravity CLI</strong></td>
+            <td align="right"><strong>1021.2 MB</strong></td>
+            <td align="right"><strong>8.7× more RAM</strong></td>
+          </tr>
         </tbody>
       </table>
     </td>
@@ -177,6 +187,7 @@ jcode is built to be as performant and resource efficient as possible. Every met
 | Tool | Time to first frame | Range | Comparison |
 |---|---:|---:|---:|
 | **jcode** | **14.0 ms** | 10.1–19.3 ms | baseline |
+| **Antigravity CLI** | **383.5 ms** | 363.1–415.4 ms | **27.4× slower** |
 | **pi** | **590.7 ms** | 369.6–934.8 ms | **42.2× slower** |
 | **Codex CLI** | **882.8 ms** | 742.3–1640.9 ms | **63.1× slower** |
 | **OpenCode** | **1035.9 ms** | 922.5–1104.4 ms | **74.0× slower** |
@@ -189,12 +200,13 @@ jcode is built to be as performant and resource efficient as possible. Every met
 Measured on this Linux machine across 10 interactive PTY launches.
 
 ### Time to first input
-(time until typed probe text appears on the rendered screen.)
+(time until typed probe text appears on the rendered screen; Antigravity uses its internal input-ready log marker because the sign-in screen suppresses probe echo.)
 <div align="center">
 
 | Tool | Time to first input | Range | Comparison |
 |---|---:|---:|---:|
 | **jcode** | **48.7 ms** | 30.3–62.7 ms | baseline |
+| **Antigravity CLI** | **383.7 ms** | 363.4–415.7 ms | **7.9× slower** |
 | **pi** | **596.4 ms** | 373.9–955.2 ms | **12.2× slower** |
 | **Codex CLI** | **905.8 ms** | 760.1–1675.7 ms | **18.6× slower** |
 | **OpenCode** | **1047.9 ms** | 931.1–1116.9 ms | **21.5× slower** |
@@ -204,7 +216,7 @@ Measured on this Linux machine across 10 interactive PTY launches.
 
 </div>
 
-Measured on this Linux machine across 10 interactive PTY launches.
+Measured on this Linux machine across 10 interactive PTY launches. Antigravity CLI was unauthenticated for this run; its sign-in screen rendered normally and emitted an internal `CLI ready for user input` marker, but did not echo the typed probe.
 
 ### Additional clients / memory scaling
 
@@ -220,6 +232,7 @@ Measured on this Linux machine across 10 interactive PTY launches.
 | **GitHub Copilot CLI** | **~158.1 MB** | **16.0× more RAM** |
 | **Cursor Agent** | **~157.5 MB** | **15.9× more RAM** |
 | **Claude Code** | **~212.7 MB** | **21.5× more RAM** |
+| **Antigravity CLI** | **~86.4 MB** | **8.7× more RAM** |
 
 </div>
 versions tested for this corrected memory rerun:
@@ -231,6 +244,7 @@ versions tested for this corrected memory rerun:
 - `GitHub Copilot CLI 1.0.24` for the 1-session rerun, `GitHub Copilot CLI 1.0.27` for the 10-session rerun
 - `Cursor Agent 2026.04.08-a41fba1`
 - `Claude Code 2.1.86 (Claude Code)`
+- `Antigravity CLI 1.0.0`
 
 <div align="center">
 
@@ -665,6 +679,7 @@ Set up jcode on this machine for me.
    - OpenRouter: `OPENROUTER_API_KEY`
    - Fireworks: `~/.config/jcode/fireworks.env`, `FIREWORKS_API_KEY`
    - MiniMax: `~/.config/jcode/minimax.env`, `MINIMAX_API_KEY`
+   - NVIDIA NIM: `~/.config/jcode/nvidia-nim.env`, `NVIDIA_API_KEY`
    - Alibaba Cloud Coding Plan: existing jcode config/env if present
 5. Prefer whichever provider is already configured and verify it with `jcode auth-test --all-configured` or a provider-specific auth test when appropriate.
 6. Only if no usable provider is already configured, guide me through the minimal manual step needed:
@@ -675,6 +690,7 @@ Set up jcode on this machine for me.
    - Azure OpenAI: `jcode login --provider azure`
    - Fireworks: `jcode login --provider fireworks`
    - MiniMax: `jcode login --provider minimax`
+   - NVIDIA NIM: `jcode login --provider nvidia-nim`
    - Alibaba Cloud Coding Plan: `jcode login --provider alibaba-coding-plan`
    - OpenRouter: help me set `OPENROUTER_API_KEY`
    - Anthropic direct API: help me set `ANTHROPIC_API_KEY`

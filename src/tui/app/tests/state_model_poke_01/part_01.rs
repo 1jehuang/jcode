@@ -319,18 +319,18 @@ fn test_handle_key_typing() {
 }
 
 #[test]
-fn test_handle_key_shift_slash_inserts_question_mark() {
+fn test_handle_key_shift_slash_preserves_layout_translated_slash() {
     let mut app = create_test_app();
 
     app.handle_key(KeyCode::Char('/'), KeyModifiers::SHIFT)
         .unwrap();
 
-    assert_eq!(app.input(), "?");
+    assert_eq!(app.input(), "/");
     assert_eq!(app.cursor_pos(), 1);
 }
 
 #[test]
-fn test_handle_key_event_shift_slash_inserts_question_mark() {
+fn test_handle_key_event_shift_slash_preserves_layout_translated_slash() {
     use crossterm::event::{KeyEvent, KeyEventKind};
 
     let mut app = create_test_app();
@@ -341,7 +341,21 @@ fn test_handle_key_event_shift_slash_inserts_question_mark() {
         KeyEventKind::Press,
     ));
 
-    assert_eq!(app.input(), "?");
+    assert_eq!(app.input(), "/");
+    assert_eq!(app.cursor_pos(), 1);
+}
+
+#[test]
+fn test_handle_key_control_alt_symbol_inserts_layout_translated_text() {
+    let mut app = create_test_app();
+
+    app.handle_key(
+        KeyCode::Char('@'),
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+    )
+    .unwrap();
+
+    assert_eq!(app.input(), "@");
     assert_eq!(app.cursor_pos(), 1);
 }
 

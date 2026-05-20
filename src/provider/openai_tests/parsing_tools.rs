@@ -583,29 +583,3 @@ fn test_build_responses_input_rewrites_orphan_tool_output_as_user_message() {
 
     assert!(saw_rewritten_message);
 }
-
-#[test]
-fn test_extract_selfdev_section_missing_returns_none() {
-    let system = "# Environment\nDate: 2026-01-01\n\n# Available Skills\n- test";
-    assert!(extract_selfdev_section(system).is_none());
-}
-
-#[test]
-fn test_extract_selfdev_section_stops_at_next_top_level_header() {
-    let system = "# Environment\nDate: 2026-01-01\n\n# Self-Development Mode\nUse selfdev tool\n## selfdev Tool\nreload\n\n# Available Skills\n- test";
-    let section = extract_selfdev_section(system).expect("expected self-dev section");
-    assert!(section.starts_with("# Self-Development Mode"));
-    assert!(section.contains("Use selfdev tool"));
-    assert!(section.contains("## selfdev Tool"));
-    assert!(!section.contains("# Available Skills"));
-}
-
-#[test]
-fn test_chatgpt_instructions_with_selfdev_appends_selfdev_block() {
-    let system = "# Environment\nDate: 2026-01-01\n\n# Self-Development Mode\nUse selfdev tool\n\n# Available Skills\n- test";
-
-    let instructions = OpenAIProvider::chatgpt_instructions_with_selfdev(system);
-    assert!(instructions.contains("Jcode Agent, in the Jcode harness"));
-    assert!(instructions.contains("# Self-Development Mode"));
-    assert!(instructions.contains("Use selfdev tool"));
-}

@@ -4,6 +4,10 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
+# shellcheck source=scripts/remote_config.sh
+source "$repo_root/scripts/remote_config.sh"
+jcode_load_remote_config
+
 log() {
   printf 'dev_cargo: %s\n' "$*" >&2
 }
@@ -276,6 +280,112 @@ rustflags=${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS:-<unset>}
 EOF
 }
 
+remote_connect_timeout() {
+  local value="${JCODE_REMOTE_CONNECT_TIMEOUT:-5}"
+  if [[ ! "$value" =~ ^[0-9]+$ || "$value" -lt 1 ]]; then
+    value=5
+  fi
+  printf '%s\n' "$value"
+}
+
+remote_cargo_preflight() {
+  local remote="${JCODE_REMOTE_HOST:-}"
+  if [[ -z "$remote" ]]; then
+    log "remote cargo requested but JCODE_REMOTE_HOST is not configured"
+    return 1
+  fi
+
+  local ssh_bin="${JCODE_REMOTE_SSH_BIN:-ssh}"
+  if ! command -v "$ssh_bin" >/dev/null 2>&1; then
+    log "remote cargo requested but ssh binary is unavailable: $ssh_bin"
+    return 1
+  fi
+
+  local connect_timeout
+  connect_timeout="$(remote_connect_timeout)"
+  local server_alive_interval="${JCODE_REMOTE_SERVER_ALIVE_INTERVAL:-10}"
+  local server_alive_count="${JCODE_REMOTE_SERVER_ALIVE_COUNT_MAX:-1}"
+  local output
+  if ! output=$("$ssh_bin" \
+    -o BatchMode=yes \
+    -o ConnectTimeout="$connect_timeout" \
+    -o ServerAliveInterval="$server_alive_interval" \
+    -o ServerAliveCountMax="$server_alive_count" \
+    "$remote" "printf 'jcode-remote-ok\\n'" 2>&1); then
+    log "remote cargo preflight failed for $remote after ~${connect_timeout}s: $output"
+    return 1
+  fi
+  return 0
+}
+
+remote_cargo_fallback_mode() {
+  local mode="${JCODE_REMOTE_CARGO_FALLBACK:-local}"
+  case "$mode" in
+    local|1|true|yes|on)
+      printf 'local\n'
+      ;;
+    error|fail|0|false|no|off|never)
+      printf 'error\n'
+      ;;
+    *)
+      printf 'error: unsupported JCODE_REMOTE_CARGO_FALLBACK=%s (expected local|error)\n' "$mode" >&2
+      exit 2
+      ;;
+  esac
+}
+
+cargo_test_has_explicit_filter() {
+  [[ "${1:-}" == "test" ]] || return 1
+
+  local expect_value=""
+  shift
+  for arg in "$@"; do
+    if [[ -n "$expect_value" ]]; then
+      expect_value=""
+      continue
+    fi
+
+    case "$arg" in
+      --)
+        return 1
+        ;;
+      --bench|--bin|--example|--features|--manifest-path|--message-format|--package|-p|--profile|--target|--target-dir)
+        expect_value="$arg"
+        ;;
+      --bench=*|--bin=*|--example=*|--features=*|--manifest-path=*|--message-format=*|--package=*|-p=*|--profile=*|--target=*|--target-dir=*)
+        ;;
+      --*)
+        ;;
+      -*)
+        ;;
+      *)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+run_local_cargo() {
+  if cargo_test_has_explicit_filter "${cargo_argv[@]}" && [[ "${JCODE_DEV_CARGO_ALLOW_ZERO_TESTS:-0}" != "1" ]]; then
+    local output_file
+    output_file=$(mktemp "${TMPDIR:-/tmp}/jcode-dev-cargo.XXXXXX")
+    local status=0
+    cargo "${cargo_argv[@]}" 2>&1 | tee "$output_file" || status=${PIPESTATUS[0]}
+    if [[ "$status" -eq 0 ]] \
+      && grep -qE '^running 0 tests$' "$output_file" \
+      && ! grep -qE '^running [1-9][0-9]* tests$' "$output_file"; then
+      printf 'dev_cargo: explicit cargo test filter matched zero tests; check the test path/name or set JCODE_DEV_CARGO_ALLOW_ZERO_TESTS=1 to allow this intentionally\n' >&2
+      rm -f "$output_file"
+      return 97
+    fi
+    rm -f "$output_file"
+    return "$status"
+  fi
+
+  exec cargo "${cargo_argv[@]}"
+}
+
 validate_feature_profile
 maybe_configure_low_memory_selfdev "$@"
 maybe_enable_sccache
@@ -294,4 +404,17 @@ while IFS= read -r -d '' arg; do
   cargo_argv+=("$arg")
 done < <(build_cargo_argv "$@")
 
-exec cargo "${cargo_argv[@]}"
+if [[ "${JCODE_REMOTE_CARGO:-0}" == "1" ]]; then
+  if remote_cargo_preflight; then
+    log "using remote cargo via scripts/remote_build.sh"
+    exec "$repo_root/scripts/remote_build.sh" "${cargo_argv[@]}"
+  fi
+  if [[ "$(remote_cargo_fallback_mode)" == "local" ]]; then
+    log "remote cargo unavailable; falling back to local cargo (set JCODE_REMOTE_CARGO_FALLBACK=error to fail instead)"
+  else
+    log "remote cargo unavailable and fallback disabled"
+    exit 75
+  fi
+fi
+
+run_local_cargo

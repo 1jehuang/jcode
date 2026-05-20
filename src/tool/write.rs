@@ -20,6 +20,8 @@ impl WriteTool {
 
 #[derive(Deserialize)]
 struct WriteInput {
+    #[serde(default)]
+    intent: Option<String>,
     file_path: String,
     content: String,
 }
@@ -89,6 +91,10 @@ impl Tool for WriteTool {
             session_id: ctx.session_id.clone(),
             path: path.to_path_buf(),
             op: FileOp::Write,
+            intent: params
+                .intent
+                .clone()
+                .filter(|value| !value.trim().is_empty()),
             summary: Some(if existed {
                 format!("overwrote file ({} lines)", line_count)
             } else {

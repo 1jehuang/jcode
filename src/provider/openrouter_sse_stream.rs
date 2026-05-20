@@ -213,11 +213,12 @@ pub(crate) struct OpenRouterStream {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
     pub(crate) buffer: String,
     pending: VecDeque<StreamEvent>,
-    current_tool_call: Option<ToolCallAccumulator>,
+    tool_call_accumulators: std::collections::BTreeMap<u64, ToolCallAccumulator>,
     /// Track if we've emitted the provider info (only emit once)
     provider_emitted: bool,
     model: String,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
+    reasoning_buffer: String,
 }
 
 #[derive(Default)]
@@ -237,10 +238,11 @@ impl OpenRouterStream {
             inner: Box::pin(stream),
             buffer: String::new(),
             pending: VecDeque::new(),
-            current_tool_call: None,
+            tool_call_accumulators: std::collections::BTreeMap::new(),
             provider_emitted: false,
             model,
             provider_pin,
+            reasoning_buffer: String::new(),
         }
     }
 
@@ -283,6 +285,87 @@ impl OpenRouterStream {
         }
     }
 
+    fn push_completed_tool_call(&mut self, tc: ToolCallAccumulator) {
+        if tc.id.trim().is_empty() {
+            crate::logging::warn(&format!(
+                "OpenRouter SSE dropped incomplete tool call for model {}: missing id (name={} args_len={})",
+                self.model,
+                tc.name,
+                tc.arguments.len()
+            ));
+            return;
+        }
+
+        if tc.name.trim().is_empty() {
+            crate::logging::warn(&format!(
+                "OpenRouter SSE dropped incomplete tool call for model {}: missing name (id={} args_len={})",
+                self.model,
+                tc.id,
+                tc.arguments.len()
+            ));
+            return;
+        }
+
+        self.pending.push_back(StreamEvent::ToolUseStart {
+            id: tc.id,
+            name: tc.name,
+        });
+        self.pending
+            .push_back(StreamEvent::ToolInputDelta(tc.arguments));
+        self.pending.push_back(StreamEvent::ToolUseEnd);
+    }
+
+    fn flush_tool_call_accumulators(&mut self) {
+        let calls = std::mem::take(&mut self.tool_call_accumulators);
+        for (_index, tc) in calls {
+            self.push_completed_tool_call(tc);
+        }
+    }
+
+    fn apply_tool_call_delta(
+        &mut self,
+        index: u64,
+        id: Option<&str>,
+        name: Option<&str>,
+        arguments: Option<&str>,
+    ) {
+        let incoming_id = id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        if let Some(existing) = self.tool_call_accumulators.get(&index)
+            && let Some(ref incoming_id) = incoming_id
+            && !existing.id.is_empty()
+            && existing.id != *incoming_id
+        {
+            if let Some(previous) = self.tool_call_accumulators.remove(&index) {
+                self.push_completed_tool_call(previous);
+            }
+        }
+
+        let tc = self
+            .tool_call_accumulators
+            .entry(index)
+            .or_insert_with(ToolCallAccumulator::default);
+
+        if tc.id.is_empty()
+            && let Some(incoming_id) = incoming_id
+        {
+            tc.id = incoming_id;
+        }
+
+        if tc.name.trim().is_empty()
+            && let Some(incoming_name) = name.map(str::trim).filter(|value| !value.is_empty())
+        {
+            tc.name = incoming_name.to_string();
+        }
+
+        if let Some(args) = arguments {
+            tc.arguments.push_str(args);
+        }
+    }
+
     pub(crate) fn parse_next_event(&mut self) -> Option<StreamEvent> {
         if let Some(event) = self.pending.pop_front() {
             return Some(event);
@@ -306,7 +389,10 @@ impl OpenRouterStream {
             };
 
             if data == "[DONE]" {
-                return Some(StreamEvent::MessageEnd { stop_reason: None });
+                self.flush_tool_call_accumulators();
+                self.pending
+                    .push_back(StreamEvent::MessageEnd { stop_reason: None });
+                return self.pending.pop_front();
             }
 
             let parsed: Value = match serde_json::from_str(data) {
@@ -361,8 +447,17 @@ impl OpenRouterStream {
                         .and_then(|c| c.as_str())
                         && !reasoning_content.is_empty()
                     {
-                        self.pending
-                            .push_back(StreamEvent::ThinkingDelta(reasoning_content.to_string()));
+                        let reasoning_delta =
+                            if reasoning_content.starts_with(&self.reasoning_buffer) {
+                                &reasoning_content[self.reasoning_buffer.len()..]
+                            } else {
+                                reasoning_content
+                            };
+                        self.reasoning_buffer = reasoning_content.to_string();
+                        if !reasoning_delta.is_empty() {
+                            self.pending
+                                .push_back(StreamEvent::ThinkingDelta(reasoning_delta.to_string()));
+                        }
                     }
 
                     // Text content
@@ -376,46 +471,18 @@ impl OpenRouterStream {
                     // Tool calls
                     if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
                         for tc in tool_calls {
-                            let _index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
-
-                            // Check if this is a new tool call
-                            if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
-                                // Emit previous tool call if any
-                                if let Some(prev) = self.current_tool_call.take()
-                                    && !prev.id.is_empty()
-                                {
-                                    self.pending.push_back(StreamEvent::ToolUseStart {
-                                        id: prev.id,
-                                        name: prev.name,
-                                    });
-                                    self.pending
-                                        .push_back(StreamEvent::ToolInputDelta(prev.arguments));
-                                    self.pending.push_back(StreamEvent::ToolUseEnd);
-                                }
-
-                                let name = tc
-                                    .get("function")
+                            let index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
+                            let function = tc.get("function");
+                            self.apply_tool_call_delta(
+                                index,
+                                tc.get("id").and_then(|i| i.as_str()),
+                                function
                                     .and_then(|f| f.get("name"))
-                                    .and_then(|n| n.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-
-                                self.current_tool_call = Some(ToolCallAccumulator {
-                                    id: id.to_string(),
-                                    name,
-                                    arguments: String::new(),
-                                });
-                            }
-
-                            // Accumulate arguments
-                            if let Some(args) = tc
-                                .get("function")
-                                .and_then(|f| f.get("arguments"))
-                                .and_then(|a| a.as_str())
-                                && let Some(ref mut tc) = self.current_tool_call
-                            {
-                                tc.arguments.push_str(args);
-                            }
+                                    .and_then(|n| n.as_str()),
+                                function
+                                    .and_then(|f| f.get("arguments"))
+                                    .and_then(|a| a.as_str()),
+                            );
                         }
                     }
 
@@ -423,18 +490,8 @@ impl OpenRouterStream {
                     if let Some(_finish_reason) =
                         choice.get("finish_reason").and_then(|f| f.as_str())
                     {
-                        // Emit any pending tool call
-                        if let Some(tc) = self.current_tool_call.take()
-                            && !tc.id.is_empty()
-                        {
-                            self.pending.push_back(StreamEvent::ToolUseStart {
-                                id: tc.id,
-                                name: tc.name,
-                            });
-                            self.pending
-                                .push_back(StreamEvent::ToolInputDelta(tc.arguments));
-                            self.pending.push_back(StreamEvent::ToolUseEnd);
-                        }
+                        // Emit any pending tool calls.
+                        self.flush_tool_call_accumulators();
 
                         // Don't emit MessageEnd here - wait for [DONE]
                     }
@@ -519,17 +576,7 @@ impl Stream for OpenRouterStream {
                 }
                 Poll::Ready(None) => {
                     // Stream ended - emit any pending tool call
-                    if let Some(tc) = self.current_tool_call.take()
-                        && !tc.id.is_empty()
-                    {
-                        self.pending.push_back(StreamEvent::ToolUseStart {
-                            id: tc.id,
-                            name: tc.name,
-                        });
-                        self.pending
-                            .push_back(StreamEvent::ToolInputDelta(tc.arguments));
-                        self.pending.push_back(StreamEvent::ToolUseEnd);
-                    }
+                    self.flush_tool_call_accumulators();
                     if let Some(event) = self.pending.pop_front() {
                         return Poll::Ready(Some(Ok(event)));
                     }
@@ -564,7 +611,7 @@ mod tests {
 
         assert!(event.is_none());
         assert!(stream.pending.is_empty());
-        assert!(stream.current_tool_call.is_none());
+        assert!(stream.tool_call_accumulators.is_empty());
     }
 
     #[test]
@@ -581,5 +628,72 @@ mod tests {
         let event = stream.parse_next_event();
 
         assert!(matches!(event, Some(StreamEvent::ThinkingDelta(text)) if text == "thinking"));
+    }
+
+    #[test]
+    fn parse_next_event_coalesces_repeated_tool_call_id_chunks() {
+        let provider_pin = Arc::new(std::sync::Mutex::new(None));
+        let mut stream =
+            OpenRouterStream::new(futures::stream::empty(), "glm-5".to_string(), provider_pin);
+
+        let chunk1 = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": ""}
+                    }]
+                }
+            }]
+        });
+        let chunk2 = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "function": {"arguments": "{\"command\""}
+                    }]
+                }
+            }]
+        });
+        let chunk3 = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "function": {"arguments": ":\"echo ok\"}"}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        stream.buffer =
+            format!("data: {chunk1}\n\ndata: {chunk2}\n\ndata: {chunk3}\n\ndata: [DONE]\n\n");
+
+        let mut events = Vec::new();
+        for _ in 0..8 {
+            if let Some(event) = stream.parse_next_event() {
+                events.push(event);
+            } else {
+                break;
+            }
+        }
+
+        assert_eq!(events.len(), 4, "events: {events:?}");
+        assert!(matches!(
+            &events[0],
+            StreamEvent::ToolUseStart { id, name } if id == "call_1" && name == "bash"
+        ));
+        assert!(matches!(
+            &events[1],
+            StreamEvent::ToolInputDelta(args) if args == "{\"command\":\"echo ok\"}"
+        ));
+        assert!(matches!(events[2], StreamEvent::ToolUseEnd));
+        assert!(matches!(events[3], StreamEvent::MessageEnd { .. }));
+        assert!(stream.tool_call_accumulators.is_empty());
     }
 }

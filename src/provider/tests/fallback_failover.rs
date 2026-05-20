@@ -8,6 +8,7 @@ fn test_fallback_sequence_includes_all_providers() {
             ActiveProvider::Copilot,
             ActiveProvider::Gemini,
             ActiveProvider::Cursor,
+            ActiveProvider::Bedrock,
             ActiveProvider::OpenRouter,
         ]
     );
@@ -19,6 +20,7 @@ fn test_fallback_sequence_includes_all_providers() {
             ActiveProvider::Copilot,
             ActiveProvider::Gemini,
             ActiveProvider::Cursor,
+            ActiveProvider::Bedrock,
             ActiveProvider::OpenRouter,
         ]
     );
@@ -31,6 +33,7 @@ fn test_fallback_sequence_includes_all_providers() {
             ActiveProvider::Antigravity,
             ActiveProvider::Gemini,
             ActiveProvider::Cursor,
+            ActiveProvider::Bedrock,
             ActiveProvider::OpenRouter,
         ]
     );
@@ -43,6 +46,7 @@ fn test_fallback_sequence_includes_all_providers() {
             ActiveProvider::Antigravity,
             ActiveProvider::Copilot,
             ActiveProvider::Cursor,
+            ActiveProvider::Bedrock,
             ActiveProvider::OpenRouter,
         ]
     );
@@ -165,6 +169,8 @@ fn test_forced_provider_disables_cross_provider_fallback_sequence() {
 #[test]
 fn test_set_model_rejects_cross_provider_without_creds() {
     let _guard = crate::storage::lock_test_env();
+    let runtime = enter_test_runtime();
+    let _enter = runtime.enter();
     crate::subscription_catalog::clear_runtime_env();
     crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
     crate::env::remove_var("JCODE_FORCE_PROVIDER");
@@ -189,8 +195,8 @@ fn test_set_model_rejects_cross_provider_without_creds() {
         .set_model("claude-sonnet-4-6")
         .expect_err("forced provider should reject when the forced provider has no creds");
     assert!(
-        err.to_string().contains("OpenAI credentials not available"),
-        "expected credentials error, got: {}",
+        err.to_string().contains("Unsupported OpenAI model 'claude-sonnet-4-6'"),
+        "expected forced-provider model validation error, got: {}",
         err
     );
 }

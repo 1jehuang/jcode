@@ -108,6 +108,38 @@ fn test_handle_server_event_session_close_requested_quits_client() {
 }
 
 #[test]
+fn test_handle_server_event_session_renamed_updates_remote_title() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.is_remote = true;
+    app.remote_session_id = Some("session_remote_rename".to_string());
+    app.session.title = Some("Generated title".to_string());
+
+    let redraw = app.handle_server_event(
+        crate::protocol::ServerEvent::SessionRenamed {
+            session_id: "session_remote_rename".to_string(),
+            title: Some("Release planning".to_string()),
+            display_title: "Release planning".to_string(),
+        },
+        &mut remote,
+    );
+
+    assert!(redraw);
+    assert_eq!(
+        app.session.custom_title.as_deref(),
+        Some("Release planning")
+    );
+    assert_eq!(app.session.display_title(), Some("Release planning"));
+    assert!(app.display_messages().iter().any(|message| {
+        message
+            .content
+            .contains("Renamed session to **Release planning**")
+    }));
+}
+
+#[test]
 fn test_handle_server_event_history_clears_connection_type_on_session_change_when_missing() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

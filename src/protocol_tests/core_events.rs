@@ -33,6 +33,31 @@ fn test_compacted_history_request_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn test_notify_auth_changed_provider_hint_is_optional() -> Result<()> {
+    let legacy = r#"{"type":"notify_auth_changed","id":9}"#;
+    let decoded = parse_request_json(legacy)?;
+    let Request::NotifyAuthChanged { id, provider } = decoded else {
+        return Err(anyhow!("wrong request type"));
+    };
+    assert_eq!(id, 9);
+    assert_eq!(provider, None);
+
+    let req = Request::NotifyAuthChanged {
+        id: 10,
+        provider: Some("azure-openai".to_string()),
+    };
+    let json = serde_json::to_string(&req)?;
+    assert!(json.contains("\"provider\":\"azure-openai\""));
+    let decoded = parse_request_json(&json)?;
+    let Request::NotifyAuthChanged { id, provider } = decoded else {
+        return Err(anyhow!("wrong request type"));
+    };
+    assert_eq!(id, 10);
+    assert_eq!(provider.as_deref(), Some("azure-openai"));
+    Ok(())
+}
+
+#[test]
 fn test_event_roundtrip() -> Result<()> {
     let event = ServerEvent::TextDelta {
         text: "hello".to_string(),

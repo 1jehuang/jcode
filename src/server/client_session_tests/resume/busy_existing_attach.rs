@@ -6,13 +6,7 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
     let target_session_id = "session_existing_live_busy";
     let temp_session_id = "session_temp_connecting_busy";
 
-    let mut persisted = crate::session::Session::create_with_id(
-        target_session_id.to_string(),
-        None,
-        Some("Live Busy Attach".to_string()),
-    );
-    persisted.model = Some("mock".to_string());
-    persisted.append_stored_message(crate::session::StoredMessage {
+    let persisted_message = crate::session::StoredMessage {
         id: "msg-live-busy".to_string(),
         role: crate::message::Role::User,
         content: vec![crate::message::ContentBlock::Text {
@@ -23,8 +17,7 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
         timestamp: None,
         tool_duration_ms: None,
         token_usage: None,
-    });
-    persisted.save()?;
+    };
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let existing_registry = Registry::new(provider.clone()).await;
@@ -32,7 +25,7 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
         provider.clone(),
         existing_registry,
         target_session_id,
-        Vec::new(),
+        vec![persisted_message],
     )));
 
     let new_registry = Registry::new(provider.clone()).await;

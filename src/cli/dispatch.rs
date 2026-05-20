@@ -85,6 +85,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             auth_code,
             json,
             complete,
+            no_validate,
             google_access_tier,
             api_base,
             api_key,
@@ -100,6 +101,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                     auth_code,
                     json,
                     complete,
+                    no_validate,
                     google_access_tier: google_access_tier.map(|tier| match tier {
                         super::args::GoogleAccessTierArg::Full => {
                             auth::google::GmailAccessTier::Full
@@ -150,7 +152,10 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 provider,
                 validate,
                 json,
-            } => commands::run_auth_doctor_command(provider.as_deref(), validate, json).await?,
+            } => {
+                let provider_arg = auth_doctor_provider_arg(provider.as_deref(), &args.provider);
+                commands::run_auth_doctor_command(provider_arg, validate, json).await?
+            }
         },
         Some(Command::Provider(subcmd)) => match subcmd {
             ProviderCommand::List { json } => {
@@ -315,6 +320,19 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn auth_doctor_provider_arg<'a>(
+    positional_provider: Option<&'a str>,
+    global_provider: &'a ProviderChoice,
+) -> Option<&'a str> {
+    positional_provider.or_else(|| {
+        if *global_provider == ProviderChoice::Auto {
+            None
+        } else {
+            Some(global_provider.as_arg_value())
+        }
+    })
 }
 
 fn resolve_resume_arg(args: &mut Args) -> Result<()> {

@@ -1,8 +1,17 @@
 use super::{
     AmbientConfig, Config, DiffDisplayMode, DisplayConfig, ProviderConfig,
-    SessionPickerResumeAction,
+    SessionPickerResumeAction, SwarmSpawnMode, config_env_fingerprint,
 };
+use std::ffi::OsString;
 use std::path::Path;
+
+fn restore_env_var(key: &str, previous: Option<OsString>) {
+    if let Some(previous) = previous {
+        crate::env::set_var(key, previous);
+    } else {
+        crate::env::remove_var(key);
+    }
+}
 
 #[test]
 fn test_openai_reasoning_effort_defaults_to_low() {
@@ -10,6 +19,43 @@ fn test_openai_reasoning_effort_defaults_to_low() {
         ProviderConfig::default().openai_reasoning_effort.as_deref(),
         Some("low")
     );
+}
+
+#[test]
+fn test_openai_fast_mode_defaults_to_priority() {
+    assert_eq!(
+        ProviderConfig::default().openai_service_tier.as_deref(),
+        Some("priority")
+    );
+}
+
+#[test]
+fn swarm_spawn_mode_defaults_to_visible() {
+    assert_eq!(
+        Config::default().agents.swarm_spawn_mode,
+        SwarmSpawnMode::Visible
+    );
+}
+
+#[test]
+fn swarm_spawn_mode_parses_supported_values() {
+    let cfg: Config = toml::from_str("[agents]\nswarm_spawn_mode = \"headless\"\n")
+        .expect("headless swarm_spawn_mode should parse");
+    assert_eq!(cfg.agents.swarm_spawn_mode, SwarmSpawnMode::Headless);
+
+    let cfg: Config = toml::from_str("[agents]\nswarm_spawn_mode = \"auto\"\n")
+        .expect("auto swarm_spawn_mode should parse");
+    assert_eq!(cfg.agents.swarm_spawn_mode, SwarmSpawnMode::Auto);
+
+    let cfg: Config = toml::from_str("[agents]\nswarm_spawn_mode = \"visible\"\n")
+        .expect("visible swarm_spawn_mode should parse");
+    assert_eq!(cfg.agents.swarm_spawn_mode, SwarmSpawnMode::Visible);
+}
+
+#[test]
+fn swarm_spawn_mode_rejects_invalid_values() {
+    let result = toml::from_str::<Config>("[agents]\nswarm_spawn_mode = \"background\"\n");
+    assert!(result.is_err());
 }
 
 #[test]
@@ -26,12 +72,145 @@ fn test_generated_default_config_uses_low_openai_reasoning_effort() {
         content.contains("openai_reasoning_effort = \"low\""),
         "generated default config should use low OpenAI reasoning effort"
     );
+    assert!(
+        content.contains("openai_service_tier = \"priority\""),
+        "generated default config should enable OpenAI fast mode"
+    );
 
     if let Some(prev) = prev_home {
         crate::env::set_var("JCODE_HOME", prev);
     } else {
         crate::env::remove_var("JCODE_HOME");
     }
+}
+
+#[test]
+fn global_config_cache_reloads_after_manual_file_edit() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    Config::invalidate_cache();
+
+    let path = Config::path().expect("config path");
+    std::fs::create_dir_all(path.parent().expect("config parent")).expect("create config parent");
+    std::fs::write(&path, "[display]\ncentered = false\n").expect("write initial config");
+
+    assert!(!crate::config::config().display.centered);
+
+    // Different length as well as mtime so the metadata fingerprint notices the
+    // manual edit even on filesystems with coarse timestamp resolution.
+    std::fs::write(&path, "[display]\ncentered = true\n# edited\n").expect("edit config");
+
+    assert!(crate::config::config().display.centered);
+
+    restore_env_var("JCODE_HOME", prev_home);
+    Config::invalidate_cache();
+}
+
+#[test]
+fn config_save_invalidates_global_config_cache() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    Config::invalidate_cache();
+
+    let mut cfg = Config::default();
+    cfg.display.centered = false;
+    cfg.save().expect("save initial config");
+    assert!(!crate::config::config().display.centered);
+
+    cfg.display.centered = true;
+    cfg.save().expect("save updated config");
+    assert!(crate::config::config().display.centered);
+
+    restore_env_var("JCODE_HOME", prev_home);
+    Config::invalidate_cache();
+}
+
+#[test]
+fn config_env_fingerprint_ignores_runtime_only_jcode_vars() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_runtime_provider = std::env::var_os("JCODE_RUNTIME_PROVIDER");
+    let prev_active_provider = std::env::var_os("JCODE_ACTIVE_PROVIDER");
+    let prev_display_centered = std::env::var_os("JCODE_DISPLAY_CENTERED");
+
+    crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
+    crate::env::remove_var("JCODE_ACTIVE_PROVIDER");
+    crate::env::remove_var("JCODE_DISPLAY_CENTERED");
+    let baseline = config_env_fingerprint();
+
+    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "openai");
+    crate::env::set_var("JCODE_ACTIVE_PROVIDER", "openai");
+    assert_eq!(baseline, config_env_fingerprint());
+
+    crate::env::set_var("JCODE_DISPLAY_CENTERED", "1");
+    assert_ne!(baseline, config_env_fingerprint());
+
+    restore_env_var("JCODE_RUNTIME_PROVIDER", prev_runtime_provider);
+    restore_env_var("JCODE_ACTIVE_PROVIDER", prev_active_provider);
+    restore_env_var("JCODE_DISPLAY_CENTERED", prev_display_centered);
+}
+
+#[test]
+fn config_env_fingerprint_tracks_every_apply_env_override_var() {
+    let override_source = include_str!("config/env_overrides.rs");
+    let mut missing = Vec::new();
+
+    for line in override_source.lines() {
+        let Some(start) = line.find("std::env::var(\"") else {
+            continue;
+        };
+        let rest = &line[start + "std::env::var(\"".len()..];
+        let Some(end) = rest.find('"') else {
+            continue;
+        };
+        let key = &rest[..end];
+        if !crate::config::CONFIG_ENV_KEYS.contains(&key) {
+            missing.push(key.to_string());
+        }
+    }
+
+    missing.sort();
+    missing.dedup();
+    assert!(
+        missing.is_empty(),
+        "CONFIG_ENV_KEYS must include every env var read by Config::apply_env_overrides; missing: {missing:?}"
+    );
+}
+
+#[test]
+fn cached_external_auth_trust_observes_manual_revocation() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    Config::invalidate_cache();
+
+    let auth_file = dir.path().join("external-auth.json");
+    std::fs::write(&auth_file, "{}\n").expect("write external auth file");
+    Config::allow_external_auth_source_for_path("test_source", &auth_file)
+        .expect("trust external auth path");
+    assert!(Config::external_auth_source_allowed_for_path_cached(
+        "test_source",
+        &auth_file
+    ));
+
+    let path = Config::path().expect("config path");
+    std::fs::write(
+        &path,
+        "[auth]\ntrusted_external_source_paths = []\n# manually revoked\n",
+    )
+    .expect("manually revoke external auth trust");
+
+    assert!(!Config::external_auth_source_allowed_for_path_cached(
+        "test_source",
+        &auth_file
+    ));
+
+    restore_env_var("JCODE_HOME", prev_home);
+    Config::invalidate_cache();
 }
 
 #[test]
@@ -67,14 +246,14 @@ fn test_native_scrollbars_default_to_enabled() {
 }
 
 #[test]
-fn test_session_picker_resume_action_defaults_to_new_terminal() {
+fn test_session_picker_resume_action_defaults_to_current_terminal() {
     assert_eq!(
         Config::default().keybindings.session_picker_enter,
-        SessionPickerResumeAction::NewTerminal
+        SessionPickerResumeAction::CurrentTerminal
     );
     assert_eq!(
-        SessionPickerResumeAction::NewTerminal.alternate(),
-        SessionPickerResumeAction::CurrentTerminal
+        SessionPickerResumeAction::CurrentTerminal.alternate(),
+        SessionPickerResumeAction::NewTerminal
     );
 }
 

@@ -23,6 +23,12 @@ impl EnvVarGuard {
         crate::env::set_var(key, value);
         Self { key, prev }
     }
+
+    fn remove(key: &'static str) -> Self {
+        let prev = std::env::var_os(key);
+        crate::env::remove_var(key);
+        Self { key, prev }
+    }
 }
 
 impl Drop for EnvVarGuard {

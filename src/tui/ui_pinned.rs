@@ -18,8 +18,7 @@ use layout_support::{
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use util_support::{
-    compact_image_label, estimate_inline_image_rows, estimate_side_panel_pane_area, lru_touch,
-    side_panel_content_signature,
+    compact_image_label, estimate_side_panel_pane_area, lru_touch, side_panel_content_signature,
 };
 
 const SIDE_PANEL_HEADER_HEIGHT: u16 = 1;
@@ -49,6 +48,26 @@ fn side_panel_content_area(area: Rect) -> Option<Rect> {
     })
 }
 
+fn side_panel_content_may_contain_mermaid(content: &str) -> bool {
+    content.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix("```")
+            .map(|lang| mermaid::is_mermaid_lang(lang.trim()))
+            .unwrap_or(false)
+    })
+}
+
+fn side_panel_mermaid_preferred_aspect_ratio(
+    page: &crate::side_panel::SidePanelPage,
+    inner: Rect,
+    has_protocol: bool,
+) -> Option<f32> {
+    if !has_protocol || !side_panel_content_may_contain_mermaid(&page.content) {
+        return None;
+    }
+    super::diagram_pane::content_area_preferred_aspect_ratio(inner)
+}
+
 #[path = "ui_pinned_selection.rs"]
 mod selection_support;
 use selection_support::apply_side_selection_highlight;
@@ -63,6 +82,7 @@ enum PinnedContentEntry {
     Image {
         label: String,
         media_type: String,
+        byte_count: Option<u64>,
         source: crate::session::RenderedImageSource,
         hash: u64,
         width: u32,
@@ -125,6 +145,7 @@ struct SidePanelMarkdownKey {
     has_protocol: bool,
     centered: bool,
     mermaid_epoch: u64,
+    mermaid_aspect_bucket: Option<u16>,
 }
 
 #[derive(Default)]
@@ -143,6 +164,7 @@ struct SidePanelRenderKey {
     centered: bool,
     image_zoom_percent: u8,
     mermaid_epoch: u64,
+    mermaid_aspect_bucket: Option<u16>,
 }
 
 #[derive(Default)]
@@ -365,7 +387,7 @@ struct PinnedImagePlacement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SidePanelImageRenderMode {
     Fit,
-    ScrollableViewport { zoom_percent: u8 },
+    ScrollableViewport { zoom_percent: u16 },
 }
 
 impl SidePanelImageRenderMode {
@@ -393,7 +415,26 @@ enum FitImageRenderPlan {
 }
 
 const SIDE_PANEL_INLINE_IMAGE_MIN_ROWS: u16 = 4;
-const SIDE_PANEL_INLINE_IMAGE_MIN_ZOOM_PERCENT: u8 = 70;
+const SIDE_PANEL_INLINE_IMAGE_MIN_ZOOM_PERCENT: u16 = 70;
+
+fn pinned_content_image_layout_with_font(
+    width: u32,
+    height: u32,
+    inner: Rect,
+    lines_before_image: usize,
+    has_following_content: bool,
+    font_size: Option<(u16, u16)>,
+) -> SidePanelImageLayout {
+    estimate_side_panel_image_layout_with_font(
+        width,
+        height,
+        inner.width,
+        inner.height,
+        lines_before_image,
+        has_following_content,
+        font_size,
+    )
+}
 
 type SidePaneSnapshotCache = (
     std::sync::Arc<Vec<String>>,
@@ -670,6 +711,7 @@ fn collect_pinned_content(
                     .clone()
                     .unwrap_or_else(|| image.media_type.clone()),
                 media_type: image.media_type.clone(),
+                byte_count: crate::tui::image_metadata::estimate_base64_decoded_len(&image.data),
                 source: image.source.clone(),
                 hash,
                 width,
@@ -784,6 +826,13 @@ pub(super) fn draw_pinned_content_cached(
         .iter()
         .filter(|e| matches!(e, PinnedContentEntry::Image { .. }))
         .count();
+    let total_image_bytes: u64 = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            PinnedContentEntry::Image { byte_count, .. } => *byte_count,
+            _ => None,
+        })
+        .sum();
     let total_additions: usize = entries
         .iter()
         .map(|e| match e {
@@ -827,7 +876,15 @@ pub(super) fn draw_pinned_content_cached(
             title_parts.push(Span::styled(" ", Style::default().fg(dim_color())));
         }
         title_parts.push(Span::styled(
-            format!("📷{}", total_images),
+            if total_image_bytes > 0 {
+                format!(
+                    "📷{} {}",
+                    total_images,
+                    crate::tui::image_metadata::format_byte_count(total_image_bytes)
+                )
+            } else {
+                format!("📷{}", total_images)
+            },
             Style::default().fg(dim_color()),
         ));
     }
@@ -926,6 +983,7 @@ pub(super) fn draw_pinned_content_cached(
                 PinnedContentEntry::Image {
                     label,
                     media_type,
+                    byte_count,
                     source,
                     hash,
                     width: img_w,
@@ -948,19 +1006,26 @@ pub(super) fn draw_pinned_content_cached(
 
                     let short_label = compact_image_label(label);
                     let source_badge = image_source_badge(source);
+                    let dimensions = crate::tui::image_metadata::format_dimensions(*img_w, *img_h);
+                    let mut metadata_parts =
+                        vec![crate::tui::image_metadata::compact_image_format(media_type)];
+                    if let Some(byte_count) = byte_count {
+                        metadata_parts
+                            .push(crate::tui::image_metadata::format_byte_count(*byte_count));
+                    }
+                    if let Some(ratio) = crate::tui::image_metadata::aspect_ratio(*img_w, *img_h) {
+                        metadata_parts.push(format!("{ratio} ratio"));
+                    }
 
                     text_lines.push(Line::from(vec![
-                        Span::styled("── 📷 ", Style::default().fg(dim_color())),
+                        Span::styled("── 🖼 ", Style::default().fg(dim_color())),
                         Span::styled(
                             short_label,
                             Style::default()
                                 .fg(rgb(180, 200, 255))
                                 .add_modifier(ratatui::style::Modifier::BOLD),
                         ),
-                        Span::styled(
-                            format!(" {}×{}", img_w, img_h),
-                            Style::default().fg(dim_color()),
-                        ),
+                        Span::styled(format!(" {dimensions}"), Style::default().fg(dim_color())),
                         Span::styled(
                             format!(" [{}]", source_badge),
                             Style::default().fg(match group {
@@ -970,22 +1035,33 @@ pub(super) fn draw_pinned_content_cached(
                             }),
                         ),
                     ]));
-                    text_lines.push(Line::from(vec![
-                        Span::styled("   ", Style::default().fg(dim_color())),
-                        Span::styled(media_type.clone(), Style::default().fg(dim_color())),
-                        Span::styled(" • exact model artifact", Style::default().fg(dim_color())),
-                    ]));
+                    let mut metadata_spans =
+                        vec![Span::styled("   ", Style::default().fg(dim_color()))];
+                    for (index, part) in metadata_parts.into_iter().enumerate() {
+                        if index > 0 {
+                            metadata_spans
+                                .push(Span::styled(" • ", Style::default().fg(dim_color())));
+                        }
+                        metadata_spans.push(Span::styled(part, Style::default().fg(dim_color())));
+                    }
+                    text_lines.push(Line::from(metadata_spans));
 
                     if has_protocol {
-                        let img_rows =
-                            estimate_inline_image_rows(*img_w, *img_h, inner.width, inner.height);
+                        let image_layout = pinned_content_image_layout_with_font(
+                            *img_w,
+                            *img_h,
+                            inner,
+                            text_lines.len(),
+                            i + 1 < entries.len(),
+                            mermaid::get_font_size(),
+                        );
                         image_placements.push(PinnedImagePlacement {
                             after_text_line: text_lines.len(),
                             hash: *hash,
-                            rows: img_rows,
-                            render_mode: SidePanelImageRenderMode::Fit,
+                            rows: image_layout.rows,
+                            render_mode: image_layout.render_mode,
                         });
-                        for _ in 0..img_rows {
+                        for _ in 0..image_layout.rows {
                             text_lines.push(Line::from(""));
                         }
                     }
@@ -1008,6 +1084,10 @@ pub(super) fn draw_pinned_content_cached(
             left_margins,
         ) = build_side_pane_snapshot_cache(&text_lines, inner.width);
 
+        let has_scrollable_images = image_placements
+            .iter()
+            .any(|placement| placement.render_mode.is_scrollable());
+
         cache.rendered_lines = Some(PinnedRenderedCache {
             inner_width: inner.width,
             line_wrap,
@@ -1018,7 +1098,7 @@ pub(super) fn draw_pinned_content_cached(
             wrapped_line_map,
             left_margins,
             image_placements,
-            has_scrollable_images: false,
+            has_scrollable_images,
         });
     }
 
@@ -1088,51 +1168,77 @@ pub(super) fn draw_pinned_content_cached(
                 width: inner.width,
                 height: avail_rows,
             };
-            if let Some((_, width, height)) = mermaid::get_cached_png(placement.hash) {
-                if let Some(plan) = plan_fit_image_render(
-                    inner,
-                    clamped_scroll,
-                    image_start,
-                    placement.rows,
-                    width,
-                    height,
-                    false,
-                ) {
-                    match plan {
-                        FitImageRenderPlan::Full { area } => {
-                            mermaid::render_image_widget_fit(
-                                placement.hash,
-                                area,
-                                frame.buffer_mut(),
-                                false,
-                                false,
-                            );
+            match placement.render_mode {
+                SidePanelImageRenderMode::Fit => {
+                    if let Some((_, width, height)) = mermaid::get_cached_png(placement.hash) {
+                        if let Some(plan) = plan_fit_image_render(
+                            inner,
+                            clamped_scroll,
+                            image_start,
+                            placement.rows,
+                            width,
+                            height,
+                            false,
+                        ) {
+                            match plan {
+                                FitImageRenderPlan::Full { area } => {
+                                    mermaid::render_image_widget_scale(
+                                        placement.hash,
+                                        area,
+                                        frame.buffer_mut(),
+                                        false,
+                                    );
+                                }
+                                FitImageRenderPlan::ClippedViewport {
+                                    area,
+                                    scroll_y,
+                                    zoom_percent,
+                                } => {
+                                    mermaid::render_image_widget_viewport_precise(
+                                        placement.hash,
+                                        area,
+                                        frame.buffer_mut(),
+                                        0,
+                                        scroll_y,
+                                        zoom_percent as u16,
+                                        false,
+                                    );
+                                }
+                            }
                         }
-                        FitImageRenderPlan::ClippedViewport {
-                            area,
-                            scroll_y,
-                            zoom_percent,
-                        } => {
-                            mermaid::render_image_widget_viewport(
-                                placement.hash,
-                                area,
-                                frame.buffer_mut(),
-                                0,
-                                scroll_y,
-                                zoom_percent,
-                                false,
-                            );
-                        }
+                    } else {
+                        mermaid::render_image_widget_scale(
+                            placement.hash,
+                            img_area,
+                            frame.buffer_mut(),
+                            false,
+                        );
                     }
                 }
-            } else {
-                mermaid::render_image_widget_fit(
-                    placement.hash,
-                    img_area,
-                    frame.buffer_mut(),
-                    false,
-                    false,
-                );
+                SidePanelImageRenderMode::ScrollableViewport { zoom_percent } => {
+                    let scroll_y = visible_start.saturating_sub(image_start) as i32;
+                    let scroll_x = mermaid::get_cached_png(placement.hash)
+                        .map(|(_, width, _)| {
+                            side_panel_viewport_scroll_x(
+                                width,
+                                img_area.width,
+                                zoom_percent,
+                                false,
+                                mermaid::get_font_size(),
+                                app.diff_pane_scroll_x(),
+                            )
+                        })
+                        .unwrap_or(0);
+                    mermaid::render_image_widget_viewport_precise(
+                        placement.hash,
+                        img_area,
+                        frame.buffer_mut(),
+                        scroll_x,
+                        scroll_y,
+                        zoom_percent,
+                        false,
+                    );
+                }
             }
         }
     }
@@ -1188,6 +1294,22 @@ pub(super) fn draw_side_panel_markdown(
         format!(" {}/{} ", page_index, page_count),
         Style::default().fg(dim_color()),
     ));
+    if focused {
+        title_parts.push(Span::styled(
+            " j/k scroll ",
+            Style::default().fg(dim_color()),
+        ));
+        if page_count > 1 {
+            title_parts.push(Span::styled(
+                " Tab/Shift-Tab pages ",
+                Style::default().fg(dim_color()),
+            ));
+        }
+        title_parts.push(Span::styled(
+            " Esc focus chat ",
+            Style::default().fg(dim_color()),
+        ));
+    }
     if rendered_full_width.has_scrollable_images {
         title_parts.push(Span::styled(
             " readable ",
@@ -1285,69 +1407,144 @@ pub(super) fn draw_side_panel_markdown(
 
     let mut visible_mermaids: Vec<SidePanelVisibleMermaidDebug> = Vec::new();
     if has_protocol {
-        let font_size_px = mermaid::get_font_size().unwrap_or((8, 16));
-        for (image_index, placement) in rendered.image_placements.iter().enumerate() {
-            let image_start = placement.after_text_line;
-            let image_end = image_start.saturating_add(placement.rows as usize);
-            let viewport_start = clamped_scroll;
-            let viewport_end = clamped_scroll.saturating_add(content_inner.height as usize);
-            if image_end <= viewport_start || image_start >= viewport_end {
-                continue;
-            }
+        let mermaid_aspect_ratio =
+            side_panel_mermaid_preferred_aspect_ratio(page, content_inner, true);
+        mermaid::with_preferred_aspect_ratio(mermaid_aspect_ratio, || {
+            let font_size_px = mermaid::get_font_size().unwrap_or((8, 16));
+            for (image_index, placement) in rendered.image_placements.iter().enumerate() {
+                let image_start = placement.after_text_line;
+                let image_end = image_start.saturating_add(placement.rows as usize);
+                let viewport_start = clamped_scroll;
+                let viewport_end = clamped_scroll.saturating_add(content_inner.height as usize);
+                if image_end <= viewport_start || image_start >= viewport_end {
+                    continue;
+                }
 
-            let visible_start = image_start.max(viewport_start);
-            let visible_end = image_end.min(viewport_end);
-            let y_in_inner = visible_start.saturating_sub(viewport_start) as u16;
-            let avail_rows = visible_end.saturating_sub(visible_start) as u16;
-            if avail_rows < 2 {
-                continue;
-            }
-            let img_area = Rect {
-                x: content_inner.x,
-                y: content_inner.y + y_in_inner,
-                width: content_inner.width,
-                height: avail_rows,
-            };
-            match placement.render_mode {
-                SidePanelImageRenderMode::Fit => {
-                    if let Some((_, width, height)) = mermaid::get_cached_png(placement.hash) {
-                        if let Some(plan) = plan_fit_image_render(
-                            content_inner,
-                            clamped_scroll,
-                            image_start,
-                            placement.rows,
-                            width,
-                            height,
-                            centered,
-                        ) {
-                            let visible_widget_rect = match plan {
-                                FitImageRenderPlan::Full { area } => {
-                                    mermaid::render_image_widget_scale(
-                                        placement.hash,
+                let visible_start = image_start.max(viewport_start);
+                let visible_end = image_end.min(viewport_end);
+                let y_in_inner = visible_start.saturating_sub(viewport_start) as u16;
+                let avail_rows = visible_end.saturating_sub(visible_start) as u16;
+                if avail_rows < 2 {
+                    continue;
+                }
+                let img_area = Rect {
+                    x: content_inner.x,
+                    y: content_inner.y + y_in_inner,
+                    width: content_inner.width,
+                    height: avail_rows,
+                };
+                match placement.render_mode {
+                    SidePanelImageRenderMode::Fit => {
+                        if let Some((_, width, height)) = mermaid::get_cached_png(placement.hash) {
+                            if let Some(plan) = plan_fit_image_render(
+                                content_inner,
+                                clamped_scroll,
+                                image_start,
+                                placement.rows,
+                                width,
+                                height,
+                                centered,
+                            ) {
+                                let visible_widget_rect = match plan {
+                                    FitImageRenderPlan::Full { area } => {
+                                        mermaid::render_image_widget_scale(
+                                            placement.hash,
+                                            area,
+                                            frame.buffer_mut(),
+                                            false,
+                                        );
+                                        area
+                                    }
+                                    FitImageRenderPlan::ClippedViewport {
                                         area,
-                                        frame.buffer_mut(),
-                                        false,
-                                    );
-                                    area
-                                }
-                                FitImageRenderPlan::ClippedViewport {
-                                    area,
-                                    scroll_y,
-                                    zoom_percent,
-                                } => {
-                                    mermaid::render_image_widget_viewport(
-                                        placement.hash,
-                                        area,
-                                        frame.buffer_mut(),
-                                        0,
                                         scroll_y,
                                         zoom_percent,
-                                        false,
-                                    );
-                                    area
-                                }
-                            };
+                                    } => {
+                                        mermaid::render_image_widget_viewport_precise(
+                                            placement.hash,
+                                            area,
+                                            frame.buffer_mut(),
+                                            0,
+                                            scroll_y,
+                                            zoom_percent as u16,
+                                            false,
+                                        );
+                                        area
+                                    }
+                                };
 
+                                let probe = build_side_panel_mermaid_probe_from_image(
+                                    width,
+                                    height,
+                                    content_inner.width,
+                                    content_inner.height,
+                                    font_size_px,
+                                    centered,
+                                );
+                                let visible_widget = probe_rect(
+                                    Rect::new(
+                                        0,
+                                        0,
+                                        visible_widget_rect.width,
+                                        visible_widget_rect.height,
+                                    ),
+                                    content_inner.width,
+                                    content_inner.height,
+                                );
+                                visible_mermaids.push(SidePanelVisibleMermaidDebug {
+                                    image_index,
+                                    hash: format!("{:016x}", placement.hash),
+                                    reserved_rows: placement.rows,
+                                    visible_rows: avail_rows,
+                                    render_mode: probe.render_mode.clone(),
+                                    rendered_png_width_px: width,
+                                    rendered_png_height_px: height,
+                                    layout_fit: probe.layout_fit,
+                                    widget_fit: probe.widget_fit,
+                                    visible_widget: visible_widget.clone(),
+                                    log: format!(
+                                        "image#{image_index} {} visible={}x{} cells ({:.1}% area)",
+                                        probe.render_mode,
+                                        visible_widget.width_cells,
+                                        visible_widget.height_cells,
+                                        visible_widget.area_utilization_percent,
+                                    ),
+                                });
+                            }
+                        } else {
+                            mermaid::render_image_widget_scale(
+                                placement.hash,
+                                img_area,
+                                frame.buffer_mut(),
+                                false,
+                            );
+                        }
+                    }
+                    SidePanelImageRenderMode::ScrollableViewport { zoom_percent } => {
+                        let scroll_y = visible_start.saturating_sub(image_start) as i32;
+                        let side_pane_scroll_x = app.diff_pane_scroll_x();
+                        let scroll_x = mermaid::get_cached_png(placement.hash)
+                            .map(|(_, width, _)| {
+                                side_panel_viewport_scroll_x(
+                                    width,
+                                    img_area.width,
+                                    zoom_percent,
+                                    centered,
+                                    mermaid::get_font_size(),
+                                    side_pane_scroll_x,
+                                )
+                            })
+                            .unwrap_or(0);
+                        mermaid::render_image_widget_viewport_precise(
+                            placement.hash,
+                            img_area,
+                            frame.buffer_mut(),
+                            scroll_x,
+                            scroll_y,
+                            zoom_percent,
+                            false,
+                        );
+                        if let Some((_, width, height)) = mermaid::get_cached_png(placement.hash) {
                             let probe = build_side_panel_mermaid_probe_from_image(
                                 width,
                                 height,
@@ -1357,12 +1554,7 @@ pub(super) fn draw_side_panel_markdown(
                                 centered,
                             );
                             let visible_widget = probe_rect(
-                                Rect::new(
-                                    0,
-                                    0,
-                                    visible_widget_rect.width,
-                                    visible_widget_rect.height,
-                                ),
+                                Rect::new(0, 0, img_area.width, img_area.height),
                                 content_inner.width,
                                 content_inner.height,
                             );
@@ -1386,76 +1578,10 @@ pub(super) fn draw_side_panel_markdown(
                                 ),
                             });
                         }
-                    } else {
-                        mermaid::render_image_widget_scale(
-                            placement.hash,
-                            img_area,
-                            frame.buffer_mut(),
-                            false,
-                        );
-                    }
-                }
-                SidePanelImageRenderMode::ScrollableViewport { zoom_percent } => {
-                    let scroll_y = visible_start.saturating_sub(image_start) as i32;
-                    let side_pane_scroll_x = app.diff_pane_scroll_x();
-                    let scroll_x = mermaid::get_cached_png(placement.hash)
-                        .map(|(_, width, _)| {
-                            side_panel_viewport_scroll_x(
-                                width,
-                                img_area.width,
-                                zoom_percent,
-                                centered,
-                                mermaid::get_font_size(),
-                                side_pane_scroll_x,
-                            )
-                        })
-                        .unwrap_or(0);
-                    mermaid::render_image_widget_viewport(
-                        placement.hash,
-                        img_area,
-                        frame.buffer_mut(),
-                        scroll_x,
-                        scroll_y,
-                        zoom_percent,
-                        false,
-                    );
-                    if let Some((_, width, height)) = mermaid::get_cached_png(placement.hash) {
-                        let probe = build_side_panel_mermaid_probe_from_image(
-                            width,
-                            height,
-                            content_inner.width,
-                            content_inner.height,
-                            font_size_px,
-                            centered,
-                        );
-                        let visible_widget = probe_rect(
-                            Rect::new(0, 0, img_area.width, img_area.height),
-                            content_inner.width,
-                            content_inner.height,
-                        );
-                        visible_mermaids.push(SidePanelVisibleMermaidDebug {
-                            image_index,
-                            hash: format!("{:016x}", placement.hash),
-                            reserved_rows: placement.rows,
-                            visible_rows: avail_rows,
-                            render_mode: probe.render_mode.clone(),
-                            rendered_png_width_px: width,
-                            rendered_png_height_px: height,
-                            layout_fit: probe.layout_fit,
-                            widget_fit: probe.widget_fit,
-                            visible_widget: visible_widget.clone(),
-                            log: format!(
-                                "image#{image_index} {} visible={}x{} cells ({:.1}% area)",
-                                probe.render_mode,
-                                visible_widget.width_cells,
-                                visible_widget.height_cells,
-                                visible_widget.area_utilization_percent,
-                            ),
-                        });
                     }
                 }
             }
-        }
+        });
     }
 
     with_side_panel_debug_mut(|debug| {
@@ -1490,6 +1616,8 @@ fn render_side_panel_markdown_cached_with_zoom(
     image_zoom_percent: u8,
 ) -> PinnedRenderedCache {
     let content_signature = side_panel_content_signature(page);
+    let mermaid_aspect_ratio = side_panel_mermaid_preferred_aspect_ratio(page, inner, has_protocol);
+    let mermaid_aspect_bucket = mermaid::preferred_aspect_ratio_bucket(mermaid_aspect_ratio);
     let key = SidePanelRenderKey {
         page_id: page.id.clone(),
         content_signature,
@@ -1499,6 +1627,7 @@ fn render_side_panel_markdown_cached_with_zoom(
         centered,
         image_zoom_percent,
         mermaid_epoch: crate::tui::mermaid::deferred_render_epoch(),
+        mermaid_aspect_bucket,
     };
 
     if let Some(rendered) = with_side_panel_render_cache_mut(|cache| {
@@ -1524,6 +1653,8 @@ fn render_side_panel_markdown_cached_with_zoom(
         inner.width,
         has_protocol,
         centered,
+        mermaid_aspect_ratio,
+        mermaid_aspect_bucket,
     );
 
     let align = if centered {
@@ -1548,12 +1679,12 @@ fn render_side_panel_markdown_cached_with_zoom(
                 let (_, cell_h) = mermaid::get_font_size().unwrap_or((8, 16));
                 let image_h_cells =
                     super::diagram_pane::div_ceil_u32(height.max(1), cell_h.max(1) as u32).max(1);
-                let rows = scaled_image_rows(image_h_cells, image_zoom_percent)
+                let rows = scaled_image_rows(image_h_cells, image_zoom_percent as u16)
                     .max(SIDE_PANEL_INLINE_IMAGE_MIN_ROWS);
                 image_layout = SidePanelImageLayout {
                     rows,
                     render_mode: SidePanelImageRenderMode::ScrollableViewport {
-                        zoom_percent: image_zoom_percent,
+                        zoom_percent: image_zoom_percent as u16,
                     },
                 };
             }
@@ -1630,6 +1761,8 @@ fn render_side_panel_markdown_lines_cached(
     inner_width: u16,
     has_protocol: bool,
     centered: bool,
+    mermaid_aspect_ratio: Option<f32>,
+    mermaid_aspect_bucket: Option<u16>,
 ) -> RenderedSidePanelMarkdown {
     let key = SidePanelMarkdownKey {
         page_id: page.id.clone(),
@@ -1638,6 +1771,7 @@ fn render_side_panel_markdown_lines_cached(
         has_protocol,
         centered,
         mermaid_epoch: crate::tui::mermaid::deferred_render_epoch(),
+        mermaid_aspect_bucket,
     };
 
     if let Some(rendered) = with_side_panel_markdown_cache_mut(|cache| {
@@ -1661,8 +1795,9 @@ fn render_side_panel_markdown_lines_cached(
     let saved_centered = markdown::center_code_blocks();
     markdown::set_diagram_mode_override(Some(crate::config::DiagramDisplayMode::None));
     markdown::set_center_code_blocks(centered);
-    let rendered_lines =
-        markdown::render_markdown_with_width(&page.content, Some(inner_width as usize));
+    let rendered_lines = mermaid::with_preferred_aspect_ratio(mermaid_aspect_ratio, || {
+        markdown::render_markdown_with_width(&page.content, Some(inner_width as usize))
+    });
     let rendered_lines = if has_protocol {
         rendered_lines
             .into_iter()

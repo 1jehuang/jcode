@@ -349,6 +349,45 @@ fn test_handle_remote_event_redraws_observe_tool_exec_immediately() {
 }
 
 #[test]
+fn test_remote_protocol_error_stops_instead_of_reconnecting() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let backend = ratatui::backend::TestBackend::new(90, 20);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let mut state = super::remote::RemoteRunState::default();
+
+    app.is_processing = true;
+    let (outcome, needs_redraw) = rt
+        .block_on(super::remote::handle_remote_event(
+            &mut app,
+            &mut terminal,
+            &mut remote,
+            &mut state,
+            crate::tui::backend::RemoteRead::Disconnected(
+                crate::tui::backend::RemoteDisconnectReason::Protocol(
+                    "expected value at line 1 column 1".to_string(),
+                ),
+            ),
+        ))
+        .expect("protocol error handling should succeed");
+
+    assert!(matches!(outcome, super::remote::RemoteEventOutcome::Quit));
+    assert!(needs_redraw);
+    assert!(!app.is_processing);
+    assert_eq!(state.reconnect_attempts, 0, "must not schedule reconnect");
+    assert!(
+        app.display_messages().iter().any(|message| {
+            message.role == "error"
+                && message.content.contains("Stopped reconnecting")
+                && message.content.contains("protocol error")
+        }),
+        "expected visible protocol error guidance"
+    );
+}
+
+#[test]
 fn test_handle_remote_event_redraws_observe_tool_done_immediately() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

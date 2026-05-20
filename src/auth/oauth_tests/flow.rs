@@ -545,15 +545,15 @@ async fn claude_exchange_uses_claude_code_token_headers() -> Result<()> {
         Some("application/json")
     );
     assert!(
-        headers.get("origin").is_none(),
+        !headers.contains_key("origin"),
         "unexpected Origin: {headers:?}"
     );
     assert!(
-        headers.get("referer").is_none(),
+        !headers.contains_key("referer"),
         "unexpected Referer: {headers:?}"
     );
     assert!(
-        headers.get("sec-fetch-mode").is_none(),
+        !headers.contains_key("sec-fetch-mode"),
         "unexpected Sec-Fetch-Mode: {headers:?}"
     );
     Ok(())

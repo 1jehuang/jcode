@@ -12,6 +12,10 @@ pub struct ModelCatalogRefreshSummary {
     pub model_count_after: usize,
     pub models_added: usize,
     pub models_removed: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models_added_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models_removed_names: Vec<String>,
     pub route_count_before: usize,
     pub route_count_after: usize,
     pub routes_added: usize,
@@ -83,6 +87,14 @@ pub fn summarize_model_catalog_refresh(
 
     let models_added = after_model_set.difference(&before_model_set).count();
     let models_removed = before_model_set.difference(&after_model_set).count();
+    let models_added_names = after_model_set
+        .difference(&before_model_set)
+        .cloned()
+        .collect();
+    let models_removed_names = before_model_set
+        .difference(&after_model_set)
+        .cloned()
+        .collect();
     let routes_added = after_route_map
         .keys()
         .filter(|key| !before_route_map.contains_key(*key))
@@ -105,6 +117,8 @@ pub fn summarize_model_catalog_refresh(
         model_count_after: after_model_set.len(),
         models_added,
         models_removed,
+        models_added_names,
+        models_removed_names,
         route_count_before: before_route_map.len(),
         route_count_after: after_route_map.len(),
         routes_added,

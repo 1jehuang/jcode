@@ -84,6 +84,7 @@ pub(super) async fn maybe_handle_session_admin_command(
             soft_interrupt_queues,
             selfdev_requested,
             None,
+            None,
             mcp_pool,
             None,
         )

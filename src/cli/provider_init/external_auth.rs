@@ -332,8 +332,8 @@ async fn validate_antigravity_import() -> Result<String> {
 
 async fn validate_copilot_import() -> Result<String> {
     let github_token = auth::copilot::load_github_token()?;
-    let api_token =
-        auth::copilot::exchange_github_token(&reqwest::Client::new(), &github_token).await?;
+    let client = crate::provider::shared_http_client();
+    let api_token = auth::copilot::exchange_github_token(&client, &github_token).await?;
     Ok(format!(
         "Copilot exchange probe succeeded (expires_at={}).",
         api_token.expires_at

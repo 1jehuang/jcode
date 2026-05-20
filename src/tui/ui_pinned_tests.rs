@@ -54,7 +54,7 @@ fn sample_mermaid_page(content: impl Into<String>) -> crate::side_panel::SidePan
 #[test]
 fn clamp_side_panel_image_rows_leaves_room_for_following_content() {
     let rows = clamp_side_panel_image_rows(18, 16, 2, true);
-    assert_eq!(rows, 10);
+    assert_eq!(rows, 15);
 }
 
 #[test]
@@ -73,7 +73,7 @@ fn clamp_side_panel_image_rows_keeps_minimum_image_presence() {
 fn clamp_side_panel_image_rows_ignores_preceding_document_length() {
     let near_top = clamp_side_panel_image_rows(18, 16, 2, true);
     let far_down_page = clamp_side_panel_image_rows(18, 16, 200, true);
-    assert_eq!(near_top, 10);
+    assert_eq!(near_top, 15);
     assert_eq!(far_down_page, near_top);
 }
 
@@ -96,6 +96,56 @@ fn side_panel_mermaid_switches_to_scrollable_viewport_when_fit_would_be_too_smal
     );
     assert!(layout.rows > 20, "expected tall scrollable diagram rows");
     assert!(layout.render_mode.is_scrollable());
+}
+
+#[test]
+fn side_panel_mermaid_fit_fill_allows_wide_short_diagrams_above_200_percent() {
+    // A left-to-right flowchart can be very wide and short. Capping automatic
+    // fill at 200% leaves it as a thin strip with most of the pane blank.
+    let layout =
+        estimate_side_panel_image_layout_with_font(1440, 110, 118, 70, 0, false, Some((8, 16)));
+
+    match layout.render_mode {
+        SidePanelImageRenderMode::ScrollableViewport { zoom_percent } => {
+            assert!(
+                zoom_percent >= 700,
+                "wide short side-panel diagrams need high fit-fill zoom, got {zoom_percent}%"
+            );
+        }
+        other => panic!("expected scrollable viewport for wide short diagram, got {other:?}"),
+    }
+    assert!(
+        layout.rows >= 70,
+        "high fill zoom should reserve enough rows to fill the pane, got {}",
+        layout.rows
+    );
+}
+
+#[test]
+fn pinned_content_image_layout_uses_high_zoom_viewport_for_generated_wide_diagram() {
+    let layout = pinned_content_image_layout_with_font(
+        1800,
+        161,
+        Rect::new(78, 1, 52, 67),
+        0,
+        false,
+        Some((10, 20)),
+    );
+
+    match layout.render_mode {
+        SidePanelImageRenderMode::ScrollableViewport { zoom_percent } => {
+            assert!(
+                zoom_percent > 200,
+                "pinned content must not fall back to the old 200% cap, got {zoom_percent}%"
+            );
+        }
+        other => panic!("expected pinned content viewport fill, got {other:?}"),
+    }
+    assert!(
+        layout.rows >= 67,
+        "pinned content should reserve enough rows to fill the visible pane, got {}",
+        layout.rows
+    );
 }
 
 #[test]
@@ -280,6 +330,18 @@ fn side_panel_viewport_scroll_x_applies_horizontal_pan_around_center() {
         panned_left < centered,
         "expected negative pan to move viewport left"
     );
+}
+
+#[test]
+fn side_panel_viewport_scroll_x_handles_high_auto_fill_zoom() {
+    let centered = side_panel_viewport_scroll_x(1800, 52, 832, true, Some((10, 20)), 0);
+    let left_aligned = side_panel_viewport_scroll_x(1800, 52, 832, false, Some((10, 20)), 0);
+
+    assert!(
+        centered > 0,
+        "high fit-fill zoom should still compute a centered horizontal viewport"
+    );
+    assert_eq!(left_aligned, 0);
 }
 
 #[test]

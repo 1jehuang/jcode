@@ -84,6 +84,28 @@ impl BackgroundTaskManager {
         self.output_dir.join(format!("{}.status.json", task_id))
     }
 
+    fn publish_task_started_activity(
+        task_id: &str,
+        tool_name: &str,
+        display_name: Option<&str>,
+        session_id: &str,
+        notify: bool,
+    ) {
+        if !notify {
+            return;
+        }
+        let label = crate::message::background_task_display_label(tool_name, display_name);
+        let safe_label = label.replace('`', "'");
+        Bus::global().publish(BusEvent::UiActivity(crate::bus::UiActivity::background(
+            Some(session_id.to_string()),
+            format!(
+                "**Background task started** `{}` · `{}`\n\nJcode is running this in the background. Progress, checkpoints, and completion will appear here.",
+                task_id, safe_label
+            ),
+            Some(format!("Background task started · {}", label)),
+        )));
+    }
+
     fn status_duration_secs(started_at: &str, completed_at: DateTime<Utc>) -> Option<f64> {
         DateTime::parse_from_rfc3339(started_at)
             .ok()
@@ -230,6 +252,13 @@ impl BackgroundTaskManager {
             event_history: Vec::new(),
         };
         self.write_status_file(&info.status_file, &status).await;
+        Self::publish_task_started_activity(
+            &info.task_id,
+            tool_name,
+            status.display_name.as_deref(),
+            session_id,
+            notify,
+        );
     }
 
     /// Spawn a background task
@@ -292,6 +321,13 @@ impl BackgroundTaskManager {
         if let Ok(json) = serde_json::to_string_pretty(&initial_status) {
             let _ = std::fs::write(&status_path, json);
         }
+        Self::publish_task_started_activity(
+            &task_id,
+            tool_name,
+            display_name.as_deref(),
+            session_id,
+            notify,
+        );
 
         let output_path_clone = output_path.clone();
         let status_path_clone = status_path.clone();
@@ -451,6 +487,7 @@ impl BackgroundTaskManager {
         if let Ok(json) = serde_json::to_string_pretty(&initial_status) {
             let _ = std::fs::write(&status_path, json);
         }
+        Self::publish_task_started_activity(&task_id, tool_name, None, session_id, true);
 
         let output_path_clone = output_path.clone();
         let status_path_clone = status_path.clone();

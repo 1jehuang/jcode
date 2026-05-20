@@ -24,6 +24,7 @@ pub(in crate::tui::app) fn handle_server_event(
             | ServerEvent::GeneratedImage { .. }
             | ServerEvent::BatchProgress { .. }
             | ServerEvent::TokenUsage { .. }
+            | ServerEvent::KvCacheRequest { .. }
             | ServerEvent::ConnectionType { .. }
             | ServerEvent::ConnectionPhase { .. }
             | ServerEvent::StatusDetail { .. }
@@ -156,6 +157,36 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             eager_stream_redraw && matches!(app.status, ProcessingStatus::Streaming)
         }
+        ServerEvent::KvCacheRequest {
+            system_static_hash,
+            tools_hash,
+            messages_hash,
+            message_hashes,
+            message_count,
+            tool_count,
+            system_static_chars,
+            tools_json_chars,
+            messages_json_chars,
+            ephemeral_hash,
+            ephemeral_chars,
+            ephemeral_message_count,
+        } => {
+            app.begin_remote_kv_cache_request(app_mod::KvCacheRequestSignature {
+                system_static_hash,
+                tools_hash,
+                messages_hash,
+                message_hashes,
+                message_count,
+                tool_count,
+                system_static_chars,
+                tools_json_chars,
+                messages_json_chars,
+                ephemeral_hash,
+                ephemeral_chars,
+                ephemeral_message_count,
+            });
+            false
+        }
         ServerEvent::ConnectionType { connection } => {
             app.connection_type = Some(connection);
             app.update_terminal_title();
@@ -203,6 +234,16 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::Interrupted => {
+            crate::logging::info(&format!(
+                "REMOTE_INTERRUPT_EVENT_RECEIVED kind=interrupted session={:?} current_message_id={:?} is_processing={} status={:?} streaming_text_bytes={} pending_soft_interrupts={} queued_messages={}",
+                app.remote_session_id,
+                app.current_message_id,
+                app.is_processing,
+                app.status,
+                app.streaming_text.len(),
+                app.pending_soft_interrupts.len(),
+                app.queued_messages.len()
+            ));
             let keep_pending_retry = app
                 .rate_limit_pending_message
                 .as_ref()
@@ -382,9 +423,20 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             remote.clear_pending();
             remote.reset_call_output_tokens_seen();
+            if crate::network_retry::classify_message(&message).is_some()
+                && app.schedule_pending_remote_network_wait(&message)
+            {
+                return false;
+            }
             if app.auto_poke_incomplete_todos
                 && crate::tui::app::commands::is_non_retryable_auto_poke_error(&message)
             {
+                if crate::tui::app::commands::is_auto_poke_connectivity_error(&message) {
+                    crate::tui::app::commands::stop_auto_poke_for_non_retryable_error(
+                        app, &message,
+                    );
+                    return false;
+                }
                 if app.schedule_pending_remote_retry_with_limit(
                     "⚠ Remote request failed with a likely non-retryable error.",
                     2,
@@ -620,6 +672,7 @@ pub(in crate::tui::app) fn handle_server_event(
             app.remote_model_options = available_model_routes;
             app.invalidate_model_picker_cache();
             app.remote_skills = skills;
+            app.invalidate_command_candidates_cache();
             app.remote_sessions = all_sessions;
             app.remote_client_count = client_count;
             app.remote_is_canary = is_canary;
@@ -912,7 +965,11 @@ pub(in crate::tui::app) fn handle_server_event(
             error,
             ..
         } => {
+            app.remote_model_switch_in_flight = false;
             if let Some(err) = error {
+                if let Some(prepared) = app.pending_prompt_after_model_switch.take() {
+                    super::input_dispatch::restore_prepared_remote_input(app, prepared);
+                }
                 app.push_display_message(DisplayMessage::error(
                     crate::tui::app::model_context::model_switch_failure_message(&err, true),
                 ));
@@ -1065,9 +1122,19 @@ pub(in crate::tui::app) fn handle_server_event(
         ServerEvent::SoftInterruptInjected {
             content,
             display_role,
-            point: _,
+            point,
             tools_skipped,
         } => {
+            crate::logging::info(&format!(
+                "REMOTE_INTERRUPT_EVENT_RECEIVED kind=soft_interrupt_injected session={:?} point={} display_role={:?} tools_skipped={:?} content_bytes={} content_chars={} pending_soft_interrupts={}",
+                app.remote_session_id,
+                point,
+                display_role,
+                tools_skipped,
+                content.len(),
+                content.chars().count(),
+                app.pending_soft_interrupts.len()
+            ));
             if let Some(chunk) = app.stream_buffer.flush() {
                 app.append_streaming_text(&chunk);
             }
@@ -1151,6 +1218,19 @@ pub(in crate::tui::app) fn handle_server_event(
                 } if scope == "background_task"
             );
 
+            let runtime_activity_scope = match &notification_type {
+                crate::protocol::NotificationType::Message {
+                    scope: Some(scope), ..
+                } if matches!(
+                    scope.as_str(),
+                    "auth_activity" | "catalog_activity" | "background_activity"
+                ) =>
+                {
+                    Some(scope.as_str())
+                }
+                _ => None,
+            };
+
             if background_task_scope {
                 let presentation =
                     present_swarm_notification(&sender, &notification_type, &message);
@@ -1163,6 +1243,18 @@ pub(in crate::tui::app) fn handle_server_event(
                 }
                 persist_replay_display_message(app, "background_task", None, &message);
                 app.set_status_notice(presentation.status_notice);
+                return false;
+            }
+
+            if let Some(scope) = runtime_activity_scope {
+                if scope == "background_activity" {
+                    app.push_display_message(DisplayMessage::background_task(message.clone()));
+                    persist_replay_display_message(app, "background_task", None, &message);
+                } else {
+                    app.push_display_message(DisplayMessage::system(message.clone()));
+                    persist_replay_display_message(app, "system", None, &message);
+                }
+                app.set_status_notice(runtime_activity_status_notice(&message));
                 return false;
             }
 
@@ -1334,4 +1426,18 @@ pub(in crate::tui::app) fn handle_server_event(
         }
         _ => false,
     }
+}
+
+fn runtime_activity_status_notice(message: &str) -> String {
+    message
+        .lines()
+        .find_map(|line| {
+            let line = line.trim();
+            (!line.is_empty()).then_some(line)
+        })
+        .unwrap_or("Jcode activity")
+        .trim_matches('*')
+        .trim()
+        .trim_end_matches('.')
+        .to_string()
 }

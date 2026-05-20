@@ -17,7 +17,7 @@ mod render;
 mod storage_paths;
 pub use crash::{
     CrashedSessionsInfo, detect_crashed_sessions, find_recent_crashed_sessions,
-    find_session_by_name_or_id, recover_crashed_sessions,
+    find_session_by_name_or_id, recover_crashed_sessions, recover_crashed_sessions_by_ids,
 };
 pub use jcode_session_types::{
     EnvSnapshot, GitState, SessionImproveMode, SessionStatus, StoredCompactionState,
@@ -233,6 +233,13 @@ pub fn derive_session_provider_key(provider_name: &str) -> Option<String> {
     let normalized_name = provider_name.trim().to_ascii_lowercase();
     if normalized_name == "jcode" {
         return Some("jcode".to_string());
+    }
+
+    if let Ok(runtime_provider) = std::env::var("JCODE_RUNTIME_PROVIDER") {
+        let runtime_provider = runtime_provider.trim().to_ascii_lowercase();
+        if !runtime_provider.is_empty() && runtime_provider != "openai-compatible" {
+            return Some(runtime_provider);
+        }
     }
 
     if let Ok(namespace) = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE") {

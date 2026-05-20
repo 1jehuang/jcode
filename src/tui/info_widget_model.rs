@@ -101,6 +101,7 @@ pub(super) fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
             AuthMethod::OpenAIOAuth => ("🔐", "OAuth", rgb(100, 200, 180)),
             AuthMethod::OpenAIApiKey => ("🔑", "API Key", rgb(180, 180, 190)),
             AuthMethod::OpenRouterApiKey => ("🔑", "API Key", rgb(140, 180, 255)),
+            AuthMethod::OpenCodeApiKey => ("🔑", "API Key", rgb(140, 180, 255)),
             AuthMethod::CopilotOAuth => ("🔐", "OAuth", rgb(110, 200, 140)),
             AuthMethod::GeminiOAuth => ("🔐", "OAuth", rgb(120, 190, 255)),
             AuthMethod::Unknown => unreachable!(),
@@ -201,6 +202,7 @@ pub(super) fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<
                 AuthMethod::OpenAIOAuth => ("🔐", "OAuth", rgb(100, 200, 180)),
                 AuthMethod::OpenAIApiKey => ("🔑", "API Key", rgb(180, 180, 190)),
                 AuthMethod::OpenRouterApiKey => ("🔑", "API Key", rgb(140, 180, 255)),
+                AuthMethod::OpenCodeApiKey => ("🔑", "API Key", rgb(140, 180, 255)),
                 AuthMethod::CopilotOAuth => ("🔐", "OAuth", rgb(110, 200, 140)),
                 AuthMethod::GeminiOAuth => ("🔐", "OAuth", rgb(120, 190, 255)),
                 AuthMethod::Unknown => unreachable!(),
@@ -370,6 +372,7 @@ mod tests {
             ambient_info: None,
             observed_context_tokens: None,
             cache_hit_info: None,
+            compaction_info: None,
             is_compacting: false,
             git_info: None,
         }

@@ -463,6 +463,9 @@ impl AmbientRunnerHandle {
 
         let mut agent = Agent::new_with_session(cycle_provider, registry, child, None);
         agent.set_debug(child_is_debug);
+        if item.working_dir.is_some() {
+            agent.set_working_dir_for_pending_context(item.working_dir.clone());
+        }
 
         let reminder = ambient::format_scheduled_session_message(item);
         let _ = agent.run_once_capture(&reminder).await?;

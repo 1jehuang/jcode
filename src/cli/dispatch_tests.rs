@@ -1,6 +1,28 @@
 use super::*;
 use crate::transport::Listener;
 
+#[test]
+fn auth_doctor_provider_focus_uses_global_provider_when_positional_is_absent() {
+    assert_eq!(
+        auth_doctor_provider_arg(None, &ProviderChoice::Cerebras),
+        Some("cerebras")
+    );
+    assert_eq!(
+        auth_doctor_provider_arg(None, &ProviderChoice::Auto),
+        None,
+        "auto should keep the default doctor behavior of checking configured providers"
+    );
+}
+
+#[test]
+fn auth_doctor_positional_provider_wins_over_global_provider() {
+    assert_eq!(
+        auth_doctor_provider_arg(Some("openai"), &ProviderChoice::Cerebras),
+        Some("openai"),
+        "`jcode --provider cerebras auth doctor openai` should diagnose the explicit positional provider"
+    );
+}
+
 struct ReloadTestEnv {
     prev_socket: Option<std::ffi::OsString>,
     prev_runtime: Option<std::ffi::OsString>,

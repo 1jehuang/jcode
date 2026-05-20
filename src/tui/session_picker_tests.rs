@@ -15,6 +15,13 @@ fn write_session_file_with_mtime(
         .expect("set modified time");
 }
 
+fn line_text(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
+}
+
 fn make_session(id: &str, short_name: &str, is_debug: bool, status: SessionStatus) -> SessionInfo {
     make_session_with_flags(id, short_name, is_debug, false, status)
 }
@@ -86,6 +93,58 @@ fn make_session_with_flags(
         },
         external_path: None,
     }
+}
+
+#[test]
+fn test_format_estimated_tokens_uses_compact_units() {
+    assert_eq!(SessionPicker::format_estimated_tokens(0), "~0 tok");
+    assert_eq!(SessionPicker::format_estimated_tokens(999), "~999 tok");
+    assert_eq!(SessionPicker::format_estimated_tokens(1_000), "~1k tok");
+    assert_eq!(SessionPicker::format_estimated_tokens(1_234), "~1.2k tok");
+    assert_eq!(SessionPicker::format_estimated_tokens(12_345), "~12k tok");
+    assert_eq!(SessionPicker::format_estimated_tokens(999_500), "~1M tok");
+    assert_eq!(
+        SessionPicker::format_estimated_tokens(1_234_567),
+        "~1.2M tok"
+    );
+    assert_eq!(
+        SessionPicker::format_estimated_tokens(1_234_567_890),
+        "~1.2B tok"
+    );
+    assert_eq!(
+        SessionPicker::format_estimated_tokens(1_234_567_890_123),
+        "~1.2T tok"
+    );
+}
+
+#[test]
+fn test_session_item_uses_single_primary_title_line() {
+    let mut session = make_session(
+        "session_primary_title",
+        "rhino",
+        false,
+        SessionStatus::Closed,
+    );
+    session.title = "Generated release planning".to_string();
+    session.estimated_tokens = 1_234_567;
+    let picker = SessionPicker::new(vec![session.clone()]);
+
+    let rows = picker.render_session_item_lines(&session, false);
+    let text_rows: Vec<String> = rows.iter().map(line_text).collect();
+
+    assert_eq!(text_rows.len(), 4);
+    assert!(text_rows[0].contains("Generated release planning"));
+    assert!(
+        text_rows[1..]
+            .iter()
+            .all(|row| !row.contains("Generated release planning")),
+        "title should only be rendered on the primary row: {text_rows:?}"
+    );
+    assert!(
+        text_rows.iter().all(|row| !row.contains("rhino")),
+        "memorable short name should remain searchable but not take display space: {text_rows:?}"
+    );
+    assert!(text_rows[1].contains("~1.2M tok"));
 }
 
 #[test]
@@ -198,7 +257,7 @@ fn test_collect_recent_session_stems_prefers_recently_modified_long_running_sess
 
     for idx in 0..120 {
         write_session_file_with_mtime(
-            &dir.path().join(format!(
+            dir.path().join(format!(
                 "session_newer_created_{:013}.json",
                 2_000_000 + idx
             )),
@@ -209,7 +268,7 @@ fn test_collect_recent_session_stems_prefers_recently_modified_long_running_sess
 
     let target = "session_long_running_0000000000500";
     write_session_file_with_mtime(
-        &dir.path().join(format!("{target}.json")),
+        dir.path().join(format!("{target}.json")),
         r#"{"messages":[{"role":"user","content":"old creation time, recently active"}]}"#,
         10_000,
     );
@@ -407,6 +466,7 @@ fn test_grouped_batch_restore_uses_last_active_at_and_includes_debug_sessions() 
         .expect("expected eligible crashed sessions");
 
     assert_eq!(crashed.session_ids.len(), 2);
+    assert_eq!(crashed.omitted_crashed_count, 1);
     assert!(crashed.session_ids.contains(&recent_normal.id));
     assert!(crashed.session_ids.contains(&recent_debug.id));
     assert!(
@@ -415,6 +475,18 @@ fn test_grouped_batch_restore_uses_last_active_at_and_includes_debug_sessions() 
             .iter()
             .any(|id| id == "session_stale_crash")
     );
+
+    let mut picker = picker;
+    let action = picker
+        .handle_overlay_key(KeyCode::Char('R'), KeyModifiers::empty())
+        .expect("restore group key should be handled");
+    let OverlayAction::Selected(PickerResult::RestoreCrashedGroup(ids)) = action else {
+        panic!("expected restore group action");
+    };
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&recent_normal.id));
+    assert!(ids.contains(&recent_debug.id));
+    assert!(!ids.iter().any(|id| id == "session_stale_crash"));
 }
 
 #[test]
@@ -463,9 +535,6 @@ fn test_loading_preview_refreshes_search_index_for_picker_filtering() {
 
     let sessions = load_sessions().expect("load sessions");
     let mut picker = SessionPicker::new(sessions);
-
-    let selected_before = picker.selected_session().expect("selected session");
-    assert!(!selected_before.search_index.contains("needle hidden"));
 
     picker.ensure_selected_preview_loaded();
 

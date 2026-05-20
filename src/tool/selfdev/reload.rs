@@ -218,14 +218,28 @@ pub fn persisted_background_tasks_note(session_id: &str) -> String {
     notes
 }
 
+pub(super) fn resolve_selfdev_reload_repo_dir(
+    working_dir: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    resolve_selfdev_reload_repo_dir_from(build::get_repo_dir(), working_dir)
+}
+
+pub(super) fn resolve_selfdev_reload_repo_dir_from(
+    primary: Option<std::path::PathBuf>,
+    working_dir: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    primary.or_else(|| working_dir.and_then(build::find_repo_in_ancestors))
+}
+
 impl SelfDevTool {
     pub(super) async fn do_reload(
         &self,
         context: Option<String>,
         session_id: &str,
         execution_mode: ToolExecutionMode,
+        working_dir: Option<&std::path::Path>,
     ) -> Result<ToolOutput> {
-        let repo_dir = build::get_repo_dir()
+        let repo_dir = resolve_selfdev_reload_repo_dir(working_dir)
             .ok_or_else(|| anyhow::anyhow!("Could not find jcode repository directory"))?;
 
         let target_binary = build::find_dev_binary(&repo_dir)
@@ -384,29 +398,17 @@ impl SelfDevTool {
                 }
             }
             ToolExecutionMode::AgentTurn => {
-                let sleep_forever = async {
-                    loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                    }
-                };
-
-                match tokio::time::timeout(timeout, sleep_forever).await {
-                    Ok(_) => unreachable!("infinite wait future unexpectedly completed"),
-                    Err(_) => {
-                        crate::logging::warn(&format!(
-                            "selfdev reload: request={} not interrupted after {}ms state={} ",
-                            ack.request_id,
-                            timeout.as_millis(),
-                            server::reload_state_summary(std::time::Duration::from_secs(60))
-                        ));
-                        Err(anyhow::anyhow!(
-                            "Reload was acknowledged by the server for build {}, but this tool execution was not interrupted within {}s. The server restart may be stuck; inspect logs and active sessions. Current reload state: {}",
-                            ack.hash,
-                            timeout.as_secs(),
-                            server::reload_state_summary(std::time::Duration::from_secs(60))
-                        ))
-                    }
-                }
+                // In normal agent turns the reload will intentionally terminate this
+                // process shortly after the server acknowledges the request. Return a
+                // tool result immediately so the harness can persist/deliver the tool
+                // output before the process exits. Previously this branch waited to be
+                // interrupted by shutdown; depending on timing, the process could exit
+                // before the in-flight tool result reached the client, producing
+                // "Tool output missing" even though reload succeeded.
+                Ok(ToolOutput::new(format!(
+                    "Reload initiated for build {}. Process restarting...",
+                    ack.hash
+                )))
             }
         }
     }

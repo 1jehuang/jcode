@@ -85,6 +85,25 @@ impl Session {
             session.replay_events.len(),
             load_start.elapsed().as_millis(),
         ));
+        crate::logging::event_info(
+            "SESSION_PERSISTENCE",
+            vec![
+                ("phase", "load_done".to_string()),
+                ("session_id", session.id.clone()),
+                ("path", path.display().to_string()),
+                ("status", format!("{:?}", session.status)),
+                ("messages", session.messages.len().to_string()),
+                ("env_snapshots", session.env_snapshots.len().to_string()),
+                ("replay_events", session.replay_events.len().to_string()),
+                ("snapshot_bytes", snapshot_bytes.to_string()),
+                ("journal_bytes", journal_bytes.to_string()),
+                ("journal_entries", journal_entries.to_string()),
+                ("snapshot_ms", snapshot_ms.to_string()),
+                ("journal_ms", journal_ms.to_string()),
+                ("finalize_ms", finalize_ms.to_string()),
+                ("elapsed_ms", load_start.elapsed().as_millis().to_string()),
+            ],
+        );
         Ok(session)
     }
 
@@ -164,6 +183,23 @@ impl Session {
             session.messages.len(),
             load_start.elapsed().as_millis(),
         ));
+        crate::logging::event_info(
+            "SESSION_PERSISTENCE",
+            vec![
+                ("phase", "remote_startup_load_done".to_string()),
+                ("session_id", session.id.clone()),
+                ("path", path.display().to_string()),
+                ("status", format!("{:?}", session.status)),
+                ("messages", session.messages.len().to_string()),
+                ("snapshot_bytes", snapshot_bytes.to_string()),
+                ("journal_bytes", journal_bytes.to_string()),
+                ("journal_entries", journal_entries.to_string()),
+                ("snapshot_ms", snapshot_ms.to_string()),
+                ("journal_ms", journal_ms.to_string()),
+                ("finalize_ms", finalize_ms.to_string()),
+                ("elapsed_ms", load_start.elapsed().as_millis().to_string()),
+            ],
+        );
         Ok(session)
     }
 
@@ -299,6 +335,8 @@ impl Session {
             }
         };
         let elapsed = start.elapsed();
+        let snapshot_bytes_after = file_len_or_zero(&path);
+        let result_ok = result.is_ok();
         if elapsed.as_millis() > 50 {
             crate::logging::info(&format!(
                 "Session save slow: total={:.0}ms mode={} metadata_snapshot={} vectors_snapshot={} entry_build={}ms append={}ms journal_stat={}ms checkpoint={}ms messages={} delta_messages={} delta_env_snapshots={} delta_memory_injections={} delta_replay_events={} snapshot_bytes_before={} journal_bytes_before={} journal_bytes_after={}",
@@ -319,6 +357,39 @@ impl Session {
                 journal_bytes_before,
                 journal_bytes_after,
             ));
+        }
+        let mut fields = vec![
+            ("phase", "save_done".to_string()),
+            ("session_id", self.id.clone()),
+            ("path", path.display().to_string()),
+            ("status", format!("{:?}", self.status)),
+            ("result", if result_ok { "ok" } else { "error" }.to_string()),
+            ("save_mode", save_mode.to_string()),
+            ("metadata_snapshot", metadata_needs_snapshot.to_string()),
+            ("vectors_snapshot", vectors_need_snapshot.to_string()),
+            ("messages", self.messages.len().to_string()),
+            ("delta_messages", delta_messages.to_string()),
+            ("delta_env_snapshots", delta_env_snapshots.to_string()),
+            (
+                "delta_memory_injections",
+                delta_memory_injections.to_string(),
+            ),
+            ("delta_replay_events", delta_replay_events.to_string()),
+            ("snapshot_bytes_before", snapshot_bytes_before.to_string()),
+            ("snapshot_bytes_after", snapshot_bytes_after.to_string()),
+            ("journal_bytes_before", journal_bytes_before.to_string()),
+            ("journal_bytes_after", journal_bytes_after.to_string()),
+            ("entry_build_ms", entry_build_ms.to_string()),
+            ("append_ms", append_ms.to_string()),
+            ("journal_stat_ms", journal_stat_ms.to_string()),
+            ("checkpoint_ms", checkpoint_ms.to_string()),
+            ("elapsed_ms", elapsed.as_millis().to_string()),
+        ];
+        if let Err(error) = &result {
+            fields.push(("error", crate::util::format_error_chain(error)));
+            crate::logging::event_warn("SESSION_PERSISTENCE", fields);
+        } else {
+            crate::logging::event_info("SESSION_PERSISTENCE", fields);
         }
         result
     }

@@ -754,37 +754,36 @@ fn search_external_sessions(query: &QueryProfile, options: &SearchOptions) -> Se
     let mut report = SearchReport::default();
     let mut records = Vec::new();
 
-    if source_matches_filter("claude", options) {
-        if let Ok(sessions) =
+    if source_matches_filter("claude", options)
+        && let Ok(sessions) =
             crate::import::list_claude_code_sessions_lazy(options.max_scan_sessions)
-        {
-            report.external_sources.push("claude");
-            for session in sessions.into_iter().take(options.max_scan_sessions) {
-                let path = PathBuf::from(&session.full_path);
-                let messages = load_claude_external_messages(&path, options.include_tools);
-                let created_at = session.created.unwrap_or_else(Utc::now);
-                let updated_at = session.modified.or(session.created).unwrap_or(created_at);
-                let title = session
-                    .summary
-                    .filter(|summary| !summary.trim().is_empty())
-                    .unwrap_or_else(|| truncate_title_text(&session.first_prompt, 72));
-                records.push(ExternalSessionRecord {
-                    source: "claude",
-                    session_id: session.session_id.clone(),
-                    short_name: Some(format!(
-                        "claude {}",
-                        &session.session_id[..session.session_id.len().min(8)]
-                    )),
-                    title: Some(title),
-                    working_dir: session.project_path,
-                    provider_key: Some("claude-code".to_string()),
-                    model: None,
-                    created_at,
-                    updated_at,
-                    path,
-                    messages,
-                });
-            }
+    {
+        report.external_sources.push("claude");
+        for session in sessions.into_iter().take(options.max_scan_sessions) {
+            let path = PathBuf::from(&session.full_path);
+            let messages = load_claude_external_messages(&path, options.include_tools);
+            let created_at = session.created.unwrap_or_else(Utc::now);
+            let updated_at = session.modified.or(session.created).unwrap_or(created_at);
+            let title = session
+                .summary
+                .filter(|summary| !summary.trim().is_empty())
+                .unwrap_or_else(|| truncate_title_text(&session.first_prompt, 72));
+            records.push(ExternalSessionRecord {
+                source: "claude",
+                session_id: session.session_id.clone(),
+                short_name: Some(format!(
+                    "claude {}",
+                    &session.session_id[..session.session_id.len().min(8)]
+                )),
+                title: Some(title),
+                working_dir: session.project_path,
+                provider_key: Some("claude-code".to_string()),
+                model: None,
+                created_at,
+                updated_at,
+                path,
+                messages,
+            });
         }
     }
 

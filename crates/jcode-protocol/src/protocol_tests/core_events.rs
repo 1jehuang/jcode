@@ -33,6 +33,76 @@ fn test_compacted_history_request_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn test_notify_auth_changed_provider_hint_is_optional() -> Result<()> {
+    let legacy = r#"{"type":"notify_auth_changed","id":9}"#;
+    let decoded = parse_request_json(legacy)?;
+    let Request::NotifyAuthChanged { id, provider, auth } = decoded else {
+        return Err(anyhow!("wrong request type"));
+    };
+    assert_eq!(id, 9);
+    assert_eq!(provider, None);
+    assert_eq!(auth, None);
+
+    let req = Request::NotifyAuthChanged {
+        id: 10,
+        provider: Some("azure-openai".to_string()),
+        auth: None,
+    };
+    let json = serde_json::to_string(&req)?;
+    assert!(json.contains("\"provider\":\"azure-openai\""));
+    let decoded = parse_request_json(&json)?;
+    let Request::NotifyAuthChanged { id, provider, auth } = decoded else {
+        return Err(anyhow!("wrong request type"));
+    };
+    assert_eq!(id, 10);
+    assert_eq!(provider.as_deref(), Some("azure-openai"));
+    assert_eq!(auth, None);
+    Ok(())
+}
+
+#[test]
+fn test_notify_auth_changed_typed_auth_payload_roundtrip() -> Result<()> {
+    let req = Request::NotifyAuthChanged {
+        id: 11,
+        provider: Some("cerebras".to_string()),
+        auth: Some(AuthChanged {
+            provider: AuthProviderId::new("cerebras"),
+            credential_source: Some(AuthCredentialSource::ApiKeyFile),
+            auth_method: Some(AuthMethod::RemoteTuiPasteApiKey),
+            expected_runtime: Some(RuntimeProviderKey::new("openai-compatible")),
+            expected_catalog_namespace: Some(CatalogNamespace::new("cerebras")),
+        }),
+    };
+    let json = serde_json::to_string(&req)?;
+    assert!(json.contains("\"provider\":\"cerebras\""));
+    assert!(json.contains("\"auth_method\":\"remote_tui_paste_api_key\""));
+    assert!(json.contains("\"expected_runtime\":\"openai-compatible\""));
+    assert!(json.contains("\"expected_catalog_namespace\":\"cerebras\""));
+
+    let decoded = parse_request_json(&json)?;
+    let Request::NotifyAuthChanged { id, provider, auth } = decoded else {
+        return Err(anyhow!("wrong request type"));
+    };
+    assert_eq!(id, 11);
+    assert_eq!(provider.as_deref(), Some("cerebras"));
+    let auth = auth.expect("typed auth payload should roundtrip");
+    assert_eq!(auth.provider.as_str(), "cerebras");
+    assert_eq!(auth.credential_source, Some(AuthCredentialSource::ApiKeyFile));
+    assert_eq!(auth.auth_method, Some(AuthMethod::RemoteTuiPasteApiKey));
+    assert_eq!(
+        auth.expected_runtime.as_ref().map(RuntimeProviderKey::as_str),
+        Some("openai-compatible")
+    );
+    assert_eq!(
+        auth.expected_catalog_namespace
+            .as_ref()
+            .map(CatalogNamespace::as_str),
+        Some("cerebras")
+    );
+    Ok(())
+}
+
+#[test]
 fn test_rewind_request_roundtrip() -> Result<()> {
     let req = Request::Rewind {
         id: 8,

@@ -71,6 +71,31 @@ fn test_should_prompt_extension_install_only_before_setup_complete() {
     assert!(!should_prompt_extension_install(&complete));
 }
 
+#[test]
+fn setup_complete_requires_native_host_binary() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    std::fs::create_dir_all(browser_dir()).expect("create browser dir");
+    std::fs::write(setup_marker_path(), "test").expect("write setup marker");
+    std::fs::write(browser_binary_path(), "browser").expect("write browser binary");
+
+    assert!(browser_binary_path().exists());
+    assert!(!host_binary_path().exists());
+    assert!(!is_setup_complete());
+
+    std::fs::write(host_binary_path(), "host").expect("write host binary");
+    assert!(is_setup_complete());
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
 #[tokio::test]
 async fn test_inspect_browser_status_without_binary() {
     let status = inspect_browser_status().await.unwrap();

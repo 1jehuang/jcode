@@ -65,7 +65,8 @@ impl App {
         let models = providers
             .into_iter()
             .map(|provider| {
-                let auth_state = status.state_for_provider(provider);
+                let assessment = status.assessment_for_provider(provider);
+                let auth_state = assessment.state;
                 let state_label = match auth_state {
                     crate::auth::AuthState::Available => {
                         if matches!(
@@ -80,14 +81,13 @@ impl App {
                     crate::auth::AuthState::Expired => "attention",
                     crate::auth::AuthState::NotConfigured => "setup",
                 };
-                let method_detail = status.method_detail_for_provider(provider);
                 PickerEntry {
                     name: provider.display_name.to_string(),
                     options: vec![PickerOption {
                         provider: provider.auth_kind.label().to_string(),
                         api_method: state_label.to_string(),
                         available: true,
-                        detail: format!("{} · {}", method_detail, provider.menu_detail),
+                        detail: format!("{} · {}", assessment.method_detail, provider.menu_detail),
                         estimated_reference_cost_micros: None,
                     }],
                     action: PickerAction::Login(provider),

@@ -20,6 +20,8 @@ impl EditTool {
 
 #[derive(Deserialize)]
 struct EditInput {
+    #[serde(default)]
+    intent: Option<String>,
     file_path: String,
     old_string: String,
     new_string: String,
@@ -120,6 +122,10 @@ impl Tool for EditTool {
             session_id: ctx.session_id.clone(),
             path: path.to_path_buf(),
             op: FileOp::Edit,
+            intent: params
+                .intent
+                .clone()
+                .filter(|value| !value.trim().is_empty()),
             summary: Some(format!(
                 "edited lines {}-{} ({} occurrence{})",
                 start_line,

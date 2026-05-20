@@ -235,8 +235,9 @@ impl App {
             let mut assistant_turns = 0;
             let mut total_chars = 0;
 
-            // Convert session messages to display messages (including tools)
-            for item in crate::session::render_messages(&session) {
+            for item in jcode_tui_messages::display_messages_from_rendered_messages(
+                crate::session::render_messages(&session),
+            ) {
                 if item.role == "user" {
                     user_turns += 1;
                 } else if item.role == "assistant" {
@@ -244,14 +245,7 @@ impl App {
                 }
                 total_chars += item.content.len();
 
-                self.push_display_message(DisplayMessage {
-                    role: item.role,
-                    content: item.content,
-                    tool_calls: item.tool_calls,
-                    duration_secs: None,
-                    title: None,
-                    tool_data: item.tool_data,
-                });
+                self.push_display_message(item);
             }
 
             // Don't restore provider_session_id - Claude sessions don't persist across

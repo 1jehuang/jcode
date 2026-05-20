@@ -32,8 +32,9 @@ pub use jcode_provider_openrouter::{
 };
 use jcode_provider_openrouter::{
     KIMI_FALLBACK_PROVIDERS, ModelCatalogRefreshState, ModelsCache, ParsedProvider, PinSource,
-    ProviderPin, current_unix_secs, known_providers, load_disk_cache, load_disk_cache_entry,
-    load_endpoints_disk_cache, parse_model_spec, save_disk_cache, save_endpoints_disk_cache,
+    ProviderPin, current_unix_secs, known_providers, load_disk_cache_entry,
+    load_endpoints_disk_cache, parse_model_spec, save_disk_cache_with_source,
+    save_disk_cache_with_source_for_namespace, save_endpoints_disk_cache,
 };
 use reqwest::Client;
 use reqwest::header::HeaderName;
@@ -315,12 +316,12 @@ fn is_coding_agent_api_base(api_base: &str) -> bool {
         || (host == "api.z.ai" && path.starts_with("/api/coding/paas"))
 }
 
-fn is_kimi_for_coding_model(model: &str) -> bool {
-    model.trim().eq_ignore_ascii_case("kimi-for-coding")
+fn is_kimi_model_name(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("kimi")
 }
 
 fn should_send_kimi_coding_agent_headers(api_base: &str, model: Option<&str>) -> bool {
-    is_coding_agent_api_base(api_base) || model.map(is_kimi_for_coding_model).unwrap_or(false)
+    is_coding_agent_api_base(api_base) || model.map(is_kimi_model_name).unwrap_or(false)
 }
 
 fn apply_kimi_coding_agent_headers(
@@ -416,6 +417,7 @@ async fn fetch_models_from_api(
     api_base: String,
     auth: ProviderAuth,
     models_cache: Arc<RwLock<ModelsCache>>,
+    cache_namespace: Option<String>,
 ) -> Result<Vec<ModelInfo>> {
     let url = format!("{}/models", api_base);
     let response =
@@ -442,38 +444,142 @@ async fn fetch_models_from_api(
         );
     }
 
-    #[derive(Deserialize)]
-    struct ModelsResponse {
-        data: Vec<ModelInfo>,
-    }
-
     let raw_body = response
         .text()
         .await
         .with_context(|| format!("Failed to read model catalog response body from {}", url))?;
-    let models_response: ModelsResponse = serde_json::from_str(&raw_body).with_context(|| {
-        format!(
-            "Failed to parse OpenAI-compatible model catalog response\n  endpoint: {}\n  auth: {}\n  expected: JSON object with a `data` array of model objects containing at least `id`\n  response: {}",
-            url,
-            auth.label(),
-            crate::util::truncate_str(&raw_body.trim().replace('\n', "\\n"), 1200)
-        )
-    })?;
+    let models = parse_openai_compatible_models_response(&raw_body).with_context(|| {
+            format!(
+                "Failed to parse OpenAI-compatible model catalog response\n  endpoint: {}\n  auth: {}\n  expected: JSON object with a `data` or `models` array, or a top-level array, with model objects containing at least `id` or `name`\n  response: {}",
+                url,
+                auth.label(),
+                crate::util::truncate_str(&raw_body.trim().replace('\n', "\\n"), 1200)
+            )
+        })?;
 
-    save_disk_cache(&models_response.data);
+    if let Some(namespace) = cache_namespace.as_deref() {
+        save_disk_cache_with_source_for_namespace(namespace, &models, Some(&api_base));
+    } else {
+        save_disk_cache_with_source(&models, Some(&api_base));
+    }
 
     if let Some(now) = current_unix_secs() {
         let mut cache = models_cache.write().await;
-        cache.models = models_response.data.clone();
+        cache.models = models.clone();
         cache.fetched = true;
         cache.cached_at = Some(now);
     } else {
         let mut cache = models_cache.write().await;
-        cache.models = models_response.data.clone();
+        cache.models = models.clone();
         cache.fetched = true;
     }
 
-    Ok(models_response.data)
+    Ok(models)
+}
+
+fn parse_openai_compatible_models_response(raw_body: &str) -> Result<Vec<ModelInfo>> {
+    let value: Value = serde_json::from_str(raw_body)?;
+    let items = match &value {
+        Value::Array(items) => items,
+        Value::Object(object) => object
+            .get("data")
+            .or_else(|| object.get("models"))
+            .and_then(Value::as_array)
+            .context("missing model array")?,
+        _ => anyhow::bail!("model catalog response must be an object or array"),
+    };
+
+    let mut models = Vec::new();
+    for item in items {
+        if let Some(model) = parse_model_info_value(item) {
+            models.push(model);
+        }
+    }
+
+    if models.is_empty() {
+        anyhow::bail!("model catalog response did not contain any valid model objects");
+    }
+
+    Ok(models)
+}
+
+fn parse_model_info_value(value: &Value) -> Option<ModelInfo> {
+    let object = value.as_object()?;
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .or_else(|| object.get("name").and_then(Value::as_str))?
+        .to_string();
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .or_else(|| object.get("display_name").and_then(Value::as_str))
+        .or_else(|| object.get("displayName").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_string();
+
+    Some(ModelInfo {
+        id,
+        name,
+        context_length: first_u64_field(
+            object,
+            &[
+                "context_length",
+                "contextLength",
+                "max_context_length",
+                "maxModelLength",
+                "max_model_len",
+                "trainingContextLength",
+            ],
+        ),
+        pricing: parse_model_pricing(object.get("pricing")),
+        created: object.get("created").and_then(value_as_u64),
+    })
+}
+
+fn first_u64_field(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(value_as_u64))
+}
+
+fn value_as_u64(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(number) => number.as_u64(),
+        Value::String(text) => text.parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
+fn value_as_pricing_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+fn parse_model_pricing(value: Option<&Value>) -> ModelPricing {
+    let Some(Value::Object(object)) = value else {
+        return ModelPricing::default();
+    };
+
+    ModelPricing {
+        prompt: object
+            .get("prompt")
+            .or_else(|| object.get("input"))
+            .and_then(value_as_pricing_string),
+        completion: object
+            .get("completion")
+            .or_else(|| object.get("output"))
+            .and_then(value_as_pricing_string),
+        input_cache_read: object
+            .get("input_cache_read")
+            .or_else(|| object.get("cached_input"))
+            .and_then(value_as_pricing_string),
+        input_cache_write: object
+            .get("input_cache_write")
+            .and_then(value_as_pricing_string),
+    }
 }
 
 fn models_fingerprint(models: &[ModelInfo]) -> String {
@@ -498,9 +604,131 @@ fn global_endpoint_refresh() -> &'static Mutex<EndpointRefreshTracker> {
     GLOBAL_ENDPOINT_REFRESH.get_or_init(|| Mutex::new(EndpointRefreshTracker::default()))
 }
 
+#[derive(Debug, Default)]
+struct ProfileCatalogRefreshTracker {
+    in_flight: HashSet<String>,
+    last_attempt_unix: HashMap<String, u64>,
+}
+
+static GLOBAL_PROFILE_CATALOG_REFRESH: OnceLock<Mutex<ProfileCatalogRefreshTracker>> =
+    OnceLock::new();
+
+fn global_profile_catalog_refresh() -> &'static Mutex<ProfileCatalogRefreshTracker> {
+    GLOBAL_PROFILE_CATALOG_REFRESH
+        .get_or_init(|| Mutex::new(ProfileCatalogRefreshTracker::default()))
+}
+
+fn begin_profile_catalog_refresh(profile_id: &str) -> bool {
+    let Some(now) = current_unix_secs() else {
+        return false;
+    };
+    let Ok(mut state) = global_profile_catalog_refresh().lock() else {
+        return false;
+    };
+    if state.in_flight.contains(profile_id) {
+        return false;
+    }
+    if let Some(last) = state.last_attempt_unix.get(profile_id)
+        && now.saturating_sub(*last) < MODEL_CATALOG_REFRESH_RETRY_SECS
+    {
+        return false;
+    }
+    state.in_flight.insert(profile_id.to_string());
+    state.last_attempt_unix.insert(profile_id.to_string(), now);
+    true
+}
+
+fn finish_profile_catalog_refresh(profile_id: &str) {
+    if let Ok(mut state) = global_profile_catalog_refresh().lock() {
+        state.in_flight.remove(profile_id);
+    }
+}
+
+pub(crate) fn maybe_schedule_openai_compatible_profile_catalog_refresh(
+    profile: crate::provider_catalog::OpenAiCompatibleProfile,
+    context: &'static str,
+) -> bool {
+    let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+    if !begin_profile_catalog_refresh(&resolved.id) {
+        return false;
+    }
+
+    let Some(api_base) = normalize_api_base(&resolved.api_base) else {
+        finish_profile_catalog_refresh(&resolved.id);
+        return false;
+    };
+    let auth = if let Some(key) =
+        load_api_key_from_env_or_config(&resolved.api_key_env, &resolved.env_file)
+    {
+        ProviderAuth::AuthorizationBearer {
+            token: key,
+            label: resolved.api_key_env.clone(),
+        }
+    } else if !resolved.requires_api_key {
+        ProviderAuth::None {
+            label: "local endpoint (no auth)".to_string(),
+        }
+    } else {
+        finish_profile_catalog_refresh(&resolved.id);
+        return false;
+    };
+
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        finish_profile_catalog_refresh(&resolved.id);
+        return false;
+    };
+
+    let profile_id = resolved.id.clone();
+    let display_name = resolved.display_name.clone();
+    let previous_fingerprint =
+        jcode_provider_openrouter::load_disk_cache_entry_for_namespace(&profile_id)
+            .map(|cache| models_fingerprint(&cache.models))
+            .unwrap_or_default();
+    handle.spawn(async move {
+        let models_cache = Arc::new(RwLock::new(ModelsCache::default()));
+        match fetch_models_from_api(
+            crate::provider::shared_http_client(),
+            api_base,
+            auth,
+            models_cache,
+            Some(profile_id.clone()),
+        )
+        .await
+        {
+            Ok(models) => {
+                let updated = models_fingerprint(&models) != previous_fingerprint;
+                if updated {
+                    crate::logging::info(&format!(
+                        "Refreshed OpenAI-compatible profile model catalog in background ({}): {} via {} models",
+                        context,
+                        display_name,
+                        models.len()
+                    ));
+                    crate::bus::Bus::global().publish_models_updated();
+                } else {
+                    crate::logging::info(&format!(
+                        "OpenAI-compatible profile model catalog refresh produced no material change ({}): {} via {} models",
+                        context,
+                        display_name,
+                        models.len()
+                    ));
+                }
+            }
+            Err(error) => crate::logging::info(&format!(
+                "Failed to refresh OpenAI-compatible profile model catalog in background ({}): {} ({})",
+                context, display_name, error
+            )),
+        }
+        finish_profile_catalog_refresh(&profile_id);
+    });
+
+    true
+}
+
 pub struct OpenRouterProvider {
     client: Client,
     model: Arc<RwLock<String>>,
+    reasoning_effort: Arc<RwLock<Option<String>>>,
     api_base: String,
     auth: ProviderAuth,
     supports_provider_features: bool,
@@ -523,6 +751,29 @@ pub struct OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
+    fn profile_supports_reasoning_effort(profile_id: Option<&str>) -> bool {
+        matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("deepseek"))
+    }
+
+    fn normalize_reasoning_effort(raw: &str) -> Option<String> {
+        let value = raw.trim().to_ascii_lowercase();
+        if value.is_empty() {
+            return None;
+        }
+        match value.as_str() {
+            "none" | "low" | "medium" | "high" | "max" => Some(value),
+            // Match the existing OpenAI UX: accept unknown non-empty effort values
+            // by snapping to the strongest setting instead of rejecting the command.
+            other => {
+                crate::logging::info(&format!(
+                    "Warning: Unsupported DeepSeek reasoning effort '{}'; expected none|low|medium|high|max. Using 'max'.",
+                    other
+                ));
+                Some("max".to_string())
+            }
+        }
+    }
+
     fn configured_max_tokens(profile_id: Option<&str>) -> Option<u32> {
         if let Ok(raw) = std::env::var("JCODE_OPENROUTER_MAX_TOKENS") {
             let trimmed = raw.trim();
@@ -545,6 +796,29 @@ impl OpenRouterProvider {
 
     pub(crate) fn supports_provider_routing_features(&self) -> bool {
         self.supports_provider_features
+    }
+
+    pub(crate) fn direct_openai_compatible_route_parts(&self) -> Option<(String, String, String)> {
+        if self.supports_provider_features {
+            return None;
+        }
+
+        let provider_label = self
+            .profile_id
+            .as_deref()
+            .map(|profile_id| {
+                openai_compatible_profile_by_id(profile_id)
+                    .map(|profile| profile.display_name.to_string())
+                    .unwrap_or_else(|| profile_id.to_string())
+            })
+            .unwrap_or_else(|| "OpenAI-compatible".to_string());
+        let api_method = self
+            .profile_id
+            .as_deref()
+            .map(|profile_id| format!("openai-compatible:{}", profile_id))
+            .unwrap_or_else(|| "openai-compatible".to_string());
+
+        Some((provider_label, api_method, self.api_base.clone()))
     }
 
     pub fn new_named_openai_compatible(
@@ -618,6 +892,7 @@ impl OpenRouterProvider {
         Ok(Self {
             client: crate::provider::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
+            reasoning_effort: Arc::new(RwLock::new(None)),
             api_base,
             auth,
             supports_provider_features: matches!(
@@ -738,6 +1013,7 @@ impl OpenRouterProvider {
         Ok(Self {
             client: crate::provider::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
+            reasoning_effort: Arc::new(RwLock::new(None)),
             api_base,
             auth,
             supports_provider_features,
@@ -777,6 +1053,63 @@ impl OpenRouterProvider {
             .last_attempt_unix
             .map(|last| now.saturating_sub(last) >= MODEL_CATALOG_REFRESH_RETRY_SECS)
             .unwrap_or(true)
+    }
+
+    pub(crate) fn should_merge_static_models_with_live_catalog(&self) -> bool {
+        // Built-in OpenAI-compatible provider profiles use `static_models` as a
+        // startup/pre-catalog fallback so `/model` is useful immediately after
+        // login. Once a live `/models` catalog has been fetched, the live catalog
+        // is more authoritative for access control. Keeping built-in fallback
+        // entries after a successful fetch can advertise preview/stale models that
+        // the provider rejects at chat time, which is especially confusing for
+        // direct providers such as Cerebras.
+        //
+        // Preserve static models for OpenRouter itself and for custom/named
+        // profiles, where the user supplied the list explicitly and there may be
+        // no provider-side catalog contract.
+        self.supports_provider_features || self.profile_id.is_none()
+    }
+
+    pub(crate) fn filter_profile_chat_supported_models(&self, models: Vec<String>) -> Vec<String> {
+        let Some(profile_id) = self.profile_id.as_deref() else {
+            return models;
+        };
+
+        models
+            .into_iter()
+            .filter(|model| {
+                crate::provider_catalog::openai_compatible_profile_model_supports_chat(
+                    profile_id, model,
+                )
+            })
+            .collect()
+    }
+
+    fn model_disk_cache_source_matches(
+        &self,
+        cache_entry: &jcode_provider_openrouter::DiskCache,
+    ) -> bool {
+        let Some(source_api_base) = cache_entry
+            .source_api_base
+            .as_deref()
+            .and_then(normalize_api_base)
+        else {
+            // Legacy cache files did not record which endpoint produced the
+            // catalog. They are acceptable for real OpenRouter catalogs, but
+            // not for direct OpenAI-compatible profiles: a process-wide cache
+            // namespace can leave an OpenRouter catalog under a profile such as
+            // `chutes`, which then makes every picker row look like that direct
+            // provider.
+            return self.supports_provider_features;
+        };
+
+        source_api_base == self.api_base
+    }
+
+    pub(crate) fn load_usable_model_disk_cache_entry(
+        &self,
+    ) -> Option<jcode_provider_openrouter::DiskCache> {
+        load_disk_cache_entry().filter(|entry| self.model_disk_cache_source_matches(entry))
     }
 
     fn begin_background_model_catalog_refresh(&self) -> bool {
@@ -901,6 +1234,7 @@ impl OpenRouterProvider {
             let provider = OpenRouterProvider {
                 client,
                 model: Arc::new(RwLock::new(model_name.clone())),
+                reasoning_effort: Arc::new(RwLock::new(None)),
                 api_base,
                 auth,
                 supports_provider_features: true,
@@ -975,7 +1309,7 @@ impl OpenRouterProvider {
         let previous_fingerprint = self.cached_model_catalog_fingerprint();
 
         handle.spawn(async move {
-            match fetch_models_from_api(client, api_base, auth, models_cache).await {
+            match fetch_models_from_api(client, api_base, auth, models_cache, None).await {
                 Ok(models) => {
                     let updated = models_fingerprint(&models) != previous_fingerprint;
                     if updated {
@@ -1274,10 +1608,27 @@ impl OpenRouterProvider {
         {
             return models_fingerprint(&cache.models);
         }
-        if let Some(cache_entry) = load_disk_cache_entry() {
+        if let Some(cache_entry) = self.load_usable_model_disk_cache_entry() {
             return models_fingerprint(&cache_entry.models);
         }
         String::new()
+    }
+
+    pub(crate) fn cached_live_model_ids_for_display(&self) -> Option<HashSet<String>> {
+        if let Ok(cache) = self.models_cache.try_read()
+            && cache.fetched
+            && !cache.models.is_empty()
+        {
+            return Some(cache.models.iter().map(|model| model.id.clone()).collect());
+        }
+
+        self.load_usable_model_disk_cache_entry().and_then(|entry| {
+            if entry.models.is_empty() {
+                None
+            } else {
+                Some(entry.models.into_iter().map(|model| model.id).collect())
+            }
+        })
     }
 
     fn cached_endpoints_fingerprint(&self, model: &str) -> String {
@@ -1397,7 +1748,7 @@ impl OpenRouterProvider {
         }
 
         // Check disk cache
-        if let Some(cache_entry) = load_disk_cache_entry() {
+        if let Some(cache_entry) = self.load_usable_model_disk_cache_entry() {
             let cache_age = current_unix_secs()
                 .map(|now| now.saturating_sub(cache_entry.cached_at))
                 .unwrap_or(0);
@@ -1415,6 +1766,7 @@ impl OpenRouterProvider {
             self.api_base.clone(),
             self.auth.clone(),
             Arc::clone(&self.models_cache),
+            None,
         )
         .await
     }
@@ -1426,6 +1778,7 @@ impl OpenRouterProvider {
             self.api_base.clone(),
             self.auth.clone(),
             Arc::clone(&self.models_cache),
+            None,
         )
         .await
     }
@@ -1574,7 +1927,8 @@ impl OpenRouterProvider {
             return Some(model.pricing.clone());
         }
 
-        if let Some(models) = load_disk_cache() {
+        if let Some(cache_entry) = self.load_usable_model_disk_cache_entry() {
+            let models = cache_entry.models;
             let pricing = models
                 .iter()
                 .find(|m| m.id == model_id)

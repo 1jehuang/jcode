@@ -97,6 +97,29 @@ pub fn has_cursor_native_auth() -> bool {
     load_access_token_from_env_or_file().is_ok() || has_cursor_vscdb_token() || has_cursor_api_key()
 }
 
+/// Check whether the local Cursor Agent CLI reports an authenticated session.
+///
+/// Full auth status may spend a little time probing external commands, while
+/// `AuthStatus::check_fast()` intentionally skips this path for UI responsiveness.
+pub fn has_authenticated_cli_session() -> bool {
+    let command = std::env::var_os("JCODE_CURSOR_CLI_PATH")
+        .unwrap_or_else(|| std::ffi::OsString::from("cursor-agent"));
+    let command_label = command.to_string_lossy();
+    if !super::command_exists(&command_label) {
+        return false;
+    }
+
+    let mut status_command = Command::new(&command);
+    status_command.arg("status");
+    let Ok(Some(output)) =
+        command_output_with_timeout(&mut status_command, CURSOR_EXTERNAL_COMMAND_TIMEOUT)
+    else {
+        return false;
+    };
+
+    status_output_indicates_authenticated(output.status.success(), &output.stdout, &output.stderr)
+}
+
 /// Check whether a trusted Cursor auth.json contains a usable direct access token.
 pub fn has_cursor_auth_file_token() -> bool {
     let Ok(file_path) = cursor_auth_file_path() else {
@@ -644,7 +667,6 @@ fn timestamp_header_now() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-#[cfg(test)]
 fn status_output_indicates_authenticated(success: bool, stdout: &[u8], stderr: &[u8]) -> bool {
     let combined = format!(
         "{}\n{}",

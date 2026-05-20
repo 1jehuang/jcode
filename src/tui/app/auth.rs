@@ -211,16 +211,7 @@ impl App {
                 self.start_openrouter_login()
             }
             crate::provider_catalog::LoginProviderTarget::Bedrock => self.start_bedrock_login(),
-            crate::provider_catalog::LoginProviderTarget::Azure => {
-                crate::telemetry::record_auth_surface_blocked(
-                    provider.id,
-                    provider.auth_kind.label(),
-                );
-                self.push_display_message(DisplayMessage::error(
-                    "Azure OpenAI login is currently CLI-only. Run `jcode login --provider azure`."
-                        .to_string(),
-                ));
-            }
+            crate::provider_catalog::LoginProviderTarget::Azure => self.start_azure_login(),
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
                 self.start_openai_compatible_profile_login(profile)
             }
@@ -953,6 +944,17 @@ impl App {
         });
     }
 
+    fn start_azure_login(&mut self) {
+        self.push_display_message(DisplayMessage::system(
+            "**Azure OpenAI Login**\n\n\
+             jcode uses Azure OpenAI's `/openai/v1` API with either Microsoft Entra ID or an API key.\n\n\
+             Enter your Azure OpenAI endpoint, for example `https://your-resource.openai.azure.com`, or type `/cancel` to abort."
+                .to_string(),
+        ));
+        self.set_status_notice("Login: Azure endpoint...");
+        self.begin_pending_login(PendingLogin::AzureEndpoint);
+    }
+
     fn start_cursor_login(&mut self) {
         crate::telemetry::record_auth_started("cursor", "api_key");
 
@@ -973,7 +975,7 @@ impl App {
         self.begin_pending_login(PendingLogin::Copilot);
 
         tokio::spawn(async move {
-            let client = reqwest::Client::new();
+            let client = crate::provider::shared_http_client();
 
             let device_resp = match crate::auth::copilot::initiate_device_flow(&client).await {
                 Ok(resp) => resp,
@@ -1557,15 +1559,10 @@ impl App {
                             crate::provider_catalog::apply_openai_compatible_profile_env(Some(
                                 profile,
                             ));
-                            crate::cli::provider_init::lock_model_provider("openrouter");
-                            if let Some(default_model) = resolved_openai_compatible
-                                .as_ref()
-                                .and_then(|resolved| resolved.default_model.as_deref())
-                                .or(default_model.as_deref())
-                            {
-                                crate::env::set_var("JCODE_OPENROUTER_MODEL", default_model);
-                            }
-                            self.start_openai_compatible_post_login_activation(provider.clone());
+                            self.start_openai_compatible_post_login_activation(
+                                profile.id.to_string(),
+                                provider.clone(),
+                            );
                         }
 
                         let effective_default_model = resolved_openai_compatible
@@ -1583,10 +1580,10 @@ impl App {
                             )
                         } else if let Some(resolved) = resolved_openai_compatible.as_ref() {
                             if resolved.requires_api_key {
-                                "Fetching models now. Jcode will switch to an accessible model and open `/model` when the catalog is ready. If the model list looks stale, run `/refresh-model-list`.".to_string()
+                                "Fetching models now. Jcode will switch to an accessible model returned by the live catalog and show the catalog diff when discovery finishes. If the model list looks stale, run `/refresh-model-list`.".to_string()
                             } else {
                                 format!(
-                                    "Local endpoint configured at `{}`. Fetching models now; Jcode will switch to an accessible model and open `/model` when the catalog is ready. If the model list looks stale, run `/refresh-model-list`.",
+                                    "Local endpoint configured at `{}`. Fetching models now; Jcode will switch to an accessible model returned by the live catalog and show the catalog diff when discovery finishes. If the model list looks stale, run `/refresh-model-list`.",
                                     endpoint.as_deref().unwrap_or(resolved.api_base.as_str()),
                                 )
                             }
@@ -1680,6 +1677,109 @@ impl App {
                 }
                 self.start_openai_compatible_key_login(profile);
             }
+            PendingLogin::AzureEndpoint => {
+                let endpoint_raw = input.trim();
+                let Some(endpoint) = crate::auth::azure::normalize_endpoint(endpoint_raw) else {
+                    self.push_display_message(DisplayMessage::error(
+                        "Invalid Azure OpenAI endpoint. Use `https://<resource>.openai.azure.com` or the full `/openai/v1` URL."
+                            .to_string(),
+                    ));
+                    self.pending_login = Some(PendingLogin::AzureEndpoint);
+                    return;
+                };
+                self.push_display_message(DisplayMessage::system(
+                    "Azure endpoint accepted. Now enter the Azure deployment/model name, for example `gpt-4.1-nano`."
+                        .to_string(),
+                ));
+                self.set_status_notice("Login: Azure model...");
+                self.pending_login = Some(PendingLogin::AzureModel { endpoint });
+            }
+            PendingLogin::AzureModel { endpoint } => {
+                let model = input.trim().to_string();
+                if model.is_empty() {
+                    self.push_display_message(DisplayMessage::error(
+                        "Azure deployment/model name cannot be empty.".to_string(),
+                    ));
+                    self.pending_login = Some(PendingLogin::AzureModel { endpoint });
+                    return;
+                }
+                self.push_display_message(DisplayMessage::system(
+                    "Authentication method:\n\n\
+                     `1` Microsoft Entra ID via DefaultAzureCredential, for example `az login`\n\
+                     `2` Azure OpenAI API key\n\n\
+                     Enter `1` or `2` [1]."
+                        .to_string(),
+                ));
+                self.set_status_notice("Login: Azure auth method...");
+                self.pending_login = Some(PendingLogin::AzureAuthChoice { endpoint, model });
+            }
+            PendingLogin::AzureAuthChoice { endpoint, model } => {
+                let choice = input.trim();
+                let use_entra = match choice {
+                    "" | "1" => true,
+                    "2" => false,
+                    other
+                        if other.eq_ignore_ascii_case("entra")
+                            || other.eq_ignore_ascii_case("oauth") =>
+                    {
+                        true
+                    }
+                    other
+                        if other.eq_ignore_ascii_case("key")
+                            || other.eq_ignore_ascii_case("api-key") =>
+                    {
+                        false
+                    }
+                    _ => {
+                        self.push_display_message(DisplayMessage::error(
+                            "Invalid auth choice. Enter `1` for Entra ID or `2` for API key."
+                                .to_string(),
+                        ));
+                        self.pending_login =
+                            Some(PendingLogin::AzureAuthChoice { endpoint, model });
+                        return;
+                    }
+                };
+                if use_entra {
+                    match Self::save_azure_config(&endpoint, &model, true, None) {
+                        Ok(()) => self.finish_azure_login(true),
+                        Err(err) => {
+                            self.push_display_message(DisplayMessage::error(format!(
+                                "Failed to save Azure OpenAI configuration: {}",
+                                err
+                            )));
+                            self.pending_login =
+                                Some(PendingLogin::AzureAuthChoice { endpoint, model });
+                        }
+                    }
+                } else {
+                    self.push_display_message(DisplayMessage::system(
+                        "Paste your Azure OpenAI API key, or type `/cancel` to abort.".to_string(),
+                    ));
+                    self.set_status_notice("Login: Azure API key...");
+                    self.pending_login = Some(PendingLogin::AzureApiKey { endpoint, model });
+                }
+            }
+            PendingLogin::AzureApiKey { endpoint, model } => {
+                let key = input.trim().to_string();
+                if key.is_empty() {
+                    self.push_display_message(DisplayMessage::error(
+                        "Azure OpenAI API key cannot be empty.".to_string(),
+                    ));
+                    self.pending_login = Some(PendingLogin::AzureApiKey { endpoint, model });
+                    return;
+                }
+                match Self::save_azure_config(&endpoint, &model, false, Some(&key)) {
+                    Ok(()) => self.finish_azure_login(false),
+                    Err(err) => {
+                        self.push_display_message(DisplayMessage::error(format!(
+                            "Failed to save Azure OpenAI configuration: {}",
+                            err
+                        )));
+                        self.pending_login = Some(PendingLogin::AzureApiKey { endpoint, model });
+                    }
+                }
+            }
             PendingLogin::CursorApiKey => {
                 let key = input.trim().to_string();
                 if key.is_empty() {
@@ -1769,6 +1869,18 @@ impl App {
     }
 
     fn trigger_provider_auth_changed(&self) {
+        crate::logging::auth_event(
+            "auth_changed_triggered",
+            self.provider.name(),
+            &[("surface", "tui")],
+        );
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
+            crate::bus::UiActivity::auth(
+                Some(self.session.id.clone()),
+                "**Auth State Changed**\n\nRefreshing provider credentials and model route availability for this session.",
+                Some("Auth: refreshing model routes..."),
+            ),
+        ));
         let provider = Arc::clone(&self.provider);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
@@ -1779,44 +1891,152 @@ impl App {
         }
     }
 
-    fn start_openai_compatible_post_login_activation(&mut self, provider_label: String) {
+    fn login_provider_is_azure(provider: &str) -> bool {
+        let provider = provider.trim();
+        provider.eq_ignore_ascii_case("azure")
+            || provider.eq_ignore_ascii_case("azure-openai")
+            || provider.eq_ignore_ascii_case("azure openai")
+    }
+
+    fn activate_azure_runtime_model_after_login(&mut self) {
+        let activated_model = match crate::provider::activation::apply_azure_openai_runtime() {
+            Ok(model) => model,
+            Err(error) => {
+                let message = error.to_string();
+                crate::logging::auth_event(
+                    "auth_changed_runtime_activation_failed",
+                    "azure-openai",
+                    &[("surface", "tui"), ("reason", message.as_str())],
+                );
+                self.trigger_provider_auth_changed();
+                return;
+            }
+        };
+
+        // Rebuild the OpenAI-compatible transport under the Azure runtime before
+        // selecting the configured deployment. This is local-only state; it does
+        // not send a prompt or resume an upstream conversation.
+        self.provider.on_auth_changed();
+
+        let Some(model) = activated_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        else {
+            crate::bus::Bus::global().publish_models_updated();
+            return;
+        };
+
+        let model_request = if self.provider.name().eq_ignore_ascii_case("openrouter") {
+            model.to_string()
+        } else {
+            format!("openrouter:{}", model)
+        };
+
+        match self.provider.set_model(&model_request) {
+            Ok(()) => {
+                self.provider_session_id = None;
+                self.session.provider_session_id = None;
+                self.upstream_provider = None;
+                let active_model = self.provider.model();
+                self.update_context_limit_for_model(&active_model);
+                self.session.model = Some(active_model.clone());
+                let _ = self.session.save();
+                self.invalidate_model_picker_cache();
+                crate::bus::Bus::global().publish_models_updated();
+                crate::logging::auth_event(
+                    "auth_changed_runtime_model_applied",
+                    "azure-openai",
+                    &[("surface", "tui"), ("provider_session", "reset")],
+                );
+                self.set_status_notice(format!("Login: Azure OpenAI ready ({})", active_model));
+            }
+            Err(error) => {
+                let message = error.to_string();
+                crate::logging::auth_event(
+                    "auth_changed_runtime_model_failed",
+                    "azure-openai",
+                    &[("surface", "tui"), ("reason", message.as_str())],
+                );
+                crate::bus::Bus::global().publish_models_updated();
+            }
+        }
+    }
+
+    pub(super) fn start_openai_compatible_post_login_activation(
+        &mut self,
+        provider_id: String,
+        provider_label: String,
+    ) {
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
+            crate::bus::UiActivity::catalog(
+                Some(self.session.id.clone()),
+                format!(
+                    "**{} Model Discovery Started**\n\nSaved credentials are active. Jcode is fetching the live model catalog, will only switch to a model returned by that catalog, and will show what changed when discovery finishes.",
+                    provider_label
+                ),
+                Some(format!("{}: fetching models...", provider_label)),
+            ),
+        ));
         self.set_status_notice(format!("{}: fetching models...", provider_label));
         self.invalidate_model_picker_cache();
-        self.open_model_picker();
 
         // Make the newly saved OpenAI-compatible credentials usable in this
         // session immediately. The normal LoginCompleted path also calls this,
         // but doing it here lets the refresh task see the hot-added provider
         // without requiring a restart or a second user action.
-        self.provider.on_auth_changed();
-
         let provider = Arc::clone(&self.provider);
         let session_id = self.session.id.clone();
+        let before_routes = provider.model_routes();
+        self.provider.on_auth_changed();
+
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 let result = provider.refresh_model_catalog().await;
                 match result {
-                    Ok(summary) => {
+                    Ok(_summary) => {
                         let routes = provider.model_routes();
-                        let selected = routes
+                        let expected_api_method = format!("openai-compatible:{}", provider_id);
+                        let route_matches_profile = |route: &crate::provider::ModelRoute| {
+                            route.available
+                                && crate::provider::is_listable_model_name(&route.model)
+                                && (route.api_method.eq_ignore_ascii_case(&expected_api_method)
+                                    || route.api_method.eq_ignore_ascii_case(&provider_id))
+                        };
+                        let before_provider_routes = before_routes
+                            .into_iter()
+                            .filter(route_matches_profile)
+                            .collect::<Vec<_>>();
+                        let provider_routes = routes
+                            .iter()
+                            .filter(|route| route_matches_profile(route))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        let before_provider_models = before_provider_routes
+                            .iter()
+                            .map(|route| route.model.clone())
+                            .collect::<Vec<_>>();
+                        let after_provider_models = provider_routes
+                            .iter()
+                            .map(|route| route.model.clone())
+                            .collect::<Vec<_>>();
+                        let summary = crate::provider::summarize_model_catalog_refresh(
+                            before_provider_models,
+                            after_provider_models,
+                            before_provider_routes,
+                            provider_routes.clone(),
+                        );
+                        let selected = provider_routes
                             .iter()
                             .find(|route| {
                                 route.available
-                                    && route.provider == provider_label
-                                    && route.api_method.starts_with("openai-compatible")
+                                    && route.api_method.eq_ignore_ascii_case(&expected_api_method)
                                     && crate::provider::is_listable_model_name(&route.model)
                             })
                             .or_else(|| {
-                                routes.iter().find(|route| {
+                                provider_routes.iter().find(|route| {
                                     route.available
-                                        && route.api_method.starts_with("openai-compatible")
-                                        && crate::provider::is_listable_model_name(&route.model)
-                                })
-                            })
-                            .or_else(|| {
-                                routes.iter().find(|route| {
-                                    route.available
-                                        && route.provider == provider_label
+                                        && route.api_method.eq_ignore_ascii_case(&provider_id)
                                         && crate::provider::is_listable_model_name(&route.model)
                                 })
                             })
@@ -1831,14 +2051,19 @@ impl App {
                                             session_id,
                                             model: model.clone(),
                                             message: format!(
-                                                "**{} is ready.**\n\nFetched model catalog: +{} models, +{} routes, ~{} changed.\nSwitched to `{}`. The model picker is open so you can choose another accessible model.\n\nIf the model list ever looks stale, run `/refresh-model-list`.",
+                                                "**{} is ready.**\n\nFetched model catalog: +{} models, +{} routes, ~{} changed.{}\n\nSwitched to `{}`. Use `/model` if you want to choose a different accessible model.\n\nIf the model list ever looks stale, run `/refresh-model-list`.",
                                                 provider_label,
                                                 summary.models_added,
                                                 summary.routes_added,
                                                 summary.routes_changed,
+                                                {
+                                                    let mut details = String::new();
+                                                    super::model_context::append_model_name_diff(&mut details, &summary);
+                                                    if details.is_empty() { String::new() } else { format!("\n{}", details) }
+                                                },
                                                 model
                                             ),
-                                            open_picker: true,
+                                            open_picker: false,
                                         },
                                     );
                                 }
@@ -1857,70 +2082,35 @@ impl App {
                                     );
                                 }
                             }
-                        } else if let Some(default_model) = crate::provider_catalog::openai_compatible_profiles()
-                            .iter()
-                            .copied()
-                            .find(|profile| {
-                                let resolved = crate::provider_catalog::resolve_openai_compatible_profile(*profile);
-                                resolved.display_name == provider_label
-                            })
-                            .and_then(|profile| crate::provider_catalog::resolve_openai_compatible_profile(profile).default_model)
-                        {
-                            match provider.set_model(&default_model) {
-                                Ok(()) => {
-                                    crate::bus::Bus::global().publish_models_updated();
-                                    crate::bus::Bus::global().publish(
-                                        crate::bus::BusEvent::ProviderModelActivated {
-                                            session_id,
-                                            model: default_model.clone(),
-                                            message: format!(
-                                                "**{} is ready.**\n\nThe live model catalog did not produce a selectable route yet, so Jcode selected the documented default `{}`. Run `/refresh-model-list` later to retry live discovery.",
-                                                provider_label,
-                                                default_model
-                                            ),
-                                            open_picker: true,
-                                        },
-                                    );
-                                }
-                                Err(error) => {
-                                    crate::bus::Bus::global().publish(crate::bus::BusEvent::LoginCompleted(
-                                        crate::bus::LoginCompleted {
-                                            provider: provider_label.clone(),
-                                            success: false,
-                                            message: format!(
-                                                "Fetched the model catalog, but it contained no selectable {} models and failed to switch to the documented default `{}`: {}\n\nRun `/refresh-model-list` to retry model discovery, then `jcode auth status` and `jcode auth doctor` for a structured diagnosis.",
-                                                provider_label,
-                                                default_model,
-                                                error
-                                            ),
-                                        },
-                                    ));
-                                }
-                            }
                         } else {
-                            crate::bus::Bus::global().publish(crate::bus::BusEvent::LoginCompleted(
-                                crate::bus::LoginCompleted {
-                                    provider: provider_label.clone(),
-                                    success: false,
-                                    message:
-                                        format!(
-                                            "Fetched the model catalog, but it contained no selectable {} models. Run `/refresh-model-list` to retry model discovery, then `jcode auth status` and `jcode auth doctor` for a structured diagnosis.",
-                                            provider_label
-                                        ),
-                                },
+                            crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
+                                crate::bus::UiActivity::catalog(
+                                    Some(session_id),
+                                    format!(
+                                        "**{} Model Discovery Still Updating**\n\nSaved credentials are active, but this local refresh pass did not find a selectable {} route yet. Jcode is still processing the auth-change catalog refresh and will switch once provider routes are available. If the model list still looks stale after the auth catalog update, run `/refresh-model-list`.",
+                                        provider_label, provider_label
+                                    ),
+                                    Some(format!(
+                                        "{}: waiting for model routes...",
+                                        provider_label
+                                    )),
+                                ),
                             ));
                         }
                     }
                     Err(error) => {
-                        crate::bus::Bus::global().publish(crate::bus::BusEvent::LoginCompleted(
-                            crate::bus::LoginCompleted {
-                                provider: provider_label,
-                                success: false,
-                                message: format!(
-                                    "Saved the API key, but failed to refresh the model catalog:\n\n{}\n\nRun `/refresh-model-list` to retry model discovery after checking the provider settings.",
-                                    error
+                        crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
+                            crate::bus::UiActivity::catalog(
+                                Some(session_id),
+                                format!(
+                                    "**{} Model Discovery Still Updating**\n\nSaved credentials are active, but this local refresh pass failed before the server auth-change catalog refresh finished. Jcode is still processing the auth-change catalog refresh and will switch once provider routes are available. If the model list still looks stale after the auth catalog update, run `/refresh-model-list`.\n\nLocal refresh error: {}",
+                                    provider_label, error
                                 ),
-                            },
+                                Some(format!(
+                                    "{}: waiting for model routes...",
+                                    provider_label
+                                )),
+                            ),
                         ));
                     }
                 }
@@ -1960,7 +2150,11 @@ impl App {
             self.invalidate_model_picker_cache();
             self.push_display_message(DisplayMessage::system(login.message));
             self.set_status_notice(format!("Login: {} ready", login.provider));
-            self.trigger_provider_auth_changed();
+            if Self::login_provider_is_azure(&login.provider) {
+                self.activate_azure_runtime_model_after_login();
+            } else {
+                self.trigger_provider_auth_changed();
+            }
         } else {
             let message = crate::auth::login_diagnostics::augment_auth_error_message(
                 &login.provider,
@@ -2050,6 +2244,72 @@ impl App {
         crate::storage::upsert_env_file_value(&file_path, key_name, Some(key))?;
         crate::env::set_var(key_name, key);
         Ok(())
+    }
+
+    fn save_azure_config(
+        endpoint: &str,
+        model: &str,
+        use_entra: bool,
+        api_key: Option<&str>,
+    ) -> anyhow::Result<()> {
+        use crate::auth::azure;
+
+        crate::provider_catalog::save_env_value_to_env_file(
+            azure::ENDPOINT_ENV,
+            azure::ENV_FILE,
+            Some(endpoint),
+        )?;
+        crate::provider_catalog::save_env_value_to_env_file(
+            azure::MODEL_ENV,
+            azure::ENV_FILE,
+            Some(model),
+        )?;
+        crate::provider_catalog::save_env_value_to_env_file(
+            azure::USE_ENTRA_ENV,
+            azure::ENV_FILE,
+            Some(if use_entra { "1" } else { "0" }),
+        )?;
+        if let Some(api_key) = api_key {
+            crate::provider_catalog::save_env_value_to_env_file(
+                azure::API_KEY_ENV,
+                azure::ENV_FILE,
+                Some(api_key),
+            )?;
+        }
+        azure::apply_runtime_env()?;
+        Ok(())
+    }
+
+    fn finish_azure_login(&mut self, use_entra: bool) {
+        crate::auth::AuthStatus::invalidate_cache();
+        if let Err(err) = crate::provider::activation::apply_azure_openai_runtime() {
+            self.push_display_message(DisplayMessage::error(format!(
+                "Failed to activate Azure OpenAI runtime: {}",
+                err
+            )));
+            return;
+        }
+        crate::telemetry::record_auth_success(
+            "azure",
+            if use_entra { "entra_id" } else { "api_key" },
+        );
+        let auth_note = if use_entra {
+            "Using Microsoft Entra ID through Azure DefaultAzureCredential. If you use Azure CLI auth, run `az login` and make sure the identity has the Cognitive Services OpenAI User role."
+        } else {
+            "Using the saved Azure OpenAI API key."
+        };
+        Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+            provider: "Azure OpenAI".to_string(),
+            success: true,
+            message: format!(
+                "**Azure OpenAI configuration saved.**\n\n\
+                 Stored at `~/.config/jcode/{}`.\n\
+                 {}\n\n\
+                 Use `/model` after your Azure deployment exists. If the model list looks stale, run `/refresh-model-list`.",
+                crate::auth::azure::ENV_FILE,
+                auth_note,
+            ),
+        }));
     }
 }
 

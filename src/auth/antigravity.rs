@@ -167,7 +167,7 @@ pub async fn load_or_refresh_tokens() -> Result<AntigravityTokens> {
 
 pub async fn refresh_tokens(tokens: &AntigravityTokens) -> Result<AntigravityTokens> {
     let result: Result<AntigravityTokens> = async {
-        let client = reqwest::Client::new();
+        let client = crate::provider::shared_http_client();
         let client_id = antigravity_client_id();
         let client_secret = antigravity_client_secret();
         let resp = client
@@ -364,7 +364,7 @@ async fn exchange_authorization_code(
     verifier: &str,
     redirect_uri: &str,
 ) -> Result<AntigravityTokens> {
-    let client = reqwest::Client::new();
+    let client = crate::provider::shared_http_client();
     let client_id = antigravity_client_id();
     let client_secret = antigravity_client_secret();
     let resp = client
@@ -411,7 +411,7 @@ async fn exchange_authorization_code(
 }
 
 pub async fn fetch_email(access_token: &str) -> Result<String> {
-    let client = reqwest::Client::new();
+    let client = crate::provider::shared_http_client();
     let resp = client
         .get(GOOGLE_USERINFO_URL)
         .header(reqwest::header::USER_AGENT, GOOGLE_OAUTH_USER_AGENT)
@@ -439,7 +439,7 @@ pub async fn fetch_email(access_token: &str) -> Result<String> {
 }
 
 pub async fn fetch_project_id(access_token: &str) -> Result<String> {
-    let client = reqwest::Client::new();
+    let client = crate::provider::shared_http_client();
     let headers = antigravity_headers(access_token)?;
     let body = serde_json::json!({
         "metadata": {

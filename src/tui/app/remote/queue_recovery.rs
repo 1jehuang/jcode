@@ -2,9 +2,19 @@ use super::*;
 
 impl App {
     pub(super) fn track_pending_soft_interrupt(&mut self, request_id: u64, content: String) {
+        let content_bytes = content.len();
+        let content_chars = content.chars().count();
         self.pending_soft_interrupt_requests
             .push((request_id, content.clone()));
         self.pending_soft_interrupts.push(content);
+        crate::logging::info(&format!(
+            "REMOTE_SOFT_INTERRUPT_TRACK_PENDING id={} content_bytes={} content_chars={} pending_requests={} pending_messages={}",
+            request_id,
+            content_bytes,
+            content_chars,
+            self.pending_soft_interrupt_requests.len(),
+            self.pending_soft_interrupts.len()
+        ));
     }
 
     pub(super) fn acknowledge_pending_soft_interrupt(&mut self, request_id: u64) -> bool {
@@ -14,18 +24,44 @@ impl App {
             .position(|(id, _)| *id == request_id)
         {
             self.pending_soft_interrupt_requests.remove(index);
+            crate::logging::info(&format!(
+                "REMOTE_SOFT_INTERRUPT_ACK_MATCHED id={} pending_requests={} pending_messages={}",
+                request_id,
+                self.pending_soft_interrupt_requests.len(),
+                self.pending_soft_interrupts.len()
+            ));
             true
         } else {
+            if !self.pending_soft_interrupt_requests.is_empty() {
+                crate::logging::info(&format!(
+                    "REMOTE_SOFT_INTERRUPT_ACK_UNMATCHED id={} pending_requests={} pending_messages={}",
+                    request_id,
+                    self.pending_soft_interrupt_requests.len(),
+                    self.pending_soft_interrupts.len()
+                ));
+            }
             false
         }
     }
 
     pub(super) fn clear_pending_soft_interrupt_tracking(&mut self) {
+        crate::logging::info(&format!(
+            "REMOTE_SOFT_INTERRUPT_TRACKING_CLEAR pending_requests={} pending_messages={}",
+            self.pending_soft_interrupt_requests.len(),
+            self.pending_soft_interrupts.len()
+        ));
         self.pending_soft_interrupts.clear();
         self.pending_soft_interrupt_requests.clear();
     }
 
     pub(super) fn mark_soft_interrupt_injected(&mut self, content: &str) {
+        crate::logging::info(&format!(
+            "REMOTE_SOFT_INTERRUPT_MARK_INJECTED content_bytes={} content_chars={} pending_requests={} pending_messages={}",
+            content.len(),
+            content.chars().count(),
+            self.pending_soft_interrupt_requests.len(),
+            self.pending_soft_interrupts.len()
+        ));
         if self.mark_combined_soft_interrupt_injected(content) {
             return;
         }

@@ -48,6 +48,106 @@ async fn session_control_handle_does_not_wait_for_busy_agent_lock() {
     assert!(queue.lock().expect("queue lock").is_empty());
 }
 
+#[tokio::test]
+async fn refreshed_session_control_handle_does_not_wait_for_busy_agent_lock() {
+    let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
+        forked: Arc::new(AtomicBool::new(false)),
+    });
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let mut session = crate::session::Session::create_with_id(
+        "session_busy_control_refresh".to_string(),
+        None,
+        None,
+    );
+    session.model = Some("panic-on-fork".to_string());
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider, registry, session, None,
+    )));
+
+    let stop_signal = InterruptSignal::new();
+    let soft_interrupt_queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let shutdown_signals = Arc::new(RwLock::new(HashMap::from([(
+        "session_busy_control_refresh".to_string(),
+        stop_signal.clone(),
+    )])));
+    let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::from([(
+        "session_busy_control_refresh".to_string(),
+        soft_interrupt_queue,
+    )])));
+
+    let _busy_agent_lock = agent.lock().await;
+
+    tokio::time::timeout(Duration::from_millis(100), async {
+        let control = refresh_session_control_handle(
+            "session_busy_control_refresh",
+            &agent,
+            &shutdown_signals,
+            &soft_interrupt_queues,
+        )
+        .await;
+        control.request_cancel();
+    })
+    .await
+    .expect("refreshing a session control handle must not wait for the busy agent mutex");
+
+    assert!(stop_signal.is_set());
+}
+
+#[tokio::test]
+async fn cancel_without_local_task_still_signals_session_control() {
+    let soft_interrupt_queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stop_signal = InterruptSignal::new();
+    let control = SessionControlHandle::cancel_only(
+        "session_detached_cancel",
+        soft_interrupt_queue,
+        stop_signal.clone(),
+    );
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+    let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+    let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (swarm_event_tx, _) = broadcast::channel(8);
+    let mut client_is_processing = true;
+    let mut message_id = Some(99);
+    let mut session_id = Some("session_detached_cancel".to_string());
+    let mut task = None;
+
+    cancel_processing_message(
+        &mut ProcessingState {
+            client_is_processing: &mut client_is_processing,
+            message_id: &mut message_id,
+            session_id: &mut session_id,
+            task: &mut task,
+        },
+        &control,
+        &client_event_tx,
+        &SwarmStatusRefs {
+            members: &swarm_members,
+            swarms_by_id: &swarms_by_id,
+            event_history: &event_history,
+            event_counter: &event_counter,
+            event_tx: &swarm_event_tx,
+        },
+        Some(99),
+        None,
+    )
+    .await;
+
+    assert!(stop_signal.is_set());
+    assert!(!client_is_processing);
+    assert!(message_id.is_none());
+    assert!(session_id.is_none());
+    assert!(matches!(
+        client_event_rx.recv().await,
+        Some(ServerEvent::Interrupted)
+    ));
+    assert!(matches!(
+        client_event_rx.recv().await,
+        Some(ServerEvent::Done { id: 99 })
+    ));
+}
+
 impl IsolatedRuntimeDir {
     fn new() -> Self {
         let temp = tempfile::TempDir::new().expect("runtime dir");

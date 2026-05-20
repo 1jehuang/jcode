@@ -118,6 +118,29 @@ impl AuthValidationMethod {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthReadinessLevel {
+    #[default]
+    None,
+    CredentialPresent,
+    Authenticated,
+    RequestValid,
+    DeploymentValid,
+}
+
+impl AuthReadinessLevel {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "not configured",
+            Self::CredentialPresent => "credential present",
+            Self::Authenticated => "authenticated",
+            Self::RequestValid => "request valid",
+            Self::DeploymentValid => "deployment valid",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderValidationRecord {
     pub checked_at_ms: i64,

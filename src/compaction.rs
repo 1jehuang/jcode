@@ -46,6 +46,16 @@ struct CompactionResult {
     summarized_messages: usize,
 }
 
+struct CompactionOutcomeLog<'a> {
+    trigger: &'a str,
+    pre_tokens: u64,
+    post_tokens: u64,
+    messages_compacted: usize,
+    messages_dropped: Option<usize>,
+    duration_ms: u64,
+    all_messages: &'a [Message],
+}
+
 /// Manages background compaction of conversation context.
 ///
 /// Does NOT own message data. The caller owns the messages and passes
@@ -603,11 +613,94 @@ impl CompactionManager {
     /// Get the active (uncompacted) messages from a full message list.
     /// Skips the first `compacted_count` messages.
     fn active_messages<'a>(&self, all_messages: &'a [Message]) -> &'a [Message] {
+        // If session restore/replay leaves the manager with bookkeeping from a
+        // longer message vector, never fall back to the full transcript. That
+        // makes already-compacted messages active again and can drive repeated
+        // emergency compaction loops. Clamp to the end instead: all available
+        // messages are covered by the summary until new turns arrive.
+        let start = self.compacted_count.min(all_messages.len());
+        &all_messages[start..]
+    }
+
+    fn clamp_compacted_count_to_messages(
+        &mut self,
+        all_messages: &[Message],
+        reason: &str,
+    ) -> bool {
+        // Some backward-compatible call paths intentionally poll/apply without
+        // caller-owned message history. An empty slice there means "unknown",
+        // not necessarily an empty transcript, so do not treat it as an
+        // authoritative upper bound.
+        if all_messages.is_empty() {
+            return false;
+        }
         if self.compacted_count <= all_messages.len() {
-            &all_messages[self.compacted_count..]
+            return false;
+        }
+
+        crate::logging::warn(&format!(
+            "[compaction/invariant] compacted_count_exceeded_messages reason={} compacted_count={} messages_len={} total_turns={} has_summary={} summary_chars={} observed_input_tokens={:?}",
+            reason,
+            self.compacted_count,
+            all_messages.len(),
+            self.total_turns,
+            self.active_summary.is_some(),
+            self.summary_chars(),
+            self.observed_input_tokens,
+        ));
+        self.compacted_count = all_messages.len();
+        self.active_message_chars = 0;
+        self.active_message_chars_dirty = false;
+        true
+    }
+
+    fn log_compaction_state(&self, phase: &str, trigger: &str, all_messages: &[Message]) {
+        let active_len = self.active_messages(all_messages).len();
+        crate::logging::info(&format!(
+            "[compaction/state] phase={} trigger={} messages_len={} active_messages={} compacted_count={} total_turns={} token_budget={} token_estimate={} effective_tokens={} observed_input_tokens={:?} has_summary={} summary_chars={} pending_cutoff={} is_compacting={}",
+            phase,
+            trigger,
+            all_messages.len(),
+            active_len,
+            self.compacted_count,
+            self.total_turns,
+            self.token_budget,
+            self.token_estimate_with(all_messages),
+            self.effective_token_count_with(all_messages),
+            self.observed_input_tokens,
+            self.active_summary.is_some(),
+            self.summary_chars(),
+            self.pending_cutoff,
+            self.pending_task.is_some(),
+        ));
+    }
+
+    fn log_compaction_outcome(&self, outcome: CompactionOutcomeLog<'_>) {
+        let tokens_saved = outcome.pre_tokens.saturating_sub(outcome.post_tokens);
+        let grew = outcome.post_tokens > outcome.pre_tokens;
+        let level = if grew { "warn" } else { "info" };
+        let line = format!(
+            "[compaction/outcome] level={} trigger={} duration_ms={} pre_tokens={} post_tokens={} tokens_saved={} grew={} messages_len={} active_messages={} compacted_count={} total_turns={} messages_compacted={} messages_dropped={} summary_chars={} observed_input_tokens={:?}",
+            level,
+            outcome.trigger,
+            outcome.duration_ms,
+            outcome.pre_tokens,
+            outcome.post_tokens,
+            tokens_saved,
+            grew,
+            outcome.all_messages.len(),
+            self.active_messages(outcome.all_messages).len(),
+            self.compacted_count,
+            self.total_turns,
+            outcome.messages_compacted,
+            outcome.messages_dropped.unwrap_or(0),
+            self.summary_chars(),
+            self.observed_input_tokens,
+        );
+        if grew {
+            crate::logging::warn(&line);
         } else {
-            // Edge case: messages were cleared/replaced with fewer items
-            all_messages
+            crate::logging::info(&line);
         }
     }
 
@@ -901,6 +994,7 @@ impl CompactionManager {
     /// Check if background compaction is done and apply it, updating rolling
     /// token-estimate state from the provided full message list.
     pub fn check_and_apply_compaction_with(&mut self, all_messages: &[Message]) {
+        self.clamp_compacted_count_to_messages(all_messages, "check_and_apply_start");
         let task = match self.pending_task.take() {
             Some(task) => task,
             None => return,
@@ -916,6 +1010,11 @@ impl CompactionManager {
         // Get result
         match futures::executor::block_on(task) {
             Ok(Ok(result)) => {
+                let trigger = self
+                    .pending_trigger
+                    .clone()
+                    .unwrap_or_else(|| self.mode_trigger_label().to_string());
+                self.log_compaction_state("apply_start", &trigger, all_messages);
                 let pre_tokens = self.effective_token_count_with(all_messages) as u64;
                 let compacted_chars: usize = self
                     .active_messages(all_messages)
@@ -931,7 +1030,10 @@ impl CompactionManager {
                 };
 
                 // Advance the compacted count — these messages are now summarized
-                self.compacted_count += self.pending_cutoff;
+                self.compacted_count = self.compacted_count.saturating_add(self.pending_cutoff);
+                if !all_messages.is_empty() {
+                    self.compacted_count = self.compacted_count.min(all_messages.len());
+                }
                 self.active_message_chars = self
                     .active_message_chars_with(all_messages)
                     .saturating_sub(compacted_chars);
@@ -943,10 +1045,7 @@ impl CompactionManager {
                 self.observed_input_tokens = None;
                 let post_tokens = self.effective_token_count_with(all_messages) as u64;
                 self.last_compaction = Some(CompactionEvent {
-                    trigger: self
-                        .pending_trigger
-                        .take()
-                        .unwrap_or_else(|| self.mode_trigger_label().to_string()),
+                    trigger: trigger.clone(),
                     pre_tokens: Some(pre_tokens),
                     post_tokens: Some(post_tokens),
                     tokens_saved: Some(pre_tokens.saturating_sub(post_tokens)),
@@ -976,12 +1075,22 @@ impl CompactionManager {
                         .unwrap_or(0),
                     self.active_messages_count(),
                 ));
+                self.log_compaction_outcome(CompactionOutcomeLog {
+                    trigger: &trigger,
+                    pre_tokens,
+                    post_tokens,
+                    messages_compacted: result.summarized_messages,
+                    messages_dropped: None,
+                    duration_ms: result.duration_ms,
+                    all_messages,
+                });
 
                 // Reset cooldown counter so proactive/semantic modes don't
                 // fire again immediately after a successful compaction.
                 self.turns_since_last_compact = 0;
 
                 self.pending_cutoff = 0;
+                self.pending_trigger = None;
             }
             Ok(Err(e)) => {
                 crate::logging::error(&format!("[compaction] Failed to generate summary: {}", e));
@@ -1196,6 +1305,10 @@ impl CompactionManager {
     /// exceed the token budget, progressively keeps fewer turns down to
     /// `MIN_TURNS_TO_KEEP`.
     pub fn hard_compact_with(&mut self, all_messages: &[Message]) -> Result<usize, String> {
+        if self.clamp_compacted_count_to_messages(all_messages, "hard_compact_start") {
+            self.log_compaction_state("hard_compact_clamped", "hard_compact", all_messages);
+        }
+
         let active = self.active_messages(all_messages);
 
         if active.len() <= MIN_TURNS_TO_KEEP {
@@ -1207,6 +1320,7 @@ impl CompactionManager {
         }
 
         let pre_tokens = self.effective_token_count_with(all_messages) as u64;
+        self.log_compaction_state("hard_compact_start", "hard_compact", all_messages);
         let active_char_counts: Vec<usize> = active.iter().map(message_char_count).collect();
         let mut remaining_suffix_chars = vec![0usize; active_char_counts.len() + 1];
         for idx in (0..active_char_counts.len()).rev() {
@@ -1257,12 +1371,15 @@ impl CompactionManager {
             original_turn_count: cutoff,
         };
 
-        self.compacted_count += cutoff;
+        self.compacted_count = self
+            .compacted_count
+            .saturating_add(cutoff)
+            .min(all_messages.len());
         self.active_message_chars = remaining_suffix_chars[cutoff];
         self.active_message_chars_dirty = false;
         self.active_summary = Some(summary);
         self.observed_input_tokens = None;
-        let post_tokens = self.effective_token_count() as u64;
+        let post_tokens = self.effective_token_count_with(all_messages) as u64;
         self.last_compaction = Some(CompactionEvent {
             trigger: "hard_compact".to_string(),
             pre_tokens: Some(pre_tokens),
@@ -1276,6 +1393,15 @@ impl CompactionManager {
                 .as_ref()
                 .map(|summary| summary.text.len()),
             active_messages: Some(self.active_messages_count()),
+        });
+        self.log_compaction_outcome(CompactionOutcomeLog {
+            trigger: "hard_compact",
+            pre_tokens,
+            post_tokens,
+            messages_compacted: dropped_count,
+            messages_dropped: Some(dropped_count),
+            duration_ms: 0,
+            all_messages,
         });
 
         Ok(dropped_count)

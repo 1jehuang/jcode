@@ -1,6 +1,92 @@
 use super::*;
 
 impl Agent {
+    pub(super) fn note_compaction_applied(&mut self) {
+        self.cache_tracker.reset();
+        self.locked_tools = None;
+        self.provider_session_id = None;
+        self.session.provider_session_id = None;
+    }
+
+    pub fn poll_compaction_completion_event(&mut self) -> Option<CompactionEvent> {
+        let provider_messages = self.session.messages_for_provider();
+        let compaction = self.registry.compaction();
+        let event = match compaction.try_write() {
+            Ok(mut manager) => {
+                let event = manager.poll_compaction_event_with(&provider_messages);
+                if event.is_some() {
+                    self.sync_session_compaction_state_from_manager(&manager);
+                }
+                event
+            }
+            Err(_) => return None,
+        };
+
+        if event.is_some() {
+            self.note_compaction_applied();
+            self.persist_session_best_effort("compaction completion");
+        }
+
+        event
+    }
+
+    pub fn request_manual_compaction(&mut self) -> (String, bool) {
+        if !self.provider.supports_compaction() {
+            return (
+                "Manual compaction is not available for this provider.".to_string(),
+                false,
+            );
+        }
+
+        let provider = self.provider.fork();
+        let messages = self.session.messages_for_provider();
+        let compaction = self.registry.compaction();
+
+        match compaction.try_write() {
+            Ok(mut manager) => {
+                let stats = manager.stats_with(&messages);
+                let status_msg = format!(
+                    "**Context Status:**\n\
+                    • Messages: {} (active), {} (total history)\n\
+                    • Token usage: ~{}k (estimate ~{}k) / {}k ({:.1}%)\n\
+                    • Has summary: {}\n\
+                    • Compacting: {}",
+                    stats.active_messages,
+                    stats.total_turns,
+                    stats.effective_tokens / 1000,
+                    stats.token_estimate / 1000,
+                    manager.token_budget() / 1000,
+                    stats.context_usage * 100.0,
+                    if stats.has_summary { "yes" } else { "no" },
+                    if stats.is_compacting {
+                        "in progress..."
+                    } else {
+                        "no"
+                    }
+                );
+
+                match manager.force_compact_with(&messages, provider) {
+                    Ok(()) => (
+                        format!(
+                            "{}\n\n📦 **Compacting context** (manual) — summarizing older messages in the background to stay within the context window.\n\
+                            The summary will be applied automatically when ready.",
+                            status_msg
+                        ),
+                        true,
+                    ),
+                    Err(reason) => (
+                        format!("{status_msg}\n\n⚠ **Cannot compact:** {reason}"),
+                        false,
+                    ),
+                }
+            }
+            Err(_) => (
+                "⚠ Cannot access compaction manager (lock held)".to_string(),
+                false,
+            ),
+        }
+    }
+
     fn is_context_limit_error(error: &str) -> bool {
         let lower = error.to_lowercase();
         lower.contains("context length")

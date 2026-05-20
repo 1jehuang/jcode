@@ -12,6 +12,10 @@ pub fn load_todos(session_id: &str) -> Result<Vec<TodoItem>> {
     storage::read_json(&path).or_else(|_| Ok(Vec::new()))
 }
 
+pub fn todos_exist(session_id: &str) -> Result<bool> {
+    Ok(todo_path(session_id)?.exists())
+}
+
 pub fn save_todos(session_id: &str, todos: &[TodoItem]) -> Result<()> {
     let path = todo_path(session_id)?;
     storage::write_json_fast(&path, todos)

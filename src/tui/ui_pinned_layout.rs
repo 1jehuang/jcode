@@ -6,7 +6,7 @@ use crate::tui::mermaid;
 use ratatui::prelude::Rect;
 
 const SIDE_PANEL_INLINE_IMAGE_TARGET_UTILIZATION_PERCENT: u16 = 85;
-const SIDE_PANEL_INLINE_IMAGE_MIN_FULL_FIT_ZOOM_PERCENT: u8 = 100;
+const SIDE_PANEL_INLINE_IMAGE_MAX_AUTO_FILL_ZOOM_PERCENT: u16 = 1000;
 
 pub(super) fn estimate_side_panel_image_layout(
     hash: u64,
@@ -71,7 +71,7 @@ pub(super) fn estimate_side_panel_image_layout_with_font(
         width,
         height,
         Some((cell_w as u16, cell_h as u16)),
-    );
+    ) as u16;
     let fit_rect = fit_image_area_with_font(
         fit_area,
         width,
@@ -82,9 +82,10 @@ pub(super) fn estimate_side_panel_image_layout_with_font(
     );
     let width_fill_zoom = axis_fill_zoom_percent(available_width, width, cell_w);
     let height_fill_zoom = axis_fill_zoom_percent(inner_height as u32, height, cell_h);
-    let preferred_viewport_zoom = width_fill_zoom
-        .max(height_fill_zoom)
-        .clamp(SIDE_PANEL_INLINE_IMAGE_MIN_ZOOM_PERCENT, 200);
+    let preferred_viewport_zoom = width_fill_zoom.max(height_fill_zoom).clamp(
+        SIDE_PANEL_INLINE_IMAGE_MIN_ZOOM_PERCENT,
+        SIDE_PANEL_INLINE_IMAGE_MAX_AUTO_FILL_ZOOM_PERCENT,
+    );
     let fit_underutilized = rect_utilization_percent(fit_rect.width, fit_area.width)
         < SIDE_PANEL_INLINE_IMAGE_TARGET_UTILIZATION_PERCENT
         || rect_utilization_percent(fit_rect.height, fit_area.height)
@@ -92,11 +93,7 @@ pub(super) fn estimate_side_panel_image_layout_with_font(
         || area_utilization_percent(fit_rect, fit_area)
             < SIDE_PANEL_INLINE_IMAGE_TARGET_UTILIZATION_PERCENT;
 
-    if fit_zoom < SIDE_PANEL_INLINE_IMAGE_MIN_ZOOM_PERCENT
-        || (fit_zoom < SIDE_PANEL_INLINE_IMAGE_MIN_FULL_FIT_ZOOM_PERCENT
-            && fit_underutilized
-            && preferred_viewport_zoom > fit_zoom)
-    {
+    if fit_underutilized && preferred_viewport_zoom > fit_zoom {
         let zoom_percent = preferred_viewport_zoom;
         return SidePanelImageLayout {
             rows: scaled_image_rows(image_h_cells, zoom_percent)
@@ -119,7 +116,7 @@ pub(super) fn estimate_side_panel_image_layout_with_font(
     }
 }
 
-fn axis_fill_zoom_percent(available_cells: u32, image_px: u32, cell_px: u32) -> u8 {
+fn axis_fill_zoom_percent(available_cells: u32, image_px: u32, cell_px: u32) -> u16 {
     if available_cells == 0 || image_px == 0 || cell_px == 0 {
         return 100;
     }
@@ -129,7 +126,7 @@ fn axis_fill_zoom_percent(available_cells: u32, image_px: u32, cell_px: u32) -> 
         .saturating_mul(100)
         .checked_div(image_px.max(1))
         .unwrap_or(100)
-        .clamp(1, 200) as u8
+        .clamp(1, SIDE_PANEL_INLINE_IMAGE_MAX_AUTO_FILL_ZOOM_PERCENT as u32) as u16
 }
 
 fn rect_utilization_percent(used: u16, total: u16) -> u16 {
@@ -148,7 +145,7 @@ fn area_utilization_percent(used: Rect, total: Rect) -> u16 {
     (used_area.saturating_mul(100) / total_area) as u16
 }
 
-pub(super) fn scaled_image_rows(image_h_cells: u32, zoom_percent: u8) -> u16 {
+pub(super) fn scaled_image_rows(image_h_cells: u32, zoom_percent: u16) -> u16 {
     if image_h_cells == 0 || zoom_percent == 0 {
         return 0;
     }
@@ -192,7 +189,7 @@ pub(super) fn estimate_side_panel_image_rows_with_font(
 pub(super) fn side_panel_viewport_scroll_x(
     img_w_px: u32,
     area_width: u16,
-    zoom_percent: u8,
+    zoom_percent: u16,
     centered: bool,
     font_size: Option<(u16, u16)>,
     pan_x_cells: i32,
@@ -213,10 +210,7 @@ pub(super) fn side_panel_viewport_scroll_x(
         return 0;
     }
 
-    let cell_w_px = font_w.saturating_mul(100) / zoom;
-    if cell_w_px == 0 {
-        return 0;
-    }
+    let cell_w_px = super::diagram_pane::div_ceil_u32(font_w.saturating_mul(100), zoom).max(1);
 
     let base_cells = if centered {
         ((max_scroll_x_px / 2) / cell_w_px).min(i32::MAX as u32) as i32

@@ -16,8 +16,7 @@ mod preview_request;
 use helpers::{
     agent_model_default_summary, agent_model_target_label, catchup_candidates,
     catchup_queue_position, model_entry_base_name, model_entry_saved_spec,
-    openai_compatible_profile_id_for_route, openrouter_route_model_id, picker_route_model_spec,
-    save_agent_model_override,
+    openrouter_route_model_id, picker_route_model_spec, save_agent_model_override,
 };
 
 impl App {
@@ -294,7 +293,22 @@ impl App {
         }
 
         if !self.is_remote && !crate::perf::tui_policy().simplified_model_picker {
-            self.open_loading_model_picker(&current_model);
+            let routes_started = std::time::Instant::now();
+            let routes = self.simplified_model_routes_for_picker(&current_model);
+            let routes_ms = routes_started.elapsed().as_millis();
+            self.open_model_picker_with_routes(
+                cache_signature.clone(),
+                picker_started,
+                routes,
+                routes_ms,
+                false,
+                false,
+            );
+            if self.inline_interactive_state.is_some() {
+                self.set_status_notice("Updating model routes…");
+            } else {
+                self.open_loading_model_picker(&current_model);
+            }
             self.start_model_picker_route_load(cache_signature, picker_started);
             return;
         }
@@ -317,6 +331,7 @@ impl App {
             routes,
             routes_ms,
             false,
+            true,
         );
     }
 
@@ -445,6 +460,7 @@ impl App {
                     result.routes,
                     result.routes_ms,
                     true,
+                    true,
                 );
                 if self.inline_interactive_state.is_some() {
                     self.set_status_notice("Model list updated");
@@ -465,6 +481,7 @@ impl App {
         routes: Vec<crate::provider::ModelRoute>,
         routes_ms: u128,
         preserve_input: bool,
+        cache_entries: bool,
     ) {
         use std::collections::BTreeMap;
 
@@ -515,6 +532,7 @@ impl App {
         } else {
             routes
         };
+        let routes = crate::provider::dedupe_model_routes(routes);
 
         if routes.is_empty() {
             self.inline_interactive_state = None;
@@ -843,7 +861,8 @@ impl App {
         };
 
         self.inline_view_state = None;
-        if Self::should_cache_model_picker_entries(model_order.len(), routes.len()) {
+        if cache_entries && Self::should_cache_model_picker_entries(model_order.len(), routes.len())
+        {
             self.model_picker_cache = Some(ModelPickerCache {
                 signature: cache_signature,
                 entries: entries.clone(),
@@ -880,6 +899,140 @@ impl App {
             self.input.clear();
             self.cursor_pos = 0;
         }
+    }
+
+    pub(in crate::tui::app) fn debug_model_picker_live_json(
+        &mut self,
+        visible_limit: Option<usize>,
+    ) -> String {
+        let previous_inline_view = self.inline_view_state.clone();
+        let previous_inline_interactive = self.inline_interactive_state.clone();
+        let previous_model_picker_cache = self.model_picker_cache.clone();
+        let previous_pending_model_picker_load = self.pending_model_picker_load.take();
+        let previous_model_picker_load_request_id = self.model_picker_load_request_id;
+        let previous_input = self.input.clone();
+        let previous_cursor_pos = self.cursor_pos;
+        let previous_status_notice = self.status_notice.clone();
+
+        let started = std::time::Instant::now();
+        let current_model = if self.is_remote {
+            self.remote_provider_model
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string())
+        } else {
+            self.provider.model().to_string()
+        };
+        let config_default_model = crate::config::config().provider.default_model.clone();
+        let current_effort = if self.is_remote {
+            self.remote_reasoning_effort.clone()
+        } else {
+            self.provider.reasoning_effort()
+        };
+        let available_efforts = if self.is_remote {
+            Vec::new()
+        } else {
+            self.provider.available_efforts()
+        };
+        let signature = self.model_picker_cache_signature(
+            &current_model,
+            config_default_model,
+            current_effort,
+            &available_efforts,
+        );
+
+        let routes_started = std::time::Instant::now();
+        let routes: Vec<crate::provider::ModelRoute> = if self.is_remote {
+            if !self.remote_model_options.is_empty() {
+                self.remote_model_options.clone()
+            } else {
+                self.build_remote_model_routes_fallback()
+            }
+        } else if crate::perf::tui_policy().simplified_model_picker {
+            self.simplified_model_routes_for_picker(&current_model)
+        } else {
+            self.provider.model_routes()
+        };
+        let routes_ms = routes_started.elapsed().as_millis();
+        let raw_route_count = routes.len();
+        let mut raw_static_fallback_by_provider =
+            std::collections::BTreeMap::<String, usize>::new();
+        for route in &routes {
+            if route
+                .detail
+                .contains("fallback: static provider model list")
+            {
+                *raw_static_fallback_by_provider
+                    .entry(route.provider.clone())
+                    .or_default() += 1;
+            }
+        }
+        let raw_static_fallback_count: usize = raw_static_fallback_by_provider.values().sum();
+        let raw_routes = routes
+            .iter()
+            .take(visible_limit.unwrap_or(200))
+            .map(|route| {
+                serde_json::json!({
+                    "model": route.model,
+                    "provider": route.provider,
+                    "api_method": route.api_method,
+                    "available": route.available,
+                    "detail": route.detail,
+                    "estimated_reference_cost_micros": route.estimated_reference_cost_micros(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        self.open_model_picker_with_routes(signature, started, routes, routes_ms, false, false);
+        let picker_json = self.debug_picker_state_json(visible_limit);
+        let picker_value: serde_json::Value = serde_json::from_str(&picker_json)
+            .unwrap_or_else(|_| serde_json::json!({ "error": "failed to serialize picker" }));
+        let mut picker_static_fallback_by_provider =
+            std::collections::BTreeMap::<String, usize>::new();
+        if let Some(picker) = self.inline_interactive_state.as_ref() {
+            for entry in &picker.entries {
+                if let Some(route) = entry.active_option()
+                    && route
+                        .detail
+                        .contains("fallback: static provider model list")
+                {
+                    *picker_static_fallback_by_provider
+                        .entry(route.provider.clone())
+                        .or_default() += 1;
+                }
+            }
+        }
+        let picker_static_fallback_count: usize = picker_static_fallback_by_provider.values().sum();
+
+        self.inline_view_state = previous_inline_view;
+        self.inline_interactive_state = previous_inline_interactive;
+        self.model_picker_cache = previous_model_picker_cache;
+        self.pending_model_picker_load = previous_pending_model_picker_load;
+        self.model_picker_load_request_id = previous_model_picker_load_request_id;
+        self.input = previous_input;
+        self.cursor_pos = previous_cursor_pos;
+        self.status_notice = previous_status_notice;
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "source_of_truth": "materialized_tui_model_picker",
+            "remote": self.is_remote,
+            "provider_name": if self.is_remote {
+                self.remote_provider_name.clone().unwrap_or_else(|| "remote".to_string())
+            } else {
+                self.provider.name().to_string()
+            },
+            "current_model": current_model,
+            "raw_route_count": raw_route_count,
+            "raw_route_sample_count": raw_routes.len(),
+            "raw_static_fallback_count": raw_static_fallback_count,
+            "raw_static_fallback_by_provider": raw_static_fallback_by_provider,
+            "picker_static_fallback_count": picker_static_fallback_count,
+            "picker_static_fallback_by_provider": picker_static_fallback_by_provider,
+            "routes_ms": routes_ms,
+            "total_ms": started.elapsed().as_millis(),
+            "raw_routes": raw_routes,
+            "picker": picker_value,
+        }))
+        .unwrap_or_else(|_| "{}".to_string())
     }
 
     pub(super) fn build_remote_model_routes_fallback(&self) -> Vec<crate::provider::ModelRoute> {
@@ -1026,7 +1179,17 @@ impl App {
                 added_any = true;
             }
 
-            if Self::remote_model_should_offer_copilot_route(model) && !model.contains("[1m]") {
+            if !added_any
+                && let Some(route) = self.remote_current_openai_compatible_route_for_model(model)
+            {
+                routes.push(route);
+                added_any = true;
+            }
+
+            if !added_any
+                && Self::remote_model_should_offer_copilot_route(model)
+                && !model.contains("[1m]")
+            {
                 routes.push(crate::provider::build_copilot_route(
                     model,
                     auth.copilot == crate::auth::AuthState::Available
@@ -1062,6 +1225,36 @@ impl App {
         routes
     }
 
+    fn remote_current_openai_compatible_route_for_model(
+        &self,
+        model: &str,
+    ) -> Option<crate::provider::ModelRoute> {
+        if model.trim().is_empty()
+            || model.contains('/')
+            || crate::provider::provider_for_model(model).is_some()
+        {
+            return None;
+        }
+
+        let provider_name = self.remote_provider_name.as_deref()?.trim();
+        let profile_id =
+            crate::provider_catalog::openai_compatible_profile_id_for_display_name(provider_name)?;
+        let profile = crate::provider_catalog::openai_compatible_profile_by_id(profile_id)?;
+        if !crate::provider_catalog::openai_compatible_profile_is_configured(profile) {
+            return None;
+        }
+        let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+
+        Some(crate::provider::ModelRoute {
+            model: model.to_string(),
+            provider: resolved.display_name,
+            api_method: format!("openai-compatible:{}", resolved.id),
+            available: true,
+            detail: resolved.api_base,
+            cheapness: None,
+        })
+    }
+
     pub(super) fn remote_model_should_offer_copilot_route(model: &str) -> bool {
         Self::remote_openai_compatible_route_for_model(model).is_none()
             && (Self::remote_model_is_server_copilot_only(model)
@@ -1078,23 +1271,68 @@ impl App {
             if !crate::provider_catalog::openai_compatible_profile_is_configured(profile) {
                 continue;
             }
-            if !crate::provider_catalog::openai_compatible_profile_static_models(profile)
-                .iter()
-                .any(|candidate| candidate == model)
-            {
-                continue;
-            }
             let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+            let Some(from_live_catalog) =
+                Self::remote_openai_compatible_profile_models(&resolved, profile)
+                    .iter()
+                    .find_map(|candidate| (candidate.0 == model).then_some(candidate.1))
+            else {
+                continue;
+            };
+            let detail = if from_live_catalog {
+                resolved.api_base.clone()
+            } else if resolved.api_base.trim().is_empty() {
+                "fallback: static provider model list".to_string()
+            } else {
+                format!(
+                    "{}; fallback: static provider model list",
+                    resolved.api_base
+                )
+            };
             return Some(crate::provider::ModelRoute {
                 model: model.to_string(),
                 provider: resolved.display_name,
                 api_method: format!("openai-compatible:{}", resolved.id),
                 available: true,
-                detail: resolved.api_base,
+                detail,
                 cheapness: None,
             });
         }
         None
+    }
+
+    fn remote_openai_compatible_profile_models(
+        resolved: &crate::provider_catalog::ResolvedOpenAiCompatibleProfile,
+        profile: crate::provider_catalog::OpenAiCompatibleProfile,
+    ) -> Vec<(String, bool)> {
+        let mut models = Vec::new();
+        let mut push = |model: String, from_live_catalog: bool| {
+            let model = model.trim().to_string();
+            if !model.is_empty() && !models.iter().any(|(existing, _)| existing == &model) {
+                models.push((model, from_live_catalog));
+            }
+        };
+
+        if let Some(cache) =
+            jcode_provider_openrouter::load_disk_cache_entry_for_namespace(&resolved.id)
+        {
+            let source_matches = cache
+                .source_api_base
+                .as_deref()
+                .and_then(crate::provider_catalog::normalize_api_base)
+                == crate::provider_catalog::normalize_api_base(&resolved.api_base);
+            if source_matches {
+                for model in cache.models {
+                    push(model.id, true);
+                }
+            }
+        }
+
+        for model in crate::provider_catalog::openai_compatible_profile_static_models(profile) {
+            push(model, false);
+        }
+
+        models
     }
 
     pub(super) fn remote_model_is_server_copilot_only(model: &str) -> bool {
@@ -1545,8 +1783,8 @@ impl App {
         self.set_status_notice(format!("Switching → {}", name));
     }
 
-    pub(super) fn handle_batch_crash_restore(&mut self) {
-        let recovered = match crate::session::recover_crashed_sessions() {
+    pub(super) fn handle_batch_crash_restore(&mut self, session_ids: &[String]) {
+        let recovered = match crate::session::recover_crashed_sessions_by_ids(session_ids) {
             Ok(ids) => ids,
             Err(e) => {
                 self.push_display_message(DisplayMessage::error(format!(
@@ -1559,7 +1797,7 @@ impl App {
 
         if recovered.is_empty() {
             self.push_display_message(DisplayMessage::system(
-                "No crashed sessions found to restore.".to_string(),
+                "No crashed sessions found in the selected restore group.".to_string(),
             ));
             return;
         }
@@ -1649,8 +1887,8 @@ impl App {
             OverlayAction::Selected(PickerResult::SelectedInCurrentTerminal(ids)) => {
                 self.handle_session_picker_current_terminal_selection(&ids);
             }
-            OverlayAction::Selected(PickerResult::RestoreAllCrashed) => {
-                self.handle_batch_crash_restore();
+            OverlayAction::Selected(PickerResult::RestoreCrashedGroup(session_ids)) => {
+                self.handle_batch_crash_restore(&session_ids);
             }
         }
         Ok(())
@@ -1780,44 +2018,13 @@ impl App {
                     let bare_name = model_entry_base_name(entry);
 
                     let (model_spec, provider_key) = if let Some(r) = route {
-                        let spec = if r.api_method == "copilot" {
-                            format!("copilot:{}", bare_name)
-                        } else if r.api_method == "cursor" {
-                            format!("cursor:{}", bare_name)
-                        } else if r.api_method == "bedrock" {
-                            format!("bedrock:{}", bare_name)
-                        } else if r.provider == "Antigravity" {
-                            format!("antigravity:{}", bare_name)
-                        } else if openai_compatible_profile_id_for_route(r).is_some() {
-                            bare_name.clone()
-                        } else if r.api_method == "openrouter" && r.provider != "auto" {
-                            if bare_name.contains('/') {
-                                format!("{}@{}", bare_name, r.provider)
-                            } else {
-                                format!("anthropic/{}@{}", bare_name, r.provider)
-                            }
-                        } else {
-                            bare_name.clone()
-                        };
-                        let pkey = match r.api_method.as_str() {
-                            "claude-oauth" | "api-key"
-                                if crate::provider::provider_for_model(&bare_name)
-                                    == Some("claude") =>
-                            {
-                                Some("claude")
-                            }
-                            "openai-oauth" | "openai-api-key" => Some("openai"),
-                            "copilot" => Some("copilot"),
-                            "cursor" => Some("cursor"),
-                            "bedrock" => Some("bedrock"),
-                            "cli" if r.provider == "Antigravity" => Some("antigravity"),
-                            "openrouter" => Some("openrouter"),
-                            method if method.starts_with("openai-compatible") => {
-                                openai_compatible_profile_id_for_route(r)
-                            }
-                            _ => openai_compatible_profile_id_for_route(r),
-                        };
-                        (spec, pkey)
+                        let selection =
+                            crate::provider::MultiProvider::default_model_selection_from_route(
+                                &bare_name,
+                                &r.api_method,
+                                &r.provider,
+                            );
+                        (selection.model_spec, selection.provider_key)
                     } else {
                         (bare_name.clone(), None)
                     };
@@ -1825,11 +2032,13 @@ impl App {
                     let notice = format!(
                         "Default → {} via {}",
                         model_spec,
-                        provider_key.unwrap_or("auto")
+                        provider_key.as_deref().unwrap_or("auto")
                     );
 
-                    match crate::config::Config::set_default_model(Some(&model_spec), provider_key)
-                    {
+                    match crate::config::Config::set_default_model(
+                        Some(&model_spec),
+                        provider_key.as_deref(),
+                    ) {
                         Ok(()) => {
                             self.invalidate_model_picker_cache();
                             self.set_status_notice(notice)
@@ -1976,9 +2185,15 @@ impl App {
                             match self.provider.set_model(&spec) {
                                 Ok(()) => {
                                     self.inline_interactive_state = None;
+                                    self.provider_session_id = None;
+                                    self.session.provider_session_id = None;
                                     self.upstream_provider = None;
                                     self.status_detail = None;
                                     self.invalidate_model_picker_cache();
+                                    let active_model = self.provider.model();
+                                    self.update_context_limit_for_model(&active_model);
+                                    self.session.model = Some(active_model);
+                                    let _ = self.session.save();
                                 }
                                 Err(error) => {
                                     self.push_display_message(DisplayMessage::error(
@@ -2146,5 +2361,109 @@ impl App {
             picker.filter = first_original[..prefix_len].to_string();
             Self::apply_inline_interactive_filter(picker);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::App;
+
+    struct EnvGuard {
+        vars: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        _temp: tempfile::TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn new() -> Self {
+            let lock = crate::storage::lock_test_env();
+            let temp = tempfile::tempdir().expect("tempdir");
+            let vars = vec![
+                ("JCODE_HOME", std::env::var_os("JCODE_HOME")),
+                ("OPENCODE_API_KEY", std::env::var_os("OPENCODE_API_KEY")),
+            ];
+            crate::env::set_var("JCODE_HOME", temp.path());
+            crate::env::set_var("OPENCODE_API_KEY", "sk-test-opencode");
+            Self {
+                vars,
+                _temp: temp,
+                _lock: lock,
+            }
+        }
+
+        fn save_opencode_cache(&self, source_api_base: &str, model_ids: &[&str]) {
+            let jcode_home = std::env::var_os("JCODE_HOME").expect("JCODE_HOME set");
+            let cache_dir = std::path::PathBuf::from(jcode_home).join("cache");
+            std::fs::create_dir_all(&cache_dir).expect("create cache dir");
+            let cache = jcode_provider_openrouter::DiskCache {
+                cached_at: jcode_provider_openrouter::current_unix_secs()
+                    .expect("current unix time"),
+                source_api_base: Some(source_api_base.to_string()),
+                models: model_ids
+                    .iter()
+                    .map(|id| jcode_provider_openrouter::ModelInfo {
+                        id: (*id).to_string(),
+                        name: String::new(),
+                        context_length: None,
+                        pricing: jcode_provider_openrouter::ModelPricing::default(),
+                        created: None,
+                    })
+                    .collect(),
+            };
+            std::fs::write(
+                cache_dir.join("opencode_models.json"),
+                serde_json::to_string(&cache).expect("serialize cache"),
+            )
+            .expect("write cache");
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.vars.drain(..) {
+                if let Some(value) = value {
+                    crate::env::set_var(key, value);
+                } else {
+                    crate::env::remove_var(key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn remote_compatible_route_uses_live_cache_and_does_not_mark_fallback() {
+        let guard = EnvGuard::new();
+        guard.save_opencode_cache("https://opencode.ai/zen/v1", &["qwen3.6-plus"]);
+
+        let route = App::remote_openai_compatible_route_for_model("qwen3.6-plus")
+            .expect("live-cache-only OpenCode model should be routed");
+
+        assert_eq!(route.provider, "OpenCode Zen");
+        assert_eq!(route.api_method, "openai-compatible:opencode");
+        assert_eq!(route.detail, "https://opencode.ai/zen/v1");
+        assert!(!route.detail.contains("fallback"));
+    }
+
+    #[test]
+    fn remote_compatible_route_marks_static_model_list_fallback() {
+        let _guard = EnvGuard::new();
+
+        let route = App::remote_openai_compatible_route_for_model("glm-4.7")
+            .expect("static OpenCode fallback model should be routed");
+
+        assert_eq!(route.provider, "OpenCode Zen");
+        assert!(
+            route
+                .detail
+                .contains("fallback: static provider model list")
+        );
+    }
+
+    #[test]
+    fn remote_compatible_route_ignores_live_cache_from_wrong_api_base() {
+        let guard = EnvGuard::new();
+        guard.save_opencode_cache("https://wrong.example.test/v1", &["qwen3.6-plus"]);
+
+        assert!(App::remote_openai_compatible_route_for_model("qwen3.6-plus").is_none());
     }
 }

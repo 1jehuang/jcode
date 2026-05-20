@@ -1216,6 +1216,7 @@ pub(super) async fn handle_comm_assign_next(
                 &swarm_id,
                 working_dir.clone(),
                 None,
+                None,
                 sessions,
                 global_session_id,
                 provider_template,

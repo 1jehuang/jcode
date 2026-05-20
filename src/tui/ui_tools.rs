@@ -34,6 +34,43 @@ fn infer_bg_action_from_intent_for_display(intent: Option<&str>) -> Option<&'sta
     }
 }
 
+fn infer_selfdev_action_from_display_text(text: Option<&str>) -> Option<&'static str> {
+    let text = text?.trim().to_ascii_lowercase();
+    if text.is_empty() {
+        return None;
+    }
+
+    if text.contains("reload") || text.contains("restart") {
+        Some("reload")
+    } else if text.contains("build") || text.contains("compile") {
+        Some("build")
+    } else if text.contains("test") || text.contains("check") || text.contains("validate") {
+        Some("test")
+    } else if text.contains("cancel") || text.contains("stop") {
+        Some("cancel-build")
+    } else if text.contains("status") || text.contains("queue") || text.contains("progress") {
+        Some("status")
+    } else if text.contains("socket") {
+        Some("socket-info")
+    } else if text.contains("enter") {
+        Some("enter")
+    } else {
+        None
+    }
+}
+
+fn log_missing_tool_action_for_display(tool: &ToolCall, display_context: &str) {
+    let keys = tool
+        .input
+        .as_object()
+        .map(|object| object.keys().cloned().collect::<Vec<_>>().join(","))
+        .unwrap_or_else(|| format!("non-object:{}", tool.input));
+    crate::logging::warn(&format!(
+        "tool summary missing action: context={} tool={} id={} intent={:?} input_keys={}",
+        display_context, tool.name, tool.id, tool.intent, keys
+    ));
+}
+
 #[path = "ui_tools/batch.rs"]
 mod batch;
 
@@ -270,7 +307,10 @@ fn summarize_swarm_tool_action(tool: &ToolCall, bounded: &dyn Fn(usize) -> usize
         .input
         .get("action")
         .and_then(|v| v.as_str())
-        .unwrap_or("action missing");
+        .unwrap_or_else(|| {
+            log_missing_tool_action_for_display(tool, "swarm");
+            "action missing"
+        });
     let target = tool
         .input
         .get("to_session")
@@ -1094,7 +1134,10 @@ pub(super) fn get_tool_summary_with_budget(
                 .input
                 .get("action")
                 .and_then(|v| v.as_str())
-                .unwrap_or("action missing");
+                .unwrap_or_else(|| {
+                    log_missing_tool_action_for_display(tool, "memory");
+                    "action missing"
+                });
             match action {
                 "remember" => {
                     let content = tool
@@ -1159,7 +1202,10 @@ pub(super) fn get_tool_summary_with_budget(
                 .input
                 .get("action")
                 .and_then(|v| v.as_str())
-                .unwrap_or("action missing");
+                .unwrap_or_else(|| {
+                    log_missing_tool_action_for_display(tool, "goal");
+                    "action missing"
+                });
             let id = tool.input.get("id").and_then(|v| v.as_str());
             let title = tool.input.get("title").and_then(|v| v.as_str());
             match (action, id, title) {
@@ -1183,7 +1229,19 @@ pub(super) fn get_tool_summary_with_budget(
                 .input
                 .get("action")
                 .and_then(|v| v.as_str())
-                .unwrap_or("action missing");
+                .or_else(|| {
+                    infer_selfdev_action_from_display_text(
+                        tool.intent
+                            .as_deref()
+                            .or_else(|| tool.input.get("intent").and_then(|value| value.as_str()))
+                            .or_else(|| tool.input.get("reason").and_then(|value| value.as_str()))
+                            .or_else(|| tool.input.get("context").and_then(|value| value.as_str())),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    log_missing_tool_action_for_display(tool, "selfdev");
+                    "selfdev"
+                });
             action.to_string()
         }
         "side_panel" => {
@@ -1191,7 +1249,10 @@ pub(super) fn get_tool_summary_with_budget(
                 .input
                 .get("action")
                 .and_then(|v| v.as_str())
-                .unwrap_or("action missing");
+                .unwrap_or_else(|| {
+                    log_missing_tool_action_for_display(tool, "side_panel");
+                    "action missing"
+                });
             let target = tool
                 .input
                 .get("title")
@@ -1263,7 +1324,10 @@ pub(super) fn get_tool_summary_with_budget(
                             .or_else(|| tool.input.get("intent").and_then(|value| value.as_str())),
                     )
                 })
-                .unwrap_or("action missing");
+                .unwrap_or_else(|| {
+                    log_missing_tool_action_for_display(tool, "bg");
+                    "action missing"
+                });
             let task_id = tool.input.get("task_id").and_then(|v| v.as_str());
             if let Some(id) = task_id {
                 format!(

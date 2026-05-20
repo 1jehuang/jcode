@@ -1,6 +1,5 @@
 use super::*;
 use crate::tui::ui::{self, WrappedLineMap};
-use std::hash::{Hash, Hasher};
 
 fn content_prefers_display_as_logical_lines(content: &str) -> bool {
     content.lines().any(|line| {
@@ -150,6 +149,63 @@ fn tool_message_copy_target(
         return tool_output_copy_target(&msg.content, rendered_line_count);
     }
     None
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "User prompt rendering updates the prepared-line side tables together"
+)]
+fn push_user_prompt_lines(
+    lines: &mut Vec<Line<'static>>,
+    raw_plain_lines: &mut Vec<String>,
+    line_raw_overrides: &mut Vec<Option<WrappedLineMap>>,
+    line_copy_offsets: &mut Vec<usize>,
+    user_line_indices: &mut Vec<usize>,
+    prompt_num: usize,
+    num_color: Color,
+    content: &str,
+    align: ratatui::layout::Alignment,
+) {
+    let prefix_width = unicode_width::UnicodeWidthStr::width(prompt_num.to_string().as_str())
+        + unicode_width::UnicodeWidthStr::width("› ");
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    for (line_idx, content_line) in normalized.split('\n').enumerate() {
+        let raw_line = raw_plain_lines.len();
+        raw_plain_lines.push(content_line.to_string());
+        let prompt_width = unicode_width::UnicodeWidthStr::width(content_line);
+        let rendered_line_idx = lines.len();
+        let is_first_line = line_idx == 0;
+        if is_first_line {
+            user_line_indices.push(rendered_line_idx);
+        }
+
+        let prefix_spans = if is_first_line {
+            vec![
+                Span::styled(
+                    format!("{}", prompt_num),
+                    user_prompt_number_style(num_color),
+                ),
+                Span::styled("› ", user_prompt_accent_style()),
+            ]
+        } else {
+            vec![Span::styled(
+                " ".repeat(prefix_width),
+                user_prompt_accent_style(),
+            )]
+        };
+        let mut spans = prefix_spans;
+        spans.push(Span::styled(
+            content_line.to_string(),
+            user_prompt_text_style(),
+        ));
+        lines.push(Line::from(spans).alignment(align));
+        line_raw_overrides.push(Some(WrappedLineMap {
+            raw_line,
+            start_col: 0,
+            end_col: prompt_width,
+        }));
+        line_copy_offsets.push(prefix_width);
+    }
 }
 
 fn empty_prepared_messages() -> PreparedMessages {
@@ -1012,33 +1068,20 @@ pub(super) fn prepare_body(
         match role {
             "user" => {
                 prompt_num += 1;
-                user_line_indices.push(lines.len());
                 user_prompt_texts.push(msg.content.clone());
                 let distance = total_prompts + pending_count + 1 - prompt_num;
                 let num_color = rainbow_prompt_color(distance);
-                let raw_line = raw_plain_lines.len();
-                raw_plain_lines.push(msg.content.clone());
-                let prompt_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());
-                let prefix_width =
-                    unicode_width::UnicodeWidthStr::width(prompt_num.to_string().as_str())
-                        + unicode_width::UnicodeWidthStr::width("› ");
-                lines.push(
-                    Line::from(vec![
-                        Span::styled(
-                            format!("{}", prompt_num),
-                            user_prompt_number_style(num_color),
-                        ),
-                        Span::styled("› ", user_prompt_accent_style()),
-                        Span::styled(msg.content.clone(), user_prompt_text_style()),
-                    ])
-                    .alignment(align),
+                push_user_prompt_lines(
+                    &mut lines,
+                    &mut raw_plain_lines,
+                    &mut line_raw_overrides,
+                    &mut line_copy_offsets,
+                    &mut user_line_indices,
+                    prompt_num,
+                    num_color,
+                    &msg.content,
+                    align,
                 );
-                line_raw_overrides.push(Some(WrappedLineMap {
-                    raw_line,
-                    start_col: 0,
-                    end_col: prompt_width,
-                }));
-                line_copy_offsets.push(prefix_width);
             }
             "assistant" => {
                 let content_width = width.saturating_sub(4);

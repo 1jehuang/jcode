@@ -12,6 +12,7 @@ impl Provider for OpenRouterProvider {
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let model = self.model.read().await.clone();
+        let reasoning_effort = self.reasoning_effort();
         let thinking_override = Self::thinking_override();
         let thinking_enabled = thinking_override.or_else(|| {
             if Self::is_kimi_model(&model) {
@@ -520,6 +521,13 @@ impl Provider for OpenRouterProvider {
             request["max_tokens"] = serde_json::json!(max_tokens);
         }
 
+        if let Some(effort) = reasoning_effort.as_deref()
+            && Self::profile_supports_reasoning_effort(self.profile_id.as_deref())
+            && effort != "none"
+        {
+            request["reasoning_effort"] = serde_json::json!(effort);
+        }
+
         if !api_tools.is_empty() {
             request["tools"] = serde_json::json!(api_tools);
             request["tool_choice"] = serde_json::json!("auto");
@@ -572,6 +580,45 @@ impl Provider for OpenRouterProvider {
         if let Some(obj) = provider_obj {
             request["provider"] = obj;
         }
+
+        let message_items = request
+            .get("messages")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let tools_value = request.get("tools").cloned();
+        let system_value = message_items
+            .first()
+            .filter(|message| message.get("role").and_then(|role| role.as_str()) == Some("system"))
+            .cloned();
+        let tool_count = tools_value
+            .as_ref()
+            .and_then(|value| value.as_array())
+            .map(|tools| tools.len())
+            .unwrap_or(0);
+        crate::provider::fingerprint::log_provider_canonical_input(
+            if self.supports_provider_features {
+                "openrouter"
+            } else {
+                "openai-compatible"
+            },
+            &model,
+            "chat_completions",
+            &request,
+            &message_items,
+            system_value.as_ref(),
+            tools_value.as_ref(),
+            Some(tool_count),
+            &[
+                ("cache_supported", cache_supported.to_string()),
+                ("cache_control_added", cache_control_added.to_string()),
+                ("thinking_enabled", format!("{:?}", thinking_enabled)),
+                (
+                    "provider_features",
+                    self.supports_provider_features.to_string(),
+                ),
+            ],
+        );
 
         // OpenRouter uses HTTPS/SSE transport only
         crate::logging::info("OpenRouter transport: HTTPS (SSE)");
@@ -648,6 +695,16 @@ impl Provider for OpenRouterProvider {
             // preserve the caller's model string exactly for custom endpoints.
             (trimmed.to_string(), None)
         };
+        if let Some(profile_id) = self.profile_id.as_deref()
+            && !crate::provider_catalog::openai_compatible_profile_model_supports_chat(
+                profile_id, &model_id,
+            )
+        {
+            anyhow::bail!(
+                "Model '{}' is listed by the provider catalog but is not currently usable for chat completions through this direct provider. Choose another model from `/model`.",
+                model_id
+            );
+        }
         if let Ok(mut current) = self.model.try_write() {
             *current = model_id.clone();
         } else {
@@ -669,6 +726,38 @@ impl Provider for OpenRouterProvider {
         Ok(())
     }
 
+    fn reasoning_effort(&self) -> Option<String> {
+        if !Self::profile_supports_reasoning_effort(self.profile_id.as_deref()) {
+            return None;
+        }
+        self.reasoning_effort
+            .try_read()
+            .ok()
+            .and_then(|effort| effort.clone())
+    }
+
+    fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+        if !Self::profile_supports_reasoning_effort(self.profile_id.as_deref()) {
+            anyhow::bail!(
+                "Reasoning effort is only supported for DeepSeek direct profiles on OpenAI-compatible providers"
+            );
+        }
+        let normalized = Self::normalize_reasoning_effort(effort);
+        let mut current = self.reasoning_effort.try_write().map_err(|_| {
+            anyhow::anyhow!("Cannot change reasoning effort while a request is in progress")
+        })?;
+        *current = normalized;
+        Ok(())
+    }
+
+    fn available_efforts(&self) -> Vec<&'static str> {
+        if Self::profile_supports_reasoning_effort(self.profile_id.as_deref()) {
+            vec!["none", "low", "medium", "high", "max"]
+        } else {
+            vec![]
+        }
+    }
+
     fn available_models(&self) -> Vec<&'static str> {
         // OpenRouter models are fetched dynamically from the API.
         // Static list is empty; use available_models_display for cached list.
@@ -676,6 +765,7 @@ impl Provider for OpenRouterProvider {
     }
 
     fn available_models_display(&self) -> Vec<String> {
+        let finalize = |models: Vec<String>| self.filter_profile_chat_supported_models(models);
         let with_current_model = |mut models: Vec<String>| {
             let current = self.model();
             if !current.trim().is_empty() && !models.iter().any(|model| model == &current) {
@@ -684,7 +774,11 @@ impl Provider for OpenRouterProvider {
             models
         };
 
+        let should_merge_static_models = self.should_merge_static_models_with_live_catalog();
         let merge_static_models = |mut models: Vec<String>| {
+            if !should_merge_static_models {
+                return with_current_model(models);
+            }
             for model in &self.static_models {
                 if !model.trim().is_empty() && !models.iter().any(|existing| existing == model) {
                     models.push(model.clone());
@@ -695,14 +789,14 @@ impl Provider for OpenRouterProvider {
 
         if !self.supports_model_catalog {
             if !self.static_models.is_empty() {
-                return with_current_model(self.static_models.clone());
+                return finalize(with_current_model(self.static_models.clone()));
             }
             let model = self.model();
-            return if model.trim().is_empty() {
+            return finalize(if model.trim().is_empty() {
                 Vec::new()
             } else {
                 vec![model]
-            };
+            });
         }
 
         if let Ok(cache) = self.models_cache.try_read()
@@ -715,10 +809,12 @@ impl Provider for OpenRouterProvider {
             {
                 self.maybe_schedule_model_catalog_refresh(cache_age, "display memory cache");
             }
-            return merge_static_models(cache.models.iter().map(|m| m.id.clone()).collect());
+            return finalize(merge_static_models(
+                cache.models.iter().map(|m| m.id.clone()).collect(),
+            ));
         }
 
-        if let Some(cache_entry) = load_disk_cache_entry() {
+        if let Some(cache_entry) = self.load_usable_model_disk_cache_entry() {
             let cache_age = current_unix_secs()
                 .map(|now| now.saturating_sub(cache_entry.cached_at))
                 .unwrap_or(0);
@@ -728,7 +824,9 @@ impl Provider for OpenRouterProvider {
                 cache.cached_at = Some(cache_entry.cached_at);
             }
             self.maybe_schedule_model_catalog_refresh(cache_age, "display disk cache");
-            return merge_static_models(cache_entry.models.into_iter().map(|m| m.id).collect());
+            return finalize(merge_static_models(
+                cache_entry.models.into_iter().map(|m| m.id).collect(),
+            ));
         }
 
         // No memory or disk catalog yet. This commonly happens immediately after
@@ -741,15 +839,15 @@ impl Provider for OpenRouterProvider {
         self.maybe_schedule_model_catalog_refresh(u64::MAX, "display cache miss");
 
         if !self.static_models.is_empty() {
-            return with_current_model(self.static_models.clone());
+            return finalize(with_current_model(self.static_models.clone()));
         }
 
         let model = self.model();
-        if model.trim().is_empty() {
+        finalize(if model.trim().is_empty() {
             Vec::new()
         } else {
             vec![model]
-        }
+        })
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
@@ -757,41 +855,45 @@ impl Provider for OpenRouterProvider {
     }
 
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
-        let provider_label = self
-            .profile_id
-            .as_deref()
-            .and_then(openai_compatible_profile_by_id)
-            .map(|profile| profile.display_name.to_string())
+        let (provider_label, api_method, detail) = self
+            .direct_openai_compatible_route_parts()
             .unwrap_or_else(|| {
-                if self.supports_provider_features {
-                    "OpenRouter".to_string()
-                } else {
-                    "OpenAI-compatible".to_string()
-                }
+                (
+                    "OpenRouter".to_string(),
+                    "openrouter".to_string(),
+                    String::new(),
+                )
             });
-        let api_method = if self.supports_provider_features {
-            "openrouter".to_string()
-        } else if let Some(profile_id) = self.profile_id.as_deref() {
-            format!("openai-compatible:{}", profile_id)
-        } else {
-            "openai-compatible".to_string()
-        };
-        let detail = if self.supports_provider_features {
-            String::new()
-        } else {
-            self.api_base.clone()
-        };
+        let live_model_ids = self.cached_live_model_ids_for_display();
+        let static_model_ids: HashSet<String> = self.static_models.iter().cloned().collect();
+        let is_direct_profile = self.profile_id.is_some();
 
         self.available_models_display()
             .into_iter()
             .filter(|model| crate::provider::is_listable_model_name(model))
-            .map(|model| crate::provider::ModelRoute {
-                model,
-                provider: provider_label.clone(),
-                api_method: api_method.clone(),
-                available: true,
-                detail: detail.clone(),
-                cheapness: None,
+            .map(|model| {
+                let fallback_not_live = is_direct_profile
+                    && live_model_ids
+                        .as_ref()
+                        .map(|live| !live.contains(&model))
+                        .unwrap_or_else(|| static_model_ids.contains(&model));
+                let route_detail = if fallback_not_live {
+                    if detail.trim().is_empty() {
+                        "fallback: static provider model list".to_string()
+                    } else {
+                        format!("{}; fallback: static provider model list", detail)
+                    }
+                } else {
+                    detail.clone()
+                };
+                crate::provider::ModelRoute {
+                    model,
+                    provider: provider_label.clone(),
+                    api_method: api_method.clone(),
+                    available: true,
+                    detail: route_detail,
+                    cheapness: None,
+                }
             })
             .collect()
     }
@@ -897,6 +999,7 @@ impl Provider for OpenRouterProvider {
             model: Arc::new(RwLock::new(
                 self.model.try_read().map(|m| m.clone()).unwrap_or_default(),
             )),
+            reasoning_effort: Arc::new(RwLock::new(self.reasoning_effort())),
             api_base: self.api_base.clone(),
             auth: self.auth.clone(),
             supports_provider_features: self.supports_provider_features,

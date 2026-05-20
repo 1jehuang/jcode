@@ -165,7 +165,7 @@ pub fn is_browser_command(command: &str) -> bool {
 }
 
 pub fn is_setup_complete() -> bool {
-    setup_marker_path().exists() && browser_binary_path().exists()
+    setup_marker_path().exists() && browser_binary_path().exists() && host_binary_path().exists()
 }
 
 fn mark_setup_complete() -> Result<()> {
@@ -219,10 +219,13 @@ pub async fn ensure_browser_setup() -> Result<String> {
         log.push_str("Browser bridge is not installed yet. Starting setup...\n");
     }
 
-    // Step 1: Check/download browser CLI binary
-    if !browser_binary_path().exists() || (initial_status.responding && !initial_status.compatible)
+    // Step 1: Check/download browser bridge assets
+    if !browser_binary_path().exists()
+        || !host_binary_path().exists()
+        || !xpi_path().exists()
+        || (initial_status.responding && !initial_status.compatible)
     {
-        log.push_str("[1/3] Downloading browser CLI... ");
+        log.push_str("[1/3] Downloading browser bridge assets... ");
         match download_browser_binary().await {
             Ok(()) => log.push_str("done\n"),
             Err(e) => {
@@ -363,10 +366,10 @@ pub async fn ensure_browser_setup() -> Result<String> {
 
 async fn download_browser_binary() -> Result<()> {
     let asset_name = get_platform_asset_name();
+    let client = crate::provider::shared_http_client();
 
-    let release_info: serde_json::Value = reqwest::Client::new()
+    let release_info: serde_json::Value = client
         .get(GITHUB_API_LATEST)
-        .header("User-Agent", "jcode")
         .send()
         .await?
         .json()
@@ -406,12 +409,25 @@ async fn download_browser_binary() -> Result<()> {
     let host_asset_name = get_host_asset_name();
     let host_asset = assets
         .iter()
-        .find(|a| a["name"].as_str() == Some(&host_asset_name));
+        .find(|a| a["name"].as_str() == Some(&host_asset_name))
+        .with_context(|| {
+            let available = assets
+                .iter()
+                .filter_map(|a| a["name"].as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "No native host asset found for platform: {}. Expected release asset '{}' alongside '{}'. Available assets: {}",
+                std::env::consts::OS,
+                host_asset_name,
+                asset_name,
+                available
+            )
+        })?;
 
     // Download browser CLI
-    let browser_bytes = reqwest::Client::new()
+    let browser_bytes = client
         .get(download_url)
-        .header("User-Agent", "jcode")
         .send()
         .await?
         .bytes()
@@ -422,9 +438,8 @@ async fn download_browser_binary() -> Result<()> {
     write_file_atomically(&bin_path, &browser_bytes, true)?;
 
     // Download XPI
-    let xpi_bytes = reqwest::Client::new()
+    let xpi_bytes = client
         .get(xpi_url)
-        .header("User-Agent", "jcode")
         .send()
         .await?
         .bytes()
@@ -433,22 +448,20 @@ async fn download_browser_binary() -> Result<()> {
 
     write_file_atomically(&xpi_path(), &xpi_bytes, false)?;
 
-    // Download host binary if available
-    if let Some(host) = host_asset
-        && let Some(host_url) = host["browser_download_url"].as_str()
-    {
-        let host_bytes = reqwest::Client::new()
-            .get(host_url)
-            .header("User-Agent", "jcode")
-            .send()
-            .await?
-            .bytes()
-            .await
-            .context("Failed to download host binary")?;
+    // Download host binary
+    let host_url = host_asset["browser_download_url"]
+        .as_str()
+        .context("No host download URL")?;
+    let host_bytes = client
+        .get(host_url)
+        .send()
+        .await?
+        .bytes()
+        .await
+        .context("Failed to download host binary")?;
 
-        let host_path = host_binary_path();
-        write_file_atomically(&host_path, &host_bytes, true)?;
-    }
+    let host_path = host_binary_path();
+    write_file_atomically(&host_path, &host_bytes, true)?;
 
     Ok(())
 }
@@ -521,10 +534,6 @@ fn get_platform_asset_name() -> String {
 }
 
 fn get_host_asset_name() -> String {
-    // The host binary isn't shipped as a separate release asset yet
-    // It's built from the same codebase, so we'd need to add it to releases
-    // For now, fall back to building from source or using the browser binary
-    // with a `host` subcommand if available
     let base = get_platform_asset_name();
     base.replace("browser-", "host-")
 }
@@ -540,6 +549,8 @@ fn install_native_host_manifest() -> Result<bool> {
         && let Some(existing_path) = existing["path"].as_str()
         && std::path::Path::new(existing_path).exists()
     {
+        #[cfg(target_os = "windows")]
+        register_windows_native_host_manifest(&manifest_path)?;
         return Ok(false);
     }
 
@@ -779,7 +790,9 @@ async fn install_extension() -> Result<String> {
     }
 
     // Try to open Firefox with the XPI to trigger install prompt
-    let xpi_url = format!("file://{}", xpi.to_string_lossy());
+    let xpi_url = url::Url::from_file_path(&xpi)
+        .map_err(|_| anyhow::anyhow!("Could not convert XPI path to file URL: {}", xpi.display()))?
+        .to_string();
 
     #[cfg(target_os = "linux")]
     {

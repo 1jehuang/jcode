@@ -119,6 +119,7 @@ fn file_activity_summary_line(operation: &str, summary: Option<&str>) -> String 
 fn format_file_activity_message(
     path: &str,
     operation: &str,
+    intent: Option<&str>,
     summary: Option<&str>,
     detail: Option<&str>,
 ) -> String {
@@ -127,6 +128,11 @@ fn format_file_activity_message(
         compact_swarm_path(path),
         file_activity_summary_line(operation, summary)
     );
+
+    if let Some(intent) = intent.map(str::trim).filter(|intent| !intent.is_empty()) {
+        message.push_str("\n\nIntent: ");
+        message.push_str(intent);
+    }
 
     if let Some(detail) = detail.map(str::trim).filter(|detail| !detail.is_empty()) {
         message.push_str("\n\n```text\n");
@@ -228,6 +234,7 @@ pub(super) fn present_swarm_notification(
         NotificationType::FileConflict {
             path,
             operation,
+            intent,
             summary,
             detail,
         } => SwarmNotificationPresentation {
@@ -235,6 +242,7 @@ pub(super) fn present_swarm_notification(
             message: format_file_activity_message(
                 path,
                 operation,
+                intent.as_deref(),
                 summary.as_deref(),
                 detail.as_deref(),
             ),
@@ -357,6 +365,7 @@ mod tests {
             &NotificationType::FileConflict {
                 path: "/home/jeremy/jcode/src/tool/communicate.rs".to_string(),
                 operation: "edited".to_string(),
+                intent: Some("wire swarm intent display".to_string()),
                 summary: Some("edited lines 323-348 (1 occurrence)".to_string()),
                 detail: Some("323- old line\n323+ new line".to_string()),
             },
@@ -373,6 +382,11 @@ mod tests {
             presentation
                 .message
                 .contains("Edited lines 323-348 (1 occurrence)")
+        );
+        assert!(
+            presentation
+                .message
+                .contains("Intent: wire swarm intent display")
         );
         assert!(
             presentation

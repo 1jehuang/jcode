@@ -61,6 +61,7 @@ mod tests {
         assert!(help.contains("TESTER COMMANDS"));
         assert!(help.contains("message_async:<text>"));
         assert!(help.contains("client:frame"));
+        assert!(help.contains("client:picker"));
     }
 
     #[test]

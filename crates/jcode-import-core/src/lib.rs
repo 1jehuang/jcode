@@ -359,10 +359,8 @@ pub fn parse_rfc3339_json(value: Option<&serde_json::Value>) -> Option<DateTime<
 pub fn extract_external_text_from_json(value: &serde_json::Value, include_tools: bool) -> String {
     fn visit(value: &serde_json::Value, include_tools: bool, out: &mut Vec<String>) {
         match value {
-            serde_json::Value::String(text) => {
-                if !text.trim().is_empty() {
-                    out.push(text.trim().to_string());
-                }
+            serde_json::Value::String(text) if !text.trim().is_empty() => {
+                out.push(text.trim().to_string());
             }
             serde_json::Value::Array(items) => {
                 for item in items {
@@ -789,10 +787,8 @@ fn truncate_title_text(text: &str, max_chars: usize) -> String {
 pub fn extract_text_from_json_value(value: &serde_json::Value) -> String {
     fn visit(value: &serde_json::Value, out: &mut Vec<String>) {
         match value {
-            serde_json::Value::String(text) => {
-                if !text.trim().is_empty() {
-                    out.push(text.trim().to_string());
-                }
+            serde_json::Value::String(text) if !text.trim().is_empty() => {
+                out.push(text.trim().to_string());
             }
             serde_json::Value::Array(items) => {
                 for item in items {
@@ -828,13 +824,16 @@ pub fn extract_text_from_json_value(value: &serde_json::Value) -> String {
 }
 
 pub fn truncate_title(s: &str) -> String {
-    let trimmed = s.trim();
+    let trimmed = s.lines().next().unwrap_or_default().trim();
     const MAX_CHARS: usize = 80;
     if trimmed.chars().count() <= MAX_CHARS {
         trimmed.to_string()
     } else {
-        let mut out = trimmed.chars().take(MAX_CHARS).collect::<String>();
-        out.push('…');
+        let mut out = trimmed
+            .chars()
+            .take(MAX_CHARS.saturating_sub(3))
+            .collect::<String>();
+        out.push_str("...");
         out
     }
 }

@@ -212,8 +212,10 @@ fn local_add_provider_message_does_not_retain_local_provider_copy() {
 fn remote_add_provider_message_retains_remote_provider_copy() {
     let mut app = create_test_app();
     app.is_remote = true;
+    app.ensure_provider_messages_hydrated();
+    let before = app.messages.len();
     app.add_provider_message(Message::user("hello"));
-    assert_eq!(app.messages.len(), 1);
+    assert_eq!(app.messages.len(), before + 1);
 }
 
 #[test]

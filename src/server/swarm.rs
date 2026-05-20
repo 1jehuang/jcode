@@ -84,6 +84,16 @@ pub(super) fn now_unix_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn log_swarm_lifecycle(phase: &str, fields: Vec<(&str, String)>) {
+    crate::logging::event_info(
+        "SWARM_LIFECYCLE",
+        Vec::from([("phase", phase.to_string())])
+            .into_iter()
+            .chain(fields)
+            .collect::<Vec<_>>(),
+    );
+}
+
 pub(super) fn swarm_task_heartbeat_interval() -> Duration {
     Duration::from_secs(configured_positive_u64(
         "JCODE_SWARM_TASK_HEARTBEAT_SECS",
@@ -423,6 +433,8 @@ pub(super) async fn broadcast_swarm_plan_with_previous(
         return;
     }
 
+    let item_count = items.len();
+    let reason_label = reason.clone().unwrap_or_else(|| "unspecified".to_string());
     let event = ServerEvent::SwarmPlan {
         swarm_id: swarm_id.to_string(),
         version,
@@ -433,11 +445,26 @@ pub(super) async fn broadcast_swarm_plan_with_previous(
     };
 
     let members = swarm_members.read().await;
+    let participant_count = participants.len();
+    let mut delivered_count = 0usize;
     for sid in participants {
         if let Some(member) = members.get(&sid) {
-            let _ = member.event_tx.send(event.clone());
+            if member.event_tx.send(event.clone()).is_ok() {
+                delivered_count += 1;
+            }
         }
     }
+    log_swarm_lifecycle(
+        "plan_broadcast",
+        vec![
+            ("swarm_id", swarm_id.to_string()),
+            ("version", version.to_string()),
+            ("item_count", item_count.to_string()),
+            ("participant_count", participant_count.to_string()),
+            ("delivered_count", delivered_count.to_string()),
+            ("reason", reason_label),
+        ],
+    );
 }
 
 pub(super) async fn rename_plan_participant(
@@ -509,6 +536,14 @@ pub(super) async fn remove_session_from_swarm(
     swarm_coordinators: &Arc<RwLock<HashMap<String, String>>>,
     swarm_plans: &Arc<RwLock<HashMap<String, VersionedPlan>>>,
 ) {
+    let started = Instant::now();
+    log_swarm_lifecycle(
+        "member_remove_start",
+        vec![
+            ("session_id", session_id.to_string()),
+            ("swarm_id", swarm_id.to_string()),
+        ],
+    );
     remove_plan_participant(swarm_id, session_id, swarm_plans).await;
 
     {
@@ -529,6 +564,7 @@ pub(super) async fn remove_session_from_swarm(
             .unwrap_or(false)
     };
 
+    let mut elected_coordinator = None;
     if was_coordinator {
         let new_coordinator = {
             let swarms = swarms_by_id.read().await;
@@ -555,6 +591,7 @@ pub(super) async fn remove_session_from_swarm(
         }
 
         if let Some(new_id) = new_coordinator {
+            elected_coordinator = Some(new_id.clone());
             {
                 let mut members = swarm_members.write().await;
                 if let Some(member) = members.get_mut(&new_id) {
@@ -605,6 +642,26 @@ pub(super) async fn remove_session_from_swarm(
         remove_persisted_swarm_state_for(swarm_id, &swarm_state).await;
     }
 
+    let remaining_member_count = swarms_by_id
+        .read()
+        .await
+        .get(swarm_id)
+        .map(|members| members.len())
+        .unwrap_or_default();
+    log_swarm_lifecycle(
+        "member_remove_done",
+        vec![
+            ("session_id", session_id.to_string()),
+            ("swarm_id", swarm_id.to_string()),
+            ("was_coordinator", was_coordinator.to_string()),
+            (
+                "new_coordinator_session_id",
+                elected_coordinator.unwrap_or_else(|| "none".to_string()),
+            ),
+            ("remaining_member_count", remaining_member_count.to_string()),
+            ("elapsed_ms", started.elapsed().as_millis().to_string()),
+        ],
+    );
     broadcast_swarm_status(swarm_id, swarm_members, swarms_by_id).await;
 }
 
@@ -706,6 +763,7 @@ pub(super) async fn update_member_status_with_report(
     swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
 ) {
     let completion_report = normalize_completion_report(completion_report);
+    let detail_present = detail.is_some();
     let (
         swarm_id,
         agent_name,
@@ -751,6 +809,28 @@ pub(super) async fn update_member_status_with_report(
         if !member_changed {
             return;
         }
+
+        log_swarm_lifecycle(
+            "member_status_updated",
+            vec![
+                ("session_id", session_id.to_string()),
+                ("swarm_id", id.clone()),
+                ("old_status", old_status.clone()),
+                ("new_status", status.to_string()),
+                ("status_changed", status_changed.to_string()),
+                ("detail_present", detail_present.to_string()),
+                (
+                    "completion_report_present",
+                    completion_report.is_some().to_string(),
+                ),
+                (
+                    "report_back_to_session_id",
+                    report_back_to_session_id
+                        .clone()
+                        .unwrap_or_else(|| "none".to_string()),
+                ),
+            ],
+        );
 
         if status_changed
             && let (Some(history), Some(counter), Some(tx)) =
@@ -828,6 +908,7 @@ pub(super) async fn run_swarm_task(
     subagent_type: &str,
     prompt: &str,
 ) -> Result<String> {
+    let started = Instant::now();
     let (provider, registry, session_id, working_dir, coordinator_model) = {
         let agent = agent.lock().await;
         (
@@ -838,15 +919,28 @@ pub(super) async fn run_swarm_task(
             agent.provider_model(),
         )
     };
+    let parent_session_id = session_id.clone();
     let mut session = Session::create(
         Some(session_id),
         Some(format!("{} (@{} swarm)", description, subagent_type)),
     );
+    let child_session_id = session.id.clone();
     session.model = Some(coordinator_model);
     if let Some(dir) = working_dir {
         session.working_dir = Some(dir.display().to_string());
     }
     session.save()?;
+
+    log_swarm_lifecycle(
+        "task_start",
+        vec![
+            ("parent_session_id", parent_session_id.clone()),
+            ("child_session_id", child_session_id.clone()),
+            ("subagent_type", subagent_type.to_string()),
+            ("description_chars", description.chars().count().to_string()),
+            ("prompt_chars", prompt.chars().count().to_string()),
+        ],
+    );
 
     let mut allowed: HashSet<String> = registry.tool_names().await.into_iter().collect();
     for blocked in ["subagent", "task", "todo", "todowrite", "todoread"] {
@@ -854,11 +948,43 @@ pub(super) async fn run_swarm_task(
     }
 
     let mut worker = Agent::new_with_session(provider, registry, session, Some(allowed));
-    let output = worker.run_once_capture(prompt).await?;
-    Ok(output)
+    match worker.run_once_capture(prompt).await {
+        Ok(output) => {
+            log_swarm_lifecycle(
+                "task_done",
+                vec![
+                    ("parent_session_id", parent_session_id),
+                    ("child_session_id", child_session_id),
+                    ("subagent_type", subagent_type.to_string()),
+                    ("output_chars", output.chars().count().to_string()),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+            Ok(output)
+        }
+        Err(error) => {
+            crate::logging::event_warn(
+                "SWARM_LIFECYCLE",
+                vec![
+                    ("phase", "task_error".to_string()),
+                    ("parent_session_id", parent_session_id),
+                    ("child_session_id", child_session_id),
+                    ("subagent_type", subagent_type.to_string()),
+                    ("error", error.to_string()),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+            Err(error)
+        }
+    }
 }
 
 pub(super) async fn run_swarm_message(agent: Arc<Mutex<Agent>>, message: &str) -> Result<String> {
+    let started = Instant::now();
+    log_swarm_lifecycle(
+        "message_start",
+        vec![("message_chars", message.chars().count().to_string())],
+    );
     let working_dir = {
         let agent = agent.lock().await;
         agent.working_dir().map(|dir| dir.to_string())
@@ -887,6 +1013,13 @@ No extra text.\n\nRequest:\n{message}"
             subagent_type: Some("general".to_string()),
         });
     }
+    log_swarm_lifecycle(
+        "message_plan_done",
+        vec![
+            ("task_count", tasks.len().to_string()),
+            ("plan_chars", plan_text.chars().count().to_string()),
+        ],
+    );
 
     let task_futures = tasks.iter().map(|task| {
         let agent = agent.clone();
@@ -921,6 +1054,15 @@ No extra text.\n\nRequest:\n{message}"
         let mut agent = agent.lock().await;
         agent.run_once_capture(&integration_prompt).await?
     };
+
+    log_swarm_lifecycle(
+        "message_done",
+        vec![
+            ("task_count", task_outputs.len().to_string()),
+            ("output_chars", final_output.chars().count().to_string()),
+            ("elapsed_ms", started.elapsed().as_millis().to_string()),
+        ],
+    );
 
     Ok(final_output)
 }

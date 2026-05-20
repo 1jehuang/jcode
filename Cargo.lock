@@ -3260,7 +3260,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "jcode"
-version = "0.11.4"
+version = "0.12.3"
 dependencies = [
  "agentgrep",
  "anyhow",
@@ -3456,15 +3456,18 @@ dependencies = [
 name = "jcode-desktop"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "arboard",
  "base64 0.22.1",
  "bytemuck",
  "glyphon",
  "image",
+ "jcode-tui-messages",
  "libc",
  "pollster",
  "pulldown-cmark",
+ "serde",
  "serde_json",
  "wgpu",
  "whoami",
@@ -3788,6 +3791,7 @@ version = "0.1.0"
 dependencies = [
  "jcode-config-types",
  "jcode-message-types",
+ "jcode-session-types",
  "jcode-tui-markdown",
  "ratatui",
  "serde_json",

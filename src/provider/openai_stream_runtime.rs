@@ -60,6 +60,16 @@ pub(super) async fn stream_response(
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<(), OpenAIStreamFailure> {
     use crate::message::ConnectionPhase;
+    let request_model = openai_request_model(&request);
+    let stream_started_at = Instant::now();
+    log_openai_stream_lifecycle(
+        crate::logging::LogLevel::Info,
+        "https_request_start",
+        vec![
+            ("model", request_model.clone()),
+            ("transport", "https".to_string()),
+        ],
+    );
     let usage_snapshot = crate::usage::get_openai_usage_sync();
     crate::logging::info(&format!(
         "OpenAI limit diag: starting fresh HTTPS request usage=({})",
@@ -102,6 +112,15 @@ pub(super) async fn stream_response(
         connect_ms,
         response.status()
     ));
+    log_openai_stream_lifecycle(
+        crate::logging::LogLevel::Info,
+        "https_connected",
+        vec![
+            ("model", request_model.clone()),
+            ("status", response.status().as_u16().to_string()),
+            ("connect_ms", connect_ms.to_string()),
+        ],
+    );
     if response.status().is_success() && usage_snapshot.exhausted() {
         crate::logging::warn(&format!(
             "OpenAI limit diag: fresh HTTPS request accepted while local usage indicates exhausted usage=({})",
@@ -118,6 +137,25 @@ pub(super) async fn stream_response(
             .and_then(|s| s.parse::<u64>().ok());
 
         let body = crate::util::http_error_body(response, "HTTP error").await;
+        log_openai_stream_lifecycle(
+            crate::logging::LogLevel::Warn,
+            "https_http_error",
+            vec![
+                ("model", request_model.clone()),
+                ("status", status.as_u16().to_string()),
+                (
+                    "retry_after_secs",
+                    retry_after
+                        .map(|seconds| seconds.to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                ),
+                ("body", body.clone()),
+                (
+                    "elapsed_ms",
+                    stream_started_at.elapsed().as_millis().to_string(),
+                ),
+            ],
+        );
 
         if let Some(reason) = classify_unavailable_model_error(status, &body)
             && let Some(model_name) = request.get("model").and_then(|m| m.as_str())
@@ -176,6 +214,18 @@ pub(super) async fn stream_response(
                         );
                     }
                     if is_retryable_error(&message.to_lowercase()) {
+                        log_openai_stream_lifecycle(
+                            crate::logging::LogLevel::Warn,
+                            "https_stream_retryable_error",
+                            vec![
+                                ("model", request_model.clone()),
+                                ("error", message.clone()),
+                                (
+                                    "elapsed_ms",
+                                    stream_started_at.elapsed().as_millis().to_string(),
+                                ),
+                            ],
+                        );
                         return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
                             "Stream error: {}",
                             message
@@ -184,10 +234,34 @@ pub(super) async fn stream_response(
                 }
                 if tx.send(Ok(event)).await.is_err() {
                     // Receiver dropped, stop streaming
+                    log_openai_stream_lifecycle(
+                        crate::logging::LogLevel::Warn,
+                        "consumer_dropped",
+                        vec![
+                            ("model", request_model.clone()),
+                            ("transport", "https".to_string()),
+                            (
+                                "elapsed_ms",
+                                stream_started_at.elapsed().as_millis().to_string(),
+                            ),
+                        ],
+                    );
                     return Ok(());
                 }
             }
             Err(e) => {
+                log_openai_stream_lifecycle(
+                    crate::logging::LogLevel::Warn,
+                    "https_stream_error",
+                    vec![
+                        ("model", request_model.clone()),
+                        ("error", e.to_string()),
+                        (
+                            "elapsed_ms",
+                            stream_started_at.elapsed().as_millis().to_string(),
+                        ),
+                    ],
+                );
                 return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
                     "Stream error: {}",
                     e
@@ -197,11 +271,33 @@ pub(super) async fn stream_response(
     }
 
     if !saw_message_end {
+        log_openai_stream_lifecycle(
+            crate::logging::LogLevel::Warn,
+            "https_eof_before_message_end",
+            vec![
+                ("model", request_model.clone()),
+                (
+                    "elapsed_ms",
+                    stream_started_at.elapsed().as_millis().to_string(),
+                ),
+            ],
+        );
         return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
             "OpenAI HTTPS stream ended before message completion marker"
         )));
     }
 
+    log_openai_stream_lifecycle(
+        crate::logging::LogLevel::Info,
+        "https_stream_complete",
+        vec![
+            ("model", request_model),
+            (
+                "elapsed_ms",
+                stream_started_at.elapsed().as_millis().to_string(),
+            ),
+        ],
+    );
     Ok(())
 }
 
@@ -228,16 +324,39 @@ pub(super) async fn try_persistent_ws_continuation(
     input_item_count: usize,
     tx: &mpsc::Sender<Result<StreamEvent>>,
 ) -> PersistentWsResult {
+    let request_model = openai_request_model(request);
     let mut guard = persistent_ws.lock().await;
     let state = match guard.as_mut() {
         Some(s) => s,
-        None => return PersistentWsResult::NotAvailable,
+        None => {
+            log_openai_stream_lifecycle(
+                crate::logging::LogLevel::Info,
+                "persistent_reuse_unavailable_detail",
+                vec![
+                    ("model", request_model.clone()),
+                    ("reason", "no_state".to_string()),
+                ],
+            );
+            return PersistentWsResult::NotAvailable;
+        }
     };
 
     // Check connection age - reconnect before the 60-min server limit
     if state.connected_at.elapsed() >= Duration::from_secs(WEBSOCKET_PERSISTENT_MAX_AGE_SECS) {
         crate::logging::info("Persistent WS connection too old; forcing reconnect");
         *guard = None;
+        log_openai_stream_lifecycle(
+            crate::logging::LogLevel::Info,
+            "persistent_state_reset",
+            vec![
+                ("model", request_model.clone()),
+                ("reason", "max_age".to_string()),
+                (
+                    "max_age_secs",
+                    WEBSOCKET_PERSISTENT_MAX_AGE_SECS.to_string(),
+                ),
+            ],
+        );
         return PersistentWsResult::NotAvailable;
     }
 
@@ -250,6 +369,14 @@ pub(super) async fn try_persistent_ws_continuation(
         Ok(false) => {
             crate::logging::info("Persistent WS healthcheck requested reconnect before reuse");
             *guard = None;
+            log_openai_stream_lifecycle(
+                crate::logging::LogLevel::Info,
+                "persistent_state_reset",
+                vec![
+                    ("model", request_model.clone()),
+                    ("reason", "healthcheck_reconnect".to_string()),
+                ],
+            );
             return PersistentWsResult::NotAvailable;
         }
         Err(err) => {
@@ -258,6 +385,15 @@ pub(super) async fn try_persistent_ws_continuation(
                 err
             ));
             *guard = None;
+            log_openai_stream_lifecycle(
+                crate::logging::LogLevel::Warn,
+                "persistent_state_reset",
+                vec![
+                    ("model", request_model.clone()),
+                    ("reason", "healthcheck_failed".to_string()),
+                    ("error", err.to_string()),
+                ],
+            );
             return PersistentWsResult::NotAvailable;
         }
     }
@@ -266,10 +402,21 @@ pub(super) async fn try_persistent_ws_continuation(
     // If the input_item_count is less than or equal to last time, the conversation
     // was reset (e.g., after compaction) - we need a fresh connection.
     if input_item_count <= state.last_input_item_count {
+        let last_input_item_count = state.last_input_item_count;
         crate::logging::info(&format!(
             "Input items didn't grow ({} <= {}); conversation may have been compacted, reconnecting",
-            input_item_count, state.last_input_item_count
+            input_item_count, last_input_item_count
         ));
+        log_openai_stream_lifecycle(
+            crate::logging::LogLevel::Info,
+            "persistent_state_reset",
+            vec![
+                ("model", request_model.clone()),
+                ("reason", "input_not_growing".to_string()),
+                ("input_item_count", input_item_count.to_string()),
+                ("last_input_item_count", last_input_item_count.to_string()),
+            ],
+        );
         *guard = None;
         return PersistentWsResult::NotAvailable;
     }
@@ -279,6 +426,14 @@ pub(super) async fn try_persistent_ws_continuation(
     if incremental_items.is_empty() {
         crate::logging::info("No incremental items to send; need fresh request");
         *guard = None;
+        log_openai_stream_lifecycle(
+            crate::logging::LogLevel::Info,
+            "persistent_state_reset",
+            vec![
+                ("model", request_model.clone()),
+                ("reason", "empty_incremental_items".to_string()),
+            ],
+        );
         return PersistentWsResult::NotAvailable;
     }
 
@@ -299,6 +454,31 @@ pub(super) async fn try_persistent_ws_continuation(
         state.last_input_item_count,
         input_item_count,
     ));
+    log_openai_stream_lifecycle(
+        crate::logging::LogLevel::Info,
+        "persistent_reuse_start",
+        vec![
+            ("model", request_model.clone()),
+            ("transport", "websocket".to_string()),
+            ("input_item_count", input_item_count.to_string()),
+            (
+                "last_input_item_count",
+                state.last_input_item_count.to_string(),
+            ),
+            (
+                "incremental_item_count",
+                incremental_items.len().to_string(),
+            ),
+            (
+                "previous_response_id_present",
+                (!previous_response_id.is_empty()).to_string(),
+            ),
+            (
+                "tool_callback",
+                (incremental_stats.tool_callback_count() > 0).to_string(),
+            ),
+        ],
+    );
 
     // Build the incremental request - only include new items + previous_response_id
     let mut continuation_request = serde_json::json!({
@@ -334,6 +514,58 @@ pub(super) async fn try_persistent_ws_continuation(
     }
     continuation_request["store"] = serde_json::json!(false);
     continuation_request["parallel_tool_calls"] = serde_json::json!(false);
+
+    let continuation_tools = continuation_request
+        .get("tools")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let continuation_instructions = continuation_request.get("instructions").cloned();
+    let continuation_tool_count = continuation_tools
+        .as_array()
+        .map(|tools| tools.len())
+        .unwrap_or(0);
+    let model_for_fingerprint = continuation_request
+        .get("model")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let continuation_payload = serde_json::json!({
+        "type": continuation_request.get("type"),
+        "previous_response_id_hash": crate::provider::fingerprint::stable_hash_str(&previous_response_id),
+        "model": continuation_request.get("model"),
+        "instructions": continuation_request.get("instructions"),
+        "input": &incremental_items,
+        "tools": continuation_request.get("tools"),
+        "tool_choice": continuation_request.get("tool_choice"),
+        "parallel_tool_calls": continuation_request.get("parallel_tool_calls"),
+        "reasoning": continuation_request.get("reasoning"),
+        "context_management": continuation_request.get("context_management"),
+        "include": continuation_request.get("include"),
+    });
+    crate::provider::fingerprint::log_provider_canonical_input(
+        "openai",
+        model_for_fingerprint,
+        "openai_responses_ws_delta",
+        &continuation_payload,
+        &incremental_items,
+        continuation_instructions.as_ref(),
+        Some(&continuation_tools),
+        Some(continuation_tool_count),
+        &[
+            (
+                "previous_response_id_present",
+                (!previous_response_id.is_empty()).to_string(),
+            ),
+            ("input_item_count", input_item_count.to_string()),
+            (
+                "last_input_item_count",
+                state.last_input_item_count.to_string(),
+            ),
+            (
+                "incremental_item_count",
+                incremental_items.len().to_string(),
+            ),
+        ],
+    );
 
     let request_text = match serde_json::to_string(&continuation_request) {
         Ok(t) => t,
@@ -537,11 +769,36 @@ pub(super) async fn try_persistent_ws_continuation(
             state.message_count,
             incremental_stats.log_fields(),
         ));
+        log_openai_stream_lifecycle(
+            crate::logging::LogLevel::Info,
+            "persistent_reuse_stream_complete",
+            vec![
+                ("model", request_model),
+                ("transport", "websocket".to_string()),
+                ("chain_length", state.message_count.to_string()),
+                (
+                    "elapsed_ms",
+                    stream_started.elapsed().as_millis().to_string(),
+                ),
+            ],
+        );
         PersistentWsResult::Success
     } else {
         // Got response but no response_id - can't chain further
         crate::logging::warn("Persistent WS: no response_id in response; breaking chain");
         *guard = None;
+        log_openai_stream_lifecycle(
+            crate::logging::LogLevel::Warn,
+            "persistent_state_reset",
+            vec![
+                ("model", request_model),
+                ("reason", "missing_response_id".to_string()),
+                (
+                    "elapsed_ms",
+                    stream_started.elapsed().as_millis().to_string(),
+                ),
+            ],
+        );
         PersistentWsResult::Success
     }
 }
@@ -560,6 +817,19 @@ pub(super) async fn stream_response_websocket_persistent(
         .get("model")
         .and_then(|m| m.as_str())
         .map(|m| m.to_string());
+    let request_model_label = request_model
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let stream_started_at = Instant::now();
+    log_openai_stream_lifecycle(
+        crate::logging::LogLevel::Info,
+        "fresh_ws_request_start",
+        vec![
+            ("model", request_model_label.clone()),
+            ("transport", "websocket".to_string()),
+            ("input_item_count", input_item_count.to_string()),
+        ],
+    );
 
     let access_token = openai_access_token(&credentials).await?;
     let usage_snapshot = crate::usage::get_openai_usage_sync();
@@ -629,6 +899,14 @@ pub(super) async fn stream_response_websocket_persistent(
                 "WebSocket connection established in {}ms (persistent mode)",
                 connect_ms
             ));
+            log_openai_stream_lifecycle(
+                crate::logging::LogLevel::Info,
+                "fresh_ws_connected",
+                vec![
+                    ("model", request_model_label.clone()),
+                    ("connect_ms", connect_ms.to_string()),
+                ],
+            );
             (stream, response)
         }
         Err(err) if is_ws_upgrade_required(&err) => {
@@ -836,6 +1114,18 @@ pub(super) async fn stream_response_websocket_persistent(
                             }
                         }
                         if tx.send(Ok(event)).await.is_err() {
+                            log_openai_stream_lifecycle(
+                                crate::logging::LogLevel::Warn,
+                                "consumer_dropped",
+                                vec![
+                                    ("model", request_model_label.clone()),
+                                    ("transport", "websocket".to_string()),
+                                    (
+                                        "elapsed_ms",
+                                        stream_started_at.elapsed().as_millis().to_string(),
+                                    ),
+                                ],
+                            );
                             return Ok(());
                         }
                     }
@@ -860,6 +1150,18 @@ pub(super) async fn stream_response_websocket_persistent(
                             saw_response_completed = true;
                         }
                         if tx.send(Ok(event)).await.is_err() {
+                            log_openai_stream_lifecycle(
+                                crate::logging::LogLevel::Warn,
+                                "consumer_dropped",
+                                vec![
+                                    ("model", request_model_label.clone()),
+                                    ("transport", "websocket".to_string()),
+                                    (
+                                        "elapsed_ms",
+                                        stream_started_at.elapsed().as_millis().to_string(),
+                                    ),
+                                ],
+                            );
                             return Ok(());
                         }
                     }
@@ -908,6 +1210,19 @@ pub(super) async fn stream_response_websocket_persistent(
             resp_id,
             request_input_stats.log_fields(),
         ));
+        log_openai_stream_lifecycle(
+            crate::logging::LogLevel::Info,
+            "fresh_ws_stream_complete_saved",
+            vec![
+                ("model", request_model_label.clone()),
+                ("transport", "websocket".to_string()),
+                (
+                    "elapsed_ms",
+                    stream_started_at.elapsed().as_millis().to_string(),
+                ),
+                ("response_id_present", "true".to_string()),
+            ],
+        );
         *guard = Some(PersistentWsState {
             ws_stream,
             last_response_id: resp_id,
@@ -919,6 +1234,19 @@ pub(super) async fn stream_response_websocket_persistent(
     } else {
         crate::logging::info(
             "No response_id captured from WS stream; connection not saved for reuse",
+        );
+        log_openai_stream_lifecycle(
+            crate::logging::LogLevel::Warn,
+            "fresh_ws_stream_complete_not_saved",
+            vec![
+                ("model", request_model_label),
+                ("transport", "websocket".to_string()),
+                (
+                    "elapsed_ms",
+                    stream_started_at.elapsed().as_millis().to_string(),
+                ),
+                ("reason", "missing_response_id".to_string()),
+            ],
         );
     }
 

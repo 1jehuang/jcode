@@ -187,6 +187,7 @@ pub(crate) fn normalize_bitmap_text(text: &str) -> String {
     normalized.trim().to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn push_bitmap_text(
     vertices: &mut Vec<Vertex>,
     text: &str,

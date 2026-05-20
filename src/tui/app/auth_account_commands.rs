@@ -827,25 +827,23 @@ fn save_openai_compat_setting(app: &mut App, setting: OpenAiCompatSetting, value
 
 fn render_provider_settings_markdown(app: &App, provider_id: &str) -> String {
     let status = crate::auth::AuthStatus::check();
-    let validation = crate::auth::validation::load_all();
     let cfg = crate::config::Config::load();
     let Some(provider) = resolve_account_provider_descriptor(provider_id) else {
         return format!("Unknown provider `{}`.", provider_id);
     };
+    let assessment = status.assessment_for_provider(provider);
     let mut lines = vec![format!("**{}**\n", provider.display_name)];
-    lines.push(format!(
-        "- Status: **{:?}**",
-        status.state_for_provider(provider)
-    ));
+    lines.push(format!("- Status: **{:?}**", assessment.state));
     lines.push(format!(
         "- Auth: {} ({})",
         provider.auth_kind.label(),
-        status.method_detail_for_provider(provider)
+        assessment.method_detail.as_str()
     ));
     lines.push(format!(
         "- Validation: {}",
-        validation
-            .get(provider.id)
+        assessment
+            .last_validation
+            .as_ref()
             .map(crate::auth::validation::format_record_label)
             .unwrap_or_else(|| "not validated".to_string())
     ));
@@ -856,7 +854,6 @@ fn render_provider_settings_markdown(app: &App, provider_id: &str) -> String {
     ));
     lines.push(String::new());
 
-    let assessment = status.assessment_for_provider(provider);
     let recommended_actions = crate::auth::doctor::recommended_actions(provider, &assessment, None);
     if !recommended_actions.is_empty() {
         lines.push("**Recommended next steps**".to_string());
@@ -915,8 +912,12 @@ fn render_provider_settings_markdown(app: &App, provider_id: &str) -> String {
                 crate::provider_catalog::OPENAI_COMPAT_PROFILE,
             );
             lines.push("**Settings**".to_string());
-            lines.push(format!("- API base: `{}`", compat.api_base));
-            lines.push(format!("- API key variable: `{}`", compat.api_key_env));
+            lines.push("Configure custom OpenAI-compatible endpoints in this order: base URL first, then API key variable/key.".to_string());
+            lines.push(format!("- Step 1, API base URL: `{}`", compat.api_base));
+            lines.push(format!(
+                "- Step 2, API key variable: `{}`",
+                compat.api_key_env
+            ));
             lines.push(format!("- Env file: `{}`", compat.env_file));
             lines.push(format!(
                 "- Default model hint: `{}`",
@@ -972,9 +973,7 @@ fn render_auth_doctor_markdown(provider_filter: Option<&str>) -> String {
         None => {
             let configured = crate::provider_catalog::auth_status_login_providers()
                 .into_iter()
-                .filter(|provider| {
-                    status.state_for_provider(*provider) != crate::auth::AuthState::NotConfigured
-                })
+                .filter(|provider| status.assessment_for_provider(*provider).is_configured())
                 .collect::<Vec<_>>();
             if configured.is_empty() {
                 crate::provider_catalog::auth_status_login_providers().to_vec()

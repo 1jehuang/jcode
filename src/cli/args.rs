@@ -31,7 +31,7 @@ pub(crate) enum ProviderAuthArg {
 #[command(version = env!("JCODE_VERSION"))]
 #[command(about = "J-Code: A coding agent using Claude Max or ChatGPT Pro subscriptions")]
 pub(crate) struct Args {
-    /// Provider to use (jcode, claude, openai, openai-api, openrouter, azure, opencode, opencode-go, zai, 302ai, baseten, cortecs, comtegra, deepseek, fpt, firmware, huggingface, moonshotai, nebius, scaleway, stackit, groq, mistral, perplexity, togetherai, deepinfra, xai, lmstudio, ollama, chutes, cerebras, alibaba-coding-plan, openai-compatible, cursor, copilot, gemini, antigravity, google, or auto-detect)
+    /// Provider to use (jcode, claude, openai, openai-api, openrouter, azure, opencode, opencode-go, zai, 302ai, baseten, cortecs, comtegra, deepseek, fpt, firmware, huggingface, moonshotai, nebius, scaleway, stackit, groq, mistral, perplexity, togetherai, deepinfra, xai, nvidia-nim, lmstudio, ollama, chutes, cerebras, alibaba-coding-plan, openai-compatible, cursor, copilot, gemini, antigravity, google, or auto-detect)
     #[arg(short, long, default_value = "auto", global = true)]
     pub(crate) provider: ProviderChoice,
 
@@ -151,6 +151,11 @@ pub(crate) enum Command {
         /// Resume a pending scriptable login flow that does not require callback/code input.
         #[arg(long, conflicts_with_all = ["print_auth_url", "callback_url", "auth_code"])]
         complete: bool,
+
+        /// Save credentials without running the post-login live provider validation.
+        /// Useful for offline setup, CI, or when entering credentials before network access is available.
+        #[arg(long)]
+        no_validate: bool,
 
         /// Gmail/Google access tier for non-interactive flows. Defaults to full.
         #[arg(long, value_enum)]

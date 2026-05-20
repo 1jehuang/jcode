@@ -1,10 +1,11 @@
 use jcode_message_types::ToolCall;
+use jcode_session_types::RenderedMessage;
 use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// A message in the conversation for TUI display.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DisplayMessage {
     pub role: String,
     pub content: String,
@@ -150,6 +151,42 @@ impl DisplayMessage {
         }
     }
 
+    /// Create a tool transcript message when the caller only has rendered text.
+    pub fn tool_text(content: impl Into<String>) -> Self {
+        Self {
+            role: "tool".to_string(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+        }
+    }
+
+    /// Create a display-only metadata transcript message.
+    pub fn meta(content: impl Into<String>) -> Self {
+        Self {
+            role: "meta".to_string(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+        }
+    }
+
+    /// Convert the shared session renderer output into the TUI transcript model.
+    pub fn from_rendered_message(item: RenderedMessage) -> Self {
+        Self {
+            role: item.role,
+            content: item.content,
+            tool_calls: item.tool_calls,
+            duration_secs: None,
+            title: None,
+            tool_data: item.tool_data,
+        }
+    }
+
     /// Create a tool message with title.
     pub fn tool_with_title(
         content: impl Into<String>,
@@ -190,6 +227,107 @@ impl DisplayMessage {
             hash_json_value(&tool.input, &mut hasher);
         }
         hasher.finish()
+    }
+}
+
+pub fn display_messages_from_rendered_messages(
+    messages: impl IntoIterator<Item = RenderedMessage>,
+) -> Vec<DisplayMessage> {
+    messages
+        .into_iter()
+        .map(DisplayMessage::from_rendered_message)
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TranscriptPreviewLabels<'a> {
+    pub user: &'a str,
+    pub assistant: &'a str,
+    pub system: &'a str,
+    pub tool: &'a str,
+    pub background_task: &'a str,
+    pub meta: &'a str,
+}
+
+impl TranscriptPreviewLabels<'static> {
+    pub const DESKTOP: Self = Self {
+        user: "user",
+        assistant: "asst",
+        system: "sys",
+        tool: "tool",
+        background_task: "task",
+        meta: "meta",
+    };
+}
+
+impl<'a> TranscriptPreviewLabels<'a> {
+    fn label_for_role(self, role: &str) -> Option<&'a str> {
+        match role {
+            "user" => Some(self.user),
+            "assistant" => Some(self.assistant),
+            "system" => Some(self.system),
+            "tool" => Some(self.tool),
+            "background_task" => Some(self.background_task),
+            "meta" => Some(self.meta),
+            _ => None,
+        }
+    }
+}
+
+pub fn transcript_preview_line(
+    role: &str,
+    content: &str,
+    char_limit: usize,
+    labels: TranscriptPreviewLabels<'_>,
+) -> Option<String> {
+    let role = labels.label_for_role(role)?;
+    let text = normalize_transcript_preview_text(content);
+    if text.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "{role} {}",
+            truncate_transcript_preview(&text, char_limit)
+        ))
+    }
+}
+
+pub fn transcript_preview_lines<'a>(
+    messages: impl DoubleEndedIterator<Item = (&'a str, &'a str)>,
+    limit: usize,
+    char_limit: usize,
+    labels: TranscriptPreviewLabels<'_>,
+) -> Vec<String> {
+    let mut previews = messages
+        .rev()
+        .filter_map(|(role, content)| transcript_preview_line(role, content, char_limit, labels))
+        .take(limit)
+        .collect::<Vec<_>>();
+    previews.reverse();
+    previews
+}
+
+pub fn latest_user_transcript_preview<'a>(
+    messages: impl DoubleEndedIterator<Item = (&'a str, &'a str)>,
+    char_limit: usize,
+) -> Option<String> {
+    messages.rev().find_map(|(role, content)| {
+        (role == "user").then(|| {
+            let text = normalize_transcript_preview_text(content);
+            (!text.is_empty()).then(|| truncate_transcript_preview(&text, char_limit))
+        })?
+    })
+}
+
+pub fn normalize_transcript_preview_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub fn truncate_transcript_preview(text: &str, max_chars: usize) -> String {
+    if text.chars().count() > max_chars {
+        format!("{}…", text.chars().take(max_chars).collect::<String>())
+    } else {
+        text.to_string()
     }
 }
 
@@ -261,5 +399,47 @@ mod tests {
         first.duration_secs = Some(1.0);
         second.duration_secs = Some(9.0);
         assert_eq!(first.stable_cache_hash(), second.stable_cache_hash());
+    }
+
+    #[test]
+    fn rendered_messages_convert_to_display_messages() {
+        let rendered = RenderedMessage {
+            role: "assistant".to_string(),
+            content: "done".to_string(),
+            tool_calls: vec!["read".to_string()],
+            tool_data: None,
+        };
+
+        let display = DisplayMessage::from_rendered_message(rendered);
+        assert_eq!(display.role, "assistant");
+        assert_eq!(display.content, "done");
+        assert_eq!(display.tool_calls, ["read"]);
+        assert!(display.tool_data.is_none());
+    }
+
+    #[test]
+    fn transcript_preview_lines_share_desktop_labeling() {
+        let messages = [
+            ("user", " hello\nworld "),
+            ("assistant", "this answer is long"),
+            ("tool", "ignored when outside the tail"),
+        ];
+
+        assert_eq!(
+            transcript_preview_lines(
+                messages.iter().copied(),
+                2,
+                11,
+                TranscriptPreviewLabels::DESKTOP
+            ),
+            vec![
+                "asst this answer…".to_string(),
+                "tool ignored whe…".to_string()
+            ]
+        );
+        assert_eq!(
+            latest_user_transcript_preview(messages.iter().copied(), 20),
+            Some("hello world".to_string())
+        );
     }
 }

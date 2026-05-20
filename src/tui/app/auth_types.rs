@@ -50,6 +50,14 @@ pub(crate) enum PendingLogin {
     AutoImportSelection {
         candidates: Vec<crate::cli::provider_init::ExternalAuthReviewCandidate>,
     },
+    /// Waiting for Azure OpenAI endpoint.
+    AzureEndpoint,
+    /// Waiting for Azure OpenAI deployment/model name.
+    AzureModel { endpoint: String },
+    /// Waiting for Azure OpenAI auth method choice.
+    AzureAuthChoice { endpoint: String, model: String },
+    /// Waiting for Azure OpenAI API key.
+    AzureApiKey { endpoint: String, model: String },
 }
 
 impl PendingLogin {
@@ -78,6 +86,10 @@ impl PendingLogin {
             Self::CursorApiKey => Some(("cursor".to_string(), "api_key".to_string())),
             Self::Copilot => Some(("copilot".to_string(), "device_code".to_string())),
             Self::AutoImportSelection { .. } => None,
+            Self::AzureEndpoint | Self::AzureModel { .. } | Self::AzureAuthChoice { .. } => {
+                Some(("azure".to_string(), "hybrid".to_string()))
+            }
+            Self::AzureApiKey { .. } => Some(("azure".to_string(), "api_key".to_string())),
         }
     }
 }

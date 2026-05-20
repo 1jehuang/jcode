@@ -1,7 +1,7 @@
 use super::{App, DisplayMessage, ProcessingStatus, is_context_limit_error};
 use crate::bus::{
     BackgroundTaskCompleted, BackgroundTaskProgressEvent, BusEvent, InputShellCompleted,
-    ManualToolCompleted,
+    ManualToolCompleted, UiActivity, UiActivityKind,
 };
 use crate::message::{
     ContentBlock, Message, Role, background_task_status_notice,
@@ -141,6 +141,7 @@ pub(super) fn handle_bus_event(
             app.handle_model_refresh_completed(result);
             true
         }
+        Ok(BusEvent::UiActivity(activity)) => handle_ui_activity(app, activity),
         Ok(BusEvent::GitStatusCompleted(result)) => {
             super::commands::handle_git_status_completed(app, result);
             true
@@ -238,6 +239,28 @@ pub(super) fn handle_bus_event(
         }
         _ => false,
     }
+}
+
+pub(super) fn handle_ui_activity(app: &mut App, activity: UiActivity) -> bool {
+    let Some(session_id) = app.active_client_session_id() else {
+        return false;
+    };
+    if !activity.is_visible_to_session(session_id) {
+        return false;
+    }
+
+    match activity.kind {
+        UiActivityKind::Background => {
+            app.push_display_message(DisplayMessage::background_task(activity.message.clone()))
+        }
+        UiActivityKind::Auth | UiActivityKind::Catalog => {
+            app.push_display_message(DisplayMessage::system(activity.message.clone()))
+        }
+    }
+    if let Some(status_notice) = activity.status_notice {
+        app.set_status_notice(status_notice);
+    }
+    true
 }
 
 fn handle_manual_tool_completed(app: &mut App, result: ManualToolCompleted) {

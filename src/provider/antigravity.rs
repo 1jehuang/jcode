@@ -9,6 +9,7 @@ use jcode_provider_gemini::{
     GeminiToolConfig, VertexGenerateContentRequest,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
@@ -296,7 +297,7 @@ fn parse_fetch_available_models_response(
         }
     }
 
-    ordered_ids
+    let mut models: Vec<CatalogModel> = ordered_ids
         .into_iter()
         .map(|id| {
             by_id.remove(&id).unwrap_or(CatalogModel {
@@ -312,7 +313,9 @@ fn parse_fetch_available_models_response(
                 remaining_fraction_milli: None,
             })
         })
-        .collect()
+        .collect();
+    models.sort_by_key(|model| !model.available);
+    models
 }
 
 fn catalog_model_detail(model: &CatalogModel) -> String {
@@ -557,6 +560,43 @@ impl AntigravityProvider {
                     .map(str::to_string),
             },
         };
+
+        let contents_value = serde_json::to_value(&request.request.contents).unwrap_or(Value::Null);
+        let content_items = contents_value.as_array().cloned().unwrap_or_default();
+        let system_value = request
+            .request
+            .system_instruction
+            .as_ref()
+            .and_then(|system| serde_json::to_value(system).ok());
+        let tools_value = request
+            .request
+            .tools
+            .as_ref()
+            .and_then(|tools| serde_json::to_value(tools).ok());
+        let payload = json!({
+            "model": &request.model,
+            "contents": contents_value,
+            "system_instruction": system_value.as_ref(),
+            "tools": tools_value.as_ref(),
+            "tool_config": &request.request.tool_config,
+        });
+        super::fingerprint::log_provider_canonical_input(
+            "antigravity",
+            model,
+            "gemini_generate_content",
+            &payload,
+            &content_items,
+            system_value.as_ref(),
+            tools_value.as_ref(),
+            request.request.tools.as_ref().map(|tools| tools.len()),
+            &[
+                (
+                    "session_id_present",
+                    request.request.session_id.is_some().to_string(),
+                ),
+                ("project_present", (!request.project.is_empty()).to_string()),
+            ],
+        );
 
         let response = self
             .client

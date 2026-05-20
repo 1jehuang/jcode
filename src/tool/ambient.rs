@@ -1,7 +1,7 @@
 use super::{Tool, ToolContext, ToolOutput};
 use crate::ambient::{
     AmbientCycleResult, AmbientManager, AmbientState, CycleStatus, Priority, ScheduleRequest,
-    ScheduleTarget,
+    ScheduleTarget, ScheduledItem,
 };
 use crate::ambient_runner::AmbientRunnerHandle;
 use crate::safety::{self, PermissionRequest, PermissionResult, SafetySystem, Urgency};
@@ -800,7 +800,12 @@ impl ScheduleTool {
 
 #[derive(Deserialize)]
 struct ScheduleToolInput {
-    task: String,
+    #[serde(default)]
+    action: Option<String>,
+    #[serde(default)]
+    schedule_id: Option<String>,
+    #[serde(default)]
+    task: Option<String>,
     #[serde(default, deserialize_with = "deserialize_string_or_option_u32")]
     wake_in_minutes: Option<u32>,
     #[serde(default)]
@@ -824,18 +829,26 @@ impl Tool for ScheduleTool {
     }
 
     fn description(&self) -> &str {
-        "Schedule a task."
+        "Schedule, list, or cancel future tasks."
     }
 
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
-            "required": ["task"],
             "properties": {
                 "intent": super::intent_schema_property(),
+                "action": {
+                    "type": "string",
+                    "enum": ["create", "list", "cancel"],
+                    "description": "Action to perform. Defaults to create for backwards compatibility."
+                },
+                "schedule_id": {
+                    "type": "string",
+                    "description": "Scheduled task ID. Required for action=cancel."
+                },
                 "task": {
                     "type": "string",
-                    "description": "Task."
+                    "description": "Task. Required for action=create."
                 },
                 "wake_in_minutes": { "type": "integer" },
                 "wake_at": { "type": "string" },
@@ -863,6 +876,29 @@ impl Tool for ScheduleTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: ScheduleToolInput = serde_json::from_value(input)?;
+
+        match params.action.as_deref().unwrap_or("create") {
+            "create" => self.execute_create(params, ctx).await,
+            "list" => self.execute_list().await,
+            "cancel" => self.execute_cancel(params).await,
+            other => anyhow::bail!(
+                "Invalid action '{}'. Expected one of: create, list, cancel",
+                other
+            ),
+        }
+    }
+}
+
+impl ScheduleTool {
+    async fn execute_create(
+        &self,
+        params: ScheduleToolInput,
+        ctx: ToolContext,
+    ) -> Result<ToolOutput> {
+        let task = params
+            .task
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("task is required for action=create"))?;
 
         if params.wake_in_minutes.is_none() && params.wake_at.is_none() {
             anyhow::bail!(
@@ -903,25 +939,17 @@ impl Tool for ScheduleTool {
             });
 
         let target = parse_schedule_target(params.target.as_deref(), &ctx.session_id)?;
-        let target_summary = match &target {
-            ScheduleTarget::Ambient => "ambient agent".to_string(),
-            ScheduleTarget::Session { session_id } => {
-                format!("resume session {}", session_id)
-            }
-            ScheduleTarget::Spawn { parent_session_id } => {
-                format!("spawn one child session from {}", parent_session_id)
-            }
-        };
+        let target_summary = format_schedule_target(&target);
 
         let request = ScheduleRequest {
             wake_in_minutes: params.wake_in_minutes,
             wake_at,
-            context: params.task.clone(),
+            context: task.clone(),
             priority: parse_priority(params.priority.as_deref()),
             target,
             created_by_session: ctx.session_id.clone(),
             working_dir: working_dir.clone(),
-            task_description: Some(params.task.clone()),
+            task_description: Some(task.clone()),
             relevant_files: params.relevant_files.clone(),
             git_branch,
             additional_context: {
@@ -939,6 +967,7 @@ impl Tool for ScheduleTool {
 
         let mut manager = AmbientManager::new()?;
         let id = manager.schedule(request)?;
+        nudge_schedule_runner();
 
         let when = if let Some(ref ts) = params.wake_at {
             ts.clone()
@@ -948,7 +977,7 @@ impl Tool for ScheduleTool {
             "unspecified".to_string()
         };
 
-        let mut summary = format!("Scheduled task '{}' for {} (id: {})", params.task, when, id);
+        let mut summary = format!("Scheduled task '{}' for {} (id: {})", task, when, id);
         if let Some(ref wd) = working_dir {
             summary.push_str(&format!("\nWorking directory: {}", wd));
         }
@@ -960,7 +989,46 @@ impl Tool for ScheduleTool {
         }
         summary.push_str(&format!("\nTarget: {}", target_summary));
 
-        Ok(ToolOutput::new(summary).with_title(format!("scheduled: {}", params.task)))
+        Ok(ToolOutput::new(summary).with_title(format!("scheduled: {}", task)))
+    }
+
+    async fn execute_list(&self) -> Result<ToolOutput> {
+        let manager = AmbientManager::new()?;
+        let mut items: Vec<&ScheduledItem> = manager.queue().items().iter().collect();
+        items.sort_by_key(|item| item.scheduled_for);
+
+        if items.is_empty() {
+            return Ok(ToolOutput::new("No scheduled tasks."));
+        }
+
+        let mut summary = format!("{} scheduled task(s):", items.len());
+        for item in items {
+            summary.push('\n');
+            summary.push_str(&format_scheduled_item(item));
+        }
+
+        Ok(ToolOutput::new(summary).with_title("scheduled tasks"))
+    }
+
+    async fn execute_cancel(&self, params: ScheduleToolInput) -> Result<ToolOutput> {
+        let id = params
+            .schedule_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("schedule_id is required for action=cancel"))?;
+
+        let mut manager = AmbientManager::new()?;
+        let Some(item) = manager.cancel_schedule(id)? else {
+            anyhow::bail!("No scheduled task found with id '{}'", id);
+        };
+        nudge_schedule_runner();
+
+        Ok(ToolOutput::new(format!(
+            "Cancelled scheduled task '{}' for {} (id: {})",
+            item.task_description.as_deref().unwrap_or(&item.context),
+            item.scheduled_for,
+            item.id
+        ))
+        .with_title(format!("cancelled: {}", item.id)))
     }
 }
 
@@ -990,6 +1058,27 @@ fn parse_schedule_target(s: Option<&str>, session_id: &str) -> Result<ScheduleTa
             other
         ),
     })
+}
+
+fn format_schedule_target(target: &ScheduleTarget) -> String {
+    match target {
+        ScheduleTarget::Ambient => "ambient agent".to_string(),
+        ScheduleTarget::Session { session_id } => format!("resume session {}", session_id),
+        ScheduleTarget::Spawn { parent_session_id } => {
+            format!("spawn one child session from {}", parent_session_id)
+        }
+    }
+}
+
+fn format_scheduled_item(item: &ScheduledItem) -> String {
+    format!(
+        "- {} | {} | {:?} | {} | {}",
+        item.id,
+        item.scheduled_for,
+        item.priority,
+        format_schedule_target(&item.target),
+        item.task_description.as_deref().unwrap_or(&item.context)
+    )
 }
 
 fn nudge_schedule_runner() {

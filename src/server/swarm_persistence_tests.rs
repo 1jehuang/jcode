@@ -2,6 +2,7 @@ use super::*;
 use std::time::Instant;
 
 struct EnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
     runtime: Option<std::ffi::OsString>,
 }
 
@@ -16,10 +17,13 @@ impl Drop for EnvGuard {
 }
 
 fn test_env(dir: &tempfile::TempDir) -> EnvGuard {
-    let _guard = storage::lock_test_env();
+    let lock = storage::lock_test_env();
     let previous = std::env::var_os("JCODE_RUNTIME_DIR");
     crate::env::set_var("JCODE_RUNTIME_DIR", dir.path());
-    EnvGuard { runtime: previous }
+    EnvGuard {
+        _lock: lock,
+        runtime: previous,
+    }
 }
 
 #[test]

@@ -26,12 +26,10 @@ impl JcodeProvider {
     }
 
     fn apply_runtime_profile() {
-        crate::env::set_var(
-            "JCODE_OPENROUTER_MODEL",
+        let _ = crate::provider::activation::ProviderActivation::jcode_subscription(
             crate::subscription_catalog::default_model().id,
-        );
-        crate::env::set_var("JCODE_ACTIVE_PROVIDER", "openrouter");
-        crate::env::set_var("JCODE_FORCE_PROVIDER", "1");
+        )
+        .apply_env();
     }
 
     fn ensure_runtime_mode(&self) {

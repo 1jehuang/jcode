@@ -9,6 +9,7 @@ const REMOTE_STARTUP_HEADER_DEBOUNCE: Duration = Duration::from_millis(400);
 enum WidgetProviderKind {
     Anthropic,
     OpenAI,
+    OpenCode,
     OpenRouter,
     Copilot,
     Gemini,
@@ -19,6 +20,9 @@ impl WidgetProviderKind {
     fn from_provider_key(raw: Option<&str>) -> Self {
         match raw.map(|provider| provider.trim().to_ascii_lowercase()) {
             Some(provider) if provider == "openrouter" => Self::OpenRouter,
+            Some(provider) if matches!(provider.as_str(), "opencode" | "opencode-go") => {
+                Self::OpenCode
+            }
             Some(provider) if provider == "copilot" => Self::Copilot,
             Some(provider) if provider == "gemini" => Self::Gemini,
             Some(provider) if provider == "openai" => Self::OpenAI,
@@ -112,12 +116,13 @@ impl App {
     }
 
     fn widget_route_info(&self, model: Option<&str>) -> WidgetRouteInfo {
-        let remote_provider_name = if self.uses_server_or_replay_metadata() {
+        let uses_remote_widget_metadata = self.is_remote || self.is_replay_runtime();
+        let remote_provider_name = if uses_remote_widget_metadata {
             self.remote_header_provider_name()
         } else {
             None
         };
-        let provider_name = if self.uses_server_or_replay_metadata() {
+        let provider_name = if uses_remote_widget_metadata {
             remote_provider_name.as_deref()
         } else {
             Some(self.provider.name())
@@ -133,7 +138,7 @@ impl App {
 
         WidgetRouteInfo {
             provider,
-            is_remote: self.uses_server_or_replay_metadata(),
+            is_remote: uses_remote_widget_metadata,
         }
     }
 
@@ -163,6 +168,7 @@ impl App {
                     crate::tui::info_widget::AuthMethod::Unknown
                 }
             }
+            WidgetProviderKind::OpenCode => crate::tui::info_widget::AuthMethod::OpenCodeApiKey,
             WidgetProviderKind::OpenRouter => crate::tui::info_widget::AuthMethod::OpenRouterApiKey,
             WidgetProviderKind::Copilot => crate::tui::info_widget::AuthMethod::CopilotOAuth,
             WidgetProviderKind::Gemini => {
@@ -259,22 +265,24 @@ impl App {
                 })
             }
             WidgetProviderKind::Gemini => None,
-            WidgetProviderKind::OpenRouter => Some(crate::tui::info_widget::UsageInfo {
-                provider: crate::tui::info_widget::UsageProvider::CostBased,
-                five_hour: 0.0,
-                five_hour_resets_at: None,
-                seven_day: 0.0,
-                seven_day_resets_at: None,
-                spark: None,
-                spark_resets_at: None,
-                total_cost: self.total_cost,
-                input_tokens: self.total_input_tokens,
-                output_tokens: self.total_output_tokens,
-                cache_read_tokens: self.streaming_cache_read_tokens,
-                cache_write_tokens: self.streaming_cache_creation_tokens,
-                output_tps,
-                available: true,
-            }),
+            WidgetProviderKind::OpenRouter | WidgetProviderKind::OpenCode => {
+                Some(crate::tui::info_widget::UsageInfo {
+                    provider: crate::tui::info_widget::UsageProvider::CostBased,
+                    five_hour: 0.0,
+                    five_hour_resets_at: None,
+                    seven_day: 0.0,
+                    seven_day_resets_at: None,
+                    spark: None,
+                    spark_resets_at: None,
+                    total_cost: self.total_cost,
+                    input_tokens: self.total_input_tokens,
+                    output_tokens: self.total_output_tokens,
+                    cache_read_tokens: self.streaming_cache_read_tokens,
+                    cache_write_tokens: self.streaming_cache_creation_tokens,
+                    output_tps,
+                    available: true,
+                })
+            }
             WidgetProviderKind::Unknown => None,
         }
     }
@@ -456,7 +464,18 @@ impl crate::tui::TuiState for App {
     }
 
     fn time_since_activity(&self) -> Option<std::time::Duration> {
-        self.last_stream_activity.map(|t| t.elapsed())
+        if let Some(last_activity) = self.last_stream_activity {
+            return Some(last_activity.elapsed());
+        }
+
+        // Restored/resumed clients often have a full transcript but no stream event in this
+        // process yet. Treat those as already idle so reopening many historical sessions does not
+        // spend the first warm-up window rerendering large static transcripts at idle FPS.
+        if !self.display_messages.is_empty() && !self.is_processing {
+            return Some(crate::tui::REDRAW_DEEP_IDLE_AFTER + std::time::Duration::from_secs(1));
+        }
+
+        Some(self.app_started.elapsed())
     }
 
     fn stream_message_ended(&self) -> bool {
@@ -619,6 +638,25 @@ impl crate::tui::TuiState for App {
         } else {
             self.session.messages.len()
         };
+        let (compaction_count, compaction_summary_chars, is_compacting) = if self.is_remote {
+            (0, 0, false)
+        } else if self.provider.uses_jcode_compaction() {
+            self.registry
+                .compaction()
+                .try_read()
+                .ok()
+                .map(|manager| {
+                    (
+                        manager.compacted_count(),
+                        manager.summary_chars(),
+                        manager.is_compacting(),
+                    )
+                })
+                .unwrap_or((0, 0, false))
+        } else {
+            (0, 0, false)
+        };
+
         if let Ok(cache) = CACHE.lock()
             && let Some((ts, cached)) = &*cache
             && ts.elapsed() < TTL
@@ -626,6 +664,9 @@ impl crate::tui::TuiState for App {
             && cached.is_remote == self.is_remote
             && cached.display_messages_version == self.display_messages_version
             && cached.message_count == message_count
+            && cached.compaction_count == compaction_count
+            && cached.compaction_summary_chars == compaction_summary_chars
+            && cached.is_compacting == is_compacting
         {
             return cached.context_info.clone();
         }
@@ -775,6 +816,9 @@ impl crate::tui::TuiState for App {
                     is_remote: self.is_remote,
                     display_messages_version: self.display_messages_version,
                     message_count,
+                    compaction_count,
+                    compaction_summary_chars,
+                    is_compacting,
                     context_info: info.clone(),
                 },
             ));
@@ -829,13 +873,14 @@ impl crate::tui::TuiState for App {
             None
         };
 
+        let uses_remote_widget_metadata = self.is_remote || self.is_replay_runtime();
         let (
             model,
             reasoning_effort,
             service_tier,
             native_compaction_mode,
             native_compaction_threshold_tokens,
-        ) = if self.uses_server_or_replay_metadata() {
+        ) = if uses_remote_widget_metadata {
             (
                 self.remote_provider_model.clone(),
                 self.remote_reasoning_effort.clone(),
@@ -1034,6 +1079,26 @@ impl crate::tui::TuiState for App {
 
         let workspace_animation_tick = self.app_started.elapsed().as_millis() as u64 / 180;
 
+        let compaction_info = if !self.is_remote && self.provider.uses_jcode_compaction() {
+            let compaction = self.registry.compaction();
+            compaction.try_read().ok().and_then(|manager| {
+                let compacted_messages = manager.compacted_count();
+                let summary_chars = manager.summary_chars();
+                let is_compacting = manager.is_compacting();
+                (is_compacting || compacted_messages > 0 || summary_chars > 0).then(|| {
+                    crate::tui::info_widget::CompactionInfo {
+                        is_compacting,
+                        compacted_messages,
+                        active_messages: manager.active_messages_count(),
+                        summary_chars,
+                        mode: manager.mode().as_str().to_string(),
+                    }
+                })
+            })
+        } else {
+            None
+        };
+
         crate::tui::info_widget::InfoWidgetData {
             todos,
             context_info,
@@ -1052,7 +1117,7 @@ impl crate::tui::TuiState for App {
             background_info,
             usage_info,
             tokens_per_second,
-            provider_name: if self.uses_server_or_replay_metadata() {
+            provider_name: if uses_remote_widget_metadata {
                 self.remote_provider_name
                     .clone()
                     .or_else(|| Some(self.provider.name().to_string()))
@@ -1068,6 +1133,7 @@ impl crate::tui::TuiState for App {
             ambient_info: gather_ambient_info(crate::config::config().ambient.enabled),
             observed_context_tokens: self.current_stream_context_tokens(),
             cache_hit_info,
+            compaction_info,
             is_compacting: if !self.is_remote && self.provider.uses_jcode_compaction() {
                 let compaction = self.registry.compaction();
                 compaction
@@ -1165,7 +1231,7 @@ impl crate::tui::TuiState for App {
         &self.side_panel
     }
     fn pin_images(&self) -> bool {
-        self.pin_images
+        self.pin_images && !self.side_panel_user_hidden
     }
     fn chat_native_scrollbar(&self) -> bool {
         self.chat_native_scrollbar

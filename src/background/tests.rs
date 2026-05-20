@@ -5,6 +5,52 @@ use tempfile::tempdir;
 use tokio::time::{Duration, sleep};
 
 #[tokio::test]
+async fn spawn_with_notify_emits_started_ui_activity() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut bus_rx = Bus::global().subscribe();
+
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            Some("checks".to_string()),
+            "session-started",
+            true,
+            false,
+            |_output_path| async move {
+                sleep(Duration::from_millis(10)).await;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+
+    for _ in 0..20 {
+        let event = tokio::time::timeout(Duration::from_millis(200), bus_rx.recv())
+            .await
+            .map_err(|err| anyhow!("timed out waiting for UI activity event: {err}"))?
+            .map_err(|err| anyhow!("bus should stay open: {err}"))?;
+        if let BusEvent::UiActivity(activity) = event
+            && activity.session_id.as_deref() == Some("session-started")
+            && activity.message.contains(&info.task_id)
+        {
+            assert_eq!(activity.kind, crate::bus::UiActivityKind::Background);
+            assert!(activity.message.contains("Background task started"));
+            assert!(activity.message.contains("checks"));
+            assert_eq!(
+                activity.status_notice.as_deref(),
+                Some("Background task started · checks")
+            );
+            return Ok(());
+        }
+    }
+
+    Err(anyhow!(
+        "started UI activity event for task {} not received",
+        info.task_id
+    ))
+}
+
+#[tokio::test]
 async fn update_delivery_applies_to_running_task_completion() -> Result<()> {
     let tmp = tempdir()?;
     let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());

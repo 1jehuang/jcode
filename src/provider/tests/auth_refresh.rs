@@ -356,7 +356,7 @@ fn test_startup_initializes_antigravity_when_cached_tokens_are_expired() {
 
         assert!(provider.antigravity_provider().is_some());
         assert!(provider.model_routes().iter().any(|route| {
-            route.provider == "Antigravity" && route.api_method == "cli" && route.available
+            route.provider == "Antigravity" && route.api_method == "https" && route.available
         }));
     });
 }
@@ -396,7 +396,7 @@ fn test_on_auth_changed_hot_initializes_antigravity_when_tokens_exist_but_are_ex
 
         assert!(provider.antigravity_provider().is_some());
         assert!(provider.model_routes().iter().any(|route| {
-            route.provider == "Antigravity" && route.api_method == "cli" && route.available
+            route.provider == "Antigravity" && route.api_method == "https" && route.available
         }));
     });
 }
@@ -421,7 +421,7 @@ fn test_multi_provider_antigravity_routes_do_not_include_legacy_duplicate_entrie
 
     let routes = provider.model_routes();
     assert!(routes.iter().any(|route| {
-        route.provider == "Antigravity" && route.api_method == "cli" && route.available
+        route.provider == "Antigravity" && route.api_method == "https" && route.available
     }));
     assert!(
         !routes

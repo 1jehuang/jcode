@@ -14,8 +14,8 @@ pub fn get_repo_dir() -> Option<PathBuf> {
     // First try: compile-time directory
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let path = PathBuf::from(manifest_dir);
-    if is_jcode_repo(&path) {
-        return Some(path);
+    if let Some(repo) = find_repo_in_ancestors(&path) {
+        return Some(repo);
     }
 
     // Fallback: check relative to executable
@@ -430,7 +430,7 @@ pub fn is_jcode_repo(dir: &Path) -> bool {
         return false;
     }
 
-    // Check for .git directory
+    // Check for a .git directory or gitdir file (worktrees use a file).
     if !dir.join(".git").exists() {
         return false;
     }
@@ -443,4 +443,43 @@ pub fn is_jcode_repo(dir: &Path) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo_fixture(git_file: bool) -> tempfile::TempDir {
+        let temp = tempfile::TempDir::new().expect("temp repo");
+        if git_file {
+            std::fs::write(temp.path().join(".git"), "gitdir: /tmp/jcode-test-git\n")
+                .expect("git file");
+        } else {
+            std::fs::create_dir_all(temp.path().join(".git")).expect("git dir");
+        }
+        std::fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"jcode\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("Cargo.toml");
+        temp
+    }
+
+    #[test]
+    fn find_repo_in_ancestors_finds_workspace_from_crate_dir() {
+        let repo = repo_fixture(false);
+        let crate_dir = repo.path().join("crates").join("jcode-build-support");
+        std::fs::create_dir_all(&crate_dir).expect("crate dir");
+
+        assert_eq!(
+            find_repo_in_ancestors(&crate_dir).as_deref(),
+            Some(repo.path())
+        );
+    }
+
+    #[test]
+    fn is_jcode_repo_accepts_git_file_for_worktree() {
+        let repo = repo_fixture(true);
+        assert!(is_jcode_repo(repo.path()));
+    }
 }

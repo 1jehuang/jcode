@@ -25,17 +25,20 @@ impl BatchCompletionCounts {
     }
 }
 
-pub(crate) fn is_batch_section_header(line: &str) -> bool {
-    line.starts_with("--- [") && line.ends_with(" ---")
-}
-
 pub(crate) fn batch_section_index(line: &str) -> Option<usize> {
-    if !is_batch_section_header(line) {
-        return None;
-    }
-    let rest = line.strip_prefix("--- [")?;
+    let rest = batch_header_fragment(line)?.strip_prefix("--- [")?;
     let (index, _) = rest.split_once(']')?;
     index.parse::<usize>().ok()
+}
+
+fn batch_header_fragment(line: &str) -> Option<&str> {
+    let header_start = line.find("--- [")?;
+    let header = &line[header_start..];
+    if header.ends_with(" ---") {
+        Some(header)
+    } else {
+        None
+    }
 }
 
 pub(crate) fn is_batch_footer_line(line: &str) -> bool {
@@ -158,4 +161,34 @@ pub(crate) fn batch_subcall_params(call: &serde_json::Value) -> serde_json::Valu
     }
 
     serde_json::Value::Object(serde_json::Map::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_first_batch_section_with_tool_timing_prefix() {
+        let content = "[tool timing: start=2026-05-14T14:10:08.525Z finish=2026-05-14T14:10:08.598Z duration=73ms] --- [1] bash ---\nfirst output\n\n--- [2] bash ---\nsecond output\n\nCompleted: 2 succeeded, 0 failed";
+
+        let parsed = parse_batch_sub_outputs_by_index(content);
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(
+            parsed.get(&1).map(|result| result.content.as_str()),
+            Some("first output")
+        );
+        assert_eq!(
+            parsed.get(&2).map(|result| result.content.as_str()),
+            Some("second output")
+        );
+    }
+
+    #[test]
+    fn rejects_non_header_lines_containing_batch_marker() {
+        assert_eq!(
+            batch_section_index("output mentions --- [1] bash --- inline"),
+            None
+        );
+    }
 }

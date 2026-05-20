@@ -157,3 +157,34 @@ pub(super) async fn dispatch_background_task_progress(
         ));
     }
 }
+
+pub(super) async fn dispatch_ui_activity(
+    activity: &crate::bus::UiActivity,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) {
+    let Some(session_id) = activity.session_id.as_deref() else {
+        return;
+    };
+
+    if fanout_session_event(
+        swarm_members,
+        session_id,
+        ServerEvent::Notification {
+            from_session: "jcode".to_string(),
+            from_name: Some("Jcode".to_string()),
+            notification_type: NotificationType::Message {
+                scope: Some(activity.kind.scope().to_string()),
+                channel: None,
+            },
+            message: activity.message.clone(),
+        },
+    )
+    .await
+        == 0
+    {
+        crate::logging::warn(&format!(
+            "Failed to notify attached clients for UI activity on session {}",
+            session_id
+        ));
+    }
+}

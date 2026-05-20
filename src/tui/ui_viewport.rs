@@ -76,6 +76,54 @@ fn highlight_line_selection(
     }
 }
 
+pub(crate) fn truncate_line_in_place_to_width(line: &mut Line<'static>, max_width: usize) {
+    let mut remaining = max_width;
+    let mut kept: Vec<Span<'static>> = Vec::new();
+
+    for span in line.spans.drain(..) {
+        if remaining == 0 {
+            break;
+        }
+
+        let span_width = span.content.as_ref().width();
+        if span_width <= remaining {
+            remaining = remaining.saturating_sub(span_width);
+            kept.push(span);
+            continue;
+        }
+
+        let mut text = String::new();
+        let mut used = 0usize;
+        for ch in span.content.chars() {
+            let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if ch_width > 0 && used.saturating_add(ch_width) > remaining {
+                break;
+            }
+            text.push(ch);
+            used = used.saturating_add(ch_width);
+        }
+        if !text.is_empty() {
+            kept.push(Span::styled(text, span.style));
+        }
+        break;
+    }
+
+    line.spans = kept;
+}
+
+pub(crate) fn copy_badge_reserved_width(
+    key: char,
+    copy_badge_ui: &crate::tui::app::CopyBadgeUiState,
+    now: std::time::Instant,
+) -> usize {
+    let mut reserved = UnicodeWidthStr::width("[Alt] [⇧] [A]");
+    if copy_badge_ui.feedback_for_key(key, now).is_some() {
+        // Includes the trailing spacer inserted between feedback and the shortcut badges.
+        reserved = reserved.saturating_add(UnicodeWidthStr::width(" ✓ Copied! "));
+    }
+    reserved
+}
+
 pub(super) fn compute_visible_margins(
     lines: &[Line],
     visible_user_indices: &[usize],
@@ -135,6 +183,29 @@ pub(super) fn compute_visible_margins(
         right_widths,
         left_widths,
         centered,
+    }
+}
+
+pub(crate) fn reserve_copy_badge_margins(
+    margins: &mut info_widget::Margins,
+    scroll: usize,
+    visible_end: usize,
+    badge_assignments: &[(usize, char)],
+    copy_badge_ui: &crate::tui::app::CopyBadgeUiState,
+    now: std::time::Instant,
+) {
+    for &(badge_line, key) in badge_assignments {
+        if badge_line < scroll || badge_line >= visible_end {
+            continue;
+        }
+
+        let rel_idx = badge_line - scroll;
+        if rel_idx >= margins.right_widths.len() {
+            continue;
+        }
+
+        let reserved = copy_badge_reserved_width(key, copy_badge_ui, now) as u16;
+        margins.right_widths[rel_idx] = margins.right_widths[rel_idx].saturating_sub(reserved);
     }
 }
 
@@ -198,6 +269,11 @@ pub(super) fn draw_messages(
     let visible_height = content_area.height as usize;
 
     let active_file_context = if app.diff_mode().is_file() {
+        active_file_diff_context(prepared.as_ref(), scroll, visible_height)
+    } else {
+        None
+    };
+    let active_inline_edit_context = if app.diff_mode().is_inline() {
         active_file_diff_context(prepared.as_ref(), scroll, visible_height)
     } else {
         None
@@ -288,6 +364,14 @@ pub(super) fn draw_messages(
         });
         badge_assignments.push((target.badge_line, key));
     }
+    reserve_copy_badge_margins(
+        &mut margins,
+        scroll,
+        visible_end,
+        &badge_assignments,
+        &copy_badge_ui,
+        copy_badge_now,
+    );
     set_visible_copy_targets(visible_copy_targets);
     super::note_viewport_metrics(super::ViewportMetrics {
         scroll,
@@ -394,12 +478,58 @@ pub(super) fn draw_messages(
         }
     }
 
+    if let Some(active) = &active_inline_edit_context {
+        let badge_line = active.start_line;
+        if badge_line >= scroll && badge_line < visible_end {
+            let rel_idx = badge_line - scroll;
+            if let Some(line) = visible_lines.get_mut(rel_idx) {
+                let badge_text = if app.diff_mode().is_full_inline() {
+                    " collapse"
+                } else {
+                    " expand"
+                };
+                let reserved = UnicodeWidthStr::width(" [Alt] [⇧] [E] collapse");
+                let max_content_width = (content_area.width as usize).saturating_sub(reserved);
+                truncate_line_in_place_to_width(line, max_content_width);
+
+                let alt_style = if copy_badge_ui.alt_is_active(copy_badge_now) {
+                    Style::default().fg(queued_color()).bold()
+                } else {
+                    Style::default().fg(dim_color())
+                };
+                let shift_style = if copy_badge_ui.shift_is_active(copy_badge_now) {
+                    Style::default().fg(queued_color()).bold()
+                } else {
+                    Style::default().fg(dim_color())
+                };
+                let key_style = if copy_badge_ui.key_is_active('e', copy_badge_now) {
+                    Style::default().fg(accent_color()).bold()
+                } else {
+                    Style::default().fg(dim_color())
+                };
+
+                line.spans.push(Span::raw(" "));
+                line.spans.push(Span::styled("[Alt]", alt_style));
+                line.spans.push(Span::raw(" "));
+                line.spans.push(Span::styled("[⇧]", shift_style));
+                line.spans.push(Span::raw(" "));
+                line.spans.push(Span::styled("[E]", key_style));
+                line.spans
+                    .push(Span::styled(badge_text, Style::default().fg(dim_color())));
+            }
+        }
+    }
+
     for (badge_line, key) in badge_assignments {
         if badge_line < scroll || badge_line >= visible_end {
             continue;
         }
         let rel_idx = badge_line - scroll;
         if let Some(line) = visible_lines.get_mut(rel_idx) {
+            let reserved = copy_badge_reserved_width(key, &copy_badge_ui, copy_badge_now);
+            let max_content_width = (content_area.width as usize).saturating_sub(reserved);
+            truncate_line_in_place_to_width(line, max_content_width);
+
             let alt_style = if copy_badge_ui.alt_is_active(copy_badge_now) {
                 Style::default().fg(queued_color()).bold()
             } else {

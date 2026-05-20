@@ -196,11 +196,11 @@ pub fn load_github_token() -> Result<String> {
         return Ok(token);
     }
 
-    if allow_gh_cli_fallback() {
-        if let Some(token) = load_token_from_gh_cli() {
-            cache_github_token(&token);
-            return Ok(token);
-        }
+    if allow_gh_cli_fallback()
+        && let Some(token) = load_token_from_gh_cli()
+    {
+        cache_github_token(&token);
+        return Ok(token);
     }
 
     anyhow::bail!(

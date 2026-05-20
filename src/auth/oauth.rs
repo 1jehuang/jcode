@@ -682,7 +682,7 @@ async fn exchange_claude_code_at_url(
         state: state.as_str(),
     };
 
-    let client = reqwest::Client::new();
+    let client = crate::provider::shared_http_client();
     let resp = client
         .post(token_url)
         .header("Content-Type", "application/json")
@@ -776,7 +776,7 @@ async fn exchange_openai_code_at_url(
     verifier: &str,
     redirect_uri: &str,
 ) -> Result<OAuthTokens> {
-    let client = reqwest::Client::new();
+    let client = crate::provider::shared_http_client();
     let resp = client
         .post(token_url)
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -953,7 +953,7 @@ async fn fetch_claude_profile_email_at_url(
     access_token: &str,
     profile_url: &str,
 ) -> Result<Option<String>> {
-    let client = reqwest::Client::new();
+    let client = crate::provider::shared_http_client();
     let resp = client
         .get(profile_url)
         .header("Accept", "application/json")
@@ -1045,7 +1045,7 @@ async fn send_claude_refresh_request(
         scope,
     };
 
-    let client = reqwest::Client::new();
+    let client = crate::provider::shared_http_client();
     let resp = client
         .post(claude::TOKEN_URL)
         .header("Content-Type", "application/json")
@@ -1184,7 +1184,7 @@ async fn refresh_openai_tokens_inner(
     label: Option<&str>,
 ) -> Result<OAuthTokens> {
     let result: Result<OAuthTokens> = async {
-        let client = reqwest::Client::new();
+        let client = crate::provider::shared_http_client();
         let resp = client
             .post(openai::TOKEN_URL)
             .header("Content-Type", "application/x-www-form-urlencoded")
@@ -1355,7 +1355,7 @@ async fn exchange_code_at_url(
         "state": effective_state,
     });
 
-    let client = reqwest::Client::new();
+    let client = crate::provider::shared_http_client();
     let resp = client
         .post(token_url)
         .header("Content-Type", "application/json")
@@ -1399,7 +1399,7 @@ async fn refresh_tokens_at_url(token_url: &str, refresh_token: &str) -> Result<O
         "scope": claude::REFRESH_SCOPES,
     });
 
-    let client = reqwest::Client::new();
+    let client = crate::provider::shared_http_client();
     let resp = client
         .post(token_url)
         .header("Content-Type", "application/json")

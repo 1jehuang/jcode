@@ -131,14 +131,12 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::empty();
+    let mut live_session = session.clone();
+    live_session.title = Some("live agent".to_string());
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         provider.clone(),
         registry,
-        crate::session::Session::create_with_id(
-            session_id.to_string(),
-            None,
-            Some("live agent".to_string()),
-        ),
+        live_session,
         None,
     )));
     let busy_guard = agent.lock().await;

@@ -15,24 +15,43 @@ impl Config {
         config
     }
 
+    /// Load config from file, with environment variable overrides.
+    ///
+    /// Unlike [`Self::load`], this returns TOML/read errors to callers that need
+    /// to distinguish a malformed config from an absent config.
+    pub fn load_strict() -> anyhow::Result<Self> {
+        let mut config = Self::load_from_file_strict()?.unwrap_or_default();
+        config.apply_env_overrides();
+        Ok(config)
+    }
+
     /// Load config from file only (no env overrides)
     fn load_from_file() -> Option<Self> {
-        let path = Self::path()?;
-        if !path.exists() {
-            return None;
-        }
-
-        let content = std::fs::read_to_string(&path).ok()?;
-        match toml::from_str::<Self>(&content) {
-            Ok(mut config) => {
-                config.display.apply_legacy_compat();
-                Some(config)
-            }
+        match Self::load_from_file_strict() {
+            Ok(config) => config,
             Err(e) => {
                 crate::logging::error(&format!("Failed to parse config file: {}", e));
                 None
             }
         }
+    }
+
+    /// Load config from file only (no env overrides), preserving parse/read errors.
+    fn load_from_file_strict() -> anyhow::Result<Option<Self>> {
+        let Some(path) = Self::path() else {
+            return Ok(None);
+        };
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("Failed to read config file {}: {}", path.display(), e))?;
+        let mut config = toml::from_str::<Self>(&content).map_err(|e| {
+            anyhow::anyhow!("Failed to parse config file {}: {}", path.display(), e)
+        })?;
+        config.display.apply_legacy_compat();
+        Ok(Some(config))
     }
 
     /// Save config to file
@@ -46,7 +65,13 @@ impl Config {
 
         let content = toml::to_string_pretty(self)?;
         std::fs::write(&path, content)?;
+        Self::invalidate_cache();
         Ok(())
+    }
+
+    /// Mark the process-cached config as stale and notify dependent caches.
+    pub fn invalidate_cache() {
+        super::invalidate_config_cache();
     }
 
     /// Update the copilot premium mode in the config file.
@@ -69,12 +94,6 @@ impl Config {
         cfg.provider.default_model = model.map(|s| s.to_string());
         cfg.provider.default_provider = provider.map(|s| s.to_string());
         cfg.save()?;
-
-        // Update the global singleton so current session reflects the change
-        let global = CONFIG.get_or_init(|| cfg.clone());
-        // CONFIG is a OnceLock so we can't mutate it directly, but the file is saved
-        // and will take effect on next restart. For this session we log it.
-        let _ = global; // suppress unused
         crate::logging::info(&format!(
             "Saved default model: {}, provider: {}",
             model.unwrap_or("(none)"),
@@ -196,7 +215,20 @@ impl Config {
             return false;
         };
 
-        config()
+        if config()
+            .auth
+            .trusted_external_source_paths
+            .iter()
+            .any(|value| value.trim().eq_ignore_ascii_case(&entry))
+        {
+            return true;
+        }
+
+        // The global config snapshot can be initialized before an auth flow saves
+        // a new path-bound trust decision, or before tests switch JCODE_HOME. Fall
+        // back to a fresh load on cache misses so fast auth probes remain correct
+        // without penalizing the common already-trusted path.
+        Self::load()
             .auth
             .trusted_external_source_paths
             .iter()

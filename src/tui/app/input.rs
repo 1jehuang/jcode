@@ -120,6 +120,22 @@ pub(super) struct PreparedInput {
     pub images: Vec<(String, String)>,
 }
 
+// Roughly 500k English words at ~6 bytes/word including spaces. This is still
+// low enough to avoid multi-megabyte submit-path hangs while allowing very large logs.
+pub(super) const MAX_SUBMITTED_TEXT_BYTES: usize = 3 * 1024 * 1024;
+
+fn oversized_message_notice(size: usize) -> String {
+    format!(
+        "Message is too large to send ({} bytes). Save it as a file or attach it instead. Your input was preserved.",
+        crate::util::format_number(size)
+    )
+}
+
+fn input_exceeds_submit_limit(input: &str) -> Option<String> {
+    let size = input.len();
+    (size > MAX_SUBMITTED_TEXT_BYTES).then(|| oversized_message_notice(size))
+}
+
 pub(super) fn paste_image_from_clipboard(app: &mut App) {
     app.set_status_notice("Reading clipboard image...");
     spawn_clipboard_paste(app, ClipboardPasteKind::ImageOnly);
@@ -296,8 +312,9 @@ where
 mod tests {
     use super::{
         ClipboardPasteContent, ClipboardPasteKind, preferred_wayland_text_type,
-        read_clipboard_for_paste_with,
+        read_clipboard_for_paste_with, shifted_printable_fallback, text_input_for_key,
     };
+    use crossterm::event::{KeyCode, KeyModifiers};
 
     #[test]
     fn smart_paste_prefers_normal_text_when_clipboard_has_text() {
@@ -353,6 +370,66 @@ mod tests {
         assert_eq!(
             preferred_wayland_text_type(types),
             Some("text/plain;charset=utf-8")
+        );
+    }
+
+    #[test]
+    fn shifted_printable_fallback_uppercases_ascii_letters() {
+        assert_eq!(shifted_printable_fallback('a', KeyModifiers::SHIFT), 'A');
+        assert_eq!(shifted_printable_fallback('z', KeyModifiers::SHIFT), 'Z');
+    }
+
+    #[test]
+    fn shifted_printable_fallback_preserves_terminal_translated_symbols() {
+        assert_eq!(shifted_printable_fallback('/', KeyModifiers::SHIFT), '/');
+        assert_eq!(shifted_printable_fallback('?', KeyModifiers::SHIFT), '?');
+        assert_eq!(shifted_printable_fallback('(', KeyModifiers::SHIFT), '(');
+        assert_eq!(shifted_printable_fallback('&', KeyModifiers::SHIFT), '&');
+    }
+
+    #[test]
+    fn shifted_printable_fallback_does_not_synthesize_us_symbol_layout() {
+        assert_eq!(shifted_printable_fallback('7', KeyModifiers::SHIFT), '7');
+        assert_eq!(shifted_printable_fallback('8', KeyModifiers::SHIFT), '8');
+        assert_eq!(shifted_printable_fallback('=', KeyModifiers::SHIFT), '=');
+    }
+
+    #[test]
+    fn text_input_for_shifted_symbols_preserves_layout_translated_char() {
+        for c in ['/', '?', '(', ')', '&', '=', '"'] {
+            assert_eq!(
+                text_input_for_key(KeyCode::Char(c), KeyModifiers::SHIFT),
+                Some(c.to_string()),
+                "shifted {c:?} should be treated as terminal/layout-translated text"
+            );
+        }
+    }
+
+    #[test]
+    fn text_input_for_altgr_symbols_preserves_layout_translated_char() {
+        let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+
+        for c in ['@', '{', '}', '\\', '€', 'ą'] {
+            assert_eq!(
+                text_input_for_key(KeyCode::Char(c), altgr),
+                Some(c.to_string()),
+                "AltGr-style {c:?} should be treated as terminal/layout-translated text"
+            );
+        }
+    }
+
+    #[test]
+    fn text_input_for_control_shortcut_letters_stays_non_text() {
+        assert_eq!(
+            text_input_for_key(
+                KeyCode::Char('q'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            ),
+            None
+        );
+        assert_eq!(
+            text_input_for_key(KeyCode::Char('@'), KeyModifiers::CONTROL),
+            None
         );
     }
 }
@@ -411,7 +488,7 @@ pub(super) fn handle_paste(app: &mut App, text: String) {
     handle_text_paste(app, text);
 }
 
-fn handle_text_paste(app: &mut App, text: String) {
+pub(super) fn handle_text_paste(app: &mut App, text: String) {
     crate::logging::info(&format!(
         "Text paste: {} chars, {} lines",
         text.len(),
@@ -542,49 +619,45 @@ pub(super) fn text_input_for_key_event(event: &KeyEvent) -> Option<String> {
 }
 
 pub(super) fn text_input_for_key(code: KeyCode, modifiers: KeyModifiers) -> Option<String> {
-    if modifiers.intersects(
-        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER,
-    ) {
-        return None;
-    }
-
     let KeyCode::Char(c) = code else {
         return None;
     };
 
+    if !modifiers_allow_printable_text(c, modifiers) {
+        return None;
+    }
+
     Some(shifted_printable_fallback(c, modifiers).to_string())
 }
 
-fn shifted_printable_fallback(c: char, modifiers: KeyModifiers) -> char {
-    if !modifiers.contains(KeyModifiers::SHIFT) {
-        return c;
+fn modifiers_allow_printable_text(c: char, modifiers: KeyModifiers) -> bool {
+    if modifiers.intersects(KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META) {
+        return false;
     }
 
-    match c {
-        'a'..='z' => c.to_ascii_uppercase(),
-        '1' => '!',
-        '2' => '@',
-        '3' => '#',
-        '4' => '$',
-        '5' => '%',
-        '6' => '^',
-        '7' => '&',
-        '8' => '*',
-        '9' => '(',
-        '0' => ')',
-        '`' => '~',
-        '-' => '_',
-        '=' => '+',
-        '[' => '{',
-        ']' => '}',
-        '\\' => '|',
-        ';' => ':',
-        '\'' => '"',
-        ',' => '<',
-        '.' => '>',
-        '/' => '?',
-        _ => c,
+    let has_control = modifiers.contains(KeyModifiers::CONTROL);
+    let has_alt = modifiers.contains(KeyModifiers::ALT);
+    match (has_control, has_alt) {
+        (false, false) => true,
+        // Some terminals report AltGr/layout-generated symbols as Ctrl+Alt plus the final
+        // printable character. Preserve that character when it cannot be confused with normal
+        // Ctrl/Alt letter shortcuts. If the terminal only reports the physical base key, we still
+        // refuse to synthesize a layout-specific character we cannot know.
+        (_, true) => is_layout_modified_text_char(c),
+        (true, false) => false,
     }
+}
+
+fn is_layout_modified_text_char(c: char) -> bool {
+    !c.is_control() && c != ' ' && !c.is_ascii_alphanumeric()
+}
+
+fn shifted_printable_fallback(c: char, modifiers: KeyModifiers) -> char {
+    if modifiers.contains(KeyModifiers::SHIFT) && c.is_ascii_lowercase() {
+        return c.to_ascii_uppercase();
+    }
+
+    c
 }
 
 pub(super) fn clear_input_for_escape(app: &mut App) {
@@ -693,7 +766,12 @@ impl App {
 
         let incomplete = super::commands::incomplete_poke_todos(self);
         if incomplete.is_empty() {
+            let had_todos = crate::todo::todos_exist(&super::commands::active_session_id(self))
+                .unwrap_or(false);
             self.auto_poke_incomplete_todos = false;
+            if !had_todos {
+                return false;
+            }
             self.push_display_message(DisplayMessage::system(
                 "✅ Todos complete. Auto-poke finished.".to_string(),
             ));
@@ -1153,6 +1231,22 @@ pub(super) fn handle_visible_copy_shortcut(
         return false;
     }
 
+    if c.eq_ignore_ascii_case(&'e') && app.diff_mode.is_inline() {
+        app.diff_mode = if app.diff_mode.is_full_inline() {
+            crate::config::DiffDisplayMode::Inline
+        } else {
+            crate::config::DiffDisplayMode::FullInline
+        };
+        app.record_copy_badge_key_press('e');
+        let action = if app.diff_mode.is_full_inline() {
+            "Expanded edit diffs"
+        } else {
+            "Collapsed edit diffs"
+        };
+        app.set_status_notice(format!("{} · Diffs: {}", action, app.diff_mode.label()));
+        return true;
+    }
+
     if let Some(target) = crate::tui::ui::recent_flicker_copy_target_for_key(c)
         .or_else(|| crate::tui::ui::visible_copy_target_for_key(c))
     {
@@ -1524,8 +1618,8 @@ impl App {
             return Ok(());
         }
 
-        // Shift+Enter inserts a newline in the input box
-        if code == KeyCode::Enter && modifiers.contains(KeyModifiers::SHIFT) {
+        // Shift+Enter and Alt/Option+Enter insert a newline in the input box.
+        if code == KeyCode::Enter && modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
             handle_shift_enter(self);
             return Ok(());
         }
@@ -1545,13 +1639,14 @@ impl App {
             }
         }
 
-        // Never fall through and insert literal text for unhandled Ctrl+key chords.
-        if modifiers.contains(KeyModifiers::CONTROL) {
+        if let Some(text) = text_input.or_else(|| text_input_for_key(code, modifiers)) {
+            handle_text_input(self, &text);
             return Ok(());
         }
 
-        if let Some(text) = text_input.or_else(|| text_input_for_key(code, modifiers)) {
-            handle_text_input(self, &text);
+        // Never fall through and insert literal text for unhandled Ctrl+key chords. This stays
+        // after text_input so Ctrl+Alt/AltGr symbols delivered as final printable text still work.
+        if modifiers.contains(KeyModifiers::CONTROL) {
             return Ok(());
         }
 
@@ -1569,15 +1664,6 @@ impl App {
 
     pub(super) fn request_full_redraw(&mut self) {
         self.force_full_redraw = true;
-    }
-
-    pub(super) fn redraw_now(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
-        if self.force_full_redraw {
-            terminal.clear()?;
-            self.force_full_redraw = false;
-        }
-        terminal.draw(|frame| crate::tui::ui::draw(frame, self))?;
-        Ok(())
     }
 
     pub(super) fn should_redraw_after_resize(&mut self) -> bool {
@@ -1836,6 +1922,13 @@ impl App {
 
         let raw_input = std::mem::take(&mut self.input);
         let input = self.expand_paste_placeholders(&raw_input);
+        if let Some(notice) = input_exceeds_submit_limit(&input) {
+            self.input = raw_input;
+            self.cursor_pos = self.input.len();
+            self.set_status_notice(notice.clone());
+            self.push_display_message(DisplayMessage::system(notice));
+            return;
+        }
         self.pasted_contents.clear();
         self.cursor_pos = 0;
         self.clear_input_undo_history();
@@ -1857,8 +1950,14 @@ impl App {
             return;
         }
 
+        if let Some(name) = self.pending_ssh_remote_name.take() {
+            commands::handle_pending_ssh_remote_target(self, name, input);
+            return;
+        }
+
         let trimmed = input.trim();
         let handled = commands::handle_help_command(self, trimmed)
+            || commands::handle_ssh_command(self, trimmed)
             || commands::handle_session_command(self, trimmed)
             || commands::handle_dictation_command(self, trimmed)
             || commands::handle_config_command(self, trimmed)
@@ -1928,6 +2027,7 @@ impl App {
                     if let Ok(mut shared) = self.registry.skills().try_write() {
                         *shared = reloaded;
                     }
+                    self.invalidate_command_candidates_cache();
                 }
             }
 

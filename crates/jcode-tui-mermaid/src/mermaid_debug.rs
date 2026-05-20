@@ -71,6 +71,7 @@ pub fn debug_stats() -> MermaidDebugStats {
     }
     out.deferred_epoch = deferred_render_epoch();
     out.protocol = protocol_type().map(|p| format!("{:?}", p));
+    out.render_size_backend = render_size_backend();
     out
 }
 
@@ -89,7 +90,7 @@ pub fn debug_cache() -> Vec<MermaidCacheEntry> {
         return cache
             .entries
             .iter()
-            .map(|(hash, diagram)| MermaidCacheEntry {
+            .map(|((hash, _profile), diagram)| MermaidCacheEntry {
                 hash: format!("{:016x}", hash),
                 path: diagram.path.to_string_lossy().to_string(),
                 width: diagram.width,
@@ -374,6 +375,7 @@ fn diff_opt_u64(after: Option<u64>, before: Option<u64>) -> Option<i64> {
 }
 
 #[cfg(test)]
+#[cfg_attr(test, allow(dead_code))]
 fn parse_proc_status_kib_line(line: &str, key: &str) -> Option<u64> {
     let rest = line.strip_prefix(key)?.trim();
     let value_kib = rest.split_whitespace().next()?.parse::<u64>().ok()?;
@@ -381,6 +383,7 @@ fn parse_proc_status_kib_line(line: &str, key: &str) -> Option<u64> {
 }
 
 #[cfg(test)]
+#[cfg_attr(test, allow(dead_code))]
 pub(super) fn parse_proc_status_value_bytes(status: &str, key: &str) -> Option<u64> {
     status
         .lines()

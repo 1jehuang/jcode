@@ -44,8 +44,28 @@ fn moving_to_missing_workspace_creates_placeholder_surface() {
     workspace.handle_key(KeyInput::Character("j".to_string()));
     workspace.handle_key(KeyInput::Character("j".to_string()));
     assert_eq!(workspace.current_workspace(), 2);
-    assert!(workspace.surfaces.iter().any(|surface| surface.lane == 2));
+    assert!(
+        workspace.surfaces.iter().any(|surface| {
+            surface.lane == 2 && surface.kind == SurfaceKind::WorkspacePlaceholder
+        })
+    );
     assert_unique_positions(&workspace);
+}
+
+#[test]
+fn placeholder_titles_do_not_define_surface_kind() {
+    let mut workspace = Workspace::fake();
+    workspace.handle_key(KeyInput::Character("n".to_string()));
+    let focused = workspace.focused_id;
+    let surface = workspace
+        .surfaces
+        .iter_mut()
+        .find(|surface| surface.id == focused)
+        .unwrap();
+    surface.title = format!("workspace {}", surface.lane);
+
+    assert_eq!(surface.kind, SurfaceKind::Scratch);
+    assert_eq!(workspace.occupied_lane_bounds(), (-1, 1));
 }
 
 #[test]
@@ -121,6 +141,73 @@ fn insert_mode_captures_text_and_escape_returns_to_navigation() {
     workspace.handle_key(KeyInput::Character("hello".to_string()));
     assert_eq!(workspace.draft, "hello");
     workspace.handle_key(KeyInput::Escape);
+    assert_eq!(workspace.mode, InputMode::Navigation);
+}
+
+#[test]
+fn insert_mode_supports_cursor_editing_and_undo() {
+    let mut workspace = Workspace::fake();
+    workspace.handle_key(KeyInput::Character("i".to_string()));
+    workspace.handle_key(KeyInput::Character("helo".to_string()));
+    workspace.handle_key(KeyInput::MoveCursorLeft);
+    workspace.handle_key(KeyInput::Character("l".to_string()));
+
+    assert_eq!(workspace.draft, "hello");
+    assert_eq!(workspace.draft_cursor, 4);
+
+    workspace.handle_key(KeyInput::DeleteNextChar);
+    assert_eq!(workspace.draft, "hell");
+
+    workspace.handle_key(KeyInput::UndoInput);
+    assert_eq!(workspace.draft, "hello");
+    assert_eq!(workspace.draft_cursor, 4);
+}
+
+#[test]
+fn insert_mode_autocompletes_workspace_slash_command() {
+    let mut workspace = Workspace::fake();
+    workspace.handle_key(KeyInput::Character("i".to_string()));
+    workspace.handle_key(KeyInput::Character("/mod".to_string()));
+
+    assert_eq!(
+        workspace.handle_key(KeyInput::Autocomplete),
+        KeyOutcome::Redraw
+    );
+    assert_eq!(workspace.draft, "/model");
+    assert_eq!(workspace.draft_cursor, "/model".len());
+}
+
+#[test]
+fn insert_mode_cuts_input_line_to_clipboard_and_undo_restores() {
+    let mut workspace = Workspace::fake();
+    workspace.handle_key(KeyInput::Character("i".to_string()));
+    workspace.handle_key(KeyInput::Character("copy me".to_string()));
+
+    assert_eq!(
+        workspace.handle_key(KeyInput::CutInputLine),
+        KeyOutcome::CutDraftToClipboard("copy me".to_string())
+    );
+    assert!(workspace.draft.is_empty());
+    assert_eq!(workspace.draft_cursor, 0);
+
+    workspace.handle_key(KeyInput::UndoInput);
+    assert_eq!(workspace.draft, "copy me");
+    assert_eq!(workspace.draft_cursor, "copy me".len());
+}
+
+#[test]
+fn toggle_input_mode_switches_between_navigation_and_insert() {
+    let mut workspace = Workspace::fake();
+    assert_eq!(workspace.mode, InputMode::Navigation);
+    assert_eq!(
+        workspace.handle_key(KeyInput::ToggleInputMode),
+        KeyOutcome::Redraw
+    );
+    assert_eq!(workspace.mode, InputMode::Insert);
+    assert_eq!(
+        workspace.handle_key(KeyInput::ToggleInputMode),
+        KeyOutcome::Redraw
+    );
     assert_eq!(workspace.mode, InputMode::Navigation);
 }
 
@@ -233,6 +320,7 @@ fn session_cards_create_real_session_surfaces() {
     let workspace = Workspace::from_session_cards(vec![session_card("a", "alpha")]);
 
     assert_eq!(workspace.surfaces.len(), 1);
+    assert_eq!(workspace.surfaces[0].kind, SurfaceKind::Session);
     assert_eq!(workspace.surfaces[0].title, "alpha");
     assert_eq!(workspace.surfaces[0].session_id.as_deref(), Some("a"));
     assert_eq!(workspace.surfaces[0].body_lines.len(), 4);
@@ -251,6 +339,57 @@ fn session_cards_create_real_session_surfaces() {
             .detail_lines
             .contains(&"user expanded hello".to_string())
     );
+}
+
+#[test]
+fn loading_workspace_renders_before_session_cards_arrive() {
+    let workspace = Workspace::loading_sessions();
+
+    assert_eq!(workspace.surfaces.len(), 1);
+    assert_eq!(workspace.surfaces[0].kind, SurfaceKind::Loading);
+    assert!(workspace.status_title().contains("loading jcode sessions"));
+}
+
+#[test]
+fn applying_preferences_does_not_create_missing_workspace_placeholder() {
+    let mut workspace = Workspace::from_session_cards(vec![session_card("a", "alpha")]);
+    let original_surface_count = workspace.surfaces.len();
+    let original_focus = workspace.focused_id;
+
+    workspace.apply_preferences(DesktopPreferences {
+        panel_size: PanelSizePreset::ThreeQuarter,
+        focused_session_id: Some("missing-session".to_string()),
+        workspace_lane: 2,
+        space_hold_toggle_ms: 300,
+    });
+
+    assert_eq!(workspace.surfaces.len(), original_surface_count);
+    assert_eq!(workspace.focused_id, original_focus);
+    assert_eq!(workspace.preferred_panel_screen_fraction(), 0.75);
+    assert_eq!(workspace.space_hold_toggle_duration().as_millis(), 300);
+    assert!(
+        !workspace
+            .surfaces
+            .iter()
+            .any(|surface| surface.kind == SurfaceKind::WorkspacePlaceholder && surface.lane == 2)
+    );
+}
+
+#[test]
+fn applying_preferences_focuses_existing_lane_without_placeholder_creation() {
+    let mut workspace = Workspace::fake();
+    let original_surface_count = workspace.surfaces.len();
+
+    workspace.apply_preferences(DesktopPreferences {
+        panel_size: PanelSizePreset::Half,
+        focused_session_id: None,
+        workspace_lane: 1,
+        space_hold_toggle_ms: DEFAULT_SPACE_HOLD_TOGGLE_MS,
+    });
+
+    assert_eq!(workspace.surfaces.len(), original_surface_count);
+    assert_eq!(workspace.current_workspace(), 1);
+    assert_eq!(workspace.preferred_panel_screen_fraction(), 0.50);
 }
 
 #[test]
@@ -274,6 +413,62 @@ fn replacing_session_cards_preserves_focus_when_possible() {
     assert_eq!(workspace.preferred_panel_screen_fraction(), 0.50);
     assert_eq!(workspace.draft, "draft");
     assert_eq!(workspace.pending_images.len(), 1);
+}
+
+#[test]
+fn replacing_session_cards_reconciles_without_destroying_manual_layout() {
+    let mut workspace =
+        Workspace::from_session_cards(vec![session_card("a", "alpha"), session_card("b", "bravo")]);
+    workspace.focused_id = 2;
+    workspace.handle_key(KeyInput::Character("J".to_string()));
+    let focused_before = workspace.focused_id;
+    let focused_position_before = workspace
+        .focused_surface()
+        .map(|surface| (surface.lane, surface.column))
+        .unwrap();
+    workspace.handle_key(KeyInput::Character("n".to_string()));
+    let scratch_id = workspace.focused_id;
+    workspace.focused_id = focused_before;
+    workspace.handle_key(KeyInput::HotkeyHelp);
+    let help_id = workspace.focused_id;
+    workspace.focused_id = focused_before;
+
+    workspace.replace_session_cards(vec![
+        session_card("b", "bravo refreshed"),
+        session_card("c", "charlie"),
+    ]);
+
+    assert!(
+        workspace
+            .surfaces
+            .iter()
+            .all(|surface| { surface.session_id.as_deref() != Some("a") })
+    );
+    let refreshed = workspace
+        .surfaces
+        .iter()
+        .find(|surface| surface.session_id.as_deref() == Some("b"))
+        .unwrap();
+    assert_eq!(refreshed.id, focused_before);
+    assert_eq!(refreshed.title, "bravo refreshed");
+    assert_eq!((refreshed.lane, refreshed.column), focused_position_before);
+    assert_eq!(workspace.focused_id, focused_before);
+    assert!(
+        workspace
+            .surfaces
+            .iter()
+            .any(|surface| { surface.id == scratch_id && surface.kind == SurfaceKind::Scratch })
+    );
+    assert!(
+        workspace
+            .surfaces
+            .iter()
+            .any(|surface| { surface.id == help_id && surface.kind == SurfaceKind::HotkeyHelp })
+    );
+    assert!(workspace.surfaces.iter().any(|surface| {
+        surface.session_id.as_deref() == Some("c") && surface.kind == SurfaceKind::Session
+    }));
+    assert_unique_positions(&workspace);
 }
 
 #[test]
@@ -473,6 +668,46 @@ fn zoomed_g_and_shift_g_jump_detail_scroll() {
         KeyOutcome::Redraw
     );
     assert_eq!(workspace.detail_scroll, 0);
+}
+
+#[test]
+fn zoomed_global_scroll_shortcuts_scroll_detail() {
+    let mut workspace = Workspace::from_session_cards(vec![session_card("a", "alpha")]);
+    workspace.surfaces[0].detail_lines = (0..20).map(|index| format!("line {index}")).collect();
+    workspace.handle_key(KeyInput::Character("z".to_string()));
+
+    assert_eq!(
+        workspace.handle_key(KeyInput::ScrollBodyToBottom),
+        KeyOutcome::Redraw
+    );
+    assert_eq!(workspace.detail_scroll, 19);
+
+    assert_eq!(
+        workspace.handle_key(KeyInput::ScrollBodyLines(1)),
+        KeyOutcome::Redraw
+    );
+    assert_eq!(workspace.detail_scroll, 18);
+
+    assert_eq!(
+        workspace.handle_key(KeyInput::ScrollBodyPages(1)),
+        KeyOutcome::Redraw
+    );
+    assert_eq!(workspace.detail_scroll, 6);
+
+    assert_eq!(
+        workspace.handle_key(KeyInput::ScrollBodyToTop),
+        KeyOutcome::Redraw
+    );
+    assert_eq!(workspace.detail_scroll, 0);
+}
+
+#[test]
+fn workspace_exit_shortcut_requests_exit() {
+    let mut workspace = Workspace::from_session_cards(vec![session_card("a", "alpha")]);
+    assert_eq!(workspace.handle_key(KeyInput::ExitApp), KeyOutcome::Exit);
+
+    workspace.handle_key(KeyInput::Character("i".to_string()));
+    assert_eq!(workspace.handle_key(KeyInput::ExitApp), KeyOutcome::Exit);
 }
 
 fn assert_unique_positions(workspace: &Workspace) {

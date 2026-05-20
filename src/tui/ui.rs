@@ -101,8 +101,9 @@ mod transitions;
 #[path = "ui_viewport.rs"]
 mod viewport;
 
+use crate::tui::mermaid;
 #[cfg(test)]
-use box_utils::truncate_line_to_width;
+pub(crate) use box_utils::truncate_line_to_width;
 use box_utils::{
     line_plain_text, render_rounded_box, truncate_line_preserving_suffix_to_width,
     truncate_line_with_ellipsis_to_width,
@@ -118,11 +119,13 @@ pub use diagram_pane::{
 };
 #[cfg(test)]
 use diagram_pane::{
-    div_ceil_u32, estimate_pinned_diagram_pane_width_with_font, is_diagram_poor_fit,
+    debug_probe_pinned_diagram_with_font, div_ceil_u32,
+    estimate_pinned_diagram_pane_width_with_font, is_diagram_poor_fit,
     vcenter_fitted_image_with_font,
 };
 use diagram_pane::{
     draw_pinned_diagram, estimate_pinned_diagram_pane_height, estimate_pinned_diagram_pane_width,
+    pinned_diagram_preferred_aspect_ratio,
 };
 pub(crate) use diagram_pane::{pinned_diagram_debug_json, reset_pinned_diagram_debug_snapshot};
 use file_diff_ui::active_file_diff_context;
@@ -164,6 +167,12 @@ use transitions::inline_ui_gap_height;
 #[cfg(test)]
 use viewport::compute_visible_margins;
 use viewport::draw_messages;
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use viewport::{
+    copy_badge_reserved_width, reserve_copy_badge_margins,
+    truncate_line_in_place_to_width as truncate_copy_badge_line_to_width,
+};
 /// Last known max scroll value from the renderer. Updated each frame.
 /// Scroll handlers use this to clamp scroll_offset and prevent overshoot.
 #[cfg(not(test))]
@@ -190,6 +199,7 @@ thread_local! {
     static TEST_LAST_DIFF_PANE_EFFECTIVE_SCROLL: Cell<usize> = const { Cell::new(0) };
     static TEST_LAST_USER_PROMPT_POSITIONS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static TEST_LAST_LAYOUT: RefCell<Option<LayoutSnapshot>> = const { RefCell::new(None) };
+    static TEST_LAST_STATUS_AREA: RefCell<Option<Rect>> = const { RefCell::new(None) };
     static TEST_VISIBLE_COPY_TARGETS: RefCell<Vec<VisibleCopyTarget>> = RefCell::new(Vec::new());
     static TEST_PROMPT_VIEWPORT_STATE: RefCell<PromptViewportState> = RefCell::new(PromptViewportState::default());
     static TEST_COPY_VIEWPORT: RefCell<CopyViewportSnapshots> = RefCell::new(CopyViewportSnapshots::default());
@@ -941,6 +951,44 @@ fn full_prep_cache() -> &'static Mutex<FullPrepCacheState> {
     FULL_PREP_CACHE.get_or_init(|| Mutex::new(FullPrepCacheState::default()))
 }
 
+#[cfg(not(test))]
+static LAST_STATUS_AREA: OnceLock<Mutex<Option<Rect>>> = OnceLock::new();
+
+#[cfg(not(test))]
+fn last_status_area_state() -> &'static Mutex<Option<Rect>> {
+    LAST_STATUS_AREA.get_or_init(|| Mutex::new(None))
+}
+
+pub(crate) fn record_status_area(area: Rect) {
+    #[cfg(test)]
+    {
+        TEST_LAST_STATUS_AREA.with(|snapshot| {
+            *snapshot.borrow_mut() = Some(area);
+        });
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        if let Ok(mut snapshot) = last_status_area_state().lock() {
+            *snapshot = Some(area);
+        }
+    }
+}
+
+pub(crate) fn last_status_area() -> Option<Rect> {
+    #[cfg(test)]
+    {
+        return TEST_LAST_STATUS_AREA.with(|snapshot| *snapshot.borrow());
+    }
+    #[cfg(not(test))]
+    {
+        last_status_area_state()
+            .lock()
+            .ok()
+            .and_then(|snapshot| *snapshot)
+    }
+}
+
 use frame_metrics::{
     ChatLayoutMetrics, FLICKER_NOTICE_COPY_KEY, ViewportMetrics, finalize_frame_metrics,
     note_body_built, note_body_cache_hit, note_body_cache_miss, note_body_incremental_reuse,
@@ -1027,6 +1075,9 @@ pub(crate) fn clear_test_render_state_for_tests() {
     set_last_diff_pane_effective_scroll(0);
     update_user_prompt_positions(&[]);
     TEST_LAST_LAYOUT.with(|snapshot| {
+        *snapshot.borrow_mut() = None;
+    });
+    TEST_LAST_STATUS_AREA.with(|snapshot| {
         *snapshot.borrow_mut() = None;
     });
     set_visible_copy_targets(Vec::new());
@@ -1655,8 +1706,30 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let pane_enabled = app.diagram_pane_enabled();
     let pane_position = app.diagram_pane_position();
     let has_side_panel_content = app.side_panel().focused_page().is_some();
-    let suppress_side_diagram =
-        has_side_panel_content && pane_position == crate::config::DiagramPanePosition::Side;
+    let diff_mode = app.diff_mode();
+    let pin_images = app.pin_images();
+    let collect_diffs = diff_mode.is_pinned();
+    let has_pinned_content = if collect_diffs || pin_images {
+        collect_pinned_content_cached(
+            app.display_messages(),
+            &app.side_pane_images(),
+            collect_diffs,
+            pin_images,
+            app.display_messages_version(),
+        )
+    } else {
+        false
+    };
+    let has_file_diff_edits = diff_mode.is_file() && app.has_display_edit_tool_messages();
+    let has_right_side_pane_content =
+        has_side_panel_content || has_pinned_content || has_file_diff_edits;
+    // The side panel is itself a single right-hand auxiliary surface and can render
+    // visual content such as Mermaid diagrams inline. Pinned image/file-diff content
+    // also uses that same right-hand surface. Do not also open the global pinned
+    // diagram pane while any right-hand side pane is visible, otherwise combinations
+    // like pinned images + Mermaid can produce chat + side pane + diagram triple-split
+    // layouts.
+    let suppress_side_diagram = has_right_side_pane_content;
     let pinned_diagram = if diagram_mode == crate::config::DiagramDisplayMode::Pinned
         && pane_enabled
         && !suppress_side_diagram
@@ -1674,7 +1747,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             crate::config::DiagramPanePosition::Side => {
                 const MIN_DIAGRAM_WIDTH: u16 = 24;
                 const MIN_CHAT_WIDTH: u16 = 20;
-                const AUTO_DIAGRAM_WIDTH_CAP_PERCENT: u32 = 50;
+                const AUTO_DIAGRAM_WIDTH_CAP_PERCENT: u32 = 75;
                 let max_diagram = area.width.saturating_sub(MIN_CHAT_WIDTH);
                 if max_diagram >= MIN_DIAGRAM_WIDTH {
                     let ratio = app.diagram_pane_ratio().clamp(25, 100) as u32;
@@ -1753,23 +1826,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         (area, None)
     };
 
-    let diff_mode = app.diff_mode();
-    let pin_images = app.pin_images();
-    let collect_diffs = diff_mode.is_pinned();
-    let has_pinned_content = if collect_diffs || pin_images {
-        collect_pinned_content_cached(
-            app.display_messages(),
-            &app.side_pane_images(),
-            collect_diffs,
-            pin_images,
-            app.display_messages_version(),
-        )
-    } else {
-        false
-    };
-    let has_file_diff_edits = diff_mode.is_file() && app.has_display_edit_tool_messages();
-
-    let needs_side_pane = has_side_panel_content || has_pinned_content || has_file_diff_edits;
+    let needs_side_pane = has_right_side_pane_content;
 
     let (chat_area, diff_pane_area) = if needs_side_pane {
         const MIN_DIFF_WIDTH: u16 = 30;
@@ -1826,7 +1883,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let prep_start = Instant::now();
     let chat_left_inset = left_aligned_content_inset(chat_area.width, app.centered_mode());
     let wide_prepare_width = chat_area.width.saturating_sub(chat_left_inset);
-    let prepared_wide = prepare::prepare_messages(app, wide_prepare_width, chat_area.height);
+    let pinned_mermaid_aspect_ratio =
+        diagram_area.and_then(|area| pinned_diagram_preferred_aspect_ratio(area, pane_position));
+    let prepared_wide = mermaid::with_preferred_aspect_ratio(pinned_mermaid_aspect_ratio, || {
+        prepare::prepare_messages(app, wide_prepare_width, chat_area.height)
+    });
     let show_donut = super::idle_donut_active(app);
     let donut_height: u16 = if show_donut { 14 } else { 0 };
     let notification_height: u16 = if app.has_notification() { 1 } else { 0 };
@@ -1848,7 +1909,9 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     } else {
         let narrow_prepare_width = wide_prepare_width.saturating_sub(1);
         let prepared_narrow =
-            prepare::prepare_messages(app, narrow_prepare_width, chat_area.height);
+            mermaid::with_preferred_aspect_ratio(pinned_mermaid_aspect_ratio, || {
+                prepare::prepare_messages(app, narrow_prepare_width, chat_area.height)
+            });
         let narrow_content_height = prepared_narrow.total_wrapped_lines().max(1) as u16;
         let narrow_overflows = narrow_content_height + fixed_height > available_height;
         if narrow_overflows {
@@ -1906,6 +1969,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             ]
         })
         .split(chat_area);
+    record_status_area(chunks[2]);
 
     // Capture layout info for visual debug
     if let Some(ref mut capture) = debug_capture {

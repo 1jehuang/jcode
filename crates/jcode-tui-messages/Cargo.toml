@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 jcode-config-types = { path = "../jcode-config-types" }
 jcode-message-types = { path = "../jcode-message-types" }
+jcode-session-types = { path = "../jcode-session-types" }
 jcode-tui-markdown = { path = "../jcode-tui-markdown" }
 ratatui = "0.30"
 serde_json = "1"

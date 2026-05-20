@@ -53,10 +53,39 @@ impl Agent {
     }
 
     pub fn set_model(&mut self, model: &str) -> Result<()> {
+        self.set_model_from_provider_state_event(
+            model,
+            crate::provider::ProviderModelSelectionSource::User,
+        )
+    }
+
+    pub(crate) fn set_model_from_auth(&mut self, model: &str) -> Result<()> {
+        self.set_model_from_provider_state_event(
+            model,
+            crate::provider::ProviderModelSelectionSource::Auth,
+        )
+    }
+
+    fn set_model_from_provider_state_event(
+        &mut self,
+        model: &str,
+        source: crate::provider::ProviderModelSelectionSource,
+    ) -> Result<()> {
         crate::provider::set_model_with_auth_refresh(self.provider.as_ref(), model)?;
-        self.session.model = Some(self.provider.model());
+        let resolved_model = self.provider.model();
+        self.session.model = Some(resolved_model.clone());
+        let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
+        self.provider_runtime_state.apply(event);
         self.log_env_snapshot("set_model");
         Ok(())
+    }
+
+    pub(crate) fn provider_model_selection_generation(&self) -> u64 {
+        self.provider_runtime_state.selection_generation()
+    }
+
+    pub(crate) fn user_selected_provider_model_after(&self, generation: u64) -> bool {
+        self.provider_runtime_state.user_selected_after(generation)
     }
 
     pub fn restore_reasoning_effort_from_session(&mut self) {
@@ -90,6 +119,14 @@ impl Agent {
         self.log_env_snapshot("set_subagent_model");
         self.session.save()?;
         Ok(())
+    }
+
+    pub fn session_provider_key(&self) -> Option<String> {
+        self.session.provider_key.clone()
+    }
+
+    pub fn set_session_provider_key(&mut self, provider_key: Option<String>) {
+        self.session.provider_key = provider_key;
     }
 
     pub fn rename_session_title(&mut self, title: Option<String>) -> Result<String> {

@@ -78,6 +78,19 @@ pub struct CopilotApiProvider {
 }
 
 impl CopilotApiProvider {
+    fn max_token_parameter_for_model(model: &str) -> &'static str {
+        let normalized = model.trim().to_ascii_lowercase();
+        if normalized.starts_with("gpt-5") {
+            "max_completion_tokens"
+        } else {
+            "max_tokens"
+        }
+    }
+
+    fn add_max_token_parameter(body: &mut Value, model: &str, max_tokens: u32) {
+        body[Self::max_token_parameter_for_model(model)] = json!(max_tokens);
+    }
+
     fn persisted_catalog_path() -> Result<std::path::PathBuf> {
         Ok(crate::storage::app_config_dir()?.join("copilot_models_cache.json"))
     }
@@ -653,9 +666,9 @@ impl CopilotApiProvider {
             let mut body = json!({
                 "model": model,
                 "messages": messages,
-                "max_tokens": max_tokens,
                 "stream": true,
             });
+            Self::add_max_token_parameter(&mut body, &model, max_tokens);
 
             if !tools.is_empty() {
                 body["tools"] = json!(tools);
@@ -1005,6 +1018,33 @@ impl Provider for CopilotApiProvider {
         }
         let built_messages = Self::build_messages(system, messages);
         let built_tools = Self::build_tools(tools);
+        let model_for_fingerprint = self.model();
+        let mut canonical_payload = json!({
+            "model": &model_for_fingerprint,
+            "messages": &built_messages,
+            "tools": &built_tools,
+        });
+        Self::add_max_token_parameter(&mut canonical_payload, &model_for_fingerprint, 32_768u32);
+        let system_value = built_messages
+            .first()
+            .filter(|message| message.get("role").and_then(|role| role.as_str()) == Some("system"))
+            .cloned();
+        let tools_value = if built_tools.is_empty() {
+            None
+        } else {
+            Some(Value::Array(built_tools.clone()))
+        };
+        super::fingerprint::log_provider_canonical_input(
+            "copilot",
+            &model_for_fingerprint,
+            "chat_completions",
+            &canonical_payload,
+            &built_messages,
+            system_value.as_ref(),
+            tools_value.as_ref(),
+            Some(built_tools.len()),
+            &[("user_initiated", is_user_initiated.to_string())],
+        );
 
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 

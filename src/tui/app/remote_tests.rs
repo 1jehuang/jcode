@@ -1,5 +1,8 @@
 use super::reconnect;
-use super::{RemoteRunState, handle_post_connect, handle_server_event, process_remote_followups};
+use super::{
+    RemoteRunState, auth_provider_hint_for_login_provider, handle_post_connect,
+    handle_server_event, process_remote_followups,
+};
 use crate::protocol::{
     MemoryActivitySnapshot, MemoryPipelineSnapshot, MemoryStateSnapshot, MemoryStepStatusSnapshot,
     ServerEvent,
@@ -52,6 +55,58 @@ fn reload_handoff_active_when_server_flag_is_set() {
     };
 
     assert!(reconnect::reload_handoff_active(&state));
+}
+
+#[test]
+fn auth_provider_hint_maps_openai_compatible_login_providers() {
+    assert_eq!(
+        auth_provider_hint_for_login_provider("Azure OpenAI"),
+        Some("azure-openai")
+    );
+    assert_eq!(
+        auth_provider_hint_for_login_provider("cerebras"),
+        Some("cerebras")
+    );
+    assert_eq!(
+        auth_provider_hint_for_login_provider("Cerebras"),
+        Some("cerebras")
+    );
+    assert_eq!(
+        auth_provider_hint_for_login_provider("minimax"),
+        Some("minimax")
+    );
+    assert_eq!(
+        auth_provider_hint_for_login_provider("not-a-provider"),
+        None
+    );
+}
+
+#[test]
+fn auth_changed_event_for_cerebras_login_carries_runtime_and_catalog_identity() {
+    let auth = super::auth_changed_event_for_login_provider("Cerebras")
+        .expect("Cerebras login should produce typed auth event");
+
+    assert_eq!(auth.provider.as_str(), "cerebras");
+    assert_eq!(
+        auth.credential_source,
+        Some(crate::protocol::AuthCredentialSource::ApiKeyFile)
+    );
+    assert_eq!(
+        auth.auth_method,
+        Some(crate::protocol::AuthMethod::RemoteTuiPasteApiKey)
+    );
+    assert_eq!(
+        auth.expected_runtime
+            .as_ref()
+            .map(crate::protocol::RuntimeProviderKey::as_str),
+        Some("openai-compatible")
+    );
+    assert_eq!(
+        auth.expected_catalog_namespace
+            .as_ref()
+            .map(crate::protocol::CatalogNamespace::as_str),
+        Some("cerebras")
+    );
 }
 
 #[test]

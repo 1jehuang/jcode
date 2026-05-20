@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::panic;
 
 use crate::{id, session, telemetry, tui};
@@ -169,14 +169,20 @@ pub fn cleanup_tui_runtime_for_run_result(
 }
 
 pub fn print_session_resume_hint(session_id: &str) {
+    let _ = write_session_resume_hint(io::stderr().lock(), session_id);
+}
+
+fn write_session_resume_hint(mut writer: impl Write, session_id: &str) -> io::Result<()> {
     let session_name = id::extract_session_name(session_id).unwrap_or(session_id);
-    eprintln!();
-    eprintln!(
+    writeln!(writer)?;
+    writeln!(
+        writer,
         "\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m",
         session_name
-    );
-    eprintln!("  jcode --resume {}", session_id);
-    eprintln!();
+    )?;
+    writeln!(writer, "  jcode --resume {}", session_id)?;
+    writeln!(writer)?;
+    Ok(())
 }
 
 fn init_tui_terminal_resume() -> Result<ratatui::DefaultTerminal> {
@@ -303,11 +309,34 @@ mod tests {
         set_current_session(test_session);
 
         if let Some(session_id) = get_current_session() {
+            let mut output = Vec::new();
+            write_session_resume_hint(&mut output, &session_id).unwrap();
+            let output = String::from_utf8(output).unwrap();
             let expected_cmd = format!("jcode --resume {}", session_id);
-            assert!(expected_cmd.starts_with("jcode --resume "));
+            assert!(output.contains(&expected_cmd));
+            assert!(output.contains("to resume"));
             assert!(!session_id.is_empty());
         } else {
             panic!("Session ID should be set");
         }
+    }
+
+    #[test]
+    fn session_resume_hint_writer_reports_closed_stderr_without_panicking() {
+        struct ClosedWriter;
+
+        impl Write for ClosedWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "stderr closed"))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let error = write_session_resume_hint(ClosedWriter, "session_closed_pipe")
+            .expect_err("closed stderr should be reported as an I/O error");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 }

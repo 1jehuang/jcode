@@ -43,7 +43,7 @@ mod util;
 
 pub(super) use self::await_members_state::AwaitMembersRuntime;
 use self::background_tasks::{
-    dispatch_background_task_completion, dispatch_background_task_progress,
+    dispatch_background_task_completion, dispatch_background_task_progress, dispatch_ui_activity,
 };
 use self::debug::{ClientConnectionInfo, ClientDebugState};
 use self::debug_jobs::DebugJob;
@@ -1442,6 +1442,7 @@ impl Server {
                             op: touch.op.clone(),
                             timestamp: Instant::now(),
                             absolute_time: std::time::SystemTime::now(),
+                            intent: touch.intent.clone(),
                             summary: touch.summary.clone(),
                             detail: touch.detail.clone(),
                         });
@@ -1472,6 +1473,7 @@ impl Server {
                             SwarmEventType::FileTouch {
                                 path: path.to_string_lossy().to_string(),
                                 op: touch.op.as_str().to_string(),
+                                intent: touch.intent.clone(),
                                 summary: touch.summary.clone(),
                                 detail: touch.detail.clone(),
                             },
@@ -1551,8 +1553,13 @@ impl Server {
                                 let prev_member = members.get(&prev.session_id);
                                 let prev_name = prev_member.and_then(|m| m.friendly_name.clone());
                                 let scope = file_activity_scope_label(prev, &touch);
+                                let intent_suffix = prev
+                                    .intent
+                                    .as_ref()
+                                    .map(|intent| format!(" — intent: {}", intent))
+                                    .unwrap_or_default();
                                 let alert_msg = format!(
-                                    "⚠ File activity: {} — {} — {} previously {} this file{}",
+                                    "⚠ File activity: {} — {} — {} previously {} this file{}{}",
                                     path.display(),
                                     scope,
                                     prev_name.as_deref().unwrap_or(&prev.session_id[..8]),
@@ -1560,7 +1567,8 @@ impl Server {
                                     prev.summary
                                         .as_ref()
                                         .map(|s| format!(": {}", s))
-                                        .unwrap_or_default()
+                                        .unwrap_or_default(),
+                                    intent_suffix
                                 );
                                 let notification = ServerEvent::Notification {
                                     from_session: prev.session_id.clone(),
@@ -1568,6 +1576,7 @@ impl Server {
                                     notification_type: NotificationType::FileConflict {
                                         path: path.display().to_string(),
                                         operation: prev.op.as_str().to_string(),
+                                        intent: prev.intent.clone(),
                                         summary: prev.summary.clone(),
                                         detail: prev.detail.clone(),
                                     },
@@ -1597,8 +1606,13 @@ impl Server {
                         for prev in &previous_touches {
                             if let Some(prev_member) = members.get(&prev.session_id) {
                                 let scope = file_activity_scope_label(prev, &touch);
+                                let intent_suffix = touch
+                                    .intent
+                                    .as_ref()
+                                    .map(|intent| format!(" — intent: {}", intent))
+                                    .unwrap_or_default();
                                 let alert_msg = format!(
-                                    "⚠ File activity: {} — {} — {} just {} this file you previously worked with{}",
+                                    "⚠ File activity: {} — {} — {} just {} this file you previously worked with{}{}",
                                     path.display(),
                                     scope,
                                     current_name
@@ -1609,7 +1623,8 @@ impl Server {
                                         .summary
                                         .as_ref()
                                         .map(|s| format!(": {}", s))
-                                        .unwrap_or_default()
+                                        .unwrap_or_default(),
+                                    intent_suffix
                                 );
                                 let notification = ServerEvent::Notification {
                                     from_session: session_id.clone(),
@@ -1617,6 +1632,7 @@ impl Server {
                                     notification_type: NotificationType::FileConflict {
                                         path: path.display().to_string(),
                                         operation: touch.op.as_str().to_string(),
+                                        intent: touch.intent.clone(),
                                         summary: touch.summary.clone(),
                                         detail: touch.detail.clone(),
                                     },
@@ -1654,6 +1670,9 @@ impl Server {
                 }
                 Ok(BusEvent::BackgroundTaskProgress(task)) => {
                     dispatch_background_task_progress(&task, &swarm_members).await;
+                }
+                Ok(BusEvent::UiActivity(activity)) => {
+                    dispatch_ui_activity(&activity, &swarm_members).await;
                 }
                 // Session todos are private. Swarm plans are updated via explicit
                 // communication actions (comm_propose_plan / comm_approve_plan), not

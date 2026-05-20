@@ -25,13 +25,71 @@ impl SessionPicker {
         ]))
     }
 
-    fn render_session_item(&self, session: &SessionInfo, is_selected: bool) -> ListItem<'static> {
+    pub(super) fn format_estimated_tokens(tokens: usize) -> String {
+        if tokens < 1_000 {
+            return format!("~{} tok", tokens);
+        }
+
+        const UNITS: &[(f64, &str)] = &[
+            (1.0, ""),
+            (1_000.0, "k"),
+            (1_000_000.0, "M"),
+            (1_000_000_000.0, "B"),
+            (1_000_000_000_000.0, "T"),
+            (1_000_000_000_000_000.0, "P"),
+            (1_000_000_000_000_000_000.0, "E"),
+        ];
+
+        let tokens = tokens as f64;
+        let mut unit_idx = 0;
+        while unit_idx + 1 < UNITS.len() && tokens >= UNITS[unit_idx + 1].0 {
+            unit_idx += 1;
+        }
+
+        loop {
+            let value = tokens / UNITS[unit_idx].0;
+            let decimals = if value < 10.0 { 1 } else { 0 };
+            let rounded = if decimals == 1 {
+                (value * 10.0).round() / 10.0
+            } else {
+                value.round()
+            };
+
+            if rounded >= 1000.0 && unit_idx + 1 < UNITS.len() {
+                unit_idx += 1;
+                continue;
+            }
+
+            let value_display = if decimals == 1 && (rounded.fract()).abs() > f64::EPSILON {
+                format!("{rounded:.1}")
+            } else {
+                format!("{rounded:.0}")
+            };
+            return format!("~{}{} tok", value_display, UNITS[unit_idx].1);
+        }
+    }
+
+    fn primary_title_display(session: &SessionInfo) -> String {
+        let title = session.title.trim();
+        let short_name = session.short_name.trim();
+        let primary = if title.is_empty() { short_name } else { title };
+        if primary.chars().count() > 54 {
+            format!("{}...", safe_truncate(primary, 51))
+        } else {
+            primary.to_string()
+        }
+    }
+
+    pub(super) fn render_session_item_lines(
+        &self,
+        session: &SessionInfo,
+        is_selected: bool,
+    ) -> Vec<Line<'static>> {
         let dim: Color = rgb(100, 100, 100);
         let dimmer: Color = rgb(70, 70, 70);
         let user_clr: Color = rgb(138, 180, 248);
         let accent: Color = rgb(186, 139, 255);
         let batch_restore: Color = rgb(255, 140, 140);
-        let batch_row_bg: Color = rgb(36, 18, 18);
 
         let created_ago = format_time_ago(session.created_at);
         let in_batch_restore = self.crashed_session_ids.contains(&session.id);
@@ -72,13 +130,16 @@ impl SessionPicker {
             }
         };
 
+        let primary_title = Self::primary_title_display(session);
         let mut line1_spans = vec![
             Span::styled(selection_marker, selection_style),
             Span::styled(
                 format!("{} ", session.icon),
                 Style::default().fg(rgb(110, 210, 255)),
             ),
-            Span::styled(session.short_name.clone(), name_style),
+            Span::styled(primary_title, name_style),
+        ];
+        line1_spans.extend([
             Span::styled(canary_marker, Style::default().fg(rgb(255, 193, 7))),
             Span::styled(debug_marker, Style::default().fg(rgb(180, 180, 180))),
             Span::styled(saved_marker, Style::default().fg(rgb(255, 180, 100))),
@@ -87,7 +148,7 @@ impl SessionPicker {
                 Style::default().fg(status_color),
             ),
             Span::styled(format!("  {}", time_label), Style::default().fg(dim)),
-        ];
+        ]);
         if let Some(ref label) = session.save_label {
             line1_spans.push(Span::styled(
                 format!("  \"{}\"", label),
@@ -112,22 +173,8 @@ impl SessionPicker {
         }
         let line1 = Line::from(line1_spans);
 
-        let title_display = if session.title.chars().count() > 42 {
-            format!("{}...", safe_truncate(&session.title, 39))
-        } else {
-            session.title.clone()
-        };
-        let line2 = Line::from(vec![
-            Span::styled("     ", Style::default()),
-            Span::styled(title_display, Style::default().fg(rgb(180, 180, 180))),
-        ]);
-
-        let tokens_display = if session.estimated_tokens >= 1000 {
-            format!("~{}k tok", session.estimated_tokens / 1000)
-        } else {
-            format!("~{} tok", session.estimated_tokens)
-        };
-        let line3 = if session.message_count > 0
+        let tokens_display = Self::format_estimated_tokens(session.estimated_tokens);
+        let line2 = if session.message_count > 0
             && session.user_message_count == 0
             && session.assistant_message_count == 0
         {
@@ -179,7 +226,7 @@ impl SessionPicker {
         } else {
             String::new()
         };
-        let line4 = Line::from(vec![
+        let line3 = Line::from(vec![
             Span::styled("     ", Style::default()),
             Span::styled(
                 format!("created: {}", created_ago),
@@ -188,12 +235,19 @@ impl SessionPicker {
             Span::styled(dir_part, Style::default().fg(dimmer)),
         ]);
 
-        let mut rows = vec![line1, line2, line3, line4];
+        let mut rows = vec![line1, line2, line3];
         if let Some(reason_line) = Self::crash_reason_line(session) {
             rows.push(reason_line);
         }
         rows.push(Line::from(""));
 
+        rows
+    }
+
+    fn render_session_item(&self, session: &SessionInfo, is_selected: bool) -> ListItem<'static> {
+        let batch_row_bg: Color = rgb(36, 18, 18);
+        let in_batch_restore = self.crashed_session_ids.contains(&session.id);
+        let rows = self.render_session_item_lines(session, is_selected);
         let mut item = ListItem::new(rows);
         if in_batch_restore && !is_selected {
             item = item.style(Style::default().bg(batch_row_bg));
@@ -320,12 +374,15 @@ impl SessionPicker {
             ));
         }
 
-        if let Some(label) = self.filter_mode.label() {
-            title_parts.push(Span::styled(
-                format!("  {}", label),
-                Style::default().fg(rgb(255, 180, 100)),
-            ));
-        }
+        let filter_label = self.filter_mode.label().unwrap_or("all");
+        title_parts.push(Span::styled(
+            format!("  {}", filter_label),
+            Style::default().fg(rgb(255, 180, 100)),
+        ));
+        title_parts.push(Span::styled(
+            " (s/S filter)",
+            Style::default().fg(rgb(80, 80, 80)),
+        ));
 
         if self.hidden_test_count > 0 {
             title_parts.push(Span::styled(
@@ -355,7 +412,14 @@ impl SessionPicker {
         } else if self.search_active {
             " type to filter, Esc cancel "
         } else {
-            " Space select · Enter resume · s next filter · S prev · d debug · / search · h/l focus · ↑↓ · q "
+            match crate::config::config().keybindings.session_picker_enter {
+                crate::config::SessionPickerResumeAction::CurrentTerminal => {
+                    " Space select · Enter in place · Ctrl+Enter new terminal · d debug · / search · h/l focus · ↑↓ · q "
+                }
+                crate::config::SessionPickerResumeAction::NewTerminal => {
+                    " Space select · Enter new terminal · Ctrl+Enter in place · d debug · / search · h/l focus · ↑↓ · q "
+                }
+            }
         };
 
         let border_dim: Color = rgb(70, 70, 70);
@@ -392,11 +456,16 @@ impl SessionPicker {
             return;
         };
 
-        let title = if info.session_ids.len() == 1 {
-            " crashed session detected "
+        let omitted = if info.omitted_crashed_count > 0 {
+            format!(" · {} older skipped", info.omitted_crashed_count)
         } else {
-            " crashed sessions detected "
+            String::new()
         };
+        let title = format!(
+            " R restore shown group · {} relevant crashed session(s) detected{} ",
+            info.session_ids.len(),
+            omitted
+        );
         let names = info.display_names.join(", ");
         let body = vec![
             Line::from(vec![
@@ -404,7 +473,7 @@ impl SessionPicker {
                 Span::styled(names, Style::default().fg(Color::White)),
             ]),
             Line::from(vec![Span::styled(
-                "Press B to restore all from the last crash window.",
+                "Press R (or B) to restore only this guessed recent group.",
                 Style::default().fg(rgb(180, 180, 180)),
             )]),
         ];

@@ -228,6 +228,7 @@ impl Tool for ReadTool {
             session_id: ctx.session_id.clone(),
             path: path.to_path_buf(),
             op: FileOp::Read,
+            intent: None,
             summary: Some(format!(
                 "read lines {}-{} of {}",
                 range.offset + 1,

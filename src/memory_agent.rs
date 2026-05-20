@@ -435,7 +435,17 @@ impl MemoryAgent {
             {
                 Ok(Ok(emb)) => emb,
                 Ok(Err(e)) => {
-                    crate::logging::info(&format!("Embedding failed: {}", e));
+                    crate::logging::event_rate_limited(
+                        crate::logging::LogLevel::Info,
+                        "memory_agent_embedding_failed",
+                        std::time::Duration::from_secs(60),
+                        "MEMORY_EMBEDDING_FAILED",
+                        vec![
+                            ("session_id", session_id.to_string()),
+                            ("error", e.to_string()),
+                            ("fallback", "skip_memory_relevance".to_string()),
+                        ],
+                    );
                     memory::set_state(MemoryState::Idle);
                     return Ok(());
                 }

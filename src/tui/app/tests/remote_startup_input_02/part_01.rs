@@ -211,6 +211,38 @@ fn test_remote_fallback_bedrock_arn_does_not_create_openrouter_route() {
 }
 
 #[test]
+fn test_remote_current_fpt_live_model_uses_fpt_route_not_copilot_without_cache() {
+    with_temp_jcode_home(|| {
+        crate::env::set_var("FPT_API_KEY", "test-fpt-key");
+
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("FPT AI Marketplace".to_string());
+        app.remote_available_entries = vec!["FPT.AI-KIE-v1.7".to_string()];
+        app.remote_model_options.clear();
+
+        let routes = app.build_remote_model_routes_fallback();
+
+        assert!(
+            routes.iter().any(|route| {
+                route.model == "FPT.AI-KIE-v1.7"
+                    && route.provider == "FPT AI Marketplace"
+                    && route.api_method == "openai-compatible:fpt"
+            }),
+            "FPT current-provider live model should use FPT route, got {routes:?}"
+        );
+        assert!(
+            !routes
+                .iter()
+                .any(|route| route.model == "FPT.AI-KIE-v1.7" && route.api_method == "copilot"),
+            "FPT current-provider live model must not be guessed as Copilot: {routes:?}"
+        );
+
+        crate::env::remove_var("FPT_API_KEY");
+    });
+}
+
+#[test]
 fn test_model_picker_ctrl_d_bedrock_selection_saves_bedrock_default() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
@@ -643,6 +675,22 @@ fn test_shift_enter_inserts_newline() {
     assert_eq!(app.interleave_message.as_deref(), None);
 }
 
+
+#[test]
+fn test_alt_enter_inserts_newline() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+
+    app.handle_key(KeyCode::Char('h'), KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Enter, KeyModifiers::ALT).unwrap();
+    app.handle_key(KeyCode::Char('i'), KeyModifiers::empty())
+        .unwrap();
+
+    assert_eq!(app.input(), "h\ni");
+    assert_eq!(app.queued_count(), 0);
+    assert_eq!(app.interleave_message.as_deref(), None);
+}
 #[test]
 fn test_ctrl_enter_opposite_send_mode() {
     let mut app = create_test_app();

@@ -376,7 +376,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(key_entry("Ctrl+Backspace", "Delete previous word in input"));
     lines.push(key_entry("Ctrl+B / Ctrl+F", "Move by word left / right"));
     lines.push(key_entry("Ctrl+Left / Right", "Move by word left / right"));
-    lines.push(key_entry("Shift+Enter", "Insert newline in input"));
+    lines.push(key_entry(
+        "Shift+Enter / Alt+Enter",
+        "Insert newline in input",
+    ));
     lines.push(key_entry(
         "Ctrl+Enter",
         "Use opposite send mode while processing",

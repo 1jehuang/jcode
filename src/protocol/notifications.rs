@@ -11,6 +11,8 @@ pub enum NotificationType {
         /// What the other agent did: "read", "wrote", "edited"
         operation: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        intent: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,

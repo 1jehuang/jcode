@@ -23,7 +23,7 @@ pub(crate) use external_auth::{
     pending_external_auth_review_candidates, run_external_auth_auto_import_candidates,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ProviderChoice {
     Jcode,
     Claude,
@@ -90,6 +90,10 @@ pub enum ProviderChoice {
     Minimax,
     #[value(alias = "x.ai", alias = "x-ai", alias = "grok")]
     Xai,
+    #[value(alias = "nvidia", alias = "nim")]
+    NvidiaNim,
+    #[value(alias = "xiaomi", alias = "mimo", alias = "xiaomi-mimo-api")]
+    XiaomiMimo,
     #[value(alias = "lm-studio")]
     Lmstudio,
     Ollama,
@@ -149,6 +153,8 @@ impl ProviderChoice {
             Self::Fireworks => "fireworks",
             Self::Minimax => "minimax",
             Self::Xai => "xai",
+            Self::NvidiaNim => "nvidia-nim",
+            Self::XiaomiMimo => "xiaomi-mimo",
             Self::Lmstudio => "lmstudio",
             Self::Ollama => "ollama",
             Self::Chutes => "chutes",
@@ -165,149 +171,217 @@ impl ProviderChoice {
     }
 }
 
+#[allow(deprecated)]
+const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescriptor)] = &[
+    (
+        ProviderChoice::Jcode,
+        crate::provider_catalog::JCODE_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Claude,
+        crate::provider_catalog::CLAUDE_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::ClaudeSubprocess,
+        crate::provider_catalog::CLAUDE_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Openai,
+        crate::provider_catalog::OPENAI_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::OpenaiApi,
+        crate::provider_catalog::OPENAI_API_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Openrouter,
+        crate::provider_catalog::OPENROUTER_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Bedrock,
+        crate::provider_catalog::BEDROCK_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Azure,
+        crate::provider_catalog::AZURE_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Opencode,
+        crate::provider_catalog::OPENCODE_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::OpencodeGo,
+        crate::provider_catalog::OPENCODE_GO_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Zai,
+        crate::provider_catalog::ZAI_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Kimi,
+        crate::provider_catalog::KIMI_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Ai302,
+        crate::provider_catalog::AI302_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Baseten,
+        crate::provider_catalog::BASETEN_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Cortecs,
+        crate::provider_catalog::CORTECS_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Comtegra,
+        crate::provider_catalog::COMTEGRA_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Deepseek,
+        crate::provider_catalog::DEEPSEEK_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Fpt,
+        crate::provider_catalog::FPT_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Firmware,
+        crate::provider_catalog::FIRMWARE_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::HuggingFace,
+        crate::provider_catalog::HUGGING_FACE_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::MoonshotAi,
+        crate::provider_catalog::MOONSHOT_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Nebius,
+        crate::provider_catalog::NEBIUS_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Scaleway,
+        crate::provider_catalog::SCALEWAY_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Stackit,
+        crate::provider_catalog::STACKIT_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Groq,
+        crate::provider_catalog::GROQ_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Mistral,
+        crate::provider_catalog::MISTRAL_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Perplexity,
+        crate::provider_catalog::PERPLEXITY_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::TogetherAi,
+        crate::provider_catalog::TOGETHER_AI_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Deepinfra,
+        crate::provider_catalog::DEEPINFRA_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Fireworks,
+        crate::provider_catalog::FIREWORKS_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Minimax,
+        crate::provider_catalog::MINIMAX_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Xai,
+        crate::provider_catalog::XAI_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::NvidiaNim,
+        crate::provider_catalog::NVIDIA_NIM_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::XiaomiMimo,
+        crate::provider_catalog::XIAOMI_MIMO_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Lmstudio,
+        crate::provider_catalog::LMSTUDIO_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Ollama,
+        crate::provider_catalog::OLLAMA_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Chutes,
+        crate::provider_catalog::CHUTES_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Cerebras,
+        crate::provider_catalog::CEREBRAS_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::AlibabaCodingPlan,
+        crate::provider_catalog::ALIBABA_CODING_PLAN_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::OpenaiCompatible,
+        crate::provider_catalog::OPENAI_COMPAT_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Cursor,
+        crate::provider_catalog::CURSOR_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Copilot,
+        crate::provider_catalog::COPILOT_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Gemini,
+        crate::provider_catalog::GEMINI_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Antigravity,
+        crate::provider_catalog::ANTIGRAVITY_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Google,
+        crate::provider_catalog::GOOGLE_LOGIN_PROVIDER,
+    ),
+];
+
+pub fn login_provider_choice_mappings() -> &'static [(ProviderChoice, LoginProviderDescriptor)] {
+    PROVIDER_CHOICE_LOGIN_PROVIDERS
+}
+
 pub fn profile_for_choice(choice: &ProviderChoice) -> Option<OpenAiCompatibleProfile> {
-    match choice {
-        ProviderChoice::Opencode => Some(crate::provider_catalog::OPENCODE_PROFILE),
-        ProviderChoice::OpencodeGo => Some(crate::provider_catalog::OPENCODE_GO_PROFILE),
-        ProviderChoice::Zai => Some(crate::provider_catalog::ZAI_PROFILE),
-        ProviderChoice::Kimi => Some(crate::provider_catalog::KIMI_PROFILE),
-        ProviderChoice::Ai302 => Some(crate::provider_catalog::AI302_PROFILE),
-        ProviderChoice::Baseten => Some(crate::provider_catalog::BASETEN_PROFILE),
-        ProviderChoice::Cortecs => Some(crate::provider_catalog::CORTECS_PROFILE),
-        ProviderChoice::Comtegra => Some(crate::provider_catalog::COMTEGRA_PROFILE),
-        ProviderChoice::Deepseek => Some(crate::provider_catalog::DEEPSEEK_PROFILE),
-        ProviderChoice::Fpt => Some(crate::provider_catalog::FPT_PROFILE),
-        ProviderChoice::Firmware => Some(crate::provider_catalog::FIRMWARE_PROFILE),
-        ProviderChoice::HuggingFace => Some(crate::provider_catalog::HUGGING_FACE_PROFILE),
-        ProviderChoice::MoonshotAi => Some(crate::provider_catalog::MOONSHOT_PROFILE),
-        ProviderChoice::Nebius => Some(crate::provider_catalog::NEBIUS_PROFILE),
-        ProviderChoice::Scaleway => Some(crate::provider_catalog::SCALEWAY_PROFILE),
-        ProviderChoice::Stackit => Some(crate::provider_catalog::STACKIT_PROFILE),
-        ProviderChoice::Groq => Some(crate::provider_catalog::GROQ_PROFILE),
-        ProviderChoice::Mistral => Some(crate::provider_catalog::MISTRAL_PROFILE),
-        ProviderChoice::Perplexity => Some(crate::provider_catalog::PERPLEXITY_PROFILE),
-        ProviderChoice::TogetherAi => Some(crate::provider_catalog::TOGETHER_AI_PROFILE),
-        ProviderChoice::Deepinfra => Some(crate::provider_catalog::DEEPINFRA_PROFILE),
-        ProviderChoice::Fireworks => Some(crate::provider_catalog::FIREWORKS_PROFILE),
-        ProviderChoice::Minimax => Some(crate::provider_catalog::MINIMAX_PROFILE),
-        ProviderChoice::Xai => Some(crate::provider_catalog::XAI_PROFILE),
-        ProviderChoice::Lmstudio => Some(crate::provider_catalog::LMSTUDIO_PROFILE),
-        ProviderChoice::Ollama => Some(crate::provider_catalog::OLLAMA_PROFILE),
-        ProviderChoice::Chutes => Some(crate::provider_catalog::CHUTES_PROFILE),
-        ProviderChoice::Cerebras => Some(crate::provider_catalog::CEREBRAS_PROFILE),
-        ProviderChoice::AlibabaCodingPlan => {
-            Some(crate::provider_catalog::ALIBABA_CODING_PLAN_PROFILE)
-        }
-        ProviderChoice::OpenaiCompatible => Some(crate::provider_catalog::OPENAI_COMPAT_PROFILE),
+    match login_provider_for_choice(choice)?.target {
+        LoginProviderTarget::OpenAiCompatible(profile) => Some(profile),
         _ => None,
     }
 }
 
 #[allow(deprecated)]
 pub fn login_provider_for_choice(choice: &ProviderChoice) -> Option<LoginProviderDescriptor> {
-    match choice {
-        ProviderChoice::Jcode => Some(crate::provider_catalog::JCODE_LOGIN_PROVIDER),
-        ProviderChoice::Claude | ProviderChoice::ClaudeSubprocess => {
-            Some(crate::provider_catalog::CLAUDE_LOGIN_PROVIDER)
-        }
-        ProviderChoice::Openai => Some(crate::provider_catalog::OPENAI_LOGIN_PROVIDER),
-        ProviderChoice::OpenaiApi => Some(crate::provider_catalog::OPENAI_API_LOGIN_PROVIDER),
-        ProviderChoice::Openrouter => Some(crate::provider_catalog::OPENROUTER_LOGIN_PROVIDER),
-        ProviderChoice::Bedrock => Some(crate::provider_catalog::BEDROCK_LOGIN_PROVIDER),
-        ProviderChoice::Azure => Some(crate::provider_catalog::AZURE_LOGIN_PROVIDER),
-        ProviderChoice::Opencode => Some(crate::provider_catalog::OPENCODE_LOGIN_PROVIDER),
-        ProviderChoice::OpencodeGo => Some(crate::provider_catalog::OPENCODE_GO_LOGIN_PROVIDER),
-        ProviderChoice::Zai => Some(crate::provider_catalog::ZAI_LOGIN_PROVIDER),
-        ProviderChoice::Kimi => Some(crate::provider_catalog::KIMI_LOGIN_PROVIDER),
-        ProviderChoice::Ai302 => Some(crate::provider_catalog::AI302_LOGIN_PROVIDER),
-        ProviderChoice::Baseten => Some(crate::provider_catalog::BASETEN_LOGIN_PROVIDER),
-        ProviderChoice::Cortecs => Some(crate::provider_catalog::CORTECS_LOGIN_PROVIDER),
-        ProviderChoice::Comtegra => Some(crate::provider_catalog::COMTEGRA_LOGIN_PROVIDER),
-        ProviderChoice::Deepseek => Some(crate::provider_catalog::DEEPSEEK_LOGIN_PROVIDER),
-        ProviderChoice::Fpt => Some(crate::provider_catalog::FPT_LOGIN_PROVIDER),
-        ProviderChoice::Firmware => Some(crate::provider_catalog::FIRMWARE_LOGIN_PROVIDER),
-        ProviderChoice::HuggingFace => Some(crate::provider_catalog::HUGGING_FACE_LOGIN_PROVIDER),
-        ProviderChoice::MoonshotAi => Some(crate::provider_catalog::MOONSHOT_LOGIN_PROVIDER),
-        ProviderChoice::Nebius => Some(crate::provider_catalog::NEBIUS_LOGIN_PROVIDER),
-        ProviderChoice::Scaleway => Some(crate::provider_catalog::SCALEWAY_LOGIN_PROVIDER),
-        ProviderChoice::Stackit => Some(crate::provider_catalog::STACKIT_LOGIN_PROVIDER),
-        ProviderChoice::Groq => Some(crate::provider_catalog::GROQ_LOGIN_PROVIDER),
-        ProviderChoice::Mistral => Some(crate::provider_catalog::MISTRAL_LOGIN_PROVIDER),
-        ProviderChoice::Perplexity => Some(crate::provider_catalog::PERPLEXITY_LOGIN_PROVIDER),
-        ProviderChoice::TogetherAi => Some(crate::provider_catalog::TOGETHER_AI_LOGIN_PROVIDER),
-        ProviderChoice::Deepinfra => Some(crate::provider_catalog::DEEPINFRA_LOGIN_PROVIDER),
-        ProviderChoice::Fireworks => Some(crate::provider_catalog::FIREWORKS_LOGIN_PROVIDER),
-        ProviderChoice::Minimax => Some(crate::provider_catalog::MINIMAX_LOGIN_PROVIDER),
-        ProviderChoice::Xai => Some(crate::provider_catalog::XAI_LOGIN_PROVIDER),
-        ProviderChoice::Lmstudio => Some(crate::provider_catalog::LMSTUDIO_LOGIN_PROVIDER),
-        ProviderChoice::Ollama => Some(crate::provider_catalog::OLLAMA_LOGIN_PROVIDER),
-        ProviderChoice::Chutes => Some(crate::provider_catalog::CHUTES_LOGIN_PROVIDER),
-        ProviderChoice::Cerebras => Some(crate::provider_catalog::CEREBRAS_LOGIN_PROVIDER),
-        ProviderChoice::AlibabaCodingPlan => {
-            Some(crate::provider_catalog::ALIBABA_CODING_PLAN_LOGIN_PROVIDER)
-        }
-        ProviderChoice::OpenaiCompatible => {
-            Some(crate::provider_catalog::OPENAI_COMPAT_LOGIN_PROVIDER)
-        }
-        ProviderChoice::Cursor => Some(crate::provider_catalog::CURSOR_LOGIN_PROVIDER),
-        ProviderChoice::Copilot => Some(crate::provider_catalog::COPILOT_LOGIN_PROVIDER),
-        ProviderChoice::Gemini => Some(crate::provider_catalog::GEMINI_LOGIN_PROVIDER),
-        ProviderChoice::Antigravity => Some(crate::provider_catalog::ANTIGRAVITY_LOGIN_PROVIDER),
-        ProviderChoice::Google => Some(crate::provider_catalog::GOOGLE_LOGIN_PROVIDER),
-        ProviderChoice::Auto => None,
-    }
+    PROVIDER_CHOICE_LOGIN_PROVIDERS
+        .iter()
+        .find(|(candidate, _)| candidate == choice)
+        .map(|(_, provider)| *provider)
 }
 
+#[allow(deprecated)]
 pub fn choice_for_login_provider(provider: LoginProviderDescriptor) -> Option<ProviderChoice> {
-    match provider.target {
-        LoginProviderTarget::AutoImport => None,
-        LoginProviderTarget::Jcode => Some(ProviderChoice::Jcode),
-        LoginProviderTarget::Claude => Some(ProviderChoice::Claude),
-        LoginProviderTarget::OpenAi => Some(ProviderChoice::Openai),
-        LoginProviderTarget::OpenAiApiKey => Some(ProviderChoice::OpenaiApi),
-        LoginProviderTarget::OpenRouter => Some(ProviderChoice::Openrouter),
-        LoginProviderTarget::Bedrock => Some(ProviderChoice::Bedrock),
-        LoginProviderTarget::Azure => Some(ProviderChoice::Azure),
-        LoginProviderTarget::OpenAiCompatible(profile) => [
-            ProviderChoice::Opencode,
-            ProviderChoice::OpencodeGo,
-            ProviderChoice::Zai,
-            ProviderChoice::Kimi,
-            ProviderChoice::Ai302,
-            ProviderChoice::Baseten,
-            ProviderChoice::Cortecs,
-            ProviderChoice::Comtegra,
-            ProviderChoice::Deepseek,
-            ProviderChoice::Fpt,
-            ProviderChoice::Firmware,
-            ProviderChoice::HuggingFace,
-            ProviderChoice::MoonshotAi,
-            ProviderChoice::Nebius,
-            ProviderChoice::Scaleway,
-            ProviderChoice::Stackit,
-            ProviderChoice::Groq,
-            ProviderChoice::Mistral,
-            ProviderChoice::Perplexity,
-            ProviderChoice::TogetherAi,
-            ProviderChoice::Deepinfra,
-            ProviderChoice::Fireworks,
-            ProviderChoice::Minimax,
-            ProviderChoice::Xai,
-            ProviderChoice::Lmstudio,
-            ProviderChoice::Ollama,
-            ProviderChoice::Chutes,
-            ProviderChoice::Cerebras,
-            ProviderChoice::AlibabaCodingPlan,
-            ProviderChoice::OpenaiCompatible,
-        ]
-        .into_iter()
-        .find(|choice| profile_for_choice(choice) == Some(profile)),
-        LoginProviderTarget::Cursor => Some(ProviderChoice::Cursor),
-        LoginProviderTarget::Copilot => Some(ProviderChoice::Copilot),
-        LoginProviderTarget::Gemini => Some(ProviderChoice::Gemini),
-        LoginProviderTarget::Antigravity => Some(ProviderChoice::Antigravity),
-        LoginProviderTarget::Google => Some(ProviderChoice::Google),
-    }
+    PROVIDER_CHOICE_LOGIN_PROVIDERS
+        .iter()
+        .find(|(choice, candidate)| {
+            candidate.id == provider.id && !matches!(choice, ProviderChoice::ClaudeSubprocess)
+        })
+        .map(|(choice, _)| *choice)
 }
 
 pub fn prompt_login_provider_selection(
@@ -404,13 +478,13 @@ pub fn render_login_provider_selection_menu(
 
     let _ = writeln!(out);
     for (index, provider) in providers.iter().copied().enumerate() {
-        let auth_state = status.state_for_provider(provider);
+        let assessment = status.assessment_for_provider(provider);
         let _ = writeln!(
             out,
             "  {}. {:<22} [{:<15}] - {}",
             index + 1,
             provider.display_name,
-            login_provider_state_badge(provider, auth_state),
+            login_provider_state_badge(provider, assessment.state),
             provider.menu_detail
         );
     }
@@ -490,6 +564,36 @@ impl AutoProviderAvailability {
             || self.has_cursor
             || self.has_openrouter
     }
+}
+
+fn maybe_enable_config_default_provider_for_auto() -> Result<bool> {
+    let cfg = crate::config::config();
+    let Some(default_provider) = cfg
+        .provider
+        .default_provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(false);
+    };
+
+    if let Some(profile) =
+        crate::provider_catalog::resolve_openai_compatible_profile_selection(default_provider)
+    {
+        apply_openai_compatible_profile_env(Some(profile));
+        return Ok(provider::openrouter::OpenRouterProvider::has_credentials());
+    }
+
+    if cfg.providers.contains_key(default_provider) {
+        crate::provider_catalog::apply_named_provider_profile_env_from_config(
+            default_provider,
+            cfg,
+        )?;
+        return Ok(provider::openrouter::OpenRouterProvider::has_credentials());
+    }
+
+    Ok(false)
 }
 
 async fn detect_auto_provider_flags() -> AutoProviderAvailability {
@@ -994,12 +1098,11 @@ fn maybe_enable_cursor_auth_for_auto(has_other_provider: bool) -> Result<bool> {
 }
 
 pub fn lock_model_provider(provider_key: &str) {
-    crate::env::set_var("JCODE_ACTIVE_PROVIDER", provider_key);
-    crate::env::set_var("JCODE_FORCE_PROVIDER", "1");
+    crate::provider::activation::lock_runtime_provider_key(provider_key);
 }
 
 pub fn unlock_model_provider() {
-    crate::env::remove_var("JCODE_FORCE_PROVIDER");
+    crate::provider::activation::unlock_runtime_provider();
 }
 
 fn disable_subscription_runtime_mode() {
@@ -1058,10 +1161,9 @@ pub async fn login_and_bootstrap_provider(
         }
         LoginProviderTarget::Azure => {
             disable_subscription_runtime_mode();
-            crate::auth::azure::apply_runtime_env()?;
-            lock_model_provider("openrouter");
+            let model = crate::provider::activation::apply_azure_openai_runtime()?;
             let multi = provider::MultiProvider::new();
-            if let Some(model) = crate::auth::azure::load_model() {
+            if let Some(model) = model {
                 let _ = multi.set_model(&model);
             }
             Arc::new(multi)
@@ -1069,9 +1171,11 @@ pub async fn login_and_bootstrap_provider(
         LoginProviderTarget::OpenAiCompatible(profile) => {
             disable_subscription_runtime_mode();
             apply_openai_compatible_profile_env(Some(profile));
-            lock_model_provider("openrouter");
             let multi = provider::MultiProvider::new();
             let resolved = resolve_openai_compatible_profile(profile);
+            crate::provider::activation::apply_openai_compatible_runtime(
+                resolved.default_model.clone(),
+            )?;
             if let Some(model) = resolved.default_model.as_deref() {
                 let _ = multi.set_model(model);
             }
@@ -1251,11 +1355,10 @@ async fn init_provider_with_options(
         }
         ProviderChoice::Azure => {
             disable_subscription_runtime_mode();
-            crate::auth::azure::apply_runtime_env()?;
+            let model = crate::provider::activation::apply_azure_openai_runtime()?;
             init_notice("Using Azure OpenAI provider (provider locked)");
-            lock_model_provider("openrouter");
             let multi = provider::MultiProvider::new_fast();
-            if let Some(model) = crate::auth::azure::load_model() {
+            if let Some(model) = model {
                 let _ = multi.set_model(&model);
             }
             Arc::new(multi)
@@ -1284,6 +1387,8 @@ async fn init_provider_with_options(
         | ProviderChoice::Fireworks
         | ProviderChoice::Minimax
         | ProviderChoice::Xai
+        | ProviderChoice::NvidiaNim
+        | ProviderChoice::XiaomiMimo
         | ProviderChoice::Lmstudio
         | ProviderChoice::Ollama
         | ProviderChoice::Chutes
@@ -1298,7 +1403,11 @@ async fn init_provider_with_options(
             {
                 apply_openai_compatible_profile_env(Some(profile));
             }
+            let mut runtime_model_hint = None;
             let display_name = if let Ok(named) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE") {
+                if let Some(profile) = crate::config::config().providers.get(&named) {
+                    runtime_model_hint = profile.default_model.clone();
+                }
                 named
             } else {
                 let resolved = resolve_openai_compatible_profile(profile);
@@ -1307,13 +1416,14 @@ async fn init_provider_with_options(
                         &resolved.api_key_env,
                     )?;
                 }
+                runtime_model_hint = resolved.default_model.clone();
                 resolved.display_name
             };
             init_notice(&format!(
                 "Using {} via OpenAI-compatible API (provider locked)",
                 display_name
             ));
-            lock_model_provider("openrouter");
+            crate::provider::activation::apply_openai_compatible_runtime(runtime_model_hint)?;
             if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_some()
                 || std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_some()
             {
@@ -1433,6 +1543,10 @@ async fn init_provider_with_options(
                 if !has_cursor {
                     has_cursor =
                         maybe_enable_cursor_auth_for_auto(has_other_provider && !has_cursor)?;
+                }
+
+                if !has_openrouter {
+                    has_openrouter = maybe_enable_config_default_provider_for_auto()?;
                 }
 
                 has_other_provider = has_openai

@@ -19,6 +19,7 @@ where
             diagram_mode: crate::config::config().display.diagram_mode,
             centered: markdown::center_code_blocks(),
             mermaid_epoch: crate::tui::mermaid::deferred_render_epoch(),
+            mermaid_aspect_bucket: crate::tui::mermaid::current_preferred_aspect_ratio_bucket(),
         },
         render,
     )

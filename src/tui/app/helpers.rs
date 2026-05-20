@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-static AMBIENT_INFO_CACHE: Mutex<
-    Option<(std::time::Instant, bool, Option<AmbientWidgetData>, bool)>,
-> = Mutex::new(None);
+type AmbientInfoCacheEntry = (std::time::Instant, bool, Option<AmbientWidgetData>, bool);
+
+static AMBIENT_INFO_CACHE: Mutex<Option<AmbientInfoCacheEntry>> = Mutex::new(None);
 
 #[derive(Clone)]
 pub(super) struct CachedContextInfo {
@@ -18,6 +18,9 @@ pub(super) struct CachedContextInfo {
     pub is_remote: bool,
     pub display_messages_version: u64,
     pub message_count: usize,
+    pub compaction_count: usize,
+    pub compaction_summary_chars: usize,
+    pub is_compacting: bool,
     pub context_info: crate::prompt::ContextInfo,
 }
 

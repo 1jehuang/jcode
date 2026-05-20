@@ -185,6 +185,7 @@ mod tests {
     fn base_assessment() -> ProviderAuthAssessment {
         ProviderAuthAssessment {
             state: AuthState::Available,
+            readiness: crate::auth::AuthReadinessLevel::RequestValid,
             method_detail: "OAuth".to_string(),
             credential_source: AuthCredentialSource::JcodeManagedFile,
             credential_source_detail: "~/.jcode/auth.json".to_string(),

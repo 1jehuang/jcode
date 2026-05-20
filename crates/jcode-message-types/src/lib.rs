@@ -458,6 +458,18 @@ impl ToolCall {
         Self::normalize_input_to_object(input.clone())
     }
 
+    pub fn parse_streamed_input_to_object(input: &str) -> serde_json::Value {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return serde_json::Value::Object(serde_json::Map::new());
+        }
+
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(value) => Self::normalize_input_to_object(value),
+            Err(_) => serde_json::Value::Null,
+        }
+    }
+
     pub fn validation_error(&self) -> Option<String> {
         if self.name.trim().is_empty() {
             return Some("Invalid tool call: tool name must not be empty.".to_string());

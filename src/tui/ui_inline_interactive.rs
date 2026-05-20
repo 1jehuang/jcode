@@ -100,9 +100,11 @@ fn picker_entry_display_name(entry: &crate::tui::PickerEntry) -> String {
     format!("{}{}", entry.name, suffix)
 }
 
-fn picker_row_marker(is_row_selected: bool, unavailable: bool) -> &'static str {
+fn picker_row_marker(is_row_selected: bool, unavailable: bool, limited: bool) -> &'static str {
     if unavailable {
         "×"
+    } else if limited {
+        "⚠"
     } else if is_row_selected {
         "▸"
     } else {
@@ -123,6 +125,42 @@ fn route_detail_display_text(detail: &str, unavailable: bool) -> Option<String> 
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn route_detail_is_limited(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    lower.contains("fallback:")
+        || lower.contains("fallback model")
+        || lower.contains("no tools")
+        || lower.contains("requires an inference profile")
+        || lower.contains("catalog still loading")
+        || lower.contains("provider will initialize")
+}
+
+fn selected_route_notice_text(
+    picker: &crate::tui::InlineInteractiveState,
+    route: Option<&crate::tui::PickerOption>,
+) -> Option<(String, bool)> {
+    if picker.kind != crate::tui::PickerKind::Model {
+        return None;
+    }
+    let route = route?;
+    let unavailable = !route.available;
+    let detail = route_detail_display_text(&route.detail, unavailable)?;
+    if unavailable {
+        return Some((format!("× {}", detail), true));
+    }
+    if route_detail_is_limited(&route.detail) {
+        return Some((format!("⚠ {}", detail), true));
+    }
+    if route
+        .detail
+        .to_ascii_lowercase()
+        .contains("inference profile")
+    {
+        return Some((format!("ⓘ {}", detail), false));
+    }
+    None
 }
 
 fn account_picker_shows_provider_badge(picker: &crate::tui::InlineInteractiveState) -> bool {
@@ -261,7 +299,7 @@ pub(super) fn format_elapsed(secs: f32) -> String {
         let s = (secs % 60.0) as u32;
         format!("{}m {}s", mins, s)
     } else {
-        format!("{:.1}s", secs)
+        format!("{}s", secs as u32)
     }
 }
 
@@ -475,8 +513,25 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
     };
     let detail_width = width.saturating_sub(row_base_width).saturating_sub(2);
 
+    let selected_route_notice = picker
+        .filtered
+        .get(selected)
+        .and_then(|entry_idx| picker.entries.get(*entry_idx))
+        .and_then(|entry| selected_route_notice_text(picker, entry.active_option()));
+
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(header_spans));
+    if let Some((notice, warning)) = selected_route_notice.as_ref() {
+        let notice_width = width.saturating_sub(1);
+        lines.push(Line::from(Span::styled(
+            format!(" {}", truncate_display(notice.as_str(), notice_width)),
+            if *warning {
+                Style::default().fg(rgb(210, 150, 110)).italic()
+            } else {
+                Style::default().fg(dim_color()).italic()
+            },
+        )));
+    }
 
     if picker.filtered.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -487,7 +542,8 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
         return;
     }
 
-    let list_height = height.saturating_sub(1);
+    let list_header_lines = 1 + usize::from(selected_route_notice.is_some());
+    let list_height = height.saturating_sub(list_header_lines);
     if list_height == 0 {
         frame.render_widget(Paragraph::new(lines), inner);
         return;
@@ -510,7 +566,10 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
         let route = entry.active_option();
         let unavailable = route.map(|r| !r.available).unwrap_or(true);
 
-        let marker = picker_row_marker(is_row_selected, unavailable);
+        let limited = route
+            .map(|r| r.available && route_detail_is_limited(&r.detail))
+            .unwrap_or(false);
+        let marker = picker_row_marker(is_row_selected, unavailable, limited);
 
         let mut spans: Vec<Span> = Vec::new();
         spans.push(Span::styled(
@@ -745,6 +804,38 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
 mod tests {
     use super::*;
 
+    #[test]
+    fn format_elapsed_uses_whole_seconds_below_one_minute() {
+        assert_eq!(format_elapsed(0.0), "0s");
+        assert_eq!(format_elapsed(1.2), "1s");
+        assert_eq!(format_elapsed(59.9), "59s");
+        assert_eq!(format_elapsed(61.2), "1m 1s");
+    }
+
+    #[test]
+    fn fallback_route_details_are_warning_limited() {
+        assert!(route_detail_is_limited(
+            "https://mkp-api.fptcloud.com; fallback: static provider model list"
+        ));
+        assert_eq!(picker_row_marker(true, false, true), "⚠");
+        assert_eq!(picker_row_marker(false, false, true), "⚠");
+    }
+
+    #[test]
+    fn selected_fallback_model_shows_warning_notice() {
+        let mut picker = sample_picker();
+        picker.entries[0].options[0].detail =
+            "https://mkp-api.fptcloud.com; fallback: static provider model list".to_string();
+
+        let (notice, warning) =
+            selected_route_notice_text(&picker, picker.entries[0].active_option())
+                .expect("fallback model should show a warning notice");
+
+        assert!(warning);
+        assert!(notice.starts_with("⚠ "));
+        assert!(notice.contains("fallback: static provider model list"));
+    }
+
     fn sample_picker() -> crate::tui::InlineInteractiveState {
         crate::tui::InlineInteractiveState {
             kind: crate::tui::PickerKind::Model,
@@ -869,10 +960,11 @@ mod tests {
 
     #[test]
     fn picker_row_marker_uses_explicit_unavailable_marker() {
-        assert_eq!(picker_row_marker(true, true), "×");
-        assert_eq!(picker_row_marker(false, true), "×");
-        assert_eq!(picker_row_marker(true, false), "▸");
-        assert_eq!(picker_row_marker(false, false), " ");
+        assert_eq!(picker_row_marker(true, true, false), "×");
+        assert_eq!(picker_row_marker(false, true, false), "×");
+        assert_eq!(picker_row_marker(true, false, true), "▸");
+        assert_eq!(picker_row_marker(false, false, true), "⚠");
+        assert_eq!(picker_row_marker(false, false, false), " ");
     }
 
     #[test]
@@ -893,6 +985,30 @@ mod tests {
         assert_eq!(
             route_detail_display_text("catalog still loading", false).as_deref(),
             Some("catalog still loading")
+        );
+    }
+
+    #[test]
+    fn selected_model_route_notice_explains_unavailable_and_limited_routes() {
+        let mut picker = sample_picker();
+        picker.entries[0].options[0].available = false;
+        picker.entries[0].options[0].detail = "legacy Bedrock model".to_string();
+        let notice = selected_route_notice_text(&picker, picker.entries[0].active_option());
+        assert_eq!(
+            notice
+                .as_ref()
+                .map(|(text, warning)| (text.as_str(), *warning)),
+            Some(("× unavailable · legacy Bedrock model", true))
+        );
+
+        picker.entries[0].options[0].available = true;
+        picker.entries[0].options[0].detail = "ConverseStream · no tools".to_string();
+        let notice = selected_route_notice_text(&picker, picker.entries[0].active_option());
+        assert_eq!(
+            notice
+                .as_ref()
+                .map(|(text, warning)| (text.as_str(), *warning)),
+            Some(("⚠ ConverseStream · no tools", true))
         );
     }
 

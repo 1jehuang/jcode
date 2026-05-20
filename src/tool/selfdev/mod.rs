@@ -452,8 +452,13 @@ impl Tool for SelfDevTool {
                         "`selfdev reload` is only available inside a self-dev session. Use `selfdev enter` first.",
                     ))
                 } else {
-                    self.do_reload(params.context, &ctx.session_id, ctx.execution_mode)
-                        .await
+                    self.do_reload(
+                        params.context,
+                        &ctx.session_id,
+                        ctx.execution_mode,
+                        ctx.working_dir.as_deref(),
+                    )
+                    .await
                 }
             }
             "status" => self.do_status().await,

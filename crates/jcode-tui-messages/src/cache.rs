@@ -14,6 +14,7 @@ struct MessageCacheKey {
     diagram_mode: DiagramDisplayMode,
     centered: bool,
     mermaid_epoch: u64,
+    mermaid_aspect_bucket: Option<u16>,
 }
 
 #[derive(Default)]
@@ -61,6 +62,7 @@ pub struct MessageCacheContext {
     pub diagram_mode: DiagramDisplayMode,
     pub centered: bool,
     pub mermaid_epoch: u64,
+    pub mermaid_aspect_bucket: Option<u16>,
 }
 
 pub fn left_pad_lines_for_centered_mode(lines: &mut [Line<'static>], width: u16) {
@@ -108,6 +110,7 @@ where
         diagram_mode: context.diagram_mode,
         centered: context.centered,
         mermaid_epoch: context.mermaid_epoch,
+        mermaid_aspect_bucket: context.mermaid_aspect_bucket,
     };
 
     let mut cache = match message_cache().lock() {

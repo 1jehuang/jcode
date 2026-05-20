@@ -33,10 +33,70 @@ scripts/onboarding_sandbox.sh login openai
 scripts/onboarding_sandbox.sh login claude
 scripts/onboarding_sandbox.sh auth-status
 
+# Save the resulting logged-in sandbox as a reusable local fixture
+scripts/onboarding_sandbox.sh fixture-save normal-openai
+
+# Later, restore that exact auth state without repeating browser login
+scripts/onboarding_sandbox.sh fixture-load normal-openai
+scripts/onboarding_sandbox.sh auth-status
+
+# Or load and run one command in the fixture-backed sandbox
+scripts/onboarding_sandbox.sh fixture-run normal-openai -- auth-test --provider openai --no-smoke
+
 # Run arbitrary jcode commands in the sandbox
 scripts/onboarding_sandbox.sh jcode auth status
 scripts/onboarding_sandbox.sh jcode pair
 ```
+
+## Reusable local auth fixtures
+
+For repeated login testing, use local auth fixtures. A fixture is a copy of a
+sandbox `JCODE_HOME` after you have put it into an interesting state, for
+example a typical logged-in OpenAI user, an expired token state, or an external
+auth import approval state.
+
+The fixture store defaults to `.tmp/auth-fixtures`, which is intentionally local
+developer state. Fixtures may contain real OAuth tokens or API-key references, so
+do not commit or share them.
+
+Recommended workflow:
+
+```bash
+# One-time setup for a realistic logged-in state
+scripts/onboarding_sandbox.sh reset
+scripts/onboarding_sandbox.sh login openai
+scripts/onboarding_sandbox.sh auth-status
+scripts/onboarding_sandbox.sh fixture-save normal-openai
+
+# Fast repeat loop after that
+scripts/onboarding_sandbox.sh fixture-load normal-openai
+scripts/onboarding_sandbox.sh auth-status
+scripts/onboarding_sandbox.sh jcode auth-test --provider openai
+```
+
+The lower-level helper can also be used directly:
+
+```bash
+scripts/auth_fixture.sh list
+scripts/auth_fixture.sh save normal-openai
+scripts/auth_fixture.sh load normal-openai
+scripts/auth_fixture.sh run normal-openai -- auth status
+```
+
+Useful environment overrides:
+
+- `JCODE_ONBOARDING_SANDBOX`: select which sandbox receives the fixture.
+- `JCODE_ONBOARDING_DIR`: use an explicit sandbox directory.
+- `JCODE_AUTH_FIXTURE_DIR`: use a fixture store outside the repo, for example
+  `~/.local/share/jcode-auth-fixtures`.
+
+Suggested fixture names:
+
+- `normal-openai`
+- `normal-claude`
+- `expired-openai`
+- `api-key-openrouter`
+- `external-opencode-approved`
 
 ## Mobile onboarding simulator
 
@@ -69,6 +129,10 @@ A fresh sandbox means:
 - no real runtime sockets are reused
 - no previously trusted external auth sources are reused
 - you can blow it away with one `reset`
+
+When using fixtures, the sandbox is still isolated from your normal jcode state,
+but the loaded fixture may intentionally contain copied auth state from an earlier
+sandbox login.
 
 ## Recommended workflow
 

@@ -7,7 +7,7 @@ use chrono::Utc;
 use flate2::read::GzDecoder;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::fmt;
 use std::io::Read;
 use std::sync::{Arc, RwLock};
@@ -268,6 +268,27 @@ impl Provider for CursorCliProvider {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
+        let prompt_items = vec![Value::String(prompt.clone())];
+        let system_value = (!system.trim().is_empty()).then(|| Value::String(system.to_string()));
+        let payload = json!({
+            "model": &model,
+            "system": system_value.as_ref(),
+            "prompt": &prompt,
+        });
+        super::fingerprint::log_provider_canonical_input(
+            "cursor",
+            &model,
+            "cursor_cli_prompt",
+            &payload,
+            &prompt_items,
+            system_value.as_ref(),
+            None,
+            Some(0),
+            &[
+                ("logical_message_count", messages.len().to_string()),
+                ("ignored_tool_count", _tools.len().to_string()),
+            ],
+        );
         let client = self.client.clone();
         let (tx, rx) = mpsc::channel::<Result<crate::message::StreamEvent>>(100);
 

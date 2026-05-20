@@ -1,11 +1,33 @@
 use super::*;
 
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+        let previous = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = &self.previous {
+            crate::env::set_var(self.key, previous);
+        } else {
+            crate::env::remove_var(self.key);
+        }
+    }
+}
+
 #[tokio::test]
 async fn side_panel_tool_writes_page() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
     let tool = SidePanelTool::new();
     let output = tool
@@ -30,20 +52,13 @@ async fn side_panel_tool_writes_page() {
         .expect("tool execute");
 
     assert!(output.output.contains("notes"));
-
-    if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
 }
 
 #[tokio::test]
 async fn side_panel_tool_loads_file_with_derived_page_id() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
     let doc_path = temp.path().join("Project Plan.md");
     std::fs::write(&doc_path, "# Plan\n\nInitial").expect("write source file");
 
@@ -78,10 +93,4 @@ async fn side_panel_tool_loads_file_with_derived_page_id() {
         .expect("loaded page");
     assert_eq!(page.title, "Project Plan.md");
     assert_eq!(page.content, "# Plan\n\nInitial");
-
-    if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
 }

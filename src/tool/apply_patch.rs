@@ -20,6 +20,8 @@ impl ApplyPatchTool {
 
 #[derive(Deserialize)]
 struct ApplyPatchInput {
+    #[serde(default)]
+    intent: Option<String>,
     patch_text: String,
 }
 
@@ -91,7 +93,14 @@ impl Tool for ApplyPatchTool {
                     }
                     tokio::fs::write(&resolved, contents).await?;
                     let diff = generate_diff_summary("", contents);
-                    publish_file_touch(&ctx, &resolved, path, "created", &diff);
+                    publish_file_touch(
+                        &ctx,
+                        &resolved,
+                        path,
+                        "created",
+                        &diff,
+                        params.intent.as_deref(),
+                    );
                     touched_paths.push(path.clone());
                     if diff.is_empty() {
                         results.push(format!("✓ {}: created", path));
@@ -106,7 +115,14 @@ impl Tool for ApplyPatchTool {
                         .unwrap_or_default();
                     if tokio::fs::remove_file(&resolved).await.is_ok() {
                         let diff = generate_diff_summary(&old_contents, "");
-                        publish_file_touch(&ctx, &resolved, path, "deleted", &diff);
+                        publish_file_touch(
+                            &ctx,
+                            &resolved,
+                            path,
+                            "deleted",
+                            &diff,
+                            params.intent.as_deref(),
+                        );
                         touched_paths.push(path.clone());
                         if diff.is_empty() {
                             results.push(format!("✓ {}: deleted", path));
@@ -133,8 +149,22 @@ impl Tool for ApplyPatchTool {
                                 }
                                 tokio::fs::write(&dest_resolved, &new_contents).await?;
                                 let _ = tokio::fs::remove_file(&resolved).await;
-                                publish_file_touch(&ctx, &resolved, path, "modified", &diff);
-                                publish_file_touch(&ctx, &dest_resolved, dest, "modified", &diff);
+                                publish_file_touch(
+                                    &ctx,
+                                    &resolved,
+                                    path,
+                                    "modified",
+                                    &diff,
+                                    params.intent.as_deref(),
+                                );
+                                publish_file_touch(
+                                    &ctx,
+                                    &dest_resolved,
+                                    dest,
+                                    "modified",
+                                    &diff,
+                                    params.intent.as_deref(),
+                                );
                                 touched_paths.push(path.clone());
                                 touched_paths.push(dest.clone());
                                 if diff.is_empty() {
@@ -155,7 +185,14 @@ impl Tool for ApplyPatchTool {
                                 }
                             } else {
                                 tokio::fs::write(&resolved, &new_contents).await?;
-                                publish_file_touch(&ctx, &resolved, path, "modified", &diff);
+                                publish_file_touch(
+                                    &ctx,
+                                    &resolved,
+                                    path,
+                                    "modified",
+                                    &diff,
+                                    params.intent.as_deref(),
+                                );
                                 touched_paths.push(path.clone());
                                 if diff.is_empty() {
                                     results.push(format!(
@@ -200,12 +237,17 @@ fn publish_file_touch(
     display_path: &str,
     verb: &str,
     diff: &str,
+    intent: Option<&str>,
 ) {
     let detail = build_file_touch_preview(diff);
     Bus::global().publish(BusEvent::FileTouch(FileTouch {
         session_id: ctx.session_id.clone(),
         path: resolved.to_path_buf(),
         op: FileOp::Edit,
+        intent: intent
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         summary: Some(format!("{} via apply_patch", verb)),
         detail,
     }));

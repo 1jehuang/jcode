@@ -22,6 +22,7 @@ pub struct LoginOptions {
     pub auth_code: Option<String>,
     pub json: bool,
     pub complete: bool,
+    pub no_validate: bool,
     pub google_access_tier: Option<auth::google::GmailAccessTier>,
     pub openai_compatible_api_base: Option<String>,
     pub openai_compatible_api_key: Option<String>,
@@ -185,7 +186,7 @@ pub async fn run_login(
                 && imported > 0
             {
                 eprintln!("\nImported {} existing auth source(s).", imported);
-                notify_running_server_auth_changed_best_effort().await;
+                notify_running_server_auth_changed_best_effort(None).await;
                 return Ok(());
             }
             match super::provider_init::prompt_login_provider_selection_optional(
@@ -214,6 +215,33 @@ pub async fn run_login_provider(
     } else {
         auto_scriptable_flow_reason(provider, &options, io::stdin().is_terminal())
     };
+    crate::logging::auth_event(
+        "login_flow_resolved",
+        provider.id,
+        &[
+            ("method", provider.auth_kind.label()),
+            (
+                "scriptable",
+                if explicit_scriptable_flow || auto_scriptable_reason.is_some() {
+                    "true"
+                } else {
+                    "false"
+                },
+            ),
+            (
+                "auto_scriptable_reason",
+                auto_scriptable_reason.unwrap_or("none"),
+            ),
+            (
+                "has_account_label",
+                if account_label.is_some() {
+                    "true"
+                } else {
+                    "false"
+                },
+            ),
+        ],
+    );
     let login_result = if explicit_scriptable_flow {
         run_scriptable_login_provider(provider, account_label, &options).await
     } else if let Some(reason) = auto_scriptable_reason {
@@ -289,6 +317,14 @@ pub async fn run_login_provider(
                 provider.auth_kind.label(),
                 reason.label(),
             );
+            crate::logging::auth_event(
+                "login_flow_failed",
+                provider.id,
+                &[
+                    ("method", provider.auth_kind.label()),
+                    ("reason", reason.label()),
+                ],
+            );
             return Err(anyhow::anyhow!(
                 crate::auth::login_diagnostics::augment_auth_error_message(
                     provider.id,
@@ -298,27 +334,56 @@ pub async fn run_login_provider(
         }
     };
     if matches!(outcome, LoginFlowOutcome::Deferred) {
+        crate::logging::auth_event(
+            "login_flow_deferred",
+            provider.id,
+            &[("method", provider.auth_kind.label())],
+        );
         return Ok(());
     }
     auth::AuthStatus::invalidate_cache();
+    if options.no_validate {
+        eprintln!("Skipping post-login provider validation (--no-validate).");
+        crate::logging::auth_event(
+            "post_login_validation_skipped",
+            provider.id,
+            &[("reason", "no_validate")],
+        );
+        maybe_persist_default_provider_after_login(provider, &options);
+        notify_running_server_auth_changed_best_effort(Some(provider.id)).await;
+        return Ok(());
+    }
     if let Err(err) = super::commands::run_post_login_validation(provider).await {
-        let reason =
-            crate::auth::login_diagnostics::classify_auth_failure_message(&err.to_string());
+        let error_message = err.to_string();
+        let reason = crate::auth::login_diagnostics::classify_auth_failure_message(&error_message);
         crate::telemetry::record_auth_failed_reason(
             provider.id,
             provider.auth_kind.label(),
             reason.label(),
         );
+        crate::logging::auth_event(
+            "post_login_validation_failed",
+            provider.id,
+            &[
+                ("method", provider.auth_kind.label()),
+                ("reason", reason.label()),
+            ],
+        );
         return Err(anyhow::anyhow!(
-            crate::auth::login_diagnostics::augment_auth_error_message(
-                provider.id,
-                err.to_string()
-            )
+            crate::auth::login_diagnostics::augment_auth_error_message(provider.id, error_message)
         ));
     }
     auth::AuthStatus::invalidate_cache();
+    crate::logging::auth_event(
+        "login_flow_completed",
+        provider.id,
+        &[
+            ("method", provider.auth_kind.label()),
+            ("validated", "true"),
+        ],
+    );
     maybe_persist_default_provider_after_login(provider, &options);
-    notify_running_server_auth_changed_best_effort().await;
+    notify_running_server_auth_changed_best_effort(Some(provider.id)).await;
     Ok(())
 }
 
@@ -331,19 +396,8 @@ fn maybe_persist_default_provider_after_login(
         return;
     }
 
-    let provider_id = match provider.target {
-        LoginProviderTarget::Claude => Some("claude"),
-        LoginProviderTarget::OpenAi => Some("openai"),
-        LoginProviderTarget::OpenAiApiKey => Some("openai-api"),
-        LoginProviderTarget::OpenRouter => Some("openrouter"),
-        LoginProviderTarget::Bedrock => Some("bedrock"),
-        LoginProviderTarget::OpenAiCompatible(profile) => Some(profile.id),
-        LoginProviderTarget::Cursor => Some("cursor"),
-        LoginProviderTarget::Copilot => Some("copilot"),
-        LoginProviderTarget::Gemini => Some("gemini"),
-        LoginProviderTarget::Antigravity => Some("antigravity"),
-        _ => None,
-    };
+    let provider_id =
+        crate::provider::MultiProvider::config_default_provider_for_login_provider(provider);
     let Some(provider_id) = provider_id else {
         return;
     };
@@ -375,11 +429,26 @@ fn maybe_persist_default_provider_after_login(
 
 /// Best-effort: tell a running jcode server that on-disk auth has changed so it
 /// can hot-initialize any newly-configured providers. No-op if no server is running.
-async fn notify_running_server_auth_changed_best_effort() {
+async fn notify_running_server_auth_changed_best_effort(provider: Option<&str>) {
     let Ok(mut client) = crate::server::Client::connect().await else {
+        crate::logging::auth_event(
+            "auth_changed_notify_skipped",
+            "server",
+            &[("reason", "no_running_server")],
+        );
         return;
     };
-    let _ = client.notify_auth_changed().await;
+    match client.notify_auth_changed_for_provider(provider).await {
+        Ok(_) => crate::logging::auth_event("auth_changed_notify_sent", "server", &[]),
+        Err(err) => {
+            let reason = err.to_string();
+            crate::logging::auth_event(
+                "auth_changed_notify_failed",
+                "server",
+                &[("reason", reason.as_str())],
+            );
+        }
+    }
 }
 
 fn login_jcode_flow() -> Result<()> {
@@ -676,9 +745,21 @@ fn login_openai_compatible_flow(
     let mut resolved = resolve_openai_compatible_profile(*profile);
 
     eprintln!("Setting up {}...", resolved.display_name);
-    eprintln!("See setup details: {}\n", resolved.setup_url);
+    let setup_url_depends_on_key = profile.id == crate::provider_catalog::MINIMAX_PROFILE.id;
+    if !setup_url_depends_on_key {
+        eprintln!("See setup details: {}\n", resolved.setup_url);
+    }
 
     if is_custom_profile {
+        if !io::stdin().is_terminal()
+            && options.openai_compatible_api_base.is_none()
+            && options.openai_compatible_api_key.is_none()
+        {
+            anyhow::bail!(
+                "Non-interactive OpenAI-compatible login requires --api-base and --api-key. \
+                 This avoids accidentally saving a piped model name or other answer as the API key."
+            );
+        }
         eprintln!(
             "You can point this at a hosted OpenAI-compatible API or a local server such as LM Studio or Ollama."
         );
@@ -741,7 +822,6 @@ fn login_openai_compatible_flow(
         resolved.default_model = Some(model.to_string());
     }
 
-    eprintln!("Endpoint: {}", resolved.api_base);
     let auth_method = if resolved.requires_api_key {
         eprintln!("API key env variable: {}\n", resolved.api_key_env);
         let key = match options.openai_compatible_api_key.as_deref() {
@@ -755,6 +835,14 @@ fn login_openai_compatible_flow(
         if key.is_empty() {
             anyhow::bail!("No API key provided.");
         }
+        resolved = crate::provider_catalog::resolve_openai_compatible_profile_with_api_key_hint(
+            *profile,
+            Some(&key),
+        );
+        eprintln!("Endpoint: {}", resolved.api_base);
+        if setup_url_depends_on_key {
+            eprintln!("See setup details: {}", resolved.setup_url);
+        }
 
         crate::provider_catalog::save_env_value_to_env_file(
             OPENAI_COMPAT_LOCAL_ENABLED_ENV,
@@ -765,6 +853,10 @@ fn login_openai_compatible_flow(
         eprintln!("\nSuccessfully saved {} API key!", resolved.display_name);
         "api_key"
     } else {
+        eprintln!("Endpoint: {}", resolved.api_base);
+        if setup_url_depends_on_key {
+            eprintln!("See setup details: {}", resolved.setup_url);
+        }
         eprintln!("This provider uses a local OpenAI-compatible endpoint.");
         eprintln!(
             "An API key is optional here. Press Enter to skip if your local server does not require one.\n"
@@ -827,12 +919,10 @@ pub fn read_secret_line() -> Result<String> {
     }
 
     let was_raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
-    if !was_raw {
-        if terminal::enable_raw_mode().is_err() {
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            return Ok(input.trim().to_string());
-        }
+    if !was_raw && terminal::enable_raw_mode().is_err() {
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        return Ok(input.trim().to_string());
     }
 
     struct RawModeGuard(bool);
@@ -952,7 +1042,7 @@ fn login_copilot_flow(no_browser: bool) -> Result<()> {
 }
 
 async fn login_copilot_device_flow(no_browser: bool) -> Result<()> {
-    let client = reqwest::Client::new();
+    let client = crate::provider::shared_http_client();
 
     let device_resp = crate::auth::copilot::initiate_device_flow(&client).await?;
 

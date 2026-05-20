@@ -181,7 +181,7 @@ pub(super) async fn start_scriptable_login(
             )
         }
         LoginProviderTarget::Copilot => {
-            let client = reqwest::Client::new();
+            let client = crate::provider::shared_http_client();
             let device_resp = auth::copilot::initiate_device_flow(&client).await?;
             (
                 PendingScriptableLogin::Copilot {
@@ -554,7 +554,7 @@ pub(super) async fn complete_scriptable_copilot_login(
         anyhow::bail!("Pending Copilot login state is invalid.");
     };
 
-    let client = reqwest::Client::new();
+    let client = crate::provider::shared_http_client();
     let token = auth::copilot::poll_for_access_token(&client, &device_code, interval).await?;
     let username = auth::copilot::fetch_github_username(&client, &token)
         .await

@@ -126,9 +126,20 @@ pub(super) async fn handle_comm_subscribe_channel(
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
 ) {
+    let started = std::time::Instant::now();
     let swarm_id = swarm_id_for_session(&req_session_id, swarm_members).await;
 
     if let Some(swarm_id) = swarm_id {
+        crate::logging::event_info(
+            "COMM_LIFECYCLE",
+            vec![
+                ("phase", "channel_subscribe_start".to_string()),
+                ("request_id", id.to_string()),
+                ("session_id", req_session_id.clone()),
+                ("swarm_id", swarm_id.clone()),
+                ("channel", channel.clone()),
+            ],
+        );
         subscribe_session_to_channel(
             &req_session_id,
             &swarm_id,
@@ -153,7 +164,29 @@ pub(super) async fn handle_comm_subscribe_channel(
         .await;
 
         let _ = client_event_tx.send(ServerEvent::Done { id });
+        crate::logging::event_info(
+            "COMM_LIFECYCLE",
+            vec![
+                ("phase", "channel_subscribe_done".to_string()),
+                ("request_id", id.to_string()),
+                ("session_id", req_session_id),
+                ("swarm_id", swarm_id),
+                ("channel", channel),
+                ("elapsed_ms", started.elapsed().as_millis().to_string()),
+            ],
+        );
     } else {
+        crate::logging::event_warn(
+            "COMM_LIFECYCLE",
+            vec![
+                ("phase", "channel_subscribe_error".to_string()),
+                ("request_id", id.to_string()),
+                ("session_id", req_session_id),
+                ("channel", channel),
+                ("error", "not_in_swarm".to_string()),
+                ("elapsed_ms", started.elapsed().as_millis().to_string()),
+            ],
+        );
         let _ = client_event_tx.send(ServerEvent::Error {
             id,
             message: "Not in a swarm.".to_string(),
@@ -178,9 +211,20 @@ pub(super) async fn handle_comm_unsubscribe_channel(
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
 ) {
+    let started = std::time::Instant::now();
     let swarm_id = swarm_id_for_session(&req_session_id, swarm_members).await;
 
     if let Some(swarm_id) = swarm_id {
+        crate::logging::event_info(
+            "COMM_LIFECYCLE",
+            vec![
+                ("phase", "channel_unsubscribe_start".to_string()),
+                ("request_id", id.to_string()),
+                ("session_id", req_session_id.clone()),
+                ("swarm_id", swarm_id.clone()),
+                ("channel", channel.clone()),
+            ],
+        );
         unsubscribe_session_from_channel(
             &req_session_id,
             &swarm_id,
@@ -205,7 +249,29 @@ pub(super) async fn handle_comm_unsubscribe_channel(
         .await;
 
         let _ = client_event_tx.send(ServerEvent::Done { id });
+        crate::logging::event_info(
+            "COMM_LIFECYCLE",
+            vec![
+                ("phase", "channel_unsubscribe_done".to_string()),
+                ("request_id", id.to_string()),
+                ("session_id", req_session_id),
+                ("swarm_id", swarm_id),
+                ("channel", channel),
+                ("elapsed_ms", started.elapsed().as_millis().to_string()),
+            ],
+        );
     } else {
+        crate::logging::event_warn(
+            "COMM_LIFECYCLE",
+            vec![
+                ("phase", "channel_unsubscribe_error".to_string()),
+                ("request_id", id.to_string()),
+                ("session_id", req_session_id),
+                ("channel", channel),
+                ("error", "not_in_swarm".to_string()),
+                ("elapsed_ms", started.elapsed().as_millis().to_string()),
+            ],
+        );
         let _ = client_event_tx.send(ServerEvent::Error {
             id,
             message: "Not in a swarm.".to_string(),

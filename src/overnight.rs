@@ -496,8 +496,6 @@ fn build_usage_projection(
 
     let confidence = if max_usage.is_some() && !has_errors {
         "medium"
-    } else if !providers.is_empty() {
-        "low"
     } else {
         "low"
     }

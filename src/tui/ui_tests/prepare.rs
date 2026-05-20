@@ -182,7 +182,7 @@ fn test_prepare_messages_shows_live_batch_progress_in_chat_history() {
     assert!(
         rendered
             .iter()
-            .any(|line| line.contains("⠋ batch · 1/2 done")),
+            .any(|line| line.contains("⠂ batch · 1/2 done")),
         "missing live batch header in {:?}",
         rendered
     );
@@ -194,7 +194,7 @@ fn test_prepare_messages_shows_live_batch_progress_in_chat_history() {
     assert!(
         rendered
             .iter()
-            .any(|line| line.contains("⠋ bash $ cargo build --release --workspace")),
+            .any(|line| line.contains("⠂ bash $ cargo build --release --workspace")),
         "missing running batch subcall in {:?}",
         rendered
     );
@@ -320,14 +320,14 @@ fn test_prepare_messages_live_batch_spinner_advances_between_frames() {
     assert!(
         first_rendered
             .iter()
-            .any(|line| line.contains("⠋ batch · 0/1 done")),
+            .any(|line| line.contains("⠂ batch · 0/1 done")),
         "expected first spinner frame in {:?}",
         first_rendered
     );
     assert!(
         second_rendered
             .iter()
-            .any(|line| line.contains("⠙ batch · 0/1 done")),
+            .any(|line| line.contains("⠆ batch · 0/1 done")),
         "expected second spinner frame in {:?}",
         second_rendered
     );

@@ -775,12 +775,10 @@ pub fn download_and_install_blocking_with_progress(
         anyhow::bail!("Download failed: {}", response.status());
     }
 
-    let total = response.content_length().or_else(|| {
-        if asset._size > 0 {
-            Some(asset._size)
-        } else {
-            None
-        }
+    let total = response.content_length().or(if asset._size > 0 {
+        Some(asset._size)
+    } else {
+        None
     });
     let mut bytes = Vec::with_capacity(total.unwrap_or_default().min(usize::MAX as u64) as usize);
     let mut buffer = [0_u8; 64 * 1024];

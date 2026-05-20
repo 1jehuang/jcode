@@ -49,7 +49,7 @@ impl Tool for McpManagementTool {
     }
 
     fn description(&self) -> &str {
-        "Manage MCP servers."
+        "Manage MCP (Model Context Protocol) servers."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -87,8 +87,21 @@ impl Tool for McpManagementTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: McpToolInput = serde_json::from_value(input)?;
+        let started = std::time::Instant::now();
+        let action = params.action.clone();
+        let server = params.server.clone().unwrap_or_else(|| "none".to_string());
+        crate::logging::event_info(
+            "MCP_LIFECYCLE",
+            vec![
+                ("phase", "management_start".to_string()),
+                ("action", action.clone()),
+                ("server", server.clone()),
+                ("session_id", ctx.session_id.clone()),
+                ("tool_call_id", ctx.tool_call_id.clone()),
+            ],
+        );
 
-        match params.action.as_str() {
+        let result = match params.action.as_str() {
             "list" => self.list_servers().await,
             "connect" => self.connect_server(params, &ctx.session_id).await,
             "disconnect" => self.disconnect_server(params).await,
@@ -97,7 +110,37 @@ impl Tool for McpManagementTool {
                 "Unknown action: {}. Use 'list', 'connect', 'disconnect', or 'reload'.",
                 params.action
             ))),
+        };
+
+        match &result {
+            Ok(_) => crate::logging::event_info(
+                "MCP_LIFECYCLE",
+                vec![
+                    ("phase", "management_done".to_string()),
+                    ("action", action),
+                    ("server", server),
+                    ("session_id", ctx.session_id),
+                    ("tool_call_id", ctx.tool_call_id),
+                    ("status", "ok".to_string()),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            ),
+            Err(error) => crate::logging::event_warn(
+                "MCP_LIFECYCLE",
+                vec![
+                    ("phase", "management_done".to_string()),
+                    ("action", action),
+                    ("server", server),
+                    ("session_id", ctx.session_id),
+                    ("tool_call_id", ctx.tool_call_id),
+                    ("status", "error".to_string()),
+                    ("error", error.to_string()),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            ),
         }
+
+        result
     }
 }
 
@@ -213,10 +256,15 @@ impl McpManagementTool {
                 Ok(ToolOutput::new(output).with_title(format!("MCP: Connected {}", server_name)))
             }
             Err(e) => {
-                crate::logging::warn(&format!(
-                    "[tool:mcp] connect failed server={} session_id={} error={}",
-                    server_name, session_id, e
-                ));
+                crate::logging::event_warn(
+                    "MCP_LIFECYCLE",
+                    vec![
+                        ("phase", "connect_failed".to_string()),
+                        ("server", server_name.clone()),
+                        ("session_id", session_id.to_string()),
+                        ("error", e.to_string()),
+                    ],
+                );
                 Ok(
                     ToolOutput::new(format!("Failed to connect to '{}': {}", server_name, e))
                         .with_title("MCP: Connection failed"),
@@ -256,11 +304,14 @@ impl McpManagementTool {
             let removed = registry
                 .unregister_prefix(&format!("mcp__{}__", server_name))
                 .await;
-            crate::logging::info(&format!(
-                "MCP: Unregistered {} tools for '{}'",
-                removed.len(),
-                server_name
-            ));
+            crate::logging::event_info(
+                "MCP_LIFECYCLE",
+                vec![
+                    ("phase", "tools_unregistered".to_string()),
+                    ("server", server_name.clone()),
+                    ("removed_tool_count", removed.len().to_string()),
+                ],
+            );
         }
 
         Ok(
@@ -314,16 +365,22 @@ impl McpManagementTool {
 
         // Show failures first
         if !failures.is_empty() {
-            crate::logging::warn(&format!(
-                "[tool:mcp] reload had {} connection failure(s) in session {}: {}",
-                failures.len(),
-                session_id,
-                failures
-                    .iter()
-                    .map(|(name, error)| format!("{}={}", name, error))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
+            crate::logging::event_warn(
+                "MCP_LIFECYCLE",
+                vec![
+                    ("phase", "reload_connect_failures".to_string()),
+                    ("session_id", session_id.to_string()),
+                    ("failure_count", failures.len().to_string()),
+                    (
+                        "servers",
+                        failures
+                            .iter()
+                            .map(|(name, _)| name.clone())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    ),
+                ],
+            );
             output.push_str("## Connection Failures\n");
             for (name, error) in &failures {
                 output.push_str(&format!("  - {}: {}\n", name, error));

@@ -29,6 +29,7 @@ DEFAULT_TOOLS = [
     "copilot_cli",
     "cursor_agent",
     "claude_code",
+    "antigravity_cli",
 ]
 
 
@@ -88,6 +89,7 @@ def build_specs() -> dict[str, ToolSpec]:
     copilot = shutil.which("copilot") or str(Path.home() / ".local/bin/copilot")
     cursor_agent = shutil.which("cursor-agent") or str(Path.home() / ".local/bin/cursor-agent")
     claude = shutil.which("claude") or str(Path.home() / ".local/bin/claude")
+    agy = shutil.which("agy") or str(Path.home() / ".local/bin/agy")
     specs = {
         "jcode_memory_off": ToolSpec(
             name="jcode_memory_off",
@@ -132,6 +134,11 @@ def build_specs() -> dict[str, ToolSpec]:
             name="claude_code",
             argv=[claude],
             version_argv=[claude, "--version"],
+        ),
+        "antigravity_cli": ToolSpec(
+            name="antigravity_cli",
+            argv=[agy],
+            version_argv=[agy, "--version"],
         ),
     }
     return specs
@@ -356,6 +363,17 @@ def run_tool(spec: ToolSpec, sessions: int, cwd: Path, timeout_s: float, settle_
             env["JCODE_SERVER_OWNER_PID"] = str(os.getpid())
             os.makedirs(env["JCODE_HOME"], exist_ok=True)
             os.makedirs(env["JCODE_RUNTIME_DIR"], exist_ok=True)
+            for auth_name in (
+                "anthropic-auth.json",
+                "openai-auth.json",
+                "antigravity_oauth.json",
+                "gemini_oauth.json",
+                "config.toml",
+            ):
+                real_auth = Path.home() / ".jcode" / auth_name
+                bench_auth = Path(env["JCODE_HOME"]) / auth_name
+                if real_auth.exists() and not bench_auth.exists():
+                    bench_auth.symlink_to(real_auth)
             if spec.name == "jcode_memory_on":
                 real_models = Path.home() / ".jcode" / "models"
                 bench_models = Path(env["JCODE_HOME"]) / "models"

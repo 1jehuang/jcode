@@ -55,6 +55,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/splitview", "Mirror the current chat in the side panel"),
     RegisteredCommand::public("/split-view", "Alias for /splitview"),
     RegisteredCommand::public("/btw", "Ask a side question in the side panel"),
+    RegisteredCommand::public("/ssh", "Connect to a remote machine using system SSH"),
     RegisteredCommand::public("/git", "Show git status for the session working directory"),
     RegisteredCommand::public("/transcript", "Open the current session transcript file"),
     RegisteredCommand::public("/subagent-model", "Show/change subagent model policy"),
@@ -250,6 +251,10 @@ impl App {
     }
 
     fn command_candidates(&self) -> Vec<(String, &'static str)> {
+        if let Some(cache) = self.command_candidates_cache.borrow().as_ref() {
+            return cache.candidates.clone();
+        }
+
         fn push_skill_commands(
             commands: &mut Vec<(String, &'static str)>,
             seen: &mut std::collections::HashSet<String>,
@@ -277,20 +282,23 @@ impl App {
         let skills = self.current_skills_snapshot();
         push_skill_commands(&mut commands, &mut seen, &skills);
 
-        // Remote/minimal TUI clients can start with an empty local skill registry,
-        // while direct slash invocation reloads on miss. Mirror that behavior for
-        // autocomplete so project-local skills like `/optimization` are suggested
-        // before the user has activated them once.
-        let working_dir = self
-            .session
-            .working_dir
-            .as_deref()
-            .map(std::path::Path::new);
-        if let Ok(reloaded) = crate::skill::SkillRegistry::load_for_working_dir(working_dir) {
-            push_skill_commands(&mut commands, &mut seen, &reloaded);
+        if self.is_remote && !self.remote_skills.is_empty() {
+            for skill in &self.remote_skills {
+                let command = format!("/{skill}");
+                if seen.insert(command.clone()) {
+                    commands.push((command, "Activate skill"));
+                }
+            }
         }
 
+        *self.command_candidates_cache.borrow_mut() = Some(CommandCandidatesCache {
+            candidates: commands.clone(),
+        });
         commands
+    }
+
+    pub(super) fn invalidate_command_candidates_cache(&self) {
+        *self.command_candidates_cache.borrow_mut() = None;
     }
 
     fn model_suggestion_candidates(&self) -> Vec<(String, &'static str)> {

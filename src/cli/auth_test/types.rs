@@ -218,7 +218,7 @@ impl ResolvedAuthTestTarget {
             Some(target) => Self::Detailed(target),
             None => Self::Generic {
                 provider,
-                choice: choice.clone(),
+                choice: *choice,
             },
         })
     }
@@ -260,7 +260,9 @@ impl AuthTestSmokeKind {
     fn success_detail(self) -> &'static str {
         match self {
             Self::Provider => "Provider returned AUTH_TEST_OK.",
-            Self::Tool => "Tool-enabled provider request returned AUTH_TEST_OK.",
+            Self::Tool => {
+                "Tool-enabled provider request returned AUTH_TEST_OK after one validated real Jcode bash tool call, successful registry execution, and tool-result followup."
+            }
         }
     }
 

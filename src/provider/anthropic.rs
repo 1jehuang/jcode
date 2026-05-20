@@ -863,6 +863,48 @@ impl Default for AnthropicProvider {
     }
 }
 
+fn log_anthropic_canonical_input(
+    model: &str,
+    format: &str,
+    request: &ApiRequest,
+    is_oauth: bool,
+    split_prompt: bool,
+) {
+    let messages_value = serde_json::to_value(&request.messages).unwrap_or(Value::Null);
+    let message_items = messages_value.as_array().cloned().unwrap_or_default();
+    let system_value = request
+        .system
+        .as_ref()
+        .and_then(|system| serde_json::to_value(system).ok());
+    let tools_value = request
+        .tools
+        .as_ref()
+        .and_then(|tools| serde_json::to_value(tools).ok());
+    let payload = json!({
+        "model": &request.model,
+        "max_tokens": request.max_tokens,
+        "system": system_value.as_ref(),
+        "messages": messages_value,
+        "tools": tools_value.as_ref(),
+        "temperature": request.temperature,
+    });
+
+    super::fingerprint::log_provider_canonical_input(
+        "anthropic",
+        model,
+        format,
+        &payload,
+        &message_items,
+        system_value.as_ref(),
+        tools_value.as_ref(),
+        request.tools.as_ref().map(|tools| tools.len()),
+        &[
+            ("oauth", is_oauth.to_string()),
+            ("split_prompt", split_prompt.to_string()),
+        ],
+    );
+}
+
 #[async_trait]
 impl Provider for AnthropicProvider {
     async fn complete(
@@ -911,6 +953,8 @@ impl Provider for AnthropicProvider {
             temperature: if is_oauth { Some(1.0) } else { None },
             stream: true,
         };
+
+        log_anthropic_canonical_input(&model, "anthropic_messages", &request, is_oauth, false);
 
         crate::logging::info(&format!(
             "Anthropic transport: HTTPS SSE stream (oauth={})",
@@ -1101,6 +1145,8 @@ impl Provider for AnthropicProvider {
             temperature: if is_oauth { Some(1.0) } else { None },
             stream: true,
         };
+
+        log_anthropic_canonical_input(&model, "anthropic_messages_split", &request, is_oauth, true);
 
         crate::logging::info(&format!(
             "Anthropic transport: HTTPS SSE split stream (oauth={})",

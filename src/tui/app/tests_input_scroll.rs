@@ -32,17 +32,17 @@ fn test_disconnected_shift_enter_inserts_newline() {
 }
 
 #[test]
-fn test_disconnected_shift_slash_inserts_question_mark() {
+fn test_disconnected_shift_slash_preserves_layout_translated_slash() {
     let mut app = create_test_app();
 
     remote::handle_disconnected_key(&mut app, KeyCode::Char('/'), KeyModifiers::SHIFT).unwrap();
 
-    assert_eq!(app.input(), "?");
+    assert_eq!(app.input(), "/");
     assert!(app.queued_messages().is_empty());
 }
 
 #[test]
-fn test_disconnected_key_event_shift_slash_inserts_question_mark() {
+fn test_disconnected_key_event_shift_slash_preserves_layout_translated_slash() {
     use crossterm::event::{KeyEvent, KeyEventKind};
 
     let mut app = create_test_app();
@@ -53,7 +53,22 @@ fn test_disconnected_key_event_shift_slash_inserts_question_mark() {
     )
     .unwrap();
 
-    assert_eq!(app.input(), "?");
+    assert_eq!(app.input(), "/");
+    assert!(app.queued_messages().is_empty());
+}
+
+#[test]
+fn test_disconnected_control_alt_symbol_inserts_layout_translated_text() {
+    let mut app = create_test_app();
+
+    remote::handle_disconnected_key(
+        &mut app,
+        KeyCode::Char('@'),
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+    )
+    .unwrap();
+
+    assert_eq!(app.input(), "@");
     assert!(app.queued_messages().is_empty());
 }
 

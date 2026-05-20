@@ -327,7 +327,7 @@ impl App {
             return (self.messages.clone(), None);
         }
         let base_messages = self.materialized_provider_messages();
-        if !self.provider.uses_jcode_compaction() && self.session.compaction.is_none() {
+        if !self.provider.supports_compaction() && self.session.compaction.is_none() {
             return (base_messages, None);
         }
         let compaction = self.registry.compaction();
@@ -349,11 +349,7 @@ impl App {
                     }
                 }
                 let messages = manager.messages_for_api_with(&base_messages);
-                let event = if self.provider.uses_jcode_compaction() {
-                    manager.take_compaction_event()
-                } else {
-                    None
-                };
+                let event = manager.take_compaction_event();
                 if event.is_some() || discarded_oversized_native {
                     self.sync_session_compaction_state_from_manager(&manager);
                 }
@@ -364,7 +360,9 @@ impl App {
     }
 
     pub(super) fn poll_compaction_completion(&mut self) -> bool {
-        if self.is_remote || !self.provider.uses_jcode_compaction() {
+        if self.is_remote
+            || (!self.provider.supports_compaction() && self.session.compaction.is_none())
+        {
             return false;
         }
         let provider_messages = self.materialized_provider_messages();
@@ -383,6 +381,12 @@ impl App {
         self.provider_session_id = None;
         self.session.provider_session_id = None;
         self.context_warning_shown = false;
+        if let Err(err) = self.session.save() {
+            crate::logging::warn(&format!(
+                "Failed to persist provider session reset after compaction for session {}: {}",
+                self.session.id, err
+            ));
+        }
         let message = if event.messages_dropped.is_some() {
             self.set_status_notice("Emergency compaction");
             Self::format_emergency_compaction_message(&event, self.context_limit)

@@ -151,10 +151,11 @@ pub(super) struct StreamingToolCallState {
 }
 
 fn normalize_openai_tool_arguments(raw_arguments: String) -> String {
-    if raw_arguments.trim().is_empty() {
+    let trimmed = raw_arguments.trim();
+    if trimmed.is_empty() || trimmed == "null" {
         let total = NORMALIZED_NULL_TOOL_ARGUMENTS.fetch_add(1, Ordering::Relaxed) + 1;
         crate::logging::warn(&format!(
-            "[openai] Normalized empty tool arguments to empty object (total={})",
+            "[openai] Normalized empty/null tool arguments to empty object (total={})",
             total
         ));
         "{}".to_string()

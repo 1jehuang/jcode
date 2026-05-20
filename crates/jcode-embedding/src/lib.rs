@@ -274,6 +274,7 @@ fn download_model(model_dir: &Path) -> Result<()> {
 
 fn download_model_blocking(model_dir: &Path) -> Result<()> {
     let client = reqwest::blocking::Client::builder()
+        .user_agent(concat!("jcode-embedding/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
 

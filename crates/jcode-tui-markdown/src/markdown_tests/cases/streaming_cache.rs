@@ -313,6 +313,7 @@ fn test_incremental_renderer_streams_fenced_block_before_close() {
     );
 }
 
+#[cfg(feature = "mermaid-renderer")]
 #[test]
 fn test_incremental_renderer_defers_mermaid_render_until_background_ready() {
     jcode_tui_mermaid::clear_cache().ok();

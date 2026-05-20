@@ -742,6 +742,76 @@ fn test_remote_model_switch_failure_shows_actionable_guidance() {
 }
 
 #[test]
+fn test_remote_prompt_defers_while_model_switch_is_in_flight() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut remote = rt.block_on(async { crate::tui::backend::RemoteConnection::dummy() });
+
+    app.is_remote = true;
+    app.remote_model_switch_in_flight = true;
+
+    rt.block_on(crate::tui::app::remote::submit_prepared_remote_input(
+        &mut app,
+        &mut remote,
+        crate::tui::app::input::PreparedInput {
+            raw_input: "hello after model switch".to_string(),
+            expanded: "hello after model switch".to_string(),
+            images: vec![("image/png".to_string(), "abc123".to_string())],
+        },
+    ))
+    .expect("queued prompt should not try to send while model switch is pending");
+
+    assert!(!app.is_processing);
+    assert_eq!(
+        app.status_notice(),
+        Some("Prompt queued until model switch completes".to_string())
+    );
+    let queued = app
+        .pending_prompt_after_model_switch
+        .as_ref()
+        .expect("prompt should be deferred until ModelChanged arrives");
+    assert_eq!(queued.raw_input, "hello after model switch");
+    assert_eq!(queued.images.len(), 1);
+    assert!(app
+        .display_messages
+        .iter()
+        .all(|message| message.role != "user"));
+}
+
+#[test]
+fn test_remote_model_switch_failure_restores_deferred_prompt() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_remote = true;
+    app.remote_model_switch_in_flight = true;
+    app.pending_prompt_after_model_switch = Some(crate::tui::app::input::PreparedInput {
+        raw_input: "please use the selected model".to_string(),
+        expanded: "please use the selected model".to_string(),
+        images: vec![("image/jpeg".to_string(), "def456".to_string())],
+    });
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ModelChanged {
+            id: 8,
+            model: "Qwen/Qwen3-32B-TEE".to_string(),
+            provider_name: Some("Chutes".to_string()),
+            error: Some("model switch failed".to_string()),
+        },
+        &mut remote,
+    );
+
+    assert!(!app.remote_model_switch_in_flight);
+    assert!(app.pending_prompt_after_model_switch.is_none());
+    assert_eq!(app.input, "please use the selected model");
+    assert_eq!(app.cursor_pos, app.input.len());
+    assert_eq!(app.pending_images.len(), 1);
+    assert_eq!(app.status_notice(), Some("Model switch failed".to_string()));
+}
+
+#[test]
 fn test_model_picker_remote_falls_back_to_current_model_when_catalog_empty() {
     let mut app = create_test_app();
     app.is_remote = true;

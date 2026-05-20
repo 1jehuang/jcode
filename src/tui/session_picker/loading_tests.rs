@@ -12,6 +12,12 @@ impl EnvVarGuard {
         crate::env::set_var(key, value);
         Self { key, prev }
     }
+
+    fn set_str(key: &'static str, value: &str) -> Self {
+        let prev = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, prev }
+    }
 }
 
 impl Drop for EnvVarGuard {
@@ -269,6 +275,102 @@ fn load_sessions_prefers_custom_title_over_generated_title() {
 }
 
 #[test]
+fn load_sessions_includes_saved_sessions_beyond_scan_limit() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _scan_limit = EnvVarGuard::set_str("JCODE_SESSION_PICKER_MAX_SESSIONS", "50");
+
+    let mut saved_session = Session::create_with_id(
+        "session_saved_beyond_scan_limit".to_string(),
+        Some("/tmp/saved-beyond-scan".to_string()),
+        Some("Saved Beyond Scan".to_string()),
+    );
+    saved_session.mark_saved(Some("Pinned Session".to_string()));
+    saved_session.append_stored_message(crate::session::StoredMessage {
+        id: "saved-msg".to_string(),
+        role: crate::message::Role::User,
+        content: vec![crate::message::ContentBlock::Text {
+            text: "keep this bookmarked session visible".to_string(),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    saved_session.save().expect("save saved session");
+
+    for idx in 0..55 {
+        let mut session = Session::create_with_id(
+            format!("session_newer_unsaved_{idx:03}"),
+            Some(format!("/tmp/newer-unsaved-{idx:03}")),
+            Some(format!("Newer Unsaved {idx:03}")),
+        );
+        session.append_stored_message(crate::session::StoredMessage {
+            id: format!("msg-{idx}"),
+            role: crate::message::Role::User,
+            content: vec![crate::message::ContentBlock::Text {
+                text: format!("newer unsaved session {idx:03}"),
+                cache_control: None,
+            }],
+            display_role: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+        session.save().expect("save unsaved session");
+    }
+    invalidate_session_list_cache();
+
+    let sessions = load_sessions().expect("load sessions");
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session.id == "session_saved_beyond_scan_limit"),
+        "saved sessions should remain visible even when the recency scan limit is full"
+    );
+}
+
+#[test]
+fn saved_metadata_detection_scans_tail_without_full_json_parse() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().join("session_large_saved.json");
+    let large_messages = "x".repeat((super::SAVED_METADATA_TAIL_SCAN_BYTES as usize) + 16_384);
+    std::fs::write(
+        &path,
+        format!(
+            r#"{{"id":"session_large_saved","messages":[{{"role":"user","content":"{large_messages}"}}],"saved"  : true}}"#
+        ),
+    )
+    .expect("write session");
+
+    assert!(super::session_snapshot_or_journal_has_saved_metadata(&path));
+}
+
+#[test]
+fn raw_content_system_reminder_detection_handles_arrays_strings_and_unicode() {
+    let raw_string: Box<serde_json::value::RawValue> =
+        serde_json::from_str(r#""   <system-reminder>\nlegacy""#).expect("raw string");
+    assert!(raw_content_starts_with_system_reminder(&raw_string));
+
+    let raw_content_array: Box<serde_json::value::RawValue> =
+        serde_json::from_str(r#"[{"type":"text","text":"<system-reminder>\n# Session Context"}]"#)
+            .expect("raw array");
+    assert!(raw_content_starts_with_system_reminder(&raw_content_array));
+
+    let long_unicode = "─".repeat(3000);
+    let raw_long_tool_result: Box<serde_json::value::RawValue> = serde_json::from_str(&format!(
+        r#"[{{"type":"tool_result","content":{}}}]"#,
+        serde_json::to_string(&long_unicode).expect("json string")
+    ))
+    .expect("raw long unicode");
+    assert!(!raw_content_starts_with_system_reminder(
+        &raw_long_tool_result
+    ));
+}
+
+#[test]
 fn session_matches_query_searches_jcode_transcript_contents() {
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp dir");
@@ -299,7 +401,7 @@ fn session_matches_query_searches_jcode_transcript_contents() {
         .find(|candidate| candidate.id == "session_transcript_search")
         .expect("session present");
 
-    assert!(!loaded.search_index.contains("zebra needle"));
+    assert!(loaded.search_index.contains("zebra needle"));
     assert!(loaded.messages_preview.is_empty());
     assert!(session_matches_query(loaded, "zebra needle"));
     assert!(session_matches_query(loaded, "ZEBRA NEEDLE"));
@@ -335,6 +437,115 @@ fn session_matches_query_searches_external_codex_transcript_contents() {
     assert!(loaded.messages_preview.is_empty());
     assert!(session_matches_query(loaded, "kiwi comet"));
     assert!(!session_matches_query(loaded, "dragonfruit meteor"));
+}
+
+#[test]
+#[ignore = "developer benchmark: times real /resume loading phases"]
+fn benchmark_real_resume_loading_phases() {
+    invalidate_session_list_cache();
+    let sessions_dir = crate::storage::jcode_dir()
+        .expect("jcode dir")
+        .join("sessions");
+    let scan_limit = session_scan_limit();
+    let candidate_limit = session_candidate_window(scan_limit);
+
+    let candidate_start = std::time::Instant::now();
+    let candidates = if sessions_dir.exists() {
+        collect_recent_session_candidates(&sessions_dir, candidate_limit)
+            .expect("collect candidates")
+    } else {
+        Vec::new()
+    };
+    let candidate_elapsed = candidate_start.elapsed();
+
+    let summary_start = std::time::Instant::now();
+    let mut loaded = 0usize;
+    let mut visible = 0usize;
+    let mut local_sessions = Vec::new();
+    for stem in candidates.iter().take(candidate_limit) {
+        if local_sessions.len() >= scan_limit {
+            break;
+        }
+        let path = sessions_dir.join(format!("{stem}.json"));
+        let Ok(session) = load_session_summary(&path) else {
+            continue;
+        };
+        loaded += 1;
+        let visible_count = session.messages.visible_message_count;
+        if visible_count == 0 {
+            continue;
+        }
+        visible += visible_count;
+        local_sessions.push(stem.clone());
+    }
+    let summary_elapsed = summary_start.elapsed();
+
+    let claude_start = std::time::Instant::now();
+    let claude = load_external_claude_code_sessions(scan_limit);
+    let claude_elapsed = claude_start.elapsed();
+
+    let codex_start = std::time::Instant::now();
+    let codex = load_external_codex_sessions(scan_limit);
+    let codex_elapsed = codex_start.elapsed();
+
+    let pi_start = std::time::Instant::now();
+    let pi = load_external_pi_sessions(scan_limit);
+    let pi_elapsed = pi_start.elapsed();
+
+    let opencode_start = std::time::Instant::now();
+    let opencode = load_external_opencode_sessions(scan_limit);
+    let opencode_elapsed = opencode_start.elapsed();
+
+    eprintln!(
+        "real resume phases: scan_limit={} candidate_limit={} candidates={} candidate_scan={}ms local_summary={}ms summaries_loaded={} local_sessions={} visible_messages={} claude={}ms/{} codex={}ms/{} pi={}ms/{} opencode={}ms/{}",
+        scan_limit,
+        candidate_limit,
+        candidates.len(),
+        candidate_elapsed.as_millis(),
+        summary_elapsed.as_millis(),
+        loaded,
+        local_sessions.len(),
+        visible,
+        claude_elapsed.as_millis(),
+        claude.len(),
+        codex_elapsed.as_millis(),
+        codex.len(),
+        pi_elapsed.as_millis(),
+        pi.len(),
+        opencode_elapsed.as_millis(),
+        opencode.len()
+    );
+}
+
+#[test]
+#[ignore = "developer benchmark: scans the real JCODE_HOME session directory"]
+fn benchmark_real_resume_loading_reports_timings() {
+    invalidate_session_list_cache();
+
+    let load_start = std::time::Instant::now();
+    let sessions = load_sessions().expect("load real sessions");
+    let load_elapsed = load_start.elapsed();
+
+    invalidate_session_list_cache();
+    let grouped_start = std::time::Instant::now();
+    let grouped = load_sessions_grouped().expect("load real grouped sessions");
+    let grouped_elapsed = grouped_start.elapsed();
+    let grouped_count = grouped
+        .0
+        .iter()
+        .map(|group| group.sessions.len())
+        .sum::<usize>()
+        + grouped.1.len();
+
+    eprintln!(
+        "real resume bench: load_sessions={}ms count={} load_sessions_grouped={}ms grouped_count={} server_groups={} orphan_sessions={}",
+        load_elapsed.as_millis(),
+        sessions.len(),
+        grouped_elapsed.as_millis(),
+        grouped_count,
+        grouped.0.len(),
+        grouped.1.len()
+    );
 }
 
 #[test]

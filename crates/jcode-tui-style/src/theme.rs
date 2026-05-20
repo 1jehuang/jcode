@@ -51,8 +51,10 @@ pub fn header_session_color() -> Color {
     rgb(255, 255, 255)
 }
 
-// Spinner frames for animated status
-const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+// Spinner frames for animated status. Keep these single-cell because the fast
+// spinner-only renderer patches one status cell between full TUI redraws. The
+// grow/recede pulse mirrors the desktop streaming cue's dot/beam animation.
+const SPINNER_FRAMES: &[&str] = &["⠂", "⠆", "⠇", "⠧", "⠷", "⠧", "⠇", "⠆"];
 const STATIC_ACTIVITY_INDICATOR: &str = "•";
 
 pub fn spinner_frame_index(elapsed: f32, fps: f32) -> usize {

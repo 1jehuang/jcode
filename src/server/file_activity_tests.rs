@@ -12,6 +12,7 @@ fn access(session_id: &str, op: FileOp, age_ms: u64) -> FileAccess {
             .checked_sub(Duration::from_millis(age_ms))
             .unwrap_or(now),
         absolute_time: SystemTime::now(),
+        intent: None,
         summary: None,
         detail: None,
     }

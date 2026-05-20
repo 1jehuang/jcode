@@ -262,7 +262,7 @@ async fn exchange_code(
     redirect_uri: &str,
     tier: GmailAccessTier,
 ) -> Result<GoogleTokens> {
-    let client = reqwest::Client::new();
+    let client = crate::provider::shared_http_client();
     let resp = client
         .post(TOKEN_URL)
         .form(&[
@@ -312,7 +312,7 @@ async fn exchange_code(
 pub async fn refresh_tokens(tokens: &GoogleTokens) -> Result<GoogleTokens> {
     let result: Result<GoogleTokens> = async {
         let creds = load_credentials()?;
-        let client = reqwest::Client::new();
+        let client = crate::provider::shared_http_client();
 
         let resp = client
             .post(TOKEN_URL)
@@ -375,7 +375,7 @@ pub async fn get_valid_token() -> Result<String> {
 }
 
 async fn fetch_email(access_token: &str) -> Result<String> {
-    let client = reqwest::Client::new();
+    let client = crate::provider::shared_http_client();
     let resp = client
         .get("https://gmail.googleapis.com/gmail/v1/users/me/profile")
         .bearer_auth(access_token)

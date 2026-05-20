@@ -993,12 +993,19 @@ impl App {
 
 pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
     if is_refresh_model_list_command(trimmed) {
-        app.set_status_notice("Refreshing model list...");
-        let provider = app.provider.clone();
         let session_id = app
             .active_client_session_id()
             .unwrap_or(app.session.id.as_str())
             .to_string();
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
+            crate::bus::UiActivity::catalog(
+                Some(session_id.clone()),
+                "**Model List Refresh Started**\n\nFetching the provider model catalog now. Jcode will show the discovered model and route changes when the refresh completes.",
+                Some("Refreshing model list..."),
+            ),
+        ));
+        app.set_status_notice("Refreshing model list...");
+        let provider = app.provider.clone();
 
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
@@ -1344,7 +1351,7 @@ pub(super) fn is_refresh_model_list_command(trimmed: &str) -> bool {
 pub(super) fn format_model_refresh_summary(
     summary: &crate::provider::ModelCatalogRefreshSummary,
 ) -> String {
-    format!(
+    let mut message = format!(
         "**Model List Refresh Complete**\n\nModels: {} → {}  (+{} / -{})\nRoutes: {} → {}  (+{} / -{} / ~{})",
         summary.model_count_before,
         summary.model_count_after,
@@ -1355,7 +1362,37 @@ pub(super) fn format_model_refresh_summary(
         summary.routes_added,
         summary.routes_removed,
         summary.routes_changed,
-    )
+    );
+    append_model_name_diff(&mut message, summary);
+    message
+}
+
+pub(super) fn append_model_name_diff(
+    message: &mut String,
+    summary: &crate::provider::ModelCatalogRefreshSummary,
+) {
+    if !summary.models_added_names.is_empty() {
+        message.push_str("\nAdded models: ");
+        message.push_str(&format_model_name_list(&summary.models_added_names, 12));
+    }
+    if !summary.models_removed_names.is_empty() {
+        message.push_str("\nRemoved models: ");
+        message.push_str(&format_model_name_list(&summary.models_removed_names, 12));
+    }
+}
+
+pub(super) fn format_model_name_list(models: &[String], limit: usize) -> String {
+    let shown = models
+        .iter()
+        .take(limit)
+        .map(|model| format!("`{}`", model))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if models.len() > limit {
+        format!("{} … and {} more", shown, models.len() - limit)
+    } else {
+        shown
+    }
 }
 
 pub(super) fn no_models_available_message(is_remote: bool) -> String {

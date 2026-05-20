@@ -18,7 +18,7 @@ use provider_fetch::*;
 use anyhow::{Context, Result};
 pub use display::{format_reset_time, format_usage_bar};
 use display::{format_token_count, humanize_key, provider_usage_cache_is_fresh};
-use openai_helpers::parse_openai_usage_payload;
+use openai_helpers::{parse_openai_usage_payload, usage_percent_to_ratio};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -101,21 +101,21 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
             .five_hour
             .as_ref()
             .and_then(|w| w.utilization)
-            .map(|u| u / 100.0)
+            .map(usage_percent_to_ratio)
             .unwrap_or(0.0),
         five_hour_resets_at: data.five_hour.as_ref().and_then(|w| w.resets_at.clone()),
         seven_day: data
             .seven_day
             .as_ref()
             .and_then(|w| w.utilization)
-            .map(|u| u / 100.0)
+            .map(usage_percent_to_ratio)
             .unwrap_or(0.0),
         seven_day_resets_at: data.seven_day.as_ref().and_then(|w| w.resets_at.clone()),
         seven_day_opus: data
             .seven_day_opus
             .as_ref()
             .and_then(|w| w.utilization)
-            .map(|u| u / 100.0),
+            .map(usage_percent_to_ratio),
         extra_usage_enabled: data
             .extra_usage
             .as_ref()

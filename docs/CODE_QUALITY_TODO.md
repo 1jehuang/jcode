@@ -27,9 +27,10 @@ Status values:
 ## Phase 2: Decompose the Biggest Files
 
 ### Highest priority
-- [ ] Split `tests/e2e/main.rs` by feature area
+- [x] Split `tests/e2e/main.rs` by feature area
   - Started 2026-03-24: extracted feature modules `session_flow`, `transport`, `provider_behavior`, `binary_integration`, `safety`, and `ambient`
   - Completed 2026-03-24: extracted shared helpers into `tests/e2e/test_support/mod.rs`
+  - Verified 2026-05-18: `tests/e2e/main.rs` is now only the feature-module entry point and the full non-ignored e2e target passed 44/44 tests.
 - [ ] Continue splitting `src/server.rs` into focused submodules ([#53](https://github.com/1jehuang/jcode/issues/53))
   - Progress 2026-03-24: extracted shared server/swarm state into `src/server/state.rs`
   - Progress 2026-03-24: extracted socket/bootstrap helpers into `src/server/socket.rs`

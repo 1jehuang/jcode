@@ -30,6 +30,7 @@ pub(super) async fn create_headless_session(
     soft_interrupt_queues: &SessionInterruptQueues,
     selfdev_requested: bool,
     model_override: Option<String>,
+    provider_key_override: Option<String>,
     mcp_pool: Option<Arc<crate::mcp::SharedMcpPool>>,
     report_back_to_session_id: Option<String>,
 ) -> Result<String> {
@@ -62,6 +63,9 @@ pub(super) async fn create_headless_session(
 
     let mut new_agent = Agent::new(Arc::clone(&provider), registry);
     new_agent.set_memory_enabled(memory_enabled);
+    if provider_key_override.is_some() {
+        new_agent.set_session_provider_key(provider_key_override);
+    }
     let client_session_id = new_agent.session_id().to_string();
 
     if let Some(model) = model_override

@@ -267,7 +267,9 @@ fn validate_profile_name(raw: &str) -> Result<String> {
         anyhow::bail!("provider profile name must be at most 64 characters");
     }
     let mut chars = name.chars();
-    let first = chars.next().unwrap();
+    let Some(first) = chars.next() else {
+        anyhow::bail!("provider profile name cannot be empty");
+    };
     if !first.is_ascii_alphanumeric() {
         anyhow::bail!("provider profile name must start with a letter or number");
     }
@@ -577,7 +579,12 @@ fn auth_label(auth: &NamedProviderAuth) -> &'static str {
 }
 
 fn toml_quote(value: &str) -> String {
-    serde_json::to_string(value).expect("string serialization cannot fail")
+    serde_json::to_string(value).unwrap_or_else(|error| {
+        crate::logging::warn(&format!(
+            "failed to quote provider config string with serde_json: {error}"
+        ));
+        format!("\"{}\"", value.escape_default())
+    })
 }
 
 fn shell_quote(value: &str) -> String {

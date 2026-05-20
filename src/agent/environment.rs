@@ -50,7 +50,7 @@ impl Agent {
     }
 
     pub(super) fn env_snapshot_detail(&self) -> EnvSnapshotDetail {
-        if self.session.messages.is_empty() {
+        if self.session.visible_conversation_message_count() == 0 {
             EnvSnapshotDetail::Minimal
         } else {
             EnvSnapshotDetail::Full

@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use jcode_provider_core::NativeToolResultSender;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -633,6 +633,37 @@ impl Provider for ClaudeProvider {
         let system_prompt = system.to_string();
         let resume = resume_session_id.map(|s| s.to_string());
         let cwd = std::env::current_dir().ok();
+
+        let prompt_items = vec![Value::String(prompt.clone())];
+        let system_value =
+            (!system_prompt.trim().is_empty()).then(|| Value::String(system_prompt.clone()));
+        let tool_names_value = Value::Array(
+            tool_names
+                .iter()
+                .map(|name| Value::String(name.clone()))
+                .collect(),
+        );
+        let payload = json!({
+            "model": &current_model,
+            "system": system_value.as_ref(),
+            "prompt": &prompt,
+            "tool_names": &tool_names,
+            "resume_present": resume.is_some(),
+        });
+        super::fingerprint::log_provider_canonical_input(
+            "claude-cli",
+            &current_model,
+            "claude_cli_prompt",
+            &payload,
+            &prompt_items,
+            system_value.as_ref(),
+            Some(&tool_names_value),
+            Some(tool_names.len()),
+            &[
+                ("resume_present", resume.is_some().to_string()),
+                ("logical_message_count", messages.len().to_string()),
+            ],
+        );
 
         crate::logging::warn(
             "Claude transport: deprecated CLI subprocess; prefer `--provider claude` native Anthropic OAuth/API transport.",

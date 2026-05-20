@@ -277,10 +277,21 @@ impl Client {
     }
 
     pub async fn notify_auth_changed(&mut self) -> Result<u64> {
+        self.notify_auth_changed_for_provider(None).await
+    }
+
+    pub async fn notify_auth_changed_for_provider(
+        &mut self,
+        provider: Option<&str>,
+    ) -> Result<u64> {
         let id = self.next_id;
         self.next_id += 1;
 
-        let request = Request::NotifyAuthChanged { id };
+        let request = Request::NotifyAuthChanged {
+            id,
+            provider: provider.map(str::to_string),
+            auth: None,
+        };
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;
         Ok(id)

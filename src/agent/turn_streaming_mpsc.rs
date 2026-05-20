@@ -65,6 +65,13 @@ impl Agent {
             // false-positive violations every turn (prior turn's memory ≠ current history prefix).
             self.record_client_cache_request(&messages);
 
+            let cache_signature_messages = if crate::config::config().features.message_timestamps {
+                Message::with_timestamps(&messages)
+            } else {
+                messages.iter().cloned().collect()
+            };
+            let mut ephemeral_signature_messages = Vec::new();
+
             // Inject memory as a user message at the end (preserves cache prefix)
             let mut messages_with_memory: Vec<Message> = messages.iter().cloned().collect();
             if let Some(memory) = memory_pending.as_ref() {
@@ -83,9 +90,12 @@ impl Agent {
                     prompt_chars: memory.prompt.chars().count(),
                     computed_age_ms,
                 });
-                let memory_msg =
-                    format!("<system-reminder>\n{}\n</system-reminder>", memory.prompt);
-                messages_with_memory.push(Message::user(&memory_msg));
+                let memory_msg = Message::user(&format!(
+                    "<system-reminder>\n{}\n</system-reminder>",
+                    memory.prompt
+                ));
+                ephemeral_signature_messages.push(memory_msg.clone());
+                messages_with_memory.push(memory_msg);
             }
 
             logging::info(&format!(
@@ -105,6 +115,12 @@ impl Agent {
             let provider = Arc::clone(&self.provider);
             let resume_session_id = self.provider_session_id.clone();
             self.last_status_detail = None;
+            let _ = event_tx.send(kv_cache_request_event(
+                &cache_signature_messages,
+                &tools,
+                &split_prompt.static_part,
+                &ephemeral_signature_messages,
+            ));
             let mut keepalive = stream_keepalive_ticker();
             let mut stream = {
                 let mut complete_future = std::pin::pin!(provider.complete_split(
@@ -118,6 +134,12 @@ impl Agent {
                     tokio::select! {
                         _ = keepalive.tick() => {
                             send_stream_keepalive_mpsc(&event_tx);
+                        }
+                        _ = self.graceful_shutdown.notified() => {
+                            logging::info(
+                                "Graceful shutdown/cancel before API stream opened - stopping turn",
+                            );
+                            return Ok(());
                         }
                         result = &mut complete_future => {
                             match result {
@@ -162,6 +184,13 @@ impl Agent {
                 "API stream opened in {:.2}s",
                 api_start.elapsed().as_secs_f64()
             ));
+            log_agent_provider_stream_lifecycle(
+                logging::LogLevel::Info,
+                self,
+                "stream_opened",
+                api_start,
+                vec![("mode", "mpsc".to_string())],
+            );
 
             let mut text_content = String::new();
             let mut text_wrapped_detected = false;
@@ -173,6 +202,7 @@ impl Agent {
             let mut usage_output: Option<u64> = None;
             let mut usage_cache_read: Option<u64> = None;
             let mut usage_cache_creation: Option<u64> = None;
+            let mut saw_message_end = false;
             let mut stop_reason: Option<String> = None;
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
@@ -191,9 +221,39 @@ impl Agent {
                         send_stream_keepalive_mpsc(&event_tx);
                         continue;
                     }
+                    _ = self.graceful_shutdown.notified() => {
+                        log_agent_provider_stream_lifecycle(
+                            logging::LogLevel::Warn,
+                            self,
+                            "stream_cancelled",
+                            api_start,
+                            vec![
+                                ("mode", "mpsc".to_string()),
+                                ("reason", "graceful_shutdown".to_string()),
+                            ],
+                        );
+                        logging::info(
+                            "Graceful shutdown/cancel while waiting for API stream event - stopping stream",
+                        );
+                        break;
+                    }
                     event = next_event => event,
                 };
                 let Some(event) = event else {
+                    log_agent_provider_stream_lifecycle(
+                        if saw_message_end {
+                            logging::LogLevel::Info
+                        } else {
+                            logging::LogLevel::Warn
+                        },
+                        self,
+                        "stream_eof",
+                        api_start,
+                        vec![
+                            ("mode", "mpsc".to_string()),
+                            ("saw_message_end", saw_message_end.to_string()),
+                        ],
+                    );
                     break;
                 };
                 let event = match event {
@@ -201,6 +261,20 @@ impl Agent {
                     Err(e) => {
                         let err_str = e.to_string();
                         if self.try_auto_compact_after_context_limit(&err_str) {
+                            log_agent_provider_stream_lifecycle(
+                                logging::LogLevel::Warn,
+                                self,
+                                "stream_error_retry_after_compaction",
+                                api_start,
+                                vec![
+                                    ("mode", "mpsc".to_string()),
+                                    ("error", err_str.clone()),
+                                    (
+                                        "context_limit_retries",
+                                        (context_limit_retries + 1).to_string(),
+                                    ),
+                                ],
+                            );
                             context_limit_retries += 1;
                             if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
                                 logging::warn(
@@ -225,6 +299,13 @@ impl Agent {
                             });
                             break;
                         }
+                        log_agent_provider_stream_lifecycle(
+                            logging::LogLevel::Error,
+                            self,
+                            "stream_error",
+                            api_start,
+                            vec![("mode", "mpsc".to_string()), ("error", err_str)],
+                        );
                         return Err(e);
                     }
                 };
@@ -299,8 +380,7 @@ impl Agent {
                     StreamEvent::ToolUseEnd => {
                         if let Some(mut tool) = current_tool.take() {
                             tool.input =
-                                serde_json::from_str::<serde_json::Value>(&current_tool_input)
-                                    .unwrap_or(serde_json::Value::Null);
+                                ToolCall::parse_streamed_input_to_object(&current_tool_input);
                             tool.refresh_intent_from_input();
 
                             let _ = event_tx.send(ServerEvent::ToolExec {
@@ -417,6 +497,7 @@ impl Agent {
                     StreamEvent::MessageEnd {
                         stop_reason: reason,
                     } => {
+                        saw_message_end = true;
                         if reason.is_some() {
                             stop_reason = reason;
                         }
@@ -452,7 +533,10 @@ impl Agent {
                             execution_mode: ToolExecutionMode::AgentTurn,
                         };
                         crate::telemetry::record_tool_call();
-                        let tool_result = self.registry.execute(&tool_name, input, ctx).await;
+                        let tool_result = self
+                            .registry
+                            .execute(&tool_name, ToolCall::normalize_input_to_object(input), ctx)
+                            .await;
                         if tool_result.is_err() {
                             crate::telemetry::record_tool_failure();
                         }
@@ -473,6 +557,20 @@ impl Agent {
                         retry_after_secs,
                     } => {
                         if self.try_auto_compact_after_context_limit(&message) {
+                            log_agent_provider_stream_lifecycle(
+                                logging::LogLevel::Warn,
+                                self,
+                                "stream_event_retry_after_compaction",
+                                api_start,
+                                vec![
+                                    ("mode", "mpsc".to_string()),
+                                    ("error", message.clone()),
+                                    (
+                                        "context_limit_retries",
+                                        (context_limit_retries + 1).to_string(),
+                                    ),
+                                ],
+                            );
                             context_limit_retries += 1;
                             if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
                                 logging::warn(
@@ -497,12 +595,35 @@ impl Agent {
                             });
                             break;
                         }
+                        log_agent_provider_stream_lifecycle(
+                            logging::LogLevel::Error,
+                            self,
+                            "stream_event_error",
+                            api_start,
+                            vec![
+                                ("mode", "mpsc".to_string()),
+                                ("error", message.clone()),
+                                (
+                                    "retry_after_secs",
+                                    retry_after_secs
+                                        .map(|seconds| seconds.to_string())
+                                        .unwrap_or_else(|| "none".to_string()),
+                                ),
+                            ],
+                        );
                         return Err(StreamError::new(message, retry_after_secs).into());
                     }
                 }
             }
 
             if retry_after_compaction {
+                log_agent_provider_stream_lifecycle(
+                    logging::LogLevel::Info,
+                    self,
+                    "retry_after_compaction",
+                    api_start,
+                    vec![("mode", "mpsc".to_string())],
+                );
                 continue;
             }
 
@@ -515,6 +636,20 @@ impl Agent {
                 usage_cache_read.unwrap_or(0),
                 usage_cache_creation.unwrap_or(0),
             ));
+            log_agent_provider_stream_lifecycle(
+                logging::LogLevel::Info,
+                self,
+                "stream_complete",
+                api_start,
+                vec![
+                    ("mode", "mpsc".to_string()),
+                    ("saw_message_end", saw_message_end.to_string()),
+                    ("input_tokens", usage_input.unwrap_or(0).to_string()),
+                    ("output_tokens", usage_output.unwrap_or(0).to_string()),
+                    ("cache_read", usage_cache_read.unwrap_or(0).to_string()),
+                    ("cache_write", usage_cache_creation.unwrap_or(0).to_string()),
+                ],
+            );
 
             if usage_input.is_some()
                 || usage_output.is_some()
@@ -773,6 +908,7 @@ impl Agent {
                 if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
                     // For native tools, ignore SDK errors and execute locally
                     if !(is_native_tool && sdk_is_error) {
+                        let sdk_content = cap_sdk_tool_content_for_history(&tc.name, sdk_content);
                         self.add_message(
                             Role::User,
                             vec![ContentBlock::ToolResult {
@@ -873,6 +1009,7 @@ impl Agent {
 
                     match result {
                         Ok(output) => {
+                            let output = cap_tool_output_for_history(&tc.name, output);
                             let _ = event_tx.send(ServerEvent::ToolDone {
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),

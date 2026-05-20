@@ -18,13 +18,7 @@ impl Provider for OpenAIProvider {
         let model_id = self.model_id().await;
         let (instructions, is_chatgpt_mode) = {
             let credentials = self.credentials.read().await;
-            let is_chatgpt = Self::is_chatgpt_mode(&credentials);
-            let instructions = if is_chatgpt {
-                Self::chatgpt_instructions_with_selfdev(system)
-            } else {
-                system.to_string()
-            };
-            (instructions, is_chatgpt)
+            (system.to_string(), Self::is_chatgpt_mode(&credentials))
         };
         let reasoning_effort = self
             .reasoning_effort
@@ -66,7 +60,63 @@ impl Provider for OpenAIProvider {
             OpenAITransportMode::WebSocket => true,
             OpenAITransportMode::Auto => Self::should_prefer_websocket(&model_id),
         };
+        let request_tools = request
+            .get("tools")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        let request_instructions = request.get("instructions").cloned();
+        let request_tool_count = request_tools
+            .as_array()
+            .map(|tools| tools.len())
+            .unwrap_or(api_tools.len());
+        let canonical_payload = serde_json::json!({
+            "model": request.get("model"),
+            "instructions": request.get("instructions"),
+            "input": &input,
+            "tools": request.get("tools"),
+            "tool_choice": request.get("tool_choice"),
+            "parallel_tool_calls": request.get("parallel_tool_calls"),
+            "reasoning": request.get("reasoning"),
+            "context_management": request.get("context_management"),
+            "include": request.get("include"),
+            "prompt_cache_key": request.get("prompt_cache_key"),
+            "prompt_cache_retention": request.get("prompt_cache_retention"),
+        });
+        crate::provider::fingerprint::log_provider_canonical_input(
+            "openai",
+            &model_id,
+            "openai_responses_full",
+            &canonical_payload,
+            &input,
+            request_instructions.as_ref(),
+            Some(&request_tools),
+            Some(request_tool_count),
+            &[
+                (
+                    "transport_mode",
+                    transport_mode_snapshot.as_str().to_string(),
+                ),
+                ("websocket_preferred", use_websocket_transport.to_string()),
+                ("input_item_count", input_item_count.to_string()),
+                ("chatgpt_mode", is_chatgpt_mode.to_string()),
+            ],
+        );
         let usage_snapshot = crate::usage::get_openai_usage_sync();
+        log_openai_stream_lifecycle(
+            crate::logging::LogLevel::Info,
+            "request_start",
+            vec![
+                ("model", model_id.clone()),
+                (
+                    "transport_mode",
+                    transport_mode_snapshot.as_str().to_string(),
+                ),
+                ("websocket_preferred", use_websocket_transport.to_string()),
+                ("input_item_count", input_item_count.to_string()),
+                ("tool_count", request_tool_count.to_string()),
+                ("chatgpt_mode", is_chatgpt_mode.to_string()),
+            ],
+        );
         crate::logging::info(&format!(
             "OpenAI limit diag: request start model={} transport_mode={} websocket_preferred={} usage=({}) provider=({})",
             model_id,
@@ -101,6 +151,14 @@ impl Provider for OpenAIProvider {
 
                     match continuation_result {
                         PersistentWsResult::Success => {
+                            log_openai_stream_lifecycle(
+                                crate::logging::LogLevel::Info,
+                                "persistent_reuse_success",
+                                vec![
+                                    ("model", model_for_transport.clone()),
+                                    ("transport", "websocket".to_string()),
+                                ],
+                            );
                             record_websocket_success(
                                 &websocket_cooldowns,
                                 &websocket_failure_streaks,
@@ -110,17 +168,42 @@ impl Provider for OpenAIProvider {
                             return;
                         }
                         PersistentWsResult::NotAvailable => {
+                            log_openai_stream_lifecycle(
+                                crate::logging::LogLevel::Info,
+                                "persistent_reuse_unavailable",
+                                vec![
+                                    ("model", model_for_transport.clone()),
+                                    ("transport", "websocket".to_string()),
+                                ],
+                            );
                             crate::logging::info(
                                 "No persistent WS connection available; using fresh connection",
                             );
                         }
                         PersistentWsResult::Failed(err) => {
+                            log_openai_stream_lifecycle(
+                                crate::logging::LogLevel::Warn,
+                                "persistent_reuse_failed",
+                                vec![
+                                    ("model", model_for_transport.clone()),
+                                    ("transport", "websocket".to_string()),
+                                    ("error", err.clone()),
+                                ],
+                            );
                             crate::logging::warn(&format!(
                                 "Persistent WS continuation failed: {}; using fresh connection",
                                 err
                             ));
                             let mut guard = persistent_ws.lock().await;
                             *guard = None;
+                            log_openai_stream_lifecycle(
+                                crate::logging::LogLevel::Warn,
+                                "persistent_state_reset",
+                                vec![
+                                    ("model", model_for_transport.clone()),
+                                    ("reason", "persistent_reuse_failed".to_string()),
+                                ],
+                            );
                         }
                     }
                 }
@@ -190,6 +273,18 @@ impl Provider for OpenAIProvider {
 
                     let transport_label = transport.as_str();
                     let attempt_started = Instant::now();
+                    log_openai_stream_lifecycle(
+                        crate::logging::LogLevel::Info,
+                        "attempt_start",
+                        vec![
+                            ("model", model_for_transport.clone()),
+                            ("attempt", (attempt + 1).to_string()),
+                            ("max_attempts", MAX_RETRIES.to_string()),
+                            ("transport", transport_label.to_string()),
+                            ("transport_mode", transport_mode.as_str().to_string()),
+                            ("forced_https", force_https_for_request.to_string()),
+                        ],
+                    );
                     crate::logging::info(&format!(
                         "OpenAI stream attempt {}/{} using transport '{}'; model='{}'; mode='{}'",
                         attempt + 1,
@@ -239,6 +334,19 @@ impl Provider for OpenAIProvider {
 
                     match result {
                         Ok(()) => {
+                            log_openai_stream_lifecycle(
+                                crate::logging::LogLevel::Info,
+                                "attempt_success",
+                                vec![
+                                    ("model", model_for_transport.clone()),
+                                    ("attempt", (attempt + 1).to_string()),
+                                    ("transport", transport_label.to_string()),
+                                    (
+                                        "elapsed_ms",
+                                        attempt_started.elapsed().as_millis().to_string(),
+                                    ),
+                                ],
+                            );
                             if use_websocket {
                                 record_websocket_success(
                                     &websocket_cooldowns,
@@ -254,6 +362,18 @@ impl Provider for OpenAIProvider {
                             let reason = summarize_websocket_fallback_reason(&error.to_string());
                             let fallback_reason =
                                 classify_websocket_fallback_reason(&error.to_string());
+                            log_openai_stream_lifecycle(
+                                crate::logging::LogLevel::Warn,
+                                "fallback_to_https",
+                                vec![
+                                    ("model", model_for_transport.clone()),
+                                    ("attempt", (attempt + 1).to_string()),
+                                    ("transport", transport_label.to_string()),
+                                    ("reason", reason.to_string()),
+                                    ("fallback_reason", fallback_reason.summary().to_string()),
+                                    ("elapsed_ms", elapsed_ms.to_string()),
+                                ],
+                            );
                             crate::logging::warn(&format!(
                                 "WebSocket fallback after {}ms: {}",
                                 elapsed_ms, error
@@ -282,6 +402,15 @@ impl Provider for OpenAIProvider {
                                 let mut guard = persistent_ws.lock().await;
                                 *guard = None;
                             }
+                            log_openai_stream_lifecycle(
+                                crate::logging::LogLevel::Warn,
+                                "persistent_state_reset",
+                                vec![
+                                    ("model", model_for_transport.clone()),
+                                    ("reason", "fallback_to_https".to_string()),
+                                    ("attempt", (attempt + 1).to_string()),
+                                ],
+                            );
                             last_error = Some(error);
                             continue;
                         }
@@ -289,6 +418,18 @@ impl Provider for OpenAIProvider {
                             let elapsed_ms = attempt_started.elapsed().as_millis();
                             let error_str = error.to_string().to_lowercase();
                             if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
+                                log_openai_stream_lifecycle(
+                                    crate::logging::LogLevel::Warn,
+                                    "retry_scheduled",
+                                    vec![
+                                        ("model", model_for_transport.clone()),
+                                        ("attempt", (attempt + 1).to_string()),
+                                        ("next_attempt", (attempt + 2).to_string()),
+                                        ("transport", transport_label.to_string()),
+                                        ("error", error.to_string()),
+                                        ("elapsed_ms", elapsed_ms.to_string()),
+                                    ],
+                                );
                                 crate::logging::info(&format!(
                                     "Transient error after {}ms, will retry: {}",
                                     elapsed_ms, error
@@ -296,6 +437,18 @@ impl Provider for OpenAIProvider {
                                 last_error = Some(error);
                                 continue;
                             }
+                            log_openai_stream_lifecycle(
+                                crate::logging::LogLevel::Error,
+                                "attempt_failed",
+                                vec![
+                                    ("model", model_for_transport.clone()),
+                                    ("attempt", (attempt + 1).to_string()),
+                                    ("transport", transport_label.to_string()),
+                                    ("will_retry", "false".to_string()),
+                                    ("error", error.to_string()),
+                                    ("elapsed_ms", elapsed_ms.to_string()),
+                                ],
+                            );
                             let _ = tx.send(Err(error)).await;
                             return;
                         }
@@ -304,6 +457,15 @@ impl Provider for OpenAIProvider {
 
                 // All retries exhausted
                 if let Some(e) = last_error {
+                    log_openai_stream_lifecycle(
+                        crate::logging::LogLevel::Error,
+                        "retries_exhausted",
+                        vec![
+                            ("model", model_for_transport.clone()),
+                            ("max_attempts", MAX_RETRIES.to_string()),
+                            ("error", e.to_string()),
+                        ],
+                    );
                     let _ = tx
                         .send(Err(anyhow::anyhow!(
                             "Failed after {} retries: {}",

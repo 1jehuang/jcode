@@ -85,6 +85,51 @@ impl App {
         self.schedule_pending_remote_retry_with_limit(reason, Self::AUTO_RETRY_MAX_ATTEMPTS)
     }
 
+    pub(super) fn schedule_pending_remote_network_wait(&mut self, reason: &str) -> bool {
+        let Some(pending) = self.rate_limit_pending_message.as_mut() else {
+            return false;
+        };
+        if !pending.auto_retry {
+            return false;
+        }
+
+        let plan = crate::network_retry::wait_plan();
+        let retry_at = Instant::now() + Duration::from_secs(5);
+        pending.retry_at = Some(retry_at);
+        self.rate_limit_reset = Some(retry_at);
+        self.status = ProcessingStatus::WaitingForNetwork {
+            listener: plan.listener_summary.clone(),
+        };
+        self.status_detail = Some("offline; waiting for network before retry".to_string());
+
+        let content = format!(
+            "📡 Network appears offline — waiting to retry automatically. {} — {}",
+            plan.listener_summary,
+            reason.trim().trim_end_matches('.')
+        );
+        if let Some(idx) = self.display_messages.iter().rposition(|message| {
+            message.role == "system"
+                && (message.title.as_deref() == Some("Connection")
+                    || message.content.starts_with("📡 Network appears offline"))
+        }) {
+            self.replace_display_message_title_and_content(
+                idx,
+                Some("Connection".to_string()),
+                content,
+            );
+        } else {
+            self.push_display_message(DisplayMessage {
+                role: "system".to_string(),
+                content,
+                tool_calls: Vec::new(),
+                duration_secs: None,
+                title: Some("Connection".to_string()),
+                tool_data: None,
+            });
+        }
+        true
+    }
+
     pub(super) fn schedule_pending_remote_retry_with_limit(
         &mut self,
         reason: &str,
@@ -124,14 +169,42 @@ impl App {
             }
             Ok((retry_attempts, backoff_secs, retry_at)) => {
                 self.rate_limit_reset = Some(retry_at);
-                self.push_display_message(DisplayMessage::system(format!(
-                    "{} Auto-retrying in {} second{} (attempt {}/{}).",
-                    reason,
-                    backoff_secs,
-                    if backoff_secs == 1 { "" } else { "s" },
+                let content = format!(
+                    "⚡ Connection lost — retrying (attempt {}/{}, in {}s) — {}",
                     retry_attempts,
-                    max_attempts
-                )));
+                    max_attempts,
+                    backoff_secs,
+                    reason
+                        .trim()
+                        .trim_start_matches("⚡ ")
+                        .trim_start_matches("Connection lost")
+                        .trim_start_matches('(')
+                        .trim_end_matches('.')
+                        .trim()
+                );
+                if let Some(idx) = self.display_messages.iter().rposition(|message| {
+                    message.role == "system"
+                        && (message.title.as_deref() == Some("Connection")
+                            || message
+                                .content
+                                .starts_with("⚡ Server reload in progress — waiting for handoff")
+                            || message.content.starts_with("⚡ Connection lost"))
+                }) {
+                    self.replace_display_message_title_and_content(
+                        idx,
+                        Some("Connection".to_string()),
+                        content,
+                    );
+                } else {
+                    self.push_display_message(DisplayMessage {
+                        role: "system".to_string(),
+                        content,
+                        tool_calls: Vec::new(),
+                        duration_secs: None,
+                        title: Some("Connection".to_string()),
+                        tool_data: None,
+                    });
+                }
                 true
             }
         }
@@ -206,6 +279,7 @@ impl App {
             display_edit_tool_message_count: 0,
             compacted_history_lazy: CompactedHistoryLazyState::default(),
             input: String::new(),
+            command_candidates_cache: RefCell::new(None),
             cursor_pos: 0,
             scroll_offset: 0,
             auto_scroll_paused: false,
@@ -388,6 +462,7 @@ impl App {
             last_client_focus_recorded_at: None,
             last_client_focus_session_id: None,
             last_side_panel_focus_id: None,
+            side_panel_user_hidden: false,
             pin_images: display.pin_images,
             chat_native_scrollbar: display.native_scrollbars.chat,
             side_panel_native_scrollbar: display.native_scrollbars.side_panel,
@@ -399,6 +474,8 @@ impl App {
             pending_model_picker_load: None,
             model_picker_load_request_id: 0,
             pending_model_switch: None,
+            remote_model_switch_in_flight: false,
+            pending_prompt_after_model_switch: None,
             pending_account_picker_action: None,
             model_switch_keys: keybind::load_model_switch_keys(),
             effort_switch_keys: keybind::load_effort_switch_keys(),
@@ -451,6 +528,7 @@ impl App {
             ambient_system_prompt: None,
             pending_login: None,
             pending_account_input: None,
+            pending_ssh_remote_name: None,
             force_full_redraw: false,
             last_mouse_scroll: None,
             mouse_scroll_target: None,
@@ -568,6 +646,7 @@ impl App {
             display_edit_tool_message_count: 0,
             compacted_history_lazy: CompactedHistoryLazyState::default(),
             input: String::new(),
+            command_candidates_cache: RefCell::new(None),
             cursor_pos: 0,
             scroll_offset: 0,
             auto_scroll_paused: false,
@@ -750,6 +829,7 @@ impl App {
             last_client_focus_recorded_at: None,
             last_client_focus_session_id: None,
             last_side_panel_focus_id: None,
+            side_panel_user_hidden: false,
             pin_images: display.pin_images,
             chat_native_scrollbar: display.native_scrollbars.chat,
             side_panel_native_scrollbar: display.native_scrollbars.side_panel,
@@ -761,6 +841,8 @@ impl App {
             pending_model_picker_load: None,
             model_picker_load_request_id: 0,
             pending_model_switch: None,
+            remote_model_switch_in_flight: false,
+            pending_prompt_after_model_switch: None,
             pending_account_picker_action: None,
             model_switch_keys: keybind::load_model_switch_keys(),
             effort_switch_keys: keybind::load_effort_switch_keys(),
@@ -813,6 +895,7 @@ impl App {
             ambient_system_prompt: None,
             pending_login: None,
             pending_account_input: None,
+            pending_ssh_remote_name: None,
             force_full_redraw: false,
             last_mouse_scroll: None,
             mouse_scroll_target: None,
@@ -879,17 +962,8 @@ impl App {
         let render_start = Instant::now();
         let (rendered_messages, rendered_images) =
             crate::session::render_messages_and_images(&session);
-        let display_messages = rendered_messages
-            .into_iter()
-            .map(|item| DisplayMessage {
-                role: item.role,
-                content: item.content,
-                tool_calls: item.tool_calls,
-                duration_secs: None,
-                title: None,
-                tool_data: item.tool_data,
-            })
-            .collect();
+        let display_messages =
+            jcode_tui_messages::display_messages_from_rendered_messages(rendered_messages);
         self.replace_display_messages(display_messages);
         let render_ms = render_start.elapsed().as_millis();
 

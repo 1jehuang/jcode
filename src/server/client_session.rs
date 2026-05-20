@@ -144,6 +144,18 @@ pub(super) async fn handle_clear_session(
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
+    let clear_start = Instant::now();
+    let old_session_id = client_session_id.clone();
+    crate::logging::event_info(
+        "SESSION_LIFECYCLE",
+        vec![
+            ("phase", "clear_start".to_string()),
+            ("request_id", id.to_string()),
+            ("session_id", old_session_id.clone()),
+            ("client_connection_id", client_connection_id.to_string()),
+            ("client_selfdev", client_selfdev.to_string()),
+        ],
+    );
     let preserve_debug = {
         let agent_guard = agent.lock().await;
         agent_guard.is_debug()
@@ -234,8 +246,8 @@ pub(super) async fn handle_clear_session(
         Some(swarm_event_tx),
     )
     .await;
-    if let Some(swarm_id) = swarm_id_for_update {
-        rename_plan_participant(&swarm_id, client_session_id, &new_id, swarm_plans).await;
+    if let Some(ref swarm_id) = swarm_id_for_update {
+        rename_plan_participant(swarm_id, client_session_id, &new_id, swarm_plans).await;
     }
 
     *client_session_id = new_id.clone();
@@ -248,6 +260,22 @@ pub(super) async fn handle_clear_session(
     }
     let _ = client_event_tx.send(ServerEvent::SessionId { session_id: new_id });
     let _ = client_event_tx.send(ServerEvent::Done { id });
+    crate::logging::event_info(
+        "SESSION_LIFECYCLE",
+        vec![
+            ("phase", "clear_done".to_string()),
+            ("request_id", id.to_string()),
+            ("old_session_id", old_session_id),
+            ("new_session_id", client_session_id.clone()),
+            ("client_connection_id", client_connection_id.to_string()),
+            ("preserve_debug", preserve_debug.to_string()),
+            (
+                "swarm_id_updated",
+                swarm_id_for_update.is_some().to_string(),
+            ),
+            ("elapsed_ms", clear_start.elapsed().as_millis().to_string()),
+        ],
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -346,6 +374,21 @@ async fn ensure_client_swarm_member(
         .await;
     }
 
+    crate::logging::event_info(
+        "SESSION_LIFECYCLE",
+        vec![
+            ("phase", "swarm_member_registered".to_string()),
+            ("session_id", client_session_id.to_string()),
+            ("client_connection_id", client_connection_id.to_string()),
+            ("inserted", inserted.to_string()),
+            ("swarm_enabled", swarm_enabled.to_string()),
+            (
+                "swarm_id",
+                derived_swarm_id.unwrap_or_else(|| "none".to_string()),
+            ),
+        ],
+    );
+
     inserted
 }
 
@@ -375,6 +418,21 @@ pub(super) async fn handle_subscribe(
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
 ) {
     let subscribe_start = Instant::now();
+    crate::logging::event_info(
+        "SESSION_LIFECYCLE",
+        vec![
+            ("phase", "subscribe_start".to_string()),
+            ("request_id", id.to_string()),
+            ("session_id", client_session_id.to_string()),
+            ("client_connection_id", client_connection_id.to_string()),
+            (
+                "working_dir_set",
+                subscribe_working_dir.is_some().to_string(),
+            ),
+            ("register_mcp_tools", register_mcp_tools.to_string()),
+            ("swarm_enabled", swarm_enabled.to_string()),
+        ],
+    );
     ensure_client_swarm_member(
         client_session_id,
         client_connection_id,
@@ -440,6 +498,24 @@ pub(super) async fn handle_subscribe(
         }
 
         if updated_swarm_id != old_swarm_id {
+            crate::logging::event_info(
+                "SESSION_LIFECYCLE",
+                vec![
+                    ("phase", "subscribe_swarm_changed".to_string()),
+                    ("session_id", client_session_id.to_string()),
+                    ("client_connection_id", client_connection_id.to_string()),
+                    (
+                        "old_swarm_id",
+                        old_swarm_id.clone().unwrap_or_else(|| "none".to_string()),
+                    ),
+                    (
+                        "new_swarm_id",
+                        updated_swarm_id
+                            .clone()
+                            .unwrap_or_else(|| "none".to_string()),
+                    ),
+                ],
+            );
             let mut members = swarm_members.write().await;
             if let Some(member) = members.get_mut(client_session_id) {
                 member.role = "agent".to_string();
@@ -540,6 +616,20 @@ pub(super) async fn handle_subscribe(
         mcp_register_ms,
         subscribe_start.elapsed().as_millis(),
     ));
+    crate::logging::event_info(
+        "SESSION_LIFECYCLE",
+        vec![
+            ("phase", "subscribe_done".to_string()),
+            ("request_id", id.to_string()),
+            ("session_id", client_session_id.to_string()),
+            ("client_connection_id", client_connection_id.to_string()),
+            ("mcp_register_ms", mcp_register_ms.to_string()),
+            (
+                "elapsed_ms",
+                subscribe_start.elapsed().as_millis().to_string(),
+            ),
+        ],
+    );
 
     if subscribe_should_mark_ready(client_session_id, swarm_members).await {
         update_member_status(
@@ -563,9 +653,9 @@ async fn subscribe_should_mark_ready(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> bool {
     let members = swarm_members.read().await;
-    !members
+    members
         .get(client_session_id)
-        .is_some_and(|member| member.status == "running")
+        .is_none_or(|member| member.status != "running")
 }
 
 pub(super) async fn handle_reload(
@@ -744,7 +834,29 @@ pub(super) async fn handle_resume_session(
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
 ) -> Result<Arc<Mutex<Agent>>> {
+    let resume_start = Instant::now();
     let incoming_client_instance_id = client_instance_id.map(str::to_string);
+    crate::logging::event_info(
+        "SESSION_LIFECYCLE",
+        vec![
+            ("phase", "resume_start".to_string()),
+            ("request_id", id.to_string()),
+            ("source_session_id", client_session_id.clone()),
+            ("target_session_id", session_id.clone()),
+            ("client_connection_id", client_connection_id.to_string()),
+            (
+                "client_instance_id",
+                incoming_client_instance_id
+                    .clone()
+                    .unwrap_or_else(|| "none".to_string()),
+            ),
+            (
+                "client_has_local_history",
+                client_has_local_history.to_string(),
+            ),
+            ("allow_takeover", allow_session_takeover.to_string()),
+        ],
+    );
     let live_target_agent = {
         let sessions_guard = sessions.read().await;
         sessions_guard.get(&session_id).cloned()
@@ -765,6 +877,25 @@ pub(super) async fn handle_resume_session(
                 })
                 .cloned()
         };
+        let live_target_busy = live_target_agent.try_lock().is_err();
+        crate::logging::info(&format!(
+            "Resume attach to existing live session {} from temporary {} on connection {}: live_target_busy={}, conflict_owner={}, conflict_processing={}, allow_takeover={}, local_history={}, incoming_instance={:?}",
+            session_id,
+            old_session_id,
+            client_connection_id,
+            live_target_busy,
+            conflicting_live_client
+                .as_ref()
+                .map(|info| info.client_id.as_str())
+                .unwrap_or("<none>"),
+            conflicting_live_client
+                .as_ref()
+                .map(|info| info.is_processing)
+                .unwrap_or(false),
+            allow_session_takeover,
+            client_has_local_history,
+            incoming_client_instance_id
+        ));
 
         cleanup_detached_source_session_if_unused(
             &old_session_id,
@@ -815,6 +946,17 @@ pub(super) async fn handle_resume_session(
                         )
                     }
                 };
+                if transferred_processing {
+                    crate::logging::warn(&format!(
+                        "Taking over live session {} from {} while old owner reports processing; new connection receives status/tool metadata but not the old processing task handle",
+                        session_id, conflict.client_id
+                    ));
+                } else {
+                    crate::logging::info(&format!(
+                        "Taking over live session {} from idle owner {}",
+                        session_id, conflict.client_id
+                    ));
+                }
 
                 {
                     let mut connections = client_connections.write().await;
@@ -893,6 +1035,18 @@ pub(super) async fn handle_resume_session(
             )
             .await;
         spawn_model_prefetch_update(Arc::clone(provider), Arc::clone(live_target_agent));
+        crate::logging::event_info(
+            "SESSION_LIFECYCLE",
+            vec![
+                ("phase", "resume_live_attach_done".to_string()),
+                ("request_id", id.to_string()),
+                ("old_session_id", old_session_id),
+                ("target_session_id", session_id.clone()),
+                ("client_connection_id", client_connection_id.to_string()),
+                ("live_target_busy", live_target_busy.to_string()),
+                ("elapsed_ms", resume_start.elapsed().as_millis().to_string()),
+            ],
+        );
         return Ok(Arc::clone(live_target_agent));
     }
 
@@ -1006,6 +1160,17 @@ pub(super) async fn handle_resume_session(
                 ),
                 retry_after_secs: Some(1),
             });
+            crate::logging::event_warn(
+                "SESSION_LIFECYCLE",
+                vec![
+                    ("phase", "resume_rejected".to_string()),
+                    ("request_id", id.to_string()),
+                    ("target_session_id", session_id.clone()),
+                    ("client_connection_id", client_connection_id.to_string()),
+                    ("conflict_client_id", conflict.client_id),
+                    ("elapsed_ms", resume_start.elapsed().as_millis().to_string()),
+                ],
+            );
             return Ok(Arc::clone(agent));
         }
     }
@@ -1159,6 +1324,18 @@ pub(super) async fn handle_resume_session(
                 )
                 .await;
             spawn_model_prefetch_update(Arc::clone(provider), Arc::clone(agent));
+            crate::logging::event_info(
+                "SESSION_LIFECYCLE",
+                vec![
+                    ("phase", "resume_restored_done".to_string()),
+                    ("request_id", id.to_string()),
+                    ("old_session_id", old_session_id),
+                    ("target_session_id", session_id.clone()),
+                    ("client_connection_id", client_connection_id.to_string()),
+                    ("was_interrupted", was_interrupted.to_string()),
+                    ("elapsed_ms", resume_start.elapsed().as_millis().to_string()),
+                ],
+            );
         }
         Err(error) => {
             let _ = client_event_tx.send(ServerEvent::Error {
@@ -1169,6 +1346,17 @@ pub(super) async fn handle_resume_session(
                 ),
                 retry_after_secs: None,
             });
+            crate::logging::event_warn(
+                "SESSION_LIFECYCLE",
+                vec![
+                    ("phase", "resume_restore_failed".to_string()),
+                    ("request_id", id.to_string()),
+                    ("target_session_id", session_id),
+                    ("client_connection_id", client_connection_id.to_string()),
+                    ("error", crate::util::format_error_chain(&error)),
+                    ("elapsed_ms", resume_start.elapsed().as_millis().to_string()),
+                ],
+            );
         }
     }
 

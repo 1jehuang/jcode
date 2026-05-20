@@ -196,6 +196,36 @@ fn test_compute_visible_margins_centered_respects_line_alignment() {
 }
 
 #[test]
+fn test_copy_badge_reserves_right_margin_for_info_widgets() {
+    let mut margins = info_widget::Margins {
+        right_widths: vec![30, 30, 30],
+        left_widths: vec![0, 0, 0],
+        centered: false,
+    };
+    let copy_badge_ui = crate::tui::app::CopyBadgeUiState::default();
+
+    reserve_copy_badge_margins(&mut margins, 10, 13, &[(11, 'a')], &copy_badge_ui, Instant::now());
+
+    assert_eq!(margins.right_widths[0], 30);
+    assert_eq!(margins.right_widths[1], 17);
+    assert_eq!(margins.right_widths[2], 30);
+}
+
+#[test]
+fn test_copy_badge_truncates_full_width_line_before_appending_shortcut() {
+    let copy_badge_ui = crate::tui::app::CopyBadgeUiState::default();
+    let reserved = copy_badge_reserved_width('a', &copy_badge_ui, Instant::now());
+    let viewport_width = 20usize;
+    let mut line = Line::from("x".repeat(viewport_width));
+
+    truncate_copy_badge_line_to_width(&mut line, viewport_width.saturating_sub(reserved));
+    line.spans.push(Span::raw("[Alt] [⇧] [A]"));
+
+    assert_eq!(line.width(), viewport_width);
+    assert!(line.width() <= viewport_width);
+}
+
+#[test]
 fn test_estimate_pinned_diagram_pane_width_scales_to_height() {
     let diagram = info_widget::DiagramInfo {
         hash: 1,

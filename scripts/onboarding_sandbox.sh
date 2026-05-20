@@ -43,6 +43,11 @@ Commands:
   auth-status            Run 'jcode auth status' inside the sandbox
   fresh [args...]        Reset sandbox, then launch jcode with args
   login <provider> ...   Run 'jcode --provider <provider> login ...' in sandbox
+  fixture-list           List saved local auth fixtures
+  fixture-save <name>    Save current sandbox auth state as a local fixture
+  fixture-load <name>    Load a saved auth fixture into this sandbox
+  fixture-run <name> -- [args...]
+                         Load a fixture, then run jcode with args
   mobile-start [scenario]
                          Start jcode-mobile-sim in background (default: onboarding)
   mobile-serve [scenario]
@@ -56,10 +61,13 @@ Commands:
 Environment overrides:
   JCODE_ONBOARDING_SANDBOX   Sandbox name (default: default)
   JCODE_ONBOARDING_DIR       Explicit sandbox directory
+  JCODE_AUTH_FIXTURE_DIR     Fixture store (default: .tmp/auth-fixtures)
 
 Examples:
   $(basename "$0") fresh
   $(basename "$0") login openai
+  $(basename "$0") fixture-save normal-openai
+  $(basename "$0") fixture-load normal-openai
   $(basename "$0") auth-status
   $(basename "$0") mobile-start onboarding
   $(basename "$0") mobile-status
@@ -126,6 +134,12 @@ run_mobile_sim() {
   fi
 }
 
+run_auth_fixture() {
+  JCODE_ONBOARDING_SANDBOX="$sandbox_name" \
+    JCODE_ONBOARDING_DIR="$sandbox_root" \
+    "$repo_root/scripts/auth_fixture.sh" "$@"
+}
+
 scenario_arg() {
   if [[ $# -gt 0 ]]; then
     printf '%s' "$1"
@@ -165,6 +179,18 @@ case "$command" in
     provider=$1
     shift
     run_jcode --provider "$provider" login "$@"
+    ;;
+  fixture-list)
+    run_auth_fixture list
+    ;;
+  fixture-save)
+    run_auth_fixture save "$@"
+    ;;
+  fixture-load)
+    run_auth_fixture load "$@"
+    ;;
+  fixture-run)
+    run_auth_fixture run "$@"
     ;;
   mobile-start)
     scenario=$(scenario_arg "$@")

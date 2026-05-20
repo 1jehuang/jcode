@@ -664,7 +664,9 @@ mod tests {
         assert_eq!(status, ReloadWaitStatus::Ready);
     }
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn wait_for_reload_ack_returns_matching_ack() {
+        let _lock = crate::storage::lock_test_env();
         let request_id = crate::id::new_id("reload-test");
         let ack = ReloadAck {
             hash: "hash-test".to_string(),
@@ -682,7 +684,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn wait_for_reload_ack_handles_repeated_unique_requests() {
+        let _lock = crate::storage::lock_test_env();
         let (tx, _) = reload_ack();
 
         for _ in 0..5 {

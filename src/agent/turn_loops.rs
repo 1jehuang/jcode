@@ -124,6 +124,13 @@ impl Agent {
                 "API stream opened in {:.2}s",
                 api_start.elapsed().as_secs_f64()
             ));
+            log_agent_provider_stream_lifecycle(
+                logging::LogLevel::Info,
+                self,
+                "stream_opened",
+                api_start,
+                vec![("mode", "blocking".to_string())],
+            );
 
             Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
                 session_id: self.session.id.clone(),
@@ -157,6 +164,20 @@ impl Agent {
                     Err(e) => {
                         let err_str = e.to_string();
                         if self.try_auto_compact_after_context_limit(&err_str) {
+                            log_agent_provider_stream_lifecycle(
+                                logging::LogLevel::Warn,
+                                self,
+                                "stream_error_retry_after_compaction",
+                                api_start,
+                                vec![
+                                    ("mode", "blocking".to_string()),
+                                    ("error", err_str.clone()),
+                                    (
+                                        "context_limit_retries",
+                                        (context_limit_retries + 1).to_string(),
+                                    ),
+                                ],
+                            );
                             context_limit_retries += 1;
                             if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
                                 logging::warn(
@@ -170,6 +191,13 @@ impl Agent {
                             retry_after_compaction = true;
                             break;
                         }
+                        log_agent_provider_stream_lifecycle(
+                            logging::LogLevel::Error,
+                            self,
+                            "stream_error",
+                            api_start,
+                            vec![("mode", "blocking".to_string()), ("error", err_str)],
+                        );
                         return Err(e);
                     }
                 };
@@ -228,8 +256,7 @@ impl Agent {
                         if let Some(mut tool) = current_tool.take() {
                             // Parse the accumulated JSON
                             let tool_input =
-                                serde_json::from_str::<serde_json::Value>(&current_tool_input)
-                                    .unwrap_or(serde_json::Value::Null);
+                                ToolCall::parse_streamed_input_to_object(&current_tool_input);
                             tool.input = tool_input.clone();
                             tool.intent = ToolCall::intent_from_input(&tool_input);
 
@@ -439,7 +466,10 @@ impl Agent {
                             execution_mode: ToolExecutionMode::AgentTurn,
                         };
                         crate::telemetry::record_tool_call();
-                        let tool_result = self.registry.execute(&tool_name, input, ctx).await;
+                        let tool_result = self
+                            .registry
+                            .execute(&tool_name, ToolCall::normalize_input_to_object(input), ctx)
+                            .await;
                         if tool_result.is_err() {
                             crate::telemetry::record_tool_failure();
                         }
@@ -460,6 +490,20 @@ impl Agent {
                             eprintln!("[trace] stream_error {}", message);
                         }
                         if self.try_auto_compact_after_context_limit(&message) {
+                            log_agent_provider_stream_lifecycle(
+                                logging::LogLevel::Warn,
+                                self,
+                                "stream_event_retry_after_compaction",
+                                api_start,
+                                vec![
+                                    ("mode", "blocking".to_string()),
+                                    ("error", message.clone()),
+                                    (
+                                        "context_limit_retries",
+                                        (context_limit_retries + 1).to_string(),
+                                    ),
+                                ],
+                            );
                             context_limit_retries += 1;
                             if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
                                 logging::warn(
@@ -473,12 +517,35 @@ impl Agent {
                             retry_after_compaction = true;
                             break;
                         }
+                        log_agent_provider_stream_lifecycle(
+                            logging::LogLevel::Error,
+                            self,
+                            "stream_event_error",
+                            api_start,
+                            vec![
+                                ("mode", "blocking".to_string()),
+                                ("error", message.clone()),
+                                (
+                                    "retry_after_secs",
+                                    retry_after_secs
+                                        .map(|seconds| seconds.to_string())
+                                        .unwrap_or_else(|| "none".to_string()),
+                                ),
+                            ],
+                        );
                         return Err(StreamError::new(message, retry_after_secs).into());
                     }
                 }
             }
 
             if retry_after_compaction {
+                log_agent_provider_stream_lifecycle(
+                    logging::LogLevel::Info,
+                    self,
+                    "retry_after_compaction",
+                    api_start,
+                    vec![("mode", "blocking".to_string())],
+                );
                 continue;
             }
 
@@ -491,6 +558,20 @@ impl Agent {
                 usage_cache_read.unwrap_or(0),
                 usage_cache_creation.unwrap_or(0),
             ));
+            log_agent_provider_stream_lifecycle(
+                logging::LogLevel::Info,
+                self,
+                "stream_complete",
+                api_start,
+                vec![
+                    ("mode", "blocking".to_string()),
+                    ("saw_message_end", saw_message_end.to_string()),
+                    ("input_tokens", usage_input.unwrap_or(0).to_string()),
+                    ("output_tokens", usage_output.unwrap_or(0).to_string()),
+                    ("cache_read", usage_cache_read.unwrap_or(0).to_string()),
+                    ("cache_write", usage_cache_creation.unwrap_or(0).to_string()),
+                ],
+            );
 
             if usage_input.is_some()
                 || usage_output.is_some()
@@ -783,6 +864,7 @@ impl Agent {
 
                 match result {
                     Ok(output) => {
+                        let output = cap_tool_output_for_history(&tc.name, output);
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
                             session_id: self.session.id.clone(),
                             message_id: message_id.clone(),

@@ -48,7 +48,7 @@ pub enum PickerResult {
     Selected(Vec<ResumeTarget>),
     SelectedInCurrentTerminal(Vec<ResumeTarget>),
     SelectedInNewTerminal(Vec<ResumeTarget>),
-    RestoreAllCrashed,
+    RestoreCrashedGroup(Vec<String>),
 }
 
 #[derive(Clone, Debug)]
@@ -522,7 +522,7 @@ impl SessionPicker {
     /// Handle a key event when used as an overlay inside the main TUI.
     /// Returns:
     /// - `Some(PickerResult::Selected(targets))` if user selected one or more sessions
-    /// - `Some(PickerResult::RestoreAllCrashed)` if user chose batch restore
+    /// - `Some(PickerResult::RestoreCrashedGroup)` if user chose crash-group restore
     /// - `None` if the overlay should close (Esc/q/Ctrl+C)
     /// - The method returns `Ok(true)` to keep the overlay open (still navigating)
     pub fn handle_overlay_key(
@@ -601,8 +601,10 @@ impl SessionPicker {
                 }
             }
             KeyCode::Char('R') | KeyCode::Char('B') | KeyCode::Char('b') => {
-                if self.crashed_sessions.is_some() {
-                    return Ok(OverlayAction::Selected(PickerResult::RestoreAllCrashed));
+                if let Some(info) = &self.crashed_sessions {
+                    return Ok(OverlayAction::Selected(PickerResult::RestoreCrashedGroup(
+                        info.session_ids.clone(),
+                    )));
                 }
             }
             KeyCode::Char('/') => {
@@ -1250,8 +1252,10 @@ impl SessionPicker {
                                 ));
                             }
                             KeyCode::Char('R') | KeyCode::Char('B') | KeyCode::Char('b') => {
-                                if self.crashed_sessions.is_some() {
-                                    break Ok(Some(PickerResult::RestoreAllCrashed));
+                                if let Some(info) = &self.crashed_sessions {
+                                    break Ok(Some(PickerResult::RestoreCrashedGroup(
+                                        info.session_ids.clone(),
+                                    )));
                                 }
                             }
                             KeyCode::Char('/') => {

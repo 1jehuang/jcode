@@ -1,7 +1,9 @@
 {
   "threshold_loc": 1200,
   "tracked_files": {
-    "crates/jcode-desktop/src/main_tests.rs": 1583,
+    "crates/jcode-desktop/src/main_tests.rs": 3720,
+    "src/provider/openrouter_tests.rs": 1232,
+    "src/tui/app/tests/state_model_poke_03.rs": 2105,
     "tests/e2e/test_support/mod.rs": 1325
   },
   "version": 1

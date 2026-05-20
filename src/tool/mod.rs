@@ -327,6 +327,7 @@ impl Registry {
             "file_edit" => "edit",
             "file_glob" => "glob",
             "file_grep" => "grep",
+            "skill" | "Skill" => "skill_manage",
             "todoread" | "todowrite" | "todo_read" | "todo_write" => "todo",
             other => other,
         }
@@ -335,6 +336,86 @@ impl Registry {
     /// Estimate token count for a string (chars / 4, matching compaction heuristic)
     fn estimate_tokens(s: &str) -> usize {
         crate::util::estimate_tokens(s)
+    }
+
+    fn tool_lifecycle_fields(
+        phase: &str,
+        requested_name: &str,
+        resolved_name: &str,
+        input: &Value,
+        ctx: &ToolContext,
+    ) -> Vec<(String, String)> {
+        let cwd = ctx
+            .working_dir
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "none".to_string());
+        let input_json = serde_json::to_string(input).unwrap_or_default();
+        let mut fields = vec![
+            ("phase".to_string(), phase.to_string()),
+            ("tool_name".to_string(), requested_name.to_string()),
+            ("resolved_tool_name".to_string(), resolved_name.to_string()),
+            ("session_id".to_string(), ctx.session_id.clone()),
+            ("message_id".to_string(), ctx.message_id.clone()),
+            ("tool_call_id".to_string(), ctx.tool_call_id.clone()),
+            (
+                "execution_mode".to_string(),
+                format!("{:?}", ctx.execution_mode),
+            ),
+            ("cwd".to_string(), cwd),
+            ("input_json_bytes".to_string(), input_json.len().to_string()),
+        ];
+
+        if let Some(object) = input.as_object() {
+            let mut keys = object.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            fields.push(("input_keys".to_string(), keys.join(",")));
+
+            let path_fields = [
+                "file_path",
+                "path",
+                "target",
+                "target_path",
+                "old_path",
+                "new_path",
+            ];
+            let mut touched_paths = Vec::new();
+            for key in path_fields {
+                if let Some(path) = object.get(key).and_then(Value::as_str) {
+                    touched_paths.push(format!(
+                        "{key}:{}",
+                        ctx.resolve_path(std::path::Path::new(path)).display()
+                    ));
+                }
+            }
+            if let Some(paths) = object.get("paths").and_then(Value::as_array) {
+                for path in paths.iter().filter_map(Value::as_str).take(8) {
+                    touched_paths.push(format!(
+                        "paths:{}",
+                        ctx.resolve_path(std::path::Path::new(path)).display()
+                    ));
+                }
+            }
+            if !touched_paths.is_empty() {
+                fields.push(("touched_paths".to_string(), touched_paths.join(",")));
+                fields.push((
+                    "touched_path_count".to_string(),
+                    touched_paths.len().to_string(),
+                ));
+            }
+
+            for text_key in ["command", "prompt", "task", "query", "content"] {
+                if let Some(text) = object.get(text_key).and_then(Value::as_str) {
+                    fields.push((format!("{text_key}_bytes"), text.len().to_string()));
+                    fields.push((
+                        format!("{text_key}_chars"),
+                        text.chars().count().to_string(),
+                    ));
+                }
+            }
+        }
+
+        fields
     }
 
     /// Maximum fraction of context budget a single tool output may consume.
@@ -357,16 +438,41 @@ impl Registry {
         // Drop the lock before executing
         drop(tools);
 
+        crate::logging::event_info(
+            "TOOL_LIFECYCLE",
+            Self::tool_lifecycle_fields("start", name, resolved_name, &input, &ctx),
+        );
+
         let started_at = std::time::Instant::now();
-        let result = tool.execute(input.clone(), ctx).await;
+        let result = tool.execute(input.clone(), ctx.clone()).await;
         let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
         crate::telemetry::record_tool_execution(resolved_name, &input, result.is_ok(), latency_ms);
 
-        let mut output = result?;
+        let mut output = match result {
+            Ok(output) => output,
+            Err(error) => {
+                let mut fields =
+                    Self::tool_lifecycle_fields("error", name, resolved_name, &input, &ctx);
+                fields.push(("elapsed_ms".to_string(), latency_ms.to_string()));
+                fields.push(("error".to_string(), crate::util::format_error_chain(&error)));
+                crate::logging::event_warn("TOOL_LIFECYCLE", fields);
+                return Err(error);
+            }
+        };
 
         // Context overflow guard: check if this output would push us over the limit
         output = self.guard_context_overflow(name, output).await;
+
+        let mut fields = Self::tool_lifecycle_fields("done", name, resolved_name, &input, &ctx);
+        fields.push(("elapsed_ms".to_string(), latency_ms.to_string()));
+        fields.push(("output_bytes".to_string(), output.output.len().to_string()));
+        fields.push((
+            "output_chars".to_string(),
+            output.output.chars().count().to_string(),
+        ));
+        fields.push(("image_count".to_string(), output.images.len().to_string()));
+        crate::logging::event_info("TOOL_LIFECYCLE", fields);
 
         Ok(output)
     }
@@ -532,7 +638,13 @@ impl Registry {
                 }
                 if !failures.is_empty() {
                     for (name, error) in &failures {
-                        crate::logging::error(&format!("MCP '{}' failed: {}", name, error));
+                        crate::logging::event_rate_limited(
+                            crate::logging::LogLevel::Error,
+                            &format!("mcp_register_failed:{name}"),
+                            std::time::Duration::from_secs(60),
+                            "MCP_REGISTER_FAILED",
+                            vec![("server", name.to_string()), ("error", error.to_string())],
+                        );
                     }
                 }
 

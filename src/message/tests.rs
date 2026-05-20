@@ -90,6 +90,38 @@ fn tool_call_normalizes_non_object_input_to_empty_object() {
 }
 
 #[test]
+fn tool_call_parses_empty_or_null_streamed_input_as_empty_object() {
+    for raw in ["", "   ", "null", "20", "false", "[]", "\"oops\""] {
+        assert_eq!(
+            ToolCall::parse_streamed_input_to_object(raw),
+            serde_json::json!({}),
+            "raw streamed input should normalize to empty object: {raw:?}"
+        );
+    }
+
+    assert_eq!(
+        ToolCall::parse_streamed_input_to_object(r#"{"command":"echo ok"}"#),
+        serde_json::json!({"command":"echo ok"})
+    );
+}
+
+#[test]
+fn tool_call_preserves_invalid_streamed_json_as_validation_error() {
+    let input = ToolCall::parse_streamed_input_to_object("{");
+    let call = ToolCall {
+        id: "call_invalid_json".to_string(),
+        name: "bash".to_string(),
+        input,
+        intent: None,
+    };
+
+    assert_eq!(
+        call.validation_error().as_deref(),
+        Some("Invalid tool call for 'bash': arguments must be a JSON object, got null.")
+    );
+}
+
+#[test]
 fn tool_call_validation_rejects_empty_name_and_non_object_input() {
     let empty_name = ToolCall {
         id: "call_1".to_string(),

@@ -80,8 +80,16 @@ impl Provider for NativeAutoCompactionProvider {
         false
     }
 
+    fn context_window(&self) -> usize {
+        1_000
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self)
+    }
+
+    async fn complete_simple(&self, _prompt: &str, _system: &str) -> Result<String> {
+        Ok("manual summary from native-auto provider".to_string())
     }
 }
 
@@ -298,6 +306,57 @@ async fn oversized_openai_native_compaction_is_persisted_as_text_fallback() {
             .iter()
             .any(|message| message.role == Role::Assistant)
     );
+}
+
+#[tokio::test]
+async fn messages_for_provider_applies_manual_compaction_in_native_auto_mode() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    for i in 0..30 {
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: format!("turn {i} {}", "x".repeat(120)),
+                cache_control: None,
+            }],
+        );
+    }
+
+    agent.provider_session_id = Some("stale-provider-session".to_string());
+    agent.session.provider_session_id = Some("stale-provider-session".to_string());
+
+    let provider_messages = agent.provider_messages();
+    let (message, success) = agent.request_manual_compaction();
+    assert!(success, "manual compaction should start: {message}");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut event = None;
+    let mut compacted_messages = Vec::new();
+    while Instant::now() < deadline {
+        let (messages, maybe_event) = agent.messages_for_provider();
+        if maybe_event.is_some() {
+            event = maybe_event;
+            compacted_messages = messages;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let event = event.expect("manual compaction event should be applied");
+    assert_eq!(event.trigger, "manual");
+    assert!(agent.session.compaction.is_some());
+    assert!(agent.provider_session_id.is_none());
+    assert!(agent.session.provider_session_id.is_none());
+    assert!(compacted_messages.len() < provider_messages.len());
+    match &compacted_messages[0].content[0] {
+        ContentBlock::Text { text, .. } => {
+            assert!(text.contains("Previous Conversation Summary"));
+            assert!(text.contains("manual summary from native-auto provider"));
+        }
+        other => panic!("expected text summary block, got {other:?}"),
+    }
 }
 
 // ── InterruptSignal tests ────────────────────────────────────────────────

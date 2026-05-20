@@ -306,6 +306,7 @@ async fn spawn_assignment_session(ctx: &ToolContext, params: &CommunicateInput) 
         working_dir: params.working_dir.clone(),
         initial_message: None,
         request_nonce: Some(fresh_spawn_request_nonce(ctx)),
+        spawn_mode: params.spawn_mode.clone(),
     };
 
     match send_request(spawn_request).await {
@@ -516,6 +517,8 @@ struct CommunicateInput {
     validation: Option<String>,
     #[serde(default)]
     follow_up: Option<String>,
+    #[serde(default)]
+    spawn_mode: Option<String>,
 }
 
 impl CommunicateInput {
@@ -611,6 +614,11 @@ impl Tool for CommunicateTool {
                 "prefer_spawn": {
                     "type": "boolean",
                     "description": "For assign_task without an explicit target_session: prefer a fresh spawned agent even if reusable workers are available."
+                },
+                "spawn_mode": {
+                    "type": "string",
+                    "enum": ["visible", "headless", "auto"],
+                    "description": "Per-call spawn mode for swarm-created agents. Overrides agents.swarm_spawn_mode config when set. Defaults to visible/headed behavior."
                 },
                 "session_ids": {
                     "type": "array",
@@ -960,6 +968,7 @@ impl Tool for CommunicateTool {
                     working_dir: params.working_dir.clone(),
                     initial_message: params.spawn_initial_message(),
                     request_nonce: None,
+                    spawn_mode: params.spawn_mode.clone(),
                 };
 
                 match send_request(request).await {

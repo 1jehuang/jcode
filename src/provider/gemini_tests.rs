@@ -5,6 +5,29 @@ use crate::tool::Registry;
 use async_trait::async_trait;
 use std::sync::Arc;
 
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+        let previous = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = &self.previous {
+            crate::env::set_var(self.key, previous);
+        } else {
+            crate::env::remove_var(self.key);
+        }
+    }
+}
+
 struct MockProvider;
 
 #[async_trait]
@@ -114,6 +137,10 @@ fn available_models_display_prefers_discovered_models_and_current_model() {
 
 #[test]
 fn available_models_display_without_discovery_uses_current_model_only() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
     let provider = GeminiProvider::new();
     provider.set_model("gemini-4-pro-preview").unwrap();
 
@@ -127,8 +154,7 @@ fn available_models_display_without_discovery_uses_current_model_only() {
 fn available_models_display_seeds_from_persisted_catalog() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
     let path = GeminiProvider::persisted_catalog_path().expect("catalog path");
     crate::storage::write_json(
@@ -146,12 +172,6 @@ fn available_models_display_seeds_from_persisted_catalog() {
             .available_models_display()
             .contains(&"gemini-3-pro-preview".to_string())
     );
-
-    if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
 }
 
 #[test]

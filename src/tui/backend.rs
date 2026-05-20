@@ -6,7 +6,7 @@
 //! Also provides debug socket events for exposing full TUI state.
 
 use crate::message::ToolCall;
-use crate::protocol::{FeatureToggle, Request, ServerEvent};
+use crate::protocol::{AuthChanged, FeatureToggle, Request, ServerEvent};
 use crate::server;
 use crate::transport::{Stream, WriteHalf};
 use crate::tui::remote_diff::RemoteDiffTracker;
@@ -340,11 +340,85 @@ impl RemoteConnection {
         Ok(conn)
     }
 
-    async fn send_request(&self, request: Request) -> Result<()> {
+    fn interrupt_request_log_fields(
+        &self,
+        request: &Request,
+        trigger: Option<&str>,
+    ) -> Option<String> {
+        let trigger = trigger.unwrap_or("unspecified");
+        let base = |kind: &str, id: u64| {
+            format!(
+                "kind={} id={} trigger={} session={:?} client_instance={:?}",
+                kind, id, trigger, self.session_id, self.client_instance_id
+            )
+        };
+
+        match request {
+            Request::Cancel { id } => Some(base("cancel", *id)),
+            Request::SoftInterrupt {
+                id,
+                content,
+                urgent,
+            } => Some(format!(
+                "{} urgent={} content_bytes={} content_chars={}",
+                base("soft_interrupt", *id),
+                urgent,
+                content.len(),
+                content.chars().count()
+            )),
+            Request::CancelSoftInterrupts { id } => Some(base("cancel_soft_interrupts", *id)),
+            Request::BackgroundTool { id } => Some(base("background_tool", *id)),
+            _ => None,
+        }
+    }
+
+    async fn send_request_with_interrupt_trigger(
+        &self,
+        request: Request,
+        interrupt_trigger: Option<&str>,
+    ) -> Result<()> {
         let json = serde_json::to_string(&request)? + "\n";
+        let interrupt_log = self.interrupt_request_log_fields(&request, interrupt_trigger);
+        if let Some(fields) = &interrupt_log {
+            crate::logging::info(&format!(
+                "REMOTE_INTERRUPT_SEND_START {} json_bytes={}",
+                fields,
+                json.len()
+            ));
+        }
+
+        let total_start = Instant::now();
+        let writer_wait_start = Instant::now();
         let mut w = self.writer.lock().await;
-        w.write_all(json.as_bytes()).await?;
+        let writer_wait_ms = writer_wait_start.elapsed().as_millis();
+        let write_start = Instant::now();
+        let result = w.write_all(json.as_bytes()).await;
+        if let Some(fields) = &interrupt_log {
+            match &result {
+                Ok(()) => crate::logging::info(&format!(
+                    "REMOTE_INTERRUPT_SEND_OK {} writer_wait_ms={} write_ms={} total_ms={}",
+                    fields,
+                    writer_wait_ms,
+                    write_start.elapsed().as_millis(),
+                    total_start.elapsed().as_millis()
+                )),
+                Err(error) => crate::logging::warn(&format!(
+                    "REMOTE_INTERRUPT_SEND_ERR {} writer_wait_ms={} write_ms={} total_ms={} error={}",
+                    fields,
+                    writer_wait_ms,
+                    write_start.elapsed().as_millis(),
+                    total_start.elapsed().as_millis(),
+                    error
+                )),
+            }
+        }
+        result?;
         Ok(())
+    }
+
+    async fn send_request(&self, request: Request) -> Result<()> {
+        self.send_request_with_interrupt_trigger(request, None)
+            .await
     }
 
     fn send_request_detached(&self, request: Request, label: &'static str) {
@@ -511,13 +585,15 @@ impl RemoteConnection {
     }
 
     /// Set the active model on the server
-    pub async fn set_model(&mut self, model: &str) -> Result<()> {
+    pub async fn set_model(&mut self, model: &str) -> Result<u64> {
+        let id = self.next_request_id;
         let request = Request::SetModel {
-            id: self.next_request_id,
+            id,
             model: model.to_string(),
         };
         self.next_request_id += 1;
-        self.send_request(request).await
+        self.send_request(request).await?;
+        Ok(id)
     }
 
     /// Set or clear the session-scoped subagent model on the server.
@@ -658,11 +734,17 @@ impl RemoteConnection {
 
     /// Cancel the current generation on the server
     pub async fn cancel(&mut self) -> Result<()> {
+        self.cancel_with_reason("remote.cancel").await
+    }
+
+    /// Cancel the current generation on the server, tagging logs with the UI trigger.
+    pub async fn cancel_with_reason(&mut self, reason: &'static str) -> Result<()> {
         let request = Request::Cancel {
             id: self.next_request_id,
         };
         self.next_request_id += 1;
-        self.send_request(request).await
+        self.send_request_with_interrupt_trigger(request, Some(reason))
+            .await
     }
 
     /// Move the currently executing tool to background
@@ -671,7 +753,8 @@ impl RemoteConnection {
             id: self.next_request_id,
         };
         self.next_request_id += 1;
-        self.send_request(request).await
+        self.send_request_with_interrupt_trigger(request, Some("background_tool"))
+            .await
     }
 
     /// Queue a soft interrupt message to be injected at the next safe point
@@ -684,7 +767,8 @@ impl RemoteConnection {
             urgent,
         };
         self.next_request_id += 1;
-        self.send_request(request).await?;
+        self.send_request_with_interrupt_trigger(request, Some("soft_interrupt"))
+            .await?;
         Ok(id)
     }
 
@@ -693,7 +777,8 @@ impl RemoteConnection {
             id: self.next_request_id,
         };
         self.next_request_id += 1;
-        self.send_request(request).await
+        self.send_request_with_interrupt_trigger(request, Some("cancel_soft_interrupts"))
+            .await
     }
 
     /// Split the current session — ask server to clone conversation into a new session
@@ -735,14 +820,40 @@ impl RemoteConnection {
     pub async fn notify_auth_changed(&mut self) -> Result<()> {
         let id = self.next_request_id;
         self.next_request_id += 1;
-        self.send_request(Request::NotifyAuthChanged { id }).await
+        self.send_request(Request::NotifyAuthChanged {
+            id,
+            provider: None,
+            auth: None,
+        })
+        .await
     }
 
     /// Notify the server about auth changes without blocking the caller.
     pub fn notify_auth_changed_detached(&mut self) {
+        self.notify_auth_changed_for_provider_detached(None);
+    }
+
+    /// Notify the server about a provider-specific auth change without blocking the caller.
+    pub fn notify_auth_changed_for_provider_detached(&mut self, provider: Option<&str>) {
+        self.notify_auth_changed_detached_event(provider, None);
+    }
+
+    /// Notify the server about a typed auth lifecycle change without blocking the caller.
+    pub fn notify_auth_changed_detached_event(
+        &mut self,
+        provider: Option<&str>,
+        auth: Option<AuthChanged>,
+    ) {
         let id = self.next_request_id;
         self.next_request_id += 1;
-        self.send_request_detached(Request::NotifyAuthChanged { id }, "notify_auth_changed");
+        self.send_request_detached(
+            Request::NotifyAuthChanged {
+                id,
+                provider: provider.map(str::to_string),
+                auth,
+            },
+            "notify_auth_changed",
+        );
     }
 
     /// Ask server to switch active Anthropic account for this process/session.
@@ -1012,6 +1123,35 @@ mod tests {
             elapsed
         );
         assert_eq!(remote.next_request_id, 2);
+    }
+
+    #[tokio::test]
+    async fn detached_auth_changed_notification_sends_provider_hint() {
+        let mut remote = RemoteConnection::dummy();
+        let peer = remote
+            ._dummy_peer
+            .take()
+            .expect("dummy remote should retain peer stream");
+        let (reader, _writer) = peer.into_split();
+        let mut reader = BufReader::new(reader);
+
+        remote.notify_auth_changed_for_provider_detached(Some("azure-openai"));
+
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut line))
+            .await
+            .expect("auth changed request should be sent before timeout")
+            .expect("auth changed request should be readable by peer");
+
+        assert_eq!(remote.next_request_id, 2);
+        assert!(matches!(
+            serde_json::from_str::<Request>(&line).expect("auth changed request should deserialize"),
+            Request::NotifyAuthChanged {
+                id: 1,
+                provider: Some(provider),
+                auth: None,
+            } if provider == "azure-openai"
+        ));
     }
 
     #[tokio::test]

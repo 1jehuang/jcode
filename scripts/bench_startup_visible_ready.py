@@ -22,6 +22,7 @@ import statistics
 import struct
 import subprocess
 import sys
+import tempfile
 import termios
 import time
 from dataclasses import dataclass
@@ -51,6 +52,7 @@ class ToolSpec:
     argv: list[str]
     no_telem_env: dict[str, str] | None = None
     disable_selfdev: bool = False
+    input_ready_log_marker: str | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -106,6 +108,12 @@ def build_tool_specs() -> list[ToolSpec]:
         ToolSpec(name="claude_code", argv=["claude"]),
         ToolSpec(name="cursor_agent", argv=["cursor-agent"]),
         ToolSpec(name="copilot_cli", argv=["copilot"]),
+        ToolSpec(
+            name="antigravity_cli",
+            argv=["agy"],
+            no_telem_env={"AGY_CLI_DISABLE_AUTO_UPDATE": "1"},
+            input_ready_log_marker="CLI ready for user input",
+        ),
     ]
     return specs
 
@@ -167,8 +175,15 @@ def run_once(spec: ToolSpec, cwd: Path, timeout_s: float) -> dict[str, object]:
     env["COLORTERM"] = "truecolor"
     if spec.no_telem_env:
         env.update(spec.no_telem_env)
+    argv = spec.argv
+    input_ready_log_path: Path | None = None
+    if spec.input_ready_log_marker:
+        log_file = tempfile.NamedTemporaryFile(prefix=f"{spec.name}-", suffix=".log", delete=False)
+        input_ready_log_path = Path(log_file.name)
+        log_file.close()
+        argv = [*spec.argv, "--log-file", str(input_ready_log_path)]
     proc = subprocess.Popen(
-        spec.argv,
+        argv,
         cwd=str(cwd),
         env=env,
         stdin=slave_fd,
@@ -211,10 +226,23 @@ def run_once(spec: ToolSpec, cwd: Path, timeout_s: float) -> dict[str, object]:
                 if PROBE in "\n".join(screen.display):
                     input_ready_ms = (time.perf_counter() - start) * 1000.0
                     break
+            if (
+                spec.input_ready_log_marker
+                and first_visible_ms is not None
+                and input_ready_ms is None
+                and input_ready_log_path
+            ):
+                try:
+                    if spec.input_ready_log_marker in input_ready_log_path.read_text(errors="replace"):
+                        input_ready_ms = (time.perf_counter() - start) * 1000.0
+                        break
+                except OSError:
+                    pass
         return {
             "first_visible_ms": first_visible_ms,
             "first_visible_excerpt": first_visible_excerpt,
             "input_ready_ms": input_ready_ms,
+            "input_ready_source": "log_marker" if spec.input_ready_log_marker else "probe_echo",
         }
     finally:
         for sig in (signal.SIGTERM, signal.SIGKILL):
@@ -228,6 +256,11 @@ def run_once(spec: ToolSpec, cwd: Path, timeout_s: float) -> dict[str, object]:
         except Exception:
             pass
         os.close(master_fd)
+        if input_ready_log_path:
+            try:
+                input_ready_log_path.unlink()
+            except OSError:
+                pass
 
 
 def summarize(samples: list[float | None]) -> dict[str, float | int] | None:

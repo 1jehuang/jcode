@@ -219,6 +219,66 @@ fn test_remote_non_retryable_error_stops_auto_poke_after_short_retry_budget() {
 }
 
 #[test]
+fn test_remote_connectivity_error_waits_for_network_without_retry_budget() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.auto_poke_incomplete_todos = true;
+    app.queued_messages
+        .push("You have 1 incomplete todo. Continue working, or update the todo tool.".to_string());
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "You have 1 incomplete todo. Continue working, or update the todo tool."
+            .to_string(),
+        images: vec![],
+        is_system: true,
+        system_reminder: None,
+        auto_retry: true,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 15,
+            message: "Failed to send OpenAI-compatible chat request\n  endpoint: https://api.groq.com/openai/v1/chat/completions\n  model: llama-3.1-8b-instant\n  auth: GROQ_API_KEY\nHint: check network connectivity, DNS/TLS, and that the base URL includes the API version (usually /v1).: error sending request for url (https://api.groq.com/openai/v1/chat/completions): client error (Connect): dns error: failed to lookup address information: Name or service not known".to_string(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+
+    assert!(app.auto_poke_incomplete_todos);
+    assert!(!app.queued_messages().is_empty());
+    let pending = app
+        .rate_limit_pending_message
+        .as_ref()
+        .expect("offline auto-poke should be held for network recovery");
+    assert_eq!(pending.retry_attempts, 0);
+    assert!(app.rate_limit_reset.is_some());
+    assert!(matches!(
+        app.status,
+        ProcessingStatus::WaitingForNetwork { .. }
+    ));
+    assert_eq!(
+        app.status_detail.as_deref(),
+        Some("offline; waiting for network before retry")
+    );
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|m| m.role == "system" && m.content.contains("Network appears offline"))
+    );
+    assert!(
+        !app.display_messages()
+            .iter()
+            .any(|m| m.role == "system" && m.content.contains("attempt 1/2"))
+    );
+}
+
+#[test]
 fn test_schedule_pending_remote_retry_respects_retry_limit() {
     let mut app = create_test_app();
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
@@ -504,6 +564,39 @@ fn test_openai_compatible_login_preserves_profile_for_runtime_activation() {
 }
 
 #[test]
+fn test_tui_login_providers_have_real_tui_handlers() {
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let _guard = runtime.enter();
+    let unsupported_needles = [
+        "CLI-only",
+        "only available from the CLI",
+        "currently CLI-only",
+    ];
+
+    for provider in crate::provider_catalog::tui_login_providers() {
+        let mut app = create_test_app();
+
+        app.start_login_provider(provider);
+
+        let rendered_messages = app
+            .display_messages()
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for needle in unsupported_needles {
+            assert!(
+                !rendered_messages.contains(needle),
+                "TUI-visible login provider `{}` emitted unsupported surface message `{}`: {}",
+                provider.id,
+                needle,
+                rendered_messages
+            );
+        }
+    }
+}
+
+#[test]
 fn test_info_widget_remote_openai_uses_remote_provider_for_usage_and_context() {
     let mut app = create_test_app();
     app.is_remote = true;
@@ -540,6 +633,25 @@ fn test_info_widget_remote_model_falls_back_to_model_provider_detection() {
         data.usage_info.as_ref().map(|info| info.provider),
         Some(crate::tui::info_widget::UsageProvider::OpenAI)
     );
+}
+
+#[test]
+fn test_info_widget_remote_opencode_shows_cost_based_usage() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_provider_name = Some("opencode".to_string());
+    app.remote_provider_model = Some("qwen3-coder".to_string());
+    app.total_input_tokens = 12_000;
+    app.total_output_tokens = 3_400;
+
+    let data = crate::tui::TuiState::info_widget_data(&app);
+
+    assert_eq!(data.provider_name.as_deref(), Some("opencode"));
+    let usage = data.usage_info.as_ref().expect("opencode usage info");
+    assert_eq!(usage.provider, crate::tui::info_widget::UsageProvider::CostBased);
+    assert!(usage.available);
+    assert_eq!(usage.input_tokens, 12_000);
+    assert_eq!(usage.output_tokens, 3_400);
 }
 
 #[test]

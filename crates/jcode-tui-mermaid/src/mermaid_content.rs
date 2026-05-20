@@ -211,6 +211,7 @@ pub fn error_to_lines(error: &str) -> Vec<Line<'static>> {
 }
 
 /// Terminal-friendly theme (works on dark backgrounds)
+#[cfg(feature = "renderer")]
 pub fn terminal_theme() -> Theme {
     Theme {
         // Catppuccin-inspired pastel dark theme tuned for jcode's terminal UI.

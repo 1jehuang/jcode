@@ -173,6 +173,31 @@ pub(super) async fn handle_comm_message(
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     _client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
 ) {
+    let started = std::time::Instant::now();
+    crate::logging::event_info(
+        "COMM_LIFECYCLE",
+        vec![
+            ("phase", "message_start".to_string()),
+            ("request_id", id.to_string()),
+            ("from_session", from_session.clone()),
+            (
+                "to_session",
+                to_session.clone().unwrap_or_else(|| "none".to_string()),
+            ),
+            (
+                "channel",
+                channel.clone().unwrap_or_else(|| "none".to_string()),
+            ),
+            (
+                "delivery",
+                delivery
+                    .map(|mode| format!("{:?}", mode))
+                    .unwrap_or_else(|| "default".to_string()),
+            ),
+            ("wake", wake.unwrap_or(false).to_string()),
+            ("message_chars", message.chars().count().to_string()),
+        ],
+    );
     let swarm_id = swarm_id_for_session(&from_session, swarm_members).await;
 
     if let Some(swarm_id) = swarm_id {
@@ -190,6 +215,17 @@ pub(super) async fn handle_comm_message(
             match resolve_dm_target_session(target, &swarm_session_ids, swarm_members).await {
                 Ok(session_id) => Some(session_id),
                 Err(message) => {
+                    crate::logging::event_warn(
+                        "COMM_LIFECYCLE",
+                        vec![
+                            ("phase", "message_resolve_error".to_string()),
+                            ("request_id", id.to_string()),
+                            ("from_session", from_session.clone()),
+                            ("target", target.clone()),
+                            ("error", message.to_string()),
+                            ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                        ],
+                    );
                     let _ = client_event_tx.send(ServerEvent::Error {
                         id,
                         message: message.to_string(),
@@ -205,6 +241,17 @@ pub(super) async fn handle_comm_message(
         if let Some(ref target) = resolved_to_session
             && !swarm_session_ids.contains(target)
         {
+            crate::logging::event_warn(
+                "COMM_LIFECYCLE",
+                vec![
+                    ("phase", "message_target_not_in_swarm".to_string()),
+                    ("request_id", id.to_string()),
+                    ("from_session", from_session.clone()),
+                    ("target_session", target.clone()),
+                    ("swarm_id", swarm_id.clone()),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
             let _ = client_event_tx.send(ServerEvent::Error {
                 id,
                 message: format!("DM failed: session '{}' not in swarm", target),
@@ -255,6 +302,7 @@ pub(super) async fn handle_comm_message(
                 .collect()
         };
 
+        let mut delivered_targets = 0usize;
         for session_id in &target_sessions {
             if !swarm_session_ids.contains(session_id) {
                 continue;
@@ -340,6 +388,7 @@ pub(super) async fn handle_comm_message(
                         }
                     }
                 }
+                delivered_targets += 1;
             }
         }
 
@@ -363,7 +412,31 @@ pub(super) async fn handle_comm_message(
         .await;
 
         let _ = client_event_tx.send(ServerEvent::Done { id });
+        crate::logging::event_info(
+            "COMM_LIFECYCLE",
+            vec![
+                ("phase", "message_done".to_string()),
+                ("request_id", id.to_string()),
+                ("from_session", from_session),
+                ("swarm_id", swarm_id),
+                ("scope", scope.to_string()),
+                ("channel", channel.unwrap_or_else(|| "none".to_string())),
+                ("target_count", target_sessions.len().to_string()),
+                ("delivered_targets", delivered_targets.to_string()),
+                ("elapsed_ms", started.elapsed().as_millis().to_string()),
+            ],
+        );
     } else {
+        crate::logging::event_warn(
+            "COMM_LIFECYCLE",
+            vec![
+                ("phase", "message_error".to_string()),
+                ("request_id", id.to_string()),
+                ("from_session", from_session),
+                ("error", "not_in_swarm".to_string()),
+                ("elapsed_ms", started.elapsed().as_millis().to_string()),
+            ],
+        );
         let _ = client_event_tx.send(ServerEvent::Error {
             id,
             message: "Not in a swarm. Use a git repository to enable swarm features.".to_string(),

@@ -55,7 +55,10 @@ pub(in crate::tui::app) async fn begin_remote_send(
     Ok(msg_id)
 }
 
-fn restore_prepared_remote_input(app: &mut App, prepared: input::PreparedInput) {
+pub(in crate::tui::app) fn restore_prepared_remote_input(
+    app: &mut App,
+    prepared: input::PreparedInput,
+) {
     app.input = prepared.raw_input;
     app.cursor_pos = app.input.len();
     app.pending_images = prepared.images;
@@ -79,6 +82,12 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     remote: &mut RemoteConnection,
     prepared: input::PreparedInput,
 ) -> Result<()> {
+    if app.remote_model_switch_in_flight {
+        app.pending_prompt_after_model_switch = Some(prepared);
+        app.set_status_notice("Prompt queued until model switch completes");
+        return Ok(());
+    }
+
     if let Some(command) = input::extract_input_shell_command(&prepared.expanded) {
         submit_remote_input_shell(app, remote, prepared.raw_input, command.to_string()).await?;
         return Ok(());

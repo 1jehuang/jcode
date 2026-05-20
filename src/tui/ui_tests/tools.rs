@@ -176,6 +176,42 @@ fn test_render_tool_message_batch_subcalls_show_individual_token_badges() {
 }
 
 #[test]
+fn test_render_tool_message_batch_first_subcall_token_badge_with_timing_prefix() {
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "[tool timing: start=2026-05-14T14:10:08.525Z finish=2026-05-14T14:10:08.598Z duration=73ms] --- [1] bash ---\n12345678\n\n--- [2] bash ---\n12345678\n\nCompleted: 2 succeeded, 0 failed"
+            .to_string(),
+        tool_calls: vec![],
+        duration_secs: None,
+        title: None,
+        tool_data: Some(ToolCall {
+            id: "call_batch_tokens_timing_prefix".to_string(),
+            name: "batch".to_string(),
+            input: serde_json::json!({
+                "tool_calls": [
+                    {"tool": "bash", "command": "echo first"},
+                    {"tool": "bash", "command": "echo second"}
+                ]
+            }),
+            intent: None,
+        }),
+    };
+
+    let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+    let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
+
+    assert_eq!(rendered.len(), 3, "rendered={rendered:?}");
+    assert!(
+        rendered[1].contains("bash $ echo first") && rendered[1].contains("2 tok"),
+        "first subcall should keep its token badge despite timing prefix: {rendered:?}"
+    );
+    assert!(
+        rendered[2].contains("bash $ echo second") && rendered[2].contains("2 tok"),
+        "rendered={rendered:?}"
+    );
+}
+
+#[test]
 fn test_render_tool_message_batch_last_subcall_keeps_token_badge_without_trailing_newline() {
     let msg = DisplayMessage {
         role: "tool".to_string(),
@@ -816,4 +852,35 @@ fn test_render_tool_message_keeps_token_badge_when_intent_is_truncated() {
     assert!(rendered[0].width() <= 47, "rendered={rendered:?}");
     assert!(rendered[0].contains('…'), "rendered={rendered:?}");
     assert!(rendered[0].contains("tok"), "rendered={rendered:?}");
+}
+
+#[test]
+fn test_render_tool_message_keeps_bash_command_visible_when_row_is_narrow() {
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "2\n".to_string(),
+        tool_calls: vec![],
+        duration_secs: None,
+        title: None,
+        tool_data: Some(ToolCall {
+            id: "call_narrow_bash".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({
+                "command": "grep -rn \"unwrap()\" src/ --include=\"*.rs\" | wc -l"
+            }),
+            intent: None,
+        }),
+    };
+
+    let lines = render_tool_message(&msg, 18, crate::config::DiffDisplayMode::Off);
+    let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
+
+    assert!(
+        rendered.iter().any(|line| line.contains("bash")),
+        "rendered={rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|line| line.contains('$')),
+        "narrow bash tool rows should include a command preview: {rendered:?}"
+    );
 }

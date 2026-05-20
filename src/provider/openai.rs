@@ -30,8 +30,6 @@ const CHATGPT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const RESPONSES_PATH: &str = "responses";
 const DEFAULT_MODEL: &str = "gpt-5.5";
 const ORIGINATOR: &str = "codex_cli_rs";
-const CHATGPT_INSTRUCTIONS: &str = include_str!("../prompt/system_prompt.md");
-const SELFDEV_SECTION_HEADER: &str = "# Self-Development Mode";
 
 /// Maximum number of retries for transient errors
 const MAX_RETRIES: u32 = 3;
@@ -166,6 +164,31 @@ impl OpenAITransport {
             Self::HTTPS => "https",
         }
     }
+}
+
+fn log_openai_stream_lifecycle(
+    level: crate::logging::LogLevel,
+    phase: &str,
+    fields: Vec<(&str, String)>,
+) {
+    let mut owned = vec![
+        ("phase".to_string(), phase.to_string()),
+        ("provider".to_string(), "openai".to_string()),
+    ];
+    owned.extend(
+        fields
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value)),
+    );
+    crate::logging::event(level, "PROVIDER_STREAM_LIFECYCLE", owned);
+}
+
+fn openai_request_model(request: &Value) -> String {
+    request
+        .get("model")
+        .and_then(|model| model.as_str())
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 /// Persistent WebSocket connection state for incremental continuation.
@@ -556,14 +579,6 @@ impl OpenAIProvider {
         !credentials.refresh_token.is_empty() || credentials.id_token.is_some()
     }
 
-    fn chatgpt_instructions_with_selfdev(system: &str) -> String {
-        if let Some(selfdev_section) = extract_selfdev_section(system) {
-            format!("{}\n\n{}", CHATGPT_INSTRUCTIONS.trim_end(), selfdev_section)
-        } else {
-            CHATGPT_INSTRUCTIONS.to_string()
-        }
-    }
-
     fn should_prefer_websocket(model: &str) -> bool {
         !model.trim().is_empty()
     }
@@ -826,21 +841,6 @@ impl OpenAIProvider {
             transport_mode,
             self.diagnostic_persistent_ws_summary()
         )
-    }
-}
-
-fn extract_selfdev_section(system: &str) -> Option<&str> {
-    let start = system.find(SELFDEV_SECTION_HEADER)?;
-    let end = if let Some(rel_end) = system[start + 1..].find("\n# ") {
-        start + 1 + rel_end
-    } else {
-        system.len()
-    };
-    let section = system[start..end].trim();
-    if section.is_empty() {
-        None
-    } else {
-        Some(section)
     }
 }
 

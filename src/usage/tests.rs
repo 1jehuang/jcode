@@ -248,6 +248,93 @@ fn test_parse_usage_percent_supports_remaining_limit_shape() {
 }
 
 #[test]
+fn test_parse_usage_percent_preserves_low_percent_values() {
+    let mut obj = serde_json::Map::new();
+    obj.insert("used_percent".to_string(), serde_json::json!(0.06));
+
+    let percent = openai_helpers::parse_usage_percent_from_obj(&obj);
+    assert_eq!(percent, Some(0.06));
+}
+
+#[test]
+fn test_parse_openai_wham_windows_preserve_low_percent_values() {
+    let json = serde_json::json!({
+        "rate_limit": {
+            "allowed": true,
+            "primary_window": {
+                "used_percent": 0.06,
+                "reset_at": 1_766_000_000
+            },
+            "secondary_window": {
+                "used_percent": 0.25,
+                "reset_at": 1_766_086_400
+            }
+        }
+    });
+
+    let parsed = openai_helpers::parse_openai_usage_payload(&json);
+
+    assert_eq!(parsed.limits[0].usage_percent, 0.06);
+    assert_eq!(parsed.limits[1].usage_percent, 0.25);
+}
+
+#[test]
+fn test_classify_openai_limits_treats_usage_limit_values_as_percent() {
+    let limits = vec![UsageLimit {
+        name: "5-hour window".to_string(),
+        usage_percent: 0.06,
+        resets_at: None,
+    }];
+
+    let classified = openai_helpers::classify_openai_limits(&limits);
+
+    let ratio = classified
+        .five_hour
+        .as_ref()
+        .map(|window| window.usage_ratio)
+        .expect("expected 5-hour window");
+    assert!((ratio - 0.0006).abs() < f32::EPSILON);
+}
+
+#[test]
+fn test_usage_data_from_provider_report_treats_usage_limit_values_as_percent() {
+    let report = ProviderUsage {
+        provider_name: "Anthropic".to_string(),
+        limits: vec![UsageLimit {
+            name: "5-hour window".to_string(),
+            usage_percent: 0.06,
+            resets_at: None,
+        }],
+        ..Default::default()
+    };
+
+    let usage = usage_data_from_provider_report(&report);
+
+    assert!((usage.five_hour - 0.0006).abs() < f32::EPSILON);
+}
+
+#[test]
+fn test_provider_usage_percent_helpers_clamp_invalid_low_values() {
+    assert_eq!(
+        provider_fetch::usage_percent_from_used_limit(25.0, 100.0),
+        25.0
+    );
+    assert_eq!(
+        provider_fetch::usage_percent_from_used_limit(-5.0, 100.0),
+        0.0
+    );
+    assert_eq!(provider_fetch::usage_percent_from_used_limit(5.0, 0.0), 0.0);
+    assert_eq!(
+        provider_fetch::usage_percent_from_remaining_limit(75.0, 100.0),
+        25.0
+    );
+    assert_eq!(
+        provider_fetch::usage_percent_from_remaining_limit(125.0, 100.0),
+        0.0
+    );
+}
+
+#[test]
 fn test_active_anthropic_usage_report_prefers_marked_account() {
     let results = vec![
         ProviderUsage {

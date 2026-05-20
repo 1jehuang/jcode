@@ -1,4 +1,160 @@
 use super::*;
+use crate::tui::TuiState;
+use crossterm::cursor::{RestorePosition, SavePosition};
+use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+use std::io::Write;
+
+pub(super) const STATUS_SPINNER_ONLY_INTERVAL: Duration = Duration::from_millis(80);
+
+pub(super) fn status_spinner_interval() -> tokio::time::Interval {
+    let mut interval = tokio::time::interval(STATUS_SPINNER_ONLY_INTERVAL);
+    // The spinner is visual liveness, not simulated time. If terminal/input work delays a tick,
+    // skip the missed frames instead of bursting them later. Bursts are especially visible while
+    // typing because normal full-frame input renders and spinner-only cell renders interleave.
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval
+}
+
+pub(super) fn status_spinner_only_symbol(app: &App) -> Option<&'static str> {
+    let policy = crate::perf::tui_policy();
+    if !policy.enable_decorative_animations
+        || !app.is_processing
+        || !app.streaming_text.is_empty()
+        || app.centered_mode()
+        || app.has_pending_mouse_scroll_animation()
+        || app.remote_startup_phase_active()
+    {
+        return None;
+    }
+
+    match app.status {
+        ProcessingStatus::Sending
+        | ProcessingStatus::Connecting(_)
+        | ProcessingStatus::Thinking(_)
+        | ProcessingStatus::Streaming => Some(jcode_tui_style::theme::activity_indicator(
+            app.animation_elapsed(),
+            12.5,
+            true,
+        )),
+        ProcessingStatus::Idle
+        | ProcessingStatus::WaitingForNetwork { .. }
+        | ProcessingStatus::RunningTool(_) => None,
+    }
+}
+
+#[derive(Default)]
+pub(super) struct StatusSpinnerRenderer {
+    last_frame: Option<Buffer>,
+}
+
+impl StatusSpinnerRenderer {
+    pub(super) fn invalidate(&mut self) {
+        self.last_frame = None;
+    }
+
+    pub(super) fn draw_full(
+        &mut self,
+        app: &mut App,
+        terminal: &mut DefaultTerminal,
+    ) -> Result<()> {
+        if app.force_full_redraw {
+            terminal.clear()?;
+            app.force_full_redraw = false;
+            self.invalidate();
+        }
+
+        let completed = terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
+        self.last_frame = Some(completed.buffer.clone());
+        Ok(())
+    }
+
+    pub(super) fn draw_status_spinner_only(
+        &mut self,
+        app: &App,
+        terminal: &mut DefaultTerminal,
+    ) -> Result<bool> {
+        let Some(symbol) = status_spinner_only_symbol(app) else {
+            return Ok(false);
+        };
+        let Some(area) = crate::tui::ui::last_status_area() else {
+            return Ok(false);
+        };
+        let Some(previous_frame) = self.last_frame.as_ref() else {
+            return Ok(false);
+        };
+        if !render_status_spinner_into_buffer(previous_frame, area, symbol) {
+            return Ok(false);
+        }
+
+        let next_frame = {
+            let current_buffer = terminal.current_buffer_mut();
+            current_buffer.clone_from(previous_frame);
+            render_status_spinner_into_buffer_mut(current_buffer, area, symbol);
+            current_buffer.clone()
+        };
+
+        // Keep ratatui's virtual buffers authoritative while preserving the user's cursor position.
+        // The only terminal mutation outside ratatui here is cursor save/restore; cell contents still
+        // go through Terminal::flush so the next full-frame diff remains synchronized.
+        crossterm::queue!(terminal.backend_mut(), SavePosition)?;
+        terminal.flush()?;
+        crossterm::queue!(terminal.backend_mut(), RestorePosition)?;
+        terminal.swap_buffers();
+        terminal.backend_mut().flush()?;
+        self.last_frame = Some(next_frame);
+        Ok(true)
+    }
+}
+
+fn render_status_spinner_into_buffer(buffer: &Buffer, area: Rect, symbol: &str) -> bool {
+    area.width > 0
+        && area.height > 0
+        && buffer.cell((area.x, area.y)).is_some()
+        && !symbol.is_empty()
+}
+
+fn render_status_spinner_into_buffer_mut(buffer: &mut Buffer, area: Rect, symbol: &str) {
+    buffer.set_stringn(
+        area.x,
+        area.y,
+        symbol,
+        1,
+        Style::default().fg(jcode_tui_style::theme::ai_color()),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::Color;
+
+    #[test]
+    fn status_spinner_partial_mutates_only_status_cell() {
+        let area = Rect::new(0, 0, 8, 2);
+        let mut buffer = Buffer::empty(area);
+        buffer.set_string(0, 0, "abcdefgh", Style::default().fg(Color::White));
+        buffer.set_string(0, 1, "ABCDEFGH", Style::default().fg(Color::Blue));
+        let before = buffer.clone();
+
+        let status_area = Rect::new(2, 1, 6, 1);
+        assert!(render_status_spinner_into_buffer(&buffer, status_area, "⠂"));
+        render_status_spinner_into_buffer_mut(&mut buffer, status_area, "⠂");
+
+        for y in 0..2 {
+            for x in 0..8 {
+                if (x, y) == (2, 1) {
+                    assert_eq!(buffer.cell((x, y)).unwrap().symbol(), "⠂");
+                    assert_eq!(
+                        buffer.cell((x, y)).unwrap().fg,
+                        jcode_tui_style::theme::ai_color()
+                    );
+                } else {
+                    assert_eq!(buffer.cell((x, y)), before.cell((x, y)));
+                }
+            }
+        }
+    }
+}
 
 impl App {
     /// Run the TUI application
@@ -7,6 +163,8 @@ impl App {
         let mut event_stream = EventStream::new();
         let mut redraw_period = crate::tui::redraw_interval(&self);
         let mut redraw_interval = interval(redraw_period);
+        let mut status_spinner_interval = status_spinner_interval();
+        let mut status_spinner_renderer = StatusSpinnerRenderer::default();
         let mut needs_redraw = true;
         let mut handterm_native_scroll =
             super::handterm_native_scroll::HandtermNativeScrollClient::connect_from_env();
@@ -21,11 +179,8 @@ impl App {
             }
 
             if needs_redraw {
-                if self.force_full_redraw {
-                    terminal.clear()?;
-                    self.force_full_redraw = false;
-                }
-                terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
+                status_spinner_renderer.draw_full(&mut self, &mut terminal)?;
+                status_spinner_interval.reset();
                 if let Some(native) = handterm_native_scroll.as_mut() {
                     native.sync_from_app(&self);
                 }
@@ -52,11 +207,20 @@ impl App {
             } else {
                 // Wait for input or redraw tick
                 tokio::select! {
+                    _ = status_spinner_interval.tick(), if status_spinner_only_symbol(&self).is_some() => {
+                        if !status_spinner_renderer.draw_status_spinner_only(&self, &mut terminal)? {
+                            needs_redraw = true;
+                        }
+                    }
                     _ = redraw_interval.tick() => {
                         needs_redraw |= local::handle_tick(&mut self);
                     }
                     event = event_stream.next() => {
-                        needs_redraw |= local::handle_terminal_event(&mut self, &mut terminal, event)?;
+                        if event.is_some() {
+                            needs_redraw |= local::handle_terminal_event(&mut self, &mut terminal, event)?;
+                        } else {
+                            tokio::time::sleep(redraw_period).await;
+                        }
                     }
                     command = async {
                         match handterm_native_scroll.as_mut() {
@@ -97,6 +261,8 @@ impl App {
         let mut event_stream = EventStream::new();
         let mut redraw_period = crate::tui::redraw_interval(&self);
         let mut redraw_interval = interval(redraw_period);
+        let mut status_spinner_interval = status_spinner_interval();
+        let mut status_spinner_renderer = StatusSpinnerRenderer::default();
         let mut needs_redraw = true;
         let mut handterm_native_scroll =
             super::handterm_native_scroll::HandtermNativeScrollClient::connect_from_env();
@@ -111,11 +277,8 @@ impl App {
                 }
             }
             if needs_redraw {
-                if self.force_full_redraw {
-                    terminal.clear()?;
-                    self.force_full_redraw = false;
-                }
-                terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
+                status_spinner_renderer.draw_full(&mut self, &mut terminal)?;
+                status_spinner_interval.reset();
                 needs_redraw = false;
             }
 
@@ -134,6 +297,7 @@ impl App {
                 remote::ConnectOutcome::Retry => continue,
                 remote::ConnectOutcome::Quit => break 'outer,
             };
+            status_spinner_renderer.invalidate();
 
             match remote::handle_post_connect(
                 &mut self,
@@ -147,6 +311,8 @@ impl App {
                 remote::PostConnectOutcome::Ready => {}
                 remote::PostConnectOutcome::Quit => break 'outer,
             }
+            status_spinner_renderer.invalidate();
+            needs_redraw = true;
 
             let mut bus_receiver_remote = Bus::global().subscribe();
 
@@ -159,11 +325,8 @@ impl App {
                 }
 
                 if needs_redraw {
-                    if self.force_full_redraw {
-                        terminal.clear()?;
-                        self.force_full_redraw = false;
-                    }
-                    terminal.draw(|frame| crate::tui::ui::draw(frame, &self))?;
+                    status_spinner_renderer.draw_full(&mut self, &mut terminal)?;
+                    status_spinner_interval.reset();
                     if let Some(native) = handterm_native_scroll.as_mut() {
                         native.sync_from_app(&self);
                     }
@@ -182,6 +345,11 @@ impl App {
                 }
 
                 tokio::select! {
+                    _ = status_spinner_interval.tick(), if status_spinner_only_symbol(&self).is_some() => {
+                        if !status_spinner_renderer.draw_status_spinner_only(&self, &mut terminal)? {
+                            needs_redraw = true;
+                        }
+                    }
                     _ = redraw_interval.tick() => {
                         needs_redraw |= remote::handle_tick(&mut self, &mut remote_conn).await;
                     }
@@ -198,10 +366,15 @@ impl App {
                         match outcome {
                             remote::RemoteEventOutcome::Continue => {}
                             remote::RemoteEventOutcome::Reconnect => continue 'outer,
+                            remote::RemoteEventOutcome::Quit => break 'outer,
                         }
                     }
                     event = event_stream.next() => {
-                        needs_redraw |= remote::handle_terminal_event(&mut self, &mut terminal, &mut remote_conn, event).await?;
+                        if event.is_some() {
+                            needs_redraw |= remote::handle_terminal_event(&mut self, &mut terminal, &mut remote_conn, event).await?;
+                        } else {
+                            tokio::time::sleep(redraw_period).await;
+                        }
                     }
                     command = async {
                         match handterm_native_scroll.as_mut() {
@@ -218,8 +391,7 @@ impl App {
                         }
                     }
                     bus_event = bus_receiver_remote.recv() => {
-                        remote::handle_bus_event(&mut self, &mut remote_conn, bus_event).await;
-                        needs_redraw = true;
+                        needs_redraw |= remote::handle_bus_event(&mut self, &mut remote_conn, bus_event).await;
                     }
                 }
             }

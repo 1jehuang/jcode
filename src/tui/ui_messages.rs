@@ -164,6 +164,14 @@ pub(crate) fn render_system_message(
         }
     }
 
+    if msg
+        .content
+        .starts_with("⚡ Server reload in progress — waiting for handoff")
+        || msg.content.starts_with("⚡ Connection lost — retrying")
+    {
+        return render_connection_system_message(msg, width);
+    }
+
     if let Some(lines) = render_scheduled_session_message(msg, width) {
         return lines;
     }
@@ -892,10 +900,24 @@ fn split_resume_hint(detail: &str) -> (&str, Option<&str>) {
     }
 }
 
+fn truncate_connection_line(input: &str, width: usize) -> String {
+    if input.chars().count() <= width {
+        return input.to_string();
+    }
+    if width <= 1 {
+        return "…".to_string();
+    }
+    let mut out: String = input.chars().take(width.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 fn parse_connection_retry_message(content: &str) -> Option<(String, String, Option<String>)> {
     let rest = content.strip_prefix("⚡ Connection lost — retrying (attempt ")?;
     let (attempt_and_elapsed, detail) = rest.split_once(") — ")?;
-    let (attempt, elapsed) = attempt_and_elapsed.split_once(", ")?;
+    let (attempt, elapsed) = attempt_and_elapsed
+        .split_once(", ")
+        .or_else(|| attempt_and_elapsed.split_once(", in "))?;
     let (detail, hint) = split_resume_hint(detail);
     Some((
         format!("Retrying · attempt {} · {}", attempt.trim(), elapsed.trim()),
@@ -978,20 +1000,22 @@ fn render_connection_system_message(msg: &DisplayMessage, width: u16) -> Vec<Lin
     let mut box_content = vec![Line::from(Span::styled(status_line, status_style))];
 
     if let Some(detail) = detail.filter(|detail| !detail.is_empty()) {
-        box_content.push(Line::from(""));
-        box_content.push(Line::from(Span::styled("Detail", label_style)));
-        for chunk in split_by_display_width(&detail, inner_width) {
-            box_content.push(Line::from(Span::styled(chunk, body_style)));
-        }
+        let detail = truncate_connection_line(&detail.replace('\n', " "), inner_width);
+        box_content.push(Line::from(vec![
+            Span::styled("Detail ", label_style),
+            Span::styled(detail, body_style),
+        ]));
     }
 
     if let Some(hint) = hint.filter(|hint| !hint.is_empty()) {
-        box_content.push(Line::from(""));
-        box_content.push(Line::from(Span::styled("Resume", label_style)));
-        for chunk in split_by_display_width(&hint, inner_width) {
-            box_content.push(Line::from(Span::styled(chunk, hint_style)));
-        }
+        let hint = truncate_connection_line(&hint.replace('\n', " "), inner_width);
+        box_content.push(Line::from(vec![
+            Span::styled("Resume ", label_style),
+            Span::styled(hint, hint_style),
+        ]));
     }
+
+    box_content.truncate(3);
 
     let mut lines = render_rounded_box(title, box_content, max_box_width, border_style);
     if centered {
@@ -1540,11 +1564,41 @@ pub(crate) fn render_tool_message(
         Span::styled(token_badge.label, Style::default().fg(token_badge.color)),
     ]);
 
-    lines.push(super::truncate_line_preserving_suffix_to_width(
+    let rendered_tool_line = super::truncate_line_preserving_suffix_to_width(
         &Line::from(tool_line),
         &token_suffix,
         row_width,
-    ));
+    );
+    let rendered_tool_line_text = super::line_plain_text(&rendered_tool_line);
+    lines.push(rendered_tool_line);
+
+    if tools_ui::canonical_tool_name(&tc.name) == "bash"
+        && !rendered_tool_line_text.contains('$')
+        && let Some(command) = tc.input.get("command").and_then(|v| v.as_str())
+    {
+        let detail_width = row_width.saturating_sub(4).max(1);
+        let command_detail = tools_ui::get_tool_summary_with_budget(tc, 80, Some(detail_width));
+        if !command_detail.trim().is_empty() {
+            let detail_line = Line::from(vec![
+                Span::raw("    "),
+                Span::styled(command_detail, Style::default().fg(dim_color())),
+            ]);
+            lines.push(super::truncate_line_with_ellipsis_to_width(
+                &detail_line,
+                row_width,
+            ));
+        } else if !command.trim().is_empty() {
+            let fallback = format!("$ {}", command.trim());
+            let detail_line = Line::from(vec![
+                Span::raw("    "),
+                Span::styled(fallback, Style::default().fg(dim_color())),
+            ]);
+            lines.push(super::truncate_line_with_ellipsis_to_width(
+                &detail_line,
+                row_width,
+            ));
+        }
+    }
 
     if tc.name == "batch"
         && let Some(calls) = tc.input.get("tool_calls").and_then(|v| v.as_array())

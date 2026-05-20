@@ -58,6 +58,7 @@ const RELOAD_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
 pub(super) enum RemoteEventOutcome {
     Continue,
     Reconnect,
+    Quit,
 }
 
 pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) -> bool {
@@ -131,6 +132,16 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         if !app.is_processing
             && let Some(pending) = app.rate_limit_pending_message.clone()
         {
+            if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. })
+                && !crate::network_retry::is_probably_online().await
+            {
+                app.schedule_pending_remote_network_wait("network probe still failing");
+                return true;
+            }
+            if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. }) {
+                app.status = ProcessingStatus::Idle;
+                app.status_detail = None;
+            }
             let status = if pending.auto_retry {
                 format!(
                     "✓ Retrying continuation...{}",
@@ -242,7 +253,18 @@ pub(super) async fn handle_terminal_event(
             if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                 handle_remote_key_event(app, key, remote).await?;
                 if let Some(spec) = app.pending_model_switch.take() {
-                    let _ = remote.set_model(&spec).await;
+                    match remote.set_model(&spec).await {
+                        Ok(_) => {
+                            app.remote_model_switch_in_flight = true;
+                        }
+                        Err(error) => {
+                            app.push_display_message(DisplayMessage::error(format!(
+                                "Failed to request model switch: {}",
+                                error
+                            )));
+                            app.set_status_notice("Model switch failed");
+                        }
+                    }
                 }
                 if let Some(selection) = app.pending_account_picker_action.take() {
                     match selection {
@@ -347,36 +369,46 @@ pub(super) async fn handle_bus_event(
     app: &mut App,
     remote: &mut RemoteConnection,
     bus_event: std::result::Result<BusEvent, tokio::sync::broadcast::error::RecvError>,
-) {
+) -> bool {
     match bus_event {
         Ok(BusEvent::UsageReport(results)) => {
             app.handle_usage_report(results);
+            true
         }
         Ok(BusEvent::ClipboardPasteCompleted(result)) => {
-            app.handle_clipboard_paste_completed(result);
+            app.handle_clipboard_paste_completed(result)
         }
         Ok(BusEvent::ModelRefreshCompleted(result)) => {
             app.handle_model_refresh_completed(result);
+            true
         }
+        Ok(BusEvent::UiActivity(activity)) => super::local::handle_ui_activity(app, activity),
         Ok(BusEvent::GitStatusCompleted(result)) => {
             super::commands::handle_git_status_completed(app, result);
+            true
         }
-        Ok(BusEvent::MermaidRenderCompleted) => {}
+        Ok(BusEvent::MermaidRenderCompleted) => true,
         Ok(BusEvent::UsageReportProgress(progress)) => {
             app.handle_usage_report_progress(progress);
+            true
         }
         Ok(BusEvent::LoginCompleted(login)) => {
             let success = login.success && login.provider != "copilot_code";
+            let provider_hint = auth_provider_hint_for_login_provider(&login.provider);
+            let auth = auth_changed_event_for_login_provider(&login.provider);
             app.handle_login_completed(login);
             if success {
-                remote.notify_auth_changed_detached();
+                remote.notify_auth_changed_detached_event(provider_hint, auth);
             }
+            true
         }
         Ok(BusEvent::UpdateStatus(status)) => {
             app.handle_update_status(status);
+            true
         }
         Ok(BusEvent::SessionUpdateStatus(status)) => {
             app.handle_session_update_status(status);
+            true
         }
         Ok(BusEvent::DictationCompleted {
             dictation_id,
@@ -385,12 +417,13 @@ pub(super) async fn handle_bus_event(
             mode,
         }) => {
             if !app.owns_dictation_event(&dictation_id, session_id.as_deref()) {
-                return;
+                return false;
             }
             match remote.send_transcript(text, mode).await {
                 Ok(()) => app.mark_dictation_delivered(),
                 Err(error) => app.handle_dictation_failure(error.to_string()),
             }
+            true
         }
         Ok(BusEvent::DictationFailed {
             dictation_id,
@@ -398,12 +431,47 @@ pub(super) async fn handle_bus_event(
             message,
         }) => {
             if !app.owns_dictation_event(&dictation_id, session_id.as_deref()) {
-                return;
+                return false;
             }
             app.handle_dictation_failure(message);
+            true
         }
-        _ => {}
+        _ => false,
     }
+}
+
+fn auth_provider_hint_for_login_provider(provider: &str) -> Option<&'static str> {
+    let provider = provider.trim();
+    if provider.eq_ignore_ascii_case("azure")
+        || provider.eq_ignore_ascii_case("azure-openai")
+        || provider.eq_ignore_ascii_case("azure openai")
+    {
+        Some("azure-openai")
+    } else if let Some(profile) =
+        crate::provider_catalog::resolve_openai_compatible_profile_selection(provider)
+    {
+        Some(profile.id)
+    } else {
+        None
+    }
+}
+
+fn auth_changed_event_for_login_provider(provider: &str) -> Option<crate::protocol::AuthChanged> {
+    let provider_id = auth_provider_hint_for_login_provider(provider)?;
+    let mut auth = crate::protocol::AuthChanged::new(provider_id);
+    auth.auth_method = Some(crate::protocol::AuthMethod::RemoteTuiPasteApiKey);
+    auth.credential_source = Some(crate::protocol::AuthCredentialSource::ApiKeyFile);
+    if provider_id == "azure-openai" {
+        auth.expected_runtime = Some(crate::protocol::RuntimeProviderKey::new("azure-openai"));
+        auth.expected_catalog_namespace =
+            Some(crate::protocol::CatalogNamespace::new("azure-openai"));
+    } else if crate::provider_catalog::openai_compatible_profile_by_id(provider_id).is_some() {
+        auth.expected_runtime = Some(crate::protocol::RuntimeProviderKey::new(
+            "openai-compatible",
+        ));
+        auth.expected_catalog_namespace = Some(crate::protocol::CatalogNamespace::new(provider_id));
+    }
+    Some(auth)
 }
 
 pub(super) async fn check_debug_command(
@@ -475,6 +543,21 @@ pub(super) async fn handle_remote_event<B: Backend>(
 ) -> Result<(RemoteEventOutcome, bool)> {
     match event {
         RemoteRead::Disconnected(reason) => {
+            if let RemoteDisconnectReason::Protocol(error) = &reason {
+                let detail = format_disconnect_reason(&reason);
+                crate::logging::error(&format!(
+                    "Remote protocol error is not retryable; stopping reconnect loop: {}",
+                    error
+                ));
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Remote protocol error. Stopped reconnecting to avoid replaying a large/corrupt session repeatedly. {}\n\nTry starting a fresh session, or resume after reducing/removing oversized tool output from the session history.",
+                    detail
+                )));
+                app.set_status_notice("Remote protocol error");
+                app.is_processing = false;
+                app.status = ProcessingStatus::Idle;
+                return Ok((RemoteEventOutcome::Quit, true));
+            }
             handle_disconnect(app, state, Some(reason));
             Ok((RemoteEventOutcome::Reconnect, true))
         }
@@ -596,6 +679,20 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
     let _ = recover_stranded_soft_interrupts(app, remote).await;
 
     if app.pending_queued_dispatch {
+        return;
+    }
+
+    if !app.remote_model_switch_in_flight
+        && !app.is_processing
+        && let Some(prepared) = app.pending_prompt_after_model_switch.take()
+    {
+        if let Err(error) = submit_prepared_remote_input(app, remote, prepared).await {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to submit prompt after model switch: {}",
+                error
+            )));
+            app.set_status_notice("Queued prompt failed");
+        }
         return;
     }
 
@@ -824,7 +921,7 @@ async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteConnection) {
                     .map(|t| t.elapsed())
                     .or(app.processing_started.map(|t| t.elapsed()))
             ));
-            let _ = remote.cancel().await;
+            let _ = remote.cancel_with_reason("stall_guard").await;
             app.is_processing = false;
             app.clear_visible_turn_started();
             app.status = ProcessingStatus::Idle;
@@ -1066,19 +1163,20 @@ fn handle_disconnected_key_internal(
         return Ok(());
     }
 
-    if code == KeyCode::Enter && modifiers.contains(KeyModifiers::SHIFT) {
+    if code == KeyCode::Enter && modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
         input::insert_input_text(app, "\n");
-        return Ok(());
-    }
-
-    // Never fall through and insert literal text for unhandled Ctrl+key chords.
-    if modifiers.contains(KeyModifiers::CONTROL) {
         return Ok(());
     }
 
     if let Some(text) = text_input.or_else(|| input::text_input_for_key(code, modifiers)) {
         input::handle_text_input(app, &text);
         app.follow_chat_bottom_for_typing();
+        return Ok(());
+    }
+
+    // Never fall through and insert literal text for unhandled Ctrl+key chords. This stays after
+    // text_input so Ctrl+Alt/AltGr symbols delivered as final printable text still work.
+    if modifiers.contains(KeyModifiers::CONTROL) {
         return Ok(());
     }
 

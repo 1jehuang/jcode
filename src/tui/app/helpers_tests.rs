@@ -1,6 +1,6 @@
 use super::{
-    build_resume_command, extract_bracketed_system_message, format_countdown_until,
-    gather_ambient_info, partition_queued_messages, resume_invocation_args,
+    build_resume_command, clear_ambient_info_cache_for_tests, extract_bracketed_system_message,
+    format_countdown_until, gather_ambient_info, partition_queued_messages, resume_invocation_args,
 };
 use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget};
 use crate::terminal_launch::{detected_resume_terminal, shell_command};
@@ -71,6 +71,7 @@ fn partition_queued_messages_moves_system_messages_into_reminders() {
 #[cfg(unix)]
 #[test]
 fn detected_resume_terminal_recognizes_handterm_term_program() {
+    let _env_lock = crate::storage::lock_test_env();
     let _guard = EnvVarGuard::set_value("TERM_PROGRAM", "handterm");
     assert_eq!(detected_resume_terminal().as_deref(), Some("handterm"));
 }
@@ -160,6 +161,7 @@ fn build_resume_command_uses_imported_jcode_session_for_codex() {
     assert_eq!(
         args,
         vec![
+            "--fresh-spawn".to_string(),
             "--resume".to_string(),
             crate::import::imported_codex_session_id("codex-session-123")
         ]
@@ -182,6 +184,7 @@ fn format_countdown_until_handles_subminute_and_minutes() {
 
 #[test]
 fn gather_ambient_info_filters_to_session_reminders_when_ambient_disabled() {
+    let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
@@ -239,7 +242,16 @@ fn gather_ambient_info_filters_to_session_reminders_when_ambient_disabled() {
         })
         .expect("schedule second reminder");
 
-    let info = gather_ambient_info(false).expect("ambient info");
+    clear_ambient_info_cache_for_tests();
+    let info = (0..20)
+        .find_map(|_| {
+            let info = gather_ambient_info(false);
+            if info.is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            info
+        })
+        .expect("ambient info");
     assert!(info.show_widget);
     assert_eq!(info.queue_count, 3);
     assert_eq!(info.reminder_count, 2);

@@ -1,11 +1,33 @@
 use super::*;
 
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+        let previous = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = &self.previous {
+            crate::env::set_var(self.key, previous);
+        } else {
+            crate::env::remove_var(self.key);
+        }
+    }
+}
+
 #[test]
 fn side_panel_pages_persist_and_focus_latest() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
     let session_id = "ses_side_panel_test";
     let first = write_markdown_page(session_id, "notes", Some("Notes"), "# Notes", true)
@@ -38,20 +60,13 @@ fn side_panel_pages_persist_and_focus_latest() {
     let reloaded = snapshot_for_session(session_id).expect("reload snapshot");
     assert_eq!(reloaded.focused_page_id.as_deref(), Some("notes"));
     assert_eq!(reloaded.pages.len(), 2);
-
-    if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
 }
 
 #[test]
 fn side_panel_delete_falls_back_to_most_recent_page() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
     let session_id = "ses_side_panel_delete";
     write_markdown_page(session_id, "one", Some("One"), "# One", true).expect("page one");
@@ -60,20 +75,13 @@ fn side_panel_delete_falls_back_to_most_recent_page() {
     let after_delete = delete_page(session_id, "two").expect("delete page two");
     assert_eq!(after_delete.pages.len(), 1);
     assert_eq!(after_delete.focused_page_id.as_deref(), Some("one"));
-
-    if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
 }
 
 #[test]
 fn load_markdown_file_uses_source_path_content() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
     let source = temp.path().join("guide.md");
     std::fs::write(&source, "# Guide\n\nHello").expect("write source file");
@@ -103,20 +111,13 @@ fn load_markdown_file_uses_source_path_content() {
         .find(|page| page.id == "guide")
         .expect("guide page");
     assert_eq!(page.content, "# Guide\n\nUpdated");
-
-    if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
 }
 
 #[test]
 fn load_markdown_file_rejects_non_markdown_extensions() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
 
     let source = temp.path().join("notes.txt");
     std::fs::write(&source, "not markdown").expect("write source file");
@@ -124,12 +125,6 @@ fn load_markdown_file_rejects_non_markdown_extensions() {
     let err = load_markdown_file("ses_side_panel_load", "notes", Some("Notes"), &source, true)
         .expect_err("non-markdown load should fail");
     assert!(err.to_string().contains("only supports markdown files"));
-
-    if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
 }
 
 #[test]

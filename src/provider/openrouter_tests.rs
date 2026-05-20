@@ -1,10 +1,22 @@
 use super::openrouter_sse_stream::OpenRouterStream;
 use super::*;
 use std::ffi::OsString;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::sync::Mutex;
+use std::sync::mpsc;
+use std::time::Duration;
 use tempfile::TempDir;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+struct SharedEnvLock;
+
+static ENV_LOCK: SharedEnvLock = SharedEnvLock;
+
+impl SharedEnvLock {
+    fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'static, ()>> {
+        crate::storage::test_env_lock().lock()
+    }
+}
 
 struct EnvVarGuard {
     key: &'static str,
@@ -88,12 +100,7 @@ fn test_has_credentials() {
 
 #[test]
 fn openai_compatible_models_endpoint_allows_minimal_model_objects() {
-    #[derive(serde::Deserialize)]
-    struct ModelsResponse {
-        data: Vec<ModelInfo>,
-    }
-
-    let parsed: ModelsResponse = serde_json::from_str(
+    let parsed = parse_openai_compatible_models_response(
         r#"{
             "object": "list",
             "data": [
@@ -104,9 +111,93 @@ fn openai_compatible_models_endpoint_allows_minimal_model_objects() {
     )
     .expect("minimal OpenAI-compatible /models response should parse");
 
-    assert_eq!(parsed.data.len(), 2);
-    assert_eq!(parsed.data[0].id, "glm-51-nvfp4");
-    assert_eq!(parsed.data[0].name, "");
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[0].id, "glm-51-nvfp4");
+    assert_eq!(parsed[0].name, "");
+}
+
+#[test]
+fn openai_compatible_models_endpoint_allows_chutes_numeric_pricing() {
+    let parsed = parse_openai_compatible_models_response(
+        r#"{
+            "object": "list",
+            "data": [{
+                "id": "Qwen/Qwen3-32B-TEE",
+                "root": "Qwen/Qwen3-32B-FP8",
+                "price": {
+                    "input": {"tao": 0.0002439746644509701, "usd": 0.08},
+                    "output": {"tao": 0.0007319239933529102, "usd": 0.24}
+                },
+                "object": "model",
+                "parent": null,
+                "created": 1778439139,
+                "pricing": {
+                    "prompt": 0.08,
+                    "completion": 0.24,
+                    "input_cache_read": 0.04
+                },
+                "owned_by": "sglang",
+                "context_length": 40960,
+                "supported_features": ["json_mode", "tools"]
+            }]
+        }"#,
+    )
+    .expect("Chutes /models response with numeric pricing should parse");
+
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].id, "Qwen/Qwen3-32B-TEE");
+    assert_eq!(parsed[0].pricing.prompt.as_deref(), Some("0.08"));
+    assert_eq!(parsed[0].pricing.completion.as_deref(), Some("0.24"));
+    assert_eq!(parsed[0].pricing.input_cache_read.as_deref(), Some("0.04"));
+}
+
+#[test]
+fn openai_compatible_models_endpoint_allows_together_top_level_array() {
+    let parsed = parse_openai_compatible_models_response(
+        r#"[
+            {
+                "id": "Austism/chronos-hermes-13b",
+                "object": "model",
+                "created": 1692896905,
+                "type": "chat",
+                "display_name": "Chronos Hermes (13B)",
+                "context_length": 2048,
+                "pricing": {
+                    "input": 0.3,
+                    "output": 0.3,
+                    "cached_input": 0.2
+                }
+            }
+        ]"#,
+    )
+    .expect("Together /models top-level array should parse");
+
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].id, "Austism/chronos-hermes-13b");
+    assert_eq!(parsed[0].name, "Chronos Hermes (13B)");
+    assert_eq!(parsed[0].context_length, Some(2048));
+    assert_eq!(parsed[0].pricing.prompt.as_deref(), Some("0.3"));
+    assert_eq!(parsed[0].pricing.completion.as_deref(), Some("0.3"));
+    assert_eq!(parsed[0].pricing.input_cache_read.as_deref(), Some("0.2"));
+}
+
+#[test]
+fn openai_compatible_models_endpoint_allows_models_array_with_name_ids() {
+    let parsed = parse_openai_compatible_models_response(
+        r#"{
+            "models": [{
+                "name": "accounts/fireworks/models/example",
+                "displayName": "Example Fireworks Model",
+                "contextLength": 8192
+            }]
+        }"#,
+    )
+    .expect("models array with name-based identifiers should parse");
+
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].id, "accounts/fireworks/models/example");
+    assert_eq!(parsed[0].name, "accounts/fireworks/models/example");
+    assert_eq!(parsed[0].context_length, Some(8192));
 }
 
 #[test]
@@ -170,6 +261,94 @@ fn minimax_profile_exposes_static_models_before_catalog_refresh() {
     assert!(models.iter().any(|model| model == "MiniMax-M2.7"));
     assert!(models.iter().any(|model| model == "MiniMax-M2.7-highspeed"));
     assert!(models.iter().any(|model| model == "MiniMax-M2"));
+}
+
+#[test]
+fn cerebras_profile_exposes_static_models_before_catalog_refresh() {
+    assert_eq!(
+        jcode_provider_metadata::CEREBRAS_PROFILE.default_model,
+        Some("qwen-3-235b-a22b-instruct-2507")
+    );
+
+    let models = crate::provider_catalog::openai_compatible_profile_static_models(
+        jcode_provider_metadata::CEREBRAS_PROFILE,
+    );
+
+    assert!(
+        !models.iter().any(|model| model == "qwen-3-coder-480b"),
+        "old Cerebras default is no longer returned by the live /models catalog"
+    );
+    assert!(
+        models
+            .iter()
+            .any(|model| model == "qwen-3-235b-a22b-instruct-2507")
+    );
+    assert!(models.iter().any(|model| model == "llama3.1-8b"));
+    assert!(
+        !models.iter().any(|model| model == "zai-glm-4.7"),
+        "Cerebras exposes zai-glm-4.7 from /models for some keys, but chat/completions returns model_not_found"
+    );
+    assert!(
+        !models.iter().any(|model| model == "gpt-oss-120b"),
+        "Cerebras exposes gpt-oss-120b from /models for some keys, but chat/completions returns model_not_found"
+    );
+}
+
+#[test]
+fn openai_compatible_profiles_with_unverified_live_catalogs_have_static_fallbacks() {
+    let cases = [
+        (jcode_provider_metadata::OPENCODE_PROFILE, "minimax-m2.7"),
+        (jcode_provider_metadata::OPENCODE_GO_PROFILE, "kimi-k2.5"),
+        (jcode_provider_metadata::ZAI_PROFILE, "glm-4.7"),
+        (
+            jcode_provider_metadata::AI302_PROFILE,
+            "qwen3-235b-a22b-instruct-2507",
+        ),
+        (jcode_provider_metadata::BASETEN_PROFILE, "zai-org/GLM-4.7"),
+        (jcode_provider_metadata::CORTECS_PROFILE, "kimi-k2.5"),
+        (jcode_provider_metadata::KIMI_PROFILE, "kimi-for-coding"),
+        (jcode_provider_metadata::FIRMWARE_PROFILE, "kimi-k2.5"),
+        (
+            jcode_provider_metadata::HUGGING_FACE_PROFILE,
+            "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+        ),
+        (jcode_provider_metadata::MOONSHOT_PROFILE, "kimi-k2.5"),
+        (
+            jcode_provider_metadata::NEBIUS_PROFILE,
+            "openai/gpt-oss-120b",
+        ),
+        (
+            jcode_provider_metadata::SCALEWAY_PROFILE,
+            "qwen3-coder-30b-a3b-instruct",
+        ),
+        (
+            jcode_provider_metadata::STACKIT_PROFILE,
+            "openai/gpt-oss-120b",
+        ),
+        (jcode_provider_metadata::PERPLEXITY_PROFILE, "sonar"),
+        (
+            jcode_provider_metadata::DEEPINFRA_PROFILE,
+            "moonshotai/Kimi-K2-Instruct",
+        ),
+        (
+            jcode_provider_metadata::FIREWORKS_PROFILE,
+            "accounts/fireworks/routers/kimi-k2p5-turbo",
+        ),
+        (jcode_provider_metadata::XIAOMI_MIMO_PROFILE, "mimo-v2.5"),
+        (
+            jcode_provider_metadata::ALIBABA_CODING_PLAN_PROFILE,
+            "qwen3-coder-plus",
+        ),
+    ];
+
+    for (profile, expected_model) in cases {
+        let models = crate::provider_catalog::openai_compatible_profile_static_models(profile);
+        assert!(
+            models.iter().any(|model| model == expected_model),
+            "{} should expose static fallback model {expected_model}; got {models:?}",
+            profile.id
+        );
+    }
 }
 
 #[test]
@@ -393,6 +572,7 @@ fn make_provider() -> OpenRouterProvider {
     OpenRouterProvider {
         client: crate::provider::shared_http_client(),
         model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
+        reasoning_effort: Arc::new(RwLock::new(None)),
         api_base: DEFAULT_API_BASE.to_string(),
         auth: ProviderAuth::AuthorizationBearer {
             token: "test".to_string(),
@@ -418,6 +598,7 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
     OpenRouterProvider {
         client: crate::provider::shared_http_client(),
         model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
+        reasoning_effort: Arc::new(RwLock::new(None)),
         api_base: "https://compat.example.test/v1".to_string(),
         auth: ProviderAuth::AuthorizationBearer {
             token: "test".to_string(),
@@ -437,6 +618,331 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         provider_pin: Arc::new(Mutex::new(None)),
         endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
     }
+}
+
+fn spawn_single_response_models_server(body: &'static str) -> (String, mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake provider server");
+    let addr = listener.local_addr().expect("fake provider addr");
+    let (request_tx, request_rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept fake provider request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+        let mut request = vec![0u8; 8192];
+        let n = stream.read(&mut request).unwrap_or(0);
+        let request = String::from_utf8_lossy(&request[..n]).into_owned();
+        let _ = request_tx.send(request);
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write fake provider response");
+    });
+
+    (format!("http://{addr}/v1"), request_rx)
+}
+
+fn spawn_single_response_chat_server() -> (String, mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake provider server");
+    let addr = listener.local_addr().expect("fake provider addr");
+    let (request_tx, request_rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept fake provider request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+        let mut request = vec![0u8; 16384];
+        let n = stream.read(&mut request).unwrap_or(0);
+        let request = String::from_utf8_lossy(&request[..n]).into_owned();
+        let _ = request_tx.send(request);
+
+        let body = "data: [DONE]\n\n";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write fake provider response");
+    });
+
+    (format!("http://{addr}/v1"), request_rx)
+}
+
+#[test]
+fn direct_deepseek_profile_exposes_max_reasoning_effort() {
+    let provider = OpenRouterProvider {
+        profile_id: Some("deepseek".to_string()),
+        supports_provider_features: false,
+        ..make_custom_compatible_provider()
+    };
+
+    assert_eq!(
+        provider.available_efforts(),
+        vec!["none", "low", "medium", "high", "max"]
+    );
+    provider
+        .set_reasoning_effort("max")
+        .expect("DeepSeek direct profile should accept max effort");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("max"));
+}
+
+#[test]
+fn non_deepseek_compatible_profile_does_not_expose_reasoning_effort() {
+    let provider = make_custom_compatible_provider();
+
+    assert!(provider.available_efforts().is_empty());
+    let error = provider
+        .set_reasoning_effort("max")
+        .expect_err("generic compatible profile should not expose DeepSeek effort UX");
+    assert!(
+        error.to_string().contains("DeepSeek direct profiles"),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[test]
+fn direct_deepseek_chat_request_sends_reasoning_effort() {
+    let (api_base, request_rx) = spawn_single_response_chat_server();
+    let provider = OpenRouterProvider {
+        api_base,
+        model: Arc::new(RwLock::new("deepseek-v4-pro".to_string())),
+        profile_id: Some("deepseek".to_string()),
+        supports_provider_features: false,
+        supports_model_catalog: false,
+        send_openrouter_headers: false,
+        ..make_custom_compatible_provider()
+    };
+    provider
+        .set_reasoning_effort("max")
+        .expect("DeepSeek direct profile should accept max effort");
+
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let mut stream = provider
+            .complete(&messages, &[], "", None)
+            .await
+            .expect("fake chat request should start");
+        while let Some(event) = stream.next().await {
+            event.expect("stream event should parse");
+        }
+    });
+
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("capture fake provider request");
+    assert!(
+        request.starts_with("POST /v1/chat/completions "),
+        "unexpected chat request: {request}"
+    );
+    assert!(
+        request.contains(r#""model":"deepseek-v4-pro""#),
+        "request should contain model: {request}"
+    );
+    assert!(
+        request.contains(r#""reasoning_effort":"max""#),
+        "DeepSeek request should include max reasoning effort: {request}"
+    );
+}
+
+#[test]
+fn openai_compatible_model_catalog_refresh_calls_models_endpoint_and_updates_display() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let temp = TempDir::new().expect("create temp home");
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _namespace = EnvVarGuard::set(
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "test-openai-compatible-flow",
+    );
+    let (api_base, request_rx) = spawn_single_response_models_server(
+        r#"{
+            "object": "list",
+            "data": [
+                {"id": "live-login-flow-model", "object": "model"}
+            ]
+        }"#,
+    );
+    let provider = OpenRouterProvider {
+        api_base,
+        auth: ProviderAuth::AuthorizationBearer {
+            token: "sk-live-catalog".to_string(),
+            label: "OPENAI_COMPAT_API_KEY".to_string(),
+        },
+        supports_provider_features: false,
+        supports_model_catalog: true,
+        profile_id: None,
+        static_models: vec!["static-login-flow-fallback".to_string()],
+        send_openrouter_headers: false,
+        ..make_custom_compatible_provider()
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let fetched = rt
+        .block_on(provider.refresh_models())
+        .expect("refresh fake model catalog");
+    assert_eq!(fetched[0].id, "live-login-flow-model");
+
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("capture fake provider request");
+    assert!(
+        request.starts_with("GET /v1/models "),
+        "unexpected catalog request: {request}"
+    );
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer sk-live-catalog"),
+        "catalog request should include saved API key auth header: {request}"
+    );
+    assert!(
+        request.to_ascii_lowercase().contains("user-agent: jcode/"),
+        "catalog requests must include a User-Agent because providers like Cerebras reject bare HTTP clients: {request}"
+    );
+
+    let display = provider.available_models_display();
+    assert!(display.iter().any(|model| model == "live-login-flow-model"));
+    assert!(
+        display
+            .iter()
+            .any(|model| model == "static-login-flow-fallback"),
+        "static fallback/default models should remain visible alongside live catalog models: {display:?}"
+    );
+}
+
+#[test]
+fn built_in_openai_compatible_static_models_drop_out_after_live_catalog() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let temp = TempDir::new().expect("create temp home");
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _namespace = EnvVarGuard::set(
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "test-cerebras-live-catalog-filters-static-fallback",
+    );
+    let (api_base, _request_rx) = spawn_single_response_models_server(
+        r#"{
+            "object": "list",
+            "data": [
+                {"id": "qwen-3-235b-a22b-instruct-2507", "object": "model"},
+                {"id": "zai-glm-4.7", "object": "model"},
+                {"id": "gpt-oss-120b", "object": "model"}
+            ]
+        }"#,
+    );
+    let provider = OpenRouterProvider {
+        api_base,
+        auth: ProviderAuth::AuthorizationBearer {
+            token: "sk-live-catalog".to_string(),
+            label: "CEREBRAS_API_KEY".to_string(),
+        },
+        supports_provider_features: false,
+        supports_model_catalog: true,
+        profile_id: Some("cerebras".to_string()),
+        static_models: vec![
+            "zai-glm-4.7".to_string(),
+            "qwen-3-235b-a22b-instruct-2507".to_string(),
+        ],
+        send_openrouter_headers: false,
+        ..make_custom_compatible_provider()
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(provider.refresh_models())
+        .expect("refresh fake model catalog");
+
+    let display = provider.available_models_display();
+    assert!(
+        display
+            .iter()
+            .any(|model| model == "qwen-3-235b-a22b-instruct-2507")
+    );
+    assert!(
+        !display.iter().any(|model| model == "zai-glm-4.7"),
+        "Cerebras models that 404 on chat/completions should not be advertised after a live catalog refresh: {display:?}"
+    );
+    assert!(
+        !display.iter().any(|model| model == "gpt-oss-120b"),
+        "Cerebras models that 404 on chat/completions should not be advertised after a live catalog refresh: {display:?}"
+    );
+}
+
+#[test]
+fn direct_openai_compatible_static_models_are_marked_as_fallback_before_live_catalog() {
+    let provider = OpenRouterProvider {
+        supports_provider_features: false,
+        supports_model_catalog: true,
+        profile_id: Some("opencode".to_string()),
+        static_models: vec!["minimax-m2.7".to_string()],
+        send_openrouter_headers: false,
+        ..make_custom_compatible_provider()
+    };
+
+    let routes = provider.model_routes();
+    let route = routes
+        .iter()
+        .find(|route| route.model == "minimax-m2.7")
+        .expect("static fallback route should be present before live catalog fetch");
+
+    assert!(
+        route
+            .detail
+            .contains("fallback: static provider model list"),
+        "fallback routes should be clearly labeled in the model picker: {route:?}"
+    );
+}
+
+#[test]
+fn cerebras_chat_unavailable_catalog_models_are_rejected_on_explicit_switch() {
+    let provider = OpenRouterProvider {
+        supports_provider_features: false,
+        supports_model_catalog: true,
+        profile_id: Some("cerebras".to_string()),
+        static_models: vec!["qwen-3-235b-a22b-instruct-2507".to_string()],
+        send_openrouter_headers: false,
+        ..make_custom_compatible_provider()
+    };
+
+    let error = provider
+        .set_model("zai-glm-4.7")
+        .expect_err("known Cerebras chat-unavailable model should be rejected before request time");
+    assert!(
+        error
+            .to_string()
+            .contains("not currently usable for chat completions"),
+        "unexpected error: {error:?}"
+    );
+    provider
+        .set_model("qwen-3-235b-a22b-instruct-2507")
+        .expect("chat-supported Cerebras model should remain selectable");
 }
 
 #[test]
@@ -626,10 +1132,33 @@ fn test_kimi_coding_header_detection_matches_endpoint_and_model() {
         "https://example.com/v1",
         Some("kimi-for-coding"),
     ));
+    assert!(should_send_kimi_coding_agent_headers(
+        "https://openrouter.ai/api/v1",
+        Some("moonshotai/kimi-k2.5"),
+    ));
     assert!(!should_send_kimi_coding_agent_headers(
         "https://api.openrouter.ai/api/v1",
         Some("anthropic/claude-sonnet-4"),
     ));
+}
+
+#[test]
+fn test_openrouter_kimi_chat_request_includes_compat_user_agent() {
+    let request = apply_kimi_coding_agent_headers(
+        Client::new().post("https://openrouter.ai/api/v1/chat/completions"),
+        "https://openrouter.ai/api/v1",
+        Some("moonshotai/kimi-k2.5"),
+    )
+    .build()
+    .expect("build request");
+    assert!(
+        request
+            .headers()
+            .get("User-Agent")
+            .and_then(|value| value.to_str().ok())
+            == Some(KIMI_CODING_USER_AGENT),
+        "Kimi OpenRouter chat request should include compatibility User-Agent"
+    );
 }
 
 #[test]
@@ -645,6 +1174,30 @@ fn test_parse_next_event_accepts_compact_sse_data_and_reasoning_content() {
     match stream.parse_next_event() {
         Some(StreamEvent::ThinkingDelta(text)) => assert_eq!(text, "thinking"),
         other => panic!("expected ThinkingDelta, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_next_event_emits_only_incremental_reasoning_content() {
+    let mut stream = OpenRouterStream::new(
+        futures::stream::empty::<Result<Bytes, reqwest::Error>>(),
+        "moonshotai/kimi-k2.5".to_string(),
+        Arc::new(Mutex::new(None)),
+    );
+
+    stream.buffer =
+        "data:{\"choices\":[{\"delta\":{\"reasoning_content\":\"Thinking\"}}]}\n\n".to_string();
+    match stream.parse_next_event() {
+        Some(StreamEvent::ThinkingDelta(text)) => assert_eq!(text, "Thinking"),
+        other => panic!("expected first ThinkingDelta, got {:?}", other),
+    }
+
+    stream.buffer =
+        "data:{\"choices\":[{\"delta\":{\"reasoning_content\":\"Thinking more\"}}]}\n\n"
+            .to_string();
+    match stream.parse_next_event() {
+        Some(StreamEvent::ThinkingDelta(text)) => assert_eq!(text, " more"),
+        other => panic!("expected incremental ThinkingDelta, got {:?}", other),
     }
 }
 

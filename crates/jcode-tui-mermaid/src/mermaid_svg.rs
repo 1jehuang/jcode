@@ -1,7 +1,10 @@
 use super::{
     DEFAULT_RENDER_HEIGHT, DEFAULT_RENDER_WIDTH, RENDER_SUPERSAMPLE, RENDER_WIDTH_BUCKET_CELLS,
-    RenderConfig, SVG_FONT_DB, Theme, get_font_size,
+    get_font_size,
 };
+#[cfg(feature = "renderer")]
+use super::{RenderConfig, SVG_FONT_DB, Theme};
+#[cfg(feature = "renderer")]
 use std::path::Path;
 
 /// Count nodes and edges in mermaid content (rough estimate)
@@ -76,6 +79,10 @@ pub(super) fn normalize_render_target_width(width: f64) -> u32 {
     rounded.clamp(400, DEFAULT_RENDER_WIDTH)
 }
 
+#[cfg(all(
+    feature = "renderer",
+    not(all(feature = "mmdr-size-api", mmdr_size_api_available))
+))]
 pub(super) fn extract_xml_attribute<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
     let pattern = format!(" {attr}=\"");
     let start = tag.find(&pattern)? + pattern.len();
@@ -83,6 +90,10 @@ pub(super) fn extract_xml_attribute<'a>(tag: &'a str, attr: &str) -> Option<&'a 
     Some(&tag[start..end])
 }
 
+#[cfg(all(
+    feature = "renderer",
+    not(all(feature = "mmdr-size-api", mmdr_size_api_available))
+))]
 pub(super) fn parse_svg_length(value: &str) -> Option<f32> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.ends_with('%') {
@@ -97,6 +108,10 @@ pub(super) fn parse_svg_length(value: &str) -> Option<f32> {
     }
 }
 
+#[cfg(all(
+    feature = "renderer",
+    not(all(feature = "mmdr-size-api", mmdr_size_api_available))
+))]
 pub(super) fn parse_svg_viewbox_size(tag: &str) -> Option<(f32, f32)> {
     let viewbox = extract_xml_attribute(tag, "viewBox")?;
     let mut parts = viewbox.split_whitespace();
@@ -111,12 +126,20 @@ pub(super) fn parse_svg_viewbox_size(tag: &str) -> Option<(f32, f32)> {
     }
 }
 
+#[cfg(all(
+    feature = "renderer",
+    not(all(feature = "mmdr-size-api", mmdr_size_api_available))
+))]
 pub(super) fn parse_svg_explicit_size(tag: &str) -> Option<(f32, f32)> {
     let width = parse_svg_length(extract_xml_attribute(tag, "width")?)?;
     let height = parse_svg_length(extract_xml_attribute(tag, "height")?)?;
     Some((width, height))
 }
 
+#[cfg(all(
+    feature = "renderer",
+    not(all(feature = "mmdr-size-api", mmdr_size_api_available))
+))]
 fn format_svg_length(value: f32) -> String {
     let mut out = format!("{:.3}", value.max(1.0));
     while out.ends_with('0') {
@@ -128,6 +151,10 @@ fn format_svg_length(value: f32) -> String {
     out
 }
 
+#[cfg(all(
+    feature = "renderer",
+    not(all(feature = "mmdr-size-api", mmdr_size_api_available))
+))]
 pub(super) fn set_xml_attribute(tag: &str, attr: &str, value: &str) -> String {
     let pattern = format!(" {attr}=\"");
     if let Some(start) = tag.find(&pattern) {
@@ -150,6 +177,10 @@ pub(super) fn set_xml_attribute(tag: &str, attr: &str, value: &str) -> String {
     updated
 }
 
+#[cfg(all(
+    feature = "renderer",
+    not(all(feature = "mmdr-size-api", mmdr_size_api_available))
+))]
 pub(super) fn retarget_svg_for_png(svg: &str, target_width: f64, target_height: f64) -> String {
     let Some(start) = svg.find("<svg") else {
         return svg.to_string();
@@ -184,6 +215,7 @@ pub(super) fn retarget_svg_for_png(svg: &str, target_width: f64, target_height: 
     updated
 }
 
+#[cfg(feature = "renderer")]
 fn primary_font_family(fonts: &str) -> String {
     fonts
         .split(',')
@@ -193,6 +225,7 @@ fn primary_font_family(fonts: &str) -> String {
         .to_string()
 }
 
+#[cfg(feature = "renderer")]
 fn parse_hex_color_for_png(input: &str) -> Option<resvg::tiny_skia::Color> {
     let color = input.trim();
     let hex = color.strip_prefix('#')?;
@@ -228,6 +261,7 @@ fn parse_hex_color_for_png(input: &str) -> Option<resvg::tiny_skia::Color> {
     resvg::tiny_skia::Color::from_rgba8(r, g, b, a).into()
 }
 
+#[cfg(feature = "renderer")]
 pub(super) fn write_output_png_cached_fonts(
     svg: &str,
     output: &Path,

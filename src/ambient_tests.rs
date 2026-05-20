@@ -66,6 +66,52 @@ fn test_scheduled_queue_push_and_pop() {
 }
 
 #[test]
+fn test_scheduled_queue_remove_by_id_persists_remaining_items() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+
+    let mut queue = ScheduledQueue::load(path.clone());
+    let future = Utc::now() + Duration::hours(1);
+
+    queue.push(ScheduledItem {
+        id: "keep".into(),
+        scheduled_for: future,
+        context: "keep item".into(),
+        priority: Priority::Normal,
+        target: ScheduleTarget::Ambient,
+        created_by_session: "test".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+    });
+    queue.push(ScheduledItem {
+        id: "cancel".into(),
+        scheduled_for: future,
+        context: "cancel item".into(),
+        priority: Priority::High,
+        target: ScheduleTarget::Ambient,
+        created_by_session: "test".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+    });
+
+    let removed = queue.remove_by_id("cancel").unwrap().unwrap();
+    assert_eq!(removed.id, "cancel");
+    assert!(queue.remove_by_id("missing").unwrap().is_none());
+
+    let reloaded = ScheduledQueue::load(path);
+    assert_eq!(reloaded.len(), 1);
+    assert_eq!(reloaded.items()[0].id, "keep");
+}
+
+#[test]
 fn test_pop_ready_sorts_by_priority_then_time() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let path = tmp.path().to_path_buf();

@@ -1,5 +1,19 @@
 use super::*;
 
+pub(super) fn usage_percent_from_used_limit(used: f64, limit: f64) -> f32 {
+    if !used.is_finite() || !limit.is_finite() || limit <= 0.0 {
+        return 0.0;
+    }
+    ((used.max(0.0) / limit) * 100.0) as f32
+}
+
+pub(super) fn usage_percent_from_remaining_limit(remaining: f64, limit: f64) -> f32 {
+    if !remaining.is_finite() || !limit.is_finite() || limit <= 0.0 {
+        return 0.0;
+    }
+    usage_percent_from_used_limit((limit - remaining).max(0.0), limit)
+}
+
 pub(super) async fn fetch_anthropic_usage_for_token(
     display_name: String,
     access_token: String,
@@ -278,7 +292,7 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
         let balance = total_credits - total_usage;
 
         if total_credits > 0.0 {
-            let usage_pct = (total_usage / total_credits * 100.0) as f32;
+            let usage_pct = usage_percent_from_used_limit(total_usage, total_credits);
             limits.push(UsageLimit {
                 name: "Credits".to_string(),
                 usage_percent: usage_pct,
@@ -319,12 +333,7 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
                 .get("limit_remaining")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
-            let used = limit - remaining;
-            let pct = if limit > 0.0 {
-                (used / limit * 100.0) as f32
-            } else {
-                0.0
-            };
+            let pct = usage_percent_from_remaining_limit(remaining, limit);
             limits.push(UsageLimit {
                 name: "Key limit".to_string(),
                 usage_percent: pct,
@@ -411,7 +420,7 @@ pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
                     let used = obj.get("used").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     let limit = obj.get("limit").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     if limit > 0.0 {
-                        let pct = (used / limit * 100.0) as f32;
+                        let pct = usage_percent_from_used_limit(used, limit);
                         limits.push(UsageLimit {
                             name: format!("{} (remote)", humanize_key(name)),
                             usage_percent: pct,

@@ -2,6 +2,8 @@ pub use jcode_provider_metadata::*;
 use std::collections::{HashMap, HashSet};
 
 pub const OPENAI_COMPAT_LOCAL_ENABLED_ENV: &str = "JCODE_OPENAI_COMPAT_LOCAL_ENABLED";
+pub const MINIMAX_CHINA_API_BASE: &str = "https://api.minimaxi.com/v1";
+pub const MINIMAX_CHINA_SETUP_URL: &str = "https://platform.minimaxi.com/docs/llms.txt";
 
 pub(crate) fn api_base_uses_localhost(raw: &str) -> bool {
     let Ok(parsed) = url::Url::parse(raw) else {
@@ -20,6 +22,13 @@ pub(crate) fn api_base_uses_localhost(raw: &str) -> bool {
 pub fn resolve_openai_compatible_profile(
     profile: OpenAiCompatibleProfile,
 ) -> ResolvedOpenAiCompatibleProfile {
+    resolve_openai_compatible_profile_with_api_key_hint(profile, None)
+}
+
+pub fn resolve_openai_compatible_profile_with_api_key_hint(
+    profile: OpenAiCompatibleProfile,
+    api_key_hint: Option<&str>,
+) -> ResolvedOpenAiCompatibleProfile {
     let mut resolved = ResolvedOpenAiCompatibleProfile {
         id: profile.id.to_string(),
         display_name: profile.display_name.to_string(),
@@ -30,6 +39,8 @@ pub fn resolve_openai_compatible_profile(
         default_model: profile.default_model.map(ToString::to_string),
         requires_api_key: profile.requires_api_key,
     };
+
+    apply_profile_key_based_endpoint_overrides(profile, &mut resolved, api_key_hint);
 
     if profile.id != OPENAI_COMPAT_PROFILE.id {
         return resolved;
@@ -83,6 +94,31 @@ pub fn resolve_openai_compatible_profile(
     resolved
 }
 
+fn apply_profile_key_based_endpoint_overrides(
+    profile: OpenAiCompatibleProfile,
+    resolved: &mut ResolvedOpenAiCompatibleProfile,
+    api_key_hint: Option<&str>,
+) {
+    if profile.id != MINIMAX_PROFILE.id {
+        return;
+    }
+
+    let key = api_key_hint
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| load_env_value_from_env_or_config(profile.api_key_env, profile.env_file));
+
+    if key
+        .as_deref()
+        .map(|key| key.trim_start().starts_with("sk-cp-"))
+        .unwrap_or(false)
+    {
+        resolved.api_base = MINIMAX_CHINA_API_BASE.to_string();
+        resolved.setup_url = MINIMAX_CHINA_SETUP_URL.to_string();
+    }
+}
+
 pub fn resolve_openai_compatible_profile_selection(input: &str) -> Option<OpenAiCompatibleProfile> {
     let provider = resolve_login_provider(input)?;
     match provider.target {
@@ -116,9 +152,7 @@ pub fn active_openai_compatible_display_name() -> Option<String> {
         .filter(|value| !value.is_empty())
         .or_else(|| env_override("JCODE_OPENAI_COMPAT_API_BASE"));
 
-    let Some(api_base) = api_base.and_then(|value| normalize_api_base(&value)) else {
-        return None;
-    };
+    let api_base = api_base.and_then(|value| normalize_api_base(&value))?;
 
     for profile in openai_compatible_profiles().iter().copied() {
         if normalize_api_base(profile.api_base).as_deref() == Some(api_base.as_str()) {
@@ -135,6 +169,12 @@ pub fn active_openai_compatible_display_name() -> Option<String> {
 
 pub fn runtime_provider_display_name(provider_name: &str) -> String {
     if provider_name.eq_ignore_ascii_case("openrouter") {
+        if let Ok(runtime_provider) = std::env::var("JCODE_RUNTIME_PROVIDER")
+            && runtime_provider.trim().eq_ignore_ascii_case("azure-openai")
+        {
+            return "Azure OpenAI".to_string();
+        }
+
         active_openai_compatible_display_name().unwrap_or_else(|| "OpenRouter".to_string())
     } else {
         provider_name.to_string()
@@ -183,11 +223,55 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
         }
     };
 
-    if let Some(default_model) = profile.default_model {
-        push(default_model);
-    }
-
     match profile.id {
+        "opencode" => {
+            push("minimax-m2.7");
+            push("kimi-k2.5");
+            push("glm-4.7");
+            push("glm-5");
+            push("claude-haiku-4-5");
+            push("gpt-5.1-codex-max");
+        }
+        "opencode-go" => {
+            push("minimax-m2.7");
+            push("kimi-k2.5");
+            push("glm-5");
+            push("glm-5.1");
+            push("deepseek-v4-flash");
+            push("qwen3.5-plus");
+        }
+        "zai" => {
+            push("glm-4.5");
+            push("glm-4.7");
+            push("glm-5");
+            push("glm-5.1");
+            push("glm-4.7-flash");
+            push("glm-4.7-flashx");
+        }
+        "302ai" => {
+            push("qwen3-235b-a22b-instruct-2507");
+            push("glm-4.7");
+            push("glm-5.1");
+            push("MiniMax-M2");
+            push("kimi-k2-0905-preview");
+            push("claude-haiku-4-5");
+        }
+        "baseten" => {
+            push("zai-org/GLM-4.7");
+            push("zai-org/GLM-5");
+            push("openai/gpt-oss-120b");
+            push("moonshotai/Kimi-K2.6");
+            push("moonshotai/Kimi-K2.5");
+            push("deepseek-ai/DeepSeek-V4-Pro");
+        }
+        "cortecs" => {
+            push("minimax-m2.7");
+            push("kimi-k2.5");
+            push("glm-4.7");
+            push("glm-5");
+            push("claude-haiku-4-5");
+            push("qwen3-235b-a22b-instruct-2507");
+        }
         // Issue #79: DeepSeek's live model catalog is not always available during
         // TUI startup, but both models should still be selectable once the direct
         // provider is configured.
@@ -208,12 +292,96 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
         }
         "kimi" => {
             push("kimi-for-coding");
+            push("kimi-k2.5");
+            push("kimi-k2.6");
+            push("kimi-k2-thinking");
+            push("kimi-k2-thinking-turbo");
+        }
+        "firmware" => {
+            push("kimi-k2.5");
+            push("zai-glm-5-1");
+            push("claude-haiku-4-5");
+            push("claude-sonnet-4-6");
+            push("grok-code-fast-1");
+            push("gemini-2.5-flash");
+        }
+        "huggingface" => {
+            push("Qwen/Qwen3-Coder-480B-A35B-Instruct");
+            push("Qwen/Qwen3-Coder-Next");
+            push("zai-org/GLM-4.7");
+            push("zai-org/GLM-5.1");
+            push("deepseek-ai/DeepSeek-V3.2");
+            push("openai/gpt-oss-120b");
+        }
+        "moonshotai" => {
+            push("kimi-k2.5");
+            push("kimi-k2.6");
+            push("kimi-k2-thinking");
+            push("kimi-k2-thinking-turbo");
+            push("kimi-k2-turbo-preview");
+        }
+        "nebius" => {
+            push("openai/gpt-oss-120b");
+            push("Qwen/Qwen3-235B-A22B-Instruct-2507");
+            push("Qwen/Qwen3.5-397B-A17B");
+            push("zai-org/GLM-5");
+            push("meta-llama/Llama-3.3-70B-Instruct");
+            push("NousResearch/Hermes-4-70B");
+        }
+        "scaleway" => {
+            push("qwen3-coder-30b-a3b-instruct");
+            push("qwen3-235b-a22b-instruct-2507");
+            push("qwen3.5-397b-a17b");
+            push("gpt-oss-120b");
+            push("mistral-small-3.2-24b-instruct-2506");
+            push("llama-3.3-70b-instruct");
+        }
+        "stackit" => {
+            push("openai/gpt-oss-120b");
+            push("Qwen/Qwen3-VL-235B-A22B-Instruct-FP8");
+            push("cortecs/Llama-3.3-70B-Instruct-FP8-Dynamic");
+            push("neuralmagic/Meta-Llama-3.1-8B-Instruct-FP8");
+            push("google/gemma-3-27b-it");
+        }
+        "perplexity" => {
+            push("sonar");
+            push("sonar-pro");
+            push("sonar-reasoning-pro");
+            push("sonar-deep-research");
+        }
+        "deepinfra" => {
+            push("moonshotai/Kimi-K2-Instruct");
+            push("Qwen/Qwen3-Coder-480B-A35B-Instruct");
+            push("Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo");
+            push("zai-org/GLM-4.7");
+            push("zai-org/GLM-5.1");
+            push("meta-llama/Llama-3.1-70B-Instruct");
+        }
+        "fireworks" => {
+            push("accounts/fireworks/routers/kimi-k2p5-turbo");
+            push("accounts/fireworks/models/kimi-k2p5");
+            push("accounts/fireworks/models/kimi-k2p6");
+            push("accounts/fireworks/models/glm-4p7");
+            push("accounts/fireworks/models/glm-5p1");
+            push("accounts/fireworks/models/deepseek-v3p2");
+        }
+        "cerebras" => {
+            push("qwen-3-235b-a22b-instruct-2507");
+            push("llama3.1-8b");
+        }
+        "xiaomi-mimo" => {
+            push("mimo-v2.5");
+            push("mimo-v2.5-pro");
+            push("mimo-v2-pro");
+            push("mimo-v2-flash");
+            push("mimo-v2-omni");
         }
         // MiniMax's `/models` endpoint is authenticated and live, but post-login
         // model activation should not depend on the catalog refresh completing
         // before the picker/routes are rebuilt. Keep the documented text models
         // selectable immediately after saving a key.
         "minimax" => {
+            push("MiniMax-M2.7");
             push("MiniMax-M2.7-highspeed");
             push("MiniMax-M2.5");
             push("MiniMax-M2.5-highspeed");
@@ -221,10 +389,34 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
             push("MiniMax-M2.1-highspeed");
             push("MiniMax-M2");
         }
+        "alibaba-coding-plan" => {
+            push("qwen3-coder-plus");
+            push("qwen3.5-plus");
+            push("qwen3-max-2026-01-23");
+            push("qwen3-coder-next");
+            push("glm-5");
+            push("glm-4.7");
+            push("kimi-k2.5");
+            push("MiniMax-M2.5");
+        }
         _ => {}
     }
 
     models
+}
+
+pub fn openai_compatible_profile_model_supports_chat(profile_id: &str, model: &str) -> bool {
+    let profile_id = profile_id.trim().to_ascii_lowercase();
+    let model = model.trim().to_ascii_lowercase();
+
+    match profile_id.as_str() {
+        // Cerebras currently exposes these preview/reasoning IDs from GET /models
+        // for some keys, but POST /chat/completions returns model_not_found for
+        // the same key. Keep them out of the picker until the provider catalog
+        // exposes enough metadata to distinguish listable from chat-usable models.
+        "cerebras" if matches!(model.as_str(), "gpt-oss-120b" | "zai-glm-4.7") => false,
+        _ => true,
+    }
 }
 
 pub fn openai_compatible_profile_static_context_limits(
@@ -327,8 +519,8 @@ fn inline_key_env_name(profile_name: &str) -> String {
 }
 
 pub fn apply_named_provider_profile_env(profile_name: &str) -> anyhow::Result<String> {
-    let config = crate::config::config();
-    apply_named_provider_profile_env_from_config(profile_name, config)
+    let config = crate::config::Config::load_strict()?;
+    apply_named_provider_profile_env_from_config(profile_name, &config)
 }
 
 pub fn apply_named_provider_profile_env_from_config(

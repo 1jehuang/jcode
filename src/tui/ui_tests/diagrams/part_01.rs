@@ -320,9 +320,9 @@ fn test_estimate_pinned_diagram_pane_height_tall_image() {
 
 #[test]
 fn test_side_panel_layout_ratio_capping() {
-    // Test that diagram_width respects the ratio cap.
-    // area = 120 cols, ratio = 50% -> cap = 60
-    // If estimated pane width > 60, it should be capped at 60.
+    // Test that diagram_width respects the auto-width cap.
+    // area = 120 cols, cap = 75% -> cap = 90
+    // If estimated pane width exceeds 90, it should be capped at 90.
     let diagram = info_widget::DiagramInfo {
         hash: 20,
         width: 2000,
@@ -330,8 +330,8 @@ fn test_side_panel_layout_ratio_capping() {
         label: None,
     };
     let area_width: u16 = 120;
-    let ratio: u32 = 50;
-    let ratio_cap = ((area_width as u32 * ratio) / 100) as u16;
+    let auto_cap_percent: u32 = 75;
+    let ratio_cap = ((area_width as u32 * auto_cap_percent) / 100) as u16;
     let min_diagram_width: u16 = 24;
     let min_chat_width: u16 = 20;
     let max_diagram = area_width.saturating_sub(min_chat_width);

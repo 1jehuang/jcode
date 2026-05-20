@@ -136,6 +136,27 @@ struct UsageReport {
 }
 
 pub(super) fn run_auth_status_command(emit_json: bool) -> Result<()> {
+    let report = build_auth_status_report();
+    if emit_json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for provider in report.providers {
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                provider.id,
+                provider.status,
+                provider.auth_kind,
+                provider.method,
+                provider.health,
+                provider.validation.as_deref().unwrap_or("not validated")
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn build_auth_status_report() -> AuthStatusReport {
     let status = crate::auth::AuthStatus::check();
     let validation = crate::auth::validation::load_all();
     let providers = crate::provider_catalog::auth_status_login_providers();
@@ -166,27 +187,10 @@ pub(super) fn run_auth_status_command(emit_json: bool) -> Result<()> {
         })
         .collect::<Vec<_>>();
 
-    if emit_json {
-        let report = AuthStatusReport {
-            any_available: status.has_any_available(),
-            providers: reports,
-        };
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        for provider in reports {
-            println!(
-                "{}\t{}\t{}\t{}\t{}\t{}",
-                provider.id,
-                provider.status,
-                provider.auth_kind,
-                provider.method,
-                provider.health,
-                provider.validation.as_deref().unwrap_or("not validated")
-            );
-        }
+    AuthStatusReport {
+        any_available: status.has_any_available(),
+        providers: reports,
     }
-
-    Ok(())
 }
 
 pub(super) async fn run_auth_doctor_command(
@@ -194,13 +198,69 @@ pub(super) async fn run_auth_doctor_command(
     validate: bool,
     emit_json: bool,
 ) -> Result<()> {
+    let report = build_auth_doctor_report(provider_arg, validate).await?;
+
+    if emit_json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    for (index, provider) in report.providers.iter().enumerate() {
+        if index > 0 {
+            println!();
+        }
+        println!("{} ({})", provider.display_name, provider.id);
+        println!("auth_kind: {}", provider.auth_kind);
+        println!("status: {}", provider.status);
+        println!("method: {}", provider.method);
+        println!("health: {}", provider.health);
+        println!(
+            "credential_source: {} ({})",
+            provider.credential_source, provider.credential_source_detail
+        );
+        println!("expiry: {}", provider.expiry_confidence);
+        println!("refresh: {}", provider.refresh_support);
+        println!("validation_method: {}", provider.validation_method);
+        println!(
+            "last_refresh: {}",
+            provider.last_refresh.as_deref().unwrap_or("not recorded")
+        );
+        println!(
+            "validation: {}",
+            provider.validation.as_deref().unwrap_or("not validated")
+        );
+        if let Some(validation_result) = provider.validation_result.as_deref() {
+            println!("validation_run: {}", validation_result);
+        }
+        println!("needs_attention: {}", provider.needs_attention);
+        if !provider.diagnostics.is_empty() {
+            println!("diagnostics:");
+            for diagnostic in &provider.diagnostics {
+                println!("- {}", diagnostic);
+            }
+        }
+        if !provider.recommended_actions.is_empty() {
+            println!("next_steps:");
+            for action in &provider.recommended_actions {
+                println!("- {}", action);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn build_auth_doctor_report(
+    provider_arg: Option<&str>,
+    validate: bool,
+) -> Result<AuthDoctorReport> {
     let mut status = crate::auth::AuthStatus::check();
     let providers = select_auth_doctor_providers(provider_arg, &status)?;
     let mut reports = Vec::new();
 
     for provider in providers {
-        let state = status.state_for_provider(provider);
-        let validation_result = if validate && state != crate::auth::AuthState::NotConfigured {
+        let pre_validation_assessment = status.assessment_for_provider(provider);
+        let validation_result = if validate && pre_validation_assessment.is_configured() {
             Some(run_auth_doctor_validation(provider).await)
         } else {
             None
@@ -267,61 +327,12 @@ pub(super) async fn run_auth_doctor_command(
         });
     }
 
-    let report = AuthDoctorReport {
+    Ok(AuthDoctorReport {
         checked_provider: provider_arg.map(str::to_string),
         validate,
         any_issue: reports.iter().any(|provider| provider.needs_attention),
         providers: reports,
-    };
-
-    if emit_json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-        return Ok(());
-    }
-
-    for (index, provider) in report.providers.iter().enumerate() {
-        if index > 0 {
-            println!();
-        }
-        println!("{} ({})", provider.display_name, provider.id);
-        println!("auth_kind: {}", provider.auth_kind);
-        println!("status: {}", provider.status);
-        println!("method: {}", provider.method);
-        println!("health: {}", provider.health);
-        println!(
-            "credential_source: {} ({})",
-            provider.credential_source, provider.credential_source_detail
-        );
-        println!("expiry: {}", provider.expiry_confidence);
-        println!("refresh: {}", provider.refresh_support);
-        println!("validation_method: {}", provider.validation_method);
-        println!(
-            "last_refresh: {}",
-            provider.last_refresh.as_deref().unwrap_or("not recorded")
-        );
-        println!(
-            "validation: {}",
-            provider.validation.as_deref().unwrap_or("not validated")
-        );
-        if let Some(validation_result) = provider.validation_result.as_deref() {
-            println!("validation_run: {}", validation_result);
-        }
-        println!("needs_attention: {}", provider.needs_attention);
-        if !provider.diagnostics.is_empty() {
-            println!("diagnostics:");
-            for diagnostic in &provider.diagnostics {
-                println!("- {}", diagnostic);
-            }
-        }
-        if !provider.recommended_actions.is_empty() {
-            println!("next_steps:");
-            for action in &provider.recommended_actions {
-                println!("- {}", action);
-            }
-        }
-    }
-
-    Ok(())
+    })
 }
 
 async fn run_auth_doctor_validation(
@@ -517,9 +528,7 @@ fn select_auth_doctor_providers(
 
     let configured = crate::provider_catalog::auth_status_login_providers()
         .into_iter()
-        .filter(|provider| {
-            status.state_for_provider(*provider) != crate::auth::AuthState::NotConfigured
-        })
+        .filter(|provider| status.assessment_for_provider(*provider).is_configured())
         .collect::<Vec<_>>();
     if configured.is_empty() {
         Ok(crate::provider_catalog::auth_status_login_providers().to_vec())
@@ -613,5 +622,147 @@ fn auth_state_label(state: crate::auth::AuthState) -> &'static str {
         crate::auth::AuthState::Available => "available",
         crate::auth::AuthState::Expired => "expired",
         crate::auth::AuthState::NotConfigured => "not_configured",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider_status<'a>(
+        report: &'a AuthStatusReport,
+        provider_id: &str,
+    ) -> &'a AuthStatusProviderReport {
+        report
+            .providers
+            .iter()
+            .find(|provider| provider.id == provider_id)
+            .unwrap_or_else(|| panic!("missing auth status provider `{}`", provider_id))
+    }
+
+    fn provider_doctor<'a>(
+        report: &'a AuthDoctorReport,
+        provider_id: &str,
+    ) -> &'a AuthDoctorProviderReport {
+        report
+            .providers
+            .iter()
+            .find(|provider| provider.id == provider_id)
+            .unwrap_or_else(|| panic!("missing auth doctor provider `{}`", provider_id))
+    }
+
+    #[tokio::test]
+    async fn cli_auth_status_doctor_and_login_lifecycle_uses_fresh_sandbox() {
+        let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+        let provider = crate::provider_catalog::CEREBRAS_LOGIN_PROVIDER;
+        let profile = crate::provider_catalog::CEREBRAS_PROFILE;
+        let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+        let env_file = sandbox.env_file_path(&resolved.env_file);
+
+        assert!(
+            !env_file.exists(),
+            "fresh CLI sandbox should start without {}",
+            env_file.display()
+        );
+        crate::auth::AuthStatus::invalidate_cache();
+
+        let before_status = build_auth_status_report();
+        let before_cerebras = provider_status(&before_status, provider.id);
+        assert_eq!(before_cerebras.status, "not_configured");
+        assert_eq!(before_cerebras.auth_kind, "API key");
+        assert_eq!(before_cerebras.credential_source, "none");
+        assert_eq!(before_cerebras.method, "not configured");
+
+        let before_doctor = build_auth_doctor_report(Some(provider.id), false)
+            .await
+            .expect("doctor before login");
+        assert_eq!(before_doctor.checked_provider.as_deref(), Some(provider.id));
+        assert!(before_doctor.any_issue);
+        let before_doctor_provider = provider_doctor(&before_doctor, provider.id);
+        assert_eq!(before_doctor_provider.status, "not_configured");
+        assert!(before_doctor_provider.needs_attention);
+        assert!(before_doctor_provider.diagnostics.iter().any(|line| {
+            line == &format!("{} is not configured for jcode yet.", provider.display_name)
+        }));
+        assert!(
+            before_doctor_provider
+                .recommended_actions
+                .iter()
+                .any(|line| {
+                    line == &format!("Connect it: `jcode login --provider {}`", provider.id)
+                })
+        );
+
+        crate::cli::login::run_login(
+            &crate::cli::provider_init::ProviderChoice::Cerebras,
+            None,
+            crate::cli::login::LoginOptions {
+                no_validate: true,
+                openai_compatible_api_key: Some("test-cerebras-cli-key".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("CLI login should save Cerebras key in sandbox");
+
+        assert!(
+            env_file.exists(),
+            "CLI login should create provider env file"
+        );
+        assert_eq!(
+            crate::provider_catalog::load_api_key_from_env_or_config(
+                &resolved.api_key_env,
+                &resolved.env_file,
+            )
+            .as_deref(),
+            Some("test-cerebras-cli-key")
+        );
+        crate::env::remove_var(&resolved.api_key_env);
+        crate::auth::AuthStatus::invalidate_cache();
+
+        let after_status = build_auth_status_report();
+        let after_cerebras = provider_status(&after_status, provider.id);
+        assert!(after_status.any_available);
+        assert_eq!(after_cerebras.status, "available");
+        assert_eq!(after_cerebras.auth_kind, "API key");
+        assert_eq!(after_cerebras.credential_source, "app config file");
+        assert!(after_cerebras.method.contains(&resolved.api_key_env));
+        assert!(
+            after_cerebras.health.contains(&resolved.env_file),
+            "status should show the sandbox env-file-backed source detail: {:?}",
+            after_cerebras
+        );
+
+        let after_doctor = build_auth_doctor_report(Some(provider.id), false)
+            .await
+            .expect("doctor after login");
+        assert_eq!(after_doctor.checked_provider.as_deref(), Some(provider.id));
+        let after_doctor_provider = provider_doctor(&after_doctor, provider.id);
+        assert_eq!(after_doctor_provider.status, "available");
+        assert_eq!(after_doctor_provider.credential_source, "app config file");
+        assert!(after_doctor_provider.needs_attention);
+        assert!(
+            after_doctor_provider
+                .diagnostics
+                .iter()
+                .any(|line| { line == "No runtime validation has been recorded." })
+        );
+        assert!(
+            after_doctor_provider
+                .recommended_actions
+                .iter()
+                .any(|line| {
+                    line == &format!(
+                        "Run runtime verification: `jcode auth-test --provider {}`",
+                        provider.id
+                    )
+                })
+        );
+        assert!(
+            after_doctor_provider
+                .recommended_actions
+                .iter()
+                .any(|line| { line == "Review current state: `jcode auth status --json`" })
+        );
     }
 }

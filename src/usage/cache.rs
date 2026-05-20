@@ -1,4 +1,4 @@
-use super::openai_helpers::{classify_openai_limits, normalize_ratio};
+use super::openai_helpers::{classify_openai_limits, usage_percent_to_ratio};
 use super::{AccountUsageSnapshot, OpenAIUsageData, ProviderUsage, UsageData, UsageLimit};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -193,14 +193,14 @@ pub(super) fn usage_data_from_provider_report(report: &ProviderUsage) -> UsageDa
 
     UsageData {
         five_hour: five_hour
-            .map(|limit| normalize_ratio(limit.usage_percent))
+            .map(|limit| usage_percent_to_ratio(limit.usage_percent))
             .unwrap_or(0.0),
         five_hour_resets_at: five_hour.and_then(|limit| limit.resets_at.clone()),
         seven_day: seven_day
-            .map(|limit| normalize_ratio(limit.usage_percent))
+            .map(|limit| usage_percent_to_ratio(limit.usage_percent))
             .unwrap_or(0.0),
         seven_day_resets_at: seven_day.and_then(|limit| limit.resets_at.clone()),
-        seven_day_opus: seven_day_opus.map(|limit| normalize_ratio(limit.usage_percent)),
+        seven_day_opus: seven_day_opus.map(|limit| usage_percent_to_ratio(limit.usage_percent)),
         extra_usage_enabled: extra_usage_enabled.unwrap_or(false),
         fetched_at: Some(Instant::now()),
         last_error: None,

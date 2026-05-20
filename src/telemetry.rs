@@ -545,6 +545,7 @@ fn infer_agent_role(state: &SessionTelemetry) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn infer_session_stop_reason(
     event_name: &'static str,
     reason: SessionEndReason,
@@ -784,6 +785,7 @@ pub fn record_command_family(command: &str) {
 
 fn post_payload(payload: serde_json::Value, timeout: Duration) -> bool {
     let client = match reqwest::blocking::Client::builder()
+        .user_agent(crate::provider::JCODE_USER_AGENT)
         .timeout(timeout)
         .build()
     {
@@ -1175,6 +1177,7 @@ pub fn record_provider_selected(provider: &str) {
 }
 
 pub fn record_auth_started(provider: &str, method: &str) {
+    crate::logging::auth_event("auth_started", provider, &[("method", method)]);
     emit_onboarding_step("auth_started", Some(provider), Some(method), None);
 }
 
@@ -1183,18 +1186,30 @@ pub fn record_auth_failed(provider: &str, method: &str) {
 }
 
 pub fn record_auth_failed_reason(provider: &str, method: &str, reason: &str) {
+    crate::logging::auth_event(
+        "auth_failed",
+        provider,
+        &[("method", method), ("reason", reason)],
+    );
     emit_onboarding_step("auth_failed", Some(provider), Some(method), Some(reason));
 }
 
 pub fn record_auth_cancelled(provider: &str, method: &str) {
+    crate::logging::auth_event("auth_cancelled", provider, &[("method", method)]);
     emit_onboarding_step("auth_cancelled", Some(provider), Some(method), None);
 }
 
 pub fn record_auth_surface_blocked(provider: &str, method: &str) {
+    crate::logging::auth_event("auth_surface_blocked", provider, &[("method", method)]);
     emit_onboarding_step("auth_surface_blocked", Some(provider), Some(method), None);
 }
 
 pub fn record_auth_surface_blocked_reason(provider: &str, method: &str, reason: &str) {
+    crate::logging::auth_event(
+        "auth_surface_blocked",
+        provider,
+        &[("method", method), ("reason", reason)],
+    );
     emit_onboarding_step(
         "auth_surface_blocked",
         Some(provider),
@@ -1204,6 +1219,7 @@ pub fn record_auth_surface_blocked_reason(provider: &str, method: &str, reason: 
 }
 
 pub fn record_auth_success(provider: &str, method: &str) {
+    crate::logging::auth_event("auth_success", provider, &[("method", method)]);
     if !is_enabled() {
         return;
     }

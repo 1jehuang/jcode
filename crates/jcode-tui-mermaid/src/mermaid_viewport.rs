@@ -14,6 +14,15 @@ fn load_source_image(hash: u64, path: &Path) -> Option<Arc<DynamicImage>> {
     Some(Arc::new(img))
 }
 
+pub(super) fn viewport_crop_should_scale_to_area(
+    crop_w: u32,
+    crop_h: u32,
+    view_w_px: u32,
+    view_h_px: u32,
+) -> bool {
+    crop_w == view_w_px && crop_h == view_h_px
+}
+
 fn kitty_viewport_unique_id(hash: u64) -> u32 {
     let mixed = (hash as u32) ^ ((hash >> 32) as u32) ^ 0x4B49_5459;
     mixed.max(1)
@@ -78,11 +87,10 @@ fn kitty_scaled_image_for_zoom(source: &DynamicImage, zoom_percent: u8) -> Dynam
 }
 
 fn div_ceil_u32_local(value: u32, divisor: u32) -> u32 {
-    if divisor == 0 {
-        value
-    } else {
-        value.saturating_add(divisor - 1) / divisor
-    }
+    value
+        .saturating_add(divisor.saturating_sub(1))
+        .checked_div(divisor)
+        .unwrap_or(value)
 }
 
 fn kitty_full_rect_for_image(img: &DynamicImage, font_size: (u16, u16)) -> (u16, u16) {
@@ -560,6 +568,31 @@ pub fn render_image_widget_viewport(
     zoom_percent: u8,
     draw_border: bool,
 ) -> u16 {
+    render_image_widget_viewport_precise(
+        hash,
+        area,
+        buf,
+        scroll_x,
+        scroll_y,
+        zoom_percent as u16,
+        draw_border,
+    )
+}
+
+/// Render a cropped viewport of an image using a wider zoom range than the
+/// interactive user zoom. This is used by automatic fit-fill layouts where a
+/// very wide or very short diagram needs more than 200% zoom before the crop
+/// has the same aspect ratio as the pane. The manual public viewport keeps the
+/// historical u8/200% behavior; this path is intentionally opt-in.
+pub fn render_image_widget_viewport_precise(
+    hash: u64,
+    area: Rect,
+    buf: &mut Buffer,
+    scroll_x: i32,
+    scroll_y: i32,
+    zoom_percent: u16,
+    draw_border: bool,
+) -> u16 {
     if VIDEO_EXPORT_MODE.load(Ordering::Relaxed) {
         return area.height;
     }
@@ -608,7 +641,7 @@ pub fn render_image_widget_viewport(
     };
 
     let font_size = picker.font_size();
-    let zoom = zoom_percent.clamp(50, 200) as u32;
+    let zoom = zoom_percent.clamp(50, 1000) as u32;
     let view_w_px = (image_area.width as u32)
         .saturating_mul(font_size.0 as u32)
         .saturating_mul(100)
@@ -626,8 +659,8 @@ pub fn render_image_widget_viewport(
     let max_scroll_x = img_width.saturating_sub(view_w_px);
     let max_scroll_y = img_height.saturating_sub(view_h_px);
 
-    let cell_w_px = (font_size.0 as u32).saturating_mul(100) / zoom;
-    let cell_h_px = (font_size.1 as u32).saturating_mul(100) / zoom;
+    let cell_w_px = ((font_size.0 as u32).saturating_mul(100) / zoom).max(1);
+    let cell_h_px = ((font_size.1 as u32).saturating_mul(100) / zoom).max(1);
     let scroll_x_px = (scroll_x.max(0) as u32)
         .saturating_mul(cell_w_px)
         .min(max_scroll_x);
@@ -640,6 +673,19 @@ pub fn render_image_widget_viewport(
     if crop_w == 0 || crop_h == 0 {
         return 0;
     }
+    let viewport_resize = || {
+        if viewport_crop_should_scale_to_area(crop_w, crop_h, view_w_px, view_h_px) {
+            // A viewport crop is intentionally smaller than the destination
+            // cell area when zoomed in. Scale it back up to the destination,
+            // otherwise Resize::Fit leaves the crop at source pixel size and
+            // the pane visually stays tiny despite a fit-fill plan.
+            Resize::Scale(None)
+        } else {
+            // If the requested viewport is larger than the source image on an
+            // axis, preserve aspect ratio instead of stretching the full image.
+            Resize::Fit(None)
+        }
+    };
 
     let viewport = ViewportState {
         scroll_x_px,
@@ -648,12 +694,13 @@ pub fn render_image_widget_viewport(
         view_h_px,
     };
 
-    if picker.protocol_type() == ProtocolType::Kitty
+    if zoom_percent <= 200
+        && picker.protocol_type() == ProtocolType::Kitty
         && let Some((_, full_cols, full_rows)) = ensure_kitty_viewport_state(
             hash,
             &source_path,
             source.as_ref(),
-            zoom_percent,
+            zoom_percent as u8,
             font_size,
         )
     {
@@ -711,7 +758,7 @@ pub fn render_image_widget_viewport(
                 image_area,
                 buf,
                 &mut img_state.protocol,
-                Resize::Fit(None),
+                viewport_resize(),
             ) {
                 return 0;
             }
@@ -747,7 +794,7 @@ pub fn render_image_widget_viewport(
             image_area,
             buf,
             &mut img_state.protocol,
-            Resize::Fit(None),
+            viewport_resize(),
         ) {
             return 0;
         }

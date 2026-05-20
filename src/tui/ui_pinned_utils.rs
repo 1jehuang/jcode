@@ -1,5 +1,4 @@
 use super::*;
-use crate::tui::mermaid;
 use std::collections::VecDeque;
 
 pub(super) fn lru_touch<K: PartialEq>(order: &mut VecDeque<K>, key: &K) {
@@ -49,29 +48,4 @@ pub(super) fn compact_image_label(label: &str) -> String {
             .join("/");
     }
     label.to_string()
-}
-
-pub(super) fn div_ceil_u32_local(value: u32, divisor: u32) -> u32 {
-    if divisor == 0 {
-        return value;
-    }
-    value.saturating_add(divisor - 1) / divisor
-}
-
-pub(super) fn estimate_inline_image_rows(
-    img_w: u32,
-    img_h: u32,
-    pane_width: u16,
-    pane_height: u16,
-) -> u16 {
-    let inner_width = pane_width.max(1) as u32;
-    let (cell_w, cell_h) = mermaid::get_font_size().unwrap_or((8, 16));
-    let cell_w = cell_w.max(1) as u32;
-    let cell_h = cell_h.max(1) as u32;
-    let width_px = inner_width.saturating_mul(cell_w);
-    let scaled_height_px = div_ceil_u32_local(img_h.max(1).saturating_mul(width_px), img_w.max(1));
-    let rows = div_ceil_u32_local(scaled_height_px, cell_h)
-        .max(SIDE_PANEL_INLINE_IMAGE_MIN_ROWS as u32)
-        .min(pane_height.max(SIDE_PANEL_INLINE_IMAGE_MIN_ROWS) as u32);
-    rows as u16
 }

@@ -52,17 +52,41 @@ fn test_refresh_model_list_command_shows_summary_and_status_notice() {
         model_count_after: 15,
         models_added: 3,
         models_removed: 0,
+        models_added_names: vec![
+            "cerebras-fast".to_string(),
+            "cerebras-large".to_string(),
+            "cerebras-reasoning".to_string(),
+        ],
+        models_removed_names: Vec::new(),
         route_count_before: 20,
         route_count_after: 29,
         routes_added: 9,
         routes_removed: 0,
         routes_changed: 2,
     });
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut bus_rx = crate::bus::Bus::global().subscribe();
+    while bus_rx.try_recv().is_ok() {}
 
     assert!(super::model_context::handle_model_command(
         &mut app,
         "/refresh-model-list"
     ));
+
+    rt.block_on(async {
+        loop {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(2), bus_rx.recv())
+                .await
+                .expect("timed out waiting for model refresh bus event")
+                .expect("bus should stay open");
+            let saw_completion = matches!(event, crate::bus::BusEvent::ModelRefreshCompleted(_));
+            super::local::handle_bus_event(&mut app, Ok(event));
+            if saw_completion {
+                break;
+            }
+        }
+    });
 
     assert_eq!(
         app.status_notice(),
@@ -74,6 +98,13 @@ fn test_refresh_model_list_command_shows_summary_and_status_notice() {
     assert!(last.content.contains("**Model List Refresh Complete**"));
     assert!(last.content.contains("Models: 12 → 15  (+3 / -0)"));
     assert!(last.content.contains("Routes: 20 → 29  (+9 / -0 / ~2)"));
+    assert!(last.content.contains("Added models:"));
+    assert!(last.content.contains("`cerebras-fast`"));
+    assert!(last.content.contains("`cerebras-large`"));
+    assert!(last.content.contains("`cerebras-reasoning`"));
+    assert!(app.display_messages.iter().any(|message| {
+        message.role == "system" && message.content.contains("**Model List Refresh Started**")
+    }));
 }
 
 #[test]
@@ -139,6 +170,37 @@ fn test_remote_available_models_updated_after_refresh_shows_summary_and_updates_
     assert!(last.content.contains("**Model List Refresh Complete**"));
     assert!(last.content.contains("Models: 1 → 2  (+1 / -0)"));
     assert!(last.content.contains("Routes: 1 → 2  (+1 / -0 / ~1)"));
+    assert!(last.content.contains("Added models: `new-model`"));
+}
+
+#[test]
+fn test_remote_runtime_activity_notification_renders_as_system_message() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Notification {
+            from_session: "jcode".to_string(),
+            from_name: Some("Jcode".to_string()),
+            notification_type: crate::protocol::NotificationType::Message {
+                scope: Some("auth_activity".to_string()),
+                channel: None,
+            },
+            message: "**Auth Change Received**\n\nThe server is refreshing provider credentials."
+                .to_string(),
+        },
+        &mut remote,
+    );
+
+    let last = app.display_messages.last().expect("display message");
+    assert_eq!(last.role, "system");
+    assert!(last.content.contains("Auth Change Received"));
+    assert_eq!(
+        app.status_notice(),
+        Some("Auth Change Received".to_string())
+    );
 }
 
 #[test]
