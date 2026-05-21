@@ -1,0 +1,164 @@
+{
+  "name": "carpai",
+  "displayName": "CarpAI",
+  "description": "AI-powered coding assistant with advanced code completion, collaboration, and debugging",
+  "version": "0.1.0",
+  "publisher": "CarpAI",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "AI",
+    "Code Assistants",
+    "Debuggers",
+    "Extension Packs"
+  ],
+  "keywords": [
+    "AI",
+    "code completion",
+    "LLM",
+    "debugging",
+    "collaboration"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:carpai.complete",
+    "onCommand:carpai.chat",
+    "onCommand:carpai.debug.start",
+    "onCommand:carpai.review"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "CarpAI",
+      "properties": {
+        "carpai.server.url": {
+          "type": "string",
+          "default": "http://localhost:8080",
+          "description": "URL of the CarpAI server"
+        },
+        "carpai.completion.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable AI code completion"
+        },
+        "carpai.completion.triggerCharacters": {
+          "type": "array",
+          "default": [".", "(", "[", "\"", "'"],
+          "description": "Characters that trigger completion"
+        },
+        "carpai.debug.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable DAP debugging"
+        },
+        "carpai.collaboration.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable real-time collaboration"
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "carpai.complete",
+        "title": "CarpAI: Complete Code",
+        "category": "CarpAI"
+      },
+      {
+        "command": "carpai.chat",
+        "title": "CarpAI: Open Chat",
+        "category": "CarpAI"
+      },
+      {
+        "command": "carpai.debug.start",
+        "title": "CarpAI: Start Debugging",
+        "category": "CarpAI"
+      },
+      {
+        "command": "carpai.review",
+        "title": "CarpAI: Code Review",
+        "category": "CarpAI"
+      },
+      {
+        "command": "carpai.summarize",
+        "title": "CarpAI: Summarize Code",
+        "category": "CarpAI"
+      },
+      {
+        "command": "carpai.explain",
+        "title": "CarpAI: Explain Code",
+        "category": "CarpAI"
+      },
+      {
+        "command": "carpai.refactor",
+        "title": "CarpAI: Refactor Code",
+        "category": "CarpAI"
+      },
+      {
+        "command": "carpai.generateTests",
+        "title": "CarpAI: Generate Tests",
+        "category": "CarpAI"
+      },
+      {
+        "command": "carpai.config",
+        "title": "CarpAI: Configure",
+        "category": "CarpAI"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "carpai.complete",
+        "key": "Ctrl+Shift+Space",
+        "mac": "Cmd+Shift+Space",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "carpai.chat",
+        "key": "Ctrl+Shift+C",
+        "mac": "Cmd+Shift+C"
+      },
+      {
+        "command": "carpai.explain",
+        "key": "Ctrl+Shift+E",
+        "mac": "Cmd+Shift+E",
+        "when": "editorTextFocus && editorHasSelection"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "carpai.explain",
+          "when": "editorHasSelection",
+          "group": "CarpAI"
+        },
+        {
+          "command": "carpai.refactor",
+          "when": "editorHasSelection",
+          "group": "CarpAI"
+        },
+        {
+          "command": "carpai.generateTests",
+          "when": "editorHasSelection",
+          "group": "CarpAI"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.0.0",
+    "vscode-test": "^1.6.0"
+  },
+  "dependencies": {
+    "axios": "^1.4.0",
+    "ws": "^8.13.0"
+  }
+}
