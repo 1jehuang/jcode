@@ -803,6 +803,14 @@ impl RemoteConnection {
 
     /// Read the next event from the server.
     pub async fn next_event(&mut self) -> RemoteRead {
+        // Tolerate up to this many consecutive malformed frames before
+        // giving up. A single corrupt line on the wire used to take down
+        // every attached session, but skipping the bad frame and resyncing
+        // at the next `\n` boundary lets the connection survive a benign
+        // glitch (e.g. an unescaped newline from a buggy emitter, a stale
+        // half-buffer from a reload, etc.).
+        const MAX_CONSECUTIVE_MALFORMED_FRAMES: u32 = 16;
+        let mut malformed_in_a_row: u32 = 0;
         loop {
             self.line_buffer.clear();
             match self.reader.read_line(&mut self.line_buffer).await {
@@ -822,15 +830,40 @@ impl RemoteConnection {
                         continue;
                     }
                     match serde_json::from_str(&self.line_buffer) {
-                        Ok(event) => return RemoteRead::Event(event),
+                        Ok(event) => {
+                            malformed_in_a_row = 0;
+                            return RemoteRead::Event(event);
+                        }
                         Err(error) => {
+                            malformed_in_a_row = malformed_in_a_row.saturating_add(1);
+                            // Truncate the dump so the log isn't flooded by
+                            // multi-KB SwarmStatus payloads.
+                            let preview: String = self
+                                .line_buffer
+                                .chars()
+                                .take(240)
+                                .collect();
                             crate::logging::warn(&format!(
-                                "RemoteConnection::next_event: protocol error={} line={:?} (session_id={:?}, client_instance_id={:?})",
-                                error, self.line_buffer, self.session_id, self.client_instance_id
+                                "RemoteConnection::next_event: protocol error={} (consecutive_malformed={}, len={}) line_preview={:?} (session_id={:?}, client_instance_id={:?})",
+                                error,
+                                malformed_in_a_row,
+                                self.line_buffer.len(),
+                                preview,
+                                self.session_id,
+                                self.client_instance_id
                             ));
-                            return RemoteRead::Disconnected(RemoteDisconnectReason::Protocol(
-                                error.to_string(),
-                            ));
+                            if malformed_in_a_row >= MAX_CONSECUTIVE_MALFORMED_FRAMES {
+                                crate::logging::error(&format!(
+                                    "RemoteConnection::next_event: {} consecutive malformed frames; giving up to avoid a busy loop",
+                                    malformed_in_a_row
+                                ));
+                                return RemoteRead::Disconnected(
+                                    RemoteDisconnectReason::Protocol(error.to_string()),
+                                );
+                            }
+                            // Skip this corrupt frame and resync at the next
+                            // `\n` instead of tearing down the session.
+                            continue;
                         }
                     }
                 }

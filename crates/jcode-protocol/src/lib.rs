@@ -2089,11 +2089,48 @@ fn default_model_direction() -> i8 {
     1
 }
 
-/// Encode an event as a newline-terminated JSON string
+/// Encode an event as a newline-terminated JSON string.
+///
+/// Defends the line-delimited protocol against accidental raw-newline
+/// injection. A correctly-serialized JSON value contains no unescaped
+/// newline bytes; if one slips through (custom Display impl, hand-built
+/// JSON, etc.) the receiving side would resync mid-frame and see
+/// "invalid type / expected value" errors that crash sessions. Stripping
+/// embedded raw newlines here keeps the wire frame intact and surfaces
+/// the bug via the eprintln below without taking the client down.
 pub fn encode_event(event: &ServerEvent) -> String {
     let mut json = serde_json::to_string(event).unwrap_or_else(|_| "{}".to_string());
+    if json.as_bytes().contains(&b'\n') {
+        // This should be impossible with serde_json, but if it ever
+        // happens we'd rather log loudly and ship a still-parseable
+        // single-line frame than corrupt the wire.
+        eprintln!(
+            "jcode-protocol: encode_event produced embedded newline; stripping. event_kind={}",
+            event_kind_for_debug(event)
+        );
+        json = json.replace('\n', " ");
+    }
+    debug_assert!(
+        !json.as_bytes().contains(&b'\n'),
+        "encode_event must not produce embedded newlines"
+    );
     json.push('\n');
     json
+}
+
+fn event_kind_for_debug(event: &ServerEvent) -> &'static str {
+    match event {
+        ServerEvent::Ack { .. } => "Ack",
+        ServerEvent::Pong { .. } => "Pong",
+        ServerEvent::Error { .. } => "Error",
+        ServerEvent::Done { .. } => "Done",
+        ServerEvent::Interrupted => "Interrupted",
+        ServerEvent::TextDelta { .. } => "TextDelta",
+        ServerEvent::ToolStart { .. } => "ToolStart",
+        ServerEvent::ToolDone { .. } => "ToolDone",
+        ServerEvent::SwarmStatus { .. } => "SwarmStatus",
+        _ => "other",
+    }
 }
 
 /// Decode a request from a JSON string
