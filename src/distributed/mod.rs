@@ -37,6 +37,8 @@ pub mod integration;
 pub mod metrics;
 pub mod dashboard_api;
 pub mod grpc_comm;
+pub mod fault_tolerance;
+pub mod partition_tolerance;
 
 #[cfg(test)]
 mod integration_tests;
@@ -60,3 +62,8 @@ pub use integration::{
 };
 pub use metrics::{get_metrics, structured_log};
 pub use dashboard_api::{DashboardServer, DashboardConfig};
+pub use fault_tolerance::{FaultToleranceManager, FaultToleranceConfig, NodeHealthState};
+pub use partition_tolerance::{
+    PartitionDetector, PartitionDetectionConfig, LeaderFence, FenceConfig, AntiEntropySync,
+    VectorClock, PartitionEvent, PartitionStatus, LeaderValidation,
+};

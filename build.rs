@@ -10,7 +10,7 @@ fn main() {
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile(&["proto/jcode.proto"], &["proto/"])
+        .compile(&["proto/jcode.proto", "proto/distributed.proto"], &["proto/"])
         .expect("Failed to compile proto files. Ensure protoc is installed.");
 
     let pkg_version = env!("CARGO_PKG_VERSION");

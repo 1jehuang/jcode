@@ -2284,7 +2284,8 @@ pub async fn run_refactor_command(cmd: super::args::CodeRefactorCommand) -> Resu
 }
 
 // ════════════════════════════════════════════════════════════════════
-pub use super::review_cmd::{run_review_command, run_debug_command};
+pub use super::review_cmd::run_review_command;
+pub use super::dap::run_debug_command;
 
 // Expanded commands — implementations for all new CLI commands
 

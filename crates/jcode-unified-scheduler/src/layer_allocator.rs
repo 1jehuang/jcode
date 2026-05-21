@@ -85,6 +85,13 @@ impl LayerLoad {
         }
     }
 
+    /// 通过节点ID移除节点贡献
+    pub fn remove_node_by_id(&mut self, node_id: &NodeId) {
+        // 注意: 这里无法准确知道该节点的KV Cache大小, 所以只能从集合中移除
+        // 实际的KV大小更新应该由调用者处理或通过全局重平衡重新计算
+        self.hosting_nodes.remove(node_id);
+    }
+
     /// 托管该层的节点数
     pub fn host_count(&self) -> usize {
         self.hosting_nodes.len()
@@ -921,6 +928,143 @@ impl LayerAllocator {
             .map(|l| (l.layer_id, l.current_kv_size, l.host_count()))
             .collect()
     }
+
+    // ========================================================================
+    // 节点移除与故障恢复
+    // ========================================================================
+
+    /// 移除故障节点并触发层重新分配
+    ///
+    /// 当检测到节点离线或故障时调用此方法:
+    /// 1. 从活跃节点列表中移除该节点
+    /// 2. 清除该节点托管的所有层
+    /// 3. 检查是否需要全局重平衡
+    /// 4. 如果需要, 执行全局重平衡以恢复完整的 Pipeline
+    pub fn remove_node_and_rebalance(
+        &mut self,
+        node_id: NodeId,
+    ) -> Result<(), SchedulerError> {
+        info!(
+            "[LayerAllocator] 开始移除节点 {} 并重新平衡",
+            node_id
+        );
+
+        // 1. 从活跃节点列表中移除
+        let initial_count = self.active_nodes.len();
+        self.active_nodes.retain(|n| n.node_id != node_id);
+        
+        if self.active_nodes.len() == initial_count {
+            warn!("[LayerAllocator] 节点 {} 不在活跃列表中", node_id);
+            return Err(SchedulerError::NodeNotFound(node_id));
+        }
+
+        // 2. 清除该节点托管的所有层
+        let mut layers_affected = 0u32;
+        for layer in &mut self.layer_loads {
+            let before_count = layer.host_count();
+            layer.remove_node_by_id(&node_id);
+            if layer.host_count() < before_count {
+                layers_affected += 1;
+            }
+        }
+
+        info!(
+            "[LayerAllocator] 节点 {} 已移除, 影响 {} 个层",
+            node_id, layers_affected
+        );
+
+        // 3. 检查是否仍然有完整 Pipeline
+        let needs_rebalance = {
+            let nodes_refs: Vec<&NodeInfo> = self.active_nodes.iter().map(|n| n.as_ref()).collect();
+            !self.has_full_pipeline(&nodes_refs)
+        };
+
+        if needs_rebalance {
+            warn!(
+                "[LayerAllocator] 移除节点后 Pipeline 不完整, 需要全局重平衡"
+            );
+            
+            // 4. 执行全局重平衡
+            if self.total_layers > 0 {
+                let nodes_refs: Vec<&NodeInfo> = self.active_nodes.iter().map(|n| n.as_ref()).collect();
+                self.global_rebalance(&nodes_refs)?;
+            }
+        } else {
+            info!("[LayerAllocator] Pipeline 仍然完整, 无需重平衡");
+        }
+
+        Ok(())
+    }
+
+    /// 批量移除多个故障节点
+    pub fn remove_nodes_and_rebalance(
+        &mut self,
+        node_ids: &[NodeId],
+    ) -> Result<(), SchedulerError> {
+        for &node_id in node_ids {
+            self.remove_node_and_rebalance(node_id)?;
+        }
+        Ok(())
+    }
+
+    /// 检查并修复不完整的 Pipeline
+    ///
+    /// 在不进行完全重平衡的情况下, 尝试快速修复缺失的层覆盖
+    pub fn repair_pipeline_gaps(&mut self) -> Result<(), SchedulerError> {
+        let total_layers = self.total_layers;
+        if total_layers == 0 {
+            return Err(SchedulerError::NotInitialized);
+        }
+
+        // 找出未被任何节点托管的层
+        let mut uncovered_layers = Vec::new();
+        for (idx, layer) in self.layer_loads.iter().enumerate() {
+            if layer.host_count() == 0 {
+                uncovered_layers.push(idx as u32);
+            }
+        }
+
+        if uncovered_layers.is_empty() {
+            debug!("[LayerAllocator] 所有层都有节点托管, 无需修复");
+            return Ok(());
+        }
+
+        warn!(
+            "[LayerAllocator] 发现 {} 个未覆盖的层: {:?}",
+            uncovered_layers.len(),
+            uncovered_layers
+        );
+
+        // 尝试将未覆盖的层分配给现有节点
+        let nodes_refs: Vec<&NodeInfo> = self.active_nodes.iter().map(|n| n.as_ref()).collect();
+        
+        // 简单的贪心修复: 找到容量最大的节点来接管这些层
+        if let Some(best_node) = nodes_refs.into_iter()
+            .max_by(|a, b| {
+                let cap_a = self.estimate_node_capacity(a, false);
+                let cap_b = self.estimate_node_capacity(b, false);
+                cap_a.cmp(&cap_b)
+            }) 
+        {
+            info!(
+                "[LayerAllocator] 使用节点 {} 接管 {} 个未覆盖的层",
+                best_node.node_id,
+                uncovered_layers.len()
+            );
+
+            for &layer_id in &uncovered_layers {
+                if let Some(layer) = self.layer_loads.get_mut(layer_id as usize) {
+                    layer.add_node(best_node);
+                }
+            }
+        } else {
+            return Err(SchedulerError::InsufficientResources {
+                required: "至少一个可用节点".to_string(),
+            });
+        }
+
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -1107,5 +1251,66 @@ mod tests {
             .map(|(&c, &p)| (c as f64).min(lam * p))
             .sum();
         assert!((total - target).abs() < 1.0, "λ 应使总和接近目标");
+    }
+
+    #[test]
+    fn test_node_removal_and_rebalance() {
+        let nodes = make_test_nodes();
+        let node_refs: Vec<&NodeInfo> = nodes.iter().collect();
+
+        let mut allocator = LayerAllocator::new(AllocationStrategy::Greedy, 0.25, 40);
+        
+        // 先进行分配
+        allocator.allocate_from_standby(&node_refs, 12).unwrap();
+        assert!(!allocator.pipelines().is_empty());
+        
+        // 移除第一个节点
+        let first_node_id = nodes[0].node_id;
+        let result = allocator.remove_node_and_rebalance(first_node_id);
+        
+        // 移除应该成功
+        assert!(result.is_ok(), "节点移除应该成功");
+        
+        // 验证节点已被移除
+        assert_eq!(allocator.active_nodes.len(), nodes.len() - 1);
+    }
+
+    #[test]
+    fn test_remove_nonexistent_node() {
+        let nodes = make_test_nodes();
+        let node_refs: Vec<&NodeInfo> = nodes.iter().collect();
+
+        let mut allocator = LayerAllocator::new(AllocationStrategy::Greedy, 0.25, 40);
+        allocator.allocate_from_standby(&node_refs, 12).unwrap();
+        
+        // 尝试移除不存在的节点
+        let fake_id = uuid::Uuid::new_v4();
+        let result = allocator.remove_node_and_rebalance(fake_id);
+        
+        assert!(result.is_err(), "移除不存在的节点应该失败");
+    }
+
+    #[test]
+    fn test_pipeline_repair() {
+        let nodes = make_test_nodes();
+        let node_refs: Vec<&NodeInfo> = nodes.iter().collect();
+
+        let mut allocator = LayerAllocator::new(AllocationStrategy::Greedy, 0.25, 40);
+        allocator.allocate_from_standby(&node_refs, 12).unwrap();
+        
+        // 模拟某些层失去托管（手动清除）
+        if let Some(layer) = allocator.layer_loads.get_mut(0) {
+            layer.hosting_nodes.clear();
+            layer.current_kv_size = 0;
+        }
+        
+        // 尝试修复
+        let result = allocator.repair_pipeline_gaps();
+        assert!(result.is_ok());
+        
+        // 验证第0层现在有节点托管
+        if let Some(layer) = allocator.layer_loads.get(0) {
+            assert!(layer.host_count() > 0, "修复后第0层应该有节点托管");
+        }
     }
 }

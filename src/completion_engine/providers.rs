@@ -44,7 +44,10 @@ pub struct LspCompletionProvider {
     lsp_manager: Arc<dyn LspManager + Send + Sync>,
 }
 
-pub trait LspManager {
+use async_trait::async_trait;
+
+#[async_trait]
+pub trait LspManager: Send + Sync {
     async fn get_completions(
         &self,
         uri: &Url,
@@ -107,7 +110,8 @@ pub struct AiCompletionProvider {
     api_client: Arc<dyn AiApiClient + Send + Sync>,
 }
 
-pub trait AiApiClient {
+#[async_trait]
+pub trait AiApiClient: Send + Sync {
     async fn generate_completions(
         &self,
         context: &CodeContext,
@@ -142,13 +146,13 @@ impl CompletionProvider for AiCompletionProvider {
                             "AI generated completion #{}",
                             i + 1
                         ))),
-                        text_edit: Some(TextEdit {
+                        text_edit: Some(lsp_types::CompletionTextEdit::Edit(TextEdit {
                             range: Range {
                                 start: context.position,
                                 end: context.position,
                             },
                             new_text: text,
-                        }),
+                        })),
                         ..Default::default()
                     },
                     provider: CompletionProviderType::Ai,
@@ -188,7 +192,13 @@ impl CompletionProvider for BuiltinCompletionProvider {
             .map(|symbol| CompletionItemEnhanced {
                 item: CompletionItem {
                     label: symbol.name.clone(),
-                    kind: Some(symbol.kind),
+                    kind: Some(match symbol.kind {
+                        SymbolKind::Class => CompletionItemKind::CLASS,
+                        SymbolKind::Function => CompletionItemKind::FUNCTION,
+                        SymbolKind::Variable => CompletionItemKind::VARIABLE,
+                        SymbolKind::Method => CompletionItemKind::METHOD,
+                        _ => CompletionItemKind::TEXT,
+                    }),
                     documentation: symbol.documentation.clone().map(Documentation::String),
                     ..Default::default()
                 },
@@ -229,7 +239,8 @@ impl CompletionProvider for SnippetCompletionProvider {
         context: &CodeContext,
     ) -> Vec<CompletionItemEnhanced> {
         let snippets = self.snippet_store.read().await;
-        let lang_snippets = snippets.get(&context.language).unwrap_or(&Vec::new());
+        let default_snippets = Vec::new();
+        let lang_snippets = snippets.get(&context.language).unwrap_or(&default_snippets);
         
         lang_snippets
             .iter()

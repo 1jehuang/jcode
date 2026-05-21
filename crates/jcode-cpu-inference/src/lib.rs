@@ -3,6 +3,8 @@
 //! 封装 llama.cpp 服务器的生命周期管理和本地推理适配，
 //! 作为企业版服务器的底层推理引擎。
 
+pub mod graceful_manager;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;

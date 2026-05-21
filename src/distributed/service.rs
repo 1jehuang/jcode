@@ -12,6 +12,7 @@ use super::node::{ClusterNode, NodeRole};
 use super::cluster::ClusterManager;
 use super::election::ElectionService;
 use super::load_balancer::{LoadBalancer, LoadBalancingStrategy};
+use super::fault_tolerance::{FaultToleranceManager, FaultToleranceConfig};
 
 /// Main cluster service handle
 pub struct ClusterService {
@@ -26,6 +27,9 @@ pub struct ClusterService {
 
     /// Load balancer
     load_balancer: Arc<RwLock<LoadBalancer>>,
+
+    /// Fault tolerance manager
+    fault_tolerance: Arc<RwLock<FaultToleranceManager>>,
 
     /// Service state
     state: Arc<RwLock<ServiceState>>,
@@ -92,11 +96,17 @@ impl ClusterService {
         // Create load balancer
         let load_balancer = LoadBalancer::new(LoadBalancingStrategy::RoundRobin);
 
+        // Create fault tolerance manager
+        let ft_config = FaultToleranceConfig::default();
+        let cluster_id = self_node.id.clone();
+        let fault_tolerance = FaultToleranceManager::new(ft_config, cluster_id);
+
         let service = Arc::new(Self {
             config,
             manager: Arc::new(RwLock::new(manager)),
             election: Arc::new(Mutex::new(election)),
             load_balancer: Arc::new(RwLock::new(load_balancer)),
+            fault_tolerance: Arc::new(RwLock::new(fault_tolerance)),
             state: Arc::new(RwLock::new(ServiceState::Initialized)),
             tasks: Arc::new(Mutex::new(Vec::new())),
         });
@@ -205,6 +215,26 @@ impl ClusterService {
         lb.select_node(&nodes_ref).cloned()
     }
 
+    /// Get fault tolerance health summary
+    pub async fn get_health_summary(&self) -> super::fault_tolerance::HealthSummary {
+        self.fault_tolerance.read().await.get_health_summary()
+    }
+
+    /// Get node health state
+    pub async fn get_node_health_state(&self, node_id: &str) -> Option<super::fault_tolerance::NodeHealthState> {
+        self.fault_tolerance.read().await.get_node_state(node_id)
+    }
+
+    /// Register a node for fault tolerance tracking
+    pub async fn register_for_fault_tracking(&self, node_id: &str) {
+        self.fault_tolerance.write().await.register_node(node_id);
+    }
+
+    /// Get alert statistics
+    pub async fn get_alert_stats(&self) -> (u64, u64) {
+        self.fault_tolerance.read().await.get_alert_stats()
+    }
+
     /// Register peer nodes from configuration
     async fn register_peers(&self) -> Result<(), String> {
         for peer_config in &self.config.peers {
@@ -214,6 +244,10 @@ impl ClusterService {
             let peer = ClusterNode::new(addr.ip().to_string().as_str(), addr.port());
             let manager = self.manager.write().await;
             manager.register_node(peer)?;
+
+            // Also register for fault tolerance tracking
+            drop(manager);
+            self.fault_tolerance.write().await.register_node(&peer.id);
 
             info!("Registered peer node: {}", peer_config.address);
         }
@@ -268,6 +302,9 @@ impl ClusterService {
                 warn!("Failed to update heartbeat: {}", e);
             }
 
+            // Record success in fault tolerance tracker
+            self.fault_tolerance.write().await.record_heartbeat(&self_id);
+
             debug!("Heartbeat sent");
         }
     }
@@ -306,14 +343,75 @@ impl ClusterService {
         loop {
             check_timer.tick().await;
 
-            // Check health of all nodes
-            {
-                let manager = self.manager.write().await;
-                let unhealthy = manager.unhealthy_nodes();
+            // Check health of all nodes and update fault tolerance tracker
+            let unhealthy_nodes = {
+                let manager = self.manager.read().await;
+                manager.unhealthy_nodes()
+            };
 
-                for node in unhealthy {
-                    warn!("Node {} is unhealthy", node.id);
-                    // TODO: Implement node removal or alerting
+            for node in &unhealthy_nodes {
+                // Record failure in fault tolerance manager
+                let new_state = self.fault_tolerance.write().await.record_heartbeat_failure(
+                    &node.id,
+                    format!("Node {} failed health check", node.id),
+                );
+
+                warn!(
+                    "Node {} is unhealthy (state: {:?}, consecutive_failures: {})",
+                    node.id,
+                    new_state,
+                    self.fault_tolerance.read().await
+                        .get_node_state(&node.id)
+                        .map(|_| 0) // Placeholder - actual count tracked internally
+                        .unwrap_or(0)
+                );
+
+                // Check if node should be removed based on graded state
+                if self.fault_tolerance.read().await.should_remove_node(&node.id) {
+                    error!(
+                        "Node {} has reached offline threshold, initiating removal",
+                        node.id
+                    );
+
+                    // Attempt to unregister the node
+                    if let Err(e) = self.manager.write().await.unregister_node(&node.id) {
+                        error!("Failed to unregister unhealthy node {}: {}", node.id, e);
+                    } else {
+                        info!("Successfully unregistered unhealthy node: {}", node.id);
+
+                        // Mark as removed in fault tolerance tracker
+                        self.fault_tolerance.write().await.mark_node_removed(&node.id);
+
+                        // TODO: Trigger layer rebalance via UnifiedScheduler
+                        // This would require passing a reference to the scheduler
+                    }
+                } else if new_state == super::fault_tolerance::NodeHealthState::Critical {
+                    warn!(
+                        "Node {} is in CRITICAL state - monitoring closely for removal",
+                        node.id
+                    );
+                }
+            }
+
+            // Periodically clean up old trackers
+            self.fault_tolerance.write().await.cleanup_removed_nodes(3600); // 1 hour
+
+            // Log health summary periodically
+            static SUMMARY_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            if SUMMARY_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 60 == 0 {
+                let summary = self.fault_tolerance.read().await.get_health_summary();
+                info!(
+                    "Cluster health summary: total={}, healthy={}, warning={}, critical={}, offline={}",
+                    summary.total_nodes,
+                    summary.healthy,
+                    summary.warning,
+                    summary.critical,
+                    summary.offline
+                );
+
+                if summary.needs_attention() {
+                    warn!("Cluster requires attention: {} critical, {} offline nodes",
+                        summary.critical, summary.offline);
                 }
             }
         }

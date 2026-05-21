@@ -13,7 +13,7 @@ use tracing::{info, warn, error};
 pub struct DebugAdapter {
     session_manager: Arc<Mutex<DebugSessionManager>>,
     command_sender: mpsc::Sender<AdapterCommand>,
-    event_receiver: mpsc::Receiver<AdapterEvent>,
+    event_sender: mpsc::Sender<AdapterEvent>,
 }
 
 pub enum AdapterCommand {
@@ -65,7 +65,7 @@ impl DebugAdapter {
         Self {
             session_manager,
             command_sender,
-            event_receiver,
+            event_sender,
         }
     }
 
@@ -76,7 +76,7 @@ impl DebugAdapter {
         loop {
             let (stream, _) = listener.accept().await?;
             let command_sender = self.command_sender.clone();
-            let event_sender = self.event_receiver.clone();
+            let event_sender = self.event_sender.clone();
             
             tokio::spawn(async move {
                 if let Err(e) = Self::handle_connection(stream, command_sender, event_sender).await {

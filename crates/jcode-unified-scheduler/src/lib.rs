@@ -42,11 +42,19 @@ pub mod request_router;
 pub mod resource_node;
 pub mod unified_queue;
 pub mod water_filling;
+pub mod topology_aware;
+pub mod resource_tracker;
+pub mod node_join_manager;
+pub mod cross_region;
 
 // 重导出核心类型 — 方便外部使用
 pub use types::*;
 pub use resource_node::*;
 pub use unified_queue::UnifiedQueue;
+pub use topology_aware::{HardwareTopology, TopologyAwareScheduler, NumaNode, GpuInfo};
+pub use resource_tracker::{ResourceManager, ResourceRequirement, NodeResourceState, AllocationId};
+pub use node_join_manager::{NodeJoinManager, NodeJoinState, ProbeResult, WarmupConfig};
+pub use cross_region::{RegionManager, Region, Zone, RegionSummary, RoutingConfig, RoutingDecision};
 
 use std::sync::Arc;
 use dashmap::DashMap;
@@ -640,13 +648,31 @@ impl UnifiedScheduler {
     /// 会释放该节点的所有层分配, 并检查是否需要全局重平衡。
     #[instrument(skip(self))]
     pub async fn unregister_node(&self, node_id: &NodeId) -> Result<(), SchedulerError> {
-        let mut manager = self.node_manager.write().await;
-        manager.unregister_node(node_id).await?;
+        // 1. 从 LayerAllocator 中移除节点并触发重平衡
+        {
+            let mut allocator = self.layer_allocator.write().await;
+            if let Some(ref mut alloc) = *allocator {
+                match alloc.remove_node_and_rebalance(*node_id) {
+                    Ok(_) => {
+                        info!("[UnifiedScheduler] 节点 {} 已从层分配器中移除", node_id);
+                    }
+                    Err(e) => {
+                        warn!("[UnifiedScheduler] 从层分配器移除节点 {} 失败: {:?}", node_id, e);
+                        // 继续执行, 因为可能节点本来就不在分配器中
+                    }
+                }
+            }
+        }
+
+        // 2. 从 NodeManager 中注销节点
+        {
+            let mut manager = self.node_manager.write().await;
+            manager.unregister_node(node_id).await?;
+        }
 
         info!("[UnifiedScheduler] 节点已注销: {}", node_id);
 
-        // 节点离开后需要检查是否还需要全局重平衡
-        drop(manager);
+        // 3. 检查是否还需要额外的重平衡
         self.check_and_rebalance().await?;
 
         Ok(())

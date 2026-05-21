@@ -37,5 +37,12 @@ flatbuffers = "24.3"
 sys-info = "0.9"
 chrono = { version = "0.4", features = ["serde"] }
 
+# Compression
+lz4_flex = "0.11"
+zstd = "0.13"
+
+# Quantization support
+half = "2.4"
+
 [build-dependencies]
 tonic-build = "0.12"

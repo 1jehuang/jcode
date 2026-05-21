@@ -10,6 +10,7 @@
 pub mod worker;
 pub mod layer_executor;
 pub mod kv_cache_manager;
+pub mod kv_cache_optimizer;
 pub mod coordinator_client;
 pub mod serialization;
 pub mod speculative;
