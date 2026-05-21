@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use serde::{Serialize, Deserialize};
+use async_trait::async_trait;
 use super::context::{CodeContext, SymbolInfo};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +31,7 @@ pub struct CompletionItemEnhanced {
     pub popularity_score: f64,
 }
 
+#[async_trait]
 pub trait CompletionProvider: Send + Sync {
     fn get_type(&self) -> CompletionProviderType;
     fn get_priority(&self) -> u32;
@@ -43,8 +45,6 @@ pub struct LspCompletionProvider {
     config: CompletionProviderConfig,
     lsp_manager: Arc<dyn LspManager + Send + Sync>,
 }
-
-use async_trait::async_trait;
 
 #[async_trait]
 pub trait LspManager: Send + Sync {

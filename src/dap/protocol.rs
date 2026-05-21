@@ -50,7 +50,7 @@ pub struct InitializeRequest {
     pub supports_invalidated_event: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct InitializeResponse {
     pub supports_configuration_done_request: Option<bool>,
@@ -250,6 +250,23 @@ pub struct StackFrame {
     pub module_id: Option<String>,
     pub presentation_hint: Option<StackFramePresentationHint>,
     pub source_reference: Option<i64>,
+}
+
+impl Default for StackFrame {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            name: String::new(),
+            source: None,
+            line: 0,
+            column: 0,
+            end_line: None,
+            end_column: None,
+            module_id: None,
+            presentation_hint: None,
+            source_reference: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
