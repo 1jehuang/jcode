@@ -470,18 +470,22 @@ pub(super) async fn handle_subscribe(
                     }
                 }
                 if let Some(new_id) = new_coordinator.clone() {
-                    let members = swarm_members.read().await;
-                    if let Some(member) = members.get(&new_id) {
-                        let _ = member.event_tx.send(ServerEvent::Notification {
-                            from_session: new_id.clone(),
-                            from_name: member.friendly_name.clone(),
-                            notification_type: NotificationType::Message {
-                                scope: Some("swarm".to_string()),
-                                channel: None,
-                            },
-                            message: "You are now the coordinator for this swarm.".to_string(),
-                        });
-                    }
+                    let friendly_name = {
+                        let members = swarm_members.read().await;
+                        members
+                            .get(&new_id)
+                            .and_then(|member| member.friendly_name.clone())
+                    };
+                    let event = ServerEvent::Notification {
+                        from_session: new_id.clone(),
+                        from_name: friendly_name,
+                        notification_type: NotificationType::Message {
+                            scope: Some("swarm".to_string()),
+                            channel: None,
+                        },
+                        message: "You are now the coordinator for this swarm.".to_string(),
+                    };
+                    let _ = super::fanout_session_event(swarm_members, &new_id, event).await;
                 }
             }
         }

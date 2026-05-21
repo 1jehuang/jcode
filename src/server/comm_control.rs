@@ -1066,17 +1066,16 @@ pub(super) async fn handle_comm_assign_task(
         sessions,
     )
     .await;
-    if let Some(member) = swarm_members.read().await.get(&target_session) {
-        let _ = member.event_tx.send(ServerEvent::Notification {
-            from_session: req_session_id.clone(),
-            from_name: coordinator_name.clone(),
-            notification_type: NotificationType::Message {
-                scope: Some("dm".to_string()),
-                channel: None,
-            },
-            message: notification,
-        });
-    }
+    let dm_event = ServerEvent::Notification {
+        from_session: req_session_id.clone(),
+        from_name: coordinator_name.clone(),
+        notification_type: NotificationType::Message {
+            scope: Some("dm".to_string()),
+            channel: None,
+        },
+        message: notification,
+    };
+    let _ = super::fanout_session_event(swarm_members, &target_session, dm_event).await;
 
     let target_has_client = {
         let connections = client_connections.read().await;
@@ -1116,22 +1115,20 @@ pub(super) async fn handle_comm_assign_task(
         "Plan updated: task '{}' assigned to {}.",
         selected_task_id, target_session
     );
-    let members = swarm_members.read().await;
     for sid in participant_ids {
         if sid == target_session || sid == req_session_id {
             continue;
         }
-        if let Some(member) = members.get(&sid) {
-            let _ = member.event_tx.send(ServerEvent::Notification {
-                from_session: req_session_id.clone(),
-                from_name: coordinator_name.clone(),
-                notification_type: NotificationType::Message {
-                    scope: Some("plan".to_string()),
-                    channel: None,
-                },
-                message: plan_msg.clone(),
-            });
-        }
+        let plan_event = ServerEvent::Notification {
+            from_session: req_session_id.clone(),
+            from_name: coordinator_name.clone(),
+            notification_type: NotificationType::Message {
+                scope: Some("plan".to_string()),
+                channel: None,
+            },
+            message: plan_msg.clone(),
+        };
+        let _ = super::fanout_session_event(swarm_members, &sid, plan_event).await;
     }
 
     finish_swarm_mutation_request(

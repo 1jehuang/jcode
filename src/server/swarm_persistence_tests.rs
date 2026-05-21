@@ -3,6 +3,13 @@ use std::time::Instant;
 
 struct EnvGuard {
     runtime: Option<std::ffi::OsString>,
+    // Hold the global test-env mutex for the lifetime of the guard so that
+    // concurrent tests cannot race on `JCODE_RUNTIME_DIR`. Previously this
+    // guard was dropped at the end of `test_env(...)`, allowing other tests
+    // running in parallel to overwrite the env var mid-test and corrupt
+    // `load_runtime_state()` results. The field is intentionally read-only;
+    // we only need RAII.
+    _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl Drop for EnvGuard {
@@ -16,10 +23,13 @@ impl Drop for EnvGuard {
 }
 
 fn test_env(dir: &tempfile::TempDir) -> EnvGuard {
-    let _guard = storage::lock_test_env();
+    let lock = storage::lock_test_env();
     let previous = std::env::var_os("JCODE_RUNTIME_DIR");
     crate::env::set_var("JCODE_RUNTIME_DIR", dir.path());
-    EnvGuard { runtime: previous }
+    EnvGuard {
+        runtime: previous,
+        _lock: lock,
+    }
 }
 
 #[test]

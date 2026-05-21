@@ -432,11 +432,12 @@ pub(super) async fn broadcast_swarm_plan_with_previous(
         summary: Some(summary),
     };
 
-    let members = swarm_members.read().await;
     for sid in participants {
-        if let Some(member) = members.get(&sid) {
-            let _ = member.event_tx.send(event.clone());
-        }
+        // Use fanout so every live attachment of this session receives the
+        // event; falling back to a single `member.event_tx` here can pick a
+        // stale or wrong-connection sender and drops events for other
+        // attachments.
+        let _ = super::fanout_session_event(swarm_members, &sid, event.clone()).await;
     }
 }
 
@@ -565,18 +566,24 @@ pub(super) async fn remove_session_from_swarm(
             if let Some(vp) = plans.get_mut(swarm_id) {
                 vp.participants.insert(new_id.clone());
             }
-            let members = swarm_members.read().await;
-            if let Some(member) = members.get(&new_id) {
-                let _ = member.event_tx.send(ServerEvent::Notification {
-                    from_session: new_id.clone(),
-                    from_name: member.friendly_name.clone(),
-                    notification_type: NotificationType::Message {
-                        scope: Some("swarm".to_string()),
-                        channel: None,
-                    },
-                    message: "You are now the coordinator for this swarm.".to_string(),
-                });
-            }
+            drop(plans);
+            let friendly_name = {
+                let members = swarm_members.read().await;
+                members
+                    .get(&new_id)
+                    .and_then(|member| member.friendly_name.clone())
+            };
+            let notification = ServerEvent::Notification {
+                from_session: new_id.clone(),
+                from_name: friendly_name,
+                notification_type: NotificationType::Message {
+                    scope: Some("swarm".to_string()),
+                    channel: None,
+                },
+                message: "You are now the coordinator for this swarm.".to_string(),
+            };
+            // Fan out to every live attachment of the promoted session.
+            let _ = super::fanout_session_event(swarm_members, &new_id, notification).await;
         }
     }
 

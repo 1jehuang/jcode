@@ -298,7 +298,15 @@ pub(super) async fn register_session_event_sender(
 ) {
     let mut members = swarm_members.write().await;
     if let Some(member) = members.get_mut(session_id) {
-        member.event_tx = event_tx.clone();
+        // Only adopt this sender as the singular fallback when the existing
+        // one is closed (e.g. the headless intake or a prior connection has
+        // gone away). Overwriting an already-live fallback would shift where
+        // subsequent direct `member.event_tx` users send their payloads,
+        // which is one of the root causes of cross-connection wire
+        // corruption observed in production logs.
+        if member.event_tx.is_closed() {
+            member.event_tx = event_tx.clone();
+        }
         member.event_txs.insert(connection_id.to_string(), event_tx);
     }
 }
@@ -311,9 +319,12 @@ pub(super) async fn unregister_session_event_sender(
     let mut members = swarm_members.write().await;
     if let Some(member) = members.get_mut(session_id) {
         member.event_txs.remove(connection_id);
-        if let Some((_, tx)) = member.event_txs.iter().next() {
-            member.event_tx = tx.clone();
-        }
+        // Intentionally do NOT silently re-point `member.event_tx` here. The
+        // singular `event_tx` is a fallback set at member creation (headless
+        // spawn intake). Silently swapping it to a surviving connection's
+        // sender means later code that reads `member.event_tx` can deliver
+        // events to a different connection's writer than intended, which has
+        // shown up as cross-connection protocol corruption in the wild.
     }
 }
 
@@ -333,9 +344,11 @@ pub(super) async fn fanout_session_event(
         if member.event_txs.is_empty() {
             vec![member.event_tx.clone()]
         } else {
-            if let Some((_, tx)) = member.event_txs.iter().next() {
-                member.event_tx = tx.clone();
-            }
+            // Snapshot all live attachments. Do not mutate `member.event_tx`
+            // here: this function is called from many fanout sites and the
+            // HashMap iteration order is non-deterministic, so re-pointing
+            // the singular fallback would silently re-route subsequent
+            // direct uses of `member.event_tx` to an arbitrary connection.
             member.event_txs.values().cloned().collect::<Vec<_>>()
         }
     };
@@ -562,5 +575,233 @@ pub(super) async fn queue_soft_interrupt_for_session(
             ));
             false
         })
+    }
+}
+
+#[cfg(test)]
+mod multi_connection_protocol_tests {
+    //! Regression tests for the multi-session protocol corruption that showed
+    //! up as truncated/interleaved JSON lines on the wire (e.g.
+    //! `nt","is_headless":true,...`) and `Remote protocol error is not
+    //! retryable` reconnect-loop terminations in
+    //! `~/.jcode/logs/jcode-2026-05-21.log`.
+    //!
+    //! Root cause: several server code paths used the singular fallback
+    //! `member.event_tx` directly instead of fanning out to all
+    //! `member.event_txs`, AND `register/unregister/fanout_session_event`
+    //! silently overwrote `member.event_tx` to point at whichever
+    //! connection's writer happened to be touched last. That meant a `send`
+    //! intended for one client's writer could land on another client's
+    //! writer mid-line, splicing event tails into unrelated frames.
+
+    use super::*;
+    use crate::protocol::ServerEvent;
+
+    fn fresh_member(
+        session_id: &str,
+        fallback_tx: mpsc::UnboundedSender<ServerEvent>,
+    ) -> SwarmMember {
+        SwarmMember {
+            session_id: session_id.to_string(),
+            event_tx: fallback_tx,
+            event_txs: HashMap::new(),
+            working_dir: None,
+            swarm_id: None,
+            swarm_enabled: false,
+            status: "ready".to_string(),
+            detail: None,
+            friendly_name: None,
+            report_back_to_session_id: None,
+            latest_completion_report: None,
+            role: "agent".to_string(),
+            joined_at: Instant::now(),
+            last_status_change: Instant::now(),
+            is_headless: true,
+        }
+    }
+
+    fn drain<T>(rx: &mut mpsc::UnboundedReceiver<T>) -> Vec<T> {
+        let mut out = Vec::new();
+        while let Ok(v) = rx.try_recv() {
+            out.push(v);
+        }
+        out
+    }
+
+    /// `register_session_event_sender` must NOT silently overwrite the
+    /// singular `event_tx` fallback while it is still live. Doing so caused
+    /// later direct `member.event_tx.send(...)` callers to deliver to a
+    /// different connection's writer than intended.
+    #[tokio::test]
+    async fn register_does_not_overwrite_live_fallback_sender() {
+        let (fallback_tx, mut fallback_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let (conn_a_tx, _conn_a_rx) = mpsc::unbounded_channel::<ServerEvent>();
+
+        let mut map = HashMap::new();
+        map.insert("sess-1".to_string(), fresh_member("sess-1", fallback_tx));
+        let members = Arc::new(RwLock::new(map));
+
+        register_session_event_sender(&members, "sess-1", "conn-a", conn_a_tx).await;
+
+        // Fallback must still point at the original headless intake.
+        let guard = members.read().await;
+        let member = guard.get("sess-1").expect("member exists");
+        member
+            .event_tx
+            .send(ServerEvent::Ack { id: 7 })
+            .expect("fallback sender still alive");
+        drop(guard);
+
+        let delivered = drain(&mut fallback_rx);
+        assert_eq!(delivered.len(), 1, "fallback receiver got the event");
+    }
+
+    /// When the live fallback is closed, `register_session_event_sender` is
+    /// allowed to adopt the new sender so the member is not stranded.
+    #[tokio::test]
+    async fn register_adopts_new_sender_when_fallback_is_closed() {
+        let (fallback_tx, fallback_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        drop(fallback_rx); // closes the channel
+
+        let (conn_a_tx, mut conn_a_rx) = mpsc::unbounded_channel::<ServerEvent>();
+
+        let mut map = HashMap::new();
+        map.insert("sess-1".to_string(), fresh_member("sess-1", fallback_tx));
+        let members = Arc::new(RwLock::new(map));
+
+        register_session_event_sender(&members, "sess-1", "conn-a", conn_a_tx).await;
+
+        let guard = members.read().await;
+        let member = guard.get("sess-1").expect("member exists");
+        member
+            .event_tx
+            .send(ServerEvent::Ack { id: 42 })
+            .expect("new fallback should be live");
+        drop(guard);
+
+        let delivered = drain(&mut conn_a_rx);
+        assert_eq!(delivered.len(), 1, "new live conn picked up the fallback");
+    }
+
+    /// `unregister_session_event_sender` must not re-point the singular
+    /// `event_tx` to a surviving connection. The fallback is owned by
+    /// member-creation (headless intake) and silently swapping it caused
+    /// cross-wired writes between connections.
+    #[tokio::test]
+    async fn unregister_does_not_repoint_fallback_to_survivor() {
+        let (fallback_tx, mut fallback_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let (conn_a_tx, _conn_a_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let (conn_b_tx, mut conn_b_rx) = mpsc::unbounded_channel::<ServerEvent>();
+
+        let mut map = HashMap::new();
+        map.insert("sess-1".to_string(), fresh_member("sess-1", fallback_tx));
+        let members = Arc::new(RwLock::new(map));
+
+        register_session_event_sender(&members, "sess-1", "conn-a", conn_a_tx).await;
+        register_session_event_sender(&members, "sess-1", "conn-b", conn_b_tx).await;
+
+        // conn-a goes away.
+        unregister_session_event_sender(&members, "sess-1", "conn-a").await;
+
+        // Sending to the singular `event_tx` must land on the original
+        // fallback receiver, NOT on conn-b's writer.
+        {
+            let guard = members.read().await;
+            let member = guard.get("sess-1").expect("member exists");
+            member
+                .event_tx
+                .send(ServerEvent::Ack { id: 1 })
+                .expect("fallback still alive");
+        }
+
+        let fallback_msgs = drain(&mut fallback_rx);
+        let conn_b_msgs = drain(&mut conn_b_rx);
+        assert_eq!(
+            fallback_msgs.len(),
+            1,
+            "fallback receiver should get the event"
+        );
+        assert!(
+            conn_b_msgs.is_empty(),
+            "surviving connection must NOT silently absorb fallback traffic"
+        );
+    }
+
+    /// `fanout_session_event` must deliver to every live attachment exactly
+    /// once and must not mutate the singular `event_tx` to point at one of
+    /// them. Without this guarantee, subsequent direct `event_tx` users
+    /// would deliver to an arbitrary connection (HashMap iteration order),
+    /// which is exactly the wire-corruption pattern observed in production.
+    #[tokio::test]
+    async fn fanout_delivers_to_all_connections_and_does_not_mutate_fallback() {
+        let (fallback_tx, mut fallback_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let (conn_a_tx, mut conn_a_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let (conn_b_tx, mut conn_b_rx) = mpsc::unbounded_channel::<ServerEvent>();
+
+        let mut map = HashMap::new();
+        map.insert("sess-1".to_string(), fresh_member("sess-1", fallback_tx));
+        let members = Arc::new(RwLock::new(map));
+
+        register_session_event_sender(&members, "sess-1", "conn-a", conn_a_tx).await;
+        register_session_event_sender(&members, "sess-1", "conn-b", conn_b_tx).await;
+
+        let delivered =
+            fanout_session_event(&members, "sess-1", ServerEvent::Ack { id: 99 }).await;
+        assert_eq!(delivered, 2, "fanout reaches both live attachments");
+
+        let a = drain(&mut conn_a_rx);
+        let b = drain(&mut conn_b_rx);
+        assert_eq!(a.len(), 1, "conn-a got exactly one copy");
+        assert_eq!(b.len(), 1, "conn-b got exactly one copy");
+
+        // Fallback receiver must NOT have received anything: when live
+        // attachments exist, fanout snapshots `event_txs` and does NOT
+        // duplicate to `event_tx`.
+        let fb = drain(&mut fallback_rx);
+        assert!(
+            fb.is_empty(),
+            "fanout must not duplicate to the singular fallback when live conns exist"
+        );
+
+        // And the singular `event_tx` must STILL be the original fallback
+        // (i.e. fanout did not silently re-point it). The cheapest check is
+        // to send via `event_tx` and confirm the fallback receiver gets it.
+        {
+            let guard = members.read().await;
+            let member = guard.get("sess-1").expect("member exists");
+            member
+                .event_tx
+                .send(ServerEvent::Ack { id: 100 })
+                .expect("fallback sender still alive");
+        }
+        let fb_after = drain(&mut fallback_rx);
+        assert_eq!(
+            fb_after.len(),
+            1,
+            "singular event_tx must remain pointed at the original fallback"
+        );
+        assert!(
+            drain(&mut conn_a_rx).is_empty()
+                && drain(&mut conn_b_rx).is_empty(),
+            "direct fallback send must NOT bleed into live connections"
+        );
+    }
+
+    /// When no live attachments are registered, fanout falls back to the
+    /// singular `event_tx` so headless-only sessions still receive events.
+    #[tokio::test]
+    async fn fanout_falls_back_to_singular_sender_when_no_live_conns() {
+        let (fallback_tx, mut fallback_rx) = mpsc::unbounded_channel::<ServerEvent>();
+
+        let mut map = HashMap::new();
+        map.insert("sess-1".to_string(), fresh_member("sess-1", fallback_tx));
+        let members = Arc::new(RwLock::new(map));
+
+        let delivered =
+            fanout_session_event(&members, "sess-1", ServerEvent::Ack { id: 1 }).await;
+        assert_eq!(delivered, 1, "fanout used the singular fallback");
+
+        let msgs = drain(&mut fallback_rx);
+        assert_eq!(msgs.len(), 1, "fallback receiver got the event");
     }
 }

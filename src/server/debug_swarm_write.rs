@@ -81,29 +81,43 @@ pub(super) async fn maybe_handle_swarm_write_command(
         };
 
         if let Some(swarm_id) = swarm_id {
-            let swarms = ctx.swarms_by_id.read().await;
-            let members = ctx.swarm_members.read().await;
-            let current_session = ctx.session_id.read().await;
-            let from_name = members
-                .get(&*current_session)
-                .and_then(|member| member.friendly_name.clone());
+            // Snapshot recipient list and the from_name under the read locks,
+            // then drop the locks before calling fanout (which needs the
+            // swarm_members write lock).
+            let (recipients, from_name, from_session) = {
+                let swarms = ctx.swarms_by_id.read().await;
+                let members = ctx.swarm_members.read().await;
+                let current_session = ctx.session_id.read().await;
+                let from_name = members
+                    .get(&*current_session)
+                    .and_then(|member| member.friendly_name.clone());
+                let recipients: Vec<String> = swarms
+                    .get(&swarm_id)
+                    .map(|ids| ids.iter().cloned().collect())
+                    .unwrap_or_default();
+                (recipients, from_name, current_session.clone())
+            };
 
-            if let Some(member_ids) = swarms.get(&swarm_id) {
+            if !recipients.is_empty() {
                 let mut sent_count = 0;
-                for member_id in member_ids {
-                    if let Some(member) = members.get(member_id) {
-                        let notification = ServerEvent::Notification {
-                            from_session: current_session.clone(),
-                            from_name: from_name.clone(),
-                            notification_type: NotificationType::Message {
-                                scope: Some("broadcast".to_string()),
-                                channel: None,
-                            },
-                            message: message.clone(),
-                        };
-                        if member.event_tx.send(notification).is_ok() {
-                            sent_count += 1;
-                        }
+                for member_id in &recipients {
+                    let notification = ServerEvent::Notification {
+                        from_session: from_session.clone(),
+                        from_name: from_name.clone(),
+                        notification_type: NotificationType::Message {
+                            scope: Some("broadcast".to_string()),
+                            channel: None,
+                        },
+                        message: message.clone(),
+                    };
+                    let delivered = super::fanout_session_event(
+                        ctx.swarm_members,
+                        member_id,
+                        notification,
+                    )
+                    .await;
+                    if delivered > 0 {
+                        sent_count += 1;
                     }
                 }
                 return Ok(Some(
@@ -134,27 +148,44 @@ pub(super) async fn maybe_handle_swarm_write_command(
                 return Err(anyhow::anyhow!("swarm:notify requires a message"));
             }
 
-            let members = ctx.swarm_members.read().await;
-            let current_session = ctx.session_id.read().await;
-            let from_name = members
-                .get(&*current_session)
-                .and_then(|member| member.friendly_name.clone());
+            // Snapshot from_name and target friendly_name under the read
+            // lock, then drop it before fanning out.
+            let (from_name, from_session, target_exists, target_friendly_name) = {
+                let members = ctx.swarm_members.read().await;
+                let current_session = ctx.session_id.read().await;
+                let from_name = members
+                    .get(&*current_session)
+                    .and_then(|member| member.friendly_name.clone());
+                let target = members.get(target_session);
+                (
+                    from_name,
+                    current_session.clone(),
+                    target.is_some(),
+                    target.and_then(|m| m.friendly_name.clone()),
+                )
+            };
 
-            if let Some(target) = members.get(target_session) {
+            if target_exists {
                 let notification = ServerEvent::Notification {
-                    from_session: current_session.clone(),
-                    from_name: from_name.clone(),
+                    from_session,
+                    from_name,
                     notification_type: NotificationType::Message {
                         scope: Some("dm".to_string()),
                         channel: None,
                     },
                     message: message.to_string(),
                 };
-                if target.event_tx.send(notification).is_ok() {
+                let delivered = super::fanout_session_event(
+                    ctx.swarm_members,
+                    target_session,
+                    notification,
+                )
+                .await;
+                if delivered > 0 {
                     return Ok(Some(
                         serde_json::json!({
                             "sent_to": target_session,
-                            "sent_to_name": target.friendly_name.clone(),
+                            "sent_to_name": target_friendly_name,
                             "message": message,
                         })
                         .to_string(),
@@ -226,12 +257,9 @@ pub(super) async fn maybe_handle_swarm_write_command(
                     .map(|sessions| sessions.iter().cloned().collect())
                     .unwrap_or_default()
             };
-            let members = ctx.swarm_members.read().await;
             for sid in &swarm_session_ids {
-                if sid != acting_session
-                    && let Some(member) = members.get(sid)
-                {
-                    let _ = member.event_tx.send(ServerEvent::Notification {
+                if sid != acting_session {
+                    let notification = ServerEvent::Notification {
                         from_session: acting_session.to_string(),
                         from_name: friendly_name.clone(),
                         notification_type: NotificationType::SharedContext {
@@ -239,7 +267,10 @@ pub(super) async fn maybe_handle_swarm_write_command(
                             value: value.clone(),
                         },
                         message: format!("Shared context: {} = {}", key, value),
-                    });
+                    };
+                    let _ =
+                        super::fanout_session_event(ctx.swarm_members, sid, notification)
+                            .await;
                 }
             }
 

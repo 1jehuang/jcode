@@ -97,7 +97,6 @@ pub(super) async fn handle_comm_propose_plan(
             (plan.version, plan.participants.clone())
         };
 
-        let members = swarm_members.read().await;
         let notification_msg = format!(
             "Plan updated by {} ({} items, v{})",
             from_label,
@@ -108,17 +107,16 @@ pub(super) async fn handle_comm_propose_plan(
             if sid == req_session_id {
                 continue;
             }
-            if let Some(member) = members.get(&sid) {
-                let _ = member.event_tx.send(ServerEvent::Notification {
-                    from_session: req_session_id.clone(),
-                    from_name: from_name.clone(),
-                    notification_type: NotificationType::Message {
-                        scope: Some("plan".to_string()),
-                        channel: None,
-                    },
-                    message: notification_msg.clone(),
-                });
-            }
+            let plan_event = ServerEvent::Notification {
+                from_session: req_session_id.clone(),
+                from_name: from_name.clone(),
+                notification_type: NotificationType::Message {
+                    scope: Some("plan".to_string()),
+                    channel: None,
+                },
+                message: notification_msg.clone(),
+            };
+            let _ = super::fanout_session_event(swarm_members, &sid, plan_event).await;
             let _ = queue_soft_interrupt_for_session(
                 &sid,
                 notification_msg.clone(),
