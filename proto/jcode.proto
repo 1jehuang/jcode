@@ -1867,6 +1867,463 @@ message ExecutePluginResponse {
   string error = 3;
 }
 
+// ==================== Collaboration Service (Figma-like Real-time Collaboration) ====================
+
+service CollaborationService {
+  // 会话管理
+  rpc CreateCollabSession(CreateCollabSessionRequest) returns (CreateCollabSessionResponse);
+  rpc JoinCollabSession(JoinCollabSessionRequest) returns (JoinCollabSessionResponse);
+  rpc LeaveCollabSession(LeaveCollabSessionRequest) returns (LeaveCollabSessionResponse);
+  rpc GetCollabSession(GetCollabSessionRequest) returns (GetCollabSessionResponse);
+  rpc ListCollabSessions(ListCollabSessionsRequest) returns (ListCollabSessionsResponse);
+
+  // 实时编辑操作
+  rpc ApplyEdit(ApplyEditRequest) returns (ApplyEditResponse);
+  rpc ApplyEditStream(stream ApplyEditRequest) returns (stream ApplyEditResponse);
+  rpc UndoEdit(UndoEditRequest) returns (UndoEditResponse);
+  rpc RedoEdit(RedoEditRequest) returns (RedoEditResponse);
+
+  // 光标和选择同步
+  rpc UpdateCursor(UpdateCursorRequest) returns (UpdateCursorResponse);
+  rpc UpdateSelection(UpdateSelectionRequest) returns (UpdateSelectionResponse);
+  rpc GetActiveCursors(GetActiveCursorsRequest) returns (GetActiveCursorsResponse);
+
+  // 存在感和通知
+  rpc UpdatePresence(UpdatePresenceRequest) returns (UpdatePresenceResponse);
+  rpc GetPresence(GetPresenceRequest) returns (GetPresenceResponse);
+  rpc SubscribePresence(SubscribePresenceRequest) returns (stream PresenceUpdate);
+
+  // 冲突解决
+  rpc ResolveConflict(ResolveConflictRequest) returns (ResolveConflictResponse);
+  rpc GetConflicts(GetConflictsRequest) returns (GetConflictsResponse);
+
+  // 文档同步
+  rpc SyncDocument(SyncDocumentRequest) returns (SyncDocumentResponse);
+  rpc GetDocumentSnapshot(GetDocumentSnapshotRequest) returns (GetDocumentSnapshotResponse);
+
+  // 离线支持
+  rpc GetOperations(GetOperationsRequest) returns (GetOperationsResponse);
+  rpc SubmitOperations(stream OperationBatch) returns (SubmitOperationsResponse);
+
+  // 评论和批注
+  rpc AddComment(AddCommentRequest) returns (AddCommentResponse);
+  rpc ResolveComment(ResolveCommentRequest) returns (ResolveCommentResponse);
+  rpc GetComments(GetCommentsRequest) returns (GetCommentsResponse);
+}
+
+message CreateCollabSessionRequest {
+  string session_id = 1;
+  string tenant_id = 2;
+  string document_name = 3;
+  string initial_content = 4;
+  CollabSettings settings = 5;
+}
+
+message CollabSettings {
+  string language = 1;
+  int32 tab_size = 2;
+  bool insert_spaces = 3;
+  bool word_wrap = 4;
+  bool show_line_numbers = 5;
+  string theme = 6;
+  int32 max_participants = 7;
+}
+
+message CreateCollabSessionResponse {
+  string collab_session_id = 1;
+  CollabSessionInfo session = 2;
+  ParticipantInfo owner = 3;
+  string document_content = 4;
+}
+
+message CollabSessionInfo {
+  string id = 1;
+  string document_name = 2;
+  int32 participant_count = 3;
+  string created_at = 4;
+  CollabSettings settings = 5;
+  DocumentVersion version = 6;
+}
+
+message DocumentVersion {
+  map<string, int64> vector_clock = 1;
+  int64 operation_count = 2;
+  string last_modified = 3;
+}
+
+message JoinCollabSessionRequest {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+  ParticipantInfo participant = 3;
+}
+
+message JoinCollabSessionResponse {
+  CollabSessionInfo session = 1;
+  string document_content = 2;
+  repeated ParticipantInfo existing_participants = 3;
+  DocumentVersion version = 4;
+  repeated Operation missed_operations = 5;
+}
+
+message LeaveCollabSessionRequest {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+  string participant_id = 3;
+}
+
+message LeaveCollabSessionResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message GetCollabSessionRequest {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+}
+
+message GetCollabSessionResponse {
+  CollabSessionInfo session = 1;
+  repeated ParticipantInfo participants = 2;
+}
+
+message ListCollabSessionsRequest {
+  string tenant_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListCollabSessionsResponse {
+  repeated CollabSessionInfo sessions = 1;
+  string next_page_token = 2;
+}
+
+message ApplyEditRequest {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+  string participant_id = 3;
+  Operation operation = 4;
+  DocumentVersion expected_version = 5;
+}
+
+message Operation {
+  string id = 1;
+  OpType op_type = 2;
+  Position position = 3;
+  string content = 4;
+  SelectionRange old_range = 5;
+  string participant_id = 6;
+  DocumentVersion version = 7;
+  int64 timestamp = 8;
+}
+
+enum OpType {
+  OP_TYPE_UNSPECIFIED = 0;
+  OP_TYPE_INSERT = 1;
+  OP_TYPE_DELETE = 2;
+  OP_TYPE_REPLACE = 3;
+}
+
+message Position {
+  int32 line = 1;
+  int32 column = 2;
+}
+
+message SelectionRange {
+  Position start = 1;
+  Position end = 2;
+}
+
+message ApplyEditResponse {
+  bool accepted = 1;
+  DocumentVersion new_version = 2;
+  repeated Conflict conflicts = 3;
+  repeated string broadcast_to = 4;
+  string error = 5;
+}
+
+message Conflict {
+  string conflict_id = 1;
+  Operation local_op = 2;
+  repeated Operation conflicting_ops = 3;
+  ConflictSuggestion suggestion = 4;
+}
+
+enum ConflictSuggestion {
+  SUGGESTION_UNSPECIFIED = 0;
+  SUGGESTION_USE_LOCAL = 1;
+  SUGGESTION_USE_REMOTE = 2;
+  SUGGESTION_MERGE = 3;
+  SUGGESTION_MANUAL = 4;
+}
+
+message UndoEditRequest {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+  string participant_id = 3;
+  int64 undo_to_operation = 4;
+}
+
+message UndoEditResponse {
+  bool success = 1;
+  DocumentVersion new_version = 2;
+  Operation undone_operation = 3;
+  string error = 4;
+}
+
+message RedoEditRequest {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+  string participant_id = 3;
+  int64 redo_from_operation = 4;
+}
+
+message RedoEditResponse {
+  bool success = 1;
+  DocumentVersion new_version = 2;
+  Operation redone_operation = 3;
+  string error = 4;
+}
+
+message UpdateCursorRequest {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+  string participant_id = 3;
+  Position cursor_position = 4;
+  SelectionRange selection = 5;
+  CursorMode mode = 6;
+}
+
+enum CursorMode {
+  CURSOR_MODE_NORMAL = 0;
+  CURSOR_MODE_INSERT = 1;
+  CURSOR_MODE_OVERWRITE = 2;
+}
+
+message UpdateCursorResponse {
+  bool success = 1;
+}
+
+message UpdateSelectionRequest {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+  string participant_id = 3;
+  SelectionRange selection = 4;
+}
+
+message UpdateSelectionResponse {
+  bool success = 1;
+}
+
+message GetActiveCursorsRequest {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+}
+
+message GetActiveCursorsResponse {
+  repeated CursorState cursors = 1;
+}
+
+message CursorState {
+  string participant_id = 1;
+  ParticipantInfo participant = 2;
+  Position cursor_position = 3;
+  SelectionRange selection = 4;
+  CursorMode mode = 5;
+  bool is_online = 6;
+  string last_activity = 7;
+}
+
+message UpdatePresenceRequest {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+  string participant_id = 3;
+  PresenceState state = 4;
+}
+
+message PresenceState {
+  bool is_online = 5;
+  bool is_typing = 6;
+  string current_file = 7;
+  string status_message = 8;
+  int32 idle_seconds = 9;
+}
+
+message UpdatePresenceResponse {
+  bool success = 1;
+}
+
+message GetPresenceRequest {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+}
+
+message GetPresenceResponse {
+  repeated ParticipantPresence participants = 1;
+}
+
+message ParticipantPresence {
+  string participant_id = 1;
+  ParticipantInfo participant = 2;
+  PresenceState state = 3;
+}
+
+message SubscribePresenceRequest {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+}
+
+message PresenceUpdate {
+  string participant_id = 1;
+  PresenceState state = 2;
+  string event_type = 3;
+  string timestamp = 4;
+}
+
+message ResolveConflictRequest {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+  string participant_id = 3;
+  string conflict_id = 4;
+  ConflictResolution resolution = 5;
+  Operation resolved_operation = 6;
+}
+
+message ConflictResolution {
+  ConflictSuggestion suggestion = 1;
+  string merged_content = 2;
+}
+
+message ResolveConflictResponse {
+  bool success = 1;
+  DocumentVersion new_version = 2;
+  string error = 3;
+}
+
+message GetConflictsRequest {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+}
+
+message GetConflictsResponse {
+  repeated Conflict conflicts = 1;
+}
+
+message SyncDocumentRequest {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+  string participant_id = 3;
+  DocumentVersion client_version = 4;
+}
+
+message SyncDocumentResponse {
+  string document_content = 1;
+  DocumentVersion server_version = 2;
+  repeated Operation operations_since = 3;
+}
+
+message GetDocumentSnapshotRequest {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+}
+
+message GetDocumentSnapshotResponse {
+  string document_content = 1;
+  DocumentVersion version = 2;
+  int64 total_operations = 3;
+}
+
+message GetOperationsRequest {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+  int64 from_operation = 3;
+  int64 limit = 4;
+}
+
+message GetOperationsResponse {
+  repeated Operation operations = 1;
+  bool has_more = 2;
+  int64 next_operation = 3;
+}
+
+message OperationBatch {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+  string participant_id = 3;
+  repeated Operation operations = 4;
+  DocumentVersion base_version = 5;
+}
+
+message SubmitOperationsResponse {
+  bool success = 1;
+  DocumentVersion new_version = 2;
+  repeated string applied_operation_ids = 3;
+  string error = 4;
+}
+
+message AddCommentRequest {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+  string participant_id = 3;
+  Comment comment = 4;
+}
+
+message Comment {
+  string id = 1;
+  Position position = 2;
+  string content = 3;
+  string author_id = 4;
+  string author_name = 5;
+  string created_at = 6;
+  bool resolved = 7;
+  string resolved_by = 8;
+  string resolved_at = 9;
+}
+
+message AddCommentResponse {
+  bool success = 1;
+  Comment comment = 2;
+}
+
+message ResolveCommentRequest {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+  string participant_id = 3;
+  string comment_id = 4;
+  bool resolved = 5;
+}
+
+message ResolveCommentResponse {
+  bool success = 1;
+}
+
+message GetCommentsRequest {
+  string collab_session_id = 1;
+  string tenant_id = 2;
+  Position range_start = 3;
+  Position range_end = 4;
+  bool include_resolved = 5;
+}
+
+message GetCommentsResponse {
+  repeated Comment comments = 1;
+}
+
+message ParticipantInfo {
+  string id = 1;
+  string display_name = 2;
+  string avatar_url = 3;
+  ParticipantRole role = 4;
+  string color = 5;
+}
+
+enum ParticipantRole {
+  PARTICIPANT_ROLE_UNSPECIFIED = 0;
+  PARTICIPANT_ROLE_OWNER = 1;
+  PARTICIPANT_ROLE_EDITOR = 2;
+  PARTICIPANT_ROLE_VIEWER = 3;
+  PARTICIPANT_ROLE_COMMENTER = 4;
+}
+
 // ==================== LLM Service (for Deepseek, vLLM, llama.cpp integration) ====================
 
 service LlmService {
