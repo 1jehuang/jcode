@@ -1,0 +1,49 @@
+apiVersion: carpai.io/v1alpha1
+kind: CarpAICluster
+metadata:
+  name: carpai-cluster
+  namespace: carpai-system
+  labels:
+    app.kubernetes.io/name: carpai
+    app.kubernetes.io/component: cluster
+spec:
+  # 节点数量
+  replicas: 3
+
+  # 容器镜像
+  image: carpai:latest
+
+  # TLS加密配置
+  tls:
+    enabled: true
+    secretName: carpai-tls-secret
+
+  # JWT身份验证配置
+  auth:
+    enabled: true
+    jwtSecretRef:
+      name: carpai-jwt-secret
+      key: secret
+
+  # 资源配置
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2000m"
+      memory: "2Gi"
+
+  # 自动扩缩容配置
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+    targetCPUUtilization: 70
+    targetMemoryUtilization: 80
+
+  # 监控配置
+  monitoring:
+    enabled: true
+    prometheusScrape: true
+    metricsPort: 9090

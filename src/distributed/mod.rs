@@ -36,6 +36,7 @@ pub mod cli;
 pub mod integration;
 pub mod metrics;
 pub mod dashboard_api;
+pub mod grpc_comm;
 
 #[cfg(test)]
 mod integration_tests;

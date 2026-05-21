@@ -1,0 +1,150 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: carpaiclusters.carpai.io
+  labels:
+    app.kubernetes.io/name: carpai-operator
+spec:
+  group: carpai.io
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                replicas:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                  description: Number of cluster nodes
+                image:
+                  type: string
+                  default: "carpai:latest"
+                  description: Container image
+                tls:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                    secretName:
+                      type: string
+                      description: TLS certificate secret name
+                auth:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                    jwtSecretRef:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        key:
+                          type: string
+                resources:
+                  type: object
+                  properties:
+                    requests:
+                      type: object
+                      properties:
+                        cpu:
+                          type: string
+                        memory:
+                          type: string
+                    limits:
+                      type: object
+                      properties:
+                        cpu:
+                          type: string
+                        memory:
+                          type: string
+                autoscaling:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    minReplicas:
+                      type: integer
+                      minimum: 1
+                    maxReplicas:
+                      type: integer
+                      maximum: 100
+                    targetCPUUtilization:
+                      type: integer
+                      default: 70
+                    targetMemoryUtilization:
+                      type: integer
+                      default: 80
+                monitoring:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                    prometheusScrape:
+                      type: boolean
+                      default: true
+                    metricsPort:
+                      type: integer
+                      default: 9090
+              required:
+                - replicas
+            status:
+              type: object
+              properties:
+                readyReplicas:
+                  type: integer
+                leaderNode:
+                  type: string
+                clusterStatus:
+                  type: string
+                  enum: ["Initializing", "Running", "Degraded", "Stopped"]
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Replicas
+          type: integer
+          jsonPath: .spec.replicas
+        - name: Ready
+          type: integer
+          jsonPath: .status.readyReplicas
+        - name: Leader
+          type: string
+          jsonPath: .status.leaderNode
+        - name: Status
+          type: string
+          jsonPath: .status.clusterStatus
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+  scope: Namespaced
+  names:
+    plural: carpaiclusters
+    singular: carpaicluster
+    kind: CarpAICluster
+    shortNames:
+      - cc

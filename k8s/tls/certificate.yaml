@@ -1,0 +1,34 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: carpai-tls-cert
+  namespace: carpai-system
+spec:
+  secretName: carpai-tls-secret
+  duration: 2160h # 90 days
+  renewBefore: 360h # 15 days
+  subject:
+    organizations:
+      - CarpAI
+  isCA: false
+  privateKey:
+    algorithm: RSA
+    encoding: PKCS1
+    size: 2048
+  usages:
+    - server auth
+    - client auth
+  dnsNames:
+    - "*.carpai-system.svc.cluster.local"
+    - "carpai.carpai-system.svc.cluster.local"
+  issuerRef:
+    name: carpai-ca-issuer
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: carpai-ca-issuer
+spec:
+  ca:
+    secretName: carpai-ca-secret

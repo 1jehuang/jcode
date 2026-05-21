@@ -1,0 +1,193 @@
+syntax = "proto3";
+
+package distributed;
+
+// Cluster node communication service
+service ClusterNodeService {
+  // Heartbeat - leader to followers
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Vote request - candidate to voters
+  rpc RequestVote(VoteRequest) returns (VoteResponse);
+
+  // State synchronization
+  rpc SyncState(StateSyncRequest) returns (StateSyncResponse);
+
+  // Task distribution
+  rpc DistributeTask(TaskDistributionRequest) returns (TaskDistributionResponse);
+
+  // Node registration
+  rpc RegisterNode(NodeRegistrationRequest) returns (NodeRegistrationResponse);
+
+  // Health check
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
+  // Stream cluster events
+  rpc StreamEvents(EventSubscriptionRequest) returns (stream ClusterEvent);
+}
+
+// === Heartbeat Messages ===
+
+message HeartbeatRequest {
+  string leader_id = 1;
+  uint64 term = 2;
+  int64 timestamp = 3;
+  map<string, string> metadata = 4;
+  repeated string committed_log_entries = 5;
+}
+
+message HeartbeatResponse {
+  bool success = 1;
+  uint64 term = 2;
+  string follower_id = 3;
+  int64 last_heartbeat_received = 4;
+}
+
+// === Election Messages ===
+
+message VoteRequest {
+  string candidate_id = 1;
+  uint64 term = 2;
+  uint64 last_log_index = 3;
+  uint64 last_log_term = 4;
+}
+
+message VoteResponse {
+  bool vote_granted = 1;
+  uint64 term = 2;
+  string voter_id = 3;
+  string reason = 4;
+}
+
+// === State Sync Messages ===
+
+message StateSyncRequest {
+  string source_node_id = 1;
+  uint64 term = 2;
+  bytes state_data = 3;
+  string state_type = 4;
+  uint64 version = 5;
+}
+
+message StateSyncResponse {
+  bool success = 1;
+  uint64 current_version = 2;
+  bytes conflict_data = 3;
+  string resolution_strategy = 4;
+}
+
+// === Task Distribution Messages ===
+
+message TaskDistributionRequest {
+  string task_id = 1;
+  string task_type = 2;
+  bytes payload = 3;
+  map<string, string> metadata = 4;
+  uint64 priority = 5;
+  int64 deadline = 6;
+  repeated string required_capabilities = 7;
+}
+
+message TaskDistributionResponse {
+  bool accepted = 1;
+  string worker_node_id = 2;
+  string execution_id = 3;
+  int64 estimated_completion_time = 4;
+}
+
+// === Node Registration Messages ===
+
+message NodeRegistrationRequest {
+  string node_id = 1;
+  string host = 2;
+  uint32 port = 3;
+  string role = 4;
+  NodeCapabilities capabilities = 5;
+  NodeMetadata metadata = 6;
+}
+
+message NodeCapabilities {
+  repeated string supported_tasks = 1;
+  uint32 max_concurrent_tasks = 2;
+  uint64 available_memory_mb = 3;
+  float cpu_cores = 4;
+  bool gpu_available = 5;
+}
+
+message NodeMetadata {
+  string version = 1;
+  string os = 2;
+  string arch = 3;
+  map<string, string> labels = 4;
+}
+
+message NodeRegistrationResponse {
+  bool success = 1;
+  string assigned_role = 2;
+  uint64 current_term = 3;
+  string leader_id = 4;
+  repeated PeerInfo known_peers = 5;
+}
+
+message PeerInfo {
+  string node_id = 1;
+  string address = 2;
+  string role = 3;
+}
+
+// === Health Check Messages ===
+
+message HealthCheckRequest {
+  string requester_id = 1;
+  int64 timestamp = 2;
+}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string node_id = 2;
+  NodeStatus status = 3;
+  SystemMetrics metrics = 4;
+  int64 uptime_seconds = 5;
+}
+
+enum NodeStatus {
+  NODE_STATUS_UNKNOWN = 0;
+  NODE_STATUS_HEALTHY = 1;
+  NODE_STATUS_DEGRADED = 2;
+  NODE_STATUS_UNHEALTHY = 3;
+  NODE_STATUS_OFFLINE = 4;
+}
+
+message SystemMetrics {
+  float cpu_usage_percent = 1;
+  uint64 memory_used_mb = 2;
+  uint64 memory_total_mb = 3;
+  float disk_usage_percent = 4;
+  uint32 active_connections = 5;
+  uint64 tasks_processed = 6;
+}
+
+// === Event Streaming Messages ===
+
+message EventSubscriptionRequest {
+  string subscriber_id = 1;
+  repeated string event_types = 2;
+  bool include_history = 3;
+}
+
+message ClusterEvent {
+  string event_id = 1;
+  string event_type = 2;
+  int64 timestamp = 3;
+  string source_node_id = 4;
+  bytes data = 5;
+  uint64 term = 6;
+}
+
+// === Common Types ===
+
+message ErrorResponse {
+  string error_code = 1;
+  string message = 2;
+  map<string, string> details = 3;
+}

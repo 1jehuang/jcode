@@ -1559,6 +1559,7 @@ dependencies = [
  "jcode-tui-workspace",
  "jcode-update-core",
  "jcode-usage-types",
+ "jsonwebtoken",
  "lazy_static",
  "libc",
  "lsp-types 0.95.1",
