@@ -53,8 +53,11 @@ pub use metrics::{CompletionMetrics, get_metrics};
 pub use ast_parser::{AstTree, AstParserCache, Language as ParserLanguage, SymbolInfo, SymbolKind as AstSymbolKind};
 pub use embedding_model::{
     EmbeddingBackend, EmbeddingModelConfig, create_embedding_model,
-    presets, CandleEmbeddingModel, FallbackEmbeddingModel,
+    presets,
 };
+
+#[cfg(feature = "embeddings")]
+pub use embedding_model::{CandleEmbeddingModel, FallbackEmbeddingModel};
 
 use std::sync::Arc;
 use std::path::PathBuf;
@@ -113,11 +116,12 @@ impl CompletionEngine {
         // Layer 0: 检查预取缓存 (0-5ms if hit)
         let temp_context = CompletionContext {
             file_path: file_path.to_string(),
-            expected_type: None,
-            scope: None,
+            line: cursor_line,
+            column: cursor_column,
             prefix: "".to_string(),
-            suffix: "".to_string(),
-            line_content: "".to_string(),
+            expected_type: None,
+            scope: ScopeKind::Expression,
+            parent_symbol: None,
         };
 
         if let Some(cached) = self.prefetcher.get_cached(&temp_context).await {
@@ -209,9 +213,9 @@ impl CompletionEngine {
                 file_path: file_path.to_string(),
                 context: CompletionContextSnapshot {
                     prefix: context.prefix.clone(),
-                    suffix: context.suffix.clone(),
-                    line_content: context.line_content.clone(),
-                    scope: context.scope.clone(),
+                    suffix: "".to_string(),
+                    line_content: "".to_string(),
+                    scope: Some(format!("{:?}", context.scope)),
                     expected_type: context.expected_type.clone(),
                 },
                 offered_completions: ranked.iter().map(|r| r.candidate.label.clone()).collect(),

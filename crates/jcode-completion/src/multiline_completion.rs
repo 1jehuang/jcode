@@ -128,11 +128,11 @@ impl MultilineCompleter {
     }
 
     /// Get the next placeholder position for tab navigation
-    pub fn get_next_placeholder(
+    pub fn get_next_placeholder<'a>(
         &self,
-        snippet: &MultilineSnippet,
+        snippet: &'a MultilineSnippet,
         current_tab_stop: usize,
-    ) -> Option<&Placeholder> {
+    ) -> Option<&'a Placeholder> {
         snippet.placeholders.iter().find(|p| p.tab_stop > current_tab_stop)
     }
 
@@ -143,26 +143,34 @@ impl MultilineCompleter {
         tab_stop: usize,
         value: &str,
     ) {
-        if let Some(placeholder) = snippet.placeholders.iter_mut().find(|p| p.tab_stop == tab_stop) {
-            let old_len = placeholder.end_pos - placeholder.start_pos;
+        // First pass: find the target placeholder and compute offset
+        let mut target_info: Option<(usize, usize, usize)> = None; // (start_pos, old_len, index)
+        for (i, p) in snippet.placeholders.iter().enumerate() {
+            if p.tab_stop == tab_stop {
+                target_info = Some((p.start_pos, p.end_pos - p.start_pos, i));
+                break;
+            }
+        }
+
+        if let Some((start_pos, old_len, index)) = target_info {
             let new_len = value.len();
+            let offset_diff = new_len as i32 - old_len as i32;
 
             snippet.resolved.replace_range(
-                placeholder.start_pos..placeholder.end_pos,
+                start_pos..start_pos + old_len,
                 value,
             );
 
             // Update subsequent placeholder positions
-            let offset_diff = new_len as i32 - old_len as i32;
-            for other in snippet.placeholders.iter_mut() {
-                if other.start_pos > placeholder.start_pos {
+            for (i, other) in snippet.placeholders.iter_mut().enumerate() {
+                if i == index {
+                    other.default_value = value.to_string();
+                    other.end_pos = start_pos + new_len;
+                } else if other.start_pos > start_pos {
                     other.start_pos = (other.start_pos as i32 + offset_diff) as usize;
                     other.end_pos = (other.end_pos as i32 + offset_diff) as usize;
                 }
             }
-
-            placeholder.default_value = value.to_string();
-            placeholder.end_pos = placeholder.start_pos + value.len();
         }
     }
 

@@ -24,6 +24,8 @@ use std::time::{Duration, Instant};
 use tokio::fs;
 use tracing::{debug, info};
 
+use chrono::Timelike;
+
 /// Maximum number of events to keep in memory
 const MAX_EVENT_HISTORY: usize = 1000;
 

@@ -1,0 +1,811 @@
+openapi: 3.0.3
+info:
+  title: JCode API
+  description: JCode AI Code Assistant API documentation
+  version: 0.12.0
+  contact:
+    name: JCode Team
+    email: dev@jcode.ai
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+  - url: https://api.jcode.ai
+    description: Production server
+
+tags:
+  - name: Health
+    description: Server health checks
+  - name: Version
+    description: Version information
+  - name: Completions
+    description: Code completion endpoints
+  - name: CRDT
+    description: Collaborative editing with CRDT
+  - name: SSO
+    description: Single Sign-On authentication
+
+paths:
+  /health:
+    get:
+      summary: Check server health
+      tags: [Health]
+      responses:
+        '200':
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "healthy"
+                  timestamp:
+                    type: string
+                    format: date-time
+
+  /version:
+    get:
+      summary: Get server version
+      tags: [Version]
+      responses:
+        '200':
+          description: Version information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: string
+                    example: "0.12.0"
+                  build:
+                    type: string
+                    example: "20240101-abc123"
+
+  /api/v1/completions:
+    post:
+      summary: Get code completions
+      tags: [Completions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - content
+                - language
+              properties:
+                content:
+                  type: string
+                  description: Source code content
+                  example: "def hello():"
+                language:
+                  type: string
+                  description: Programming language
+                  example: "python"
+                cursor_line:
+                  type: integer
+                  description: Cursor line position
+                  default: 0
+                  example: 0
+                cursor_column:
+                  type: integer
+                  description: Cursor column position
+                  default: 0
+                  example: 12
+                file_path:
+                  type: string
+                  description: File path (optional)
+                  example: "/path/to/file.py"
+      responses:
+        '200':
+          description: List of completion candidates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  candidates:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CompletionCandidate'
+
+  /api/v1/completions/stream:
+    post:
+      summary: Stream code completions
+      tags: [Completions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - content
+                - language
+              properties:
+                content:
+                  type: string
+                  description: Source code content
+                language:
+                  type: string
+                  description: Programming language
+                cursor_line:
+                  type: integer
+                  description: Cursor line position
+                  default: 0
+                cursor_column:
+                  type: integer
+                  description: Cursor column position
+                  default: 0
+                file_path:
+                  type: string
+                  description: File path (optional)
+      responses:
+        '200':
+          description: Stream of completion candidates
+          content:
+            text/event-stream:
+              schema:
+                type: object
+                properties:
+                  label:
+                    type: string
+                  kind:
+                    type: string
+                  insert_text:
+                    type: string
+                  rank_score:
+                    type: number
+
+  /api/v1/completions/context:
+    post:
+      summary: Get completion context
+      tags: [Completions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - content
+                - cursor_line
+                - cursor_column
+              properties:
+                content:
+                  type: string
+                  description: Source code content
+                cursor_line:
+                  type: integer
+                  description: Cursor line position
+                cursor_column:
+                  type: integer
+                  description: Cursor column position
+      responses:
+        '200':
+          description: Completion context
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompletionContext'
+
+  /api/v1/completions/stats:
+    get:
+      summary: Get completion statistics
+      tags: [Completions]
+      responses:
+        '200':
+          description: Statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total_requests:
+                    type: integer
+                  cache_hits:
+                    type: integer
+                  cache_misses:
+                    type: integer
+                  avg_latency_ms:
+                    type: number
+
+  /api/v1/crdt/documents:
+    get:
+      summary: List all documents
+      tags: [CRDT]
+      responses:
+        '200':
+          description: List of documents
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CrdtDocumentInfo'
+    post:
+      summary: Create a new document
+      tags: [CRDT]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - title
+              properties:
+                title:
+                  type: string
+                  description: Document title
+                content:
+                  type: string
+                  description: Initial content
+                  default: ""
+      responses:
+        '201':
+          description: Document created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CrdtDocumentInfo'
+
+  /api/v1/crdt/documents/{document_id}:
+    get:
+      summary: Get document by ID
+      tags: [CRDT]
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Document found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CrdtDocumentInfo'
+        '404':
+          description: Document not found
+    patch:
+      summary: Update document metadata
+      tags: [CRDT]
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                  description: New document title
+      responses:
+        '200':
+          description: Document updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CrdtDocumentInfo'
+    delete:
+      summary: Delete a document
+      tags: [CRDT]
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Document deleted
+
+  /api/v1/crdt/documents/{document_id}/edit:
+    post:
+      summary: Apply edit to document
+      tags: [CRDT]
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - position
+                - content
+              properties:
+                position:
+                  type: integer
+                  description: Edit position
+                content:
+                  type: string
+                  description: Content to insert
+                delete_length:
+                  type: integer
+                  description: Number of characters to delete
+                  default: 0
+      responses:
+        '200':
+          description: Edit applied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EditOperation'
+
+  /api/v1/crdt/ws/{document_id}:
+    get:
+      summary: WebSocket connection for real-time collaboration
+      tags: [CRDT]
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: client_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '101':
+          description: WebSocket connection established
+          headers:
+            Upgrade:
+              schema:
+                type: string
+                example: "websocket"
+            Connection:
+              schema:
+                type: string
+                example: "Upgrade"
+
+  /api/v1/sso/providers:
+    get:
+      summary: List all SSO providers
+      tags: [SSO]
+      responses:
+        '200':
+          description: List of providers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SsoProviderConfig'
+    post:
+      summary: Create a new SSO provider
+      tags: [SSO]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SsoProviderConfig'
+      responses:
+        '201':
+          description: Provider created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SsoProviderConfig'
+
+  /api/v1/sso/providers/{provider_id}:
+    get:
+      summary: Get provider by ID
+      tags: [SSO]
+      parameters:
+        - name: provider_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Provider found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SsoProviderConfig'
+        '404':
+          description: Provider not found
+    put:
+      summary: Update provider configuration
+      tags: [SSO]
+      parameters:
+        - name: provider_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SsoProviderConfig'
+      responses:
+        '200':
+          description: Provider updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SsoProviderConfig'
+    delete:
+      summary: Delete a provider
+      tags: [SSO]
+      parameters:
+        - name: provider_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Provider deleted
+
+  /api/v1/sso/providers/{provider_id}/authorize:
+    get:
+      summary: Get authorization URL
+      tags: [SSO]
+      parameters:
+        - name: provider_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: redirect_uri
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Authorization URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url:
+                    type: string
+                    example: "https://auth.example.com/authorize?client_id=xxx&redirect_uri=yyy"
+
+  /api/v1/sso/providers/{provider_id}/token:
+    post:
+      summary: Exchange authorization code for tokens
+      tags: [SSO]
+      parameters:
+        - name: provider_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - code
+                - redirect_uri
+              properties:
+                code:
+                  type: string
+                  description: Authorization code
+                redirect_uri:
+                  type: string
+                  description: Redirect URI
+      responses:
+        '200':
+          description: Token response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+
+  /api/v1/sso/providers/{provider_id}/userinfo:
+    get:
+      summary: Get user information
+      tags: [SSO]
+      parameters:
+        - name: provider_id
+          in: path
+          required: true
+          schema:
+            type: string
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: User information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SsoUserInfo'
+
+  /api/v1/sso/validate:
+    post:
+      summary: Validate access token
+      tags: [SSO]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - provider_id
+                - token
+              properties:
+                provider_id:
+                  type: string
+                  description: Provider ID
+                token:
+                  type: string
+                  description: Access token
+      responses:
+        '200':
+          description: Validated user info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SsoUserInfo'
+
+components:
+  schemas:
+    CompletionCandidate:
+      type: object
+      properties:
+        label:
+          type: string
+          description: Completion label
+        kind:
+          type: string
+          description: Completion kind
+        detail:
+          type: string
+          description: Detailed description
+        documentation:
+          type: string
+          description: Documentation
+        insert_text:
+          type: string
+          description: Text to insert
+        rank_score:
+          type: number
+          description: Ranking score
+        is_multiline:
+          type: boolean
+          description: Is multiline completion
+
+    CompletionContext:
+      type: object
+      properties:
+        file_path:
+          type: string
+          description: File path
+        line:
+          type: integer
+          description: Cursor line
+        column:
+          type: integer
+          description: Cursor column
+        prefix:
+          type: string
+          description: Text before cursor
+        expected_type:
+          type: string
+          description: Expected type
+        scope:
+          type: string
+          description: Scope kind
+        parent_symbol:
+          type: string
+          description: Parent symbol
+
+    CrdtDocumentInfo:
+      type: object
+      properties:
+        document_id:
+          type: string
+          description: Document ID
+        title:
+          type: string
+          description: Document title
+        content:
+          type: string
+          description: Document content
+        version:
+          type: string
+          description: Current version
+        last_modified:
+          type: string
+          format: date-time
+          description: Last modified timestamp
+        collaborators:
+          type: array
+          items:
+            type: string
+          description: Active collaborators
+
+    EditOperation:
+      type: object
+      properties:
+        operation_id:
+          type: string
+          description: Unique operation ID
+        document_id:
+          type: string
+          description: Document ID
+        client_id:
+          type: string
+          description: Client ID
+        position:
+          type: integer
+          description: Edit position
+        content:
+          type: string
+          description: Content to insert
+        delete_length:
+          type: integer
+          description: Number of characters to delete
+        timestamp:
+          type: string
+          format: date-time
+          description: Operation timestamp
+        version:
+          type: string
+          description: Version identifier
+
+    SsoUserInfo:
+      type: object
+      properties:
+        sub:
+          type: string
+          description: Subject ID
+        email:
+          type: string
+          description: User email
+        email_verified:
+          type: boolean
+          description: Email verified
+        name:
+          type: string
+          description: Full name
+        nickname:
+          type: string
+          description: Nickname
+        picture:
+          type: string
+          description: Profile picture URL
+        tenant_id:
+          type: string
+          description: Tenant ID
+        groups:
+          type: array
+          items:
+            type: string
+          description: User groups
+        roles:
+          type: array
+          items:
+            type: string
+          description: User roles
+        claims:
+          type: object
+          additionalProperties:
+            type: string
+          description: Additional claims
+
+    SsoProviderConfig:
+      type: object
+      required:
+        - id
+        - name
+        - provider_type
+        - client_id
+      properties:
+        id:
+          type: string
+          description: Provider ID
+        name:
+          type: string
+          description: Provider name
+        provider_type:
+          type: string
+          description: Provider type (oidc, saml)
+          enum:
+            - oidc
+            - saml
+            - okta
+            - azure_ad
+            - google_workspace
+            - auth0
+            - keycloak
+            - ldap
+        client_id:
+          type: string
+          description: Client ID
+        client_secret:
+          type: string
+          description: Client secret
+        issuer_url:
+          type: string
+          description: Issuer URL
+        discovery_url:
+          type: string
+          description: Discovery URL
+        saml_metadata_url:
+          type: string
+          description: SAML metadata URL
+        saml_sso_url:
+          type: string
+          description: SAML SSO URL
+        enabled:
+          type: boolean
+          description: Is enabled
+          default: true
+
+    TokenResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: Access token
+        token_type:
+          type: string
+          description: Token type
+        refresh_token:
+          type: string
+          description: Refresh token
+        id_token:
+          type: string
+          description: ID token
+        expires_in:
+          type: integer
+          description: Expiration time in seconds
+        scope:
+          type: string
+          description: Scope
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error type
+        message:
+          type: string
+          description: Error message
+        code:
+          type: integer
+          description: Error code
+        details:
+          type: object
+          additionalProperties:
+            type: string
+          description: Additional details
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer

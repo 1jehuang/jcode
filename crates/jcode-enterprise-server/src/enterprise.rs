@@ -11,6 +11,7 @@ use crate::{
     priority::{EnterprisePriority, PriorityRuleEngine, TaskType},
     usage::UsageManager,
     virtual_memory::VirtualMemoryManager,
+    quota::{UsageTracker, SharedUsageTracker, QuotaPolicy, UsageTier},
 };
 use jcode_llm::{LlmProvider, LlmProviderFactory, OpenAiCompatibleProvider, config::LlmConfig};
 use jcode_unified_scheduler::{UnifiedScheduler, SchedulerConfig, NodeHardwareInfo};
@@ -37,6 +38,8 @@ pub struct EnterpriseServerState {
     pub discovery_manager: Arc<NodeDiscoveryManager>,
     /// 用量管理器
     pub usage_manager: Arc<RwLock<UsageManager>>,
+    /// 配额追踪器
+    pub quota_tracker: SharedUsageTracker,
     /// Ruflo-Parallax 统一调度器
     pub scheduler: Arc<UnifiedScheduler>,
     /// 优先级规则引擎
@@ -105,6 +108,9 @@ impl EnterpriseServer {
         // 初始化用量管理器
         let usage_manager = Arc::new(RwLock::new(UsageManager::new()));
 
+        // 初始化配额追踪器
+        let quota_tracker = Arc::new(RwLock::new(UsageTracker::new()));
+
         // 初始化 Ruflo-Parallax 统一调度器
         let scheduler_config = SchedulerConfig {
             min_bootstrap_nodes: 1,
@@ -146,6 +152,7 @@ impl EnterpriseServer {
             distributed_scheduler,
             discovery_manager: discovery_manager.clone(),
             usage_manager,
+            quota_tracker,
             priority_engine,
             vm_manager,
             db,
@@ -224,18 +231,33 @@ impl EnterpriseServer {
         let config = self.config.clone();
         let state = self.state.clone();
 
-        // 1. 启动 API 和 Admin 服务
+        // 1. 创建 Prometheus 指标收集器
+        let metrics_collector = Arc::new(crate::metrics::MetricsCollector::new()?);
+
+        // 2. 启动 API 和 Admin 服务
         let api_router = admin_api::create_openai_router()
-            .merge(admin_api::create_admin_router())
-            .layer(axum::middleware::from_fn(admin_api::auth_middleware::api_key_middleware))
             .with_state(state.clone());
+
+        let admin_router = admin_api::create_admin_router(state.clone());
+
+        // 合并路由并添加认证中间件
+        let app = api_router
+            .merge(admin_router)
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_api::auth_middleware,
+            ));
+
+        // 添加 /metrics 端点
+        let metrics_router = crate::metrics::create_metrics_router(metrics_collector.clone());
+        let app = app.merge(metrics_router);
 
         let api_addr = format!("{}:{}", config.server.bind, config.server.api_port)
             .parse::<std::net::SocketAddr>()?;
         let admin_addr = format!("{}:{}", config.server.bind, config.server.admin_port)
             .parse::<std::net::SocketAddr>()?;
 
-        // 2. 启动 Ruflo-Parallax 调度循环
+        // 3. 启动 Ruflo-Parallax 调度循环
         let scheduler = state.scheduler.clone();
         tokio::spawn(async move {
             if let Err(e) = scheduler.run().await {
@@ -244,13 +266,13 @@ impl EnterpriseServer {
         });
         info!("✅ Ruflo-Parallax 调度循环已启动");
 
-        // 3. 启动心跳检测循环
+        // 4. 启动心跳检测循环
         let discovery = state.discovery_manager.clone();
         tokio::spawn(async move {
             discovery.heartbeat_check_loop().await;
         });
 
-        // 4. 按需加载预热模型 (CPU 推理引擎)
+        // 5. 按需加载预热模型 (CPU 推理引擎)
         if !config.models.warm_up_models.is_empty() {
             info!("🔥 预热模型: {:?}", config.models.warm_up_models);
             let state = state.clone();

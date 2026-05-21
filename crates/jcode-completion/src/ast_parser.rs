@@ -32,9 +32,9 @@ impl Language {
 
     pub fn get_tree_sitter_language(&self) -> tree_sitter::Language {
         match self {
-            Language::Rust => tree_sitter_rust::language(),
-            Language::TypeScript => tree_sitter_typescript::language_typescript(),
-            Language::Python => tree_sitter_python::language(),
+            Language::Rust => tree_sitter_rust::LANGUAGE.into(),
+            Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Language::Python => tree_sitter_python::LANGUAGE.into(),
         }
     }
 }
@@ -49,7 +49,10 @@ pub struct AstTree {
 impl AstTree {
     pub fn parse(code: &str, language: Language) -> Option<Self> {
         let mut parser = tree_sitter::Parser::new();
-        parser.set_language(language.get_tree_sitter_language()).ok()?;
+        let lang = language.get_tree_sitter_language();
+        if parser.set_language(&lang).is_err() {
+            return None;
+        }
 
         let tree = parser.parse(code, None)?;
 

@@ -210,8 +210,9 @@ impl StreamingPrefetcher {
             if !cached.is_expired() {
                 self.stats.write().cache_hits += 1;
                 // Increment hit count for relevance scoring
+                let result = cached.candidates.clone();
                 cache.peek_mut(&context_key).unwrap().hit_count += 1;
-                return Some(cached.candidates.clone());
+                return Some(result);
             } else {
                 // Remove expired entry
                 cache.pop(&context_key);
@@ -237,11 +238,12 @@ impl StreamingPrefetcher {
             if confidence > PREFETCH_CONFIDENCE_THRESHOLD {
                 let predicted_context = CompletionContext {
                     file_path: context.file_path.clone(),
-                    expected_type: context.expected_type.clone(),
-                    scope: context.scope.clone(),
+                    line: context.line,
+                    column: context.column,
                     prefix: predicted_symbol,
-                    suffix: context.suffix.clone(),
-                    line_content: context.line_content.clone(),
+                    expected_type: context.expected_type.clone(),
+                    scope: context.scope,
+                    parent_symbol: context.parent_symbol.clone(),
                 };
 
                 let context_key = self.compute_context_key(&predicted_context);
@@ -299,7 +301,7 @@ impl StreamingPrefetcher {
         format!(
             "{}:{}:{}:{}",
             context.file_path,
-            context.scope.as_deref().unwrap_or(""),
+            format!("{:?}", context.scope),
             context.expected_type.as_deref().unwrap_or(""),
             context.prefix
         )

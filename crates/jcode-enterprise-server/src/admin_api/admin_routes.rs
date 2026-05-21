@@ -20,19 +20,26 @@ use axum::{
     response::IntoResponse,
     routing::{get, post, delete},
     Json, Router,
+    middleware,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::auth::{AuthManager, User, UserRole, Organization, OrgPlan, hash_password, JwtClaims};
+use crate::auth::{AuthManager, User, UserRole, Organization, OrgPlan, hash_password, JwtClaims, Permission, PermissionScope};
 use crate::enterprise::EnterpriseServerState;
+use super::auth_middleware::{auth_middleware, current_user_id, current_org_id};
 
 /// 创建管理后台路由器
-pub fn create_admin_router() -> Router<Arc<EnterpriseServerState>> {
+pub fn create_admin_router(state: Arc<EnterpriseServerState>) -> Router {
     Router::new()
-        // 认证
+        // 公开端点（无需认证）
         .route("/admin/auth/login", post(login_handler))
         .route("/admin/auth/register", post(register_handler))
+        // 受保护端点（需要认证）
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         // 组织管理
         .route("/admin/org", get(get_org_handler))
         .route("/admin/org", post(update_org_handler))
@@ -40,11 +47,20 @@ pub fn create_admin_router() -> Router<Arc<EnterpriseServerState>> {
         .route("/admin/users", get(list_users_handler))
         .route("/admin/users", post(create_user_handler))
         .route("/admin/users/:user_id", delete(delete_user_handler))
+        // RBAC 角色管理
+        .route("/admin/roles", get(list_roles_handler))
+        .route("/admin/roles", post(create_role_handler))
+        .route("/admin/roles/:role_id", delete(delete_role_handler))
+        .route("/admin/users/:user_id/roles", post(assign_role_handler))
+        .route("/admin/users/:user_id/roles/:role_id", delete(revoke_role_handler))
+        .route("/admin/users/:user_id/permissions", get(get_user_permissions_handler))
         // API Keys
         .route("/admin/api-keys", post(generate_api_key_handler))
         .route("/admin/api-keys", get(list_api_keys_handler))
-        // 用量
+        // 用量和配额
         .route("/admin/usage", get(get_usage_handler))
+        .route("/admin/quota", get(get_quota_handler))
+        .route("/admin/quota", post(update_quota_handler))
         // 审计
         .route("/admin/audit", get(get_audit_handler))
         // 节点
@@ -79,6 +95,23 @@ pub struct CreateUserRequest {
     pub name: String,
     pub password: String,
     pub role: String,
+}
+
+/// 分配角色请求
+#[derive(Debug, Deserialize)]
+pub struct AssignRoleRequest {
+    pub role_id: String,
+}
+
+/// 创建角色请求
+#[derive(Debug, Deserialize)]
+pub struct CreateRoleRequest {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub permissions: Vec<String>,
+    pub scope: String,
+    pub scope_value: Option<String>,
 }
 
 // ==============  Handler 实现 ==============
@@ -221,6 +254,60 @@ async fn get_usage_handler(
     (StatusCode::OK, Json(usage))
 }
 
+/// GET /admin/quota - 获取用户配额状态
+async fn get_quota_handler(
+    State(state): State<Arc<EnterpriseServerState>>,
+) -> impl IntoResponse {
+    // 示例：获取第一个用户的配额
+    let users = state.users.read().await;
+    if let Some(user) = users.values().next() {
+        let tracker = state.quota_tracker.read().await;
+        if let Some(summary) = tracker.get_usage_summary(&user.id) {
+            return (StatusCode::OK, Json(summary));
+        }
+    }
+
+    (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "没有找到用户用量数据"})))
+}
+
+/// POST /admin/quota - 更新用户配额
+async fn update_quota_handler(
+    State(state): State<Arc<EnterpriseServerState>>,
+    Json(req): Json<UpdateQuotaRequest>,
+) -> impl IntoResponse {
+    let tier = match req.tier.as_str() {
+        "free" => UsageTier::Free,
+        "pro" => UsageTier::Pro,
+        "enterprise" => UsageTier::Enterprise,
+        _ => UsageTier::Free,
+    };
+
+    let policy = QuotaPolicy::new(tier)
+        .with_soft_limit(req.soft_limit.unwrap_or(false))
+        .with_warning_threshold(req.warning_threshold.unwrap_or(80));
+
+    let mut tracker = state.quota_tracker.write().await;
+    tracker.set_policy(req.user_id.clone(), policy);
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "message": "配额更新成功",
+            "user_id": req.user_id,
+            "tier": req.tier,
+        })),
+    )
+}
+
+/// 更新配额请求
+#[derive(Debug, Deserialize)]
+pub struct UpdateQuotaRequest {
+    pub user_id: String,
+    pub tier: String,
+    pub soft_limit: Option<bool>,
+    pub warning_threshold: Option<u32>,
+}
+
 /// GET /admin/nodes
 async fn list_nodes_handler(
     State(state): State<Arc<EnterpriseServerState>>,
@@ -296,4 +383,154 @@ async fn list_configured_models_handler(
 /// POST /admin/models
 async fn add_model_handler() -> impl IntoResponse {
     (StatusCode::CREATED, Json(serde_json::json!({"message": "模型添加成功"})))
+}
+
+// ============== RBAC Handlers ==============
+
+/// GET /admin/roles - 列出所有角色
+async fn list_roles_handler(
+    State(state): State<Arc<EnterpriseServerState>>,
+) -> impl IntoResponse {
+    let engine = state.auth_manager.read().await.policy_engine.read().await;
+    let roles: Vec<serde_json::Value> = engine.list_roles().iter().map(|role| {
+        let permissions: Vec<String> = role.permissions.iter().map(|p| p.name()).collect();
+        serde_json::json!({
+            "id": role.id,
+            "name": role.name,
+            "description": role.description,
+            "permissions": permissions,
+            "scope": format!("{:?}", role.scope),
+            "is_builtin": role.is_builtin,
+        })
+    }).collect();
+
+    (StatusCode::OK, Json(roles))
+}
+
+/// POST /admin/roles - 创建自定义角色
+async fn create_role_handler(
+    State(state): State<Arc<EnterpriseServerState>>,
+    Json(req): Json<CreateRoleRequest>,
+) -> impl IntoResponse {
+    let mut engine = state.auth_manager.write().await.policy_engine.write().await;
+
+    // 解析权限
+    let mut permissions = std::collections::HashSet::new();
+    for perm_name in &req.permissions {
+        if let Some(perm) = Permission::from_name(perm_name) {
+            permissions.insert(perm);
+        } else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("无效权限: {}", perm_name)})),
+            );
+        }
+    }
+
+    // 解析范围
+    let scope = match req.scope.as_str() {
+        "global" => PermissionScope::Global,
+        "organization" => PermissionScope::Organization(req.scope_value.unwrap_or_default()),
+        "team" => PermissionScope::Team(req.scope_value.unwrap_or_default()),
+        "project" => PermissionScope::Project(req.scope_value.unwrap_or_default()),
+        _ => PermissionScope::Global,
+    };
+
+    let role = Role {
+        id: req.id.clone(),
+        name: req.name,
+        description: req.description,
+        permissions,
+        scope,
+        is_builtin: false,
+        parent_role: None,
+    };
+
+    engine.register_role(role);
+
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({"message": "角色创建成功", "role_id": req.id})),
+    )
+}
+
+/// DELETE /admin/roles/:role_id - 删除角色
+async fn delete_role_handler(
+    Path(role_id): Path<String>,
+    State(state): State<Arc<EnterpriseServerState>>,
+) -> impl IntoResponse {
+    let mut engine = state.auth_manager.write().await.policy_engine.write().await;
+
+    match engine.delete_role(&role_id) {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"message": format!("角色 {} 已删除", role_id)})),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+/// POST /admin/users/:user_id/roles - 分配角色给用户
+async fn assign_role_handler(
+    Path(user_id): Path<String>,
+    Json(req): Json<AssignRoleRequest>,
+    State(state): State<Arc<EnterpriseServerState>>,
+) -> impl IntoResponse {
+    state.auth_manager.read().await.assign_role_to_user(user_id.clone(), req.role_id.clone()).await;
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "message": "角色分配成功",
+            "user_id": user_id,
+            "role_id": req.role_id,
+        })),
+    )
+}
+
+/// DELETE /admin/users/:user_id/roles/:role_id - 撤销用户角色
+async fn revoke_role_handler(
+    Path((user_id, role_id)): Path<(String, String)>,
+    State(state): State<Arc<EnterpriseServerState>>,
+) -> impl IntoResponse {
+    let mut engine = state.auth_manager.write().await.policy_engine.write().await;
+    engine.revoke_role(&user_id, &role_id);
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "message": "角色撤销成功",
+            "user_id": user_id,
+            "role_id": role_id,
+        })),
+    )
+}
+
+/// GET /admin/users/:user_id/permissions - 获取用户权限
+async fn get_user_permissions_handler(
+    Path(user_id): Path<String>,
+    State(state): State<Arc<EnterpriseServerState>>,
+) -> impl IntoResponse {
+    let engine = state.auth_manager.read().await.policy_engine.read().await;
+    let permissions: Vec<String> = engine.get_user_permissions(&user_id)
+        .iter()
+        .map(|p| p.name())
+        .collect();
+
+    let roles: Vec<String> = engine.get_user_roles(&user_id)
+        .iter()
+        .map(|r| r.id.clone())
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "user_id": user_id,
+            "roles": roles,
+            "permissions": permissions,
+        })),
+    )
 }

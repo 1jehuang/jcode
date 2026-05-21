@@ -24,6 +24,7 @@ pub mod cli;
 pub mod compaction;
 pub mod config;
 pub mod copilot_usage;
+pub mod crdt;
 pub mod dictation;
 #[cfg(feature = "embeddings")]
 pub mod embedding;

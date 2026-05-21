@@ -49,6 +49,9 @@ sys-info = "0.9"
 num_cpus = "1"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 
+# Metrics
+prometheus = "0.13"
+
 # Scheduler
 jcode-unified-scheduler = { path = "../jcode-unified-scheduler" }
 

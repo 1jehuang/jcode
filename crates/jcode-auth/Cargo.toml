@@ -36,10 +36,3 @@ base64 = "0.21"
 # Error handling
 thiserror = { workspace = true }
 anyhow = { workspace = true }
-
-# Database (for audit logs)
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "sqlite"], optional = true }
-
-[features]
-default = []
-database = ["sqlx"]

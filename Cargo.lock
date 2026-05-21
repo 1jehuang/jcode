@@ -34,6 +34,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aead"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d122413f284cf2d62fb1b7db97e02edb8cda96d769b16e443a4f6195e35662b0"
+dependencies = [
+ "crypto-common 0.1.7",
+ "generic-array",
+]
+
+[[package]]
 name = "aes"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -42,6 +52,20 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.2.17",
+]
+
+[[package]]
+name = "aes-gcm"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "831010a0f742e1209b3bcea8fab6a8e149051ba6099432c8cb2cc117dec3ead1"
+dependencies = [
+ "aead",
+ "aes",
+ "cipher",
+ "ctr",
+ "ghash",
+ "subtle",
 ]
 
 [[package]]
@@ -1045,7 +1069,7 @@ dependencies = [
  "async-trait",
  "azure_core",
  "futures",
- "oauth2",
+ "oauth2 5.0.0",
  "pin-project",
  "serde",
  "time",
@@ -1569,13 +1593,13 @@ dependencies = [
  "tonic-build 0.11.0",
  "tracing",
  "tracing-subscriber",
- "tree-sitter 0.24.7",
+ "tree-sitter",
  "tree-sitter-c",
  "tree-sitter-cpp",
  "tree-sitter-go",
  "tree-sitter-javascript",
- "tree-sitter-python 0.23.6",
- "tree-sitter-rust 0.23.3",
+ "tree-sitter-python",
+ "tree-sitter-rust",
  "unicode-width 0.2.2",
  "url",
  "urlencoding",
@@ -1596,12 +1620,12 @@ dependencies = [
  "tantivy",
  "tokio",
  "tracing",
- "tree-sitter 0.24.7",
+ "tree-sitter",
  "tree-sitter-cpp",
  "tree-sitter-go",
- "tree-sitter-python 0.23.6",
- "tree-sitter-rust 0.23.3",
- "tree-sitter-typescript 0.23.2",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
  "walkdir",
 ]
 
@@ -2284,6 +2308,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
  "generic-array",
+ "rand_core 0.6.4",
  "typenum",
 ]
 
@@ -2304,6 +2329,15 @@ checksum = "eb2a7d3066da2de787b7f032c736763eb7ae5d355f81a68bab2675a96008b0bf"
 dependencies = [
  "lab",
  "phf",
+]
+
+[[package]]
+name = "ctr"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0369ee1ad671834580515889b80f2ea915f23b8be8d0daa4bbaf2ac5c7590835"
+dependencies = [
+ "cipher",
 ]
 
 [[package]]
@@ -3522,6 +3556,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghash"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0d8a4362ccb29cb0b265253fb0a2728f592895ee6854fd9bc13f2ffda266ff1"
+dependencies = [
+ "opaque-debug",
+ "polyval",
+]
+
+[[package]]
 name = "gif"
 version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4610,6 +4654,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-auth"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "async-trait",
+ "base64 0.21.7",
+ "bitflags 2.11.1",
+ "chrono",
+ "dashmap 5.5.3",
+ "jsonwebtoken",
+ "oauth2 4.4.2",
+ "rand 0.8.6",
+ "reqwest 0.12.28",
+ "ring",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "jcode-auth-types"
 version = "0.1.0"
 dependencies = [
@@ -4743,10 +4811,10 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "tree-sitter 0.20.10",
- "tree-sitter-python 0.20.3",
- "tree-sitter-rust 0.20.3",
- "tree-sitter-typescript 0.20.3",
+ "tree-sitter",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
 ]
 
 [[package]]
@@ -4850,11 +4918,11 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "tree-sitter 0.24.7",
+ "tree-sitter",
  "tree-sitter-go",
- "tree-sitter-python 0.23.6",
- "tree-sitter-rust 0.23.3",
- "tree-sitter-typescript 0.23.2",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
  "uuid",
 ]
 
@@ -4938,6 +5006,7 @@ dependencies = [
  "mdns-sd",
  "num_cpus",
  "parking_lot",
+ "prometheus",
  "rand 0.9.4",
  "regex",
  "reqwest 0.12.28",
@@ -5102,8 +5171,8 @@ dependencies = [
  "tokio-test",
  "tokio-tungstenite 0.24.0",
  "tracing",
- "tree-sitter 0.24.7",
- "tree-sitter-rust 0.23.3",
+ "tree-sitter",
+ "tree-sitter-rust",
  "tungstenite 0.24.0",
  "uuid",
 ]
@@ -6792,6 +6861,26 @@ checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 
 [[package]]
 name = "oauth2"
+version = "4.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c38841cdd844847e3e7c8d29cef9dcfed8877f8f56f9071f77843ecf3baf937f"
+dependencies = [
+ "base64 0.13.1",
+ "chrono",
+ "getrandom 0.2.17",
+ "http 0.2.12",
+ "rand 0.8.6",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "url",
+]
+
+[[package]]
+name = "oauth2"
 version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51e219e79014df21a225b1860a479e2dcd7cbd9130f4defd4bd0e191ea31d67d"
@@ -6968,6 +7057,12 @@ name = "oorandom"
 version = "11.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
+
+[[package]]
+name = "opaque-debug"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "open"
@@ -7577,6 +7672,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50596ddc09eb5ad5f75cacd40209568e66df71baf86e1499a0e99c4cff12a5a6"
 dependencies = [
  "arrayvec",
+]
+
+[[package]]
+name = "polyval"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d1fe60d06143b2430aa532c94cfe9e29783047f06c0d7fd359a9a51b729fa25"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "opaque-debug",
+ "universal-hash",
 ]
 
 [[package]]
@@ -10901,16 +11008,6 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter"
-version = "0.20.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e747b1f9b7b931ed39a548c1fae149101497de3c1fc8d9e18c62c1a66c683d3d"
-dependencies = [
- "cc",
- "regex",
-]
-
-[[package]]
-name = "tree-sitter"
 version = "0.24.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a5387dffa7ffc7d2dae12b50c6f7aab8ff79d6210147c6613561fc3d474c6f75"
@@ -10970,16 +11067,6 @@ checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
 
 [[package]]
 name = "tree-sitter-python"
-version = "0.20.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f47ebd9cac632764b2f4389b08517bf2ef895431dd163eb562e3d2062cc23a14"
-dependencies = [
- "cc",
- "tree-sitter 0.20.10",
-]
-
-[[package]]
-name = "tree-sitter-python"
 version = "0.23.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d065aaa27f3aaceaf60c1f0e0ac09e1cb9eb8ed28e7bcdaa52129cffc7f4b04"
@@ -10990,32 +11077,12 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-rust"
-version = "0.20.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "797842733e252dc11ae5d403a18060bf337b822fc2ae5ddfaa6ff4d9cc20bda6"
-dependencies = [
- "cc",
- "tree-sitter 0.24.7",
-]
-
-[[package]]
-name = "tree-sitter-rust"
 version = "0.23.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca8ccb3e3a3495c8a943f6c3fd24c3804c471fd7f4f16087623c7fa4c0068e8a"
 dependencies = [
  "cc",
  "tree-sitter-language",
-]
-
-[[package]]
-name = "tree-sitter-typescript"
-version = "0.20.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a75049f0aafabb2aac205d7bb24da162b53dcd0cfb326785f25a2f32efa8071a"
-dependencies = [
- "cc",
- "tree-sitter 0.20.10",
 ]
 
 [[package]]
@@ -11314,6 +11381,16 @@ name = "unicode_categories"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
+
+[[package]]
+name = "universal-hash"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc1de2c688dc15305988b563c3854064043356019f97a4b46276fe734c4f07ea"
+dependencies = [
+ "crypto-common 0.1.7",
+ "subtle",
+]
 
 [[package]]
 name = "unsafe-libyaml"

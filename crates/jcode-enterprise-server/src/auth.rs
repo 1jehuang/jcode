@@ -2,12 +2,16 @@
 //!
 //! 支持：JWT 认证、API Key、RBAC 角色权限、组织管理
 
+pub mod rbac;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
+
+pub use rbac::{Permission, PermissionScope, Role, PolicyEngine};
 
 /// 用户角色
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -134,14 +138,21 @@ pub struct AuthManager {
     jwt_secret: String,
     jwt_expiry: chrono::Duration,
     users: Arc<RwLock<HashMap<String, User>>>,
+    /// RBAC 策略引擎
+    pub policy_engine: Arc<RwLock<PolicyEngine>>,
 }
 
 impl AuthManager {
     pub fn new(jwt_secret: String, jwt_expiry_hours: u32) -> Self {
+        let mut policy_engine = PolicyEngine::new();
+        // 注册内置角色（示例：在创建时动态添加组织范围）
+        policy_engine.register_role(Role::super_admin());
+
         Self {
             jwt_secret,
             jwt_expiry: chrono::Duration::hours(jwt_expiry_hours as i64),
             users: Arc::new(RwLock::new(HashMap::new())),
+            policy_engine: Arc::new(RwLock::new(policy_engine)),
         }
     }
 
@@ -207,6 +218,23 @@ impl AuthManager {
         let full_key = format!("carpai_{}_{}", user.id, key);
         user.api_key_hash = Some(hash_api_key(&full_key));
         full_key
+    }
+
+    /// 为用户分配角色（RBAC）
+    pub async fn assign_role_to_user(&self, user_id: String, role_id: String) {
+        let mut engine = self.policy_engine.write().await;
+        engine.assign_role(user_id, role_id);
+    }
+
+    /// 检查用户权限（RBAC）
+    pub async fn check_permission(
+        &self,
+        user_id: &str,
+        permission: &Permission,
+        scope: Option<&PermissionScope>,
+    ) -> bool {
+        let engine = self.policy_engine.read().await;
+        engine.check_permission(user_id, permission, scope)
     }
 }
 

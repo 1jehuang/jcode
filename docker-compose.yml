@@ -7,6 +7,58 @@
 # ============================================================
 
 services:
+  # ── PostgreSQL (审计日志、用户数据) ──
+  postgres:
+    image: postgres:15-alpine
+    container_name: carpai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: carpai
+      POSTGRES_USER: carpai
+      POSTGRES_PASSWORD: carpai_dev_password
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U carpai -d carpai"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - carpai-net
+    profiles:
+      - dev
+      - enterprise
+
+  # ── Redis (会话共享、速率限制、缓存) ──
+  redis:
+    image: redis:7-alpine
+    container_name: carpai-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - carpai-net
+    profiles:
+      - dev
+      - enterprise
+
   jcode-server:
     image: jcode:latest
     build:
@@ -24,12 +76,32 @@ services:
       - JCODE_REST_PORT=8081
       - JCODE_BIND_ADDR=0.0.0.0
       - RUST_LOG=jcode=info
+      # Database
+      - DATABASE_URL=postgresql://carpai:carpai_dev_password@postgres:5432/carpai
+      # Redis
+      - REDIS_URL=redis://redis:6379
+      # JWT
+      - JWT_SECRET=${JWT_SECRET:-change_this_to_a_secure_random_string_at_least_32_chars}
+      - JWT_EXPIRATION_HOURS=24
+      # OAuth2
+      - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-}
+      - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET:-}
+      - OAUTH_REDIRECT_URI=${OAUTH_REDIRECT_URI:-http://localhost:8080/oauth/callback}
+      # Audit
+      - AUDIT_RETENTION_DAYS=90
+      - AUDIT_MAX_EVENTS=100000
+      - AUDIT_LOG_PII=false
       # OTLP Metrics (可选, 需要 OTEL Collector)
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
       - OTEL_SERVICE_NAME=jcode-server
     volumes:
       - jcode-data:/home/jcode/.jcode
       - ./config.toml:/home/jcode/.jcode/config.toml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "jcode", "--version"]
       interval: 30s
@@ -37,7 +109,7 @@ services:
       retries: 3
       start_period: 10s
     networks:
-      - jcode-net
+      - carpai-net
     deploy:
       resources:
         limits:
@@ -46,6 +118,9 @@ services:
         reservations:
           cpus: '1'
           memory: 1G
+    profiles:
+      - default
+      - enterprise
 
   # ── 可选: OTel Collector (Metrics/Traces 收集) ──
   otel-collector:
@@ -102,9 +177,13 @@ services:
 
 volumes:
   jcode-data:
+  postgres-data:
+  redis-data:
   prometheus-data:
   grafana-data:
 
 networks:
+  carpai-net:
+    driver: bridge
   jcode-net:
     driver: bridge

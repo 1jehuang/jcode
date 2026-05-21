@@ -125,6 +125,8 @@ members = [
     "crates/jcode-remote-enhanced",
     # 统一调度器
     "crates/jcode-unified-scheduler",
+    # Enterprise Authentication & Authorization
+    "crates/jcode-auth",
 ]
 
 # Workspace 包元数据 (供成员 crate 继承)

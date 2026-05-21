@@ -3,6 +3,7 @@
 //! 支持 OIDC (OpenID Connect) 和 SAML 2.0 企业认证
 
 pub mod oidc;
+pub mod saml;
 pub mod session;
 
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,10 @@ use chrono::{DateTime, Utc};
 pub use oidc::{
     build_authorization_url, exchange_code_for_tokens, fetch_user_info, OidcMetadataCache,
     OidcTokenResponse,
+};
+pub use saml::{
+    build_saml_auth_request, parse_saml_metadata, validate_saml_response,
+    SamlAssertion, SamlMetadata, SamlResponse,
 };
 pub use session::{
     SessionState, SessionStats, SsoSessionExt, SsoSessionStore,
@@ -272,7 +277,7 @@ impl SsoProviderManager {
                 self.validate_oidc_token(&provider, token).await
             }
             SsoProviderType::Saml => {
-                self.validate_saml_response(token).await
+                self.validate_saml_response(&provider, token).await
             }
             SsoProviderType::Ldap => {
                 Err(SsoError::UnsupportedProvider("LDAP validation not implemented".to_string()))
@@ -286,10 +291,8 @@ impl SsoProviderManager {
     }
 
     /// SAML 响应验证
-    async fn validate_saml_response(&self, _response: &str) -> Result<SsoUserInfo, SsoError> {
-        // SAML 验证实现
-        // 注意: 完整的 SAML 实现需要 xmlsec 库
-        Err(SsoError::UnsupportedProvider("SAML validation not implemented".to_string()))
+    async fn validate_saml_response(&self, provider: &SsoProviderConfig, response: &str) -> Result<SsoUserInfo, SsoError> {
+        saml::validate_saml_response(response, provider).await
     }
 }
 

@@ -67,6 +67,9 @@ pub mod auth;
 pub mod db;
 pub mod usage;
 pub mod enterprise;
+pub mod audit;
+pub mod quota;
+pub mod metrics;
 
 pub use config::*;
 pub use enterprise::EnterpriseServer;
