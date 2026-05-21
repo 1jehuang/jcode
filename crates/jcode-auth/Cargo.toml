@@ -1,0 +1,45 @@
+[package]
+name = "jcode-auth"
+version = "0.1.0"
+edition = "2021"
+description = "Enterprise authentication and authorization for CarpAI"
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true, features = ["full"] }
+async-trait = "0.1"
+
+# OAuth2
+oauth2 = "4.4"
+reqwest = { workspace = true, features = ["json"] }
+
+# JWT
+jsonwebtoken = "9.2"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# RBAC & Permissions
+dashmap = "5.5"
+bitflags = "2.4"
+
+# Audit logging
+chrono = { workspace = true, features = ["serde"] }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["v4", "serde"] }
+
+# Encryption
+aes-gcm = "0.10"
+rand = "0.8"
+ring = "0.17"
+base64 = "0.21"
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Database (for audit logs)
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "sqlite"], optional = true }
+
+[features]
+default = []
+database = ["sqlx"]
