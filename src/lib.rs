@@ -98,6 +98,7 @@ pub mod ws;
 pub mod rest;
 pub mod auto_mode;
 pub mod security;
+pub mod dap;
 pub mod debugger;
 pub mod metrics;
 pub mod compression;

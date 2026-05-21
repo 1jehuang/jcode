@@ -899,6 +899,18 @@ pub(crate) enum Command {
         /// Output JSON
         #[arg(long)]
         json: bool,
+
+        /// Review a single file
+        #[arg(long)]
+        file: Option<String>,
+
+        /// Review a directory
+        #[arg(long)]
+        directory: Option<String>,
+
+        /// Enable AI-powered review
+        #[arg(long)]
+        ai_review: bool,
     },
 
     /// Distributed cluster management commands

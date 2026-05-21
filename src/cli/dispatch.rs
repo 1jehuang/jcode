@@ -423,8 +423,11 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             diff,
             security,
             json,
+            file,
+            directory,
+            ai_review,
         }) => {
-            commands::run_review_command(staged, diff.as_deref(), security, json).await?;
+            commands::run_review_command(staged, diff.as_deref(), security, json, file.as_deref(), directory.as_deref(), ai_review).await?;
         }
         Some(Command::Debug(cmd)) => {
             commands::run_debug_command(cmd).await?;
