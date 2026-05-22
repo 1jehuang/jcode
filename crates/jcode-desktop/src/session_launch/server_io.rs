@@ -22,6 +22,7 @@ use super::{
 
 const CANCEL_COMPLETION_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[cfg(unix)]
 pub(super) fn ensure_server_running() -> Result<()> {
     let path = socket_path();
     if UnixStream::connect(&path).is_ok() {

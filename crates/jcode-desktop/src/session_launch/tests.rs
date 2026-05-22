@@ -1,6 +1,9 @@
 use super::events::desktop_event_from_server_value;
 use super::*;
-use serde_json::{Value, json};
+#[cfg(unix)]
+use serde_json::Value;
+use serde_json::json;
+#[cfg(unix)]
 use std::io::{self, BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -981,6 +984,7 @@ fn fake_desktop_server_accept_old_reload_client(
     })
 }
 
+#[cfg(unix)]
 fn assert_client_reload_sequence(events: Vec<DesktopSessionEvent>, session_id: &str) {
     let reload_index = events
         .iter()
@@ -1045,6 +1049,7 @@ fn read_fake_server_request(reader: &mut BufReader<UnixStream>) -> Result<Value>
     Ok(serde_json::from_str(line.trim())?)
 }
 
+#[cfg(unix)]
 fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
     unsafe {
         if let Some(value) = value {

@@ -985,7 +985,10 @@ fn single_session_slash_suggestions_support_tui_style_fuzzy_abbreviations() {
     let mut app = SingleSessionApp::new(None);
     app.handle_key(KeyInput::Character("/cp".to_string()));
 
-    assert_eq!(app.active_inline_widget(), Some(InlineWidgetKind::SlashSuggestions));
+    assert_eq!(
+        app.active_inline_widget(),
+        Some(InlineWidgetKind::SlashSuggestions)
+    );
     let suggestions = app.inline_widget_styled_lines();
     assert!(suggestions.iter().any(|line| {
         line.style == SingleSessionLineStyle::OverlaySelection && line.text.contains("/copy")
@@ -999,7 +1002,10 @@ fn single_session_slash_suggestions_support_tui_style_fuzzy_abbreviations() {
 fn single_session_raw_slash_tab_completion_uses_fuzzy_after_suggestions_are_dismissed() {
     let mut app = SingleSessionApp::new(None);
     app.handle_key(KeyInput::Character("/cp".to_string()));
-    assert_eq!(app.active_inline_widget(), Some(InlineWidgetKind::SlashSuggestions));
+    assert_eq!(
+        app.active_inline_widget(),
+        Some(InlineWidgetKind::SlashSuggestions)
+    );
 
     assert_eq!(app.handle_key(KeyInput::Escape), KeyOutcome::Redraw);
     assert_eq!(app.active_inline_widget(), None);
@@ -1012,7 +1018,10 @@ fn single_session_raw_slash_tab_completion_uses_fuzzy_after_suggestions_are_dism
 fn single_session_raw_slash_tab_completion_covers_commands_from_help_table() {
     let mut app = SingleSessionApp::new(None);
     app.handle_key(KeyInput::Character("/ef".to_string()));
-    assert_eq!(app.active_inline_widget(), Some(InlineWidgetKind::SlashSuggestions));
+    assert_eq!(
+        app.active_inline_widget(),
+        Some(InlineWidgetKind::SlashSuggestions)
+    );
 
     assert_eq!(app.handle_key(KeyInput::Escape), KeyOutcome::Redraw);
     assert_eq!(app.active_inline_widget(), None);
@@ -6167,7 +6176,7 @@ fn fresh_welcome_model_picker_only_reserves_inline_lane() {
     );
 
     let vertices = build_single_session_vertices(&app, size, 0.0, 0);
-    let inline_card_vertices = positions_for_color(&vertices, [0.972, 0.982, 1.000, 0.54]);
+    let inline_card_vertices = positions_for_color(&vertices, [0.992, 0.996, 1.000, 0.72]);
     assert!(
         !inline_card_vertices.is_empty(),
         "inline picker should draw a rounded card background"
@@ -6467,14 +6476,16 @@ fn single_session_wraps_one_session_card() {
 
 #[test]
 fn workspace_focused_session_promotes_to_single_session_app() {
-    let mut app = DesktopApp::Workspace(Workspace::from_session_cards(vec![workspace::SessionCard {
-        session_id: "session_alpha".to_string(),
-        title: "alpha".to_string(),
-        subtitle: "active".to_string(),
-        detail: "3 msgs".to_string(),
-        preview_lines: vec!["user hello".to_string()],
-        detail_lines: vec!["assistant hi".to_string()],
-    }]));
+    let mut app = DesktopApp::Workspace(Workspace::from_session_cards(vec![
+        workspace::SessionCard {
+            session_id: "session_alpha".to_string(),
+            title: "alpha".to_string(),
+            subtitle: "active".to_string(),
+            detail: "3 msgs".to_string(),
+            preview_lines: vec!["user hello".to_string()],
+            detail_lines: vec!["assistant hi".to_string()],
+        },
+    ]));
 
     assert!(app.promote_focused_workspace_session());
     let snapshot = app.debug_snapshot();

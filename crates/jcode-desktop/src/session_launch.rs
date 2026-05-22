@@ -1,12 +1,17 @@
 use anyhow::{Context, Result};
+#[cfg(unix)]
 use serde_json::json;
+#[cfg(unix)]
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+#[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(unix)]
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(unix)]
 const SERVER_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(50);
 const DESKTOP_SESSION_WORKER_LIMIT: usize = 12;
 
@@ -63,10 +68,13 @@ fn spawn_bounded_desktop_session_worker(
     Ok(())
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 mod events;
+#[cfg(unix)]
 mod server_io;
 mod terminal;
 
+#[cfg(unix)]
 use server_io::{
     DrainOutcome, connect_server_with_retry, connect_server_with_retry_path, drain_session_events,
     ensure_server_running, establish_session_id, read_control_response,
@@ -111,6 +119,7 @@ pub struct DesktopModelChoice {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub enum DesktopSessionStatus {
     StartingSharedServer,
     ConnectingSharedServer,
@@ -240,6 +249,7 @@ fn desktop_status_label_is_in_flight(status: &str) -> bool {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub enum DesktopSessionEvent {
     Status(DesktopSessionStatus),
     SessionStarted {
@@ -1215,6 +1225,7 @@ fn send_desktop_status(event_tx: &Option<DesktopSessionEventSender>, status: Des
     send_desktop_event(event_tx, DesktopSessionEvent::Status(status));
 }
 
+#[cfg(unix)]
 fn send_desktop_event(event_tx: &Option<DesktopSessionEventSender>, event: DesktopSessionEvent) {
     send_desktop_event_ref(event_tx.as_ref(), event);
 }
@@ -1255,6 +1266,7 @@ fn desktop_session_event_kind(event: &DesktopSessionEvent) -> &'static str {
     }
 }
 
+#[cfg(unix)]
 pub(super) fn socket_path() -> PathBuf {
     if let Ok(custom) = std::env::var("JCODE_SOCKET") {
         return PathBuf::from(custom);
@@ -1273,13 +1285,6 @@ pub(super) fn socket_path() -> PathBuf {
 #[cfg(unix)]
 fn runtime_user_discriminator() -> String {
     unsafe { libc::geteuid() }.to_string()
-}
-
-#[cfg(not(unix))]
-fn runtime_user_discriminator() -> String {
-    std::env::var("USERNAME")
-        .or_else(|_| std::env::var("USER"))
-        .unwrap_or_else(|_| "user".to_string())
 }
 
 #[cfg(test)]
