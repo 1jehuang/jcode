@@ -706,6 +706,20 @@ impl Session {
     }
 
     pub fn create(parent_id: Option<String>, title: Option<String>) -> Self {
+        // Issue #99: top-level user sessions can be auto-titled via
+        // `jcode --name <title>` (translated to `JCODE_SESSION_NAME`). Only
+        // apply when the caller didn't pass an explicit title and there is
+        // no parent (subagents/spawned children should not inherit the env).
+        let title = title.or_else(|| {
+            if parent_id.is_none() {
+                std::env::var("JCODE_SESSION_NAME")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            } else {
+                None
+            }
+        });
         let now = Utc::now();
         let (id, short_name) = new_memorable_session_id();
         let is_debug = default_is_test_session();

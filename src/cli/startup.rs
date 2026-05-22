@@ -82,6 +82,15 @@ fn parse_and_prepare_args() -> Result<Args> {
         crate::env::set_var("JCODE_APPEND_SYSTEM_PROMPT", text);
     }
 
+    // --name <title>: translate to env so the next freshly-created top-level
+    // session picks it up as `Session::title`. Issue #99.
+    if let Some(ref text) = args.session_name {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            crate::env::set_var("JCODE_SESSION_NAME", trimmed);
+        }
+    }
+
     if let Some(ref socket) = args.socket {
         server::set_socket_path(socket);
     }
