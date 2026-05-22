@@ -3462,6 +3462,7 @@ dependencies = [
  "base64 0.22.1",
  "bytemuck",
  "glyphon",
+ "hex",
  "image",
  "jcode-tui-messages",
  "libc",
@@ -3469,8 +3470,10 @@ dependencies = [
  "pulldown-cmark",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "wgpu",
  "whoami",
+ "windows-sys 0.59.0",
  "winit",
 ]
 

@@ -1,17 +1,22 @@
 use super::events::desktop_event_from_server_value;
 use super::*;
+use serde_json::{Value, json};
+#[cfg(any(unix, windows))]
 #[cfg(unix)]
-use serde_json::Value;
-use serde_json::json;
-#[cfg(unix)]
-use std::io::{self, BufRead, BufReader, Write};
+use std::io;
+#[cfg(any(unix, windows))]
+use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle};
 #[cfg(unix)]
+use std::sync::Mutex;
+#[cfg(windows)]
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
@@ -333,6 +338,92 @@ fn desktop_worker_roundtrips_message_with_fake_server() -> Result<()> {
         "fake assistant response".to_string()
     )));
     assert!(events.contains(&DesktopSessionEvent::Done));
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn desktop_worker_roundtrips_message_with_fake_windows_named_pipe() -> Result<()> {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let socket_path = std::env::temp_dir().join(format!(
+        "jcode-desktop-worker-smoke-{}-{}.sock",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let previous_socket = std::env::var_os("JCODE_SOCKET");
+    unsafe {
+        std::env::set_var("JCODE_SOCKET", &socket_path);
+    }
+
+    let pipe_name = server_io::path_to_windows_pipe_name(&socket_path);
+    let pipe = create_windows_pipe_instance(&pipe_name)?;
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        fake_windows_desktop_server_roundtrip(pipe_name, pipe, ready_tx)
+    });
+    ready_rx
+        .recv()
+        .context("fake Windows pipe server did not start")?;
+
+    let (event_tx, event_rx) = mpsc::channel();
+    let (_command_tx, command_rx) = mpsc::channel();
+    let result = run_server_session(
+        None,
+        "hello desktop",
+        vec![("image/png".to_string(), "abc123".to_string())],
+        Some(event_tx),
+        command_rx,
+    );
+
+    restore_env_var("JCODE_SOCKET", previous_socket);
+
+    assert_eq!(result?, "session_desktop_fake");
+    let requests = server.join().unwrap()?;
+    assert_eq!(requests[0]["type"], "subscribe");
+    assert_eq!(requests[1]["type"], "state");
+    assert_eq!(requests[2]["type"], "message");
+    assert_eq!(requests[2]["content"], "hello desktop");
+    assert_eq!(requests[2]["images"], json!([["image/png", "abc123"]]));
+    let events = event_rx.try_iter().collect::<Vec<_>>();
+    assert!(events.contains(&DesktopSessionEvent::SessionStarted {
+        session_id: "session_desktop_fake".to_string()
+    }));
+    assert!(events.contains(&DesktopSessionEvent::TextDelta(
+        "fake assistant response".to_string()
+    )));
+    assert!(events.contains(&DesktopSessionEvent::Done));
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_named_pipe_fixture_roundtrips_bytes() -> Result<()> {
+    let socket_path = std::env::temp_dir().join(format!(
+        "jcode-desktop-pipe-fixture-{}-{}.sock",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let pipe_name = server_io::path_to_windows_pipe_name(&socket_path);
+    let pipe = create_windows_pipe_instance(&pipe_name)?;
+    let server = std::thread::spawn(move || -> Result<Vec<u8>> {
+        connect_windows_pipe(&pipe)?;
+        let mut reader = BufReader::new(pipe);
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        Ok(line.into_bytes())
+    });
+
+    let mut client = open_windows_pipe_client(&pipe_name)?;
+    client.write_all(b"ping\n")?;
+    client.flush()?;
+
+    assert_eq!(server.join().unwrap()?, b"ping\n");
     Ok(())
 }
 
@@ -753,6 +844,42 @@ fn fake_desktop_server_roundtrip(listener: UnixListener) -> Result<Vec<Value>> {
     Ok(vec![subscribe, state, message])
 }
 
+#[cfg(windows)]
+fn fake_windows_desktop_server_roundtrip(
+    pipe_name: String,
+    mut stream: std::fs::File,
+    ready_tx: mpsc::Sender<()>,
+) -> Result<Vec<Value>> {
+    let _ = ready_tx.send(());
+    let (accepted_stream, mut reader, subscribe) =
+        accept_first_requesting_windows_client(&pipe_name, stream)?;
+    stream = accepted_stream;
+    write_json_line(&mut stream, json!({"type": "ack", "id": subscribe["id"]}))?;
+    write_json_line(&mut stream, json!({"type": "mcp_status", "servers": []}))?;
+    write_json_line(&mut stream, json!({"type": "done", "id": subscribe["id"]}))?;
+
+    let state = read_fake_server_request(&mut reader)?;
+    write_json_line(
+        &mut stream,
+        json!({
+            "type": "state",
+            "id": state["id"],
+            "session_id": "session_desktop_fake",
+            "message_count": 0,
+            "is_processing": false,
+        }),
+    )?;
+
+    let message = read_fake_server_request(&mut reader)?;
+    write_json_line(&mut stream, json!({"type": "ack", "id": message["id"]}))?;
+    write_json_line(
+        &mut stream,
+        json!({"type": "text_delta", "text": "fake assistant response"}),
+    )?;
+    write_json_line(&mut stream, json!({"type": "done", "id": message["id"]}))?;
+    Ok(vec![subscribe, state, message])
+}
+
 #[cfg(unix)]
 fn fake_desktop_server_reload_roundtrip(
     listener: UnixListener,
@@ -1042,6 +1169,108 @@ fn accept_first_requesting_client(
     }
 }
 
+#[cfg(windows)]
+fn create_windows_pipe_instance(pipe_name: &str) -> Result<std::fs::File> {
+    use std::ffi::OsStr;
+    use std::iter;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+    use windows_sys::Win32::System::Pipes::{
+        CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+    };
+
+    let wide_name = OsStr::new(pipe_name)
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateNamedPipeW(
+            wide_name.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            255,
+            4096,
+            4096,
+            0,
+            std::ptr::null(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error()).context("failed to create named pipe");
+    }
+
+    let file = unsafe { std::fs::File::from_raw_handle(handle as std::os::windows::io::RawHandle) };
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn connect_windows_pipe(pipe: &std::fs::File) -> Result<()> {
+    use windows_sys::Win32::Foundation::{ERROR_PIPE_CONNECTED, GetLastError};
+    use windows_sys::Win32::System::Pipes::ConnectNamedPipe;
+
+    let connected = unsafe { ConnectNamedPipe(pipe.as_raw_handle(), std::ptr::null_mut()) } != 0;
+    if !connected {
+        let error = unsafe { GetLastError() };
+        if error != ERROR_PIPE_CONNECTED {
+            return Err(std::io::Error::from_raw_os_error(error as i32))
+                .context("failed to connect named pipe");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn accept_first_requesting_windows_client(
+    pipe_name: &str,
+    mut pipe: std::fs::File,
+) -> Result<(std::fs::File, BufReader<std::fs::File>, Value)> {
+    loop {
+        connect_windows_pipe(&pipe)?;
+        let mut reader = BufReader::new(pipe.try_clone()?);
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        if line.trim().is_empty() {
+            pipe = create_windows_pipe_instance(pipe_name)?;
+            continue;
+        }
+        let request = serde_json::from_str(line.trim())?;
+        return Ok((pipe, reader, request));
+    }
+}
+
+#[cfg(windows)]
+fn open_windows_pipe_client(pipe_name: &str) -> Result<std::fs::File> {
+    use std::ffi::OsStr;
+    use std::iter;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING,
+    };
+
+    let wide_name = OsStr::new(pipe_name)
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            wide_name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error()).context("failed to open named pipe client");
+    }
+
+    Ok(unsafe { std::fs::File::from_raw_handle(handle as std::os::windows::io::RawHandle) })
+}
+
 #[cfg(unix)]
 fn read_fake_server_request(reader: &mut BufReader<UnixStream>) -> Result<Value> {
     let mut line = String::new();
@@ -1049,7 +1278,14 @@ fn read_fake_server_request(reader: &mut BufReader<UnixStream>) -> Result<Value>
     Ok(serde_json::from_str(line.trim())?)
 }
 
-#[cfg(unix)]
+#[cfg(windows)]
+fn read_fake_server_request(reader: &mut BufReader<std::fs::File>) -> Result<Value> {
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    Ok(serde_json::from_str(line.trim())?)
+}
+
+#[cfg(any(unix, windows))]
 fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
     unsafe {
         if let Some(value) = value {

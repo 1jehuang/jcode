@@ -1,17 +1,12 @@
 use anyhow::{Context, Result};
-#[cfg(unix)]
 use serde_json::json;
-#[cfg(unix)]
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-#[cfg(unix)]
 use std::time::Duration;
 
-#[cfg(unix)]
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
-#[cfg(unix)]
 const SERVER_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(50);
 const DESKTOP_SESSION_WORKER_LIMIT: usize = 12;
 
@@ -68,13 +63,10 @@ fn spawn_bounded_desktop_session_worker(
     Ok(())
 }
 
-#[cfg_attr(not(unix), allow(dead_code))]
 mod events;
-#[cfg(unix)]
 mod server_io;
 mod terminal;
 
-#[cfg(unix)]
 use server_io::{
     DrainOutcome, connect_server_with_retry, connect_server_with_retry_path, drain_session_events,
     ensure_server_running, establish_session_id, read_control_response,
@@ -430,7 +422,6 @@ pub fn spawn_message_to_session(
     Ok(handle)
 }
 
-#[cfg(unix)]
 pub fn spawn_cycle_model(
     direction: i8,
     target_session_id: Option<String>,
@@ -458,7 +449,6 @@ pub fn spawn_cycle_model(
     Ok(())
 }
 
-#[cfg(unix)]
 pub fn spawn_cycle_reasoning_effort(
     direction: i8,
     target_session_id: Option<String>,
@@ -486,38 +476,6 @@ pub fn spawn_cycle_reasoning_effort(
     Ok(())
 }
 
-#[cfg(not(unix))]
-pub fn spawn_cycle_reasoning_effort(
-    _direction: i8,
-    _target_session_id: Option<String>,
-    event_tx: DesktopSessionEventSender,
-) -> Result<()> {
-    send_desktop_event_ref(
-        Some(&event_tx),
-        DesktopSessionEvent::ModelCatalogError {
-            error: "desktop reasoning effort switching is not implemented on this platform yet"
-                .to_string(),
-        },
-    );
-    Ok(())
-}
-
-#[cfg(not(unix))]
-pub fn spawn_cycle_model(
-    _direction: i8,
-    _target_session_id: Option<String>,
-    event_tx: DesktopSessionEventSender,
-) -> Result<()> {
-    send_desktop_event_ref(
-        Some(&event_tx),
-        DesktopSessionEvent::ModelCatalogError {
-            error: "desktop model switching is not implemented on this platform yet".to_string(),
-        },
-    );
-    Ok(())
-}
-
-#[cfg(unix)]
 pub fn spawn_load_model_catalog(
     target_session_id: Option<String>,
     event_tx: DesktopSessionEventSender,
@@ -541,22 +499,6 @@ pub fn spawn_load_model_catalog(
     Ok(())
 }
 
-#[cfg(not(unix))]
-pub fn spawn_load_model_catalog(
-    _target_session_id: Option<String>,
-    event_tx: DesktopSessionEventSender,
-) -> Result<()> {
-    send_desktop_event_ref(
-        Some(&event_tx),
-        DesktopSessionEvent::ModelCatalogError {
-            error: "desktop model catalog loading is not implemented on this platform yet"
-                .to_string(),
-        },
-    );
-    Ok(())
-}
-
-#[cfg(unix)]
 pub fn spawn_set_model(
     model: String,
     target_session_id: Option<String>,
@@ -582,22 +524,6 @@ pub fn spawn_set_model(
     Ok(())
 }
 
-#[cfg(not(unix))]
-pub fn spawn_set_model(
-    _model: String,
-    _target_session_id: Option<String>,
-    event_tx: DesktopSessionEventSender,
-) -> Result<()> {
-    send_desktop_event_ref(
-        Some(&event_tx),
-        DesktopSessionEvent::ModelCatalogError {
-            error: "desktop model switching is not implemented on this platform yet".to_string(),
-        },
-    );
-    Ok(())
-}
-
-#[cfg(unix)]
 pub fn spawn_refresh_models(
     target_session_id: Option<String>,
     event_tx: DesktopSessionEventSender,
@@ -613,21 +539,6 @@ pub fn spawn_refresh_models(
     )
 }
 
-#[cfg(not(unix))]
-pub fn spawn_refresh_models(
-    _target_session_id: Option<String>,
-    event_tx: DesktopSessionEventSender,
-) -> Result<()> {
-    send_desktop_event_ref(
-        Some(&event_tx),
-        DesktopSessionEvent::ModelCatalogError {
-            error: "desktop model refresh is not implemented on this platform yet".to_string(),
-        },
-    );
-    Ok(())
-}
-
-#[cfg(unix)]
 pub fn spawn_set_reasoning_effort(
     effort: String,
     target_session_id: Option<String>,
@@ -644,23 +555,6 @@ pub fn spawn_set_reasoning_effort(
     )
 }
 
-#[cfg(not(unix))]
-pub fn spawn_set_reasoning_effort(
-    _effort: String,
-    _target_session_id: Option<String>,
-    event_tx: DesktopSessionEventSender,
-) -> Result<()> {
-    send_desktop_event_ref(
-        Some(&event_tx),
-        DesktopSessionEvent::Status(DesktopSessionStatus::ReasoningEffortFailed(
-            "desktop reasoning effort switching is not implemented on this platform yet"
-                .to_string(),
-        )),
-    );
-    Ok(())
-}
-
-#[cfg(unix)]
 pub fn spawn_set_service_tier(
     service_tier: String,
     target_session_id: Option<String>,
@@ -677,22 +571,6 @@ pub fn spawn_set_service_tier(
     )
 }
 
-#[cfg(not(unix))]
-pub fn spawn_set_service_tier(
-    _service_tier: String,
-    _target_session_id: Option<String>,
-    event_tx: DesktopSessionEventSender,
-) -> Result<()> {
-    send_desktop_event_ref(
-        Some(&event_tx),
-        DesktopSessionEvent::Status(DesktopSessionStatus::ServiceTierFailed(
-            "desktop fast mode switching is not implemented on this platform yet".to_string(),
-        )),
-    );
-    Ok(())
-}
-
-#[cfg(unix)]
 pub fn spawn_set_transport(
     transport: String,
     target_session_id: Option<String>,
@@ -709,22 +587,6 @@ pub fn spawn_set_transport(
     )
 }
 
-#[cfg(not(unix))]
-pub fn spawn_set_transport(
-    _transport: String,
-    _target_session_id: Option<String>,
-    event_tx: DesktopSessionEventSender,
-) -> Result<()> {
-    send_desktop_event_ref(
-        Some(&event_tx),
-        DesktopSessionEvent::Status(DesktopSessionStatus::TransportFailed(
-            "desktop transport switching is not implemented on this platform yet".to_string(),
-        )),
-    );
-    Ok(())
-}
-
-#[cfg(unix)]
 pub fn spawn_set_compaction_mode(
     mode: String,
     target_session_id: Option<String>,
@@ -741,22 +603,6 @@ pub fn spawn_set_compaction_mode(
     )
 }
 
-#[cfg(not(unix))]
-pub fn spawn_set_compaction_mode(
-    _mode: String,
-    _target_session_id: Option<String>,
-    event_tx: DesktopSessionEventSender,
-) -> Result<()> {
-    send_desktop_event_ref(
-        Some(&event_tx),
-        DesktopSessionEvent::Status(DesktopSessionStatus::CompactionModeFailed(
-            "desktop compaction mode switching is not implemented on this platform yet".to_string(),
-        )),
-    );
-    Ok(())
-}
-
-#[cfg(unix)]
 pub fn spawn_compact_session(
     target_session_id: Option<String>,
     event_tx: DesktopSessionEventSender,
@@ -772,22 +618,6 @@ pub fn spawn_compact_session(
     )
 }
 
-#[cfg(not(unix))]
-pub fn spawn_compact_session(
-    _target_session_id: Option<String>,
-    event_tx: DesktopSessionEventSender,
-) -> Result<()> {
-    send_desktop_event_ref(
-        Some(&event_tx),
-        DesktopSessionEvent::Status(DesktopSessionStatus::CompactResult {
-            message: "desktop compaction is not implemented on this platform yet".to_string(),
-            success: false,
-        }),
-    );
-    Ok(())
-}
-
-#[cfg(unix)]
 pub fn spawn_rename_session(
     title: Option<String>,
     target_session_id: Option<String>,
@@ -804,22 +634,6 @@ pub fn spawn_rename_session(
     )
 }
 
-#[cfg(not(unix))]
-pub fn spawn_rename_session(
-    _title: Option<String>,
-    _target_session_id: Option<String>,
-    event_tx: DesktopSessionEventSender,
-) -> Result<()> {
-    send_desktop_event_ref(
-        Some(&event_tx),
-        DesktopSessionEvent::Status(DesktopSessionStatus::external(
-            "desktop session renaming is not implemented on this platform yet",
-        )),
-    );
-    Ok(())
-}
-
-#[cfg(unix)]
 pub fn spawn_clear_server_session(
     target_session_id: Option<String>,
     event_tx: DesktopSessionEventSender,
@@ -835,21 +649,6 @@ pub fn spawn_clear_server_session(
     )
 }
 
-#[cfg(not(unix))]
-pub fn spawn_clear_server_session(
-    _target_session_id: Option<String>,
-    event_tx: DesktopSessionEventSender,
-) -> Result<()> {
-    send_desktop_event_ref(
-        Some(&event_tx),
-        DesktopSessionEvent::Error(
-            "desktop session clearing is not implemented on this platform yet".to_string(),
-        ),
-    );
-    Ok(())
-}
-
-#[cfg(unix)]
 fn spawn_control_request<F>(
     worker_name: &'static str,
     target_session_id: Option<String>,
@@ -887,7 +686,6 @@ where
     Ok(())
 }
 
-#[cfg(unix)]
 fn run_control_request<F>(
     target_session_id: Option<&str>,
     event_tx: Option<DesktopSessionEventSender>,
@@ -926,7 +724,6 @@ where
     )
 }
 
-#[cfg(unix)]
 fn cycle_model(
     direction: i8,
     target_session_id: Option<&str>,
@@ -964,7 +761,6 @@ fn cycle_model(
     )
 }
 
-#[cfg(unix)]
 fn load_model_catalog(
     target_session_id: Option<&str>,
     event_tx: Option<DesktopSessionEventSender>,
@@ -1000,7 +796,6 @@ fn load_model_catalog(
     )
 }
 
-#[cfg(unix)]
 fn set_model(
     model: &str,
     target_session_id: Option<&str>,
@@ -1038,7 +833,6 @@ fn set_model(
     )
 }
 
-#[cfg(unix)]
 fn cycle_reasoning_effort(
     direction: i8,
     target_session_id: Option<&str>,
@@ -1105,7 +899,6 @@ fn cycle_reasoning_effort(
     )
 }
 
-#[cfg(unix)]
 fn run_server_session(
     target_session_id: Option<&str>,
     message: &str,
@@ -1209,23 +1002,10 @@ fn run_server_session(
     Ok(session_id)
 }
 
-#[cfg(not(unix))]
-fn run_server_session(
-    _target_session_id: Option<&str>,
-    _message: &str,
-    _images: Vec<(String, String)>,
-    _event_tx: Option<DesktopSessionEventSender>,
-    _command_rx: Receiver<DesktopSessionCommand>,
-) -> Result<String> {
-    anyhow::bail!("desktop server sessions are not implemented on this platform yet")
-}
-
-#[cfg(unix)]
 fn send_desktop_status(event_tx: &Option<DesktopSessionEventSender>, status: DesktopSessionStatus) {
     send_desktop_event(event_tx, DesktopSessionEvent::Status(status));
 }
 
-#[cfg(unix)]
 fn send_desktop_event(event_tx: &Option<DesktopSessionEventSender>, event: DesktopSessionEvent) {
     send_desktop_event_ref(event_tx.as_ref(), event);
 }
@@ -1266,7 +1046,6 @@ fn desktop_session_event_kind(event: &DesktopSessionEvent) -> &'static str {
     }
 }
 
-#[cfg(unix)]
 pub(super) fn socket_path() -> PathBuf {
     if let Ok(custom) = std::env::var("JCODE_SOCKET") {
         return PathBuf::from(custom);
@@ -1285,6 +1064,13 @@ pub(super) fn socket_path() -> PathBuf {
 #[cfg(unix)]
 fn runtime_user_discriminator() -> String {
     unsafe { libc::geteuid() }.to_string()
+}
+
+#[cfg(not(unix))]
+fn runtime_user_discriminator() -> String {
+    std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "user".to_string())
 }
 
 #[cfg(test)]
