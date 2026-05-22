@@ -699,6 +699,12 @@ pub struct ProviderConfig {
     /// model that ships a different default persona, or for project-pinned
     /// behavior baselines.
     pub system_prompt: Option<String>,
+
+    /// User-defined ordered list of model id patterns to scope `Ctrl+P` /
+    /// `/scoped-models` cycling to. Patterns match by case-insensitive
+    /// substring or by glob (`*` and `?`). Empty = full provider list. See
+    /// issue #26.
+    pub scoped_models: Vec<String>,
 }
 
 impl Default for ProviderConfig {
@@ -715,6 +721,7 @@ impl Default for ProviderConfig {
             same_provider_account_failover: true,
             copilot_premium: None,
             system_prompt: None,
+            scoped_models: Vec::new(),
         }
     }
 }

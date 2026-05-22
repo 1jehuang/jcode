@@ -65,6 +65,13 @@ pub(crate) struct Args {
     #[arg(long, global = true)]
     pub(crate) append_system_prompt: Option<String>,
 
+    /// Comma-separated list of model id patterns to scope `Ctrl+P` / `/scoped-models`
+    /// cycling to. Patterns match by case-insensitive substring or by glob (`*` and
+    /// `?`). Falls back to `provider.scoped_models` config when not given.
+    /// Equivalent to setting `JCODE_SCOPED_MODELS`.
+    #[arg(long = "models", global = true, value_delimiter = ',')]
+    pub(crate) scoped_models: Vec<String>,
+
     /// Log tool inputs/outputs and token usage to stderr
     #[arg(long, global = true)]
     pub(crate) trace: bool,
