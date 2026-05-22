@@ -1113,6 +1113,10 @@ impl OpenRouterProvider {
     }
 
     fn begin_background_model_catalog_refresh(&self) -> bool {
+        // Offline mode disables every startup network operation (issue #24).
+        if std::env::var("JCODE_OFFLINE").is_ok() {
+            return false;
+        }
         let Some(now) = current_unix_secs() else {
             return false;
         };

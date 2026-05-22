@@ -259,6 +259,10 @@ pub fn is_enabled() -> bool {
         logging::debug("telemetry disabled by environment");
         return false;
     }
+    if std::env::var("JCODE_OFFLINE").is_ok() {
+        logging::debug("telemetry disabled by JCODE_OFFLINE");
+        return false;
+    }
     if let Ok(dir) = storage::jcode_dir()
         && dir.join("no_telemetry").exists()
     {

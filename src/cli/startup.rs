@@ -59,6 +59,19 @@ fn parse_and_prepare_args() -> Result<Args> {
         crate::env::set_var("JCODE_TRACE", "1");
     }
 
+    // Translate --offline to the in-process JCODE_OFFLINE flag so deep code
+    // paths can read it without threading an extra argument. See issue #24.
+    // Honor a pre-existing env value too (the env var is the documented way
+    // to enable offline mode for wrapper scripts).
+    if args.offline || std::env::var("JCODE_OFFLINE").is_ok() {
+        crate::env::set_var("JCODE_OFFLINE", "1");
+        if !args.quiet {
+            output::stderr_info(
+                "Offline mode: startup network operations disabled (JCODE_OFFLINE=1).",
+            );
+        }
+    }
+
     if let Some(ref socket) = args.socket {
         server::set_socket_path(socket);
     }
@@ -129,6 +142,9 @@ fn spawn_background_update_check(args: &Args) {
 }
 
 fn should_spawn_background_update_check(args: &Args) -> bool {
+    if std::env::var("JCODE_OFFLINE").is_ok() {
+        return false;
+    }
     !args.quiet
         && !args.no_update
         && !matches!(

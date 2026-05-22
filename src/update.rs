@@ -540,6 +540,10 @@ pub fn spawn_background_session_update(session_id: String) {
 }
 
 pub fn check_for_update_blocking() -> Result<Option<GitHubRelease>> {
+    if std::env::var("JCODE_OFFLINE").is_ok() {
+        crate::logging::info("Update check skipped (JCODE_OFFLINE=1)");
+        return Ok(None);
+    }
     let channel = crate::config::config().features.update_channel;
     match channel {
         crate::config::UpdateChannel::Main => check_for_main_update_blocking(),
@@ -1119,5 +1123,31 @@ mod tests {
             estimate_source_update_duration(true, true, Some(123.4)),
             Duration::from_secs(123)
         );
+    }
+
+    #[test]
+    fn check_for_update_blocking_returns_none_in_offline_mode() {
+        // Regression for issue #24: --offline / JCODE_OFFLINE must short-circuit
+        // every startup network operation, including the update check.
+        let _guard = crate::storage::lock_test_env();
+        let prev = std::env::var_os("JCODE_OFFLINE");
+        crate::env::set_var("JCODE_OFFLINE", "1");
+
+        let result = check_for_update_blocking();
+
+        if let Some(prev) = prev {
+            crate::env::set_var("JCODE_OFFLINE", prev);
+        } else {
+            crate::env::remove_var("JCODE_OFFLINE");
+        }
+
+        match result {
+            Ok(None) => {}
+            Ok(Some(release)) => panic!(
+                "offline mode must not return a release; got {:?}",
+                release.tag_name
+            ),
+            Err(e) => panic!("offline mode must not error; got {e}"),
+        }
     }
 }
