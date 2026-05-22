@@ -200,9 +200,14 @@ pub fn build_system_prompt_full(
     memory_prompt: Option<&str>,
     working_dir: Option<&Path>,
 ) -> (String, ContextInfo) {
-    let mut parts = vec![DEFAULT_SYSTEM_PROMPT.to_string()];
+    // Resolve the effective system-prompt root: CLI/env > .jcode/SYSTEM.md
+    // (closest to cwd, walking up to ~/.jcode/agent) > config > built-in default.
+    // See issue #22.
+    let system_root = resolve_system_prompt_override(working_dir)
+        .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
+    let mut parts = vec![system_root.clone()];
     let mut info = ContextInfo {
-        system_prompt_chars: DEFAULT_SYSTEM_PROMPT.len(),
+        system_prompt_chars: system_root.len(),
         ..Default::default()
     };
 
@@ -214,6 +219,15 @@ pub fn build_system_prompt_full(
         parts.push(selfdev_prompt);
     } else {
         parts.push(build_selfdev_hint_prompt());
+    }
+
+    // Project + global APPEND_SYSTEM.md and `--append-system-prompt` go right
+    // after the system prompt (and self-dev guidance) and before AGENTS.md so
+    // they consistently affect the framing without burying overlay/skills.
+    let (append_content, append_chars) = load_append_system_prompt_files_from_dir(working_dir);
+    if let Some(content) = append_content {
+        info.prompt_overlay_chars = info.prompt_overlay_chars.saturating_add(append_chars);
+        parts.push(content);
     }
 
     // Add AGENTS.md instructions with tracking (from working_dir or cwd)
@@ -272,10 +286,13 @@ pub fn build_system_prompt_split(
     memory_prompt: Option<&str>,
     working_dir: Option<&Path>,
 ) -> (SplitSystemPrompt, ContextInfo) {
-    let mut static_parts = vec![DEFAULT_SYSTEM_PROMPT.to_string()];
+    // Resolve effective system-prompt root (issue #22).
+    let system_root = resolve_system_prompt_override(working_dir)
+        .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
+    let mut static_parts = vec![system_root.clone()];
     let mut dynamic_parts = Vec::new();
     let mut info = ContextInfo {
-        system_prompt_chars: DEFAULT_SYSTEM_PROMPT.len(),
+        system_prompt_chars: system_root.len(),
         ..Default::default()
     };
 
@@ -289,6 +306,14 @@ pub fn build_system_prompt_split(
         static_parts.push(selfdev_prompt);
     } else {
         static_parts.push(build_selfdev_hint_prompt());
+    }
+
+    // APPEND_SYSTEM.md files + --append-system-prompt are static per
+    // working_dir + env, so they live in the cacheable section.
+    let (append_content, append_chars) = load_append_system_prompt_files_from_dir(working_dir);
+    if let Some(content) = append_content {
+        info.prompt_overlay_chars = info.prompt_overlay_chars.saturating_add(append_chars);
+        static_parts.push(content);
     }
 
     // Add AGENTS.md instructions (static per project)
@@ -642,6 +667,125 @@ pub fn load_agents_md_files_from_dir(working_dir: Option<&Path>) -> (Option<Stri
         (None, info)
     } else {
         (Some(contents.join("\n\n")), info)
+    }
+}
+
+/// Resolve the effective system-prompt replacement from highest-priority source.
+///
+/// Precedence (issue #22):
+///   1. `JCODE_SYSTEM_PROMPT` env var (set from `--system-prompt` CLI flag).
+///   2. `<cwd>/.jcode/SYSTEM.md` walking up the ancestry, closest-to-cwd wins.
+///   3. `~/.jcode/agent/SYSTEM.md` (user-global default).
+///   4. `provider.system_prompt` config value.
+///   5. `None` — fall back to the built-in `DEFAULT_SYSTEM_PROMPT`.
+pub fn resolve_system_prompt_override(working_dir: Option<&Path>) -> Option<String> {
+    if let Ok(text) = std::env::var("JCODE_SYSTEM_PROMPT")
+        && !text.is_empty()
+    {
+        return Some(text);
+    }
+
+    // Walk up from working_dir looking for `.jcode/SYSTEM.md` (closest wins).
+    let start = working_dir
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok());
+    if let Some(dir) = start {
+        let mut current: Option<&Path> = Some(dir.as_path());
+        while let Some(d) = current {
+            let candidate = d.join(".jcode").join("SYSTEM.md");
+            if candidate.exists()
+                && let Ok(text) = std::fs::read_to_string(&candidate)
+            {
+                return Some(text);
+            }
+            current = d.parent();
+        }
+    }
+
+    // User-global: ~/.jcode/agent/SYSTEM.md
+    if let Ok(global) = crate::storage::jcode_dir().map(|d| d.join("agent").join("SYSTEM.md"))
+        && global.exists()
+        && let Ok(text) = std::fs::read_to_string(&global)
+    {
+        return Some(text);
+    }
+
+    // Note: a `provider.system_prompt` config-value fallback is tracked in
+    // PR #189 (issue #55) and will plug in here once that PR merges.
+    None
+}
+
+/// Load all `.jcode/APPEND_SYSTEM.md` files in the order documented by issue #22:
+///   1. `~/.jcode/agent/APPEND_SYSTEM.md` (user-global, first).
+///   2. ancestors of cwd, walked root-first to cwd-closest-last so deeper context
+///      overrides shallower context.
+///   3. `JCODE_APPEND_SYSTEM_PROMPT` env (set from `--append-system-prompt` CLI flag),
+///      appended last.
+///
+/// Returns `(joined_content, total_chars)`.
+pub fn load_append_system_prompt_files_from_dir(
+    working_dir: Option<&Path>,
+) -> (Option<String>, usize) {
+    let mut sections = Vec::<String>::new();
+    let mut total = 0usize;
+
+    let push = |path: &Path, label: &str, sections: &mut Vec<String>, total: &mut usize| {
+        if path.exists()
+            && let Ok(content) = std::fs::read_to_string(path)
+        {
+            *total += content.len();
+            sections.push(format!("# {}\n\n{}", label, content.trim()));
+        }
+    };
+
+    if let Ok(global) =
+        crate::storage::jcode_dir().map(|d| d.join("agent").join("APPEND_SYSTEM.md"))
+    {
+        push(
+            &global,
+            "Global System Append (~/.jcode/agent/APPEND_SYSTEM.md)",
+            &mut sections,
+            &mut total,
+        );
+    }
+
+    // Walk ancestors top-down (root-first), so cwd-closest is appended last
+    // and therefore wins for any conflicting late-binding instructions.
+    let start = working_dir
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok());
+    if let Some(dir) = start {
+        let mut chain: Vec<&Path> = Vec::new();
+        let mut current: Option<&Path> = Some(dir.as_path());
+        while let Some(d) = current {
+            chain.push(d);
+            current = d.parent();
+        }
+        for d in chain.into_iter().rev() {
+            let candidate = d.join(".jcode").join("APPEND_SYSTEM.md");
+            push(
+                &candidate,
+                &format!("Project System Append ({})", candidate.display()),
+                &mut sections,
+                &mut total,
+            );
+        }
+    }
+
+    if let Ok(text) = std::env::var("JCODE_APPEND_SYSTEM_PROMPT")
+        && !text.is_empty()
+    {
+        total += text.len();
+        sections.push(format!(
+            "# CLI System Append (--append-system-prompt)\n\n{}",
+            text.trim()
+        ));
+    }
+
+    if sections.is_empty() {
+        (None, 0)
+    } else {
+        (Some(sections.join("\n\n")), total)
     }
 }
 

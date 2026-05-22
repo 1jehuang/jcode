@@ -59,6 +59,16 @@ fn parse_and_prepare_args() -> Result<Args> {
         crate::env::set_var("JCODE_TRACE", "1");
     }
 
+    // --system-prompt / --append-system-prompt: translate to env vars so the
+    // build_system_prompt helpers (which run on demand from many code paths)
+    // can pick them up without threading args through every layer. Issue #22.
+    if let Some(ref text) = args.system_prompt {
+        crate::env::set_var("JCODE_SYSTEM_PROMPT", text);
+    }
+    if let Some(ref text) = args.append_system_prompt {
+        crate::env::set_var("JCODE_APPEND_SYSTEM_PROMPT", text);
+    }
+
     if let Some(ref socket) = args.socket {
         server::set_socket_path(socket);
     }

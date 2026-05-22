@@ -200,3 +200,114 @@ fn split_prompt_estimated_tokens_is_positive_when_populated() {
     assert!(split.chars() > 0);
     assert!(split.estimated_tokens() > 0);
 }
+
+// ---------------------------------------------------------------------------
+// Regression tests for issue #22:
+// - .jcode/SYSTEM.md replaces the default system prompt.
+// - .jcode/APPEND_SYSTEM.md (and the CLI/env equivalents) extend it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn system_prompt_env_var_replaces_default_root() {
+    let _lock = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_SYSTEM_PROMPT");
+    crate::env::set_var("JCODE_SYSTEM_PROMPT", "ROOT_FROM_CLI");
+
+    let temp = tempfile::TempDir::new().expect("temp");
+    let resolved = resolve_system_prompt_override(Some(temp.path()));
+
+    if let Some(prev) = prev {
+        crate::env::set_var("JCODE_SYSTEM_PROMPT", prev);
+    } else {
+        crate::env::remove_var("JCODE_SYSTEM_PROMPT");
+    }
+
+    assert_eq!(resolved.as_deref(), Some("ROOT_FROM_CLI"));
+}
+
+#[test]
+fn project_jcode_system_md_replaces_default_root() {
+    let _lock = crate::storage::lock_test_env();
+    let prev_env = std::env::var_os("JCODE_SYSTEM_PROMPT");
+    crate::env::remove_var("JCODE_SYSTEM_PROMPT");
+
+    let temp = tempfile::TempDir::new().expect("temp");
+    let dot = temp.path().join(".jcode");
+    std::fs::create_dir_all(&dot).unwrap();
+    std::fs::write(dot.join("SYSTEM.md"), "PROJECT_ROOT").unwrap();
+
+    let resolved = resolve_system_prompt_override(Some(temp.path()));
+
+    if let Some(prev) = prev_env {
+        crate::env::set_var("JCODE_SYSTEM_PROMPT", prev);
+    }
+
+    assert_eq!(resolved.as_deref(), Some("PROJECT_ROOT"));
+}
+
+#[test]
+fn append_system_prompt_collects_env_and_files_in_order() {
+    let _lock = crate::storage::lock_test_env();
+    let prev_env = std::env::var_os("JCODE_APPEND_SYSTEM_PROMPT");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_APPEND_SYSTEM_PROMPT", "FROM_CLI");
+
+    let home_temp = tempfile::TempDir::new().expect("home temp");
+    crate::env::set_var("JCODE_HOME", home_temp.path());
+    let agent_dir = home_temp.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(agent_dir.join("APPEND_SYSTEM.md"), "FROM_GLOBAL").unwrap();
+
+    let proj_temp = tempfile::TempDir::new().expect("proj temp");
+    let dot = proj_temp.path().join(".jcode");
+    std::fs::create_dir_all(&dot).unwrap();
+    std::fs::write(dot.join("APPEND_SYSTEM.md"), "FROM_PROJECT").unwrap();
+
+    let (joined, total) = load_append_system_prompt_files_from_dir(Some(proj_temp.path()));
+
+    if let Some(prev) = prev_env {
+        crate::env::set_var("JCODE_APPEND_SYSTEM_PROMPT", prev);
+    } else {
+        crate::env::remove_var("JCODE_APPEND_SYSTEM_PROMPT");
+    }
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+
+    let joined = joined.expect("expected appended content");
+    let global_pos = joined.find("FROM_GLOBAL").expect("global section present");
+    let project_pos = joined
+        .find("FROM_PROJECT")
+        .expect("project section present");
+    let cli_pos = joined.find("FROM_CLI").expect("cli section present");
+    assert!(
+        global_pos < project_pos && project_pos < cli_pos,
+        "expected global < project < cli order in {joined:?}"
+    );
+    assert!(total >= "FROM_GLOBAL".len() + "FROM_PROJECT".len() + "FROM_CLI".len());
+}
+
+#[test]
+fn build_system_prompt_full_uses_jcode_system_md_root() {
+    let _lock = crate::storage::lock_test_env();
+    let prev_env = std::env::var_os("JCODE_SYSTEM_PROMPT");
+    crate::env::remove_var("JCODE_SYSTEM_PROMPT");
+
+    let temp = tempfile::TempDir::new().expect("temp");
+    let dot = temp.path().join(".jcode");
+    std::fs::create_dir_all(&dot).unwrap();
+    std::fs::write(dot.join("SYSTEM.md"), "MY_OVERRIDDEN_ROOT").unwrap();
+
+    let (prompt, info) = build_system_prompt_full(None, &[], false, None, Some(temp.path()));
+
+    if let Some(prev) = prev_env {
+        crate::env::set_var("JCODE_SYSTEM_PROMPT", prev);
+    }
+
+    assert!(prompt.starts_with("MY_OVERRIDDEN_ROOT"));
+    // Default prompt is much longer; the override is a tiny string.
+    assert!(info.system_prompt_chars < 200);
+    assert!(!prompt.contains(crate::prompt::DEFAULT_SYSTEM_PROMPT));
+}
