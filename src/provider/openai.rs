@@ -702,6 +702,20 @@ impl OpenAIProvider {
         format!("{}/compact", Self::responses_url(credentials))
     }
 
+    /// Codex-family models (`gpt-5.x-codex*`, including the `[1m]` long-context
+    /// suffix variants) do not accept the native `image_generation` tool. The
+    /// OpenAI Responses API rejects requests with that tool attached and the
+    /// session aborts with a 400. Other ChatGPT-mode models (gpt-5.x non-codex,
+    /// gpt-4o, …) still support it, so we only suppress the tool for codex
+    /// model ids.
+    fn supports_native_image_generation(model_id: &str) -> bool {
+        let normalized = model_id
+            .strip_suffix("[1m]")
+            .unwrap_or(model_id)
+            .to_ascii_lowercase();
+        !normalized.contains("codex")
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "request construction threads explicit per-request OpenAI settings without hidden state"
@@ -720,7 +734,7 @@ impl OpenAIProvider {
         native_compaction_threshold: Option<usize>,
     ) -> Value {
         let mut tools = api_tools.to_vec();
-        if is_chatgpt_mode {
+        if is_chatgpt_mode && Self::supports_native_image_generation(model_id) {
             tools.push(serde_json::json!({ "type": "image_generation" }));
         }
 
