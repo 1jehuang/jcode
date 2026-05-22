@@ -295,11 +295,12 @@ impl FaultToleranceManager {
             .entry(node_id.to_string())
             .or_insert_with(|| NodeHealthTracker::new(node_id.to_string()));
 
+        let consecutive_failures = tracker.consecutive_failures;
         let new_state = tracker.record_failure(FailureType::HeartbeatTimeout, details);
 
         // Send alert if state changed to Warning or worse
         if new_state.severity() >= NodeHealthState::Warning.severity() {
-            self.send_alert(node_id, new_state, tracker.consecutive_failures);
+            self.send_alert(node_id, new_state, consecutive_failures);
         }
 
         new_state

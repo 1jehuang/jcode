@@ -76,10 +76,10 @@ impl DebugAdapter {
         loop {
             let (stream, _) = listener.accept().await?;
             let command_sender = self.command_sender.clone();
-            let event_sender = self.event_sender.clone();
+            let (_, event_receiver) = mpsc::channel(100);
             
             tokio::spawn(async move {
-                if let Err(e) = Self::handle_connection(stream, command_sender, event_sender).await {
+                if let Err(e) = Self::handle_connection(stream, command_sender, event_receiver).await {
                     log::error!("Connection error: {}", e);
                 }
             });
@@ -372,45 +372,57 @@ impl DebugAdapter {
                 }
                 AdapterCommand::Pause(id, params) => {
                     log::info!("Pause request: {:?}", params);
-                    let sm = session_manager.lock().unwrap();
-                    if let Some(session) = sm.get_session("session-1") {
-                        let mut s = session.lock().unwrap();
-                        s.pause(params.thread_id);
-                        
-                        event_sender.send(AdapterEvent::Stopped(StoppedEvent {
-                            reason: "pause".to_string(),
-                            thread_id: params.thread_id,
-                            description: None,
-                            hit_condition_count: None,
-                            text: None,
-                            all_threads_stopped: Some(true),
-                        })).await.ok();
+                    let thread_id = params.thread_id;
+                    
+                    {
+                        let sm = session_manager.lock().unwrap();
+                        if let Some(session) = sm.get_session("session-1") {
+                            let mut s = session.lock().unwrap();
+                            s.pause(params.thread_id);
+                        }
                     }
+                    
+                    event_sender.send(AdapterEvent::Stopped(StoppedEvent {
+                        reason: "pause".to_string(),
+                        thread_id,
+                        description: None,
+                        hit_condition_count: None,
+                        text: None,
+                        all_threads_stopped: Some(true),
+                    })).await.ok();
                 }
                 AdapterCommand::Continue(id, params) => {
                     log::info!("Continue request: {:?}", params);
-                    let sm = session_manager.lock().unwrap();
-                    if let Some(session) = sm.get_session("session-1") {
-                        let mut s = session.lock().unwrap();
-                        s.continue_execution(params.thread_id);
-                        
-                        event_sender.send(AdapterEvent::Continued(ContinuedEvent {
-                            thread_id: params.thread_id,
-                            all_threads_continued: Some(true),
-                        })).await.ok();
+                    let thread_id = params.thread_id;
+                    
+                    {
+                        let sm = session_manager.lock().unwrap();
+                        if let Some(session) = sm.get_session("session-1") {
+                            let mut s = session.lock().unwrap();
+                            s.continue_execution(params.thread_id);
+                        }
                     }
+                    
+                    event_sender.send(AdapterEvent::Continued(ContinuedEvent {
+                        thread_id,
+                        all_threads_continued: Some(true),
+                    })).await.ok();
                 }
                 AdapterCommand::Terminate(id, params) => {
                     log::info!("Terminate request: {:?}", params);
-                    let sm = session_manager.lock().unwrap();
-                    if let Some(session) = sm.get_session("session-1") {
-                        let mut s = session.lock().unwrap();
-                        s.terminate();
-                        
-                        event_sender.send(AdapterEvent::Terminated(TerminatedEvent {
-                            restart: params.restart,
-                        })).await.ok();
+                    let restart = params.restart;
+                    
+                    {
+                        let sm = session_manager.lock().unwrap();
+                        if let Some(session) = sm.get_session("session-1") {
+                            let mut s = session.lock().unwrap();
+                            s.terminate();
+                        }
                     }
+                    
+                    event_sender.send(AdapterEvent::Terminated(TerminatedEvent {
+                        restart,
+                    })).await.ok();
                 }
                 AdapterCommand::Disconnect(id, params) => {
                     log::info!("Disconnect request: {:?}", params);

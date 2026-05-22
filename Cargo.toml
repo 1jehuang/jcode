@@ -198,6 +198,27 @@ name = "tui_bench"
 path = "src/bin/tui_bench.rs"
 required-features = ["dev-bins"]
 
+# Benchmark tests
+[[test]]
+name = "code_generation_benchmark"
+path = "tests/benchmarks/code_generation.rs"
+
+[[test]]
+name = "rag_retrieval_benchmark"
+path = "tests/benchmarks/rag_retrieval.rs"
+
+[[test]]
+name = "cross_file_refactoring_benchmark"
+path = "tests/benchmarks/cross_file_refactoring.rs"
+
+[[test]]
+name = "performance_baseline_benchmark"
+path = "tests/benchmarks/performance_baseline.rs"
+
+[[test]]
+name = "kv_cache_cost_benchmark"
+path = "tests/benchmarks/kv_cache_cost.rs"
+
 [[bin]]
 name = "jcode-grpc"
 path = "src/bin/jcode-grpc.rs"
@@ -262,6 +283,7 @@ lazy_static = "1.4"
 proctitle = "0.1"
 which = "6"
 sysinfo = "0.32"         # System information (CPU, memory, etc.)
+lru = "0.12"             # LRU cache for response caching
 # md5 已被替换为 sha2 (2026-05-10) — md5 = "0.7"
 cron = "0.12"             # Cron expression parsing for task scheduler
 
@@ -345,6 +367,7 @@ jcode-micro-ci = { path = "crates/jcode-micro-ci" }
 jcode-code-value = { path = "crates/jcode-code-value" }
 jcode-completion = { path = "crates/jcode-completion" }
 jcode-lsp = { path = "crates/jcode-lsp" }
+jcode-unified-scheduler = { path = "crates/jcode-unified-scheduler" }
 
 # Archive extraction (for auto-update)
 flate2 = "1"
@@ -369,11 +392,15 @@ prost-types = "0.12"
 jsonwebtoken = "9.2"
 tracing-subscriber = "0.3"
 parking_lot = "0.12"
+xmlparser = "0.13"
 
 # REST dependencies
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 hyper = "1"
 futures-util = "0.3"
+
+# Prometheus metrics
+prometheus-client = "0.22"
 
 [features]
 # Keep the heavyweight local ONNX/tokenizer embedding stack opt-in. It remains
@@ -442,6 +469,11 @@ codegen-units = 256
 [dev-dependencies]
 async-stream = "0.3"
 tempfile = "3"
+reqwest = { version = "0.12", features = ["json"] }
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+serde_json = "1"
 
 [build-dependencies]
 tonic-build = "0.11"

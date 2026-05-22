@@ -76,11 +76,23 @@ pub enum LspOperation {
     Hover { file_path: String, line: u32, character: u32 },
     DocumentSymbol { file_path: String },
     WorkspaceSymbol { query: String },
+    /// textDocument/codeAction — 获取代码操作列表
+    CodeAction { file_path: String, line: u32, character: u32 },
+    /// textDocument/rename — 重命名符号
+    Rename { file_path: String, line: u32, character: u32, new_name: String },
 }
 
 impl LspOperation {
     pub fn name(&self) -> &'static str {
-        match self { Self::GoToDefinition { .. } => "goToDefinition", Self::FindReferences { .. } => "findReferences", Self::Hover { .. } => "hover", Self::DocumentSymbol { .. } => "documentSymbol", Self::WorkspaceSymbol { .. } => "workspaceSymbol" }
+        match self {
+            Self::GoToDefinition { .. } => "goToDefinition",
+            Self::FindReferences { .. } => "findReferences",
+            Self::Hover { .. } => "hover",
+            Self::DocumentSymbol { .. } => "documentSymbol",
+            Self::WorkspaceSymbol { .. } => "workspaceSymbol",
+            Self::CodeAction { .. } => "codeAction",
+            Self::Rename { .. } => "rename",
+        }
     }
 }
 
@@ -189,6 +201,8 @@ impl LspServerManager {
             LspOperation::Hover { line, character, .. } => ("textDocument/hover".to_string(), serde_json::json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": character } })),
             LspOperation::DocumentSymbol { .. } => ("textDocument/documentSymbol".to_string(), serde_json::json!({ "textDocument": { "uri": uri } })),
             LspOperation::WorkspaceSymbol { query } => ("workspace/symbol".to_string(), serde_json::json!({ "query": query })),
+            LspOperation::CodeAction { line, character, .. } => ("textDocument/codeAction".to_string(), serde_json::json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": character } })),
+            LspOperation::Rename { line, character, new_name, .. } => ("textDocument/rename".to_string(), serde_json::json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": character }, "newName": new_name })),
         }
     }
 }

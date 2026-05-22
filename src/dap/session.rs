@@ -98,28 +98,24 @@ impl DebugSession {
     }
 
     pub fn pause(&mut self, thread_id: ThreadId) -> Option<&ThreadState> {
-        if let Some(thread) = self.threads.get_mut(&thread_id) {
+        {
+            let thread = self.threads.get_mut(&thread_id)?;
             thread.state = ThreadStateEnum::Paused;
             self.state = DebugSessionState::Paused;
-            self.generate_stack_frames(thread_id);
-            Some(thread)
-        } else {
-            None
         }
+        self.generate_stack_frames(thread_id);
+        self.threads.get(&thread_id)
     }
 
     pub fn continue_execution(&mut self, thread_id: ThreadId) -> Option<&ThreadState> {
-        if let Some(thread) = self.threads.get_mut(&thread_id) {
-            thread.state = ThreadStateEnum::Running;
-            
-            let all_running = self.threads.values().all(|t| t.state == ThreadStateEnum::Running);
-            if all_running {
-                self.state = DebugSessionState::Running;
-            }
-            Some(thread)
-        } else {
-            None
+        let all_running = self.threads.values().all(|t| t.state == ThreadStateEnum::Running);
+        if all_running {
+            self.state = DebugSessionState::Running;
         }
+        
+        let thread = self.threads.get_mut(&thread_id)?;
+        thread.state = ThreadStateEnum::Running;
+        Some(thread)
     }
 
     pub fn step_in(&mut self, thread_id: ThreadId) {
@@ -228,15 +224,15 @@ impl DebugSession {
             .collect()
     }
 
-    pub fn get_stack_frames(&self, thread_id: ThreadId, start_frame: i64, levels: i64) -> Vec<StackFrame> {
+    pub fn get_stack_frames(&self, thread_id: ThreadId, start_frame: i64, levels: i64) -> Option<Vec<StackFrame>> {
         let thread = self.threads.get(&thread_id)?;
         let start = start_frame as usize;
         let end = start + levels as usize;
         
-        thread.stack_frames[start..end.min(thread.stack_frames.len())]
+        Some(thread.stack_frames[start..end.min(thread.stack_frames.len())]
             .iter()
             .filter_map(|&frame_id| self.frames.get(&frame_id).map(|d| d.frame.clone()))
-            .collect()
+            .collect())
     }
 
     pub fn get_scopes(&self, frame_id: StackFrameId) -> Option<Vec<Scope>> {
@@ -261,11 +257,9 @@ impl DebugSession {
     }
 
     fn generate_stack_frames(&mut self, thread_id: ThreadId) {
-        let thread = self.threads.get_mut(&thread_id);
-        if thread.is_none() {
+        if !self.threads.contains_key(&thread_id) {
             return;
         }
-        let thread = thread.unwrap();
         
         let frames = vec![
             StackFrame {
@@ -325,6 +319,7 @@ impl DebugSession {
         ];
         
         let mut frame_ids = Vec::new();
+        let mut frame_datas: Vec<(StackFrame, Vec<Scope>, HashMap<String, Variable>)> = Vec::new();
         for (idx, frame) in frames.into_iter().enumerate() {
             let frame_id = (idx + 1) as StackFrameId;
             frame_ids.push(frame_id);
@@ -332,6 +327,14 @@ impl DebugSession {
             let scopes = self.generate_scopes(frame_id);
             let variables = self.generate_variables();
             
+            frame_datas.push((frame, scopes, variables));
+        }
+        
+        let thread = self.threads.get_mut(&thread_id);
+        let thread = thread.unwrap();
+        
+        for (idx, (frame, scopes, variables)) in frame_datas.into_iter().enumerate() {
+            let frame_id = (idx + 1) as StackFrameId;
             self.frames.insert(frame_id, StackFrameData {
                 frame,
                 scopes: scopes.clone(),
