@@ -72,6 +72,31 @@ fn parse_and_prepare_args() -> Result<Args> {
         }
     }
 
+    // --safe-eval: layered first-run sandbox. Sets an isolated JCODE_HOME and
+    // turns off network/ambient/telemetry/selfdev so users can poke at jcode
+    // without touching their main credentials/sessions/memory. Issue #60.
+    if args.safe_eval || std::env::var("JCODE_SAFE_EVAL").is_ok() {
+        crate::env::set_var("JCODE_SAFE_EVAL", "1");
+        if std::env::var_os("JCODE_HOME").is_none()
+            && let Some(home) = dirs::home_dir()
+        {
+            let isolated = home.join(".jcode-safe-eval");
+            crate::env::set_var("JCODE_HOME", &isolated);
+        }
+        crate::env::set_var("JCODE_OFFLINE", "1");
+        crate::env::set_var("JCODE_NO_TELEMETRY", "1");
+        crate::env::set_var("JCODE_AMBIENT_DISABLED", "1");
+        crate::env::set_var("JCODE_NO_SELFDEV", "1");
+        if !args.quiet {
+            output::stderr_info(
+                "Safe-eval profile: isolated JCODE_HOME, telemetry off, offline, ambient/selfdev gated.",
+            );
+            if let Some(home) = std::env::var_os("JCODE_HOME") {
+                output::stderr_info(format!("  JCODE_HOME = {}", home.to_string_lossy()));
+            }
+        }
+    }
+
     // --system-prompt / --append-system-prompt: translate to env vars so the
     // build_system_prompt helpers (which run on demand from many code paths)
     // can pick them up without threading args through every layer. Issue #22.

@@ -53,6 +53,14 @@ pub(crate) struct Args {
     #[arg(long, global = true)]
     pub(crate) offline: bool,
 
+    /// First-run safe evaluation profile: isolated `~/.jcode-safe-eval/` home,
+    /// telemetry off, offline mode, ambient/swarm/selfdev gated. Layered on top of
+    /// any other flags so users can verify jcode behavior before pointing it at a
+    /// real repo + credentials. Equivalent to setting `JCODE_SAFE_EVAL=1`. See
+    /// `docs/SAFE_EVALUATION.md`.
+    #[arg(long = "safe-eval", global = true)]
+    pub(crate) safe_eval: bool,
+
     /// Replace the built-in system prompt with the given text for this session.
     /// Higher priority than `.jcode/SYSTEM.md` and the `provider.system_prompt`
     /// config value. Equivalent to setting `JCODE_SYSTEM_PROMPT`.
