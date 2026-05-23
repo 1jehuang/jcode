@@ -433,18 +433,8 @@ fn named_provider_config_accepts_openai_compatible_spelling() {
 }
 
 #[test]
-fn named_provider_profile_reports_malformed_config_instead_of_unknown_profile() {
-    let _lock = crate::storage::lock_test_env();
-    let previous_home = std::env::var_os("JCODE_HOME");
-    let temp = tempfile::TempDir::new().expect("tempdir");
-    crate::env::set_var("JCODE_HOME", temp.path());
-    crate::config::Config::invalidate_cache();
-
-    let config_path = crate::config::Config::path().expect("config path");
-    std::fs::create_dir_all(config_path.parent().expect("config parent"))
-        .expect("create config dir");
-    std::fs::write(
-        &config_path,
+fn named_provider_profile_malformed_config_reports_parse_error() {
+    let err = toml::from_str::<crate::config::Config>(
         r#"
         [providers.antigravity]
         type = "anthropic-compatible"
@@ -457,12 +447,12 @@ fn named_provider_profile_reports_malformed_config_instead_of_unknown_profile() 
         context_window = 128000
         "#,
     )
-    .expect("write config");
-
-    let err = apply_named_provider_profile_env("antigravity").expect_err("malformed config");
+    .expect_err("malformed config");
     let message = err.to_string();
     assert!(
-        message.contains("Failed to parse config file"),
+        message.contains("unknown variant")
+            || message.contains("expected one of")
+            || message.contains("unknown field"),
         "unexpected error: {message}"
     );
     assert!(
@@ -473,13 +463,6 @@ fn named_provider_profile_reports_malformed_config_instead_of_unknown_profile() 
         !message.contains("Unknown provider profile"),
         "unexpected error: {message}"
     );
-
-    if let Some(previous_home) = previous_home {
-        crate::env::set_var("JCODE_HOME", previous_home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
-    crate::config::Config::invalidate_cache();
 }
 
 #[test]

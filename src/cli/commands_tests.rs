@@ -126,6 +126,8 @@ fn test_parse_tailscale_dns_name_invalid_json() {
 #[test]
 fn configured_auth_test_targets_only_include_configured_supported_providers() {
     let _guard = crate::storage::lock_test_env();
+    let _env = SavedEnv::capture(&["OPENROUTER_API_KEY"]);
+    crate::env::set_var("OPENROUTER_API_KEY", "test-openrouter-key");
 
     let status = AuthStatus {
         anthropic: ProviderAuth {
