@@ -59,7 +59,7 @@ Run these first after broad Windows changes:
 ```powershell
 $env:HOME=$env:USERPROFILE
 cargo check --workspace --all-targets
-cargo test -p jcode auth --lib
+cargo test -p jcode auth --lib -- --test-threads=1
 cargo test -p jcode provider --lib
 cargo test -p jcode socket --lib
 cargo test -p jcode server::socket --lib
@@ -218,9 +218,16 @@ Typical validation:
 
 ```powershell
 $env:HOME=$env:USERPROFILE
-cargo test -p jcode auth --lib
+cargo test -p jcode auth --lib -- --test-threads=1
 cargo test -p jcode provider --lib
 ```
+
+The broad `auth` filter includes tests that mutate process environment and
+global provider/model state. On Windows it has been observed to pass serially
+while failing in parallel with follow-on `PoisonError` noise after the first
+shared-state assertion fails. Use `--test-threads=1` for this broad filter, and
+run narrower auth/provider modules in parallel when investigating a specific
+failure.
 
 ## Reporting Format
 
