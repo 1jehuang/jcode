@@ -89,13 +89,14 @@ fn load_sessions_includes_claude_code_sessions_from_external_home() {
     )
     .expect("write transcript");
 
+    let transcript_path_json = serde_json::to_string(&transcript_path).expect("json path");
     std::fs::write(
         project_dir.join("sessions-index.json"),
         format!(
             concat!(
                 "{{\"version\":1,\"entries\":[",
                 "{{\"sessionId\":\"claude-session-123\",",
-                "\"fullPath\":\"{}\",",
+                "\"fullPath\":{},",
                 "\"firstPrompt\":\"Investigate the login bug\",",
                 "\"summary\":\"Investigate the login bug\",",
                 "\"messageCount\":2,",
@@ -104,7 +105,7 @@ fn load_sessions_includes_claude_code_sessions_from_external_home() {
                 "\"projectPath\":\"/tmp/demo-project\"",
                 "}}]}}"
             ),
-            transcript_path.display()
+            transcript_path_json
         ),
     )
     .expect("write index");
@@ -147,20 +148,21 @@ fn load_claude_code_preview_reads_transcript_messages() {
     )
     .expect("write transcript");
 
+    let transcript_path_json = serde_json::to_string(&transcript_path).expect("json path");
     std::fs::write(
         project_dir.join("sessions-index.json"),
         format!(
             concat!(
                 "{{\"version\":1,\"entries\":[",
                 "{{\"sessionId\":\"claude-session-456\",",
-                "\"fullPath\":\"{}\",",
+                "\"fullPath\":{},",
                 "\"firstPrompt\":\"Fix the flaky test\",",
                 "\"messageCount\":2,",
                 "\"created\":\"2026-04-04T12:00:00Z\",",
                 "\"modified\":\"2026-04-04T12:05:00Z\"",
                 "}}]}}"
             ),
-            transcript_path.display()
+            transcript_path_json
         ),
     )
     .expect("write index");

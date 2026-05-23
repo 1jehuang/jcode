@@ -155,7 +155,7 @@ fn test_list_claude_code_sessions_uses_live_transcripts_when_index_is_stale() {
         .iter()
         .find(|session| session.session_id == "live-session-1")
         .expect("indexed live transcript should be discovered");
-    assert_eq!(indexed.full_path, indexed_session_path.to_string_lossy());
+    assert_eq!(PathBuf::from(&indexed.full_path), indexed_session_path);
     assert_eq!(
         indexed.summary.as_deref(),
         Some("Investigate the login bug")
@@ -166,7 +166,7 @@ fn test_list_claude_code_sessions_uses_live_transcripts_when_index_is_stale() {
         .iter()
         .find(|session| session.session_id == "orphan-session-2")
         .expect("orphan live transcript should be discovered");
-    assert_eq!(orphan.full_path, orphan_session_path.to_string_lossy());
+    assert_eq!(PathBuf::from(&orphan.full_path), orphan_session_path);
     assert_eq!(orphan.first_prompt, "Summarize the deployment issue");
     assert_eq!(orphan.message_count, 2);
 }
@@ -183,13 +183,14 @@ fn test_list_claude_code_sessions_uses_index_metadata_without_parsing_transcript
     let transcript_path = project_dir.join("indexed-session.jsonl");
     std::fs::write(&transcript_path, "{this is not valid jsonl}\n").unwrap();
 
+    let transcript_path_json = serde_json::to_string(&transcript_path).expect("json path");
     std::fs::write(
         project_dir.join("sessions-index.json"),
         format!(
             concat!(
                 "{{\"version\":1,\"entries\":[",
                 "{{\"sessionId\":\"indexed-session\",",
-                "\"fullPath\":\"{}\",",
+                "\"fullPath\":{},",
                 "\"firstPrompt\":\"Investigate the login bug\",",
                 "\"summary\":\"Investigate the login bug\",",
                 "\"messageCount\":2,",
@@ -198,7 +199,7 @@ fn test_list_claude_code_sessions_uses_index_metadata_without_parsing_transcript
                 "\"projectPath\":\"/tmp/demo-project\"",
                 "}}]}}"
             ),
-            transcript_path.display()
+            transcript_path_json
         ),
     )
     .unwrap();
@@ -233,19 +234,20 @@ fn test_list_claude_code_sessions_skips_empty_index_entries_without_messages() {
     )
     .unwrap();
 
+    let transcript_path_json = serde_json::to_string(&transcript_path).expect("json path");
     std::fs::write(
         project_dir.join("sessions-index.json"),
         format!(
             concat!(
                 "{{\"version\":1,\"entries\":[",
                 "{{\"sessionId\":\"empty-session\",",
-                "\"fullPath\":\"{}\",",
+                "\"fullPath\":{},",
                 "\"firstPrompt\":\"\",",
                 "\"summary\":\"\",",
                 "\"messageCount\":0",
                 "}}]}}"
             ),
-            transcript_path.display()
+            transcript_path_json
         ),
     )
     .unwrap();
