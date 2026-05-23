@@ -350,11 +350,12 @@ mod tests {
 
         let context = CompletionContext {
             file_path: "src/main.rs".to_string(),
+            line: 0,
+            column: 0,
             expected_type: Some("String".to_string()),
-            scope: Some("function".to_string()),
+            scope: crate::ast_context::ScopeKind::FunctionBody,
             prefix: "hello".to_string(),
-            suffix: "".to_string(),
-            line_content: "let x = hello".to_string(),
+            parent_symbol: None,
         };
 
         let candidates = vec![

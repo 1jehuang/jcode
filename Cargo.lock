@@ -1565,6 +1565,7 @@ dependencies = [
  "libc",
  "lru 0.12.5",
  "lsp-types 0.95.1",
+ "num_cpus",
  "open",
  "parking_lot",
  "proctitle",

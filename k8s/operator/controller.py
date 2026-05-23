@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 CarpAI Cluster Operator - Kubernetes Controller
-Manages CarpAICluster custom resources and automates cluster lifecycle.
+Manages CarpAICluster, RedisCluster, and MilvusCluster custom resources.
 """
 
 import kopf
@@ -9,6 +9,7 @@ import kubernetes
 from kubernetes import client, config
 import logging
 import json
+import hashlib
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ except config.ConfigException:
 
 v1 = client.CoreV1Api()
 apps_v1 = client.AppsV1Api()
+batch_v1 = client.BatchV1Api()
 
 
 @kopf.on.create('carpai.io', 'v1alpha1', 'carpaiclusters')
@@ -364,6 +366,359 @@ def create_hpa(name, namespace, autoscaling_spec):
         }
     }
     return hpa
+
+
+# ============================================================================
+# Redis Cluster Operator
+# ============================================================================
+
+@kopf.on.create('carpai.io', 'v1alpha1', 'redisclusters')
+def create_redis_cluster(spec, name, namespace, **kwargs):
+    """Handle creation of RedisCluster resource"""
+    logger.info(f"Creating Redis cluster: {name}")
+
+    replicas = spec.get('replicas', 6)
+    image = spec.get('image', 'redis:7-alpine')
+    config = spec.get('config', {})
+    resources = spec.get('resources', {})
+
+    # Create StatefulSet for Redis nodes
+    statefulset = create_redis_statefulset(
+        name=name,
+        namespace=namespace,
+        replicas=replicas,
+        image=image,
+        redis_config=config,
+        resource_spec=resources,
+        spec=spec
+    )
+
+    apps_v1.create_namespaced_stateful_set(
+        namespace=namespace,
+        body=statefulset
+    )
+
+    # Create headless service for Redis cluster communication
+    service = create_redis_service(name, namespace)
+    v1.create_namespaced_service(namespace=namespace, body=service)
+
+    # Create initialization job to set up the cluster
+    init_job = create_redis_init_job(name, namespace, replicas)
+    batch_v1.create_namespaced_job(namespace=namespace, body=init_job)
+
+    return {'message': f'Redis cluster {name} creation initiated'}
+
+
+@kopf.on.update('carpai.io', 'v1alpha1', 'redisclusters')
+def update_redis_cluster(spec, name, namespace, status, **kwargs):
+    """Handle updates to RedisCluster resource"""
+    logger.info(f"Updating Redis cluster: {name}")
+    # TODO: Implement rolling update logic
+    return {'message': f'Redis cluster {name} update in progress'}
+
+
+@kopf.on.delete('carpai.io', 'v1alpha1', 'redisclusters')
+def delete_redis_cluster(name, namespace, **kwargs):
+    """Handle deletion of RedisCluster resource"""
+    logger.info(f"Deleting Redis cluster: {name}")
+    # Kubernetes will clean up StatefulSet and associated resources
+    return {'message': f'Redis cluster {name} deletion initiated'}
+
+
+def create_redis_statefulset(name, namespace, replicas, image, redis_config, resource_spec, spec):
+    """Create Redis StatefulSet manifest"""
+    storage = spec.get('storage', {})
+    storage_size = storage.get('size', '10Gi')
+    storage_class = storage.get('storageClass', 'standard')
+
+    maxmemory = redis_config.get('maxmemory', '512mb')
+    maxmemory_policy = redis_config.get('maxmemoryPolicy', 'allkeys-lru')
+    appendonly = redis_config.get('appendonly', True)
+    save_config = redis_config.get('saveConfig', '900 1 300 10 60 10000')
+
+    container_spec = {
+        'name': 'redis',
+        'image': image,
+        'command': [
+            'redis-server',
+            '--port', '6379',
+            '--cluster-enabled', 'yes',
+            '--cluster-config-file', 'nodes.conf',
+            '--cluster-node-timeout', '5000',
+            '--appendonly', str(appendonly).lower(),
+            '--maxmemory', maxmemory,
+            '--maxmemory-policy', maxmemory_policy,
+            '--save', save_config.replace(' ', ';'),
+        ],
+        'ports': [
+            {'containerPort': 6379, 'name': 'redis'},
+            {'containerPort': 16379, 'name': 'cluster-bus'},
+        ],
+        'resources': resource_spec if resource_spec else {
+            'requests': {'cpu': '500m', 'memory': '512Mi'},
+            'limits': {'cpu': '1', 'memory': '1Gi'},
+        },
+        'volumeMounts': [
+            {'name': 'redis-data', 'mountPath': '/data'},
+        ],
+        'livenessProbe': {
+            'exec': {'command': ['redis-cli', 'ping']},
+            'initialDelaySeconds': 30,
+            'periodSeconds': 10,
+        },
+        'readinessProbe': {
+            'exec': {'command': ['redis-cli', 'ping']},
+            'initialDelaySeconds': 5,
+            'periodSeconds': 5,
+        },
+    }
+
+    statefulset = {
+        'apiVersion': 'apps/v1',
+        'kind': 'StatefulSet',
+        'metadata': {
+            'name': name,
+            'labels': {
+                'app': 'redis-cluster',
+                'cluster': name,
+            },
+        },
+        'spec': {
+            'serviceName': f'{name}-headless',
+            'replicas': replicas,
+            'selector': {
+                'matchLabels': {
+                    'app': 'redis-cluster',
+                    'cluster': name,
+                },
+            },
+            'template': {
+                'metadata': {
+                    'labels': {
+                        'app': 'redis-cluster',
+                        'cluster': name,
+                    },
+                },
+                'spec': {
+                    'containers': [container_spec],
+                },
+            },
+            'volumeClaimTemplates': [
+                {
+                    'metadata': {'name': 'redis-data'},
+                    'spec': {
+                        'accessModes': ['ReadWriteOnce'],
+                        'storageClassName': storage_class,
+                        'resources': {
+                            'requests': {'storage': storage_size},
+                        },
+                    },
+                },
+            ],
+        },
+    }
+
+    return statefulset
+
+
+def create_redis_service(name, namespace):
+    """Create headless Service for Redis cluster"""
+    service = {
+        'apiVersion': 'v1',
+        'kind': 'Service',
+        'metadata': {
+            'name': f'{name}-headless',
+            'labels': {
+                'app': 'redis-cluster',
+                'cluster': name,
+            },
+        },
+        'spec': {
+            'clusterIP': 'None',  # Headless service
+            'ports': [
+                {'port': 6379, 'targetPort': 6379, 'name': 'redis'},
+                {'port': 16379, 'targetPort': 16379, 'name': 'cluster-bus'},
+            ],
+            'selector': {
+                'app': 'redis-cluster',
+                'cluster': name,
+            },
+        },
+    }
+    return service
+
+
+def create_redis_init_job(name, namespace, replicas):
+    """Create Job to initialize Redis cluster"""
+    # Build node list for cluster creation command
+    nodes = ' '.join([f'{name}-{i}.{name}-headless.{namespace}.svc.cluster.local:6379' for i in range(replicas)])
+
+    job = {
+        'apiVersion': 'batch/v1',
+        'kind': 'Job',
+        'metadata': {
+            'name': f'{name}-init',
+        },
+        'spec': {
+            'template': {
+                'spec': {
+                    'containers': [
+                        {
+                            'name': 'redis-init',
+                            'image': 'redis:7-alpine',
+                            'command': [
+                                'sh', '-c',
+                                f'sleep 10 && redis-cli --cluster create {nodes} --cluster-replicas 1 --cluster-yes'
+                            ],
+                        },
+                    ],
+                    'restartPolicy': 'OnFailure',
+                },
+            },
+            'backoffLimit': 5,
+        },
+    }
+    return job
+
+
+# ============================================================================
+# Milvus Cluster Operator
+# ============================================================================
+
+@kopf.on.create('carpai.io', 'v1alpha1', 'milvusclusters')
+def create_milvus_cluster(spec, name, namespace, **kwargs):
+    """Handle creation of MilvusCluster resource"""
+    logger.info(f"Creating Milvus cluster: {name}")
+
+    mode = spec.get('mode', 'standalone')
+    image = spec.get('image', 'milvusdb/milvus:v2.4.0')
+
+    if mode == 'standalone':
+        deployment = create_milvus_standalone(name, namespace, image, spec)
+        apps_v1.create_namespaced_deployment(namespace=namespace, body=deployment)
+    else:
+        # Cluster mode - create multiple components
+        create_milvus_cluster_mode(name, namespace, image, spec)
+
+    # Create service
+    service = create_milvus_service(name, namespace, mode)
+    v1.create_namespaced_service(namespace=namespace, body=service)
+
+    return {'message': f'Milvus cluster {name} creation initiated ({mode})'}
+
+
+@kopf.on.delete('carpai.io', 'v1alpha1', 'milvusclusters')
+def delete_milvus_cluster(name, namespace, **kwargs):
+    """Handle deletion of MilvusCluster resource"""
+    logger.info(f"Deleting Milvus cluster: {name}")
+    return {'message': f'Milvus cluster {name} deletion initiated'}
+
+
+def create_milvus_standalone(name, namespace, image, spec):
+    """Create Milvus standalone deployment"""
+    components = spec.get('components', {})
+    standalone = components.get('standalone', {})
+    resources = standalone.get('resources', {
+        'requests': {'cpu': '2', 'memory': '4Gi'},
+        'limits': {'cpu': '4', 'memory': '8Gi'},
+    })
+
+    storage = spec.get('storage', {})
+    storage_size = storage.get('size', '100Gi')
+
+    deployment = {
+        'apiVersion': 'apps/v1',
+        'kind': 'Deployment',
+        'metadata': {
+            'name': name,
+            'labels': {
+                'app': 'milvus',
+                'component': 'standalone',
+                'cluster': name,
+            },
+        },
+        'spec': {
+            'replicas': standalone.get('replicas', 1),
+            'selector': {
+                'matchLabels': {
+                    'app': 'milvus',
+                    'cluster': name,
+                },
+            },
+            'template': {
+                'metadata': {
+                    'labels': {
+                        'app': 'milvus',
+                        'cluster': name,
+                    },
+                },
+                'spec': {
+                    'containers': [
+                        {
+                            'name': 'milvus',
+                            'image': image,
+                            'command': ['milvus', 'run', 'standalone'],
+                            'ports': [
+                                {'containerPort': 19530, 'name': 'rpc'},
+                                {'containerPort': 9091, 'name': 'metrics'},
+                            ],
+                            'env': [
+                                {'name': 'ETCD_ENDPOINTS', 'value': f'{name}-etcd:2379'},
+                                {'name': 'MINIO_ADDRESS', 'value': f'{name}-minio:9000'},
+                            ],
+                            'resources': resources,
+                            'livenessProbe': {
+                                'tcpSocket': {'port': 19530},
+                                'initialDelaySeconds': 60,
+                                'periodSeconds': 10,
+                            },
+                            'readinessProbe': {
+                                'tcpSocket': {'port': 19530},
+                                'initialDelaySeconds': 30,
+                                'periodSeconds': 5,
+                            },
+                        },
+                    ],
+                },
+            },
+        },
+    }
+
+    return deployment
+
+
+def create_milvus_service(name, namespace, mode):
+    """Create Milvus service"""
+    service = {
+        'apiVersion': 'v1',
+        'kind': 'Service',
+        'metadata': {
+            'name': name,
+            'labels': {
+                'app': 'milvus',
+                'cluster': name,
+            },
+        },
+        'spec': {
+            'type': 'ClusterIP',
+            'ports': [
+                {'port': 19530, 'targetPort': 19530, 'name': 'rpc'},
+                {'port': 9091, 'targetPort': 9091, 'name': 'metrics'},
+            ],
+            'selector': {
+                'app': 'milvus',
+                'cluster': name,
+            },
+        },
+    }
+    return service
+
+
+def create_milvus_cluster_mode(name, namespace, image, spec):
+    """Create Milvus in cluster mode with multiple components"""
+    # TODO: Implement full cluster mode with querynode, datanode, indexnode, proxy
+    logger.warning("Milvus cluster mode not fully implemented yet")
+    pass
 
 
 if __name__ == '__main__':

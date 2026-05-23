@@ -121,11 +121,50 @@ impl LspServer {
     }
 
     async fn handle_completion(&self, id: Option<&serde_json::Value>, params: Option<&serde_json::Value>) -> String {
-        let _ = params; // 简化: 返回空补全列表
+        // 闭环: LSP → AutoFallback → FIM → 返回IDE
+        let (file_path, line, character) = self.parse_completion_params(params);
+
+        let mut items = Vec::new();
+
+        if let (Some(fp), Some(ln), Some(ch)) = (file_path, line, character) {
+            let path = std::path::Path::new(&fp);
+            let content = tokio::fs::read_to_string(path).await.unwrap_or_default();
+            let lines: Vec<&str> = content.lines().collect();
+            let cursor_offset: usize = lines.iter().take(ln as usize).map(|l| l.len() + 1).sum::<usize>() + ch as usize;
+
+            // 用 SmartCompleter (FIM + AutoFallback)
+            let completer = crate::completion_quality::SmartCompleter::new("http://127.0.0.1:8080");
+            let (response, completion_id) = completer.adaptive_complete(
+                &content, cursor_offset, &fp, &[]
+            ).await;
+
+            for candidate in &response.items {
+                items.push(serde_json::json!({
+                    "label": candidate.text.chars().take(60).collect::<String>(),
+                    "text": candidate.text,
+                    "score": candidate.score,
+                }));
+            }
+
+            // 记录反馈占位 (IDE 会异步调用 carpai.completion.feedback)
+            let _ = completion_id;
+        }
+
         serde_json::to_string(&serde_json::json!({
             "jsonrpc": "2.0", "id": id,
-            "result": { "isIncomplete": false, "items": [] }
+            "result": { "isIncomplete": false, "items": items }
         })).unwrap_or_default()
+    }
+
+    /// 解析补全参数
+    fn parse_completion_params(&self, params: Option<&serde_json::Value>) -> (Option<String>, Option<u32>, Option<u32>) {
+        let p = match params { Some(v) => v, None => return (None, None, None) };
+        let uri = p.get("textDocument").and_then(|d| d.get("uri")).and_then(|u| u.as_str())
+            .map(|u| u.strip_prefix("file://").unwrap_or(u).to_string());
+        let pos = p.get("position");
+        let line = pos.and_then(|p| p.get("line")).and_then(|l| l.as_u64()).map(|l| l as u32);
+        let character = pos.and_then(|p| p.get("character")).and_then(|c| c.as_u64()).map(|c| c as u32);
+        (uri, line, character)
     }
 
     async fn handle_code_action(&self, id: Option<&serde_json::Value>, _params: Option<&serde_json::Value>) -> String {

@@ -1,0 +1,2 @@
+-r requirements.txt
+docker>=7.0.0

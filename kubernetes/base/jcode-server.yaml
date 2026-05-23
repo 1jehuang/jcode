@@ -1,0 +1,214 @@
+# JCode Server Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jcode-server
+  namespace: carpai
+  labels:
+    app: jcode-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jcode-server
+  template:
+    metadata:
+      labels:
+        app: jcode-server
+    spec:
+      containers:
+        - name: jcode-server
+          image: jcode:latest
+          imagePullPolicy: IfNotPresent  # Use local images for offline deployment
+          ports:
+            - containerPort: 50051
+              name: grpc
+            - containerPort: 8080
+              name: websocket
+            - containerPort: 8081
+              name: rest
+          env:
+            - name: JCODE_GRPC_PORT
+              value: "50051"
+            - name: JCODE_WS_PORT
+              value: "8080"
+            - name: JCODE_REST_PORT
+              value: "8081"
+            - name: JCODE_BIND_ADDR
+              value: "0.0.0.0"
+            - name: RUST_LOG
+              value: "jcode=info"
+            - name: DATABASE_URL
+              value: "postgresql://carpai:carpai_dev_password@postgres:5432/carpai"
+            - name: VECTOR_STORE_TYPE
+              value: "pgvector"
+            - name: REDIS_MODE
+              value: "cluster"
+            - name: REDIS_URL
+              value: "redis://redis-node-0.redis-node:6379,redis://redis-node-1.redis-node:6379,redis://redis-node-2.redis-node:6379,redis://redis-node-3.redis-node:6379,redis://redis-node-4.redis-node:6379,redis://redis-node-5.redis-node:6379"
+            - name: KV_CACHE_STORAGE_TYPE
+              value: "nvme"
+            - name: KV_CACHE_STORAGE_PATH
+              value: "/data/kv_cache"
+            - name: KV_CACHE_TTL_SECS
+              value: "3600"
+            - name: LOAD_BALANCER_STRATEGY
+              value: "three_layer"
+            - name: TENANT_ISOLATION_ENABLED
+              value: "true"
+            - name: MODEL_ROUTING_ENABLED
+              value: "true"
+            - name: SESSION_STICKY_ENABLED
+              value: "true"
+            - name: SESSION_STICKY_TTL_SECS
+              value: "3600"
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: jcode-secret
+                  key: jwt-secret
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          volumeMounts:
+            - name: jcode-data
+              mountPath: /home/jcode/.jcode
+            - name: config-volume
+              mountPath: /home/jcode/.jcode/config.toml
+              subPath: config.toml
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: jcode-data
+          persistentVolumeClaim:
+            claimName: jcode-data-pvc
+        - name: config-volume
+          configMap:
+            name: jcode-config
+---
+# JCode Server Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: jcode-server
+  namespace: carpai
+spec:
+  type: ClusterIP
+  ports:
+    - port: 50051
+      targetPort: 50051
+      name: grpc
+    - port: 8080
+      targetPort: 8080
+      name: websocket
+    - port: 8081
+      targetPort: 8081
+      name: rest
+  selector:
+    app: jcode-server
+---
+# JCode Server Ingress (for external access)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jcode-server-ingress
+  namespace: carpai
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - carpai.local
+      secretName: carpai-tls-secret
+  rules:
+    - host: carpai.local  # Change to your domain
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: jcode-server
+                port:
+                  number: 8081
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: jcode-server
+                port:
+                  number: 8080
+---
+# PersistentVolumeClaim for JCode data
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jcode-data-pvc
+  namespace: carpai
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+---
+# ConfigMap for JCode configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jcode-config
+  namespace: carpai
+data:
+  config.toml: |
+    [server]
+    bind_addr = "0.0.0.0"
+    grpc_port = 50051
+    ws_port = 8080
+    rest_port = 8081
+
+    [database]
+    url = "postgresql://carpai:carpai_dev_password@postgres:5432/carpai"
+
+    [redis]
+    mode = "cluster"
+    urls = [
+      "redis://redis-node-0.redis-node:6379",
+      "redis://redis-node-1.redis-node:6379",
+      "redis://redis-node-2.redis-node:6379",
+      "redis://redis-node-3.redis-node:6379",
+      "redis://redis-node-4.redis-node:6379",
+      "redis://redis-node-5.redis-node:6379"
+    ]
+---
+# Secret for sensitive data
+apiVersion: v1
+kind: Secret
+metadata:
+  name: jcode-secret
+  namespace: carpai
+type: Opaque
+stringData:
+  jwt-secret: "change_this_to_a_secure_random_string_at_least_32_chars"

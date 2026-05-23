@@ -1,0 +1,66 @@
+{
+  "servers": {
+    "carpai-github": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["mcp-servers/github/src/server.py"],
+      "env": {}
+    },
+    "carpai-jira": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["mcp-servers/jira/src/server.py"],
+      "env": {}
+    },
+    "carpai-slack": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["mcp-servers/slack/src/server.py"],
+      "env": {}
+    },
+    "carpai-docker": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["mcp-servers/docker/src/server.py"],
+      "env": {}
+    },
+    "carpai-postgres": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["mcp-servers/postgres/src/server.py"],
+      "env": {
+        "PG_OFFLINE_FALLBACK": "1"
+      }
+    },
+    "carpai-redis": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["mcp-servers/redis/src/server.py"],
+      "env": {}
+    },
+    "carpai-kubernetes": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["mcp-servers/kubernetes/src/server.py"],
+      "env": {}
+    },
+    "carpai-aws": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["mcp-servers/aws/src/server.py"],
+      "env": {}
+    },
+    "carpai-sentry": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["mcp-servers/sentry/src/server.py"],
+      "env": {}
+    },
+    "carpai-datadog": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["mcp-servers/datadog/src/server.py"],
+      "env": {}
+    }
+  }
+}

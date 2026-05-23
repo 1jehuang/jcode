@@ -1,0 +1,485 @@
+# CarpAI Data Infrastructure Operator
+# Manages Redis Cluster and Milvus vector database lifecycle
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: redisclusters.carpai.io
+  labels:
+    app.kubernetes.io/name: carpai-data-operator
+spec:
+  group: carpai.io
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                # Redis Cluster Configuration
+                replicas:
+                  type: integer
+                  minimum: 3
+                  maximum: 9
+                  default: 6
+                  description: Total nodes (masters + replicas). Must be multiple of 3.
+                masters:
+                  type: integer
+                  minimum: 1
+                  maximum: 3
+                  default: 3
+                  description: Number of master nodes
+                replicasPerMaster:
+                  type: integer
+                  minimum: 0
+                  maximum: 2
+                  default: 1
+                  description: Replicas per master
+                image:
+                  type: string
+                  default: "redis:7-alpine"
+                resources:
+                  type: object
+                  properties:
+                    requests:
+                      type: object
+                      properties:
+                        cpu:
+                          type: string
+                          default: "500m"
+                        memory:
+                          type: string
+                          default: "512Mi"
+                    limits:
+                      type: object
+                      properties:
+                        cpu:
+                          type: string
+                          default: "1"
+                        memory:
+                          type: string
+                          default: "1Gi"
+                storage:
+                  type: object
+                  properties:
+                    size:
+                      type: string
+                      default: "10Gi"
+                    storageClass:
+                      type: string
+                      default: "standard"
+                config:
+                  type: object
+                  properties:
+                    maxmemory:
+                      type: string
+                      default: "512mb"
+                    maxmemoryPolicy:
+                      type: string
+                      default: "allkeys-lru"
+                    appendonly:
+                      type: boolean
+                      default: true
+                    saveConfig:
+                      type: string
+                      default: "900 1 300 10 60 10000"
+                tls:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    secretName:
+                      type: string
+                monitoring:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                    prometheusExporter:
+                      type: boolean
+                      default: true
+              required:
+                - replicas
+            status:
+              type: object
+              properties:
+                readyReplicas:
+                  type: integer
+                clusterState:
+                  type: string
+                  enum: ["ok", "fail", "initializing"]
+                masterNodes:
+                  type: array
+                  items:
+                    type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Replicas
+          type: integer
+          jsonPath: .spec.replicas
+        - name: Ready
+          type: integer
+          jsonPath: .status.readyReplicas
+        - name: State
+          type: string
+          jsonPath: .status.clusterState
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+  scope: Namespaced
+  names:
+    plural: redisclusters
+    singular: rediscluster
+    kind: RedisCluster
+    shortNames:
+      - rc
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: milvusclusters.carpai.io
+  labels:
+    app.kubernetes.io/name: carpai-data-operator
+spec:
+  group: carpai.io
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                # Milvus Cluster Configuration
+                mode:
+                  type: string
+                  enum: ["standalone", "cluster"]
+                  default: "standalone"
+                  description: Deployment mode
+                image:
+                  type: string
+                  default: "milvusdb/milvus:v2.4.0"
+                components:
+                  type: object
+                  properties:
+                    standalone:
+                      type: object
+                      properties:
+                        replicas:
+                          type: integer
+                          default: 1
+                        resources:
+                          type: object
+                          properties:
+                            requests:
+                              type: object
+                              properties:
+                                cpu:
+                                  type: string
+                                  default: "2"
+                                memory:
+                                  type: string
+                                  default: "4Gi"
+                            limits:
+                              type: object
+                              properties:
+                                cpu:
+                                  type: string
+                                  default: "4"
+                                memory:
+                                  type: string
+                                  default: "8Gi"
+                    querynode:
+                      type: object
+                      properties:
+                        replicas:
+                          type: integer
+                          default: 2
+                        resources:
+                          type: object
+                          properties:
+                            requests:
+                              type: object
+                              properties:
+                                cpu:
+                                  type: string
+                                  default: "2"
+                                memory:
+                                  type: string
+                                  default: "8Gi"
+                            limits:
+                              type: object
+                              properties:
+                                cpu:
+                                  type: string
+                                  default: "4"
+                                memory:
+                                  type: string
+                                  default: "16Gi"
+                    datanode:
+                      type: object
+                      properties:
+                        replicas:
+                          type: integer
+                          default: 1
+                    indexnode:
+                      type: object
+                      properties:
+                        replicas:
+                          type: integer
+                          default: 1
+                    proxy:
+                      type: object
+                      properties:
+                        replicas:
+                          type: integer
+                          default: 1
+                storage:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                      enum: ["local", "minio", "s3", "xsky_ai_mesh"]
+                      default: "minio"
+                    size:
+                      type: string
+                      default: "100Gi"
+                    storageClass:
+                      type: string
+                      default: "standard"
+                dependencies:
+                  type: object
+                  properties:
+                    etcd:
+                      type: object
+                      properties:
+                        managed:
+                          type: boolean
+                          default: true
+                        replicas:
+                          type: integer
+                          default: 3
+                    minio:
+                      type: object
+                      properties:
+                        managed:
+                          type: boolean
+                          default: true
+                        replicas:
+                          type: integer
+                          default: 1
+                    pulsar:
+                      type: object
+                      properties:
+                        managed:
+                          type: boolean
+                          default: false
+                config:
+                  type: object
+                  properties:
+                    indexType:
+                      type: string
+                      default: "HNSW"
+                    metricType:
+                      type: string
+                      default: "COSINE"
+                    nlist:
+                      type: integer
+                      default: 128
+                    nprobe:
+                      type: integer
+                      default: 16
+                monitoring:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                    metricsPort:
+                      type: integer
+                      default: 9091
+              required:
+                - mode
+            status:
+              type: object
+              properties:
+                readyComponents:
+                  type: array
+                  items:
+                    type: string
+                clusterStatus:
+                  type: string
+                  enum: ["Initializing", "Running", "Degraded", "Stopped"]
+                totalVectors:
+                  type: integer
+                collectionCount:
+                  type: integer
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Mode
+          type: string
+          jsonPath: .spec.mode
+        - name: Status
+          type: string
+          jsonPath: .status.clusterStatus
+        - name: Vectors
+          type: integer
+          jsonPath: .status.totalVectors
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+  scope: Namespaced
+  names:
+    plural: milvusclusters
+    singular: milvuscluster
+    kind: MilvusCluster
+    shortNames:
+      - mc
+---
+# RBAC for the Data Operator
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: carpai-data-operator
+rules:
+  - apiGroups: ["carpai.io"]
+    resources: ["redisclusters", "milvusclusters"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["carpai.io"]
+    resources: ["redisclusters/status", "milvusclusters/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "secrets", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: carpai-data-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: carpai-data-operator
+subjects:
+  - kind: ServiceAccount
+    name: carpai-data-operator
+    namespace: carpai-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: carpai-data-operator
+  namespace: carpai-system
+---
+# Example: Redis Cluster with 3 masters + 3 replicas
+apiVersion: carpai.io/v1alpha1
+kind: RedisCluster
+metadata:
+  name: carpai-redis
+  namespace: carpai-system
+spec:
+  replicas: 6
+  masters: 3
+  replicasPerMaster: 1
+  image: "redis:7-alpine"
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+  storage:
+    size: "10Gi"
+    storageClass: "standard"
+  config:
+    maxmemory: "512mb"
+    maxmemoryPolicy: "allkeys-lru"
+    appendonly: true
+  monitoring:
+    enabled: true
+    prometheusExporter: true
+---
+# Example: Milvus Standalone for development
+apiVersion: carpai.io/v1alpha1
+kind: MilvusCluster
+metadata:
+  name: carpai-milvus
+  namespace: carpai-system
+spec:
+  mode: "standalone"
+  image: "milvusdb/milvus:v2.4.0"
+  components:
+    standalone:
+      replicas: 1
+      resources:
+        requests:
+          cpu: "2"
+          memory: "4Gi"
+        limits:
+          cpu: "4"
+          memory: "8Gi"
+  storage:
+    type: "minio"
+    size: "100Gi"
+  dependencies:
+    etcd:
+      managed: true
+      replicas: 3
+    minio:
+      managed: true
+      replicas: 1
+  config:
+    indexType: "HNSW"
+    metricType: "COSINE"
+  monitoring:
+    enabled: true

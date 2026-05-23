@@ -23,7 +23,7 @@ use chrono::{DateTime, Utc};
 // ============================================================================
 
 /// Instance lifecycle state
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InstanceState {
     /// Initializing, loading model weights
     Initializing,
@@ -188,12 +188,43 @@ impl SnapshotManager {
 
         for entry in std::fs::read_dir(&self.snapshot_dir)? {
             let entry = entry?;
-            if entry.path().extension().and_then(|s| s.to_str()) == Some("json") {
-                let content = std::fs::read_to_string(entry.path())?;
-                if let Ok(metadata) = serde_json::from_str::<SnapshotMetadata>(&content) {
-                    if metadata.timestamp < cutoff {
-                        std::fs::remove_file(entry.path())?;
-                        cleaned += 1;
+            let path = entry.path();
+            // Clean both metadata (.json) and binary snapshot (.bin) files
+            let should_clean = path.extension().and_then(|s| s.to_str()) == Some("json")
+                || path.extension().and_then(|s| s.to_str()) == Some("bin");
+
+            if should_clean {
+                let stem = path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+
+                // For .bin files, check corresponding .json metadata
+                if path.extension().and_then(|s| s.to_str()) == Some("bin") {
+                    let json_path = path.with_extension("json");
+                    if json_path.exists() {
+                        let content = std::fs::read_to_string(json_path).ok();
+                        if let Some(content) = content {
+                            if let Ok(metadata) = serde_json::from_str::<SnapshotMetadata>(&content) {
+                                if metadata.timestamp < cutoff {
+                                    std::fs::remove_file(&path)?;
+                                    std::fs::remove_file(json_path)?;
+                                    cleaned += 1;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // For .json files, check timestamp directly
+                    let content = std::fs::read_to_string(&path)?;
+                    if let Ok(metadata) = serde_json::from_str::<SnapshotMetadata>(&content) {
+                        if metadata.timestamp < cutoff {
+                            let bin_path = path.with_extension("bin");
+                            if bin_path.exists() {
+                                std::fs::remove_file(bin_path)?;
+                            }
+                            std::fs::remove_file(&path)?;
+                            cleaned += 1;
+                        }
                     }
                 }
             }
@@ -201,6 +232,214 @@ impl SnapshotManager {
 
         info!("Cleaned up {} old snapshots", cleaned);
         Ok(cleaned)
+    }
+
+    /// Save KV Cache snapshot from llama.cpp instance
+    ///
+    /// Fetches the current KV Cache state via llama.cpp's internal API
+    /// and saves it to disk as a binary file with metadata.
+    ///
+    /// Note: llama.cpp doesn't expose direct KV Cache export yet,
+    /// so this implementation prepares the infrastructure for when available.
+    pub async fn save_kv_cache_snapshot(
+        &self,
+        instance_id: &str,
+        model_name: &str,
+        port: u16,
+        request_id: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        info!("Saving KV Cache snapshot for instance {}", instance_id);
+
+        // Create snapshot filename
+        let timestamp = Utc::now().timestamp_millis();
+        let snapshot_name = format!("{}_{}", instance_id, timestamp);
+        let bin_path = format!("{}/{}.bin", self.snapshot_dir, snapshot_name);
+        let json_path = format!("{}/{}.json", self.snapshot_dir, snapshot_name);
+
+        // Try to fetch KV Cache state from llama.cpp internal API
+        // Note: This endpoint may not be available in all llama.cpp versions
+        let client = reqwest::Client::new();
+        let api_url = format!("http://127.0.0.1:{}/internal/state", port);
+
+        let mut sequence_length = 0;
+        let mut layer_count = 0;
+        let mut size_bytes = 0;
+
+        match client.get(&api_url).timeout(Duration::from_secs(10)).send().await {
+            Ok(response) if response.status().is_success() => {
+                // Save binary data
+                let bytes = response.bytes().await?;
+                size_bytes = bytes.len();
+                std::fs::write(&bin_path, &bytes)?;
+                info!("Saved KV Cache binary data: {} bytes", size_bytes);
+
+                // Extract metadata from response headers if available
+                if let Some(seq_len) = response.headers().get("x-sequence-length") {
+                    if let Ok(len) = seq_len.to_str() {
+                        sequence_length = len.parse().unwrap_or(0);
+                    }
+                }
+                if let Some(layers) = response.headers().get("x-layer-count") {
+                    if let Ok(count) = layers.to_str() {
+                        layer_count = count.parse().unwrap_or(0);
+                    }
+                }
+            }
+            Ok(response) => {
+                warn!(
+                    "KV Cache export returned status {}: feature may not be supported in this llama.cpp version",
+                    response.status()
+                );
+                // Create empty snapshot file to track the attempt
+                std::fs::write(&bin_path, Vec::new())?;
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to fetch KV Cache from llama.cpp ({}): {}. Creating metadata-only snapshot.",
+                    api_url, e
+                );
+                // Create empty snapshot file to track the attempt
+                std::fs::write(&bin_path, Vec::new())?;
+            }
+        }
+
+        // Save metadata
+        let metadata = SnapshotMetadata {
+            instance_id: instance_id.to_string(),
+            model_name: model_name.to_string(),
+            timestamp: Utc::now(),
+            request_id: request_id.to_string(),
+            sequence_length,
+            layer_count,
+            size_bytes,
+        };
+
+        self.save_metadata(&metadata)?;
+
+        info!(
+            "KV Cache snapshot saved: {} (size={} bytes, seq_len={}, layers={})",
+            snapshot_name, size_bytes, sequence_length, layer_count
+        );
+
+        Ok(snapshot_name)
+    }
+
+    /// Restore KV Cache snapshot to llama.cpp instance
+    ///
+    /// Loads a previously saved KV Cache state and POSTs it to
+    /// llama.cpp's internal state loading endpoint.
+    pub async fn restore_kv_cache_snapshot(
+        &self,
+        snapshot_name: &str,
+        port: u16,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        info!("Restoring KV Cache snapshot: {}", snapshot_name);
+
+        let bin_path = format!("{}/{}.bin", self.snapshot_dir, snapshot_name);
+        let json_path = format!("{}/{}.json", self.snapshot_dir, snapshot_name);
+
+        // Load metadata
+        let metadata = if std::path::Path::new(&json_path).exists() {
+            let content = std::fs::read_to_string(&json_path)?;
+            let meta: SnapshotMetadata = serde_json::from_str(&content)?;
+            info!(
+                "Loaded metadata: model={}, seq_len={}, layers={}, size={} bytes",
+                meta.model_name, meta.sequence_length, meta.layer_count, meta.size_bytes
+            );
+            Some(meta)
+        } else {
+            warn!("No metadata file found for snapshot: {}", json_path);
+            None
+        };
+
+        // Load binary data
+        if !std::path::Path::new(&bin_path).exists() {
+            return Err(format!("Snapshot binary file not found: {}", bin_path).into());
+        }
+
+        let kv_cache_data = std::fs::read(&bin_path)?;
+
+        if kv_cache_data.is_empty() {
+            warn!("Snapshot file is empty, skipping restore");
+            return Ok(());
+        }
+
+        // POST to llama.cpp internal state loading endpoint
+        let client = reqwest::Client::new();
+        let load_url = format!("http://127.0.0.1:{}/internal/state/load", port);
+
+        match client
+            .post(&load_url)
+            .timeout(Duration::from_secs(30))
+            .body(kv_cache_data.clone())
+            .header("Content-Type", "application/octet-stream")
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => {
+                info!(
+                    "Successfully restored KV Cache snapshot to port {} ({} bytes)",
+                    port, kv_cache_data.len()
+                );
+                Ok(())
+            }
+            Ok(response) => {
+                Err(format!(
+                    "KV Cache restore returned status {}: {}",
+                    response.status(),
+                    response.text().await.unwrap_or_default()
+                ).into())
+            }
+            Err(e) => {
+                Err(format!(
+                    "Failed to restore KV Cache to {}: {}. Feature may not be supported in this llama.cpp version.",
+                    load_url, e
+                ).into())
+            }
+        }
+    }
+
+    /// List available snapshots for a model
+    pub fn list_snapshots(&self, model_name: Option<&str>) -> Vec<SnapshotMetadata> {
+        let mut snapshots = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(&self.snapshot_dir) {
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    let path = entry.path();
+                    if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            if let Ok(metadata) = serde_json::from_str::<SnapshotMetadata>(&content) {
+                                // Filter by model name if specified
+                                if model_name.map_or(true, |m| metadata.model_name == m) {
+                                    snapshots.push(metadata);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by timestamp (newest first)
+        snapshots.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        snapshots
+    }
+
+    /// Delete a specific snapshot
+    pub fn delete_snapshot(&self, snapshot_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let bin_path = format!("{}/{}.bin", self.snapshot_dir, snapshot_name);
+        let json_path = format!("{}/{}.json", self.snapshot_dir, snapshot_name);
+
+        if std::path::Path::new(&bin_path).exists() {
+            std::fs::remove_file(&bin_path)?;
+        }
+        if std::path::Path::new(&json_path).exists() {
+            std::fs::remove_file(&json_path)?;
+        }
+
+        info!("Deleted snapshot: {}", snapshot_name);
+        Ok(())
     }
 }
 
@@ -418,8 +657,17 @@ impl GracefulManager {
 
         // Step 3: Save snapshot if enabled
         if let Some(ref snapshot_mgr) = self.snapshot_manager {
-            info!("Saving state snapshot for {}", instance_id);
-            // TODO: Implement actual snapshot saving
+            info!("Saving KV Cache snapshot for {}", instance_id);
+            let snapshot_mgr = snapshot_mgr.lock().await;
+            match snapshot_mgr.save_kv_cache_snapshot(
+                instance_id,
+                model_name,
+                target_instance.read().await.port,
+                &format!("shutdown-{}", instance_id),
+            ).await {
+                Ok(snapshot_name) => info!("Snapshot saved successfully: {}", snapshot_name),
+                Err(e) => warn!("Failed to save snapshot: {}. This is expected if llama.cpp doesn't support KV Cache export yet.", e),
+            }
         }
 
         // Step 4: Mark as stopping

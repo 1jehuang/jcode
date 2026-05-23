@@ -1,0 +1,132 @@
+# Redis Cluster StatefulSet (3 masters + 3 replicas)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: carpai
+data:
+  redis.conf: |
+    cluster-enabled yes
+    cluster-config-file nodes.conf
+    cluster-node-timeout 5000
+    appendonly yes
+    maxmemory 512mb
+    maxmemory-policy allkeys-lru
+    save 900 1 300 10 60 10000
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-node
+  namespace: carpai
+spec:
+  serviceName: redis-node
+  replicas: 6
+  selector:
+    matchLabels:
+      app: redis-node
+  template:
+    metadata:
+      labels:
+        app: redis-node
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+              name: redis
+            - containerPort: 16379
+              name: gossip
+          command: ["redis-server"]
+          args: ["/conf/redis.conf"]
+          resources:
+            requests:
+              cpu: "0.5"
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: redis-config
+              mountPath: /conf
+            - name: redis-data
+              mountPath: /data
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: redis-config
+          configMap:
+            name: redis-config
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+---
+# Headless service for Redis Cluster
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-node
+  namespace: carpai
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - port: 6379
+      targetPort: 6379
+      name: redis
+    - port: 16379
+      targetPort: 16379
+      name: gossip
+  selector:
+    app: redis-node
+---
+# Redis Cluster initialization Job
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: redis-cluster-init
+  namespace: carpai
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init
+          image: redis:7-alpine
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for Redis nodes to be ready..."
+              sleep 10
+
+              echo "Creating Redis Cluster..."
+              redis-cli --cluster create \
+                redis-node-0.redis-node:6379 \
+                redis-node-1.redis-node:6379 \
+                redis-node-2.redis-node:6379 \
+                redis-node-3.redis-node:6379 \
+                redis-node-4.redis-node:6379 \
+                redis-node-5.redis-node:6379 \
+                --cluster-replicas 1 \
+                --cluster-yes
+
+              echo "Redis Cluster initialized successfully!"
+      initContainers:
+        - name: wait-for-redis
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z redis-node-0.redis-node 6379; do echo waiting for redis; sleep 2; done']

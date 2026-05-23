@@ -4,6 +4,17 @@
 
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::fmt;
+
+/// 会话 ID
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SessionId(pub String);
+
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// 会话状态 (三态模型，对应 Claude Code)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

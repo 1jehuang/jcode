@@ -1,0 +1,38 @@
+{
+  "name": "mcp-advanced-features",
+  "leadAgentId": "4fb1dfe135bd44a79cd0483cc18350d1",
+  "workspacePath": "d:/studying/Codecargo/CarpAI",
+  "createdAt": "2026-05-22T12:44:08.846Z",
+  "options": {
+    "workspacePath": "d:/studying/Codecargo/CarpAI",
+    "isAutoTeam": false
+  },
+  "members": [
+    {
+      "memberId": "team-lead@mcp-advanced-features",
+      "name": "team-lead",
+      "role": "Team Lead - coordinates the team and interacts with the user"
+    },
+    {
+      "memberId": "auto-mcp-agent@mcp-advanced-features",
+      "name": "auto-mcp-agent",
+      "role": "Implement auto MCP tool calling"
+    },
+    {
+      "memberId": "cross-file-planning-agent@mcp-advanced-features",
+      "name": "cross-file-planning-agent",
+      "role": "Implement cross-file planning"
+    },
+    {
+      "memberId": "semantic-refactor-agent@mcp-advanced-features",
+      "name": "semantic-refactor-agent",
+      "role": "Implement semantic refactoring"
+    },
+    {
+      "memberId": "transactions-agent@mcp-advanced-features",
+      "name": "transactions-agent",
+      "role": "Implement cross-file transactions"
+    }
+  ],
+  "isAutoTeam": false
+}

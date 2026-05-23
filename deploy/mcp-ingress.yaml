@@ -1,0 +1,80 @@
+# CarpAI MCP Gateway Ingress Configuration
+# Exposes MCP servers via a single ingress endpoint
+# Requires: ingress-nginx or similar ingress controller
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: carpai-mcp-ingress
+  namespace: carpai
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    # Enable SSE for streaming endpoints
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_buffering off;
+      proxy_cache off;
+      proxy_set_header Connection '';
+      chunked_transfer_encoding on;
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: mcp.carpai.local
+      http:
+        paths:
+          # Gateway health
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: carpai-mcp-gateway
+                port:
+                  number: 8000
+
+          # GitHub MCP Server
+          - path: /github(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: carpai-mcp-gateway
+                port:
+                  number: 8000
+
+          # PostgreSQL MCP Server
+          - path: /postgres(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: carpai-mcp-gateway
+                port:
+                  number: 8000
+
+          # Default route to gateway
+          - path: /(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: carpai-mcp-gateway
+                port:
+                  number: 8000
+
+---
+# TLS Configuration (optional - requires cert-manager)
+# apiVersion: cert-manager.io/v1
+# kind: Certificate
+# metadata:
+#   name: carpai-mcp-tls
+#   namespace: carpai
+# spec:
+#   secretName: carpai-mcp-tls
+#   issuerRef:
+#     name: letsencrypt-prod
+#     kind: ClusterIssuer
+#   commonName: mcp.carpai.local
+#   dnsNames:
+#     - mcp.carpai.local

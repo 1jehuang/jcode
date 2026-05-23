@@ -1,7 +1,7 @@
 [package]
 name = "jcode-unified-scheduler"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 description = "Ruflo-Parallax 统一调度层: 任务调度(GOAP/A*) + 算力调度(DP/Pipeline)融合"
 license = "MIT"
 
@@ -30,8 +30,12 @@ thiserror = "2"
 anyhow = "1"
 # 哈希
 fxhash = "0.2"
+# 随机数 (用于 gslb 随机选择和反熵同步)
+rand = "0.8"
 # 可选: 本地 LLM 路由
 reqwest = { version = "0.12", default-features = false, features = ["json"], optional = true }
+# 可选: GPU发现和管理 (NVIDIA NVML)
+nvml-wrapper = { version = "0.10", optional = true }
 
 [features]
 default = ["core"]
@@ -40,10 +44,11 @@ goap = []                      # GOAP A* 规划器 (Ruflo)
 parallax = []                  # 两阶段调度器 (Parallax)
 water-filling = []             # 注水负载均衡
 remote-routing = ["reqwest"]   # 远程路由决策
+gpu-discovery = ["nvml-wrapper"]  # NVIDIA GPU发现和管理
+cross-region-sync = []         # 跨区域数据同步
 
 [dev-dependencies]
 criterion = "0.5"
 tokio-test = "0.4"
 tempfile = "3"
-rand = "0.8"
 

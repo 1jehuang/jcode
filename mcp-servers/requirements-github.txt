@@ -1,0 +1,2 @@
+-r requirements.txt
+pygithub>=2.0.0

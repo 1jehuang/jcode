@@ -12,7 +12,7 @@ pub struct CodeParser {
 
 impl CodeParser {
     pub fn new() -> Result<Self> {
-        let mut parser = Parser::new();
+        let parser = Parser::new();
         let mut languages = HashMap::new();
 
         // 注册支持的语言
@@ -41,7 +41,7 @@ impl CodeParser {
 
         if let Some(lang) = self.languages.get(lang_name) {
             self.parser.set_language(lang)?;
-            if let Ok(Some(tree)) = self.parser.parse(content, None) {
+            if let Some(tree) = self.parser.parse(content, None) {
                 return Ok(self.walk_tree(&tree, content));
             }
         }

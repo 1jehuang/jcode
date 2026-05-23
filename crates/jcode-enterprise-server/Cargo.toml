@@ -27,6 +27,9 @@ toml = "0.8"
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "chrono", "uuid"] }
 
+# Vector databases (optional - requires manual installation)
+# milvus-sdk = { version = "0.2", optional = true }  # Uncomment if Milvus is needed
+
 # Error handling
 thiserror = "2"
 anyhow = "1"
@@ -45,6 +48,7 @@ hmac = "0.12"
 hex = "0.4"
 base64 = "0.22"
 rand = "0.9"
+aes-gcm = "0.10"
 sys-info = "0.9"
 num_cpus = "1"
 reqwest = { version = "0.12", features = ["json", "stream"] }
@@ -79,6 +83,7 @@ sqlite = ["sqlx/sqlite"]
 postgres = ["sqlx/postgres"]
 mdns = ["dep:mdns-sd"]
 cpu-inference = ["dep:jcode-cpu-inference"]
+# milvus = ["dep:milvus-sdk"]  # Disabled - milvus-sdk not available on crates.io
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

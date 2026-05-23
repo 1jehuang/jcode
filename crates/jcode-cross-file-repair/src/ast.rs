@@ -197,6 +197,7 @@ impl TreeSitterAstAdapter {
     }
 
     fn extract_name(&self, node: &tree_sitter::Node, source: &str) -> Option<String> {
+        #[allow(unreachable_patterns)]
         match node.kind() {
             // Rust
             "function_item" | "function_signature_item" => {

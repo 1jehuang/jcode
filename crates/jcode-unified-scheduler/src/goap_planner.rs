@@ -85,6 +85,7 @@ struct SearchNode {
     f_cost: f64,
     /// 到达此状态的动作历史
     path: Vec<usize>, // indices into the action list
+    #[allow(dead_code)]
     parent: Option<Box<SearchNode>>,
 }
 

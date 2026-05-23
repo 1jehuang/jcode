@@ -7,12 +7,12 @@
 //! 3. **Data Locality Constraints**: GDPR/compliance-aware data placement
 //! 4. **Region Failure Handling**: Automatic failover to backup regions
 //! 5. **Cost Optimization**: Consider cross-region data transfer costs
+//! 6. **Hierarchical Integration**: Works with HierarchicalScheduler for large-scale clusters
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
-use tracing::{info, warn, debug};
-use uuid::Uuid;
+use tracing::{info, debug};
 
 use crate::NodeId;
 
@@ -147,7 +147,7 @@ impl Zone {
 // ============================================================================
 
 /// Region assignment for a specific node
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct NodeRegionInfo {
     pub node_id: NodeId,
     pub region_id: RegionId,
@@ -160,6 +160,7 @@ pub struct NodeRegionInfo {
     pub allowed_data_classes: HashSet<String>,
 
     /// Last heartbeat timestamp
+    #[serde(skip)]
     pub last_heartbeat: Instant,
 }
 
@@ -415,16 +416,16 @@ impl RegionManager {
 
             let latency = if is_intra_region {
                 5.0 // Intra-region latency estimate
-            } else if let Some(src) = source_region {
-                region.latency_to(src).unwrap_or(100.0)
+            } else if let Some(ref src) = source_region {
+                region.latency_to(&src.to_string()).unwrap_or(100.0)
             } else {
                 50.0 // Default estimate
             };
 
             let cost = if is_intra_region {
                 0.0 // No cross-region cost
-            } else if let Some(src) = source_region {
-                region.cost_to(src).unwrap_or(0.1)
+            } else if let Some(ref src) = source_region {
+                region.cost_to(&src.to_string()).unwrap_or(0.1)
             } else {
                 0.05
             };

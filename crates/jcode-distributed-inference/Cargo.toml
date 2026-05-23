@@ -37,9 +37,11 @@ flatbuffers = "24.3"
 sys-info = "0.9"
 chrono = { version = "0.4", features = ["serde"] }
 
-# Compression
+# Compression (P1-4 optimization)
 lz4_flex = "0.11"
 zstd = "0.13"
+snap = "1.1"           # Snappy compression for ultra-fast scenarios
+crc32fast = "1.4"      # Fast CRC32 checksums
 
 # Quantization support
 half = "2.4"

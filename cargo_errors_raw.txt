@@ -1,0 +1,794 @@
+    Blocking waiting for file lock on build directory
+warning: unused import: `super::*`
+  --> crates\jcode-unified-scheduler\src\gpu_load_balancer.rs:10:5
+   |
+10 | use super::*;
+   |     ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `debug` and `warn`
+  --> crates\jcode-unified-scheduler\src\topology_aware.rs:14:21
+   |
+14 | use tracing::{info, warn, debug};
+   |                     ^^^^  ^^^^^
+
+warning: unused import: `NodeInfo`
+  --> crates\jcode-unified-scheduler\src\node_join_manager.rs:18:21
+   |
+18 | use crate::{NodeId, NodeInfo, NodeHardwareInfo, SchedulerError};
+   |                     ^^^^^^^^
+
+warning: unused import: `warn`
+  --> crates\jcode-unified-scheduler\src\cross_region.rs:15:21
+   |
+15 | use tracing::{info, warn, debug};
+   |                     ^^^^
+
+warning: unused import: `uuid::Uuid`
+  --> crates\jcode-unified-scheduler\src\cross_region.rs:16:5
+   |
+16 | use uuid::Uuid;
+   |     ^^^^^^^^^^
+
+warning: unused import: `ClusterGroupId`
+  --> crates\jcode-unified-scheduler\src\cross_region.rs:18:21
+   |
+18 | use crate::{NodeId, ClusterGroupId};
+   |                     ^^^^^^^^^^^^^^
+
+warning: unused import: `error`
+  --> crates\jcode-unified-scheduler\src\hierarchical_scheduler.rs:31:34
+   |
+31 | use tracing::{info, warn, debug, error};
+   |                                  ^^^^^
+
+warning: unused imports: `NodeInfo` and `TaskStatus`
+  --> crates\jcode-unified-scheduler\src\hierarchical_scheduler.rs:35:48
+   |
+35 |     UnifiedScheduler, SchedulerConfig, NodeId, NodeInfo, NodeHardwareInfo,
+   |                                                ^^^^^^^^
+36 |     SchedulerError, TaskStatus, ScheduledTask,
+   |                     ^^^^^^^^^^
+
+warning: unused import: `WarmupConfig`
+  --> crates\jcode-unified-scheduler\src\batch_node_operations.rs:21:61
+   |
+21 |     NodeId, NodeHardwareInfo, NodeJoinManager, ProbeResult, WarmupConfig,
+   |                                                             ^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+   --> crates\jcode-unified-scheduler\src\node_join_manager.rs:267:13
+    |
+267 |         let mut status = NodeJoinStatus::new(node_id);
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates\jcode-unified-scheduler\src\lib.rs:522:17
+    |
+522 |             let mut planner = self.goap_planner.write().await;
+    |                 ----^^^^^^^
+    |                 |
+    |                 help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:531:13
+    |
+531 |             mut open_residuals: Vec<i32>,
+    |             ----^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates\jcode-unified-scheduler\src\request_router.rs:346:9
+    |
+346 |     let mut layer_hosts: Vec<Vec<usize>> = (0..num_layers)
+    |         ----^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `last_layer`
+   --> crates\jcode-unified-scheduler\src\request_router.rs:419:9
+    |
+419 |     let last_layer = num_layers as usize - 1;
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_last_layer`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `priority_idx`
+   --> crates\jcode-unified-scheduler\src\unified_queue.rs:219:14
+    |
+219 |         for (priority_idx, queue) in self.queues.iter_mut().enumerate() {
+    |              ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_priority_idx`
+
+warning: unused variable: `config`
+  --> crates\jcode-unified-scheduler\src\hierarchical_scheduler.rs:93:13
+   |
+93 |         let config = SchedulerConfig {
+   |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: unused variable: `group_mut`
+   --> crates\jcode-unified-scheduler\src\hierarchical_scheduler.rs:317:21
+    |
+317 |         if let Some(group_mut) = groups_mut.get_mut(&target_group) {
+    |                     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_group_mut`
+
+warning: unused variable: `task`
+   --> crates\jcode-unified-scheduler\src\hierarchical_scheduler.rs:474:43
+    |
+474 |     async fn select_group_for_task(&self, task: &ScheduledTask) -> Result<ClusterGroupId, SchedulerError> {
+    |                                           ^^^^ help: if this is intentional, prefix it with an underscore: `_task`
+
+warning: unused variable: `node_id`
+   --> crates\jcode-unified-scheduler\src\batch_node_operations.rs:512:21
+    |
+512 |                 let node_id = ns.node_id;
+    |                     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_node_id`
+
+warning: unused variable: `probe`
+   --> crates\jcode-unified-scheduler\src\batch_node_operations.rs:553:5
+    |
+553 |     probe: ProbeResult,
+    |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_probe`
+
+warning: unused variable: `join_manager`
+   --> crates\jcode-unified-scheduler\src\batch_node_operations.rs:555:5
+    |
+555 |     join_manager: &RwLock<NodeJoinManager>,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_join_manager`
+
+warning: function `block_on_metrics` is never used
+    --> crates\jcode-unified-scheduler\src\lib.rs:1390:4
+     |
+1390 | fn block_on_metrics() -> Result<std::sync::RwLockWriteGuard<'static, SchedulerMetrics>, SchedulerError> {
+     |    ^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `parent` is never read
+  --> crates\jcode-unified-scheduler\src\goap_planner.rs:88:5
+   |
+77 | struct SearchNode {
+   |        ---------- field in this struct
+...
+88 |     parent: Option<Box<SearchNode>>,
+   |     ^^^^^^
+   |
+   = note: `SearchNode` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `0` is never read
+    --> crates\jcode-unified-scheduler\src\layer_allocator.rs:1084:14
+     |
+1084 |     StartNew(i64, bool),           // (residual, closed immediately)
+     |     -------- ^^^
+     |     |
+     |     field in this variant
+     |
+     = note: `DpActionKind` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+     |
+1084 -     StartNew(i64, bool),           // (residual, closed immediately)
+1084 +     StartNew((), bool),           // (residual, closed immediately)
+     |
+
+warning: function `estimate_fp16_tflops` is never used
+   --> crates\jcode-unified-scheduler\src\gpu_discovery.rs:131:4
+    |
+131 | fn estimate_fp16_tflops(model: &str, utilization_pct: u32) -> f64 {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `estimate_int8_tops` is never used
+   --> crates\jcode-unified-scheduler\src\gpu_discovery.rs:159:4
+    |
+159 | fn estimate_int8_tops(model: &str, utilization_pct: u32) -> f64 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `estimate_memory_bandwidth` is never used
+   --> crates\jcode-unified-scheduler\src\gpu_discovery.rs:165:4
+    |
+165 | fn estimate_memory_bandwidth(model: &str) -> f64 {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `detect_nvlink_groups` is never used
+   --> crates\jcode-unified-scheduler\src\gpu_discovery.rs:186:4
+    |
+186 | fn detect_nvlink_groups(gpus: &HashMap<u32, GpuInfo>) -> Vec<HashSet<u32>> {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `default_group` is never read
+   --> crates\jcode-unified-scheduler\src\hierarchical_scheduler.rs:141:5
+    |
+136 | pub struct HierarchicalScheduler {
+    |            --------------------- field in this struct
+...
+141 |     default_group: Option<ClusterGroupId>,
+    |     ^^^^^^^^^^^^^
+
+warning: field `config` is never read
+   --> crates\jcode-unified-scheduler\src\batch_node_operations.rs:185:9
+    |
+182 | struct BatchOperation {
+    |        -------------- field in this struct
+...
+185 |     pub config: BatchOperationConfig,
+    |         ^^^^^^
+
+warning: field `distance_matrix` is never read
+  --> crates\jcode-unified-scheduler\src\gslb.rs:84:5
+   |
+78 | pub struct GslbRouter {
+   |            ---------- field in this struct
+...
+84 |     distance_matrix: HashMap<(String, String), f64>,
+   |     ^^^^^^^^^^^^^^^
+
+warning: calls to `std::mem::drop` with a reference instead of an owned value does nothing
+    --> crates\jcode-unified-scheduler\src\lib.rs:1212:9
+     |
+1212 |         drop(allocator);
+     |         ^^^^^---------^
+     |              |
+     |              argument has type `&LayerAllocator`
+     |
+     = note: `#[warn(dropping_references)]` on by default
+help: use `let _ = ...` to ignore the expression or result
+     |
+1212 -         drop(allocator);
+1212 +         let _ = allocator;
+     |
+
+warning: variable `L` should have a snake case name
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:440:13
+    |
+440 |         let L = self.total_layers as usize;
+    |             ^ help: convert the identifier to snake case: `l`
+    |
+    = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: variable `L` should have a snake case name
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:518:9
+    |
+518 |         L: usize,
+    |         ^ help: convert the identifier to snake case: `l`
+
+warning: variable `L` should have a snake case name
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:535:13
+    |
+535 |             L: usize,
+    |             ^ help: convert the identifier to snake case: `l`
+
+warning: comparison is useless due to type limits
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:556:16
+    |
+556 |             if new_needed < 0
+    |                ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_comparisons)]` on by default
+
+warning: variable `L` should have a snake case name
+   --> crates\jcode-unified-scheduler\src\layer_allocator.rs:712:13
+    |
+712 |         let L = self.total_layers as usize;
+    |             ^ help: convert the identifier to snake case: `l`
+
+warning: method `vrAM_utilization` should have a snake case name
+  --> crates\jcode-unified-scheduler\src\topology_aware.rs:92:12
+   |
+92 |     pub fn vrAM_utilization(&self) -> f64 {
+   |            ^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `vr_am_utilization`
+
+warning: error finalizing incremental compilation session directory `\\?\D:\studying\Codecargo\CarpAI\target\debug\incremental\jcode_unified_scheduler-200e5r9naoh46\s-hirq1tean0-1wulfks-working`: 拒绝访问。 (os error 5)
+
+warning: `jcode-unified-scheduler` (lib) generated 39 warnings (run `cargo fix --lib -p jcode-unified-scheduler` to apply 21 suggestions)
+warning: unused import: `info`
+  --> crates\jcode-completion\src\streaming_prefetch.rs:25:22
+   |
+25 | use tracing::{debug, info};
+   |                      ^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Duration`
+  --> crates\jcode-completion\src\behavior_learner.rs:23:17
+   |
+23 | use std::time::{Duration, Instant};
+   |                 ^^^^^^^^
+
+warning: unused import: `SymbolEntry`
+ --> crates\jcode-completion\src\collab_aware_completion.rs:9:32
+  |
+9 | use crate::incremental_index::{SymbolEntry, IncrementalIndex};
+  |                                ^^^^^^^^^^^
+
+warning: unused import: `std::time::Instant`
+ --> crates\jcode-completion\src\metrics.rs:7:5
+  |
+7 | use std::time::Instant;
+  |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::path::PathBuf`
+  --> crates\jcode-completion\src\embedding_model.rs:14:5
+   |
+14 | use std::path::PathBuf;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `debug`
+  --> crates\jcode-completion\src\embedding_model.rs:16:21
+   |
+16 | use tracing::{info, debug};
+   |                     ^^^^^
+
+warning: unused variable: `cache`
+   --> crates\jcode-completion\src\streaming_prefetch.rs:179:13
+    |
+179 |         let cache = prefetcher.preload_cache.clone();
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_cache`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `prefix`
+   --> crates\jcode-completion\src\streaming_prefetch.rs:228:13
+    |
+228 |         let prefix = std::path::Path::new(&context.file_path)
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_prefix`
+
+warning: unused variable: `context`
+   --> crates\jcode-completion\src\multiline_completion.rs:245:36
+    |
+245 |     fn expand_from_template(&self, context: &str, trigger: &str) -> Option<MultilineSnippet> {
+    |                                    ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_context`
+
+warning: field `context_hash` is never read
+  --> crates\jcode-completion\src\streaming_prefetch.rs:42:5
+   |
+38 | struct CachedCompletions {
+   |        ----------------- field in this struct
+...
+42 |     context_hash: String,
+   |     ^^^^^^^^^^^^
+   |
+   = note: `CachedCompletions` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `relevance_score` is never used
+  --> crates\jcode-completion\src\streaming_prefetch.rs:50:8
+   |
+45 | impl CachedCompletions {
+   | ---------------------- method in this implementation
+...
+50 |     fn relevance_score(&self) -> f64 {
+   |        ^^^^^^^^^^^^^^^
+
+warning: method `get_hot_symbols` is never used
+   --> crates\jcode-completion\src\streaming_prefetch.rs:129:12
+    |
+ 71 | impl EditPatternDetector {
+    | ------------------------ method in this implementation
+...
+129 |     pub fn get_hot_symbols(&self, limit: usize) -> Vec<(String, u32)> {
+    |            ^^^^^^^^^^^^^^^
+
+warning: field `avg_latency_ms` is never read
+   --> crates\jcode-completion\src\streaming_prefetch.rs:157:5
+    |
+153 | struct PrefetchStats {
+    |        ------------- field in this struct
+...
+157 |     avg_latency_ms: f64,
+    |     ^^^^^^^^^^^^^^
+    |
+    = note: `PrefetchStats` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `context` is never read
+   --> crates\jcode-completion\src\streaming_prefetch.rs:163:5
+    |
+161 | struct PrefetchRequest {
+    |        --------------- field in this struct
+162 |     context_key: String,
+163 |     context: CompletionContext,
+    |     ^^^^^^^
+    |
+    = note: `PrefetchRequest` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `index` is never read
+  --> crates\jcode-completion\src\collab_aware_completion.rs:34:5
+   |
+26 | pub struct CollabAwareCompleter {
+   |            -------------------- field in this struct
+...
+34 |     index: Arc<IncrementalIndex>,
+   |     ^^^^^
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> crates\jcode-completion\src\ast_parser.rs:67:33
+   |
+67 |     pub fn get_node_at_position(&self, byte_offset: usize) -> Option<tree_sitter::Node> {
+   |                                 ^^^^^ the lifetime is elided here    ^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+   = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+   |
+67 |     pub fn get_node_at_position(&self, byte_offset: usize) -> Option<tree_sitter::Node<'_>> {
+   |                                                                                       ++++
+
+warning: `jcode-completion` (lib) generated 16 warnings (run `cargo fix --lib -p jcode-completion` to apply 10 suggestions)
+    Checking carpai v0.12.0 (D:\studying\Codecargo\CarpAI)
+src\memory_advanced\tencent_port.rs:545:5: error: struct is not supported in `trait`s or `impl`s
+src\memory_advanced\tencent_port.rs:560:5: error: implementation is not supported in `trait`s or `impl`s
+src\memory_advanced\tencent_port.rs:648:5: error: struct is not supported in `trait`s or `impl`s
+src\memory_advanced\tencent_port.rs:653:5: error: implementation is not supported in `trait`s or `impl`s
+src\tdd\mod.rs:376:15: error: unknown character escape: ` `: unknown character escape
+src\tdd\mod.rs:377:15: error: unknown character escape: ` `: unknown character escape
+src\tdd\mod.rs:378:15: error: unknown character escape: ` `: unknown character escape
+src\refactor_verify_pipeline.rs:19:22: error[E0432]: unresolved import `crate::refactor::semantic`: could not find `semantic` in `refactor`
+src\server\server_impl.rs:783:21: error: cannot find macro `debug` in this scope
+src\server\server_impl.rs:776:21: error: cannot find macro `info` in this scope
+src\server\server_impl.rs:706:13: error: cannot find macro `spawn_on` in this scope
+src\server\server_impl.rs:685:13: error: cannot find macro `spawn_on` in this scope
+src\server\server_impl.rs:627:9: error: cannot find macro `spawn_on` in this scope
+src\claude_agent_port.rs:452:47: error[E0106]: missing lifetime specifier: expected named lifetime parameter
+src\completion_engine\engine.rs:217:25: error[E0433]: failed to resolve: use of unresolved module or unlinked crate `providers`: use of unresolved module or unlinked crate `providers`
+src\completion_engine\engine.rs:230:25: error[E0433]: failed to resolve: use of unresolved module or unlinked crate `providers`: use of unresolved module or unlinked crate `providers`
+src\completion_engine\engine.rs:243:25: error[E0433]: failed to resolve: use of unresolved module or unlinked crate `providers`: use of unresolved module or unlinked crate `providers`
+src\completion_engine\engine.rs:256:25: error[E0433]: failed to resolve: use of unresolved module or unlinked crate `providers`: use of unresolved module or unlinked crate `providers`
+src\tdd\mod.rs:256:34: error[E0424]: expected value, found module `self`: `self` value is a keyword only available in methods with a `self` parameter
+src\tdd\mod.rs:286:31: error[E0433]: failed to resolve: use of undeclared type `ContentBlock`: use of undeclared type `ContentBlock`
+src\tdd\mod.rs:330:34: error[E0424]: expected value, found module `self`: `self` value is a keyword only available in methods with a `self` parameter
+src\agent\concurrency_integration.rs:11:27: warning: unused import: `Instant`
+src\agent\cross_file_repair.rs:7:21: warning: unused imports: `error` and `warn`
+src\agent\cross_file_repair.rs:10:63: warning: unused import: `EditBridge`
+src\auth\sso\saml.rs:5:26: warning: unused import: `Serialize`
+src\auth\sso\session.rs:3:25: warning: unused import: `SsoUserInfo`
+src\cli\management_commands.rs:229:5: warning: unused import: `crate::mcp::server::McpServer`
+src\crdt\mod.rs:12:33: warning: unused import: `HashSet`
+src\crdt\sequence_crdt.rs:7:25: warning: unused imports: `CrdtOperation` and `Element`
+src\crdt\ot_bridge.rs:6:24: warning: unused imports: `HashMap` and `VecDeque`
+src\crdt\ot_bridge.rs:8:54: warning: unused import: `SelectionRange`
+src\crdt\version_vector.rs:7:5: warning: unused import: `std::cmp::Ordering`
+src\server.rs:56:5: warning: unused import: `self::reload::await_reload_signal`
+src\server\server_impl.rs:9:15: warning: unexpected `cfg` condition value: `gpu-discovery`
+src\server\server_impl.rs:53:19: warning: unexpected `cfg` condition value: `gpu-discovery`
+src\server\server_impl.rs:6:29: warning: unused import: `warn`
+src\tui\render_integration.rs:19:5: warning: unused import: `tokio::sync::RwLock`
+src\dap\session.rs:6:33: warning: unused import: `HashSet`
+src\dap\adapter.rs:11:15: warning: unused imports: `error`, `info`, and `warn`
+src\runtime_manager.rs:25:5: warning: unused import: `std::sync::Arc`
+src\runtime_manager.rs:27:21: warning: unused import: `error`
+src\cgroup_isolation.rs:16:27: warning: unused import: `error`
+src\lsp_server.rs:12:5: warning: unused import: `std::collections::HashMap`
+src\lsp_server.rs:171:143: warning: unused import: `CodeActionDiagnostic`
+src\auto_fallback.rs:15:5: warning: unused import: `std::collections::HashMap`
+src\rest_llm.rs:9:5: warning: unused import: `tokio::sync::RwLock`
+src\claude_agent_port.rs:12:24: warning: unused imports: `HashMap` and `HashSet`
+src\claude_agent_port.rs:14:5: warning: unused import: `std::sync::Arc`
+src\claude_agent_port.rs:16:5: warning: unused import: `tokio::sync::RwLock`
+src\diff_integration.rs:9:5: warning: unused import: `std::collections::HashMap`
+src\compilation_engine.rs:12:5: warning: unused import: `std::collections::HashMap`
+src\compilation_engine.rs:17:5: warning: unused import: `tokio::time::sleep`
+src\agent_runtime.rs:19:17: warning: unused imports: `Duration` and `Instant`
+src\agent_runtime.rs:24:28: warning: unused imports: `AutoFallbackRouter` and `InferenceTarget`
+src\agent_runtime.rs:26:37: warning: unused imports: `CompileError` and `FixCycleResult`
+src\agent_runtime.rs:29:18: warning: unused imports: `AgentLoopConfig`, `partition_tool_calls`, `structured_error`, `tool_is_readonly`, and `with_memory_hint`
+src\agent_runtime.rs:32:31: warning: unused imports: `CodeActionProvider` and `RefactoringEngine`
+src\completion\integration.rs:10:5: warning: unused import: `std::sync::Arc`
+src\completion\mod.rs:4:9: warning: ambiguous glob re-exports: the name `CompletionKind` in the type namespace is first re-exported here
+src\semantic\mod.rs:10:33: warning: unused import: `HashSet`
+src\cache_optimizer.rs:10:5: warning: unused import: `anyhow::Result`
+src\cache_integration.rs:6:73: warning: unused import: `CacheStats`
+src\cache_integration.rs:10:5: warning: unused import: `tokio::sync::RwLock`
+src\inference_optimizer.rs:16:34: warning: unused import: `Semaphore`
+src\inference_optimizer.rs:242:13: warning: unused import: `std::os::windows::io::FromRawHandle`
+src\inference_integration.rs:15:17: warning: unused import: `Duration`
+src\distributed\three_layer_load_balancer.rs:17:5: warning: unused import: `uuid::Uuid`
+src\distributed\grpc_comm.rs:9:27: warning: unused import: `error`
+src\distributed\fault_tolerance.rs:11:17: warning: unused imports: `Duration` and `Instant`
+src\distributed\partition_tolerance.rs:13:27: warning: unused import: `Instant`
+src\distributed\partition_tolerance.rs:14:5: warning: unused import: `std::sync::Arc`
+src\distributed\partition_tolerance.rs:15:5: warning: unused import: `tokio::sync::RwLock`
+src\distributed\partition_tolerance.rs:16:34: warning: unused import: `debug`
+src\context\intelligent_selector.rs:15:56: warning: unused import: `SupportedLanguage`
+src\context\intelligent_selector.rs:16:32: warning: unused imports: `IncrementalIndexConfig` and `get_or_create_indexer`
+src\completion_engine\engine.rs:2:33: warning: unused import: `HashSet`
+src\completion_engine\engine.rs:7:5: warning: unused import: `tracing::info`
+src\completion_engine\context.rs:2:33: warning: unused import: `HashSet`
+src\completion_engine\context.rs:4:37: warning: unused imports: `Node` and `Tree`
+src\completion_engine\mod.rs:8:9: warning: ambiguous glob re-exports: the name `Snippet` in the type namespace is first re-exported here
+src\knowledge_agents\project_scanner.rs:9:13: warning: unused imports: `ArchitectureLayer`, `ComplexityLevel`, `KGEdge`, `KGNode`, `KnowledgeGraph`, `NodeKind`, and `RelationType`
+src\knowledge_agents\file_analyzer.rs:5:24: warning: unused import: `HashMap`
+src\knowledge_agents\file_analyzer.rs:10:5: warning: unused import: `super::project_scanner::FileEntry`
+src\knowledge_agents\file_analyzer.rs:11:13: warning: unused imports: `KGNode`, `NodeKind`, and `RelationType`
+src\knowledge_agents\architecture_analyzer.rs:5:5: warning: unused import: `std::collections::HashMap`
+src\knowledge_agents\architecture_analyzer.rs:11:32: warning: unused imports: `KGNode` and `NodeKind`
+src\knowledge_agents\domain_analyzer.rs:5:5: warning: unused import: `std::collections::HashMap`
+src\knowledge_agents\domain_analyzer.rs:10:13: warning: unused import: `KGNode`
+src\knowledge_agents\tour_builder.rs:8:39: warning: unused import: `RelationType`
+src\knowledge_agents\graph_reviewer.rs:5:13: warning: unused imports: `KGEdge`, `KGNode`, and `RelationType`
+src\knowledge_agents\knowledge_graph.rs:13:13: warning: unused imports: `KGEdge` and `KGNode`
+src\refactor\mod.rs:16:5: warning: unused import: `std::path::Path`
+src\refactor\mod.rs:513:9: warning: unused import: `super::*`
+src\transaction\mod.rs:12:5: warning: unused import: `std::collections::HashMap`
+src\orchestrator\mod.rs:9:33: warning: unused import: `HashSet`
+src\orchestrator\mod.rs:11:17: warning: unused import: `Duration`
+src\memory_advanced\tencent_port.rs:13:17: warning: unused import: `Path`
+src\memory_advanced\tencent_port.rs:15:17: warning: unused import: `Duration`
+src\memory_advanced\mod.rs:20:39: warning: unused import: `UNIX_EPOCH`
+src\tdd\mod.rs:74:5: warning: unused import: `async_trait::async_trait`
+src\tdd\mod.rs:76:42: warning: unused import: `ToolDefinition`
+src\performance_advanced\mod.rs:604:7: warning: unexpected `cfg` condition value: `redis`
+src\performance_advanced\mod.rs:610:7: warning: unexpected `cfg` condition value: `redis`
+src\performance_advanced\mod.rs:660:11: warning: unexpected `cfg` condition value: `redis`
+src\performance_advanced\mod.rs:663:11: warning: unexpected `cfg` condition value: `redis`
+src\performance_advanced\cache_optimizer.rs:12:36: warning: unused import: `SystemTime`
+src\performance_advanced\mod.rs:14:27: warning: unused import: `Instant`
+src\refactor_verify_pipeline.rs:12:5: warning: unused import: `std::sync::Arc`
+src\refactor_verify_pipeline.rs:13:5: warning: unused import: `tokio::sync::RwLock`
+src\refactor_verify_pipeline.rs:16:21: warning: unused imports: `KnowledgePipeline`, `architecture_analyzer`, and `graph_reviewer`
+src\delivery_pipeline.rs:12:5: warning: unused import: `std::collections::HashMap`
+src\delivery_pipeline.rs:14:5: warning: unused import: `std::sync::Arc`
+src\delivery_pipeline.rs:15:17: warning: unused import: `Duration`
+src\delivery_pipeline.rs:16:5: warning: unused import: `tokio::sync::RwLock`
+src\delivery_pipeline.rs:17:5: warning: unused import: `tokio::time::sleep`
+src\p2_integration.rs:15:5: warning: unused import: `LlmResponseCache`
+src\server\server_impl.rs:790:46: error[E0728]: `await` is only allowed inside `async` functions and blocks: only allowed inside `async` functions and blocks
+src\compilation_engine.rs:559:78: error[E0728]: `await` is only allowed inside `async` functions and blocks: only allowed inside `async` functions and blocks
+src\auth\sso\saml.rs:238:16: warning: use of deprecated function `base64::encode`: Use Engine::encode
+src\auth\sso\saml.rs:246:27: warning: use of deprecated function `base64::decode`: Use Engine::decode
+src\completion_engine\providers.rs:68:33: error[E0195]: lifetime parameters or bounds on method `provide_completions` do not match the trait declaration: lifetimes do not match method in trait
+src\completion_engine\providers.rs:132:33: error[E0195]: lifetime parameters or bounds on method `provide_completions` do not match the trait declaration: lifetimes do not match method in trait
+src\completion_engine\providers.rs:184:33: error[E0195]: lifetime parameters or bounds on method `provide_completions` do not match the trait declaration: lifetimes do not match method in trait
+src\completion_engine\providers.rs:261:33: error[E0195]: lifetime parameters or bounds on method `provide_completions` do not match the trait declaration: lifetimes do not match method in trait
+src\agent\concurrency_integration.rs:55:41: error[E0277]: `F` is not a future: `F` is not a future
+src\agent\concurrency_integration.rs:55:5: error[E0277]: `F` is not a future: `F` is not a future
+src\agent\concurrency_integration.rs:55:44: error[E0277]: `F` is not a future: `F` is not a future
+src\auth\sso\saml.rs:278:22: error[E0277]: the trait bound `Tokenizer<'_>: From<&std::string::String>` is not satisfied: the trait `From<&std::string::String>` is not implemented for `Tokenizer<'_>`
+src\auth\sso\mod.rs:218:13: warning: variable does not need to be mutable
+src\cli\dispatch.rs:52:17: warning: variable does not need to be mutable
+src\cache_optimizer.rs:227:13: warning: variable does not need to be mutable
+src\cli\management_commands.rs:336:28: error[E0308]: `match` arms have incompatible types: expected `Result<PathBuf, VarError>`, found `Option<PathBuf>`
+src\cli\management_commands.rs:342:20: error[E0282]: type annotations needed: cannot infer type
+src\cli\management_commands.rs:343:25: error[E0277]: the size for values of type `str` cannot be known at compilation time: doesn't have a size known at compile-time
+src\cli\management_commands.rs:343:35: error[E0277]: the size for values of type `str` cannot be known at compilation time: doesn't have a size known at compile-time
+src\cli\management_commands.rs:343:73: error[E0277]: the size for values of type `str` cannot be known at compilation time: doesn't have a size known at compile-time
+src\mcp\auto_mcp.rs:107:52: error[E0308]: mismatched types: expected `mcp::server::McpServerConfig`, found `mcp::protocol::McpServerConfig`
+src\mcp\auto_mcp.rs:135:31: error[E0308]: mismatched types: expected `mcp::protocol::McpServerConfig`, found `mcp::server::McpServerConfig`
+src\mcp\auto_mcp.rs:194:35: error[E0308]: mismatched types: expected `mcp::server::McpServerConfig`, found `mcp::protocol::McpServerConfig`
+src\mcp\auto_mcp.rs:232:30: error[E0061]: this method takes 1 argument but 0 arguments were supplied
+src\mcp\tool_discovery.rs:99:35: error[E0599]: no method named `list_all_tools` found for struct `std::sync::Arc<DynamicToolRegistry>` in the current scope
+src\mcp\tool_discovery.rs:99:13: error[E0282]: type annotations needed
+src\mcp\tool_discovery.rs:116:39: error[E0599]: no method named `list_all_tools` found for struct `std::sync::Arc<DynamicToolRegistry>` in the current scope
+src\mcp\tool_discovery.rs:116:13: error[E0282]: type annotations needed
+src\mcp\tool_discovery.rs:130:35: error[E0308]: mismatched types: expected `Option<Value>`, found `Value`
+src\dap\launch_integration.rs:190:24: error[E0308]: mismatched types: expected `Option<DirEntry>`, found `Result<_, _>`
+src\dap\launch_integration.rs:191:16: error[E0282]: type annotations needed: cannot infer type
+src\dap\launch_integration.rs:191:45: error[E0282]: type annotations needed
+src\dap\launch_integration.rs:192:39: error[E0282]: type annotations needed: cannot infer type
+src\dap\launch_integration.rs:192:72: error[E0282]: type annotations needed
+src\prometheus.rs:40:15: error[E0599]: no method named `unwrap_or` found for unit type `()` in the current scope: method not found in `()`
+src\prometheus.rs:60:15: error[E0599]: no method named `unwrap_or` found for unit type `()` in the current scope: method not found in `()`
+src\prometheus.rs:68:23: error[E0308]: mismatched types: expected `i64`, found `f64`
+src\prometheus.rs:80:15: error[E0599]: no method named `unwrap_or` found for unit type `()` in the current scope: method not found in `()`
+src\lsp_client.rs:121:24: error[E0004]: non-exhaustive patterns: `&LspOperation::CodeAction { .. }` and `&LspOperation::Rename { .. }` not covered: patterns `&LspOperation::CodeAction { .. }` and `&LspOperation::Rename { .. }` not covered
+src\lsp_code_actions.rs:335:70: error[E0277]: a value of type `Vec<&str>` cannot be built from an iterator over elements of type `&&str`: value of type `Vec<&str>` cannot be built from `std::iter::Iterator<Item=&&str>`
+src\lsp_server.rs:178:32: error[E0061]: this method takes 3 arguments but 1 argument was supplied
+src\claude_agent_port.rs:459:34: error[E0282]: type annotations needed: cannot infer type
+src\compilation_engine.rs:559:59: error[E0282]: type annotations needed for `std::option::Option<std::result::Result<_, _>>`
+src\compilation_engine.rs:561:39: error[E0282]: type annotations needed: cannot infer type
+src\compilation_engine.rs:562:24: error[E0282]: type annotations needed: cannot infer type
+src\agent_runtime.rs:359:54: error[E0277]: `()` is not a future: `()` is not a future
+src\semantic\mod.rs:59:37: error[E0277]: `()` is not a future: `()` is not a future
+src\verify\mod.rs:167:29: error[E0382]: borrow of moved value: `result.errors`: value borrowed here after move
+src\verify\mod.rs:303:58: error[E0308]: mismatched types: expected `u64`, found `&u64`
+src\verify\mod.rs:304:57: error[E0308]: mismatched types: expected `u64`, found `&u64`
+src\verify\mod.rs:305:58: error[E0308]: mismatched types: expected `u64`, found `&u64`
+src\verify\mod.rs:306:60: error[E0308]: mismatched types: expected `u64`, found `&u64`
+src\concurrency_optimizer.rs:161:27: error[E0502]: cannot borrow `hist` as immutable because it is also borrowed as mutable: immutable borrow occurs here
+src\concurrency_optimizer.rs:288:61: error[E0618]: expected function, found `F`
+src\inference_optimizer.rs:98:23: error[E0502]: cannot borrow `free` as immutable because it is also borrowed as mutable: immutable borrow occurs here
+src\inference_optimizer.rs:212:66: error[E0502]: cannot borrow `queue` as immutable because it is also borrowed as mutable: immutable borrow occurs here
+src\inference_integration.rs:91:60: error[E0616]: field `block_size` of struct `KvCacheManager` is private: private field
+src\dashboard\audit_log.rs:157:47: error[E0369]: binary operation `==` cannot be applied to type `dashboard::audit_log::ActionType`
+src\dashboard\audit_log.rs:161:44: error[E0369]: binary operation `==` cannot be applied to type `LogSeverity`
+src\dashboard\routes.rs:238:53: error[E0308]: mismatched types: expected `Utf8Bytes`, found `String`
+src\dashboard\routes.rs:252:78: error[E0308]: mismatched types: expected `Utf8Bytes`, found `String`
+src\dashboard\audit_log.rs:111:30: error[E0502]: cannot borrow `entries` as immutable because it is also borrowed as mutable: immutable borrow occurs here
+src\dashboard\audit_log.rs:115:9: error[E0521]: borrowed data escapes outside of method: `self` escapes the method body here, argument requires that `'1` must outlive `'static`
+src\context\intelligent_selector.rs:116:47: error[E0599]: no method named `analyze_file` found for struct `std::sync::Arc<AstParser>` in the current scope: method not found in `std::sync::Arc<AstParser>`
+src\context\intelligent_selector.rs:120:32: error[E0282]: type annotations needed: cannot infer type
+src\context\intelligent_selector.rs:122:33: error[E0282]: type annotations needed: cannot infer type
+src\context\intelligent_selector.rs:308:51: error[E0609]: no field `signature` on type `&tree_sitter::SymbolInfo`: unknown field
+src\context\intelligent_selector.rs:310:52: error[E0609]: no field `range` on type `&tree_sitter::SymbolInfo`: unknown field
+src\context\intelligent_selector.rs:311:50: error[E0609]: no field `range` on type `&tree_sitter::SymbolInfo`: unknown field
+src\context\intelligent_selector.rs:407:35: error[E0609]: no field `kind` on type `&tree_sitter::SymbolInfo`: unknown field
+src\context\intelligent_selector.rs:407:64: error[E0609]: no field `kind` on type `&tree_sitter::SymbolInfo`: unknown field
+src\context\intelligent_selector.rs:440:19: error[E0609]: no field `range` on type `&tree_sitter::SymbolInfo`: unknown field
+src\context\intelligent_selector.rs:440:51: error[E0609]: no field `range` on type `&tree_sitter::SymbolInfo`: unknown field
+src\context\intelligent_selector.rs:441:37: error[E0609]: no field `range` on type `&tree_sitter::SymbolInfo`: unknown field
+src\context\intelligent_selector.rs:441:53: error[E0609]: no field `range` on type `&tree_sitter::SymbolInfo`: unknown field
+src\context\intelligent_selector.rs:444:77: error[E0609]: no field `range` on type `&tree_sitter::SymbolInfo`: unknown field
+src\context\intelligent_selector.rs:444:93: error[E0609]: no field `range` on type `&tree_sitter::SymbolInfo`: unknown field
+src\context\intelligent_selector.rs:456:43: error[E0599]: no method named `analyze_file` found for struct `std::sync::Arc<AstParser>` in the current scope: method not found in `std::sync::Arc<AstParser>`
+src\context\intelligent_selector.rs:469:28: error[E0282]: type annotations needed: cannot infer type
+src\context\intelligent_selector.rs:471:29: error[E0282]: type annotations needed: cannot infer type
+src\knowledge_agents\article_analyzer.rs:74:9: error[E0277]: the `?` operator can only be applied to values that implement `Try`: the `?` operator cannot be applied to type `impl futures::Future<Output = std::result::Result<(), std::string::String>>`
+src\knowledge_agents\mod.rs:205:67: error[E0308]: mismatched types: expected `&[String]`, found `&Vec<FileEntry>`
+src\transaction\mod.rs:266:20: error[E0308]: mismatched types: expected `Transaction`, found `Option<_>`
+src\transaction\mod.rs:288:20: error[E0308]: mismatched types: expected `Transaction`, found `Option<_>`
+src\transaction\mod.rs:343:11: error[E0599]: no method named `success` found for struct `jcode_tool_types::ToolOutput` in the current scope: method not found in `jcode_tool_types::ToolOutput`
+src\memory_advanced\tencent_port.rs:372:42: error[E0382]: borrow of moved value: `persona`: value borrowed here after move
+src\memory_advanced\tencent_port.rs:748:24: error[E0433]: failed to resolve: use of undeclared type `Bm25Scorer`: use of undeclared type `Bm25Scorer`
+src\memory_advanced\tencent_port.rs:754:34: error[E0433]: failed to resolve: use of undeclared type `VectorSearchEngine`: use of undeclared type `VectorSearchEngine`
+src\tdd\mod.rs:258:35: error[E0282]: type annotations needed: cannot infer type
+src\tdd\mod.rs:305:33: error[E0599]: no variant named `ContentDelta` found for enum `jcode_message_types::StreamEvent`: variant not found in `jcode_message_types::StreamEvent`
+src\tdd\mod.rs:308:33: error[E0599]: no variant named `ContentBlockStop` found for enum `jcode_message_types::StreamEvent`: variant not found in `jcode_message_types::StreamEvent`
+src\tdd\mod.rs:332:13: error[E0282]: type annotations needed: cannot infer type
+src\tdd\mod.rs:1028:33: error[E0599]: no method named `generate_unit_test_llm` found for struct `TestGenerator` in the current scope: this is an associated function, not a method
+src\tdd\mod.rs:1020:77: error[E0277]: `?` couldn't convert the error to `(std::string::String, _)`: the trait `From<std::string::String>` is not implemented for `(std::string::String, _)`
+src\tdd\mod.rs:1131:29: error[E0599]: no method named `generate_unit_test_llm` found for struct `TestGenerator` in the current scope: this is an associated function, not a method
+src\agent\cross_file_repair.rs:22:36: error[E0061]: this function takes 1 argument but 0 arguments were supplied
+src\agent\cross_file_repair.rs:68:40: error[E0599]: no variant or associated item named `Insert` found for enum `AstEditOp` in the current scope: variant or associated item not found in `AstEditOp`
+src\agent\cross_file_repair.rs:69:40: error[E0599]: no variant or associated item named `Delete` found for enum `AstEditOp` in the current scope: variant or associated item not found in `AstEditOp`
+src\agent\cross_file_repair.rs:70:41: error[E0599]: no variant or associated item named `Replace` found for enum `AstEditOp` in the current scope: variant or associated item not found in `AstEditOp`
+src\agent\cross_file_repair.rs:76:17: error[E0560]: struct `AstEdit` has no field named `operation`: unknown field
+src\agent\cross_file_repair.rs:77:17: error[E0560]: struct `AstEdit` has no field named `start_line`: `AstEdit` does not have this field
+src\agent\cross_file_repair.rs:78:17: error[E0560]: struct `AstEdit` has no field named `end_line`: `AstEdit` does not have this field
+src\agent\cross_file_repair.rs:79:17: error[E0560]: struct `AstEdit` has no field named `content`: `AstEdit` does not have this field
+src\agent\cross_file_repair.rs:91:40: error[E0609]: no field `operation` on type `AstEdit`: unknown field
+src\agent\cross_file_repair.rs:92:28: error[E0599]: no variant or associated item named `Insert` found for enum `AstEditOp` in the current scope: variant or associated item not found in `AstEditOp`
+src\agent\cross_file_repair.rs:93:28: error[E0599]: no variant or associated item named `Delete` found for enum `AstEditOp` in the current scope: variant or associated item not found in `AstEditOp`
+src\agent\cross_file_repair.rs:94:28: error[E0599]: no variant or associated item named `Replace` found for enum `AstEditOp` in the current scope: variant or associated item not found in `AstEditOp`
+src\agent\cross_file_repair.rs:100:34: error[E0609]: no field `start_line` on type `AstEdit`: unknown field
+src\agent\cross_file_repair.rs:101:32: error[E0609]: no field `end_line` on type `AstEdit`: unknown field
+src\agent\cross_file_repair.rs:102:31: error[E0609]: no field `content` on type `AstEdit`: unknown field
+src\tui\app\tui_lifecycle.rs:854:13: error[E0308]: mismatched types: expected `Box<dyn CompletionProvider>`, found `Arc<dyn Provider>`
+src\tui\app\tui_lifecycle.rs:858:13: error[E0277]: the trait bound `ProviderCandidateGenerator: jcode_completion::CompletionProvider` is not satisfied: the trait `jcode_completion::CompletionProvider` is not implemented for `ProviderCandidateGenerator`
+src\tui\app\tui_lifecycle.rs:865:69: error[E0599]: no variant or associated item named `new` found for enum `CompletionPrefetchState` in the current scope: variant or associated item not found in `CompletionPrefetchState`
+src\compilation_engine.rs:151:25: error[E0284]: type annotations needed for `std::option::Option<_>`
+src\semantic\mod.rs:118:51: error[E0308]: mismatched types: expected `&[&str]`, found `Vec<&str>`
+src\semantic\mod.rs:128:83: error[E0308]: mismatched types: expected `&[&str]`, found `Vec<&str>`
+src\semantic\mod.rs:137:83: error[E0308]: mismatched types: expected `&[&str]`, found `Vec<&str>`
+src\semantic\mod.rs:146:83: error[E0308]: mismatched types: expected `&[&str]`, found `Vec<&str>`
+src\semantic\mod.rs:324:23: error[E0308]: mismatched types: expected `String`, found `&str`
+src\semantic\mod.rs:326:30: error[E0308]: mismatched types: expected `String`, found `&str`
+src\semantic\mod.rs:327:27: error[E0308]: mismatched types: expected `String`, found `&str`
+src\semantic\mod.rs:334:23: error[E0308]: mismatched types: expected `String`, found `&str`
+src\semantic\mod.rs:335:30: error[E0308]: mismatched types: expected `String`, found `&str`
+src\semantic\mod.rs:343:23: error[E0308]: mismatched types: expected `String`, found `&str`
+src\semantic\mod.rs:345:30: error[E0308]: mismatched types: expected `String`, found `&str`
+src\semantic\mod.rs:353:23: error[E0308]: mismatched types: expected `String`, found `&str`
+src\semantic\mod.rs:354:30: error[E0308]: mismatched types: expected `String`, found `&str`
+src\semantic\mod.rs:362:23: error[E0308]: mismatched types: expected `String`, found `&str`
+src\semantic\mod.rs:363:30: error[E0308]: mismatched types: expected `String`, found `&str`
+src\cache_optimizer.rs:92:52: error[E0308]: mismatched types: expected `NonZero<usize>`, found `usize`
+src\completion_engine\context.rs:42:5: error[E0277]: `tree_sitter::Parser` doesn't implement `std::fmt::Debug`: the trait `std::fmt::Debug` is not implemented for `tree_sitter::Parser`
+src\knowledge_agents\architecture_analyzer.rs:24:23: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\architecture_analyzer.rs:24:23: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\architecture_analyzer.rs:25:24: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\architecture_analyzer.rs:25:24: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\architecture_analyzer.rs:26:23: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\architecture_analyzer.rs:26:23: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\architecture_analyzer.rs:27:24: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\architecture_analyzer.rs:27:24: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\architecture_analyzer.rs:28:23: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\architecture_analyzer.rs:28:23: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\architecture_analyzer.rs:29:24: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\architecture_analyzer.rs:29:24: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\architecture_analyzer.rs:30:23: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\architecture_analyzer.rs:30:23: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\architecture_analyzer.rs:31:24: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\architecture_analyzer.rs:31:24: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\architecture_analyzer.rs:32:23: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\architecture_analyzer.rs:32:23: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\architecture_analyzer.rs:33:24: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\architecture_analyzer.rs:33:24: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\architecture_analyzer.rs:34:23: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\architecture_analyzer.rs:34:23: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\architecture_analyzer.rs:35:24: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\architecture_analyzer.rs:35:24: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\architecture_analyzer.rs:36:23: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\architecture_analyzer.rs:36:23: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\architecture_analyzer.rs:37:24: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\architecture_analyzer.rs:37:24: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\architecture_analyzer.rs:38:23: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\architecture_analyzer.rs:38:23: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\architecture_analyzer.rs:39:24: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\architecture_analyzer.rs:39:24: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\architecture_analyzer.rs:40:23: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\architecture_analyzer.rs:40:23: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\architecture_analyzer.rs:41:24: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\architecture_analyzer.rs:41:24: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\domain_analyzer.rs:20:28: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\domain_analyzer.rs:20:28: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\domain_analyzer.rs:23:28: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\domain_analyzer.rs:23:28: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\domain_analyzer.rs:26:28: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\domain_analyzer.rs:26:28: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\domain_analyzer.rs:29:28: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\domain_analyzer.rs:29:28: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\domain_analyzer.rs:32:28: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\domain_analyzer.rs:32:28: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\domain_analyzer.rs:34:28: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\domain_analyzer.rs:34:28: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\domain_analyzer.rs:37:28: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\domain_analyzer.rs:37:28: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\domain_analyzer.rs:39:28: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\domain_analyzer.rs:39:28: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\domain_analyzer.rs:41:28: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\domain_analyzer.rs:41:28: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\domain_analyzer.rs:43:28: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\domain_analyzer.rs:43:28: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\domain_analyzer.rs:45:28: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\domain_analyzer.rs:45:28: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\domain_analyzer.rs:47:28: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\domain_analyzer.rs:47:28: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\domain_analyzer.rs:50:28: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\domain_analyzer.rs:50:28: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\knowledge_agents\domain_analyzer.rs:53:28: error[E0010]: allocations are not allowed in constants: allocation not allowed in constants
+src\knowledge_agents\domain_analyzer.rs:53:28: error[E0015]: cannot call non-const method `std::slice::<impl [&str]>::into_vec::<std::alloc::Global>` in constants
+src\file_history.rs:63:37: error[E0599]: no method named `finish` found for struct `CoreWrapper<T>` in the current scope: method not found in `CoreWrapper<CtVariableCoreWrapper<Sha256VarCore, UInt<..., ...>, ...>>`
+src\crdt\mod.rs:13:23: warning: unused import: `Hasher`
+src\memory\cache.rs:12:17: warning: unused import: `Hash`
+src\cache_optimizer.rs:13:5: warning: unused import: `std::hash::Hash`
+src\auth\sso\saml.rs:74:9: warning: variable `in_status_code` is assigned to, but never used
+src\auth\sso\saml.rs:125:41: warning: value assigned to `in_status_code` is never read
+src\auth\sso\saml.rs:146:5: warning: unused variable: `response`: help: if this is intentional, prefix it with an underscore: `_response`
+src\auth\sso\saml.rs:206:5: warning: unused variable: `relay_state`: help: if this is intentional, prefix it with an underscore: `_relay_state`
+src\auth\sso\saml.rs:244:5: warning: unused variable: `provider`: help: if this is intentional, prefix it with an underscore: `_provider`
+src\dap\adapter.rs:54:28: warning: unused variable: `event_receiver`: help: if this is intentional, prefix it with an underscore: `_event_receiver`
+src\cli\slash_commands.rs:441:26: warning: value assigned to `all_passed` is never read
+src\crdt\sequence_crdt.rs:119:90: warning: unused variable: `p`: help: if this is intentional, prefix it with an underscore: `_p`
+src\crdt\mod.rs:76:13: warning: variable does not need to be mutable
+src\crdt\mod.rs:456:32: warning: unused variable: `id`: help: if this is intentional, prefix it with an underscore: `_id`
+src\crdt\mod.rs:508:42: warning: unused variable: `max_age_secs`: help: if this is intentional, prefix it with an underscore: `_max_age_secs`
+src\backpressure.rs:163:13: warning: unused variable: `effective_concurrent`: help: if this is intentional, prefix it with an underscore: `_effective_concurrent`
+src\tui\ui_blocks_integration.rs:265:5: warning: unused variable: `buf`: help: if this is intentional, prefix it with an underscore: `_buf`
+src\tui\render_integration.rs:66:9: warning: unused variable: `frame_start`: help: if this is intentional, prefix it with an underscore: `_frame_start`
+src\dap\session.rs:213:13: warning: unused variable: `filter`: help: if this is intentional, prefix it with an underscore: `_filter`
+src\dap\session.rs:246:46: warning: unused variable: `frame_id`: help: if this is intentional, prefix it with an underscore: `_frame_id`
+src\dap\session.rs:349:35: warning: unused variable: `frame_id`: help: if this is intentional, prefix it with an underscore: `_frame_id`
+src\dap\adapter.rs:336:44: warning: unused variable: `id`: help: if this is intentional, prefix it with an underscore: `_id`
+src\dap\adapter.rs:339:40: warning: unused variable: `id`: help: if this is intentional, prefix it with an underscore: `_id`
+src\dap\adapter.rs:352:40: warning: unused variable: `id`: help: if this is intentional, prefix it with an underscore: `_id`
+src\dap\adapter.rs:355:48: warning: unused variable: `id`: help: if this is intentional, prefix it with an underscore: `_id`
+src\dap\adapter.rs:367:41: warning: unused variable: `id`: help: if this is intentional, prefix it with an underscore: `_id`
+src\dap\adapter.rs:370:44: warning: unused variable: `id`: help: if this is intentional, prefix it with an underscore: `_id`
+src\dap\adapter.rs:373:39: warning: unused variable: `id`: help: if this is intentional, prefix it with an underscore: `_id`
+src\dap\adapter.rs:394:42: warning: unused variable: `id`: help: if this is intentional, prefix it with an underscore: `_id`
+src\dap\adapter.rs:411:43: warning: unused variable: `id`: help: if this is intentional, prefix it with an underscore: `_id`
+src\dap\adapter.rs:427:44: warning: unused variable: `id`: help: if this is intentional, prefix it with an underscore: `_id`
+src\compilation_engine.rs:263:41: warning: unused variable: `full_output`: help: if this is intentional, prefix it with an underscore: `_full_output`
+src\completion_quality.rs:74:13: warning: unused variable: `i`: help: if this is intentional, prefix it with an underscore: `_i`
+src\completion_quality.rs:497:21: warning: unused variable: `hint`: help: if this is intentional, prefix it with an underscore: `_hint`
+src\diff_integration.rs:166:13: warning: unused variable: `normalized_new`: help: if this is intentional, prefix it with an underscore: `_normalized_new`
+src\agent_runtime.rs:129:17: warning: unused variable: `fix_prompt`: help: if this is intentional, prefix it with an underscore: `_fix_prompt`
+src\completion\bash\fish.rs:753:25: warning: value assigned to `current_cmd_words` is never read
+src\completion\bash\fish.rs:775:25: warning: value assigned to `current_cmd_words` is never read
+src\completion\integration.rs:198:55: warning: unused variable: `expected_type`: help: if this is intentional, prefix it with an underscore: `_expected_type`
+src\semantic\mod.rs:261:26: warning: unused variable: `file_path`: help: if this is intentional, prefix it with an underscore: `_file_path`
+src\verify\mod.rs:163:33: warning: unused variable: `suggestion`: help: if this is intentional, prefix it with an underscore: `_suggestion`
+src\concurrency_optimizer.rs:135:13: warning: unused variable: `adjusted_max`: help: if this is intentional, prefix it with an underscore: `_adjusted_max`
+src\inference_optimizer.rs:180:17: warning: unused variable: `batch_duration`: help: if this is intentional, prefix it with an underscore: `_batch_duration`
+src\inference_integration.rs:60:5: warning: unused variable: `model_path`: help: if this is intentional, prefix it with an underscore: `_model_path`
+src\inference_integration.rs:61:5: warning: unused variable: `ctx_size`: help: if this is intentional, prefix it with an underscore: `_ctx_size`
+src\inference_integration.rs:62:5: warning: unused variable: `threads`: help: if this is intentional, prefix it with an underscore: `_threads`
+src\context\intelligent_selector.rs:194:9: warning: unused variable: `call_graph`: help: if this is intentional, prefix it with an underscore: `_call_graph`
+src\completion_engine\context.rs:222:35: warning: unused variable: `content`: help: if this is intentional, prefix it with an underscore: `_content`
+src\completion_engine\context.rs:222:50: warning: unused variable: `position`: help: if this is intentional, prefix it with an underscore: `_position`
+src\knowledge_agents\project_scanner.rs:39:9: warning: unreachable pattern: no value can reach this
+src\knowledge_agents\project_scanner.rs:113:40: warning: unused variable: `config`: help: if this is intentional, prefix it with an underscore: `_config`
+src\knowledge_agents\knowledge_graph.rs:192:17: warning: unused variable: `style`: help: if this is intentional, prefix it with an underscore: `_style`
+src\knowledge_agents\article_analyzer.rs:160:29: warning: unused variable: `bracket_start`: help: if this is intentional, prefix it with an underscore: `_bracket_start`
+src\performance_advanced\cache_optimizer.rs:184:50: warning: unused variable: `prompt`: help: if this is intentional, prefix it with an underscore: `_prompt`
+src\performance_advanced\cache_optimizer.rs:311:21: warning: unused variable: `records`: help: if this is intentional, prefix it with an underscore: `_records`
+src\performance_advanced\mod.rs:767:29: warning: unused variable: `key`: help: if this is intentional, prefix it with an underscore: `_key`
+src\performance_advanced\mod.rs:230:13: warning: unused variable: `now`: help: if this is intentional, prefix it with an underscore: `_now`
+src\performance_advanced\mod.rs:773:29: warning: unused variable: `key`: help: if this is intentional, prefix it with an underscore: `_key`
+src\performance_advanced\mod.rs:773:39: warning: unused variable: `value`: help: if this is intentional, prefix it with an underscore: `_value`
+src\performance_advanced\mod.rs:773:52: warning: unused variable: `ttl`: help: if this is intentional, prefix it with an underscore: `_ttl`
+src\p2_integration.rs:131:13: warning: unused variable: `url`: help: if this is intentional, prefix it with an underscore: `_url`
+warning: `carpai` (lib) generated 160 warnings
+error: could not compile `carpai` (lib) due to 213 previous errors; 160 warnings emitted

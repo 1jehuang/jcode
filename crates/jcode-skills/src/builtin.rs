@@ -283,6 +283,7 @@ impl CodeReviewSkill {
     }
 
     /// 执行完整的代码审查
+    #[allow(unused_assignments)]
     pub async fn review_code(
         &self,
         code: &str,

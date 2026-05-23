@@ -1,0 +1,2 @@
+-r requirements.txt
+slack-sdk>=3.27.0

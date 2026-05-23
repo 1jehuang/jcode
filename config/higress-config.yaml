@@ -1,0 +1,114 @@
+# Higress网关配置 - 三层负载均衡
+# Layer 1: 租户隔离
+# Layer 2: 模型路由
+# Layer 3: 会话粘性
+
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: carpai-gateway
+spec:
+  selector:
+    istio: higress
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "*"
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: carpai-routes
+spec:
+  hosts:
+  - "*"
+  gateways:
+  - carpai-gateway
+  http:
+  # Layer 1: 租户隔离路由
+  - match:
+    - uri:
+        prefix: /api/tenant/
+    route:
+    - destination:
+        host: jcode-server
+        port:
+          number: 8081
+    # Layer 3: 会话粘性 (TTL=3600s,与Redis对齐)
+    timeout: 30s
+    retries:
+      attempts: 3
+      perTryTimeout: 10s
+
+  # Layer 2: 模型路由 - OpenAI兼容接口
+  - match:
+    - uri:
+        prefix: /v1/chat/completions
+    route:
+    - destination:
+        host: jcode-server
+        port:
+          number: 8081
+      weight: 100
+    # 基于请求头的模型路由
+    headers:
+      request:
+        add:
+          x-model-routing: enabled
+          x-cache-ttl: "3600"  # 与session sticky TTL对齐
+
+  # gRPC流式接口
+  - match:
+    - uri:
+        prefix: /jcode.Gateway/
+    route:
+    - destination:
+        host: jcode-server
+        port:
+          number: 50051
+
+  # WebSocket接口
+  - match:
+    - uri:
+        prefix: /ws
+    upgrade: websocket
+    route:
+    - destination:
+        host: jcode-server
+        port:
+          number: 8080
+
+---
+# 健康检查配置
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: jcode-server-destination
+spec:
+  host: jcode-server
+  trafficPolicy:
+    # Layer 3: 会话粘性配置
+    connectionPool:
+      tcp:
+        maxConnections: 1000
+      http:
+        h2UpgradePolicy: DEFAULT
+        http1MaxPendingRequests: 1000
+        http2MaxRequests: 1000
+    # 负载均衡策略 - 三层感知
+    loadBalancer:
+      simple: ROUND_ROBIN
+      # 会话粘性 (与Redis TTL严格对齐)
+      consistentHash:
+        httpCookie:
+          name: JCODE_SESSION_ID
+          ttl: 3600s  # 必须与REDIS_SESSION_TTL一致
+    # 熔断器配置
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50

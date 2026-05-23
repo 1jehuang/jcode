@@ -1344,6 +1344,7 @@ fn looks_like_line_oriented_transcript_line(line: &str) -> bool {
         return true;
     }
 
+    #[allow(unreachable_patterns)]
     matches!(trimmed.chars().next(), Some('✓' | '✗' | '+' | '-' | '|'))
 }
 

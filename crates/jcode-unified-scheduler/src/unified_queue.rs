@@ -77,7 +77,15 @@ impl UnifiedQueue {
             total_dropped: 0,
         }
     }
+}
 
+impl Default for UnifiedQueue {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+impl UnifiedQueue {
     /// 当前队列长度
     pub fn len(&self) -> usize {
         self.len
@@ -208,7 +216,7 @@ impl UnifiedQueue {
 
     /// 升级任务的优先级
     pub fn bump_priority(&mut self, task_id: &TaskId, new_priority: TaskPriority) -> bool {
-        for (priority_idx, queue) in self.queues.iter_mut().enumerate() {
+        for (_priority_idx, queue) in self.queues.iter_mut().enumerate() {
             if let Some(pos) = queue.iter().position(|t| &t.id == task_id) {
                 let mut task = queue.swap_remove(pos);
                 task.priority = new_priority;

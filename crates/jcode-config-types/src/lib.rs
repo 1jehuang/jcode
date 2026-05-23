@@ -547,8 +547,8 @@ impl Default for DisplayConfig {
             disabled_animations: Vec::new(),
             diff_line_wrap: true,
             performance: String::new(),
-            animation_fps: 60,
-            redraw_fps: 60,
+            animation_fps: 20,  // Optimized for <50ms frame time (Phase 2)
+            redraw_fps: 20,     // Optimized for <50ms frame time (Phase 2)
             prompt_preview: true,
             native_scrollbars: NativeScrollbarConfig::default(),
         }

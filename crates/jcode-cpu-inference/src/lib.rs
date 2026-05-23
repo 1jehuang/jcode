@@ -4,6 +4,7 @@
 //! 作为企业版服务器的底层推理引擎。
 
 pub mod graceful_manager;
+pub mod model_lifecycle_manager;  // P1-5: Hot-swapping and graceful shutdown
 
 use std::collections::HashMap;
 use std::path::PathBuf;

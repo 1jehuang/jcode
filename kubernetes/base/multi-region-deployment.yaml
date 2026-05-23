@@ -1,0 +1,565 @@
+# Cross-Region Multi-Active Deployment Architecture
+# Supports active-active deployment across multiple geographic regions
+# with CRDT-based data synchronization and GSLB routing
+
+---
+# Region A - US East (Primary)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: carpai-us-east
+  labels:
+    region: us-east-1
+    environment: production
+---
+# Region B - EU West (Secondary)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: carpai-eu-west
+  labels:
+    region: eu-west-1
+    environment: production
+---
+# Region C - Asia Pacific (Tertiary)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: carpai-ap-southeast
+  labels:
+    region: ap-southeast-1
+    environment: production
+
+---
+# Global Traffic Manager Configuration (GSLB)
+# Routes traffic based on latency and load
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gslb-config
+  namespace: carpai-us-east
+data:
+  routing-strategy: "latency-load-balanced"
+  health-check-interval: "10s"
+  failover-threshold: "3"
+  regions: |
+    {
+      "us-east-1": {
+        "endpoint": "carpai-us.example.com",
+        "weight": 50,
+        "priority": 1,
+        "health_check": "/healthz"
+      },
+      "eu-west-1": {
+        "endpoint": "carpai-eu.example.com",
+        "weight": 30,
+        "priority": 2,
+        "health_check": "/healthz"
+      },
+      "ap-southeast-1": {
+        "endpoint": "carpai-ap.example.com",
+        "weight": 20,
+        "priority": 3,
+        "health_check": "/healthz"
+      }
+    }
+
+---
+# JCode Server Deployment - US East
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jcode-server
+  namespace: carpai-us-east
+  labels:
+    app: jcode-server
+    region: us-east-1
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: jcode-server
+      region: us-east-1
+  template:
+    metadata:
+      labels:
+        app: jcode-server
+        region: us-east-1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - jcode-server
+                topologyKey: "kubernetes.io/hostname"
+      containers:
+        - name: jcode-server
+          image: jcode:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 50051
+              name: grpc
+            - containerPort: 8080
+              name: websocket
+            - containerPort: 8081
+              name: rest
+            - containerPort: 9090
+              name: metrics
+          env:
+            - name: REGION
+              value: "us-east-1"
+            - name: CLUSTER_NAME
+              value: "carpai-us-east"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: us-east-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: redis-secret
+                  key: us-east-url
+            - name: CROSS_REGION_SYNC_ENABLED
+              value: "true"
+            - name: CRDT_SYNC_INTERVAL_MS
+              value: "5000"
+            - name: ANTI_ENTROPY_INTERVAL_SEC
+              value: "60"
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "8"
+              memory: 16Gi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+# JCode Server Service - US East
+apiVersion: v1
+kind: Service
+metadata:
+  name: jcode-server
+  namespace: carpai-us-east
+  labels:
+    app: jcode-server
+    region: us-east-1
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 50051
+      targetPort: 50051
+      name: grpc
+    - port: 8080
+      targetPort: 8080
+      name: websocket
+    - port: 8081
+      targetPort: 8081
+      name: rest
+  selector:
+    app: jcode-server
+    region: us-east-1
+
+---
+# JCode Server Deployment - EU West
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jcode-server
+  namespace: carpai-eu-west
+  labels:
+    app: jcode-server
+    region: eu-west-1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: jcode-server
+      region: eu-west-1
+  template:
+    metadata:
+      labels:
+        app: jcode-server
+        region: eu-west-1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      containers:
+        - name: jcode-server
+          image: jcode:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 50051
+              name: grpc
+            - containerPort: 8080
+              name: websocket
+            - containerPort: 8081
+              name: rest
+            - containerPort: 9090
+              name: metrics
+          env:
+            - name: REGION
+              value: "eu-west-1"
+            - name: CLUSTER_NAME
+              value: "carpai-eu-west"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: eu-west-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: redis-secret
+                  key: eu-west-url
+            - name: CROSS_REGION_SYNC_ENABLED
+              value: "true"
+            - name: CRDT_SYNC_INTERVAL_MS
+              value: "5000"
+            - name: ANTI_ENTROPY_INTERVAL_SEC
+              value: "60"
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "8"
+              memory: 16Gi
+---
+# JCode Server Service - EU West
+apiVersion: v1
+kind: Service
+metadata:
+  name: jcode-server
+  namespace: carpai-eu-west
+  labels:
+    app: jcode-server
+    region: eu-west-1
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 50051
+      targetPort: 50051
+      name: grpc
+    - port: 8080
+      targetPort: 8080
+      name: websocket
+    - port: 8081
+      targetPort: 8081
+      name: rest
+  selector:
+    app: jcode-server
+    region: eu-west-1
+
+---
+# JCode Server Deployment - Asia Pacific
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jcode-server
+  namespace: carpai-ap-southeast
+  labels:
+    app: jcode-server
+    region: ap-southeast-1
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: jcode-server
+      region: ap-southeast-1
+  template:
+    metadata:
+      labels:
+        app: jcode-server
+        region: ap-southeast-1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      containers:
+        - name: jcode-server
+          image: jcode:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 50051
+              name: grpc
+            - containerPort: 8080
+              name: websocket
+            - containerPort: 8081
+              name: rest
+            - containerPort: 9090
+              name: metrics
+          env:
+            - name: REGION
+              value: "ap-southeast-1"
+            - name: CLUSTER_NAME
+              value: "carpai-ap-southeast"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: ap-southeast-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: redis-secret
+                  key: ap-southeast-url
+            - name: CROSS_REGION_SYNC_ENABLED
+              value: "true"
+            - name: CRDT_SYNC_INTERVAL_MS
+              value: "5000"
+            - name: ANTI_ENTROPY_INTERVAL_SEC
+              value: "60"
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "8"
+              memory: 16Gi
+---
+# JCode Server Service - Asia Pacific
+apiVersion: v1
+kind: Service
+metadata:
+  name: jcode-server
+  namespace: carpai-ap-southeast
+  labels:
+    app: jcode-server
+    region: ap-southeast-1
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 50051
+      targetPort: 50051
+      name: grpc
+    - port: 8080
+      targetPort: 8080
+      name: websocket
+    - port: 8081
+      targetPort: 8081
+      name: rest
+  selector:
+    app: jcode-server
+    region: ap-southeast-1
+
+---
+# Cross-Region CRDT Sync Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crdt-sync-service
+  namespace: carpai-us-east
+  labels:
+    app: crdt-sync-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: crdt-sync-service
+  template:
+    metadata:
+      labels:
+        app: crdt-sync-service
+    spec:
+      containers:
+        - name: crdt-sync
+          image: crdt-sync:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8090
+              name: sync-api
+          env:
+            - name: SYNC_MODE
+              value: "anti-entropy"
+            - name: SYNC_INTERVAL_MS
+              value: "5000"
+            - name: CONFLICT_RESOLUTION
+              value: "last-writer-wins"
+            - name: REMOTE_ENDPOINTS
+              value: "carpai-eu.example.com:8090,carpai-ap.example.com:8090"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+
+---
+# Cross-Region Database Replication Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cross-region-replication
+  namespace: carpai-us-east
+data:
+  replication.conf: |
+    # PostgreSQL logical replication configuration
+    # Master: us-east-1
+    # Replicas: eu-west-1, ap-southeast-1
+
+    # Enable logical replication
+    wal_level = logical
+    max_replication_slots = 10
+    max_wal_senders = 10
+
+    # Create publication for all tables
+    CREATE PUBLICATION carpai_publication FOR ALL TABLES;
+
+    # Subscriptions (run on replica regions)
+    # EU West subscription:
+    # CREATE SUBSCRIPTION carpai_subscription
+    #   CONNECTION 'host=carpai-us-db.example.com dbname=carpai user=replicator password=***'
+    #   PUBLICATION carpai_publication;
+
+    # Conflict resolution strategy
+    conflict_resolution = last_writer_wins
+    resolve_conflicts_on = subscriber
+
+---
+# Monitoring: Cross-Region Latency Dashboard
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cross-region-monitoring
+  namespace: carpai-us-east
+data:
+  grafana-dashboard.json: |
+    {
+      "dashboard": {
+        "title": "Cross-Region Multi-Active Monitoring",
+        "panels": [
+          {
+            "title": "Inter-Region Latency",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, rate(crdt_sync_latency_seconds_bucket[5m]))",
+                "legendFormat": "{{source_region}} -> {{target_region}}"
+              }
+            ]
+          },
+          {
+            "title": "Sync Lag by Region",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "crdt_sync_lag_seconds",
+                "legendFormat": "{{region}}"
+              }
+            ]
+          },
+          {
+            "title": "Conflict Resolution Rate",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(crdt_conflicts_resolved_total[5m])",
+                "legendFormat": "{{region}}"
+              }
+            ]
+          },
+          {
+            "title": "Requests by Region",
+            "type": "piechart",
+            "targets": [
+              {
+                "expr": "sum by (region) (rate(http_requests_total[5m]))"
+              }
+            ]
+          }
+        ]
+      }
+    }
+
+---
+# Network Policies for Cross-Region Communication
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cross-region-communication
+  namespace: carpai-us-east
+spec:
+  podSelector:
+    matchLabels:
+      app: jcode-server
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              region: eu-west-1
+        - namespaceSelector:
+            matchLabels:
+              region: ap-southeast-1
+      ports:
+        - protocol: TCP
+          port: 8090
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              region: eu-west-1
+        - namespaceSelector:
+            matchLabels:
+              region: ap-southeast-1
+      ports:
+        - protocol: TCP
+          port: 8090
+
+---
+# Failover Testing CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: failover-test
+  namespace: carpai-us-east
+spec:
+  schedule: "0 2 * * 0"  # Weekly at 2 AM Sunday
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: failover-test
+              image: busybox:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  echo "Starting failover test..."
+                  # Simulate region failure by scaling down
+                  kubectl scale deployment jcode-server --replicas=0 -n carpai-us-east
+                  sleep 300
+                  # Verify traffic routed to other regions
+                  # Scale back up
+                  kubectl scale deployment jcode-server --replicas=5 -n carpai-us-east
+                  echo "Failover test completed"
+              env:
+                - name: KUBECONFIG
+                  value: /etc/kubernetes/admin.conf
+          restartPolicy: Never

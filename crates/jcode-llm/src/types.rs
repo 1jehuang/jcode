@@ -42,6 +42,8 @@ impl std::fmt::Display for MessageRole {
             Self::User => write!(f, "user"),
             Self::Assistant => write!(f, "assistant"),
             Self::Tool => write!(f, "tool"),
+            Self::FimPrefix => write!(f, "fim_prefix"),
+            Self::FimSuffix => write!(f, "fim_suffix"),
         }
     }
 }

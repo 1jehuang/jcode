@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: carpai-mcp-gateway
+  namespace: carpai
+  labels:
+    app: carpai-mcp
+    component: gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: carpai-mcp
+      component: gateway
+  template:
+    metadata:
+      labels:
+        app: carpai-mcp
+        component: gateway
+    spec:
+      containers:
+        - name: gateway
+          image: carpai/mcp-gateway:latest
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: RUST_LOG
+              value: "info"
+            - name: MCP_CONFIG_PATH
+              value: "/etc/carpai/mcp_servers.yaml"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/carpai
+              readOnly: true
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: carpai-mcp-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: carpai-mcp-gateway
+  namespace: carpai
+spec:
+  selector:
+    app: carpai-mcp
+    component: gateway
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+  type: ClusterIP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: carpai-mcp-gateway
+  namespace: carpai
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: carpai-mcp-gateway
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: carpai-mcp-config
+  namespace: carpai
+data:
+  mcp_servers.yaml: |
+    # CarpAI MCP Server Configuration
+    servers:
+      github:
+        url: "http://carpai-mcp-github:8000"
+        transport: sse
+      jira:
+        url: "http://carpai-mcp-jira:8000"
+        transport: sse
+      slack:
+        url: "http://carpai-mcp-slack:8000"
+        transport: sse
+      docker:
+        url: "http://carpai-mcp-docker:8000"
+        transport: sse
+      postgres:
+        url: "http://carpai-mcp-postgres:8000"
+        transport: sse
+      redis:
+        url: "http://carpai-mcp-redis:8000"
+        transport: sse
+      kubernetes:
+        url: "http://carpai-mcp-kubernetes:8000"
+        transport: sse
+      aws:
+        url: "http://carpai-mcp-aws:8000"
+        transport: sse
+      sentry:
+        url: "http://carpai-mcp-sentry:8000"
+        transport: sse
+      datadog:
+        url: "http://carpai-mcp-datadog:8000"
+        transport: sse

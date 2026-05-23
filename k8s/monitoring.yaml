@@ -54,6 +54,78 @@ data:
             annotations:
               summary: "Low auto-approval success rate"
               description: "Auto-approval success rate is {{ $value }}"
+
+      - name: backpressure_alerts
+        rules:
+          # Critical: Backpressure is actively rejecting requests
+          - alert: BackpressureActive
+            expr: carpai_backpressure_active == 1
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Backpressure is actively rejecting requests"
+              description: "System is overloaded and rejecting connections. Pending: {{ $value }}, Max: {{ with (printf \"carpai_backpressure_max_pending\") }}{{ . | first | value }}{{ end }}"
+
+          # Warning: System approaching capacity (>80% load)
+          - alert: BackpressureNearCapacity
+            expr: carpai_backpressure_load_ratio > 0.8
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "System approaching backpressure capacity"
+              description: "Load ratio is {{ $value }} (threshold: 0.8). Consider scaling up."
+
+          # Warning: High rejection rate
+          - alert: HighRejectionRate
+            expr: rate(carpai_backpressure_rejected_total[5m]) > 10
+            for: 2m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High request rejection rate"
+              description: "Rejecting {{ $value }} requests/sec due to overload"
+
+          # Info: Dynamic threshold adjustment detected
+          - alert: BackpressureThresholdReduced
+            expr: changes(carpai_backpressure_max_pending[10m]) > 0
+            for: 0m
+            labels:
+              severity: info
+            annotations:
+              summary: "Backpressure thresholds dynamically adjusted"
+              description: "Max pending limit changed to {{ $value }}. System adapting to load conditions."
+
+          # Critical: Sustained high CPU utilization
+          - alert: HighCpuUtilization
+            expr: carpai_system_cpu_utilization > 8500
+            for: 5m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Sustained high CPU utilization"
+              description: "CPU at {{ $value | humanizePercentage }}. May trigger backpressure reduction."
+
+          # Warning: High memory utilization
+          - alert: HighMemoryUtilization
+            expr: carpai_system_memory_utilization > 8500
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High memory utilization"
+              description: "Memory at {{ $value | humanizePercentage }}. Risk of OOM."
+
+          # Warning: GC not keeping up with session growth
+          - alert: SessionGcLagging
+            expr: carpai_sessions_total > 1000
+            for: 1h
+            labels:
+              severity: warning
+            annotations:
+              summary: "Large number of active sessions"
+              description: "{{ $value }} sessions tracked. GC may need tuning."
 ---
 # Grafana Dashboard Configuration
 apiVersion: v1
@@ -68,8 +140,10 @@ data:
         "title": "CarpAI Overview",
         "panels": [
           {
+            "id": 1,
             "title": "Request Rate",
             "type": "graph",
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
             "targets": [
               {
                 "expr": "rate(http_requests_total[5m])",
@@ -78,18 +152,31 @@ data:
             ]
           },
           {
+            "id": 2,
             "title": "Response Time (P95)",
             "type": "gauge",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
             "targets": [
               {
                 "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))",
                 "legendFormat": "P95 Latency"
               }
-            ]
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "thresholds": [
+                  {"value": 0, "color": "green"},
+                  {"value": 0.5, "color": "yellow"},
+                  {"value": 1.0, "color": "red"}
+                ]
+              }
+            }
           },
           {
+            "id": 3,
             "title": "Active Tasks",
             "type": "stat",
+            "gridPos": {"h": 4, "w": 6, "x": 0, "y": 8},
             "targets": [
               {
                 "expr": "carpai_tasks_active",
@@ -98,19 +185,145 @@ data:
             ]
           },
           {
+            "id": 4,
             "title": "Plugin Status",
             "type": "table",
+            "gridPos": {"h": 4, "w": 6, "x": 6, "y": 8},
             "targets": [
               {
                 "expr": "carpai_plugins_enabled",
                 "legendFormat": "Enabled Plugins"
               }
             ]
+          },
+          {
+            "id": 5,
+            "title": "Backpressure Status",
+            "type": "stat",
+            "gridPos": {"h": 4, "w": 6, "x": 12, "y": 8},
+            "targets": [
+              {
+                "expr": "carpai_backpressure_active",
+                "legendFormat": "Active"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "mappings": [
+                  {"options": {"0": {"text": "Normal", "color": "green"}}, "type": "value"},
+                  {"options": {"1": {"text": "OVERLOADED", "color": "red"}}, "type": "value"}
+                ]
+              }
+            }
+          },
+          {
+            "id": 6,
+            "title": "Backpressure Load Ratio",
+            "type": "gauge",
+            "gridPos": {"h": 4, "w": 6, "x": 18, "y": 8},
+            "targets": [
+              {
+                "expr": "carpai_backpressure_load_ratio",
+                "legendFormat": "Load Ratio"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "min": 0,
+                "max": 1,
+                "thresholds": [
+                  {"value": 0, "color": "green"},
+                  {"value": 0.7, "color": "yellow"},
+                  {"value": 0.9, "color": "red"}
+                ]
+              }
+            }
+          },
+          {
+            "id": 7,
+            "title": "Pending Requests vs Max",
+            "type": "timeseries",
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+            "targets": [
+              {
+                "expr": "carpai_backpressure_pending",
+                "legendFormat": "Pending"
+              },
+              {
+                "expr": "carpai_backpressure_max_pending",
+                "legendFormat": "Max Limit (Dynamic)"
+              }
+            ]
+          },
+          {
+            "id": 8,
+            "title": "Rejected Requests Rate",
+            "type": "timeseries",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+            "targets": [
+              {
+                "expr": "rate(carpai_backpressure_rejected_total[1m])",
+                "legendFormat": "Rejections/sec"
+              }
+            ]
+          },
+          {
+            "id": 9,
+            "title": "System Resources",
+            "type": "timeseries",
+            "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20},
+            "targets": [
+              {
+                "expr": "carpai_system_cpu_utilization / 100",
+                "legendFormat": "CPU %"
+              },
+              {
+                "expr": "carpai_system_memory_utilization / 100",
+                "legendFormat": "Memory %"
+              }
+            ]
+          },
+          {
+            "id": 10,
+            "title": "Session GC Stats",
+            "type": "stat",
+            "gridPos": {"h": 4, "w": 8, "x": 0, "y": 28},
+            "targets": [
+              {
+                "expr": "carpai_sessions_total",
+                "legendFormat": "Total Sessions"
+              }
+            ]
+          },
+          {
+            "id": 11,
+            "title": "GC Compactions",
+            "type": "stat",
+            "gridPos": {"h": 4, "w": 8, "x": 8, "y": 28},
+            "targets": [
+              {
+                "expr": "increase(carpai_gc_compacted_total[1h])",
+                "legendFormat": "Last Hour"
+              }
+            ]
+          },
+          {
+            "id": 12,
+            "title": "GC Memory Freed",
+            "type": "stat",
+            "gridPos": {"h": 4, "w": 8, "x": 16, "y": 28},
+            "targets": [
+              {
+                "expr": "increase(carpai_gc_memory_freed_bytes[1h]) / 1024 / 1024",
+                "legendFormat": "MB Freed (1h)"
+              }
+            ]
           }
         ],
         "refresh": "5s",
         "schemaVersion": 30,
-        "version": 1
+        "version": 1,
+        "time": {"from": "now-1h", "to": "now"}
       }
     }
 ---

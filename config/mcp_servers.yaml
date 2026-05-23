@@ -1,0 +1,113 @@
+# CarpAI MCP Server Configuration
+# Each server can be enabled by setting the corresponding environment variables.
+# Reference: CarpAI config/mcp_servers.yaml
+
+mcp_servers:
+  # GitHub - PR review, issue tracking, code browsing
+  github:
+    command: python
+    args: ["mcp-servers/github/src/server.py"]
+    env:
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+    enabled: ${GITHUB_TOKEN:+true}
+    description: "GitHub PR/Issue management"
+
+  # Jira - Project and task management
+  jira:
+    command: python
+    args: ["mcp-servers/jira/src/server.py"]
+    env:
+      JIRA_URL: ${JIRA_URL}
+      JIRA_EMAIL: ${JIRA_EMAIL}
+      JIRA_API_TOKEN: ${JIRA_API_TOKEN}
+    enabled: ${JIRA_URL:+true}
+    description: "Jira issue tracking"
+
+  # Slack - Team communication
+  slack:
+    command: python
+    args: ["mcp-servers/slack/src/server.py"]
+    env:
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN}
+    enabled: ${SLACK_BOT_TOKEN:+true}
+    description: "Slack messaging and notifications"
+
+  # Docker - Container management
+  docker:
+    command: python
+    args: ["mcp-servers/docker/src/server.py"]
+    env: {}
+    enabled: true
+    description: "Local Docker container management"
+
+  # PostgreSQL - Database operations
+  postgres:
+    command: python
+    args: ["mcp-servers/postgres/src/server.py"]
+    env:
+      DATABASE_URL: ${DATABASE_URL}
+    enabled: ${DATABASE_URL:+true}
+    description: "PostgreSQL database query and schema management"
+
+  # Redis - Cache and key-value store
+  redis:
+    command: python
+    args: ["mcp-servers/redis/src/server.py"]
+    env:
+      REDIS_URL: ${REDIS_URL}
+    enabled: ${REDIS_URL:+true}
+    description: "Redis cache operations"
+
+  # Kubernetes - Cluster management
+  kubernetes:
+    command: python
+    args: ["mcp-servers/kubernetes/src/server.py"]
+    env:
+      KUBECONFIG: ${KUBECONFIG}
+    enabled: true
+    description: "Kubernetes cluster management (uses default kubeconfig)"
+
+  # AWS - Cloud infrastructure
+  aws:
+    command: python
+    args: ["mcp-servers/aws/src/server.py"]
+    env:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+    enabled: ${AWS_ACCESS_KEY_ID:+true}
+    description: "AWS EC2, S3, Lambda, CloudWatch operations"
+
+  # Sentry - Error tracking
+  sentry:
+    command: python
+    args: ["mcp-servers/sentry/src/server.py"]
+    env:
+      SENTRY_TOKEN: ${SENTRY_TOKEN}
+      SENTRY_ORG_SLUG: ${SENTRY_ORG_SLUG}
+    enabled: ${SENTRY_TOKEN:+true}
+    description: "Sentry issue and error tracking"
+
+  # Datadog - Monitoring and observability
+  datadog:
+    command: python
+    args: ["mcp-servers/datadog/src/server.py"]
+    env:
+      DATADOG_API_KEY: ${DATADOG_API_KEY}
+      DATADOG_APP_KEY: ${DATADOG_APP_KEY}
+      DATADOG_SITE: ${DATADOG_SITE:-datadoghq.com}
+    enabled: ${DATADOG_API_KEY:+true}
+    description: "Datadog metrics, monitors, logs, and dashboards"
+
+# Global MCP configuration options
+config:
+  # Timeout in seconds for MCP tool calls
+  tool_timeout: 60
+  # Maximum number of concurrently running MCP servers
+  max_concurrent: 10
+  # Log level for MCP server output
+  log_level: info
+  # Auto-connect servers on CarpAI startup
+  auto_connect: true
+  # MCP JSON-RPC protocol version
+  protocol_version: "2024-11-05"

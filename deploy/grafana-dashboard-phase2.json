@@ -1,0 +1,283 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "carpai-enterprise",
+    "title": "CarpAI Enterprise Server - Phase 2 Monitoring",
+    "tags": ["carpai", "enterprise", "phase2"],
+    "timezone": "browser",
+    "schemaVersion": 38,
+    "version": 1,
+    "refresh": "10s",
+    "time": {
+      "from": "now-6h",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Active Sessions",
+        "type": "stat",
+        "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "sum(carpai_active_sessions)",
+            "legendFormat": "Total Sessions"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 300},
+                {"color": "red", "value": 450}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "Requests Per Second",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 6, "y": 0},
+        "targets": [
+          {
+            "expr": "sum(rate(http_requests_total[5m])) by (region)",
+            "legendFormat": "{{region}}"
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "HPA Replicas",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 6, "x": 18, "y": 0},
+        "targets": [
+          {
+            "expr": "kube_deployment_spec_replicas{deployment='jcode-server'}",
+            "legendFormat": "Desired"
+          },
+          {
+            "expr": "kube_deployment_status_replicas_available{deployment='jcode-server'}",
+            "legendFormat": "Available"
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "title": "Cache Hit Rate",
+        "type": "gauge",
+        "gridPos": {"h": 8, "w": 6, "x": 0, "y": 8},
+        "targets": [
+          {
+            "expr": "rate(carpai_cache_hits_total[5m]) / (rate(carpai_cache_hits_total[5m]) + rate(carpai_cache_misses_total[5m])) * 100",
+            "legendFormat": "Hit Rate %"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "min": 0,
+            "max": 100,
+            "unit": "percent",
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": null},
+                {"color": "yellow", "value": 60},
+                {"color": "green", "value": 80}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 5,
+        "title": "Database Partition Size",
+        "type": "bargauge",
+        "gridPos": {"h": 8, "w": 12, "x": 6, "y": 8},
+        "targets": [
+          {
+            "expr": "pg_table_size_bytes{table='audit_logs'}",
+            "legendFormat": "{{partition}}"
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Cross-Region Sync Lag",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 6, "x": 18, "y": 8},
+        "targets": [
+          {
+            "expr": "crdt_sync_lag_seconds",
+            "legendFormat": "{{source}} -> {{target}}"
+          }
+        ]
+      },
+      {
+        "id": 7,
+        "title": "SOC2 Compliance Status",
+        "type": "table",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+        "targets": [
+          {
+            "expr": "carpai_compliance_check_result",
+            "format": "table",
+            "legendFormat": ""
+          }
+        ],
+        "transformations": [
+          {
+            "id": "organize",
+            "options": {
+              "excludeByName": {},
+              "indexByName": {},
+              "renameByName": {
+                "control_id": "Control ID",
+                "compliant": "Status",
+                "checked_at": "Last Check"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": 8,
+        "title": "GDPR Data Requests",
+        "type": "stat",
+        "gridPos": {"h": 8, "w": 6, "x": 12, "y": 16},
+        "targets": [
+          {
+            "expr": "sum(rate(carpai_gdpr_requests_total[24h]))",
+            "legendFormat": "Requests/Day"
+          }
+        ]
+      },
+      {
+        "id": 9,
+        "title": "PHI Access Events",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 6, "x": 18, "y": 16},
+        "targets": [
+          {
+            "expr": "rate(carpai_phi_access_total[1h])",
+            "legendFormat": "Access Events/hr"
+          }
+        ]
+      },
+      {
+        "id": 10,
+        "title": "CPU Usage by Region",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+        "targets": [
+          {
+            "expr": "avg(rate(container_cpu_usage_seconds_total[5m])) by (region) * 100",
+            "legendFormat": "{{region}}"
+          }
+        ]
+      },
+      {
+        "id": 11,
+        "title": "Memory Usage by Region",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+        "targets": [
+          {
+            "expr": "avg(container_memory_usage_bytes) by (region) / 1024 / 1024 / 1024",
+            "legendFormat": "{{region}} GB"
+          }
+        ]
+      },
+      {
+        "id": 12,
+        "title": "Audit Trail Integrity",
+        "type": "stat",
+        "gridPos": {"h": 8, "w": 6, "x": 0, "y": 32},
+        "targets": [
+          {
+            "expr": "carpai_audit_chain_verified",
+            "legendFormat": "Chain Verified"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": null},
+                {"color": "green", "value": 1}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 13,
+        "title": "Conflicts Resolved (CRDT)",
+        "type": "counter",
+        "gridPos": {"h": 8, "w": 6, "x": 6, "y": 32},
+        "targets": [
+          {
+            "expr": "crdt_conflicts_resolved_total",
+            "legendFormat": "Total Conflicts"
+          }
+        ]
+      },
+      {
+        "id": 14,
+        "title": "Session Duration Distribution",
+        "type": "histogram",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(carpai_session_duration_seconds_bucket[1h]))",
+            "legendFormat": "95th percentile"
+          }
+        ]
+      }
+    ],
+    "templating": {
+      "list": [
+        {
+          "name": "region",
+          "type": "custom",
+          "multi": true,
+          "includeAll": true,
+          "current": {
+            "text": "All",
+            "value": "$__all"
+          },
+          "options": [
+            {"text": "us-east-1", "value": "us-east-1"},
+            {"text": "eu-west-1", "value": "eu-west-1"},
+            {"text": "ap-southeast-1", "value": "ap-southeast-1"}
+          ]
+        }
+      ]
+    },
+    "annotations": {
+      "list": [
+        {
+          "builtIn": 1,
+          "datasource": "-- Grafana --",
+          "enable": true,
+          "hide": true,
+          "iconColor": "rgba(0, 211, 255, 1)",
+          "name": "Annotations & Alerts",
+          "type": "dashboard"
+        },
+        {
+          "datasource": "Prometheus",
+          "enable": true,
+          "expr": "carpai_deployment_events",
+          "iconColor": "blue",
+          "name": "Deployments",
+          "titleFormat": "Deployment"
+        }
+      ]
+    }
+  },
+  "overwrite": true
+}

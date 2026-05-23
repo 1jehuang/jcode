@@ -1,0 +1,125 @@
+<idea-plugin>
+    <id>com.carpai.plugin</id>
+    <name>CarpAI Assistant</name>
+    <vendor email="support@carpai.example.com" url="https://carpai.example.com">CarpAI Team</vendor>
+
+    <description><![CDATA[
+    <!-- Plugin description -->
+    CarpAI is an AI-powered coding assistant that brings intelligent code completion, chat, and real-time collaboration to JetBrains IDEs.
+
+    ## Features
+
+    - **AI Chat**: Natural language conversations about your code
+    - **Intelligent Code Completion**: Context-aware suggestions powered by multiple LLMs
+    - **Real-time Collaboration**: Share sessions and collaborate with teammates using CRDT
+    - **Code Analysis**: Deep code understanding with AST parsing and call graph analysis
+    - **Multi-model Support**: Route requests to optimal AI models (OpenAI, Gemini, Qwen, etc.)
+    - **Private Deployment**: Connect to your organization's self-hosted CarpAI server
+
+    ## Getting Started
+
+    1. Install the plugin
+    2. Open the CarpAI tool window (View → Tool Windows → CarpAI)
+    3. Configure your CarpAI server URL in Settings
+    4. Start chatting with AI about your code!
+
+    ## Enterprise Features
+
+    - SSO authentication (OIDC/SAML/LDAP)
+    - Team session sharing
+    - Audit logging
+    - Custom model routing policies
+    <!-- Plugin description end -->
+    ]]></description>
+
+    <change-notes><![CDATA[
+    <h3>1.0.0</h3>
+    <ul>
+        <li>Initial release with AI chat and code completion</li>
+        <li>Real-time collaboration support</li>
+        <li>Multi-model routing</li>
+        <li>Enterprise SSO integration</li>
+    </ul>
+    ]]>
+    </change-notes>
+
+    <!-- please see https://plugins.jetbrains.com/docs/intellij/plugin-compatibility.html
+         on how to target different products -->
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.lang</depends>
+    <depends>com.intellij.modules.vcs</depends>
+
+    <!-- Extension points defined by the plugin -->
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- Tool Window -->
+        <toolWindow
+            id="CarpAI"
+            secondary="false"
+            anchor="right"
+            icon="/icons/carpai_13x13.svg"
+            factoryClass="com.carpai.plugin.ui.CarpaiToolWindowFactory"/>
+
+        <!-- Settings -->
+        <applicationConfigurable
+            parentId="tools"
+            instance="com.carpai.plugin.settings.CarpaiSettingsConfigurable"
+            id="com.carpai.plugin.settings.CarpaiSettingsConfigurable"
+            displayName="CarpAI Assistant"/>
+
+        <applicationService
+            serviceImplementation="com.carpai.plugin.settings.CarpaiSettings"/>
+
+        <!-- Notifications -->
+        <notificationGroup
+            id="carpai.notifications"
+            displayType="BALLOON"
+            key="carpai.notifications"/>
+
+        <!-- Status Bar Widget -->
+        <statusBarWidgetFactory
+            implementation="com.carpai.plugin.ui.CarpaiStatusBarWidgetFactory"
+            id="com.carpai.plugin.ui.CarpaiStatusBarWidgetFactory"/>
+    </extensions>
+
+    <!-- Actions -->
+    <actions>
+        <!-- Main Action Group -->
+        <group id="Carpai.MainMenu" text="CarpAI" description="CarpAI AI Assistant">
+            <add-to-group group-id="MainMenu" anchor="last"/>
+
+            <action id="Carpai.OpenChat"
+                    class="com.carpai.plugin.actions.OpenChatAction"
+                    text="Open Chat"
+                    description="Open CarpAI chat panel">
+                <keyboard-shortcut first-keystroke="ctrl alt C" keymap="$default"/>
+            </action>
+
+            <action id="Carpai.ExplainCode"
+                    class="com.carpai.plugin.actions.ExplainCodeAction"
+                    text="Explain This Code"
+                    description="Ask AI to explain selected code">
+                <keyboard-shortcut first-keystroke="ctrl alt E" keymap="$default"/>
+            </action>
+
+            <action id="Carpai.RefactorCode"
+                    class="com.carpai.plugin.actions.RefactorCodeAction"
+                    text="Refactor This Code"
+                    description="Ask AI to refactor selected code">
+                <keyboard-shortcut first-keystroke="ctrl alt R" keymap="$default"/>
+            </action>
+        </group>
+
+        <!-- Editor Context Menu -->
+        <group id="Carpai.EditorContextMenu">
+            <reference ref="Carpai.ExplainCode"/>
+            <reference ref="Carpai.RefactorCode"/>
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </group>
+    </actions>
+
+    <!-- Listeners -->
+    <applicationListeners>
+        <listener class="com.carpai.plugin.listeners.CarpaiProjectManagerListener"
+                  topic="com.intellij.openapi.project.ProjectManagerListener"/>
+    </applicationListeners>
+</idea-plugin>

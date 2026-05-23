@@ -40,12 +40,21 @@ pub mod goap_planner;
 pub mod layer_allocator;
 pub mod request_router;
 pub mod resource_node;
+pub mod gpu_load_balancer;
+pub mod gpu_discovery;
 pub mod unified_queue;
 pub mod water_filling;
 pub mod topology_aware;
 pub mod resource_tracker;
 pub mod node_join_manager;
 pub mod cross_region;
+pub mod hierarchical_scheduler;
+pub mod batch_node_operations;
+pub mod gslb;
+#[cfg(feature = "cross-region-sync")]
+pub mod cross_region_sync;
+#[cfg(feature = "cross-region-sync")]
+pub mod conflict_resolution;
 
 // 重导出核心类型 — 方便外部使用
 pub use types::*;
@@ -55,12 +64,21 @@ pub use topology_aware::{HardwareTopology, TopologyAwareScheduler, NumaNode, Gpu
 pub use resource_tracker::{ResourceManager, ResourceRequirement, NodeResourceState, AllocationId};
 pub use node_join_manager::{NodeJoinManager, NodeJoinState, ProbeResult, WarmupConfig};
 pub use cross_region::{RegionManager, Region, Zone, RegionSummary, RoutingConfig, RoutingDecision};
+pub use hierarchical_scheduler::{HierarchicalScheduler, ClusterGroup, ClusterGroupId, ClusterGroupType, HierarchicalSchedulerConfig};
+pub use batch_node_operations::{BatchNodeManager, BatchOperationConfig, BatchOperationStatus};
+pub use gslb::{GslbRouter, RegionalCluster, GslbStrategy, HealthStatus, ClientLocation};
+#[cfg(feature = "cross-region-sync")]
+pub use cross_region_sync::{CrossRegionReplicator, GossipProtocol, VectorClock, LwwRegister, OrSet, GSet, StateStore};
+#[cfg(feature = "cross-region-sync")]
+pub use conflict_resolution::{PNCounter, LwwMap, MVRegister, ConflictAwareSession, ResolutionStrategy, MergeResult};
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
 use dashmap::DashMap;
 use indexmap::IndexMap;
 use tokio::sync::{RwLock, Notify};
 use tracing::{info, warn, debug, error, instrument};
+use uuid::Uuid;
 
 // ============================================================================
 // UnifiedScheduler — 统一调度器主结构体
@@ -73,7 +91,7 @@ use tracing::{info, warn, debug, error, instrument};
 /// - **算力资源**: CPU/GPU/内存/网络容量与实时负载 (来自 Parallax)
 ///
 /// 做出全局最优的调度决策。
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct UnifiedScheduler {
     /// 全局唯一实例 ID
     pub id: uuid::Uuid,
@@ -111,8 +129,12 @@ pub struct UnifiedScheduler {
     /// 通知信号 — 新任务入队或资源变化时唤醒调度循环
     notify: Arc<Notify>,
 
-    /// 统计指标
-    metrics: Arc<RwLock<SchedulerMetrics>>,
+    /// 统计指标 (使用原子操作和DashMap减少锁竞争)
+    metrics: Arc<SchedulerMetrics>,
+
+    /// === GPU推理子系统 ===
+    /// GPU负载均衡器 (可选，仅在GPU可用时启用)
+    gpu_balancer: Arc<RwLock<Option<gpu_load_balancer::GpuLoadBalancer>>>,
 }
 
 /// 调度器配置
@@ -159,26 +181,34 @@ pub struct SchedulerConfig {
     pub adaptive_scheduling: bool,
     /// 性能采样窗口 (秒)
     pub performance_window_secs: u64,
+
+    // --- GPU调度配置 ---
+    /// GPU负载均衡策略: "balanced" | "latency" | "throughput" | "power"
+    pub gpu_balance_strategy: String,
+    /// 启用GPU推理 (如果硬件可用)
+    pub enable_gpu_inference: bool,
 }
 
-impl SchedulerConfig {
-    pub fn default() -> Self {
+impl Default for SchedulerConfig {
+    fn default() -> Self {
         Self {
             max_concurrent_tasks: 16,
-            max_queue_size: 1024,
-            max_wait_time_ms: 300_000, // 5 分钟
+            max_queue_size: 0,
+            max_wait_time_ms: 30000,
             enable_goap: true,
-            max_planning_iterations: 10_000,
-            heuristic_weight: 1.0,
+            max_planning_iterations: 100,
+            heuristic_weight: 1.5,
             allocation_strategy: AllocationStrategy::DynamicProgramming,
-            rebalance_threshold: 0.25,
+            rebalance_threshold: 0.3,
             water_filling_max_iterations: 40,
             routing_strategy: RoutingStrategy::DynamicProgramming,
-            enable_warmup_trim: true,
+            enable_warmup_trim: false,
             heartbeat_timeout_secs: 30,
             min_bootstrap_nodes: 1,
             adaptive_scheduling: true,
             performance_window_secs: 60,
+            gpu_balance_strategy: "balanced".to_string(),
+            enable_gpu_inference: true,
         }
     }
 }
@@ -220,59 +250,112 @@ pub enum SchedulerState {
     Shutdown,
 }
 
-/// 调度器性能指标
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+/// 调度器性能指标 (原子操作版本，无锁)
+#[derive(Debug, Default)]
 pub struct SchedulerMetrics {
     // --- 任务统计 ---
     /// 总提交任务数
-    pub tasks_submitted: u64,
+    pub tasks_submitted: AtomicU64,
     /// 总完成任务数
-    pub tasks_completed: u64,
+    pub tasks_completed: AtomicU64,
     /// 总失败任务数
-    pub tasks_failed: u64,
+    pub tasks_failed: AtomicU64,
     /// 总取消任务数
-    pub tasks_cancelled: u64,
+    pub tasks_cancelled: AtomicU64,
     /// 当前队列中的任务数
-    pub queue_length: u64,
+    pub queue_length: AtomicU64,
     /// 当前正在执行的任务数
-    pub running_count: u64,
+    pub running_count: AtomicU64,
 
     // --- 调度延迟 (微秒) ---
     /// 平均调度决策时间 (从入队到开始执行)
-    pub avg_schedule_latency_us: u64,
+    pub avg_schedule_latency_us: AtomicU64,
     /// P99 调度延迟
-    pub p99_schedule_latency_us: u64,
+    pub p99_schedule_latency_us: AtomicU64,
     /// 上一次调度延迟
-    pub last_schedule_latency_us: u64,
+    pub last_schedule_latency_us: AtomicU64,
 
     // --- 资源利用率 ---
     /// 平均 CPU 利用率 (0-10000, 表示 0%-100%)
-    pub avg_cpu_utilization: u32,
+    pub avg_cpu_utilization: AtomicU32,
     /// 平均 GPU 利用率 (0-10000)
-    pub avg_gpu_utilization: u32,
+    pub avg_gpu_utilization: AtomicU32,
     /// 平均内存利用率 (0-10000)
-    pub avg_memory_utilization: u32,
+    pub avg_memory_utilization: AtomicU32,
 
     // --- Parallax 特有 ---
     /// Phase 1 (层分配) 执行次数
-    pub phase1_allocations: u64,
+    pub phase1_allocations: AtomicU64,
     /// Phase 2 (请求路由) 执行次数
-    pub phase2_routings: u64,
+    pub phase2_routings: AtomicU64,
     /// 全局重平衡触发次数
-    pub global_rebalances: u64,
-    /// 平均流水线数量
-    pub avg_pipeline_count: f64,
+    pub global_rebalances: AtomicU64,
+    /// 平均流水线数量 (使用f64的原子表示，需要unsafe或Mutex)
+    pub avg_pipeline_count: std::sync::RwLock<f64>,
 
     // --- GOAP 特有 ---
     /// GOAP 规划次数
-    pub goap_plans_generated: u64,
+    pub goap_plans_generated: AtomicU64,
     /// 平均规划耗时 (毫秒)
-    pub avg_plan_time_ms: f64,
+    pub avg_plan_time_ms: std::sync::RwLock<f64>,
     /// 规划失败次数
-    pub goap_plan_failures: u64,
+    pub goap_plan_failures: AtomicU64,
 
     // --- 时间戳 ---
     /// 指标采集时间
+    pub collected_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl SchedulerMetrics {
+    /// Clone metrics snapshot for serialization/reporting
+    pub fn snapshot(&self) -> SchedulerMetricsSnapshot {
+        SchedulerMetricsSnapshot {
+            tasks_submitted: self.tasks_submitted.load(Ordering::Relaxed),
+            tasks_completed: self.tasks_completed.load(Ordering::Relaxed),
+            tasks_failed: self.tasks_failed.load(Ordering::Relaxed),
+            tasks_cancelled: self.tasks_cancelled.load(Ordering::Relaxed),
+            queue_length: self.queue_length.load(Ordering::Relaxed),
+            running_count: self.running_count.load(Ordering::Relaxed),
+            avg_schedule_latency_us: self.avg_schedule_latency_us.load(Ordering::Relaxed),
+            p99_schedule_latency_us: self.p99_schedule_latency_us.load(Ordering::Relaxed),
+            last_schedule_latency_us: self.last_schedule_latency_us.load(Ordering::Relaxed),
+            avg_cpu_utilization: self.avg_cpu_utilization.load(Ordering::Relaxed),
+            avg_gpu_utilization: self.avg_gpu_utilization.load(Ordering::Relaxed),
+            avg_memory_utilization: self.avg_memory_utilization.load(Ordering::Relaxed),
+            phase1_allocations: self.phase1_allocations.load(Ordering::Relaxed),
+            phase2_routings: self.phase2_routings.load(Ordering::Relaxed),
+            global_rebalances: self.global_rebalances.load(Ordering::Relaxed),
+            avg_pipeline_count: *self.avg_pipeline_count.read().unwrap(),
+            goap_plans_generated: self.goap_plans_generated.load(Ordering::Relaxed),
+            avg_plan_time_ms: *self.avg_plan_time_ms.read().unwrap(),
+            goap_plan_failures: self.goap_plan_failures.load(Ordering::Relaxed),
+            collected_at: self.collected_at,
+        }
+    }
+}
+
+/// Serializable snapshot of scheduler metrics
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SchedulerMetricsSnapshot {
+    pub tasks_submitted: u64,
+    pub tasks_completed: u64,
+    pub tasks_failed: u64,
+    pub tasks_cancelled: u64,
+    pub queue_length: u64,
+    pub running_count: u64,
+    pub avg_schedule_latency_us: u64,
+    pub p99_schedule_latency_us: u64,
+    pub last_schedule_latency_us: u64,
+    pub avg_cpu_utilization: u32,
+    pub avg_gpu_utilization: u32,
+    pub avg_memory_utilization: u32,
+    pub phase1_allocations: u64,
+    pub phase2_routings: u64,
+    pub global_rebalances: u64,
+    pub avg_pipeline_count: f64,
+    pub goap_plans_generated: u64,
+    pub avg_plan_time_ms: f64,
+    pub goap_plan_failures: u64,
     #[serde(with = "chrono::serde::ts_seconds")]
     pub collected_at: chrono::DateTime<chrono::Utc>,
 }
@@ -303,13 +386,43 @@ impl UnifiedScheduler {
             config,
             state: Arc::new(RwLock::new(SchedulerState::Initializing)),
             notify: Arc::new(Notify::new()),
-            metrics: Arc::new(RwLock::new(SchedulerMetrics::default())),
+            metrics: Arc::new(SchedulerMetrics {
+                collected_at: chrono::Utc::now(),
+                ..Default::default()
+            }),
+            gpu_balancer: Arc::new(RwLock::new(None)),  // Will be initialized if GPU available
         };
 
         // 初始化子系统
         scheduler.init_subsystems().await?;
 
+        // 尝试初始化GPU负载均衡器 (非阻塞，失败不影响主流程)
+        scheduler.try_init_gpu_balancer().await;
+
         Ok(scheduler)
+    }
+
+    /// 尝试初始化GPU负载均衡器 (可选功能)
+    async fn try_init_gpu_balancer(&self) {
+        use gpu_load_balancer::{GpuTopology, GpuLoadBalancer, GpuLoadBalanceStrategy};
+
+        match GpuTopology::discover() {
+            Ok(topology) => {
+                let strategy = match self.config.gpu_balance_strategy.as_str() {
+                    "latency" => GpuLoadBalanceStrategy::LatencyOptimized,
+                    "throughput" => GpuLoadBalanceStrategy::ThroughputOptimized,
+                    "power" => GpuLoadBalanceStrategy::PowerOptimized,
+                    _ => GpuLoadBalanceStrategy::Balanced,
+                };
+
+                let balancer = GpuLoadBalancer::new(topology, strategy);
+                *self.gpu_balancer.write().await = Some(balancer);
+                info!("[UnifiedScheduler] GPU load balancer initialized");
+            }
+            Err(e) => {
+                info!("[UnifiedScheduler] GPU not available ({}), running CPU-only mode", e);
+            }
+        }
     }
 
     /// 初始化各子系统 (GOAP + Parallax)
@@ -406,7 +519,7 @@ impl UnifiedScheduler {
                 "[UnifiedScheduler] 任务 {} 是高层目标, 触发 GOAP 规划...",
                 task.id
             );
-            let mut planner = self.goap_planner.write().await;
+            let planner = self.goap_planner.write().await;
             match planner.plan(&task).await {
                 Ok(ref plan) => { info!(
                         "[UnifiedScheduler] GOAP 规划成功: {} 个步骤",
@@ -434,8 +547,7 @@ impl UnifiedScheduler {
                 }
                 Err(e) => {
                     warn!("[UnifiedScheduler] GOAP 规划失败: {:?}, 使用原始任务", e);
-                    let mut metrics = self.metrics.write().await;
-                    metrics.goap_plan_failures += 1;
+                    self.metrics.goap_plan_failures.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -466,13 +578,15 @@ impl UnifiedScheduler {
             let mut queue = self.queue.write().await;
             queue.push(task)?;
 
-            // 记录调度延迟
+            // 记录调度延迟 (使用原子操作)
             let elapsed_us = start.elapsed().as_micros() as u64;
-            let mut metrics = self.metrics.write().await;
-            metrics.tasks_submitted += 1;
-            metrics.avg_schedule_latency_us =
-                (metrics.avg_schedule_latency_us + elapsed_us) / 2;
-            metrics.last_schedule_latency_us = elapsed_us;
+            self.metrics.tasks_submitted.fetch_add(1, Ordering::Relaxed);
+            
+            // 更新平均延迟 (简单的移动平均)
+            let old_avg = self.metrics.avg_schedule_latency_us.load(Ordering::Relaxed);
+            let new_avg = (old_avg + elapsed_us) / 2;
+            self.metrics.avg_schedule_latency_us.store(new_avg, Ordering::Relaxed);
+            self.metrics.last_schedule_latency_us.store(elapsed_us, Ordering::Relaxed);
         }
 
         info!(
@@ -531,10 +645,7 @@ impl UnifiedScheduler {
             queue.remove(task_id);
         }
 
-        {
-            let mut metrics = self.metrics.write().await;
-            metrics.tasks_cancelled += 1;
-        }
+        self.metrics.tasks_cancelled.fetch_add(1, Ordering::Relaxed);
 
         info!("[UnifiedScheduler] 任务 {} 已取消", task_id);
         Ok(())
@@ -732,13 +843,11 @@ impl UnifiedScheduler {
                         break;
                     }
                     SchedulerState::ShuttingDown => {
-                        // 等待正在执行的任务完成
-                        let metrics = self.metrics.read().await;
-                        if metrics.running_count == 0 {
+                        // 等待正在执行的任务完成 (使用原子操作)
+                        if self.metrics.running_count.load(Ordering::Relaxed) == 0 {
                             info!("[UnifiedScheduler] 所有任务已完成, 关闭");
                             break;
                         }
-                        drop(metrics);
                     }
                     SchedulerState::Paused => {
                         drop(state);
@@ -830,6 +939,66 @@ impl UnifiedScheduler {
     // 内部调度方法
     // ========================================================================
 
+    /// Try GPU-aware scheduling for inference tasks
+    async fn try_gpu_scheduling(
+        &self,
+        task: &ScheduledTask,
+    ) -> Result<Option<(Vec<NodeId>, f64)>, SchedulerError> {
+        use gpu_load_balancer::{GpuInferenceRequest, Precision};
+
+        let mut balancer_guard = self.gpu_balancer.write().await;
+        if let Some(balancer) = balancer_guard.as_mut() {
+            // Estimate model size based on model name
+            let model_size = Self::estimate_model_size(&task.required_model);
+
+            let request = GpuInferenceRequest {
+                request_id: task.id.to_string(),
+                model_name: task.required_model.clone(),
+                model_size_bytes: model_size,
+                batch_size: task.batch_size.unwrap_or(1),
+                seq_len: task.max_seq_len.unwrap_or(512),
+                precision: Precision::FP16,
+                max_latency_ms: self.config.max_wait_time_ms,
+                priority: task.priority as u32,
+            };
+
+            if let Some(decision) = balancer.schedule(&request) {
+                info!(
+                    "[GPU Scheduler] Task {} scheduled to GPUs {:?}, est. latency {:.1}ms",
+                    task.id, decision.gpu_ids, decision.estimated_latency_ms
+                );
+
+                // Record scheduling decision in metrics
+                self.metrics.phase2_routings.fetch_add(1, Ordering::Relaxed);
+
+                return Ok(Some((
+                    decision.gpu_ids.iter().map(|&id| Uuid::from_fields_le(id, 0, 0, &[0;8])).collect(),
+                    decision.estimated_latency_ms,
+                )));
+            }
+        }
+
+        // GPU scheduling not available or failed
+        Ok(None)
+    }
+
+    /// Estimate model size in bytes based on model name
+    fn estimate_model_size(model_name: &str) -> u64 {
+        let model_lower = model_name.to_lowercase();
+        // Rough estimates for common models (FP16 = 2 bytes per param)
+        if model_lower.contains("72b") || model_lower.contains("70b") {
+            72_000_000_000u64 * 2 // ~144GB
+        } else if model_lower.contains("32b") || model_lower.contains("35b") {
+            32_000_000_000u64 * 2 // ~64GB
+        } else if model_lower.contains("13b") || model_lower.contains("14b") {
+            13_000_000_000u64 * 2 // ~26GB
+        } else if model_lower.contains("7b") {
+            7_000_000_000u64 * 2  // ~14GB
+        } else {
+            1_000_000_000u64 * 2  // Default ~2GB for smaller models
+        }
+    }
+
     /// 批量调度: 尝试将尽可能多的就绪任务分配到可用资源
     async fn schedule_batch(&self) -> Result<usize, SchedulerError> {
         let start = std::time::Instant::now();
@@ -839,8 +1008,8 @@ impl UnifiedScheduler {
             // 1. 从队列取下一个可执行任务 (依赖已满足)
             let next_task = {
                 let mut queue = self.queue.write().await;
-                let metrics = self.metrics.read().await;
-                if metrics.running_count >= self.config.max_concurrent_tasks as u64 {
+                let running_count = self.metrics.running_count.load(Ordering::Relaxed);
+                if running_count >= self.config.max_concurrent_tasks as u64 {
                     None // 达到最大并发限制
                 } else {
                     queue.pop_ready(&*self.task_registry)?
@@ -880,9 +1049,8 @@ impl UnifiedScheduler {
 
                     // 更新指标
                     {
-                        let mut metrics = self.metrics.write().await;
-                        metrics.running_count += 1;
-                        metrics.phase2_routings += 1;
+                        self.metrics.running_count.fetch_add(1, Ordering::Relaxed);
+                        self.metrics.phase2_routings.fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 None => {
@@ -902,14 +1070,12 @@ impl UnifiedScheduler {
 
         let elapsed = start.elapsed();
         if scheduled_count > 0 {
-            let mut metrics = self.metrics.write().await;
-            metrics.last_schedule_latency_us = elapsed.as_micros() as u64;
+            self.metrics.last_schedule_latency_us.store(elapsed.as_micros() as u64, Ordering::Relaxed);
             // EMA 更新平均延迟
             let alpha = 0.3;
-            metrics.avg_schedule_latency_us =
-                (alpha * elapsed.as_micros() as f64
-                    + (1.0 - alpha) * metrics.avg_schedule_latency_us as f64)
-                    as u64;
+            let old_avg = self.metrics.avg_schedule_latency_us.load(Ordering::Relaxed);
+            let new_avg = (alpha * elapsed.as_micros() as f64 + (1.0 - alpha) * old_avg as f64) as u64;
+            self.metrics.avg_schedule_latency_us.store(new_avg, Ordering::Relaxed);
         }
 
         Ok(scheduled_count)
@@ -927,6 +1093,15 @@ impl UnifiedScheduler {
     ) -> Result<Option<(Vec<NodeId>, f64)>, SchedulerError> {
         #[allow(unused_variables)]
         let _ = task;
+
+        // === GPU-Aware Scheduling (if enabled and task requires inference) ===
+        if self.config.enable_gpu_inference && task.requires_inference {
+            if let Some(decision) = self.try_gpu_scheduling(task).await? {
+                return Ok(Some(decision));
+            }
+            // Fall back to CPU scheduling if GPU scheduling fails
+        }
+
         let nodes: Vec<Arc<NodeInfo>> = { let mgr = self.node_manager.read().await; mgr.active_nodes().into_iter().map(|n| Arc::new(n)).collect() };
 
         if nodes.is_empty() {
@@ -964,8 +1139,7 @@ impl UnifiedScheduler {
 
         // 更新 Phase 1 计数
         {
-            let mut metrics = self.metrics.write().await;
-            metrics.phase1_allocations += 1;
+            self.metrics.phase1_allocations.fetch_add(1, Ordering::Relaxed);
         }
 
         Ok(result.map(|(path, lat)| (path, lat)))
@@ -1049,22 +1223,15 @@ impl UnifiedScheduler {
     async fn execute_global_rebalance(&self) -> Result<(), SchedulerError> {
         info!("[UnifiedScheduler] 开始全局重平衡...");
 
-        let nodes = {
-            let mgr = self.node_manager.read().await;
-            mgr.active_node_list_arc()
-        };
-        let nodes_refs: Vec<&NodeInfo> = nodes.iter().map(|n| n.as_ref()).collect();
-
         {
             let mut allocator = self.layer_allocator.write().await;
             if let Some(ref mut alloc) = *allocator {
-                alloc.global_rebalance(&nodes_refs)?;
+                alloc.global_rebalance()?;
             }
         }
 
         {
-            let mut metrics = self.metrics.write().await;
-            metrics.global_rebalances += 1;
+            self.metrics.global_rebalances.fetch_add(1, Ordering::Relaxed);
         }
 
         info!("[UnifiedScheduler] 全局重平衡完成");
@@ -1129,27 +1296,24 @@ impl UnifiedScheduler {
             }
         }
 
-        // 更新全局指标 (需要异步锁, 所以整个方法改为 async)
-        {
-            let mut metrics = self.metrics.write().await;
-            match new_status {
-                TaskStatus::Running => {
-                    metrics.running_count += 1;
-                }
-                TaskStatus::Completed => {
-                    metrics.running_count = metrics.running_count.saturating_sub(1);
-                    metrics.tasks_completed += 1;
-                }
-                TaskStatus::Failed => {
-                    metrics.running_count = metrics.running_count.saturating_sub(1);
-                    metrics.tasks_failed += 1;
-                }
-                TaskStatus::Cancelled => {
-                    metrics.running_count = metrics.running_count.saturating_sub(1);
-                    metrics.tasks_cancelled += 1;
-                }
-                _ => {}
+        // 更新全局指标 (使用原子操作，无锁)
+        match new_status {
+            TaskStatus::Running => {
+                self.metrics.running_count.fetch_add(1, Ordering::Relaxed);
             }
+            TaskStatus::Completed => {
+                self.metrics.running_count.fetch_sub(1, Ordering::Relaxed);
+                self.metrics.tasks_completed.fetch_add(1, Ordering::Relaxed);
+            }
+            TaskStatus::Failed => {
+                self.metrics.running_count.fetch_sub(1, Ordering::Relaxed);
+                self.metrics.tasks_failed.fetch_add(1, Ordering::Relaxed);
+            }
+            TaskStatus::Cancelled => {
+                self.metrics.running_count.fetch_sub(1, Ordering::Relaxed);
+                self.metrics.tasks_cancelled.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
         }
 
         Ok(())
@@ -1179,14 +1343,41 @@ impl UnifiedScheduler {
     }
 
     /// 获取当前性能指标快照
-    pub async fn get_metrics(&self) -> SchedulerMetrics {
-        let mut m = self.metrics.read().await.clone();
+    pub async fn get_metrics(&self) -> SchedulerMetricsSnapshot {
+        let mut m = self.metrics.snapshot();
         m.queue_length = {
             let q = self.queue.read().await;
             q.len() as u64
         };
         m.collected_at = chrono::Utc::now();
         m
+    }
+
+    /// Get GPU statistics (if GPU balancer is available)
+    pub async fn get_gpu_stats(&self) -> Option<gpu_load_balancer::GpuStats> {
+        let balancer_guard = self.gpu_balancer.read().await;
+        if let Some(balancer) = balancer_guard.as_ref() {
+            Some(balancer.get_stats())
+        } else {
+            None
+        }
+    }
+
+    /// Get GPU utilization for Prometheus export
+    pub async fn get_gpu_prometheus_metrics(&self) -> Vec<(String, f64)> {
+        let mut metrics = Vec::new();
+
+        if let Some(stats) = self.get_gpu_stats().await {
+            metrics.push(("carpai_gpu_total".to_string(), stats.total_gpus as f64));
+            metrics.push(("carpai_gpu_active".to_string(), stats.active_gpus as f64));
+            metrics.push(("carpai_gpu_avg_utilization".to_string(), stats.avg_utilization / 100.0));
+            metrics.push(("carpai_gpu_vram_total_bytes".to_string(), stats.total_vram_bytes as f64));
+            metrics.push(("carpai_gpu_vram_used_bytes".to_string(), stats.used_vram_bytes as f64));
+            metrics.push(("carpai_gpu_vram_usage_percent".to_string(), stats.vram_usage_percent()));
+            metrics.push(("carpai_gpu_pending_requests".to_string(), stats.pending_requests as f64));
+        }
+
+        metrics
     }
 
     /// 获取调度器状态
@@ -1196,6 +1387,7 @@ impl UnifiedScheduler {
 }
 
 // 由于 SchedulerError 在 async context 中使用, 这里提供一个辅助函数来处理 metrics 写锁
+#[allow(dead_code)]
 fn block_on_metrics() -> Result<std::sync::RwLockWriteGuard<'static, SchedulerMetrics>, SchedulerError> {
     Err(SchedulerError::NotInitialized)
 }

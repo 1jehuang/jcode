@@ -11,11 +11,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use tracing::{info, warn, debug};
+use tracing::info;
 use serde::{Serialize, Deserialize};
 
 // ============================================================================
-//! NUMA Node Representation
+// NUMA Node Representation
 // ============================================================================
 
 /// NUMA node information
@@ -62,7 +62,7 @@ impl NumaNode {
 }
 
 // ============================================================================
-//! GPU Information and Topology
+// GPU Information and Topology
 // ============================================================================
 
 /// GPU device information
@@ -89,7 +89,7 @@ pub struct GpuInfo {
 }
 
 impl GpuInfo {
-    pub fn vrAM_utilization(&self) -> f64 {
+    pub fn vram_utilization(&self) -> f64 {
         if self.vram_gb == 0.0 {
             return 0.0;
         }
@@ -98,7 +98,7 @@ impl GpuInfo {
 }
 
 // ============================================================================
-//! GPU Interconnect Topology
+// GPU Interconnect Topology
 // ============================================================================
 
 /// Type of GPU interconnect
@@ -194,7 +194,7 @@ impl GpuLink {
 }
 
 // ============================================================================
-//! Hardware Topology Graph
+// Hardware Topology Graph
 // ============================================================================
 
 /// Complete hardware topology for a node
@@ -416,7 +416,7 @@ pub struct TopologySummary {
 }
 
 // ============================================================================
-//! Topology-Aware Task Placement
+// Topology-Aware Task Placement
 // ============================================================================
 
 /// Task placement recommendation
@@ -505,7 +505,7 @@ impl TopologyAwareScheduler {
 }
 
 // ============================================================================
-//! System Topology Detection (Linux-specific via sysfs)
+// System Topology Detection (Linux-specific via sysfs)
 // ============================================================================
 
 /// Detect hardware topology from system (Linux-only via sysfs)
@@ -569,7 +569,7 @@ pub fn detect_system_topology() -> anyhow::Result<HardwareTopology> {
 }
 
 // ============================================================================
-//! Tests
+// Tests
 // ============================================================================
 
 #[cfg(test)]

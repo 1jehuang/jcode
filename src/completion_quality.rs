@@ -511,6 +511,72 @@ impl SmartCompleter {
     pub fn tracker(&self) -> &Arc<AcceptanceTracker> {
         &self.tracker
     }
+
+    /// 自适应补全 — 根据接受率调整参数
+    /// 闭环: 显示→接受/拒绝→记录→调整参数→下次更好
+    pub async fn adaptive_complete(
+        &self,
+        full_content: &str,
+        cursor_offset: usize,
+        file_path: &str,
+        workspace_files: &[String],
+    ) -> (FimCompletionResponse, String) {
+        let completion_id = format!("cmp-{}", SystemTime::now()
+            .duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos());
+
+        // 根据历史接受率调整 temperature 和 max_tokens
+        let rate = self.tracker.acceptance_rate().await;
+        let temperature = if rate < 0.3 {
+            0.3  // 接受率低 → 更保守
+        } else if rate > 0.7 {
+            0.7  // 接受率高 → 更有创意
+        } else {
+            0.5  // 默认
+        };
+
+        let ctx = self.ctx_builder.build(full_content, cursor_offset, file_path, workspace_files);
+
+        let fim_req = FimCompletionRequest {
+            before_cursor: ctx.prefix,
+            after_cursor: ctx.suffix,
+            file_path: file_path.to_string(),
+            max_tokens: if rate < 0.3 { 32 } else { 64 }, // 接受率低→更短
+            temperature,
+        };
+
+        let mut response = self.fim.complete(&fim_req).await;
+        rank_candidates(&mut response.items);
+
+        (response, completion_id)
+    }
+
+    /// 反馈闭环 — 用户接受/拒绝后调用
+    pub async fn record_feedback(&self, completion_id: &str, accepted: bool, text: &str, prefix: &str, lang: &str, latency_ms: u64) {
+        self.tracker.record_accepted(CompletionFeedback {
+            completion_id: completion_id.to_string(),
+            accepted,
+            displayed_text: text.to_string(),
+            prefix_context: prefix.to_string(),
+            language: lang.to_string(),
+            latency_ms,
+        }).await;
+
+        // 如果接受率过低, 日志警告
+        if self.tracker.should_adjust().await {
+            tracing::warn!("[Completion] Acceptance rate < 30%, consider adjusting parameters");
+        }
+    }
+}
+
+/// 补全闭环统计
+pub async fn completion_loop_stats(tracker: &AcceptanceTracker) -> String {
+    let rate = tracker.acceptance_rate().await;
+    let by_lang = tracker.stats_by_language().await;
+    let mut out = format!("━━━ 补全闭环统计 ━━━\n总接受率: {:.1}%\n", rate * 100.0);
+    for (lang, (shown, accepted, lang_rate)) in &by_lang {
+        out.push_str(&format!("  {}: {}/{} ({:.0}%)\n", lang, accepted, shown, lang_rate * 100.0));
+    }
+    out
 }
 
 #[cfg(test)]

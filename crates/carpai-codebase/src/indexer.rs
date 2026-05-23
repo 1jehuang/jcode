@@ -5,7 +5,7 @@ use tantivy::{
     collector::TopDocs,
     query::QueryParser,
     schema::{Schema, TEXT, STORED, INDEXED},
-    Index, IndexWriter, ReloadPolicy,
+    TantivyDocument, Index, IndexWriter, ReloadPolicy,
 };
 use std::path::PathBuf;
 use tokio::sync::Mutex;
@@ -59,7 +59,7 @@ impl SemanticIndexer {
         let mut writer = self.writer.lock().await;
         
         for symbol in symbols {
-            let doc = tantivy::schema::Document::default();
+            let doc = TantivyDocument::default();
             let mut doc = doc;
             doc.add_text(self.schema.get_field("file_path").unwrap(), file_path);
             doc.add_text(self.schema.get_field("symbol_name").unwrap(), symbol.name.as_str());
@@ -94,17 +94,17 @@ impl SemanticIndexer {
 
         let mut results = Vec::new();
         for (score, doc_address) in top_docs {
-            let retrieved_doc: tantivy::schema::Document = searcher.doc(doc_address)?;
+            let retrieved_doc: TantivyDocument = searcher.doc(doc_address)?;
             let file_path = retrieved_doc.get_first(schema.get_field("file_path").unwrap())
                 .and_then(|v| v.as_text())
                 .unwrap_or("").to_string();
             
             let symbol_name = retrieved_doc.get_first(schema.get_field("symbol_name").unwrap())
-                .and_then(|v: &OwnedValue| v.as_text())
+                .and_then(|v| v.as_text())
                 .unwrap_or("").to_string();
 
             let content = retrieved_doc.get_first(schema.get_field("content").unwrap())
-                .and_then(|v: &OwnedValue| v.as_text())
+                .and_then(|v| v.as_text())
                 .unwrap_or("").to_string();
 
             results.push(SearchResult {

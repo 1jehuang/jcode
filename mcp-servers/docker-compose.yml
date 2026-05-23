@@ -1,0 +1,157 @@
+version: '3.8'
+
+# CarpAI MCP Server Deployment
+# docker-compose up -d [server-name]
+# docker-compose down
+
+services:
+  # GitHub integration
+  mcp-github:
+    image: carpai/mcp-github:latest
+    build:
+      context: ./github
+      dockerfile: Dockerfile
+    environment:
+      - GITHUB_TOKEN=${GITHUB_TOKEN:?err}
+    ports:
+      - "8001:8000"
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+  # Jira integration
+  mcp-jira:
+    image: carpai/mcp-jira:latest
+    build:
+      context: ./jira
+      dockerfile: Dockerfile
+    environment:
+      - JIRA_URL=${JIRA_URL:?err}
+      - JIRA_EMAIL=${JIRA_EMAIL}
+      - JIRA_API_TOKEN=${JIRA_API_TOKEN:?err}
+    ports:
+      - "8002:8000"
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+  # Slack integration
+  mcp-slack:
+    image: carpai/mcp-slack:latest
+    build:
+      context: ./slack
+      dockerfile: Dockerfile
+    environment:
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:?err}
+    ports:
+      - "8003:8000"
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+  # Docker integration (access host docker socket)
+  mcp-docker:
+    image: carpai/mcp-docker:latest
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "8004:8000"
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+  # PostgreSQL integration
+  mcp-postgres:
+    image: carpai/mcp-postgres:latest
+    build:
+      context: ./postgres
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=${DATABASE_URL:?err}
+    ports:
+      - "8005:8000"
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+  # Redis integration
+  mcp-redis:
+    image: carpai/mcp-redis:latest
+    build:
+      context: ./redis
+      dockerfile: Dockerfile
+    environment:
+      - REDIS_URL=${REDIS_URL:?err}
+    ports:
+      - "8006:8000"
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+  # Kubernetes integration
+  mcp-kubernetes:
+    image: carpai/mcp-kubernetes:latest
+    build:
+      context: ./kubernetes
+      dockerfile: Dockerfile
+    volumes:
+      - ${KUBECONFIG:-~/.kube/config}:/root/.kube/config:ro
+    ports:
+      - "8007:8000"
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+  # AWS integration
+  mcp-aws:
+    image: carpai/mcp-aws:latest
+    build:
+      context: ./aws
+      dockerfile: Dockerfile
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:?err}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:?err}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+    ports:
+      - "8008:8000"
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+  # Sentry integration
+  mcp-sentry:
+    image: carpai/mcp-sentry:latest
+    build:
+      context: ./sentry
+      dockerfile: Dockerfile
+    environment:
+      - SENTRY_TOKEN=${SENTRY_TOKEN:?err}
+      - SENTRY_ORG_SLUG=${SENTRY_ORG_SLUG}
+    ports:
+      - "8009:8000"
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+  # Datadog integration
+  mcp-datadog:
+    image: carpai/mcp-datadog:latest
+    build:
+      context: ./datadog
+      dockerfile: Dockerfile
+    environment:
+      - DATADOG_API_KEY=${DATADOG_API_KEY:?err}
+      - DATADOG_APP_KEY=${DATADOG_APP_KEY:?err}
+      - DATADOG_SITE=${DATADOG_SITE:-datadoghq.com}
+    ports:
+      - "8010:8000"
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+networks:
+  mcp-network:
+    driver: bridge

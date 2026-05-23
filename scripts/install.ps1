@@ -1,201 +1,404 @@
-@echo off
-REM jcode Quick Install Script for Windows
-REM Like Cursor's installer - download, configure, start!
+#!/usr/bin/env pwsh
+<#
+.SYNOPSIS
+    Install or update CarpAI (Code Analysis & Refactoring Platform for AI)
 
-setlocal EnableDelayedExpansion
+.DESCRIPTION
+    Downloads and installs the latest CarpAI release from GitHub.
+    Supports version specification, custom install paths, and offline installation.
 
-echo ========================================
-echo   jcode AI Coding Assistant Installer
-echo   (Open-Source Cursor Alternative)
-echo ========================================
-echo.
+.PARAMETER Version
+    Specific version to install (e.g., "v0.5.0"). Defaults to latest stable.
 
-REM Check prerequisites
-echo [1/6] Checking system requirements...
+.PARAMETER InstallDir
+    Custom installation directory. Defaults to $env:LOCALAPPDATA\carpai
 
-where python >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    echo ❌ Python not found. Please install Python 3.8+
-    echo    Download: https://www.python.org/downloads/
-    pause
-    exit /b 1
+.PARAMETER Offline
+    Use offline mode - install from local package instead of downloading.
+
+.PARAMETER PackagePath
+    Path to local .zip package (used with -Offline).
+
+.PARAMETER Verbose
+    Enable verbose output for debugging.
+
+.EXAMPLE
+    .\install.ps1
+    Install latest stable version
+
+.EXAMPLE
+    .\install.ps1 -Version v0.5.0
+    Install specific version
+
+.EXAMPLE
+    .\install.ps1 -InstallDir D:\Tools\CarpAI
+    Install to custom directory
+
+.EXAMPLE
+    .\install.ps1 -Offline -PackagePath C:\Downloads\carpai-v0.5.0.zip
+    Install from local package (offline mode)
+#>
+
+[CmdletBinding()]
+param(
+    [string]$Version = "",
+    [string]$InstallDir = "",
+    [switch]$Offline,
+    [string]$PackagePath = "",
+    [switch]$Verbose
 )
 
-python --version >nul 2>&1
-for /f "tokens=2 delims= " %%v in ('python --version 2^>^&1') do set PYTHON_VERSION=%%v)
-echo ✅ Found Python %PYTHON_VERSION%
+# Colors for output
+$RED = "`e[31m"
+$GREEN = "`e[32m"
+$YELLOW = "`e[33m"
+$BLUE = "`e[34m"
+$NC = "`e[0m" # No Color
 
-REM Check Rust toolchain (optional, for building from source)
-where cargo >nul 2>&1
-if %ERRORLEVEL% EQU 0 (
-    for /f "tokens=3 delims= " %%v in ('cargo --version') do set CARGO_VERSION=%%v)
-    echo ✅ Found Cargo %CARGO_VERSION%
-) else (
-    echo ⚠️  Rust/Cargo not found. Will use pre-built binaries if available.
-)
+function Write-Success {
+    param([string]$Message)
+    Write-Host "$GREEN✓ $Message$NC"
+}
 
-echo.
+function Write-Error-Custom {
+    param([string]$Message)
+    Write-Host "$RED✗ $Message$NC"
+}
 
-REM Detect VS Code installation
-echo [2/6] Detecting VS Code...
-if exist "%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe" (
-    set VSCODE_PATH=%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe
-    echo ✅ VS Code found at: %VSCODE_PATH%
-) else if exist "%ProgramFiles%\Microsoft VS Code\Code.exe" (
-    set VSCODE_PATH=%ProgramFiles%\Microsoft VS Code\Code.exe
-    echo ✅ VS Code found at: %VSCODE_PATH%
-) else (
-    echo ⚠️  VS Code not found. jcode will still work but IDE integration limited.
-    set VSCODE_PATH=
-)
+function Write-Info {
+    param([string]$Message)
+    Write-Host "$BLUEℹ $Message$NC"
+}
 
-echo.
+function Write-Warning-Custom {
+    param([string]$Message)
+    Write-Host "$YELLOW⚠ $Message$NC"
+}
 
-REM Create configuration directory
-echo [3/6] Creating configuration directory...
+# Check if running as administrator
+function Test-Administrator {
+    $currentUser = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    return $currentUser.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
 
-if not exist "%USERPROFILE%\.jcode" (
-    mkdir "%USERPROFILE%\.jcode"
-    echo ✅ Created ~/.jcode/
-) else (
-    echo ℹ️  Configuration directory already exists
-)
+# Check system requirements
+function Test-SystemRequirements {
+    Write-Info "Checking system requirements..."
 
-if not exist "%USERPROFILE%\.jcode\logs" (
-    mkdir "%USERPROFILE%\.jcode\logs"
-)
+    # Check Windows version (Windows 10 or later recommended)
+    $osVersion = [Environment]::OSVersion.Version.Major
+    if ($osVersion -lt 10) {
+        Write-Warning-Custom "Windows 10 or later is recommended. Current version: $osVersion"
+    }
 
-echo.
+    # Check PowerShell version
+    $psVersion = $PSVersionTable.PSVersion.Major
+    if ($psVersion -lt 5) {
+        Write-Error-Custom "PowerShell 5.0 or later required. Current version: $psVersion"
+        exit 1
+    }
 
-REM Check for API keys
-echo [4/6] Checking API keys...
+    # Check available disk space (minimum 500MB)
+    $drive = Split-Path $env:TEMP -Qualifier
+    $diskSpace = (Get-Volume -DriveLetter $drive.Substring(0,1)).SizeRemaining / 1GB
+    if ($diskSpace -lt 0.5) {
+        Write-Error-Custom "Insufficient disk space. Need at least 500MB. Available: $([math]::Round($diskSpace * 1024))MB"
+        exit 1
+    }
 
-set HAS_API_KEY=0
+    Write-Success "System requirements met"
+}
 
-if defined DEEPSEEK_API_KEY (
-    if not "%DEEPSEEK_API_KEY%"=="" (
-        set HAS_API_KEY=1
-        echo ✅ DEEPSEEK_API_KEY found in environment
-    )
-)
+# Check dependencies
+function Test-Dependencies {
+    Write-Info "Checking dependencies..."
 
-if defined OPENAI_API_KEY (
-    if not "%OPENAI_API_KEY%"=="" (
-        set HAS_API_KEY=1
-        echo ✅ OPENAI_API_KEY found in environment
-    )
-)
+    $missingDeps = @()
 
-if %HAS_API_KEY% EQU 0 (
-    echo.
-    echo ⚠️  No API key detected!
-    echo.
-    echo To use jcode with cloud providers, set one of:
-    echo   set DEEPSEEK_API_KEY=your-key-here
-    echo   set OPENAI_API_KEY=your-key-here
-    echo.
-    echo Or edit %%USERPROFILE%%\.jcode\config.toml later
-    echo.
-    echo For now, we'll configure for local-only mode or you can add the key later.
-)
+    # Check Git (optional but recommended)
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        $missingDeps += "Git (recommended for version control integration)"
+    }
 
-echo.
+    # Check Docker Desktop (optional for containerized deployment)
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        Write-Warning-Custom "Docker not found (optional for containerized mode)"
+    }
 
-REM Generate default configuration
-echo [5/6] Generating smart default config...
+    if ($missingDeps.Count -gt 0) {
+        Write-Warning-Custom "Missing optional dependencies:"
+        foreach ($dep in $missingDeps) {
+            Write-Host "  - $dep"
+        }
+    } else {
+        Write-Success "All dependencies satisfied"
+    }
+}
 
-(
-echo # jcode Configuration File
-echo # Generated by installer on %date% %time%
-echo.
-echo [llm]
-echo # Auto-detect provider based on available API keys
-echo default_provider = "deepseek"
-echo default_model = "deepseek-chat"
-echo auto_detect_api_key = true
-echo timeout_secs = 30
-echo max_retries = 3
-echo.
-echo [grpc]
-echo address = "[::]"
-echo port = 50051
-echo.
-echo [rest]
-echo address = "127.0.0.1"
-echo port = 3000
-echo enable_docs = true
-echo.
-echo [rag]
-echo enabled = true
-echo max_retrieved_snippets = 8
-echo.
-echo [vscode]
-echo auto_detect = true
-echo inline_completion_enabled = true
-echo chat_panel_enabled = true
-echo terminal_integration = true
-echo.
-echo [performance]
-echo worker_threads = 4
-echo stream_buffer_size = 4096
-echo enable_cache = true
-echo.
-echo [logging]
-echo level = "info"
-echo log_requests = true
-) > "%USERPROFILE%\.jcode\config.toml"
+# Get latest release version from GitHub
+function Get-LatestVersion {
+    try {
+        $releasesUrl = "https://api.github.com/repos/codecargo/carpai/releases/latest"
+        $response = Invoke-RestMethod -Uri $releasesUrl -Headers @{
+            "Accept" = "application/vnd.github.v3+json"
+            "User-Agent" = "CarpAI-Installer"
+        }
+        return $response.tag_name
+    } catch {
+        Write-Error-Custom "Failed to fetch latest version: $_"
+        exit 1
+    }
+}
 
-echo ✅ Configuration saved to %USERPROFILE%\.jcode\config.toml
+# Download release package
+function Download-Release {
+    param([string]$version)
 
-echo.
+    $downloadUrl = "https://github.com/codecargo/carpai/releases/download/$version/carpai-$version-windows-x86_64.zip"
+    $tempFile = Join-Path $env:TEMP "carpai-$version.zip"
 
-REM Download or build jcode
-echo [6/6] Setting up jcode binary...
+    Write-Info "Downloading CarpAI $version..."
+    Write-Info "URL: $downloadUrl"
 
-if exist "%LOCALAPPDATA%\jcode\bin\jcode.exe" (
-    echo ✅ jcode binary already installed
-    set JCODE_BINARY=%LOCALAPPDATA%\jcode\bin\jcode.exe
-) else (
-    echo Downloading pre-built jcode binary...
-    
-    REM Try to download from GitHub releases (placeholder URL)
-    echo ⚠️  Pre-built binaries not yet available.
-    echo    You can build from source:
-    echo      git clone https://github.com/jcode-dev/jcode.git
-    echo      cd jcode
-    echo      cargo build --release
-    echo.
-    echo    Or wait for official release binaries.
-    
-    set JCODE_BINARY=jcode
-)
+    try {
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $tempFile -ProgressAction SilentlyContinue
+        Write-Success "Download completed: $tempFile"
+        return $tempFile
+    } catch {
+        Write-Error-Custom "Download failed: $_"
+        exit 1
+    }
+}
 
-echo.
-echo ========================================
-echo   Installation Complete! 🎉
-echo ========================================
-echo.
-echo Next steps:
-echo.
-echo 1. Start jcode server:
-echo    jcode-server start
-echo.
-echo 2. Open VS Code and install extension:
-echo    ext install jcode.jcode
-echo    (or build from vscode-extension/ folder)
-echo.
-echo 3. Configure your API key (if using cloud):
-echo    - Set DEEPSEEK_API_KEY environment variable
-echo    - Or edit %%USERPROFILE%%\.jcode\config.toml
-echo.
-echo 4. Enjoy! Press Alt+\ for inline completions
-echo.
-echo ========================================
-echo.
-echo For help and documentation:
-echo   https://github.com/jcode-dev/jcode
-echo   https://docs.jcode.dev
-echo.
+# Extract package to install directory
+function Install-Package {
+    param([string]$packagePath, [string]$installDir)
 
-pause
-endlocal
+    Write-Info "Installing to: $installDir"
+
+    # Create install directory if it doesn't exist
+    if (-not (Test-Path $installDir)) {
+        New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+    }
+
+    # Extract zip file
+    try {
+        Expand-Archive -Path $packagePath -DestinationPath $installDir -Force
+        Write-Success "Package extracted"
+    } catch {
+        Write-Error-Custom "Extraction failed: $_"
+        exit 1
+    }
+
+    # Verify installation
+    $exePath = Join-Path $installDir "carpai.exe"
+    if (-not (Test-Path $exePath)) {
+        Write-Error-Custom "Installation verification failed: carpai.exe not found"
+        exit 1
+    }
+
+    Write-Success "Installation verified: $exePath"
+}
+
+# Add to PATH
+function Add-ToPath {
+    param([string]$installDir)
+
+    Write-Info "Adding CarpAI to user PATH..."
+
+    # Get current user PATH
+    $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+    $paths = $userPath -split ";"
+
+    # Check if already in PATH
+    if ($paths -contains $installDir) {
+        Write-Info "CarpAI already in PATH"
+        return
+    }
+
+    # Add to PATH
+    $newPath = $userPath.TrimEnd(";") + ";$installDir"
+    [Environment]::SetEnvironmentVariable("PATH", $newPath, "User")
+
+    # Update current session PATH
+    $env:PATH = $env:PATH + ";$installDir"
+
+    Write-Success "Added to PATH: $installDir"
+    Write-Info "Please restart your terminal or run: `$env:PATH = `$env:PATH + `";$installDir`""
+}
+
+# Create default configuration
+function Create-DefaultConfig {
+    param([string]$installDir)
+
+    $configDir = Join-Path $env:USERPROFILE ".carpai"
+    $configFile = Join-Path $configDir "config.toml"
+
+    if (Test-Path $configFile) {
+        Write-Info "Configuration already exists: $configFile"
+        return
+    }
+
+    Write-Info "Creating default configuration..."
+
+    # Create config directory
+    if (-not (Test-Path $configDir)) {
+        New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+    }
+
+    # Write default config
+    $defaultConfig = @"
+# CarpAI Configuration File
+# Location: ~/.carpai/config.toml
+
+[general]
+workspace_root = "."
+log_level = "info"
+max_context_tokens = 8192
+
+[agent]
+auto_mcp_discovery = true
+cross_file_planning = true
+semantic_refactoring = true
+
+[mcp]
+enabled_servers = ["github", "jira", "slack"]
+
+[offline]
+mode = "auto"  # auto, online, offline
+cache_size_mb = 512
+vector_index_type = "hnsw"
+
+[kubernetes]
+namespace = "carpai"
+replicas = 3
+
+[database]
+url = "postgresql://carpai:password@localhost:5432/carpai"
+pool_size = 10
+"@
+
+    Set-Content -Path $configFile -Value $defaultConfig -Encoding UTF8
+    Write-Success "Configuration created: $configFile"
+}
+
+# Create start menu shortcut
+function Create-Shortcut {
+    param([string]$installDir)
+
+    $startMenuPath = [Environment]::GetFolderPath("StartMenu")
+    $shortcutPath = Join-Path $startMenuPath "Programs\CarpAI.lnk"
+
+    $exePath = Join-Path $installDir "carpai.exe"
+    $iconPath = Join-Path $installDir "assets\carpai.ico"
+
+    try {
+        $WshShell = New-Object -ComObject WScript.Shell
+        $shortcut = $WshShell.CreateShortcut($shortcutPath)
+        $shortcut.TargetPath = $exePath
+        $shortcut.WorkingDirectory = $installDir
+        $shortcut.Description = "CarpAI - Code Analysis & Refactoring Platform"
+        if (Test-Path $iconPath) {
+            $shortcut.IconLocation = $iconPath
+        }
+        $shortcut.Save()
+        Write-Success "Start menu shortcut created"
+    } catch {
+        Write-Warning-Custom "Failed to create shortcut: $_"
+    }
+}
+
+# Display post-installation information
+function Show-PostInstallInfo {
+    param([string]$installDir, [string]$version)
+
+    Write-Host ""
+    Write-Host "$GREEN╔═══════════════════════════════════════════════════════════╗$NC"
+    Write-Host "$GREEN║         CarpAI Installation Completed Successfully!       ║$NC"
+    Write-Host "$GREEN╚═══════════════════════════════════════════════════════════╝$NC"
+    Write-Host ""
+    Write-Host "  Version:      $version"
+    Write-Host "  Install Dir:  $installDir"
+    Write-Host "  Config File:  $env:USERPROFILE\.carpai\config.toml"
+    Write-Host ""
+    Write-Host "$BLUE Quick Start:$NC"
+    Write-Host "  1. Restart your terminal or reload PATH"
+    Write-Host "  2. Run: carpai --version"
+    Write-Host "  3. Run: carpai init <workspace>"
+    Write-Host "  4. Run: carpai analyze"
+    Write-Host ""
+    Write-Host "$BLUE Documentation:$NC"
+    Write-Host "  https://docs.codecargo.io/carpai"
+    Write-Host ""
+    Write-Host "$BLUE Support:$NC"
+    Write-Host "  GitHub Issues: https://github.com/codecargo/carpai/issues"
+    Write-Host "  Discord: https://discord.gg/codecargo"
+    Write-Host ""
+}
+
+# Main installation flow
+function Main {
+    Write-Host ""
+    Write-Host "$BLUE╔═══════════════════════════════════════════════════════════╗$NC"
+    Write-Host "$BLUE║              CarpAI Installer v1.0                        ║$NC"
+    Write-Host "$BLUE╚═══════════════════════════════════════════════════════════╝$NC"
+    Write-Host ""
+
+    # Step 1: System checks
+    Test-SystemRequirements
+    Test-Dependencies
+
+    # Step 2: Determine version
+    if ([string]::IsNullOrEmpty($Version)) {
+        Write-Info "Fetching latest stable version..."
+        $Version = Get-LatestVersion
+        Write-Success "Latest version: $Version"
+    } else {
+        Write-Info "Using specified version: $Version"
+    }
+
+    # Step 3: Determine install directory
+    if ([string]::IsNullOrEmpty($InstallDir)) {
+        $InstallDir = Join-Path $env:LOCALAPPDATA "carpai\$Version"
+    }
+
+    # Step 4: Get package (download or local)
+    $packagePath = ""
+    if ($Offline) {
+        if ([string]::IsNullOrEmpty($PackagePath)) {
+            Write-Error-Custom "Offline mode requires -PackagePath parameter"
+            exit 1
+        }
+        if (-not (Test-Path $PackagePath)) {
+            Write-Error-Custom "Package not found: $PackagePath"
+            exit 1
+        }
+        $packagePath = $PackagePath
+        Write-Info "Using offline package: $packagePath"
+    } else {
+        $packagePath = Download-Release $Version
+    }
+
+    # Step 5: Install
+    Install-Package $packagePath $InstallDir
+
+    # Step 6: Configure PATH
+    Add-ToPath $InstallDir
+
+    # Step 7: Create configuration
+    Create-DefaultConfig
+
+    # Step 8: Create shortcut
+    Create-Shortcut $InstallDir
+
+    # Step 9: Post-install info
+    Show-PostInstallInfo $InstallDir $Version
+}
+
+# Execute main function
+try {
+    Main
+} catch {
+    Write-Error-Custom "Installation failed: $_"
+    exit 1
+}

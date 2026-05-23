@@ -5,8 +5,8 @@ use jcode_multi_file_edit::MultiFileEngine;
 use std::path::Path;
 use std::sync::Arc;
 
-#[allow(dead_code)]
 pub struct CrossFileProcessor<A: AstAdapter> {
+    #[allow(dead_code)]
     ast_adapter: Arc<A>,
 }
 

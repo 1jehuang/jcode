@@ -15,14 +15,14 @@ use tokio::time::sleep;
 use tracing::{info, warn, debug, error};
 use uuid::Uuid;
 
-use crate::{NodeId, NodeInfo, NodeHardwareInfo, SchedulerError};
+use crate::{NodeId, NodeHardwareInfo, SchedulerError};
 
 // ============================================================================
 // Node Join States
 // ============================================================================
 
 /// Represents the current phase of a node joining process
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeJoinState {
     /// Node has announced presence, not yet validated
     Discovered,
@@ -49,9 +49,10 @@ impl NodeJoinState {
 // ============================================================================
 
 /// Results from hardware capability probing
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ProbeResult {
     pub node_id: NodeId,
+    #[serde(skip)]
     pub probed_at: Instant,
 
     // === VRAM Probe ===
@@ -73,6 +74,47 @@ pub struct ProbeResult {
 
     // === Quality Score (0-100) ===
     pub overall_quality_score: f64,
+}
+
+impl<'de> serde::Deserialize<'de> for ProbeResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct Helper {
+            node_id: NodeId,
+            available_vram_gb: f64,
+            vram_bandwidth_gbs: f64,
+            measured_tflops_fp16: f64,
+            #[serde(default)]
+            measured_tflops_int8: Option<f64>,
+            avg_latency_to_leader_ms: f64,
+            bandwidth_to_leader_mbps: f64,
+            baseline_cpu_usage_pct: f64,
+            baseline_memory_usage_pct: f64,
+            #[serde(default)]
+            baseline_temperature_c: Option<f64>,
+            #[serde(default)]
+            overall_quality_score: f64,
+        }
+
+        let helper = Helper::deserialize(deserializer)?;
+        Ok(Self {
+            node_id: helper.node_id,
+            probed_at: Instant::now(),
+            available_vram_gb: helper.available_vram_gb,
+            vram_bandwidth_gbs: helper.vram_bandwidth_gbs,
+            measured_tflops_fp16: helper.measured_tflops_fp16,
+            measured_tflops_int8: helper.measured_tflops_int8,
+            avg_latency_to_leader_ms: helper.avg_latency_to_leader_ms,
+            bandwidth_to_leader_mbps: helper.bandwidth_to_leader_mbps,
+            baseline_cpu_usage_pct: helper.baseline_cpu_usage_pct,
+            baseline_memory_usage_pct: helper.baseline_memory_usage_pct,
+            baseline_temperature_c: helper.baseline_temperature_c,
+            overall_quality_score: helper.overall_quality_score,
+        })
+    }
 }
 
 impl ProbeResult {
@@ -151,12 +193,14 @@ impl WarmupConfig {
 // ============================================================================
 
 /// Tracks the status of an ongoing node join operation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct NodeJoinStatus {
     pub join_id: Uuid,
     pub node_id: NodeId,
     pub state: NodeJoinState,
+    #[serde(skip)]
     pub started_at: Instant,
+    #[serde(skip)]
     pub updated_at: Instant,
     pub probe_result: Option<ProbeResult>,
     pub warmup_progress: Option<WarmupProgress>,
@@ -220,7 +264,7 @@ impl NodeJoinManager {
     pub async fn start_join(&mut self, node_id: NodeId, hardware: NodeHardwareInfo) -> Result<Uuid, SchedulerError> {
         info!("[NodeJoinManager] Starting join process for node {}", node_id);
 
-        let mut status = NodeJoinStatus::new(node_id);
+        let status = NodeJoinStatus::new(node_id);
         let join_id = status.join_id;
 
         self.active_joins.insert(join_id, status);

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: carpai
+  labels:
+    app.kubernetes.io/name: carpai
+    app.kubernetes.io/part-of: carpai-platform

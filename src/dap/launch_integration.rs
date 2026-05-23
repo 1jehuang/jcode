@@ -220,6 +220,45 @@ pub struct DapDebugConfig {
     pub stop_at_entry: bool,
 }
 
+/// DAP ↔ AutoFixLoop 桥梁
+/// 闭环: DAP检测运行时错误 → 捕获上下文 → AutoFixLoop修复 → 重编译 → 重新调试
+pub struct DapFixBridge {
+    workspace: PathBuf,
+}
+
+impl DapFixBridge {
+    pub fn new(workspace: &Path) -> Self {
+        Self { workspace: workspace.to_path_buf() }
+    }
+
+    /// DAP 错误 → AutoFixLoop → 修复 → 重编译 → 返回修复报告
+    pub async fn handle_dap_error(&self, error_message: &str, _stack_frame: Option<&str>) -> Result<String, String> {
+        println!("[DAP-Fix] Error detected: {}", error_message);
+
+        // 用 FixEngine 修复
+        let fix_engine = crate::compilation_engine::FixEngine::new(&self.workspace);
+        let engine = crate::compilation_engine::CompilationEngine::new(&self.workspace);
+        let result = engine.cargo_check(&[]).await;
+
+        if result.success {
+            return Ok("✅ Already compiles cleanly".to_string());
+        }
+
+        let fixes = fix_engine.fix_errors(&result.errors, &result.raw_output).await?;
+        if fixes.is_empty() {
+            return Ok("⚠️  No auto-fix available for this error".to_string());
+        }
+
+        // 重新编译验证
+        let recheck = engine.cargo_check(&[]).await;
+        if recheck.success {
+            Ok(format!("✅ Auto-fixed via DAP: {} files changed", fixes.len()))
+        } else {
+            Ok(format!("⚠️  Partial fix: {} files changed, {} errors remain", fixes.len(), recheck.errors.len()))
+        }
+    }
+}
+
 impl DapDebugConfig {
     /// 从 launch.json 配置生成 DAP 启动参数
     pub fn from_launch_config(config: &LaunchConfig, workspace: &Path) -> Self {

@@ -1,8 +1,8 @@
 {
   "name": "carpai",
   "displayName": "CarpAI",
-  "description": "AI-powered coding assistant with advanced code completion, collaboration, and debugging",
-  "version": "0.1.0",
+  "description": "AI-powered coding assistant with advanced MCP ecosystem, inline completion, collaboration, and debugging",
+  "version": "0.2.0",
   "publisher": "CarpAI",
   "engines": {
     "vscode": "^1.80.0"
@@ -11,21 +11,33 @@
     "AI",
     "Code Assistants",
     "Debuggers",
-    "Extension Packs"
+    "Extension Packs",
+    "Programming Languages"
   ],
   "keywords": [
     "AI",
     "code completion",
     "LLM",
     "debugging",
-    "collaboration"
+    "collaboration",
+    "MCP",
+    "refactoring",
+    "code review"
   ],
   "activationEvents": [
     "onStartupFinished",
     "onCommand:carpai.complete",
     "onCommand:carpai.chat",
     "onCommand:carpai.debug.start",
-    "onCommand:carpai.review"
+    "onCommand:carpai.review",
+    "onCommand:carpai.quickFix",
+    "onCommand:carpai.startServer",
+    "onCommand:carpai.syncMcp",
+    "onCommand:carpai.showDiff",
+    "onCommand:carpai.refactor.extractMethod",
+    "onCommand:carpai.refactor.rename",
+    "onCommand:carpai.fixAll",
+    "onCodeAction"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -44,8 +56,27 @@
         },
         "carpai.completion.triggerCharacters": {
           "type": "array",
-          "default": [".", "(", "[", "\"", "'"],
+          "default": [".", "(", "[", "\"", "'", ":", "/", "<", "#", "@"],
           "description": "Characters that trigger completion"
+        },
+        "carpai.inlineCompletion.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable inline ghost text completion (like Cursor/Copilot)"
+        },
+        "carpai.inlineCompletion.debounceMs": {
+          "type": "number",
+          "default": 150,
+          "minimum": 50,
+          "maximum": 1000,
+          "description": "Debounce delay in milliseconds for inline completion requests"
+        },
+        "carpai.inlineCompletion.maxSuggestions": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "Maximum number of inline completion suggestions to show"
         },
         "carpai.debug.enabled": {
           "type": "boolean",
@@ -56,13 +87,29 @@
           "type": "boolean",
           "default": true,
           "description": "Enable real-time collaboration"
+        },
+        "carpai.mcp.autoConnect": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-connect MCP servers from workspace config (.jcode/mcp.json, .vscode/mcp.json, .cursor/mcp.json)"
+        },
+        "carpai.mcp.configPriority": {
+          "type": "string",
+          "enum": [".vscode", ".cursor", ".jcode"],
+          "default": ".vscode",
+          "description": "Priority order for MCP config files"
+        },
+        "carpai.server.autoStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-start CarpAI server in terminal on extension activation"
         }
       }
     },
     "commands": [
       {
         "command": "carpai.complete",
-        "title": "CarpAI: Complete Code",
+        "title": "CarpAI: Trigger Code Completion",
         "category": "CarpAI"
       },
       {
@@ -81,8 +128,13 @@
         "category": "CarpAI"
       },
       {
+        "command": "carpai.quickFix",
+        "title": "CarpAI: Quick Fix Diagnostics",
+        "category": "CarpAI"
+      },
+      {
         "command": "carpai.summarize",
-        "title": "CarpAI: Summarize Code",
+        "title": "CarpAI: Summarize File",
         "category": "CarpAI"
       },
       {
@@ -101,8 +153,38 @@
         "category": "CarpAI"
       },
       {
+        "command": "carpai.showDiff",
+        "title": "CarpAI: Show Git Diff",
+        "category": "CarpAI"
+      },
+      {
+        "command": "carpai.startServer",
+        "title": "CarpAI: Start Server",
+        "category": "CarpAI"
+      },
+      {
+        "command": "carpai.syncMcp",
+        "title": "CarpAI: Sync MCP Config",
+        "category": "CarpAI"
+      },
+      {
         "command": "carpai.config",
-        "title": "CarpAI: Configure",
+        "title": "CarpAI: Open Settings",
+        "category": "CarpAI"
+      },
+      {
+        "command": "carpai.refactor.extractMethod",
+        "title": "CarpAI: Extract Method",
+        "category": "CarpAI"
+      },
+      {
+        "command": "carpai.refactor.rename",
+        "title": "CarpAI: Rename Symbol",
+        "category": "CarpAI"
+      },
+      {
+        "command": "carpai.fixAll",
+        "title": "CarpAI: Fix All Issues",
         "category": "CarpAI"
       }
     ],
@@ -123,6 +205,18 @@
         "key": "Ctrl+Shift+E",
         "mac": "Cmd+Shift+E",
         "when": "editorTextFocus && editorHasSelection"
+      },
+      {
+        "command": "carpai.quickFix",
+        "key": "Ctrl+Shift+F",
+        "mac": "Cmd+Shift+F",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "carpai.review",
+        "key": "Ctrl+Shift+R",
+        "mac": "Cmd+Shift+R",
+        "when": "editorTextFocus"
       }
     ],
     "menus": {
@@ -130,35 +224,69 @@
         {
           "command": "carpai.explain",
           "when": "editorHasSelection",
-          "group": "CarpAI"
+          "group": "CarpAI@1"
         },
         {
           "command": "carpai.refactor",
           "when": "editorHasSelection",
-          "group": "CarpAI"
+          "group": "CarpAI@2"
         },
         {
           "command": "carpai.generateTests",
           "when": "editorHasSelection",
+          "group": "CarpAI@3"
+        },
+        {
+          "command": "carpai.quickFix",
+          "when": "editorTextFocus",
+          "group": "CarpAI@4"
+        },
+        {
+          "command": "carpai.review",
+          "when": "editorTextFocus",
+          "group": "CarpAI@5"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "carpai.summarize",
+          "when": "resourceExtname =~ /\\.(rs|py|ts|js|go|java)/",
           "group": "CarpAI"
         }
       ]
-    }
+    },
+    "languages": [
+      {
+        "id": "carpai-chat",
+        "aliases": ["CarpAI Chat", "carpai-chat"],
+        "extensions": [".carpai-chat"]
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "test": "npm run compile && node ./out/test/runTest.js"
+    "test": "npm run compile && node ./out/test/runTest.js",
+    "package": "vsce package",
+    "publish": "vsce publish"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.80.0",
     "typescript": "^5.0.0",
-    "vscode-test": "^1.6.0"
+    "vscode-test": "^1.6.0",
+    "vsce": "^2.0.0"
   },
   "dependencies": {
     "axios": "^1.4.0",
     "ws": "^8.13.0"
-  }
+  },
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/carpai/carpai-vscode"
+  },
+  "homepage": "https://carpai.dev",
+  "license": "MIT"
 }

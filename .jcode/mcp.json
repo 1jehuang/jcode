@@ -1,0 +1,66 @@
+{
+  "servers": {
+    "github": {
+      "command": "python",
+      "args": ["mcp-servers/github/src/server.py"],
+      "env": {},
+      "shared": true
+    },
+    "jira": {
+      "command": "python",
+      "args": ["mcp-servers/jira/src/server.py"],
+      "env": {},
+      "shared": true
+    },
+    "slack": {
+      "command": "python",
+      "args": ["mcp-servers/slack/src/server.py"],
+      "env": {},
+      "shared": true
+    },
+    "docker": {
+      "command": "python",
+      "args": ["mcp-servers/docker/src/server.py"],
+      "env": {},
+      "shared": true
+    },
+    "postgres": {
+      "command": "python",
+      "args": ["mcp-servers/postgres/src/server.py"],
+      "env": {
+        "PG_OFFLINE_FALLBACK": "1"
+      },
+      "shared": true
+    },
+    "redis": {
+      "command": "python",
+      "args": ["mcp-servers/redis/src/server.py"],
+      "env": {},
+      "shared": true
+    },
+    "kubernetes": {
+      "command": "python",
+      "args": ["mcp-servers/kubernetes/src/server.py"],
+      "env": {},
+      "shared": true
+    },
+    "aws": {
+      "command": "python",
+      "args": ["mcp-servers/aws/src/server.py"],
+      "env": {},
+      "shared": true
+    },
+    "sentry": {
+      "command": "python",
+      "args": ["mcp-servers/sentry/src/server.py"],
+      "env": {},
+      "shared": true
+    },
+    "datadog": {
+      "command": "python",
+      "args": ["mcp-servers/datadog/src/server.py"],
+      "env": {},
+      "shared": true
+    }
+  }
+}

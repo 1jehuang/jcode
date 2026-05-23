@@ -1,0 +1,122 @@
+# PostgreSQL Backup CronJob
+# Performs daily full backups with WAL archiving
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+  namespace: carpai
+  labels:
+    app: postgres-backup
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 7  # Keep 7 days of backups
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: postgres-backup
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: postgres:16-alpine
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -euo pipefail
+
+                  BACKUP_DIR="/backups"
+                  TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+                  BACKUP_FILE="${BACKUP_DIR}/carpai_backup_${TIMESTAMP}.sql.gz"
+
+                  echo "Starting PostgreSQL backup at $(date)"
+                  echo "Backup file: ${BACKUP_FILE}"
+
+                  # Perform pg_dump with compression
+                  PGPASSWORD=${POSTGRES_PASSWORD} pg_dump \
+                    -h ${POSTGRES_HOST} \
+                    -U ${POSTGRES_USER} \
+                    -d ${POSTGRES_DB} \
+                    --format=custom \
+                    --compress=9 \
+                    --verbose \
+                    > "${BACKUP_FILE}"
+
+                  # Verify backup
+                  if [ -f "${BACKUP_FILE}" ] && [ -s "${BACKUP_FILE}" ]; then
+                    BACKUP_SIZE=$(du -h "${BACKUP_FILE}" | cut -f1)
+                    echo "Backup completed successfully. Size: ${BACKUP_SIZE}"
+
+                    # Cleanup old backups (keep last 7 days)
+                    find ${BACKUP_DIR} -name "carpai_backup_*.sql.gz" -mtime +7 -delete
+                    echo "Cleaned up backups older than 7 days"
+                  else
+                    echo "ERROR: Backup file is missing or empty!"
+                    exit 1
+                  fi
+
+                  echo "Backup finished at $(date)"
+              env:
+                - name: POSTGRES_HOST
+                  value: "postgres.carpai.svc.cluster.local"
+                - name: POSTGRES_PORT
+                  value: "5432"
+                - name: POSTGRES_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-credentials
+                      key: username
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-credentials
+                      key: password
+                - name: POSTGRES_DB
+                  value: "carpai"
+              volumeMounts:
+                - name: backup-storage
+                  mountPath: /backups
+              resources:
+                requests:
+                  cpu: "500m"
+                  memory: 512Mi
+                limits:
+                  cpu: "1"
+                  memory: 1Gi
+          volumes:
+            - name: backup-storage
+              persistentVolumeClaim:
+                claimName: postgres-backup-pvc
+---
+# PersistentVolumeClaim for backup storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-backup-pvc
+  namespace: carpai
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: standard
+---
+# WAL Archiving ConfigMap (for Point-in-Time Recovery)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-wal-config
+  namespace: carpai
+data:
+  postgresql.conf: |
+    # WAL Archiving Configuration
+    wal_level = replica
+    archive_mode = on
+    archive_command = 'cp %p /wal_archive/%f'
+    max_wal_senders = 3
+    wal_keep_size = 1GB

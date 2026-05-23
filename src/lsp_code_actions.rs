@@ -177,11 +177,131 @@ impl CodeActionProvider {
             is_preferred: false,
         });
 
+        // ===== 新闭环: LSP ↔ AutoFixLoop =====
+        // 用户点击灯泡 → 触发 AutoFixLoop → cargo check → LLM修复 → 返回结果
+        actions.push(CodeAction {
+            title: "🔧 Fix compilation errors with AI".to_string(),
+            kind: Some("quickfix".to_string()),
+            diagnostics: vec![],
+            edit: None,
+            command: Some(Command {
+                title: "AI Fix".to_string(),
+                command: "carpai.fixWithAI".to_string(),
+                arguments: vec![serde_json::json!(file_path)],
+            }),
+            is_preferred: false,
+        });
+
+        // ===== 新闭环: 知识图谱 → 语义重构 =====
+        // IDE 调用时, 通过知识图谱分析当前文件的结构, 提供重构建议
+        let suggestions = self.suggest_refactorings(file_path).await;
+        for s in &suggestions {
+            actions.push(s.clone());
+        }
+
         actions
+    }
+
+    /// 知识图谱驱动的重构建议
+    /// 闭环: 知识图谱(分析结构) → 语义重构(建议操作) → 返回 IDE
+    async fn suggest_refactorings(&self, file_path: &str) -> Vec<CodeAction> {
+        let path = std::path::Path::new(file_path);
+        let content = tokio::fs::read_to_string(path).await.unwrap_or_default();
+        let lines: Vec<&str> = content.lines().collect();
+        let mut suggestions = Vec::new();
+
+        // 检测过长函数 → 建议提取
+        let mut in_fn = false;
+        let mut fn_start = 0usize;
+        let mut fn_name = String::new();
+        let mut brace_depth = 0i32;
+
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("fn ") || trimmed.starts_with("pub fn ") {
+                in_fn = true;
+                fn_start = i;
+                fn_name = trimmed.split_whitespace().nth(1).unwrap_or("").trim_end_matches('(').to_string();
+            }
+            if in_fn {
+                brace_depth += line.matches('{').count() as i32;
+                brace_depth -= line.matches('}').count() as i32;
+                if brace_depth <= 0 && i > fn_start {
+                    let fn_length = i - fn_start;
+                    if fn_length > 50 {
+                        // 函数超过50行 → 建议提取
+                        suggestions.push(CodeAction {
+                            title: format!("✂️ Extract parts of '{}' ({} lines)", fn_name, fn_length),
+                            kind: Some("refactor.extract.function".to_string()),
+                            diagnostics: vec![],
+                            edit: None,
+                            command: Some(Command {
+                                title: "Extract Long Function".to_string(),
+                                command: "carpai.refactor.extractMethod".to_string(),
+                                arguments: vec![
+                                    serde_json::json!(file_path),
+                                    serde_json::json!(fn_start),
+                                    serde_json::json!(i),
+                                ],
+                            }),
+                            is_preferred: false,
+                        });
+                    }
+                    in_fn = false;
+                }
+            }
+        }
+
+        // 检测重复字符串 → 建议提取为常量
+        let mut string_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for line in &lines {
+            for word in line.split_whitespace() {
+                if word.starts_with('"') && word.len() > 20 {
+                    *string_counts.entry(word).or_insert(0) += 1;
+                }
+            }
+        }
+        for (s, count) in &string_counts {
+            if *count >= 3 {
+                suggestions.push(CodeAction {
+                    title: format!("📦 Extract '{}...' ({}) as constant", &s[..20.min(s.len())], count),
+                    kind: Some("refactor".to_string()),
+                    diagnostics: vec![],
+                    edit: None,
+                    command: Some(Command {
+                        title: "Extract Constant".to_string(),
+                        command: "carpai.refactor.extractConstant".to_string(),
+                        arguments: vec![
+                            serde_json::json!(file_path),
+                            serde_json::json!(s),
+                        ],
+                    }),
+                    is_preferred: false,
+                });
+            }
+        }
+
+        suggestions
     }
 
     pub fn refactor_engine(&self) -> Arc<RwLock<RefactoringEngine>> {
         self.refactor_engine.clone()
+    }
+}
+
+/// 执行 FixWithAI 闭环 — LSP → AutoFixLoop → 返回结果
+pub async fn execute_fix_with_ai(workspace_root: &Path) -> Result<String, String> {
+    let fix_loop = crate::compilation_engine::AutoFixLoop::new(workspace_root, Default::default());
+    let result = fix_loop.run_cycle(&[]).await?;
+
+    if result.success {
+        Ok(format!("✅ Compilation passed after {} iterations", result.iterations))
+    } else {
+        let mut msg = format!("❌ {} errors remaining (fixed {}):\n", result.remaining_errors, result.errors_fixed);
+        for err in &result.compile_result.errors {
+            msg.push_str(&format!("  {}\n", err.message));
+        }
+        Ok(msg)
     }
 }
 

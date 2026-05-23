@@ -1,6 +1,8 @@
-//! Large-Scale Cluster Integration Tests (18-node scenario)
+//! Large-Scale Cluster Integration Tests (18-node and 100+ node scenarios)
 //!
-//! Tests for 3 main nodes + 15 cafe machines dynamic deployment scenario.
+//! Tests for:
+//! - 3 main nodes + 15 cafe machines dynamic deployment scenario
+//! - 100+ node hierarchical cluster management
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,11 +14,15 @@ mod cluster_stability;
 mod dynamic_node_management;
 mod fault_injection;
 mod performance_benchmarks;
+mod stress_test;
+mod test_100_nodes;
 
 pub use cluster_stability::*;
 pub use dynamic_node_management::*;
 pub use fault_injection::*;
 pub use performance_benchmarks::*;
+pub use stress_test::*;
+pub use test_100_nodes::*;
 
 /// Helper: Create test node hardware info simulating different GPU types
 fn create_test_node(id: usize, gpu_type: &str) -> jcode_unified_scheduler::NodeHardwareInfo {

@@ -7,19 +7,20 @@
 
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use uuid::Uuid;
 
 // ============================================================================
 // 基础标识符
 // ============================================================================
 
 /// 任务 ID (UUID v4)
-pub type TaskId = uuid::Uuid;
+pub type TaskId = Uuid;
 
 /// 节点 ID (UUID v4)
-pub type NodeId = uuid::Uuid;
+pub type NodeId = Uuid;
 
 /// Pipeline ID (UUID v4)
-pub type PipelineId = uuid::Uuid;
+pub type PipelineId = Uuid;
 
 // ============================================================================
 // 任务相关类型 (Ruflo GOAP 体系)
@@ -373,6 +374,10 @@ pub struct ScheduledTask {
     pub max_latency_ms: Option<f64>,
     /// 估算 token 数 (用于 KV Cache 预算)
     pub estimated_tokens: Option<u64>,
+    /// 批量大小 (用于推理)
+    pub batch_size: Option<u32>,
+    /// 最大序列长度 (用于推理)
+    pub max_seq_len: Option<u32>,
 
     /// === 时间戳 ===
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -422,6 +427,8 @@ impl ScheduledTask {
             min_tflops: None,
             max_latency_ms: None,
             estimated_tokens: None,
+            batch_size: None,
+            max_seq_len: None,
             created_at: Some(chrono::Utc::now()),
             submitted_at: None,
             started_at: None,

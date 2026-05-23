@@ -257,6 +257,9 @@ impl LlmProvider for DeepseekProvider {
             request.messages = vec![ChatMessage {
                 role: MessageRole::User,
                 content: Some(fim_content),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
             }];
         }
 

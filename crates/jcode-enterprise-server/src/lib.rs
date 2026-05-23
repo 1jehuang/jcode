@@ -70,6 +70,13 @@ pub mod enterprise;
 pub mod audit;
 pub mod quota;
 pub mod metrics;
+pub mod kv_cache_storage;
+pub mod milvus_adapter;
+pub mod cache;
+pub mod compliance;
+pub mod gdpr;
+pub mod hipaa;
+pub mod cross_region;
 
 pub use config::*;
 pub use enterprise::EnterpriseServer;

@@ -104,6 +104,7 @@ pub struct ToolResultMessage {
 #[allow(dead_code)]
 struct ToolExecutionResult {
     /// Result messages (typically one, but could be multiple with progress).
+    #[allow(dead_code)]
     messages: Vec<ToolResultMessage>,
 }
 
@@ -211,8 +212,10 @@ pub struct StreamingToolExecutor {
     /// Whether discard() has been called (e.g., streaming fallback).
     discarded: bool,
     /// Whether any tool has errored (triggers sibling abort).
+    #[allow(dead_code)]
     has_errored: bool,
     /// Description of the errored tool (for error messages).
+    #[allow(dead_code)]
     errored_tool_description: String,
     /// Cancellation token (cascades to all running tools).
     cancel_token: CancellationToken,

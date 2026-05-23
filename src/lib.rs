@@ -219,6 +219,8 @@ pub mod memory_advanced;
 pub mod tdd;
 pub mod performance_advanced;
 pub mod engine;
+pub mod refactor_verify_pipeline;
+pub mod delivery_pipeline;
 
 // P2 Integration - 将P2功能模块接入主流程
 pub mod p2_integration;

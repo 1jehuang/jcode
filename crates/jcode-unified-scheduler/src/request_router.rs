@@ -343,7 +343,7 @@ pub fn find_turning_points(nodes: &[Arc<NodeInfo>], num_layers: u32) -> Vec<(Nod
     }
 
     // 构建每层的 host 列表
-    let mut layer_hosts: Vec<Vec<usize>> = (0..num_layers)
+    let layer_hosts: Vec<Vec<usize>> = (0..num_layers)
         .map(|l| {
             nodes
                 .iter()
@@ -416,7 +416,7 @@ pub fn find_turning_points(nodes: &[Arc<NodeInfo>], num_layers: u32) -> Vec<(Nod
     }
 
     // 回溯最优路径 (按层记录选择的节点索引)
-    let last_layer = num_layers as usize - 1;
+    let _last_layer = num_layers as usize - 1;
     let last_dp = match dp.last() {
         Some(d) if !d.is_empty() => d,
         _ => return vec![],

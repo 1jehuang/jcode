@@ -1,1 +1,39 @@
-{"servers":{}}
+{
+  "servers": {
+    "carpai-github": {
+      "command": "python",
+      "args": ["mcp-servers/github/src/server.py"]
+    },
+    "carpai-postgres": {
+      "command": "python",
+      "args": ["mcp-servers/postgres/src/server.py"],
+      "env": {
+        "PG_OFFLINE_FALLBACK": "1"
+      }
+    },
+    "carpai-docker": {
+      "command": "python",
+      "args": ["mcp-servers/docker/src/server.py"]
+    },
+    "carpai-kubernetes": {
+      "command": "python",
+      "args": ["mcp-servers/kubernetes/src/server.py"]
+    },
+    "carpai-redis": {
+      "command": "python",
+      "args": ["mcp-servers/redis/src/server.py"]
+    },
+    "carpai-sentry": {
+      "command": "python",
+      "args": ["mcp-servers/sentry/src/server.py"]
+    },
+    "carpai-aws": {
+      "command": "python",
+      "args": ["mcp-servers/aws/src/server.py"]
+    },
+    "carpai-datadog": {
+      "command": "python",
+      "args": ["mcp-servers/datadog/src/server.py"]
+    }
+  }
+}
