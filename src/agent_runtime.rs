@@ -283,7 +283,7 @@ impl AutonomousAgent {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
                 if path.is_dir() {
-                    Box::pin(self.collect_files_recursive(&path, files, depth + 1)).await;
+                    self.collect_files_recursive(&path, files, depth + 1).await;
                 } else if let Ok(metadata) = entry.metadata().await {
                     if metadata.len() < 50000 { // 跳过 >50KB 的文件
                         if let Some(rel) = path.strip_prefix(&self.workspace).ok() {
@@ -356,7 +356,7 @@ impl CrossFileAgent {
         // 扫描所有 Rust 源文件
         let src_dir = self.workspace.join("src");
         if src_dir.exists() {
-            self.collect_files(&src_dir, &mut files).await;
+            self.collect_files(&src_dir, &mut files);
         }
 
         // 解析 import 关系
@@ -396,6 +396,99 @@ impl CrossFileAgent {
 
     pub fn agent(&self) -> &Arc<AutonomousAgent> {
         &self.agent
+    }
+
+    /// 跨文件一致性闭环 — 编辑后检查 imports/类型一致性 → 修复 → 重编译
+    /// 闭环: 编辑→检查跨文件一致性→修复import→重编译→循环×3
+    pub async fn verify_consistency_loop(&self, edited_files: &[String]) -> Result<Vec<String>, String> {
+        let mut all_fixes = Vec::new();
+
+        for iteration in 0..3 {
+            let mut consistency_issues = Vec::new();
+
+            // 检查每个已编辑文件的 import 引用
+            for file in edited_files {
+                let path = self.workspace.join(file);
+                if !path.exists() { continue; }
+                let content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+
+                // 检查 use crate::xxx 是否指向存在的模块
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("use crate::") {
+                        let module = trimmed.trim_start_matches("use crate::")
+                            .split("::").next().unwrap_or("")
+                            .trim_end_matches(';');
+                        if !module.is_empty() && !self.module_exists(module) {
+                            consistency_issues.push(format!("Missing module: {}", module));
+                        }
+                    }
+                }
+            }
+
+            if consistency_issues.is_empty() {
+                // 无一致性问题 → 退出循环
+                all_fixes.push("Consistency check passed".to_string());
+                break;
+            }
+
+            // 有 issues → 尝试修复 (第3轮则放弃)
+            if iteration >= 2 {
+                all_fixes.push(format!("Unresolved issues (skipped): {:?}", consistency_issues));
+                break;
+            }
+
+            // 用 LLM 修复一致性
+            let prompt = format!(
+                "Fix these cross-file consistency issues:\n{}\n\n\
+                 Return each fixed file in ```file:path\n...content\n``` format.",
+                consistency_issues.join("\n")
+            );
+            let router = InferenceRouter::new(vec![], "deepseek-chat");
+            let result = router.chat_completion(&prompt, "You are a cross-file consistency fixer.").await?;
+
+            // 解析修复并应用
+            for block in result.split("```") {
+                let block = block.trim();
+                if block.starts_with("file:") {
+                    let rest = block.trim_start_matches("file:").trim();
+                    if let Some((path, content)) = rest.split_once('\n') {
+                        let full_path = self.workspace.join(path.trim());
+                        tokio::fs::write(&full_path, content).await.ok();
+                        all_fixes.push(format!("Fixed: {}", path.trim()));
+                    }
+                }
+            }
+        }
+
+        Ok(all_fixes)
+    }
+
+    /// 检查模块是否存在
+    fn module_exists(&self, module: &str) -> bool {
+        let paths = [
+            self.workspace.join("src").join(format!("{}.rs", module)),
+            self.workspace.join("src").join(module).join("mod.rs"),
+        ];
+        paths.iter().any(|p| p.exists())
+    }
+
+    /// 执行跨文件闭环 — 依赖排序→编辑→一致性检查→修复→编译
+    pub async fn execute_cross_file_task(&self, goal: &str) -> Result<String, String> {
+        // 1. 分析依赖
+        let task = self.analyze_dependencies().await?;
+        println!("[CrossFile] {} files, order: {:?}", task.affected_files.len(), task.execution_order);
+
+        // 2. 用 AutonomousAgent 执行
+        let result = self.agent.execute_task(goal).await?;
+
+        // 3. 一致性检查闭环
+        if !task.affected_files.is_empty() {
+            let fixes = self.verify_consistency_loop(&task.affected_files).await?;
+            println!("[CrossFile] Consistency fixes: {:?}", fixes);
+        }
+
+        Ok(result)
     }
 }
 

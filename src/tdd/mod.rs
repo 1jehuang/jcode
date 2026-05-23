@@ -73,7 +73,7 @@ use tokio::sync::RwLock;
 use regex::Regex;
 use async_trait::async_trait;
 use jcode_provider_core::Provider;
-use jcode_message_types::{Message, Role, ToolDefinition, StreamEvent};
+use jcode_message_types::{ContentBlock, Message, Role, ToolDefinition, StreamEvent};
 use futures::StreamExt;
 
 /// TDD配置

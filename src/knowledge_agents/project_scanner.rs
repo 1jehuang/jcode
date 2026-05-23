@@ -30,13 +30,6 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "go" => Some("Go"),
         "java" => Some("Java"),
         "kt" | "kts" => Some("Kotlin"),
-        "swift" => Some("Swift"),
-        "rb" => Some("Ruby"),
-        "php" => Some("PHP"),
-        "c" | "h" => Some("C"),
-        "cpp" | "hpp" | "cc" => Some("C++"),
-        "cs" => Some("C#"),
-        "rs"  => Some("Rust"),
         "vue" => Some("Vue"),
         "svelte" => Some("Svelte"),
         "css" | "scss" | "less" => Some("CSS"),
@@ -110,7 +103,7 @@ pub fn detect_framework(root: &Path) -> Vec<String> {
 
 /// 扫描项目文件 (Agent 1)
 /// 跳过: .git, node_modules, target, build, dist, .venv, .next, __pycache__
-pub async fn scan_project(root: &Path, config: &PipelineConfig) -> Result<Vec<FileEntry>, String> {
+pub async fn scan_project(root: &Path, _config: &PipelineConfig) -> Result<Vec<FileEntry>, String> {
     let mut files = Vec::new();
 
     let walker = WalkBuilder::new(root)

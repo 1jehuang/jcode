@@ -189,15 +189,6 @@ pub mod export {
         // 按架构层分组着色
         for node in &graph.nodes {
             let layer = node.architecture_layer.as_deref().unwrap_or("Unknown");
-            let style = match layer {
-                "Api" => "fill:#e1f5fe,stroke:#0288d1",
-                "Service" => "fill:#e8f5e9,stroke:#388e3c",
-                "Business" => "fill:#fff3e0,stroke:#f57c00",
-                "Data" => "fill:#fce4ec,stroke:#c62828",
-                "Infrastructure" => "fill:#f3e5f5,stroke:#7b1fa2",
-                "Ui" => "fill:#e0f7fa,stroke:#00838f",
-                _ => "fill:#f5f5f5,stroke:#616161",
-            };
             let label = node.name.chars().take(20).collect::<String>();
             mermaid.push_str(&format!("    {}[\"{}\"]:::{}Style\n", node.id, label, layer));
         }

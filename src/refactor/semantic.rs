@@ -262,6 +262,14 @@ impl AstRenamer {
 pub struct ScopeAwareRenamer {
     workspace_root: std::path::PathBuf,
 }
+
+impl ScopeAwareRenamer {
+    pub fn new(workspace_root: &std::path::Path) -> Self {
+        Self { workspace_root: workspace_root.to_path_buf() }
+    }
+
+    /// 查找依赖文件
+    pub async fn find_dependent_files(&self, file_path: &str) -> Result<Vec<String>, String> {
         let current_stem = Path::new(file_path)
             .file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let mut deps = Vec::new();

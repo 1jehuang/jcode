@@ -13,32 +13,32 @@ use super::{ArchitectureLayer, KGNode, KnowledgeGraph, NodeKind};
 /// 架构层识别规则
 struct LayerRule {
     /// 匹配的目录名
-    dirs: Vec<&'static str>,
+    dirs: &'static [&'static str],
     /// 匹配的文件名模式
-    file_patterns: Vec<&'static str>,
+    file_patterns: &'static [&'static str],
     /// 对应的架构层
     layer: ArchitectureLayer,
 }
 
-const LAYER_RULES: &[LayerRule] = &[
-    LayerRule { dirs: vec!["api", "routes", "endpoints", "controllers", "handlers"],
-        file_patterns: vec!["api", "route", "endpoint", "controller", "handler"], layer: ArchitectureLayer::Api },
-    LayerRule { dirs: vec!["service", "services", "use-cases", "usecases"],
-        file_patterns: vec!["service", "use_case", "usecase"], layer: ArchitectureLayer::Service },
-    LayerRule { dirs: vec!["business", "domain", "model", "models", "entity", "entities"],
-        file_patterns: vec!["domain", "model", "entity", "business"], layer: ArchitectureLayer::Business },
-    LayerRule { dirs: vec!["data", "repository", "repositories", "dao", "persistence", "db", "database", "sql"],
-        file_patterns: vec!["repo", "repository", "dao", "data", "db", "database", "sql"], layer: ArchitectureLayer::Data },
-    LayerRule { dirs: vec!["infra", "infrastructure", "config", "configuration", "deploy", "deployment", "k8s", "docker"],
-        file_patterns: vec!["infra", "config", "deploy", "k8s"], layer: ArchitectureLayer::Infrastructure },
-    LayerRule { dirs: vec!["ui", "components", "pages", "views", "screens", "widgets", "templates"],
-        file_patterns: vec!["ui", "component", "page", "view", "screen", "widget"], layer: ArchitectureLayer::Ui },
-    LayerRule { dirs: vec!["utils", "util", "helpers", "helper", "common", "shared", "lib"],
-        file_patterns: vec!["util", "helper", "common", "shared"], layer: ArchitectureLayer::Utility },
-    LayerRule { dirs: vec!["test", "tests", "spec", "specs", "__tests__", "__test__"],
-        file_patterns: vec!["test", "spec", "mock", "stub", "fixture"], layer: ArchitectureLayer::Testing },
-    LayerRule { dirs: vec!["config", "configuration", "settings", "env"],
-        file_patterns: vec!["config", "setting", "env"], layer: ArchitectureLayer::Config },
+static LAYER_RULES: [LayerRule; 9] = [
+    LayerRule { dirs: &["api", "routes", "endpoints", "controllers", "handlers"],
+        file_patterns: &["api", "route", "endpoint", "controller", "handler"], layer: ArchitectureLayer::Api },
+    LayerRule { dirs: &["service", "services", "use-cases", "usecases"],
+        file_patterns: &["service", "use_case", "usecase"], layer: ArchitectureLayer::Service },
+    LayerRule { dirs: &["business", "domain", "model", "models", "entity", "entities"],
+        file_patterns: &["domain", "model", "entity", "business"], layer: ArchitectureLayer::Business },
+    LayerRule { dirs: &["data", "repository", "repositories", "dao", "persistence", "db", "database", "sql"],
+        file_patterns: &["repo", "repository", "dao", "data", "db", "database", "sql"], layer: ArchitectureLayer::Data },
+    LayerRule { dirs: &["infra", "infrastructure", "config", "configuration", "deploy", "deployment", "k8s", "docker"],
+        file_patterns: &["infra", "config", "deploy", "k8s"], layer: ArchitectureLayer::Infrastructure },
+    LayerRule { dirs: &["ui", "components", "pages", "views", "screens", "widgets", "templates"],
+        file_patterns: &["ui", "component", "page", "view", "screen", "widget"], layer: ArchitectureLayer::Ui },
+    LayerRule { dirs: &["utils", "util", "helpers", "helper", "common", "shared", "lib"],
+        file_patterns: &["util", "helper", "common", "shared"], layer: ArchitectureLayer::Utility },
+    LayerRule { dirs: &["test", "tests", "spec", "specs", "__tests__", "__test__"],
+        file_patterns: &["test", "spec", "mock", "stub", "fixture"], layer: ArchitectureLayer::Testing },
+    LayerRule { dirs: &["config", "configuration", "settings", "env"],
+        file_patterns: &["config", "setting", "env"], layer: ArchitectureLayer::Config },
 ];
 
 /// 识别文件的架构层

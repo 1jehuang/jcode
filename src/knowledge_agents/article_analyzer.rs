@@ -157,7 +157,7 @@ impl ArticleAnalyzer {
             while let Some(start) = remaining.find("](") {
                 // 往前找 [
                 let before = &remaining[..start];
-                if let Some(bracket_start) = before.rfind('[') {
+                if let Some(_bracket_start) = before.rfind('[') {
                     let after_start = &remaining[start + 2..];
                     if let Some(end) = after_start.find(')') {
                         let url = &after_start[..end];

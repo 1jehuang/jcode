@@ -289,7 +289,7 @@ impl LayerAllocator {
     }
 
     /// 触发全局重平衡
-    pub fn global_rebalance(&mut self, nodes: &[&NodeInfo]) -> Result<(), SchedulerError> {
+    pub fn global_rebalance(&mut self) -> Result<(), SchedulerError> {
         info!("[LayerAllocator] 开始全局重平衡...");
         self.rebalance_count += 1;
 
@@ -298,10 +298,14 @@ impl LayerAllocator {
             return Err(SchedulerError::NotInitialized);
         }
 
+        // 先克隆节点数据,避免借用冲突
+        let nodes_clone: Vec<NodeInfo> = self.active_nodes.iter().map(|n| (**n).clone()).collect();
+        let nodes_refs: Vec<&NodeInfo> = nodes_clone.iter().collect();
+
         // 清空当前状态并重新分配
         self.pipelines.clear();
         self.layer_loads.clear();
-        self.allocate_from_standby(nodes, total_layers)?;
+        self.allocate_from_standby(&nodes_refs, total_layers)?;
 
         info!(
             "[LayerAllocator] 全局重平衡完成, {} 条 pipeline",
@@ -507,11 +511,12 @@ impl LayerAllocator {
     }
 
     /// DP 搜索核心
+    #[allow(non_snake_case)]
     fn dp_search(
         &self,
         k_target: usize,
         n: usize,
-        L: usize,
+        #[allow(non_snake_case)] L: usize,
         suffix_sum: &[usize],
     ) -> Result<std::collections::HashMap<(usize, Vec<i32>, usize), DpAction>, SchedulerError>
     {
@@ -524,7 +529,7 @@ impl LayerAllocator {
 
         fn solve(
             i: usize,
-            mut open_residuals: Vec<i32>,
+            open_residuals: Vec<i32>,
             finished: usize,
             k_target: usize,
             n: usize,
@@ -549,8 +554,7 @@ impl LayerAllocator {
             let new_needed = k_target.saturating_sub(finished) - open_residuals.len();
             let need_open: i64 = open_residuals.iter().map(|&x| x as i64).sum();
             let remaining_cap = suffix_sum[i];
-            if new_needed < 0
-                || remaining_cap < (need_open.max(0) as usize + new_needed.max(0) as usize * L)
+            if remaining_cap < (need_open.max(0) as usize + new_needed as usize * L)
                 || finished + open_residuals.len() + (n - i) < k_target
             {
                 return f64::INFINITY;
@@ -705,6 +709,7 @@ impl LayerAllocator {
         pipeline_nodes: &[Arc<NodeInfo>],
     ) -> Result<(), SchedulerError> {
         let n = pipeline_nodes.len();
+        #[allow(non_snake_case)]
         let L = self.total_layers as usize;
         if n == 0 || L == 0 {
             return Ok(());
@@ -973,11 +978,15 @@ impl LayerAllocator {
             node_id, layers_affected
         );
 
-        // 3. 检查是否仍然有完整 Pipeline
-        let needs_rebalance = {
-            let nodes_refs: Vec<&NodeInfo> = self.active_nodes.iter().map(|n| n.as_ref()).collect();
-            !self.has_full_pipeline(&nodes_refs)
-        };
+        // 3. 检查是否仍然有完整 Pipeline 并决定是否需要重平衡
+        let total_layers = self.total_layers;
+        
+        // 预先计算节点引用并检查
+        let nodes_refs_for_check: Vec<&NodeInfo> = self.active_nodes.iter().map(|n| n.as_ref()).collect();
+        let needs_rebalance = total_layers > 0 && !self.has_full_pipeline(&nodes_refs_for_check);
+        
+        // 清除借用
+        drop(nodes_refs_for_check);
 
         if needs_rebalance {
             warn!(
@@ -985,10 +994,7 @@ impl LayerAllocator {
             );
             
             // 4. 执行全局重平衡
-            if self.total_layers > 0 {
-                let nodes_refs: Vec<&NodeInfo> = self.active_nodes.iter().map(|n| n.as_ref()).collect();
-                self.global_rebalance(&nodes_refs)?;
-            }
+            self.global_rebalance()?;
         } else {
             info!("[LayerAllocator] Pipeline 仍然完整, 无需重平衡");
         }
@@ -1076,6 +1082,7 @@ enum DpActionKind {
     Done,
     Skip,
     AssignToExisting(usize, bool), // (pipeline_index, closed)
+    #[allow(dead_code)]
     StartNew(i64, bool),           // (residual, closed immediately)
 }
 
