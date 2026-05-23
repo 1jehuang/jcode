@@ -246,6 +246,34 @@ fn redact_secrets_redacts_env_style_assignments() {
 }
 
 #[test]
+fn redact_secrets_redacts_common_cloud_and_notification_assignments() {
+    let input = "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\nAWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nAWS_SESSION_TOKEN=session-secret\nDISCORD_BOT_TOKEN=discord-secret\nTELEGRAM_BOT_TOKEN=telegram-secret\nJCODE_SMTP_PASSWORD=smtp-secret\nBING_API_KEY=bing-secret\n";
+    let out = redact_secrets(input);
+    assert!(out.contains("AWS_ACCESS_KEY_ID=[REDACTED_SECRET]"));
+    assert!(out.contains("AWS_SECRET_ACCESS_KEY=[REDACTED_SECRET]"));
+    assert!(out.contains("AWS_SESSION_TOKEN=[REDACTED_SECRET]"));
+    assert!(out.contains("DISCORD_BOT_TOKEN=[REDACTED_SECRET]"));
+    assert!(out.contains("TELEGRAM_BOT_TOKEN=[REDACTED_SECRET]"));
+    assert!(out.contains("JCODE_SMTP_PASSWORD=[REDACTED_SECRET]"));
+    assert!(out.contains("BING_API_KEY=[REDACTED_SECRET]"));
+    assert!(!out.contains("EXAMPLEKEY"));
+    assert!(!out.contains("discord-secret"));
+    assert!(!out.contains("smtp-secret"));
+}
+
+#[test]
+fn redact_secrets_redacts_authorization_headers() {
+    let input = "Authorization: Bearer sk-test-secret-value\nauthorization: token ghp_SECRETSECRETSECRETSECRET\nx-api-key: inline-secret\n";
+    let out = redact_secrets(input);
+    assert!(out.contains("Authorization: Bearer [REDACTED_SECRET]"));
+    assert!(out.contains("authorization: token [REDACTED_SECRET]"));
+    assert!(out.contains("x-api-key: [REDACTED_SECRET]"));
+    assert!(!out.contains("sk-test-secret-value"));
+    assert!(!out.contains("ghp_SECRET"));
+    assert!(!out.contains("inline-secret"));
+}
+
+#[test]
 fn redact_secrets_redacts_runtime_key_assignment() {
     let key_var = "JCODE_OPENAI_COMPAT_API_KEY_NAME";
     let prev = std::env::var(key_var).ok();

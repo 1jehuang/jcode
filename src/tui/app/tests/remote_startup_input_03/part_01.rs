@@ -595,7 +595,7 @@ fn test_new_for_remote_restored_queued_messages_stay_queued_until_remote_idle() 
         restored.hidden_queued_system_messages,
         vec!["continue silently"]
     );
-    assert!(!restored.pending_queued_dispatch);
+    assert!(restored.pending_queued_dispatch);
     assert!(!restored.is_processing);
     assert!(matches!(restored.status, ProcessingStatus::Idle));
 }

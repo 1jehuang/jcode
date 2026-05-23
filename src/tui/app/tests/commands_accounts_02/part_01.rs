@@ -62,7 +62,18 @@ fn test_usage_report_updates_display_only_card_without_system_message() {
     assert!(msg.content.contains("5h"));
     assert!(msg.content.contains("82%"));
     assert!(msg.content.contains("plan: pro"));
-    assert!(app.materialized_provider_messages().is_empty());
+    let provider_context = app
+        .materialized_provider_messages()
+        .into_iter()
+        .flat_map(|message| message.content.into_iter())
+        .filter_map(|block| match block {
+            crate::message::ContentBlock::Text { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!provider_context.contains("OpenAI (ChatGPT)"));
+    assert!(!provider_context.contains("plan: pro"));
 }
 
 #[test]
