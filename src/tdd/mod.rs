@@ -211,7 +211,14 @@ pub struct TestGenerator {
 }
 
 impl TestGenerator {
-    pub fn new() -> Self {
+    pub fn new(_config: TddConfig) -> Self {
+        Self { 
+            provider: None,
+            cache: None,
+        }
+    }
+
+    pub fn new_empty() -> Self {
         Self { 
             provider: None,
             cache: None,

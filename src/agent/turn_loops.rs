@@ -910,34 +910,33 @@ impl Agent {
                         tool_results_dirty = true;
                     }
                 }
-            }
 
-            // ===== [I-01] MCP工具调用检测 =====
-            // 记录MCP工具调用名称，用于后续注入到工具列表
-            if tc.name.starts_with("mcp__") {
-                let parts: Vec<&str> = tc.name.split("__").collect();
-                if parts.len() >= 3 {
-                    let server_name = parts[1];
-                    if !self.mcp_tool_names.contains(&server_name.to_string()) {
-                        self.mcp_tool_names.push(server_name.to_string());
+                // ===== [I-01] MCP工具调用检测 =====
+                // 记录MCP工具调用名称，用于后续注入到工具列表
+                if tc.name.starts_with("mcp__") {
+                    let parts: Vec<&str> = tc.name.split("__").collect();
+                    if parts.len() >= 3 {
+                        let server_name = parts[1];
+                        if !self.mcp_tool_names.contains(&server_name.to_string()) {
+                            self.mcp_tool_names.push(server_name.to_string());
+                        }
                     }
                 }
-            }
 
-            // ===== [I-02] 编辑工具触发跨文件修复 =====
-            if tc.name == "edit" || tc.name == "multiedit" || tc.name == "batch_edit" {
-                if let Some(file_path) = tc.input.get("file_path").and_then(|v| v.as_str()) {
-                    if !self.recent_edit_files.contains(&file_path.to_string()) {
-                        self.recent_edit_files.push(file_path.to_string());
+                // ===== [I-02] 编辑工具触发跨文件修复 =====
+                if tc.name == "edit" || tc.name == "multiedit" || tc.name == "batch_edit" {
+                    if let Some(file_path) = tc.input.get("file_path").and_then(|v| v.as_str()) {
+                        if !self.recent_edit_files.contains(&file_path.to_string()) {
+                            self.recent_edit_files.push(file_path.to_string());
+                        }
                     }
-                }
-                // 对于 batch_edit，可能有多个 files
-                if tc.name == "batch_edit" {
-                    if let Some(files) = tc.input.get("files").and_then(|v| v.as_array()) {
-                        for f in files {
-                            if let Some(path) = f.as_str() {
-                                if !self.recent_edit_files.contains(&path.to_string()) {
-                                    self.recent_edit_files.push(path.to_string());
+                    if tc.name == "batch_edit" {
+                        if let Some(files) = tc.input.get("files").and_then(|v| v.as_array()) {
+                            for f in files {
+                                if let Some(path) = f.as_str() {
+                                    if !self.recent_edit_files.contains(&path.to_string()) {
+                                        self.recent_edit_files.push(path.to_string());
+                                    }
                                 }
                             }
                         }
@@ -947,6 +946,7 @@ impl Agent {
 
             if tool_results_dirty {
                 self.session.save()?;
+            }
 
             // ===== [自主规划] Phase 10: 跨文件依赖分析与规划注入 =====
             if !self.recent_edit_files.is_empty() {
@@ -959,7 +959,6 @@ impl Agent {
                         edited_count, files_list
                     ));
 
-                    // 生成依赖计划并注入到系统上下文
                     let plan_msg = format!(
                         "<system-reminder>\n\
                         [Cross-File Dependency Plan]\n\
@@ -986,8 +985,6 @@ impl Agent {
                     ));
                 }
 
-                // ===== [I-06] Phase 11: 自主验证修复 =====
-                // 在编辑后自动运行编译验证（仅对 Rust 项目）
                 let workspace = self.session.working_dir.as_ref()
                     .map(|d| std::path::Path::new(d))
                     .or_else(|| Some(std::path::Path::new(".")))
@@ -1005,7 +1002,6 @@ impl Agent {
                             let stderr = String::from_utf8_lossy(&output.stderr);
                             let has_errors = stderr.contains("error[");
                             if has_errors {
-                                // 提取错误摘要
                                 let error_summary: Vec<&str> = stderr.lines()
                                     .filter(|l| l.contains("error[") || l.contains("error:"))
                                     .take(5)
@@ -1045,9 +1041,7 @@ impl Agent {
                     logging::info("Phase 11: Not a Rust project, skipping auto-verify");
                 }
 
-                // 清除列表，为下一轮准备
                 self.recent_edit_files.clear();
-            }
             }
 
             if !generated_image_contexts.is_empty() {

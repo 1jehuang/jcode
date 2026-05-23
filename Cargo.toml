@@ -284,6 +284,7 @@ proctitle = "0.1"
 which = "6"
 sysinfo = "0.32"         # System information (CPU, memory, etc.)
 lru = "0.12"             # LRU cache for response caching
+num_cpus = "1"           # Get number of CPUs
 # md5 已被替换为 sha2 (2026-05-10) — md5 = "0.7"
 cron = "0.12"             # Cron expression parsing for task scheduler
 

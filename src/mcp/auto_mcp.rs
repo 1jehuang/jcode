@@ -302,13 +302,11 @@ impl AutoMcpManager {
                         ));
 
                         // Reconnect with backoff
-                        let result = {
-                            let mgr = manager.read().await;
-                            let cfg = McpConfig::load();
-                            cfg.servers.get(name).map(|sc| (name.clone(), sc.clone()))
-                        };
+                        let cfg = McpConfig::load();
+                        let server_config = cfg.servers.get(name).map(|sc| (name.clone(), sc.clone()));
 
-                        if let Some((n, sc)) = result {
+                        if let Some((n, sc)) = server_config {
+                            let mgr = manager.read().await;
                             match mgr.connect(&n, &sc).await {
                                 Ok(()) => {
                                     // Re-register tools

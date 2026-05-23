@@ -46,8 +46,9 @@ pub struct CacheStatsAdvanced {
 
 impl LlmResponseCache {
     pub fn new(capacity: usize) -> Self {
+        let nz_capacity = std::num::NonZeroUsize::new(capacity).unwrap_or(std::num::NonZeroUsize::new(100).unwrap());
         Self {
-            l1_memory: Arc::new(RwLock::new(lru::LruCache::new(capacity))),
+            l1_memory: Arc::new(RwLock::new(lru::LruCache::new(nz_capacity))),
             l2_disk: Arc::new(RwLock::new(HashMap::new())),
             l3_redis: None,  // Will be initialized separately
             l4_semantic: None,
@@ -65,8 +66,9 @@ impl LlmResponseCache {
         cdn_cache: Option<Arc<CdnCache>>,
         model_cache: Option<Arc<ModelCache>>,
     ) -> Self {
+        let nz_capacity = std::num::NonZeroUsize::new(capacity).unwrap_or(std::num::NonZeroUsize::new(100).unwrap());
         Self {
-            l1_memory: Arc::new(RwLock::new(lru::LruCache::new(capacity))),
+            l1_memory: Arc::new(RwLock::new(lru::LruCache::new(nz_capacity))),
             l2_disk: Arc::new(RwLock::new(HashMap::new())),
             l3_redis: redis_cache,
             l4_semantic: semantic_cache,
@@ -651,6 +653,25 @@ impl RedisCache {
         } else {
             Err("Redis client not initialized".to_string())
         }
+    }
+}
+
+/// 无操作版本 (无 Redis feature
+#[cfg(not(feature = "redis"))]
+pub struct RedisCache;
+
+#[cfg(not(feature = "redis"))]
+impl RedisCache {
+    pub fn new(_redis_url: &str, _prefix: &str) -> Result<Self, String> {
+        Ok(Self)
+    }
+    
+    pub async fn get(&self, _key: u64) -> Option<String> {
+        None
+    }
+    
+    pub async fn set(&self, _key: u64, _value: &str, _ttl: Duration) -> Result<(), String> {
+        Ok(())
     }
 }
 
