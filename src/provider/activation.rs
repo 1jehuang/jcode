@@ -262,6 +262,7 @@ mod tests {
 
     #[test]
     fn azure_activation_preserves_identity_while_using_openrouter_slot() {
+        let _lock = crate::storage::lock_test_env();
         let _guard = EnvGuard::new(&[
             "JCODE_RUNTIME_PROVIDER",
             "JCODE_ACTIVE_PROVIDER",

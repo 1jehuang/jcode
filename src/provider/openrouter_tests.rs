@@ -14,7 +14,7 @@ static ENV_LOCK: SharedEnvLock = SharedEnvLock;
 
 impl SharedEnvLock {
     fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'static, ()>> {
-        crate::storage::test_env_lock().lock()
+        Ok(crate::storage::lock_test_env())
     }
 }
 
@@ -63,7 +63,9 @@ fn test_config_dir(temp: &TempDir) -> std::path::PathBuf {
 }
 
 fn write_test_api_key(temp: &TempDir, env_file: &str, env_key: &str, value: &str) {
-    let config_dir = test_config_dir(temp).join("jcode");
+    let config_dir = std::env::var_os("JCODE_HOME")
+        .map(|path| std::path::PathBuf::from(path).join("config").join("jcode"))
+        .unwrap_or_else(|| test_config_dir(temp).join("jcode"));
     std::fs::create_dir_all(&config_dir).expect("create test config dir");
     std::fs::write(config_dir.join(env_file), format!("{env_key}={value}\n"))
         .expect("write test api key");
@@ -412,6 +414,7 @@ fn autodetects_single_saved_openai_compatible_profile() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().join("jcode-home"));
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env();
 
@@ -437,13 +440,14 @@ fn autodetects_single_saved_local_openai_compatible_profile() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().join("jcode-home"));
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env();
 
     let lmstudio = crate::provider_catalog::resolve_openai_compatible_profile(
         crate::provider_catalog::LMSTUDIO_PROFILE,
     );
-    let config_dir = test_config_dir(&temp).join("jcode");
+    let config_dir = crate::storage::app_config_dir().expect("test config dir");
     std::fs::create_dir_all(&config_dir).expect("create test config dir");
     std::fs::write(
         config_dir.join(&lmstudio.env_file),
@@ -467,6 +471,7 @@ fn does_not_guess_when_multiple_saved_openai_compatible_profiles_exist() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().join("jcode-home"));
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env();
 
@@ -501,6 +506,7 @@ fn autodetected_profile_seeds_default_model_and_cache_namespace() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().join("jcode-home"));
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env();
 
@@ -771,6 +777,7 @@ fn openai_compatible_model_catalog_refresh_calls_models_endpoint_and_updates_dis
     let _lock = ENV_LOCK.lock().unwrap();
     let temp = TempDir::new().expect("create temp home");
     let _home = EnvVarGuard::set("HOME", temp.path());
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().join("jcode-home"));
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _namespace = EnvVarGuard::set(
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
@@ -840,6 +847,7 @@ fn built_in_openai_compatible_static_models_drop_out_after_live_catalog() {
     let _lock = ENV_LOCK.lock().unwrap();
     let temp = TempDir::new().expect("create temp home");
     let _home = EnvVarGuard::set("HOME", temp.path());
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().join("jcode-home"));
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _namespace = EnvVarGuard::set(
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
@@ -989,6 +997,7 @@ fn named_openai_compatible_loads_api_key_from_env_file() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().join("jcode-home"));
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
     let _api_key = EnvVarGuard::remove("CUSTOM_API_KEY");
