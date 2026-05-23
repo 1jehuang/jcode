@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
+use async_trait::async_trait;
 
 /// 记忆条目
 #[derive(Debug, Clone)]
@@ -105,6 +106,7 @@ impl RelevanceScorer {
 }
 
 /// ===== [3] 向量数据库集成 =====
+#[async_trait]
 pub trait VectorDatabase: Send + Sync {
     /// 存储向量
     async fn upsert(&self, id: &str, embedding: Vec<f32>, metadata: HashMap<String, String>) -> Result<(), String>;
@@ -125,6 +127,7 @@ impl PgVectorAdapter {
     }
 }
 
+#[async_trait]
 impl VectorDatabase for PgVectorAdapter {
     async fn upsert(&self, id: &str, _embedding: Vec<f32>, _metadata: HashMap<String, String>) -> Result<(), String> {
         // 实际实现: INSERT INTO memories (id, embedding, metadata) VALUES ($1, $2, $3)

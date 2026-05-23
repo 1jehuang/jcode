@@ -326,9 +326,9 @@ impl AutoMcpManager {
                                         status.last_connected = Some(SystemTime::now());
                                         status.last_error = None;
                                     }
-                                    crate::logging::info!(
+                                    crate::logging::info(&format!(
                                         "Auto MCP: reconnected '{}'", n
-                                    );
+                                    ));
                                 }
                                 Err(e) => {
                                     let mut servers = connected_servers.write().await;
@@ -388,7 +388,7 @@ impl AutoMcpManager {
         }
 
         self.connected_servers.write().await.clear();
-        crate::logging::info!("Auto MCP: all servers disconnected");
+        crate::logging::info("Auto MCP: all servers disconnected");
     }
 }
 
