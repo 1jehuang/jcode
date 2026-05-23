@@ -132,7 +132,7 @@ impl Stream {
         static PAIR_COUNTER: AtomicU64 = AtomicU64::new(0);
         let counter = PAIR_COUNTER.fetch_add(1, Ordering::Relaxed);
         let pipe_name = format!(r"\\.\pipe\jcode-pair-{}-{}", std::process::id(), counter);
-        let mut server = ServerOptions::new()
+        let server = ServerOptions::new()
             .first_pipe_instance(true)
             .create(&pipe_name)?;
         let client = ClientOptions::new().open(&pipe_name)?;
