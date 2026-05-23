@@ -917,15 +917,57 @@ fn run_server_session(
 }
 
 fn run_server_session_at_path(
-    mut current_socket_path: PathBuf,
+    current_socket_path: PathBuf,
     target_session_id: Option<&str>,
     message: &str,
     images: Vec<(String, String)>,
     event_tx: Option<DesktopSessionEventSender>,
     command_rx: Receiver<DesktopSessionCommand>,
 ) -> Result<String> {
+    run_server_session_at_path_inner(
+        current_socket_path,
+        target_session_id,
+        message,
+        images,
+        event_tx,
+        command_rx,
+        true,
+    )
+}
+
+#[cfg(test)]
+fn run_server_session_at_path_without_ensure(
+    current_socket_path: PathBuf,
+    target_session_id: Option<&str>,
+    message: &str,
+    images: Vec<(String, String)>,
+    event_tx: Option<DesktopSessionEventSender>,
+    command_rx: Receiver<DesktopSessionCommand>,
+) -> Result<String> {
+    run_server_session_at_path_inner(
+        current_socket_path,
+        target_session_id,
+        message,
+        images,
+        event_tx,
+        command_rx,
+        false,
+    )
+}
+
+fn run_server_session_at_path_inner(
+    mut current_socket_path: PathBuf,
+    target_session_id: Option<&str>,
+    message: &str,
+    images: Vec<(String, String)>,
+    event_tx: Option<DesktopSessionEventSender>,
+    command_rx: Receiver<DesktopSessionCommand>,
+    ensure_server: bool,
+) -> Result<String> {
     send_desktop_status(&event_tx, DesktopSessionStatus::StartingSharedServer);
-    ensure_server_running_path(&current_socket_path)?;
+    if ensure_server {
+        ensure_server_running_path(&current_socket_path)?;
+    }
     send_desktop_status(&event_tx, DesktopSessionStatus::ConnectingSharedServer);
     let stream = connect_server_with_retry_path(&current_socket_path, SERVER_START_TIMEOUT)?;
     let mut writer = stream

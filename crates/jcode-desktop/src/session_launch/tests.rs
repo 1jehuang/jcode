@@ -421,6 +421,56 @@ fn windows_named_pipe_fixture_roundtrips_bytes() -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+#[test]
+fn desktop_worker_emits_reloaded_with_fake_windows_named_pipe_reload() -> Result<()> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let socket_path = std::env::temp_dir().join(format!(
+        "jcode-desktop-worker-reload-old-{}-{nonce}.sock",
+        std::process::id(),
+    ));
+    let new_socket_path = std::env::temp_dir().join(format!(
+        "jcode-desktop-worker-reload-new-{}-{nonce}.sock",
+        std::process::id(),
+    ));
+    let pipe_name = server_io::path_to_windows_pipe_name(&socket_path);
+    let pipe = create_windows_pipe_instance(&pipe_name)?;
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        fake_windows_desktop_server_reload_roundtrip(pipe_name, pipe, new_socket_path, ready_tx)
+    });
+    ready_rx
+        .recv()
+        .context("fake Windows reload pipe server did not start")?;
+
+    let (event_tx, event_rx) = mpsc::channel();
+    let (_command_tx, command_rx) = mpsc::channel();
+    let result = run_server_session_at_path_without_ensure(
+        socket_path,
+        None,
+        "hello reload",
+        Vec::new(),
+        Some(event_tx),
+        command_rx,
+    );
+
+    assert_eq!(result?, "session_desktop_reload_fake");
+    let requests = server.join().unwrap()?;
+    assert_eq!(requests[0]["type"], "subscribe");
+    assert_eq!(requests[1]["type"], "state");
+    assert_eq!(requests[2]["type"], "message");
+    assert_eq!(requests[3]["type"], "subscribe");
+    assert_eq!(
+        requests[3]["target_session_id"],
+        "session_desktop_reload_fake"
+    );
+    assert_client_reload_sequence(event_rx.try_iter().collect(), "session_desktop_reload_fake");
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn desktop_worker_emits_reloaded_before_real_done_after_fake_reload() -> Result<()> {
@@ -874,6 +924,62 @@ fn fake_windows_desktop_server_roundtrip(
     Ok(vec![subscribe, state, message])
 }
 
+#[cfg(windows)]
+fn fake_windows_desktop_server_reload_roundtrip(
+    pipe_name: String,
+    mut stream: std::fs::File,
+    new_socket_path: PathBuf,
+    ready_tx: mpsc::Sender<()>,
+) -> Result<Vec<Value>> {
+    let _ = ready_tx.send(());
+    let (accepted_stream, mut reader, subscribe) =
+        accept_first_requesting_windows_client(&pipe_name, stream)?;
+    stream = accepted_stream;
+    write_json_line(&mut stream, json!({"type": "ack", "id": subscribe["id"]}))?;
+    write_json_line(&mut stream, json!({"type": "done", "id": subscribe["id"]}))?;
+
+    let state = read_fake_server_request(&mut reader)?;
+    write_json_line(
+        &mut stream,
+        json!({
+            "type": "state",
+            "id": state["id"],
+            "session_id": "session_desktop_reload_fake",
+            "message_count": 0,
+            "is_processing": false,
+        }),
+    )?;
+
+    let message = read_fake_server_request(&mut reader)?;
+    write_json_line(&mut stream, json!({"type": "ack", "id": message["id"]}))?;
+    let new_pipe_name = server_io::path_to_windows_pipe_name(&new_socket_path);
+    let new_pipe = create_windows_pipe_instance(&new_pipe_name)?;
+    write_json_line(
+        &mut stream,
+        json!({"type": "reloading", "new_socket": new_socket_path.display().to_string()}),
+    )?;
+    let _ = write_json_line(&mut stream, json!({"type": "done", "id": message["id"]}));
+    drop(reader);
+    drop(stream);
+
+    let (mut new_stream, new_reader, reconnect_subscribe) =
+        accept_first_requesting_windows_client(&new_pipe_name, new_pipe)?;
+    write_json_line(
+        &mut new_stream,
+        json!({
+            "type": "session",
+            "session_id": "session_desktop_reload_fake",
+        }),
+    )?;
+    write_json_line(
+        &mut new_stream,
+        json!({"type": "done", "id": message["id"]}),
+    )?;
+    drop(new_reader);
+
+    Ok(vec![subscribe, state, message, reconnect_subscribe])
+}
+
 #[cfg(unix)]
 fn fake_desktop_server_reload_roundtrip(
     listener: UnixListener,
@@ -1105,7 +1211,7 @@ fn fake_desktop_server_accept_old_reload_client(
     })
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn assert_client_reload_sequence(events: Vec<DesktopSessionEvent>, session_id: &str) {
     let reload_index = events
         .iter()
