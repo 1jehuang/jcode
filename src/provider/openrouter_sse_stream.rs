@@ -165,10 +165,10 @@ async fn stream_response(
 
     let mut stream = OpenRouterStream::new(response.bytes_stream(), model.clone(), provider_pin);
 
-    const SSE_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+    let sse_chunk_timeout = crate::provider::sse_timeout::chunk_timeout(180);
 
     loop {
-        let event = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, stream.next()).await {
+        let event = match tokio::time::timeout(sse_chunk_timeout, stream.next()).await {
             Ok(Some(Ok(event))) => event,
             Ok(Some(Err(e))) => anyhow::bail!(
                 "OpenAI-compatible stream error\n  endpoint: {}\n  model: {}\n  auth: {}\n  error: {}",

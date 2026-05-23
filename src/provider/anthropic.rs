@@ -1455,15 +1455,18 @@ async fn stream_response(
     let mut cache_read_input_tokens: Option<u64> = None;
     let mut cache_creation_input_tokens: Option<u64> = None;
 
-    const SSE_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+    let sse_chunk_timeout = crate::provider::sse_timeout::chunk_timeout(180);
 
     loop {
-        let chunk = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, stream.next()).await {
+        let chunk = match tokio::time::timeout(sse_chunk_timeout, stream.next()).await {
             Ok(Some(chunk_result)) => chunk_result.context("Error reading stream chunk")?,
             Ok(None) => break, // stream ended normally
             Err(_) => {
-                crate::logging::warn("Anthropic SSE stream timed out (no data for 180s)");
-                anyhow::bail!("Stream read timeout: no data received for 180 seconds");
+                let secs = sse_chunk_timeout.as_secs();
+                crate::logging::warn(&format!(
+                    "Anthropic SSE stream timed out (no data for {secs}s)"
+                ));
+                anyhow::bail!("Stream read timeout: no data received for {secs} seconds");
             }
         };
         let chunk_str = String::from_utf8_lossy(&chunk);

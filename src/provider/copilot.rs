@@ -801,7 +801,7 @@ impl CopilotApiProvider {
     ) -> Result<()> {
         use futures::StreamExt;
 
-        const SSE_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+        let sse_chunk_timeout = crate::provider::sse_timeout::chunk_timeout(180);
 
         let mut stream = resp.bytes_stream();
         let mut buffer = String::new();
@@ -813,7 +813,7 @@ impl CopilotApiProvider {
         let mut saw_any_data = false;
 
         loop {
-            let chunk = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, stream.next()).await {
+            let chunk = match tokio::time::timeout(sse_chunk_timeout, stream.next()).await {
                 Ok(Some(Ok(c))) => c,
                 Ok(Some(Err(e))) => {
                     anyhow::bail!("Stream error: {}", e);
@@ -822,12 +822,12 @@ impl CopilotApiProvider {
                 Err(_) => {
                     crate::logging::warn(&format!(
                         "Copilot SSE stream timed out (no data for {}s, saw_data={})",
-                        SSE_CHUNK_TIMEOUT.as_secs(),
+                        sse_chunk_timeout.as_secs(),
                         saw_any_data
                     ));
                     anyhow::bail!(
                         "Stream read timeout: no data received for {} seconds",
-                        SSE_CHUNK_TIMEOUT.as_secs()
+                        sse_chunk_timeout.as_secs()
                     );
                 }
             };
