@@ -86,7 +86,7 @@ fn parse_ppid_from_proc_status() {
 
 #[tokio::test]
 async fn run_command_trims_trailing_newlines() {
-    let text = run_command("printf 'hello from test\\n'", 5)
+    let text = run_command("echo hello from test", 5)
         .await
         .expect("dictation command should succeed");
     assert_eq!(text, "hello from test");

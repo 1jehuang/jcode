@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 const RELOAD_HANDOFF_EVENT_POLL_MS: i32 = 100;
 
 pub fn reload_marker_path() -> PathBuf {

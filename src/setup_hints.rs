@@ -33,9 +33,7 @@ use macos_terminal::{
     launch_command_for_macos_terminal, paused_jcode_shell_command, save_preferred_macos_terminal,
 };
 #[cfg(windows)]
-use windows_setup::{
-    create_windows_desktop_shortcut, maybe_show_windows_setup_hints, run_setup_hotkey_windows,
-};
+use windows_setup::{maybe_show_windows_setup_hints, run_setup_hotkey_windows};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SetupHintsState {
@@ -541,14 +539,10 @@ pub fn run_setup_launcher() -> Result<()> {
 
 /// Create a desktop shortcut/launcher for jcode.
 ///
-/// - Windows: creates a .lnk shortcut on the Desktop
 /// - macOS: creates a jcode.app bundle in ~/Applications/
+/// - Linux/other Unix: records that no shortcut prompt is needed.
+#[cfg(any(test, target_os = "macos", not(any(windows, target_os = "macos"))))]
 fn create_desktop_shortcut(state: &mut SetupHintsState) -> Result<()> {
-    #[cfg(windows)]
-    {
-        create_windows_desktop_shortcut(state)?;
-    }
-
     #[cfg(any(test, target_os = "macos"))]
     {
         let (app_dir, _terminal) = install_macos_app_launcher()?;

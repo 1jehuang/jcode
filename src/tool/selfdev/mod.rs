@@ -344,15 +344,15 @@ impl BuildRequest {
 }
 
 struct BuildLockGuard {
-    _file: std::fs::File,
+    _file: Option<std::fs::File>,
     path: PathBuf,
 }
 
 type SelfDevBuildCommand = build::SelfDevBuildCommand;
 
-#[cfg(unix)]
 impl Drop for BuildLockGuard {
     fn drop(&mut self) {
+        drop(self._file.take());
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -556,7 +556,10 @@ impl SelfDevTool {
             .open(&path)?;
         let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if ret == 0 {
-            Ok(Some(BuildLockGuard { _file: file, path }))
+            Ok(Some(BuildLockGuard {
+                _file: Some(file),
+                path,
+            }))
         } else {
             Ok(None)
         }
@@ -568,7 +571,10 @@ impl SelfDevTool {
 
         let path = Self::build_lock_path(worktree_scope)?;
         match OpenOptions::new().create_new(true).write(true).open(&path) {
-            Ok(file) => Ok(Some(BuildLockGuard { _file: file, path })),
+            Ok(file) => Ok(Some(BuildLockGuard {
+                _file: Some(file),
+                path,
+            })),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
             Err(err) => Err(err.into()),
         }
