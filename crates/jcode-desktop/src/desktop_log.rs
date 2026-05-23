@@ -6,6 +6,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_MAX_LOG_MESSAGE_CHARS: usize = 8 * 1024;
+const REDACTED_SECRET: &str = "[REDACTED_SECRET]";
 
 static DESKTOP_LOG_FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 
@@ -26,11 +27,69 @@ pub(crate) fn error(args: fmt::Arguments<'_>) {
 }
 
 pub(crate) fn truncate_for_log(value: &str, max_chars: usize) -> String {
-    let sanitized = value
+    let redacted = redact_for_log(value);
+    let sanitized = redacted
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t");
     truncate_chars(&sanitized, max_chars)
+}
+
+fn redact_for_log(value: &str) -> String {
+    static DIRECT_PATTERNS: OnceLock<Vec<regex::Regex>> = OnceLock::new();
+    static FIELD_PATTERNS: OnceLock<Vec<regex::Regex>> = OnceLock::new();
+
+    let lower = value.to_ascii_lowercase();
+    if !value.contains("sk-")
+        && !value.contains("ghp_")
+        && !value.contains("github_pat_")
+        && !value.contains("AIza")
+        && !value.contains("ya29.")
+        && !lower.contains("authorization")
+        && !lower.contains("api_key")
+        && !lower.contains("password")
+        && !lower.contains("secret")
+        && !lower.contains("token")
+    {
+        return value.to_string();
+    }
+
+    let direct_patterns = DIRECT_PATTERNS.get_or_init(|| {
+        compile_regexes(&[
+            r"sk-ant-(?:oat|ort)01-[A-Za-z0-9_-]{20,}",
+            r"sk-or-v1-[A-Za-z0-9_-]{20,}",
+            r"ghp_[A-Za-z0-9]{20,}",
+            r"github_pat_[A-Za-z0-9_]{20,}",
+            r"ya29\.[A-Za-z0-9._-]{20,}",
+            r"AIza[0-9A-Za-z_-]{20,}",
+        ])
+    });
+    let field_patterns = FIELD_PATTERNS.get_or_init(|| {
+        compile_regexes(&[
+            r#"(?im)(authorization\s*:\s*(?:bearer|token)\s+)[^\r\n",}]+"#,
+            r#"(?im)(x-api-key\s*:\s*)[^\r\n",}]+"#,
+            r#"(?im)\b((?:[A-Z0-9_]*API_KEY|[A-Z0-9_]*TOKEN|[A-Z0-9_]*SECRET|[A-Z0-9_]*PASSWORD)\s*=\s*)[^\r\n\s",}]+"#,
+            r#"(?im)("(?:api_key|token|secret|password|authorization)"\s*:\s*")[^"]+"#,
+        ])
+    });
+
+    let mut redacted = value.to_string();
+    for pattern in direct_patterns {
+        redacted = pattern.replace_all(&redacted, REDACTED_SECRET).into_owned();
+    }
+    for pattern in field_patterns {
+        redacted = pattern
+            .replace_all(&redacted, format!("${{1}}{REDACTED_SECRET}"))
+            .into_owned();
+    }
+    redacted
+}
+
+fn compile_regexes(patterns: &[&str]) -> Vec<regex::Regex> {
+    patterns
+        .iter()
+        .filter_map(|pattern| regex::Regex::new(pattern).ok())
+        .collect()
 }
 
 fn write(level: &str, args: fmt::Arguments<'_>, mirror_to_stderr: bool) {
@@ -178,5 +237,31 @@ mod tests {
     fn truncate_for_log_escapes_control_characters() {
         assert_eq!(truncate_for_log("a\nb\tc", 16), "a\\nb\\tc");
         assert!(truncate_for_log("abcdef", 3).contains("abc… <truncated>"));
+    }
+
+    #[test]
+    fn truncate_for_log_redacts_common_secret_shapes() {
+        let line = truncate_for_log(
+            "Authorization: Bearer sk-ant-oat01-secretvaluethatmustnotappear\nOPENAI_API_KEY=sk-live-secret-that-must-not-appear",
+            4096,
+        );
+
+        assert!(line.contains("Authorization: Bearer [REDACTED_SECRET]"));
+        assert!(line.contains("OPENAI_API_KEY=[REDACTED_SECRET]"));
+        assert!(!line.contains("secretvaluethatmustnotappear"));
+        assert!(!line.contains("sk-live-secret-that-must-not-appear"));
+        assert!(!line.contains('\n'));
+    }
+
+    #[test]
+    fn truncate_for_log_redacts_json_secret_fields() {
+        let line = truncate_for_log(
+            r#"{"type":"stdin_response","input":"keep","api_key":"sk-live-secret-that-must-not-appear"}"#,
+            4096,
+        );
+
+        assert!(line.contains(r#""api_key":"[REDACTED_SECRET]"#));
+        assert!(line.contains(r#""input":"keep""#));
+        assert!(!line.contains("sk-live-secret-that-must-not-appear"));
     }
 }

@@ -3294,6 +3294,7 @@ dependencies = [
  "hex",
  "ignore",
  "image",
+ "indexmap",
  "jcode-agent-runtime",
  "jcode-ambient-types",
  "jcode-auth-types",
@@ -3304,6 +3305,8 @@ dependencies = [
  "jcode-compaction-core",
  "jcode-config-types",
  "jcode-core",
+ "jcode-debate-core",
+ "jcode-debate-orchestrator",
  "jcode-embedding",
  "jcode-gateway-types",
  "jcode-import-core",
@@ -3460,6 +3463,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-debate-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "jcode-message-types",
+ "jcode-provider-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "jcode-debate-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "indexmap",
+ "jcode-debate-core",
+ "jcode-message-types",
+ "parking_lot",
+ "regex",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "jcode-desktop"
 version = "0.1.0"
 dependencies = [
@@ -3469,15 +3506,19 @@ dependencies = [
  "base64 0.22.1",
  "bytemuck",
  "glyphon",
+ "hex",
  "image",
  "jcode-tui-messages",
  "libc",
  "pollster",
  "pulldown-cmark",
+ "regex",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "wgpu",
  "whoami",
+ "windows-sys 0.59.0",
  "winit",
 ]
 

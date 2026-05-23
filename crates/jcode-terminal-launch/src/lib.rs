@@ -342,6 +342,7 @@ fn build_spawn_command(term: &str, command: &TerminalCommand, cwd: &Path) -> Opt
     Some(cmd)
 }
 
+#[cfg(unix)]
 fn command_parts(command: &TerminalCommand) -> Vec<String> {
     std::iter::once(command.program.to_string_lossy().into_owned())
         .chain(command.args.iter().cloned())
@@ -349,6 +350,7 @@ fn command_parts(command: &TerminalCommand) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
@@ -356,7 +358,6 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    #[cfg(unix)]
     fn detected_resume_terminal_recognizes_ghostty_env() {
         let _guard = ENV_LOCK.lock().unwrap();
         unsafe {
@@ -378,7 +379,6 @@ mod tests {
     #[test]
     fn shell_command_quotes_arguments() {
         let shell = shell_command(&["jcode".to_string(), "it's ok".to_string()]);
-        #[cfg(unix)]
         assert_eq!(shell, "'jcode' 'it'\"'\"'s ok'");
     }
 }

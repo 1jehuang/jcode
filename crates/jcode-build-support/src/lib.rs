@@ -29,9 +29,11 @@ use anyhow::Result;
 use chrono::Utc;
 use jcode_storage as storage;
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 pub use jcode_selfdev_types::{

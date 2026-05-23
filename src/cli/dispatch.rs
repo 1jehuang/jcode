@@ -349,6 +349,10 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             RestartCommand::Status => commands::run_restart_status_command()?,
             RestartCommand::Clear => commands::run_restart_clear_command()?,
         },
+        Some(Command::Debate { topic, depth }) => {
+            commands::run_debate_command(&args.provider, args.model.as_deref(), &topic, &depth)
+                .await?
+        }
         None => run_default_command(args).await?,
     }
 
@@ -860,8 +864,6 @@ pub(crate) async fn spawn_server(
             timeout.as_millis()
         );
     }
-
-    Ok(())
 }
 
 #[cfg(test)]

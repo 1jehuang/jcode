@@ -58,6 +58,19 @@ fn create_git_repo_fixture() -> tempfile::TempDir {
     temp
 }
 
+fn assert_same_target_or_copy(actual: &std::path::Path, expected: &std::path::Path) {
+    let actual_canonical = std::fs::canonicalize(actual).expect("canonical actual");
+    let expected_canonical = std::fs::canonicalize(expected).expect("canonical expected");
+    if actual_canonical == expected_canonical {
+        return;
+    }
+
+    assert_eq!(
+        std::fs::read(actual).expect("read actual"),
+        std::fs::read(expected).expect("read expected")
+    );
+}
+
 fn source_state_fixture(short_hash: &str, fingerprint: &str) -> SourceState {
     SourceState {
         repo_scope: "repo-scope".to_string(),
@@ -204,9 +217,12 @@ fn test_client_update_candidate_prefers_dev_binary_for_selfdev() {
     let candidate = client_update_candidate(true).expect("expected selfdev candidate");
     assert_eq!(candidate.1, "current");
     assert_eq!(
-        std::fs::canonicalize(candidate.0).expect("canonical candidate"),
-        std::fs::canonicalize(version_binary).expect("canonical version binary")
+        read_current_version()
+            .expect("read current version")
+            .as_deref(),
+        Some(version)
     );
+    assert_same_target_or_copy(&candidate.0, &version_binary);
 
     if let Some(prev_home) = prev_home {
         jcode_core::env::set_var("JCODE_HOME", prev_home);
@@ -240,9 +256,12 @@ fn update_launcher_symlink_stays_inside_sandbox_home() {
             .join(binary_name());
         assert_eq!(launcher, expected_launcher);
         assert_eq!(
-            std::fs::canonicalize(&launcher).expect("canonical launcher"),
-            std::fs::canonicalize(version_binary).expect("canonical version binary")
+            read_current_version()
+                .expect("read current version")
+                .as_deref(),
+            Some(version)
         );
+        assert_same_target_or_copy(&launcher, &version_binary);
     });
 }
 
@@ -348,9 +367,13 @@ fn shared_server_candidate_prefers_approved_channel_over_current() {
         let candidate =
             shared_server_update_candidate(true).expect("expected shared-server candidate");
         assert_eq!(candidate.1, "shared-server");
-        let selected = std::fs::canonicalize(candidate.0).expect("canonical selected");
-        let approved = std::fs::canonicalize(version_binary_path(approved_version).unwrap())
-            .expect("canonical approved");
-        assert_eq!(selected, approved);
+        assert_eq!(
+            read_shared_server_version()
+                .expect("read shared server version")
+                .as_deref(),
+            Some(approved_version)
+        );
+        let approved = version_binary_path(approved_version).unwrap();
+        assert_same_target_or_copy(&candidate.0, &approved);
     });
 }

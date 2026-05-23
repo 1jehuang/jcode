@@ -59,36 +59,39 @@ fn find_command(name: &str) -> Option<PathBuf> {
 fn get_terminal_font() -> (String, f64) {
     #[cfg(windows)]
     {
-        return ("JetBrains Mono".to_string(), 11.0);
+        ("JetBrains Mono".to_string(), 11.0)
     }
 
-    if let Ok(conf) = std::fs::read_to_string(
-        dirs::home_dir()
-            .unwrap_or_default()
-            .join(".config/kitty/kitty.conf"),
-    ) {
-        let mut family = String::new();
-        let mut size: f64 = 11.0;
-        for line in conf.lines() {
-            let line = line.trim();
-            if line.starts_with("font_family ") {
-                family = line
-                    .strip_prefix("font_family ")
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
+    #[cfg(not(windows))]
+    {
+        if let Ok(conf) = std::fs::read_to_string(
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(".config/kitty/kitty.conf"),
+        ) {
+            let mut family = String::new();
+            let mut size: f64 = 11.0;
+            for line in conf.lines() {
+                let line = line.trim();
+                if line.starts_with("font_family ") {
+                    family = line
+                        .strip_prefix("font_family ")
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                }
+                if line.starts_with("font_size ")
+                    && let Ok(s) = line.strip_prefix("font_size ").unwrap_or("").trim().parse()
+                {
+                    size = s;
+                }
             }
-            if line.starts_with("font_size ")
-                && let Ok(s) = line.strip_prefix("font_size ").unwrap_or("").trim().parse()
-            {
-                size = s;
+            if !family.is_empty() {
+                return (family, size);
             }
         }
-        if !family.is_empty() {
-            return (family, size);
-        }
+        ("JetBrains Mono".to_string(), 11.0)
     }
-    ("JetBrains Mono".to_string(), 11.0)
 }
 
 fn swarm_export_grid(pane_count: u16) -> (u16, u16) {

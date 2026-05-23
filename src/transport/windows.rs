@@ -132,7 +132,7 @@ impl Stream {
         static PAIR_COUNTER: AtomicU64 = AtomicU64::new(0);
         let counter = PAIR_COUNTER.fetch_add(1, Ordering::Relaxed);
         let pipe_name = format!(r"\\.\pipe\jcode-pair-{}-{}", std::process::id(), counter);
-        let mut server = ServerOptions::new()
+        let server = ServerOptions::new()
             .first_pipe_instance(true)
             .create(&pipe_name)?;
         let client = ClientOptions::new().open(&pipe_name)?;
@@ -363,7 +363,16 @@ impl io::Write for SyncStream {
 
 pub fn is_socket_path(path: &Path) -> bool {
     let pipe_name = path_to_pipe_name(path);
-    ClientOptions::new().open(&pipe_name).is_ok()
+    match ClientOptions::new().open(&pipe_name) {
+        Ok(_) => true,
+        Err(err)
+            if err.raw_os_error()
+                == Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32) =>
+        {
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 pub fn remove_socket(path: &Path) {

@@ -734,6 +734,9 @@ async fn firefox_run_bridge_command(
     params: Value,
     ctx: &ToolContext,
 ) -> Result<Value> {
+    #[cfg(windows)]
+    let _ = ctx;
+
     let bin = crate::browser::browser_binary_path();
     if !bin.exists() {
         anyhow::bail!(

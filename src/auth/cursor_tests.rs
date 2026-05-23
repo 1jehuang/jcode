@@ -238,13 +238,17 @@ fn load_key_from_file(path: &PathBuf) -> Result<String> {
 }
 
 /// Helper: create a mock state.vscdb with the given key/value pairs.
-fn create_mock_vscdb(dir: &std::path::Path, entries: &[(&str, &str)]) -> PathBuf {
+fn create_mock_vscdb(dir: &std::path::Path, entries: &[(&str, &str)]) -> Option<PathBuf> {
     let db_path = dir.join("state.vscdb");
-    let status = std::process::Command::new("sqlite3")
+    let status = match std::process::Command::new("sqlite3")
         .arg(&db_path)
         .arg("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);")
         .status()
-        .expect("sqlite3 must be installed for these tests");
+    {
+        Ok(status) => status,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => panic!("failed to run sqlite3: {err}"),
+    };
     assert!(status.success(), "Failed to create mock vscdb");
 
     for (key, value) in entries {
@@ -259,13 +263,31 @@ fn create_mock_vscdb(dir: &std::path::Path, entries: &[(&str, &str)]) -> PathBuf
             .unwrap();
         assert!(status.success(), "Failed to insert into mock vscdb");
     }
-    db_path
+    Some(db_path)
+}
+
+fn create_mock_vscdb_with_sql(dir: &std::path::Path, sql: &str) -> Option<PathBuf> {
+    let db_path = dir.join("state.vscdb");
+    let status = match std::process::Command::new("sqlite3")
+        .arg(&db_path)
+        .arg(sql)
+        .status()
+    {
+        Ok(status) => status,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => panic!("failed to run sqlite3: {err}"),
+    };
+    assert!(status.success());
+    Some(db_path)
 }
 
 #[test]
 fn vscdb_read_access_token() {
     let dir = TempDir::new().unwrap();
-    let db = create_mock_vscdb(dir.path(), &[("cursorAuth/accessToken", "tok_abc123xyz")]);
+    let Some(db) = create_mock_vscdb(dir.path(), &[("cursorAuth/accessToken", "tok_abc123xyz")])
+    else {
+        return;
+    };
     let result = read_vscdb_key(&db, "cursorAuth/accessToken").unwrap();
     assert_eq!(result, "tok_abc123xyz");
 }
@@ -273,13 +295,15 @@ fn vscdb_read_access_token() {
 #[test]
 fn vscdb_read_machine_id() {
     let dir = TempDir::new().unwrap();
-    let db = create_mock_vscdb(
+    let Some(db) = create_mock_vscdb(
         dir.path(),
         &[(
             "storage.serviceMachineId",
             "550e8400-e29b-41d4-a716-446655440000",
         )],
-    );
+    ) else {
+        return;
+    };
     let result = read_vscdb_key(&db, "storage.serviceMachineId").unwrap();
     assert_eq!(result, "550e8400-e29b-41d4-a716-446655440000");
 }
@@ -287,7 +311,9 @@ fn vscdb_read_machine_id() {
 #[test]
 fn vscdb_missing_key_returns_error() {
     let dir = TempDir::new().unwrap();
-    let db = create_mock_vscdb(dir.path(), &[("other/key", "value")]);
+    let Some(db) = create_mock_vscdb(dir.path(), &[("other/key", "value")]) else {
+        return;
+    };
     let result = read_vscdb_key(&db, "cursorAuth/accessToken");
     assert!(result.is_err());
     assert!(
@@ -301,7 +327,9 @@ fn vscdb_missing_key_returns_error() {
 #[test]
 fn vscdb_empty_value_returns_error() {
     let dir = TempDir::new().unwrap();
-    let db = create_mock_vscdb(dir.path(), &[("cursorAuth/accessToken", "")]);
+    let Some(db) = create_mock_vscdb(dir.path(), &[("cursorAuth/accessToken", "")]) else {
+        return;
+    };
     let result = read_vscdb_key(&db, "cursorAuth/accessToken");
     assert!(result.is_err());
 }
@@ -316,7 +344,7 @@ fn vscdb_missing_file_returns_error() {
 #[test]
 fn vscdb_multiple_keys() {
     let dir = TempDir::new().unwrap();
-    let db = create_mock_vscdb(
+    let Some(db) = create_mock_vscdb(
         dir.path(),
         &[
             ("cursorAuth/accessToken", "my_token"),
@@ -324,7 +352,9 @@ fn vscdb_multiple_keys() {
             ("cursorAuth/refreshToken", "refresh_456"),
             ("cursorAuth/cachedEmail", "user@example.com"),
         ],
-    );
+    ) else {
+        return;
+    };
     assert_eq!(
         read_vscdb_key(&db, "cursorAuth/accessToken").unwrap(),
         "my_token"
@@ -346,13 +376,12 @@ fn vscdb_multiple_keys() {
 #[test]
 fn vscdb_wrong_table_name() {
     let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("state.vscdb");
-    let status = std::process::Command::new("sqlite3")
-        .arg(&db_path)
-        .arg("CREATE TABLE WrongTable (key TEXT, value BLOB);")
-        .status()
-        .unwrap();
-    assert!(status.success());
+    let Some(db_path) = create_mock_vscdb_with_sql(
+        dir.path(),
+        "CREATE TABLE WrongTable (key TEXT, value BLOB);",
+    ) else {
+        return;
+    };
     let result = read_vscdb_key(&db_path, "cursorAuth/accessToken");
     assert!(result.is_err());
 }

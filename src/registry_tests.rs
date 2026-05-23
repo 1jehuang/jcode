@@ -1,5 +1,6 @@
 use super::*;
 use crate::storage::lock_test_env;
+#[cfg(unix)]
 use crate::transport::Listener;
 use std::ffi::OsString;
 

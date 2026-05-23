@@ -1350,3 +1350,163 @@ fn filter_cli_model_routes_for_choice(
 #[cfg(test)]
 #[path = "commands_tests.rs"]
 mod tests;
+
+// =============================================================================
+// Debate Command
+// =============================================================================
+
+use jcode_debate_core::{
+    Coordinator, DebateConfig, DebateTopic, DebateVerdict, create_adapter_from_multi_provider,
+};
+use jcode_debate_orchestrator::{DebateDecisionEngine, DebateDepth};
+use std::sync::Arc;
+
+/// Run the multi-perspective debate command
+pub async fn run_debate_command(
+    provider_choice: &super::provider_init::ProviderChoice,
+    model: Option<&str>,
+    topic: &str,
+    depth_arg: &str,
+) -> Result<()> {
+    let depth = match depth_arg.trim().to_ascii_lowercase().as_str() {
+        "quick" => DebateDepth::Quick,
+        "medium" => DebateDepth::Medium,
+        "deep" => DebateDepth::Deep,
+        other => {
+            anyhow::bail!(
+                "Invalid debate depth '{}'. Expected one of: quick, medium, deep",
+                other
+            )
+        }
+    };
+
+    // Use decision engine to validate the debate request
+    let engine = DebateDecisionEngine::new();
+    let decision = engine.decide_explicit(topic, depth);
+
+    if !decision.should_debate {
+        println!(
+            "Debate not recommended for this topic: {}",
+            decision.explanation
+        );
+        return Ok(());
+    }
+
+    print_debate_header(topic, depth);
+
+    println!("Initializing provider-backed debate...\n");
+
+    let provider = super::provider_init::init_provider_quiet(provider_choice, model).await?;
+    let active_model = model
+        .map(str::to_string)
+        .unwrap_or_else(|| provider.model());
+    let provider_name = provider.name().to_string();
+    let adapter = create_adapter_from_multi_provider(provider, &provider_name, Some(&active_model));
+    let config = debate_config_for_depth(depth, provider_name.clone(), active_model.clone());
+    let coordinator = Coordinator::new(config, Arc::new(adapter));
+
+    coordinator.set_topic(DebateTopic::new(topic)).await;
+    let verdict = coordinator.run_debate().await?;
+
+    print_debate_verdict(&verdict, depth, &provider_name, &active_model);
+
+    Ok(())
+}
+
+fn debate_config_for_depth(depth: DebateDepth, provider: String, model: String) -> DebateConfig {
+    let mut config = DebateConfig {
+        provider,
+        model,
+        ..DebateConfig::default()
+    };
+
+    match depth {
+        DebateDepth::Quick => {
+            config.rounds = 1;
+            config.max_tokens = 768;
+            config.timeout_secs = 30;
+            config.rate_limit_interval_secs = 1;
+        }
+        DebateDepth::Medium => {
+            config.rounds = 2;
+            config.max_tokens = 1024;
+            config.timeout_secs = 60;
+            config.rate_limit_interval_secs = 2;
+        }
+        DebateDepth::Deep => {
+            config.rounds = 3;
+            config.max_tokens = 1536;
+            config.timeout_secs = 120;
+            config.rate_limit_interval_secs = 2;
+        }
+    }
+
+    config
+}
+
+/// Print the debate header
+fn print_debate_header(topic: &str, depth: DebateDepth) {
+    println!("\n{}", "=".repeat(60));
+    println!("MULTI-PERSPECTIVE DEBATE");
+    println!("{}", "=".repeat(60));
+    println!("\nTopic: {}", topic);
+    println!("Depth: {:?} ({}s timeout)", depth, depth.timeout_secs());
+    println!(
+        "Token cost estimate: {:.1}x vs simple response\n",
+        depth.token_budget_multiplier()
+    );
+}
+
+/// Print the debate result in a formatted way
+fn print_debate_verdict(
+    verdict: &DebateVerdict,
+    depth: DebateDepth,
+    provider_name: &str,
+    model: &str,
+) {
+    println!("\n{}", "=".repeat(60));
+    println!("DEBATE VERDICT");
+    println!("{}", "=".repeat(60));
+
+    println!("\n[RECOMMENDATION]");
+    println!("{}", verdict.recommendation);
+
+    println!("\n[CONFIDENCE]");
+    println!("{}", verdict.confidence);
+
+    println!("\n[SUMMARY]");
+    println!("{}", verdict.summary);
+
+    if !verdict.agreements.is_empty() {
+        println!("\n[AGREEMENTS]");
+        for agreement in &verdict.agreements {
+            println!("  - {}", agreement);
+        }
+    }
+
+    if !verdict.disagreements.is_empty() {
+        println!("\n[DISAGREEMENTS]");
+        for disagreement in &verdict.disagreements {
+            println!("  - {}", disagreement);
+        }
+    }
+
+    if !verdict.caveats.is_empty() {
+        println!("\n[CAVEATS]");
+        for caveat in &verdict.caveats {
+            println!("  - {}", caveat);
+        }
+    }
+
+    println!("\n{}", "=".repeat(60));
+    println!(
+        "Debate completed with {:?} depth, {} round(s)",
+        depth, verdict.rounds_completed
+    );
+    println!("Provider: {} | Model: {}", provider_name, model);
+    println!(
+        "Token cost: {:.1}x vs simple response",
+        depth.token_budget_multiplier()
+    );
+    println!("{}", "=".repeat(60));
+}

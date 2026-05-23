@@ -419,6 +419,16 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: RestartCommand,
     },
+
+    /// Run multi-perspective debate on a topic
+    Debate {
+        /// Topic to debate
+        topic: String,
+
+        /// Depth preset (quick, medium, deep)
+        #[arg(long, default_value = "medium")]
+        depth: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]

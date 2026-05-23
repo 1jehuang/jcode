@@ -7,15 +7,17 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant, sleep};
 
 pub(crate) struct ActiveDictation {
+    #[cfg(unix)]
     pid: u32,
     #[cfg(not(unix))]
     child: Arc<Mutex<Option<Child>>>,
 }
 
 impl ActiveDictation {
-    fn new(pid: u32, _child: Arc<Mutex<Option<Child>>>) -> Self {
+    fn new(_pid: u32, _child: Arc<Mutex<Option<Child>>>) -> Self {
         Self {
-            pid,
+            #[cfg(unix)]
+            pid: _pid,
             #[cfg(not(unix))]
             child: _child,
         }
@@ -254,10 +256,10 @@ async fn wait_for_dictation_exit(
                 let guard = child.lock().await;
                 guard.as_ref().and_then(|process| process.id())
             };
-            if let Some(pid) = pid {
+            if let Some(_pid) = pid {
                 #[cfg(unix)]
                 {
-                    let _ = crate::platform::signal_detached_process_group(pid, libc::SIGINT);
+                    let _ = crate::platform::signal_detached_process_group(_pid, libc::SIGINT);
                 }
                 #[cfg(not(unix))]
                 {
@@ -519,7 +521,7 @@ mod tests {
 
     #[tokio::test]
     async fn dictation_command_trims_trailing_newlines() {
-        let text = run_dictation_command("printf 'hello from test\\n'", 5)
+        let text = run_dictation_command("echo hello from test", 5)
             .await
             .expect("dictation command should succeed");
         assert_eq!(text, "hello from test");

@@ -58,6 +58,10 @@ pub fn redact_secrets(text: &str) -> String {
         && !text.contains("ya29.")
         && !text.contains("xox")
         && !lower.contains("api_key")
+        && !lower.contains("authorization")
+        && !lower.contains("bearer")
+        && !lower.contains("password")
+        && !lower.contains("secret")
         && !lower.contains("token")
     {
         logging::debug("secret redaction fast path skipped regex scan");
@@ -71,6 +75,7 @@ pub fn redact_secrets(text: &str) -> String {
 
     static DIRECT_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     static ASSIGNMENT_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    static HEADER_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
 
     let direct_patterns = DIRECT_PATTERNS.get_or_init(|| {
         compile_static_regexes(&[
@@ -117,6 +122,22 @@ pub fn redact_secrets(text: &str) -> String {
             r"(?m)^\s*(AZURE_OPENAI_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(CURSOR_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(GITHUB_TOKEN\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(GOOGLE_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(GEMINI_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(BING_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(JCODE_BING_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(TELEGRAM_BOT_TOKEN\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(DISCORD_BOT_TOKEN\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(JCODE_SMTP_PASSWORD\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(AWS_ACCESS_KEY_ID\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(AWS_SECRET_ACCESS_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(AWS_SESSION_TOKEN\s*=\s*)[^\r\n]+",
+        ])
+    });
+    let header_patterns = HEADER_PATTERNS.get_or_init(|| {
+        compile_static_regexes(&[
+            r"(?im)^(\s*authorization\s*:\s*(?:bearer|token)\s+)[^\r\n]+",
+            r"(?im)^(\s*x-api-key\s*:\s*)[^\r\n]+",
         ])
     });
 
@@ -153,6 +174,16 @@ pub fn redact_secrets(text: &str) -> String {
         "AZURE_OPENAI_API_KEY",
         "CURSOR_API_KEY",
         "GITHUB_TOKEN",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "BING_API_KEY",
+        "JCODE_BING_API_KEY",
+        "TELEGRAM_BOT_TOKEN",
+        "DISCORD_BOT_TOKEN",
+        "JCODE_SMTP_PASSWORD",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
     ]
     .iter()
     .map(|k| (*k).to_string())
@@ -163,6 +194,12 @@ pub fn redact_secrets(text: &str) -> String {
     }
 
     for re in assignment_patterns {
+        redacted = re
+            .replace_all(&redacted, "${1}[REDACTED_SECRET]")
+            .into_owned();
+    }
+
+    for re in header_patterns {
         redacted = re
             .replace_all(&redacted, "${1}[REDACTED_SECRET]")
             .into_owned();

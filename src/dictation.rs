@@ -68,8 +68,8 @@ pub async fn run_command(command: &str, timeout_secs: u64) -> Result<String> {
     Ok(transcript)
 }
 
-fn last_focused_session_write_cache() -> &'static Mutex<Option<String>> {
-    static CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+fn last_focused_session_write_cache() -> &'static Mutex<Option<(std::path::PathBuf, String)>> {
+    static CACHE: OnceLock<Mutex<Option<(std::path::PathBuf, String)>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(None))
 }
 
@@ -79,20 +79,20 @@ pub fn remember_last_focused_session(session_id: &str) -> Result<()> {
         return Ok(());
     }
 
+    let path = last_focused_session_path()?;
     if let Ok(cache) = last_focused_session_write_cache().lock()
-        && cache.as_deref() == Some(session_id)
+        && cache.as_ref() == Some(&(path.clone(), session_id.to_string()))
     {
         return Ok(());
     }
 
-    let path = last_focused_session_path()?;
     if let Some(parent) = path.parent() {
         crate::storage::ensure_dir(parent)?;
     }
     std::fs::write(&path, session_id).context("failed to persist last focused jcode session")?;
 
     if let Ok(mut cache) = last_focused_session_write_cache().lock() {
-        *cache = Some(session_id.to_string());
+        *cache = Some((path, session_id.to_string()));
     }
 
     Ok(())

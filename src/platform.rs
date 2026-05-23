@@ -1,5 +1,6 @@
 use std::path::Path;
 
+#[cfg(any(unix, test))]
 fn desired_nofile_soft_limit(current: u64, hard: u64, minimum: u64) -> Option<u64> {
     let desired = current.max(minimum).min(hard);
     (desired > current).then_some(desired)

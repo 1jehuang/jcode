@@ -1,6 +1,7 @@
 use crate::cli::args::{AmbientCommand, Args, Command};
 
 const LINUX_PROCESS_TITLE_LIMIT: usize = 15;
+#[cfg(target_os = "linux")]
 const KILLALL_PROCESS_NAME: &str = "jcode";
 
 fn compact_process_title(prefix: &str, name: Option<&str>) -> String {
@@ -154,6 +155,7 @@ pub(crate) fn initial_title(args: &Args) -> String {
         Some(Command::Model(_)) => "jcode model".to_string(),
         Some(Command::AuthTest { .. }) => "jcode auth-test".to_string(),
         Some(Command::Restart { .. }) => "jcode restart".to_string(),
+        Some(Command::Debate { .. }) => "jcode debate".to_string(),
         Some(Command::SetupLauncher) => "jcode setup-launcher".to_string(),
         None => {
             if let Some(resume) = args.resume.as_deref().filter(|resume| !resume.is_empty()) {

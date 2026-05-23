@@ -1,7 +1,6 @@
 use super::animation::{FOCUS_PULSE_DURATION, VIEWPORT_ANIMATION_DURATION};
 use super::single_session::*;
 use super::*;
-use std::sync::Mutex;
 
 #[test]
 fn desktop_frame_profile_is_opt_in_and_recognizes_trace_modes() {
@@ -97,15 +96,8 @@ fn desktop_hot_reload_drops_resume_when_current_app_is_fresh() {
 
 #[test]
 fn desktop_hot_reload_persists_workspace_focus_before_spawn() -> Result<()> {
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-    let Ok(_guard) = ENV_LOCK.lock() else {
-        anyhow::bail!("desktop hot reload env lock poisoned");
-    };
     let temp = unique_desktop_test_dir("desktop-hot-reload-workspace-state")?;
     let state_path = temp.join("desktop-state.json");
-    unsafe {
-        std::env::set_var("JCODE_DESKTOP_STATE", &state_path);
-    }
 
     let relaunch = DesktopRelaunch {
         binary: PathBuf::from("/old/jcode-desktop"),
@@ -138,17 +130,19 @@ fn desktop_hot_reload_persists_workspace_focus_before_spawn() -> Result<()> {
     });
     let app = DesktopApp::Workspace(workspace);
 
-    let updated = relaunch.for_app(&app, PathBuf::from("/new/jcode-desktop"));
+    let updated = relaunch.for_app_with_preferences_path(
+        &app,
+        PathBuf::from("/new/jcode-desktop"),
+        Some(&state_path),
+    );
 
     assert_eq!(updated.args, vec![OsString::from("--workspace")]);
-    let saved = desktop_prefs::load_preferences()?.expect("workspace preferences saved");
+    let saved = desktop_prefs::load_preferences_from_path(&state_path)?
+        .expect("workspace preferences saved");
     assert_eq!(saved.focused_session_id.as_deref(), Some("session-b"));
     assert_eq!(saved.panel_size, PanelSizePreset::ThreeQuarter);
     assert_eq!(saved.space_hold_toggle_ms, 333);
 
-    unsafe {
-        std::env::remove_var("JCODE_DESKTOP_STATE");
-    }
     std::fs::remove_dir_all(temp)?;
     Ok(())
 }

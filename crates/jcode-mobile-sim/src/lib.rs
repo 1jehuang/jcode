@@ -1,11 +1,16 @@
-use anyhow::{Context, Result, anyhow, bail};
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::{Result, bail};
+use jcode_mobile_core::ScenarioName;
+#[cfg(unix)]
 use jcode_mobile_core::{
-    DispatchReport, ScenarioName, ScreenshotSnapshot, SimulatorAction, SimulatorStore,
-    UiNodeAction, diff_screenshots, hit_test, hit_test_actionable, render_text,
-    screenshot_snapshot,
+    DispatchReport, ScreenshotSnapshot, SimulatorAction, SimulatorStore, UiNodeAction,
+    diff_screenshots, hit_test, hit_test_actionable, render_text, screenshot_snapshot,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(unix)]
+use serde_json::json;
 use std::path::{Path, PathBuf};
 
 pub mod gpu_preview;
@@ -643,6 +648,7 @@ async fn handle_request(
     }
 }
 
+#[cfg(unix)]
 fn required_str<'a>(params: &'a Value, field: &str) -> Result<&'a str> {
     params
         .get(field)
@@ -650,6 +656,7 @@ fn required_str<'a>(params: &'a Value, field: &str) -> Result<&'a str> {
         .ok_or_else(|| anyhow!("missing {field}"))
 }
 
+#[cfg(unix)]
 fn required_i32(params: &Value, field: &str) -> Result<i32> {
     let value = params
         .get(field)
@@ -658,6 +665,7 @@ fn required_i32(params: &Value, field: &str) -> Result<i32> {
     i32::try_from(value).map_err(|_| anyhow!("{field} is outside i32 range"))
 }
 
+#[cfg(unix)]
 fn text_action_for_node(
     state: &jcode_mobile_core::SimulatorState,
     node_id: &str,
@@ -691,6 +699,7 @@ fn text_action_for_node(
     }
 }
 
+#[cfg(unix)]
 fn keypress_action(
     state: &jcode_mobile_core::SimulatorState,
     node_id: &str,
@@ -725,6 +734,7 @@ fn keypress_action(
     }
 }
 
+#[cfg(unix)]
 fn wait_condition_matches(store: &SimulatorStore, params: &Value) -> bool {
     if let Some(screen) = params.get("screen").and_then(Value::as_str) {
         let actual = format!("{:?}", store.state().screen).to_lowercase();
@@ -747,6 +757,7 @@ fn wait_condition_matches(store: &SimulatorStore, params: &Value) -> bool {
     true
 }
 
+#[cfg(unix)]
 fn fault_action(kind: &str, params: &Value) -> Result<SimulatorAction> {
     let message = params
         .get("message")
@@ -768,6 +779,7 @@ fn fault_action(kind: &str, params: &Value) -> Result<SimulatorAction> {
     }
 }
 
+#[cfg(unix)]
 fn find_node_json<'a>(value: &'a Value, node_id: &str) -> Option<&'a Value> {
     if value.get("id").and_then(Value::as_str) == Some(node_id) {
         return Some(value);
@@ -788,6 +800,7 @@ fn find_node_json<'a>(value: &'a Value, node_id: &str) -> Option<&'a Value> {
     None
 }
 
+#[cfg(unix)]
 fn assert_optional_bool(node: &Value, params: &Value, field: &str) -> Result<()> {
     let Some(expected) = params.get(field).and_then(Value::as_bool) else {
         return Ok(());
@@ -803,6 +816,7 @@ fn assert_optional_bool(node: &Value, params: &Value, field: &str) -> Result<()>
     }
 }
 
+#[cfg(unix)]
 fn assert_optional_string(node: &Value, params: &Value, field: &str) -> Result<()> {
     let Some(expected) = params.get(field).and_then(Value::as_str) else {
         return Ok(());
@@ -820,6 +834,7 @@ fn assert_optional_string(node: &Value, params: &Value, field: &str) -> Result<(
     }
 }
 
+#[cfg(unix)]
 fn find_matching_record<'a>(
     records: &'a Value,
     params: &Value,
@@ -831,6 +846,7 @@ fn find_matching_record<'a>(
         .find(|record| record_matches(record, params, typed_field))
 }
 
+#[cfg(unix)]
 fn record_matches(record: &Value, params: &Value, typed_field: &str) -> bool {
     if let Some(expected_type) = params.get("type").and_then(Value::as_str) {
         let actual_type = record
@@ -852,6 +868,7 @@ fn record_matches(record: &Value, params: &Value, typed_field: &str) -> bool {
     true
 }
 
+#[cfg(unix)]
 fn describe_record_assertion(params: &Value) -> String {
     let mut parts = Vec::new();
     if let Some(expected_type) = params.get("type").and_then(Value::as_str) {
@@ -889,6 +906,7 @@ fn user_discriminator() -> String {
         .unwrap_or_else(|_| "user".to_string())
 }
 
+#[cfg(unix)]
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -896,6 +914,6 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "lib_tests.rs"]
 mod tests;

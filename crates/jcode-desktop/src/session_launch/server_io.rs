@@ -22,9 +22,19 @@ use super::{
 
 const CANCEL_COMPLETION_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[cfg(unix)]
+type DesktopServerStream = UnixStream;
+
+#[cfg(windows)]
+type DesktopServerStream = std::fs::File;
+
 pub(super) fn ensure_server_running() -> Result<()> {
     let path = socket_path();
-    if UnixStream::connect(&path).is_ok() {
+    ensure_server_running_path(&path)
+}
+
+pub(super) fn ensure_server_running_path(path: &Path) -> Result<()> {
+    if try_connect_server_path(&path).is_ok() {
         return Ok(());
     }
 
@@ -34,12 +44,12 @@ pub(super) fn ensure_server_running() -> Result<()> {
         .lock()
         .map_err(|_| anyhow::anyhow!("desktop server startup lock is poisoned"))?;
 
-    if UnixStream::connect(&path).is_ok() {
+    if try_connect_server_path(&path).is_ok() {
         return Ok(());
     }
 
     spawn_jcode_server_with_diagnostics()?;
-    connect_server_with_retry_path(&path, SERVER_START_TIMEOUT).map(|_| ())
+    connect_server_with_retry_path(path, SERVER_START_TIMEOUT).map(|_| ())
 }
 
 fn spawn_jcode_server_with_diagnostics() -> Result<()> {
@@ -111,20 +121,18 @@ where
     }
 }
 
-#[cfg(unix)]
-pub(super) fn connect_server_with_retry(timeout: Duration) -> Result<UnixStream> {
+pub(super) fn connect_server_with_retry(timeout: Duration) -> Result<DesktopServerStream> {
     connect_server_with_retry_path(&socket_path(), timeout)
 }
 
-#[cfg(unix)]
 pub(super) fn connect_server_with_retry_path(
     socket_path: &Path,
     timeout: Duration,
-) -> Result<UnixStream> {
+) -> Result<DesktopServerStream> {
     let started = Instant::now();
     let mut last_error = None;
     while started.elapsed() < timeout {
-        match UnixStream::connect(socket_path) {
+        match try_connect_server_path(socket_path) {
             Ok(stream) => return Ok(stream),
             Err(error) => last_error = Some(error),
         }
@@ -140,6 +148,93 @@ pub(super) fn connect_server_with_retry_path(
         }),
         None => anyhow::bail!("timed out connecting to jcode server"),
     }
+}
+
+#[cfg(unix)]
+fn try_connect_server_path(socket_path: &Path) -> io::Result<DesktopServerStream> {
+    UnixStream::connect(socket_path)
+}
+
+#[cfg(windows)]
+fn try_connect_server_path(socket_path: &Path) -> io::Result<DesktopServerStream> {
+    use std::ffi::OsStr;
+    use std::iter;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::{
+        ERROR_PIPE_BUSY, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
+
+    let pipe_name = path_to_windows_pipe_name(socket_path);
+    let wide_name = OsStr::new(&pipe_name)
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            wide_name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) {
+            let waited = unsafe { WaitNamedPipeW(wide_name.as_ptr(), 50) } != 0;
+            if waited {
+                return try_connect_server_path(socket_path);
+            }
+        }
+        return Err(error);
+    }
+
+    Ok(unsafe { std::fs::File::from_raw_handle(handle as std::os::windows::io::RawHandle) })
+}
+
+#[cfg(unix)]
+fn configure_read_timeout(
+    stream: &DesktopServerStream,
+    timeout: Option<Duration>,
+) -> io::Result<()> {
+    stream.set_read_timeout(timeout)
+}
+
+#[cfg(windows)]
+fn configure_read_timeout(
+    _stream: &DesktopServerStream,
+    _timeout: Option<Duration>,
+) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+pub(super) fn path_to_windows_pipe_name(path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+
+    let stem: String = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("jcode")
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+        .take(32)
+        .collect();
+    let stem = if stem.is_empty() { "jcode" } else { &stem };
+    let normalized = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    let digest = Sha256::digest(normalized.as_bytes());
+    let hash = hex::encode(digest);
+    format!(r"\\.\pipe\{}-{}", stem, &hash[..16])
 }
 
 #[cfg(unix)]
@@ -218,9 +313,49 @@ pub(super) fn validate_reload_socket_path(
     Ok(new_socket_path)
 }
 
-#[cfg(unix)]
+#[cfg(windows)]
+pub(super) fn validate_reload_socket_path(
+    current_socket_path: &Path,
+    raw_new_socket: &str,
+) -> Result<PathBuf> {
+    let trimmed = raw_new_socket.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("jcode server advertised an empty reload socket path");
+    }
+
+    let new_socket_path = PathBuf::from(trimmed);
+    if !new_socket_path.is_absolute() {
+        anyhow::bail!(
+            "jcode server advertised non-absolute reload socket path {}",
+            new_socket_path.display()
+        );
+    }
+
+    let Some(current_parent) = current_socket_path.parent() else {
+        anyhow::bail!(
+            "current jcode socket path has no parent: {}",
+            current_socket_path.display()
+        );
+    };
+    let Some(new_parent) = new_socket_path.parent() else {
+        anyhow::bail!(
+            "advertised reload socket path has no parent: {}",
+            new_socket_path.display()
+        );
+    };
+    if current_parent != new_parent {
+        anyhow::bail!(
+            "jcode server advertised reload socket outside current socket directory: {} (current directory {})",
+            new_socket_path.display(),
+            current_parent.display()
+        );
+    }
+
+    Ok(new_socket_path)
+}
+
 pub(super) fn subscribe_to_server(
-    writer: &mut UnixStream,
+    writer: &mut DesktopServerStream,
     id: u64,
     target_session_id: Option<&str>,
 ) -> Result<()> {
@@ -236,10 +371,9 @@ pub(super) fn subscribe_to_server(
     )
 }
 
-#[cfg(unix)]
 pub(super) fn establish_session_id(
-    reader: &mut BufReader<UnixStream>,
-    writer: &mut UnixStream,
+    reader: &mut BufReader<DesktopServerStream>,
+    writer: &mut DesktopServerStream,
     next_request_id: &mut u64,
     subscribe_request_id: u64,
     event_tx: Option<&DesktopSessionEventSender>,
@@ -265,10 +399,9 @@ pub(super) fn establish_session_id(
     read_session_id_from_state(reader, SERVER_START_TIMEOUT, event_tx, state_request_id)
 }
 
-#[cfg(unix)]
 pub(super) fn subscribe_and_establish_session(
-    reader: &mut BufReader<UnixStream>,
-    writer: &mut UnixStream,
+    reader: &mut BufReader<DesktopServerStream>,
+    writer: &mut DesktopServerStream,
     next_request_id: &mut u64,
     target_session_id: Option<&str>,
     event_tx: Option<&DesktopSessionEventSender>,
@@ -285,16 +418,13 @@ pub(super) fn subscribe_and_establish_session(
     )
 }
 
-#[cfg(unix)]
 pub(super) fn read_session_id_from_events(
-    reader: &mut BufReader<UnixStream>,
+    reader: &mut BufReader<DesktopServerStream>,
     timeout: Duration,
     event_tx: Option<&DesktopSessionEventSender>,
     complete_request_id: Option<u64>,
 ) -> Result<Option<String>> {
-    reader
-        .get_ref()
-        .set_read_timeout(Some(SERVER_CONNECT_RETRY_DELAY))
+    configure_read_timeout(reader.get_ref(), Some(SERVER_CONNECT_RETRY_DELAY))
         .context("failed to configure server socket timeout")?;
     let started = Instant::now();
     let mut line = String::new();
@@ -341,16 +471,13 @@ pub(super) fn read_session_id_from_events(
     anyhow::bail!("timed out waiting for jcode server session id")
 }
 
-#[cfg(unix)]
 pub(super) fn read_session_id_from_state(
-    reader: &mut BufReader<UnixStream>,
+    reader: &mut BufReader<DesktopServerStream>,
     timeout: Duration,
     event_tx: Option<&DesktopSessionEventSender>,
     state_request_id: u64,
 ) -> Result<String> {
-    reader
-        .get_ref()
-        .set_read_timeout(Some(SERVER_CONNECT_RETRY_DELAY))
+    configure_read_timeout(reader.get_ref(), Some(SERVER_CONNECT_RETRY_DELAY))
         .context("failed to configure server socket timeout")?;
     let started = Instant::now();
     let mut line = String::new();
@@ -395,16 +522,13 @@ pub(super) fn read_session_id_from_state(
     anyhow::bail!("timed out waiting for jcode server state")
 }
 
-#[cfg(unix)]
 pub(super) fn read_model_changed(
-    reader: &mut BufReader<UnixStream>,
+    reader: &mut BufReader<DesktopServerStream>,
     timeout: Duration,
     event_tx: Option<&DesktopSessionEventSender>,
     request_id: u64,
 ) -> Result<()> {
-    reader
-        .get_ref()
-        .set_read_timeout(Some(SERVER_CONNECT_RETRY_DELAY))
+    configure_read_timeout(reader.get_ref(), Some(SERVER_CONNECT_RETRY_DELAY))
         .context("failed to configure server socket timeout")?;
     let started = Instant::now();
     let mut line = String::new();
@@ -449,16 +573,13 @@ pub(super) fn read_model_changed(
     anyhow::bail!("timed out waiting for jcode server model switch")
 }
 
-#[cfg(unix)]
 pub(super) fn read_history_reasoning_effort(
-    reader: &mut BufReader<UnixStream>,
+    reader: &mut BufReader<DesktopServerStream>,
     timeout: Duration,
     event_tx: Option<&DesktopSessionEventSender>,
     request_id: u64,
 ) -> Result<Option<String>> {
-    reader
-        .get_ref()
-        .set_read_timeout(Some(SERVER_CONNECT_RETRY_DELAY))
+    configure_read_timeout(reader.get_ref(), Some(SERVER_CONNECT_RETRY_DELAY))
         .context("failed to configure server socket timeout")?;
     let started = Instant::now();
     let mut line = String::new();
@@ -500,16 +621,13 @@ pub(super) fn read_history_reasoning_effort(
     anyhow::bail!("timed out waiting for jcode server history")
 }
 
-#[cfg(unix)]
 pub(super) fn read_reasoning_effort_changed(
-    reader: &mut BufReader<UnixStream>,
+    reader: &mut BufReader<DesktopServerStream>,
     timeout: Duration,
     event_tx: Option<&DesktopSessionEventSender>,
     request_id: u64,
 ) -> Result<()> {
-    reader
-        .get_ref()
-        .set_read_timeout(Some(SERVER_CONNECT_RETRY_DELAY))
+    configure_read_timeout(reader.get_ref(), Some(SERVER_CONNECT_RETRY_DELAY))
         .context("failed to configure server socket timeout")?;
     let started = Instant::now();
     let mut line = String::new();
@@ -554,16 +672,13 @@ pub(super) fn read_reasoning_effort_changed(
     anyhow::bail!("timed out waiting for jcode server reasoning effort switch")
 }
 
-#[cfg(unix)]
 pub(super) fn read_model_catalog(
-    reader: &mut BufReader<UnixStream>,
+    reader: &mut BufReader<DesktopServerStream>,
     timeout: Duration,
     event_tx: Option<&DesktopSessionEventSender>,
     request_id: u64,
 ) -> Result<()> {
-    reader
-        .get_ref()
-        .set_read_timeout(Some(SERVER_CONNECT_RETRY_DELAY))
+    configure_read_timeout(reader.get_ref(), Some(SERVER_CONNECT_RETRY_DELAY))
         .context("failed to configure server socket timeout")?;
     let started = Instant::now();
     let mut line = String::new();
@@ -609,18 +724,15 @@ pub(super) fn read_model_catalog(
     anyhow::bail!("timed out waiting for jcode server model catalog")
 }
 
-#[cfg(unix)]
 pub(super) fn read_control_response(
-    reader: &mut BufReader<UnixStream>,
+    reader: &mut BufReader<DesktopServerStream>,
     timeout: Duration,
     event_tx: Option<&DesktopSessionEventSender>,
     request_id: u64,
     expected_event_types: &[&str],
     action_label: &str,
 ) -> Result<()> {
-    reader
-        .get_ref()
-        .set_read_timeout(Some(SERVER_CONNECT_RETRY_DELAY))
+    configure_read_timeout(reader.get_ref(), Some(SERVER_CONNECT_RETRY_DELAY))
         .context("failed to configure server socket timeout")?;
     let started = Instant::now();
     let mut line = String::new();
@@ -670,8 +782,7 @@ pub(super) fn read_control_response(
     anyhow::bail!("timed out waiting for jcode server while {action_label}")
 }
 
-#[cfg(unix)]
-pub(super) fn write_json_line(writer: &mut UnixStream, value: Value) -> Result<()> {
+pub(super) fn write_json_line(writer: &mut DesktopServerStream, value: Value) -> Result<()> {
     serde_json::to_writer(&mut *writer, &value).context("failed to encode server request")?;
     writer
         .write_all(b"\n")
@@ -679,25 +790,21 @@ pub(super) fn write_json_line(writer: &mut UnixStream, value: Value) -> Result<(
     writer.flush().context("failed to flush server request")
 }
 
-#[cfg(unix)]
 pub(super) enum DrainOutcome {
     Terminal,
     Disconnected,
     Reloading { new_socket: Option<String> },
 }
 
-#[cfg(unix)]
 pub(super) fn drain_session_events(
-    mut reader: BufReader<UnixStream>,
-    writer: &mut UnixStream,
+    mut reader: BufReader<DesktopServerStream>,
+    writer: &mut DesktopServerStream,
     next_request_id: &mut u64,
     event_tx: Option<&DesktopSessionEventSender>,
     command_rx: &Receiver<DesktopSessionCommand>,
     terminal_request_id: u64,
 ) -> Result<DrainOutcome> {
-    reader
-        .get_ref()
-        .set_read_timeout(Some(SERVER_CONNECT_RETRY_DELAY))
+    configure_read_timeout(reader.get_ref(), Some(SERVER_CONNECT_RETRY_DELAY))
         .context("failed to configure server socket timeout")?;
     let mut line = String::new();
     let mut pending_cancel_requests = Vec::<PendingCancelRequest>::new();
@@ -893,9 +1000,8 @@ fn forward_non_done_server_event(event_tx: Option<&DesktopSessionEventSender>, v
     }
 }
 
-#[cfg(unix)]
 pub(super) fn drain_worker_commands(
-    writer: &mut UnixStream,
+    writer: &mut DesktopServerStream,
     next_request_id: &mut u64,
     event_tx: Option<&DesktopSessionEventSender>,
     command_rx: &Receiver<DesktopSessionCommand>,

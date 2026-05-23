@@ -11,6 +11,10 @@ static PREFERENCES_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub fn load_preferences() -> Result<Option<DesktopPreferences>> {
     let path = preferences_path()?;
+    load_preferences_from_path(&path)
+}
+
+pub(super) fn load_preferences_from_path(path: &Path) -> Result<Option<DesktopPreferences>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -43,6 +47,13 @@ pub fn load_preferences() -> Result<Option<DesktopPreferences>> {
 
 pub fn save_preferences(preferences: &DesktopPreferences) -> Result<()> {
     let path = preferences_path()?;
+    save_preferences_to_path(&path, preferences)
+}
+
+pub(super) fn save_preferences_to_path(
+    path: &Path,
+    preferences: &DesktopPreferences,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -136,25 +147,19 @@ fn preferences_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     #[test]
     fn saves_and_loads_preferences() -> Result<()> {
-        let Ok(_guard) = env_lock().lock() else {
-            anyhow::bail!("desktop prefs test env lock poisoned");
-        };
-        let dir =
-            std::env::temp_dir().join(format!("jcode-desktop-prefs-test-{}", std::process::id()));
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let dir = std::env::temp_dir().join(format!(
+            "jcode-desktop-prefs-test-{}-{nonce}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         let path = dir.join("state.json");
-        unsafe {
-            std::env::set_var("JCODE_DESKTOP_STATE", &path);
-        }
 
         let preferences = DesktopPreferences {
             panel_size: PanelSizePreset::Half,
@@ -162,8 +167,8 @@ mod tests {
             workspace_lane: 2,
             space_hold_toggle_ms: 300,
         };
-        save_preferences(&preferences)?;
-        assert_eq!(load_preferences()?, Some(preferences));
+        save_preferences_to_path(&path, &preferences)?;
+        assert_eq!(load_preferences_from_path(&path)?, Some(preferences));
         assert!(!path.with_extension("json.tmp").exists());
         assert!(
             fs::read_dir(&dir)?
@@ -172,9 +177,6 @@ mod tests {
             "preference save should not leave temp files behind"
         );
 
-        unsafe {
-            std::env::remove_var("JCODE_DESKTOP_STATE");
-        }
         let _ = fs::remove_dir_all(dir);
         Ok(())
     }

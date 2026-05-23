@@ -353,11 +353,13 @@ fn build_selfdev_hint_prompt() -> String {
 }
 
 /// Build self-dev tools prompt section (static version without dynamic socket path)
+#[cfg(test)]
 fn build_selfdev_prompt_static() -> String {
     build_selfdev_prompt_static_for_context(SelfDevProductContext::Tui)
 }
 
 /// Build self-dev tools prompt section
+#[cfg(test)]
 fn build_selfdev_prompt() -> String {
     build_selfdev_prompt_for_context(SelfDevProductContext::Tui)
 }

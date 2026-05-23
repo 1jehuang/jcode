@@ -538,6 +538,7 @@ pub(super) fn run_setup_hotkey_windows() -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(super) fn create_windows_desktop_shortcut(state: &mut SetupHintsState) -> Result<()> {
     let exe = std::env::current_exe()?;
     let exe_path = exe.to_string_lossy();
