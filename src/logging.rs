@@ -494,17 +494,25 @@ pub fn auth_event(event: &str, provider: &str, fields: &[(&str, &str)]) {
     reason = "Logger lock + optional logger branching is intentionally straightforward"
 )]
 pub fn tool_call(name: &str, input: &str, output: &str) {
-    let msg = format!(
-        "TOOL[{}] input={} output={}",
-        name,
-        truncate(input, 200),
-        truncate(output, 500)
-    );
+    let msg = format_tool_call_message(name, input, output);
     if let Ok(mut guard) = LOGGER.lock() {
         if let Some(logger) = guard.as_mut() {
             logger.write("TOOL", &msg);
         }
     }
+}
+
+fn format_tool_call_message(name: &str, input: &str, output: &str) -> String {
+    format!(
+        "TOOL[{}] input={} output={}",
+        name,
+        redact_and_truncate_log_blob(input, 200),
+        redact_and_truncate_log_blob(output, 500)
+    )
+}
+
+fn redact_and_truncate_log_blob(value: &str, max_len: usize) -> String {
+    truncate(&crate::message::redact_secrets(value), max_len)
 }
 
 /// Log a crash/panic for auto-debug
@@ -657,5 +665,20 @@ mod tests {
     fn structured_event_keeps_non_secret_code_fields() {
         let line = format_structured_event("tool_done", vec![("exit_code", "127")]);
         assert_eq!(line, "EVENT event=tool_done exit_code=127");
+    }
+
+    #[test]
+    fn tool_call_log_redacts_secrets_from_input_and_output() {
+        let line = format_tool_call_message(
+            "shell",
+            "Authorization: Bearer sk-ant-oat01-secretvaluethatmustnotappear",
+            "OPENAI_API_KEY=sk-live-secret-that-must-not-appear",
+        );
+
+        assert!(line.contains("TOOL[shell]"));
+        assert!(line.contains("Authorization: Bearer [REDACTED_SECRET]"));
+        assert!(line.contains("OPENAI_API_KEY=[REDACTED_SECRET]"));
+        assert!(!line.contains("secretvaluethatmustnotappear"));
+        assert!(!line.contains("sk-live-secret-that-must-not-appear"));
     }
 }
