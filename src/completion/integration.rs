@@ -7,7 +7,6 @@
 //! - SemanticCompleter: 语义搜索补全
 //! - Ghost Text Rendering: 实时渲染接口
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -117,7 +116,7 @@ pub struct BehaviorLearner {
 
 impl BehaviorLearner {
     pub fn new(config: CompletionConfig) -> Self {
-        Self { enabled: AtomicBool::new(true), config }
+        Self { enabled: AtomicBool::new(config.behavior_learning_enabled), config }
     }
 
     /// 记录用户接受了一个补全

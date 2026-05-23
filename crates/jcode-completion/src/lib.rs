@@ -77,6 +77,8 @@ pub struct CompletionEngine {
     prefetcher: Arc<StreamingPrefetcher>,
     /// Layer 5: 用户行为学习
     behavior_learner: Arc<BehaviorLearner>,
+    /// Layer 6: 协作感知补全 (Swarm 多成员冲突检测 + 团队模式)
+    collab: Arc<CollabAwareCompleter>,
 }
 
 impl CompletionEngine {
@@ -90,12 +92,14 @@ impl CompletionEngine {
             Some(l) => Arc::new(UnifiedContextProvider::new().with_lsp(l)),
             None => Arc::new(UnifiedContextProvider::new()),
         };
+        let index = Arc::new(IncrementalIndex::new());
         Self {
             ast,
             provider,
             memory: Arc::new(crate::memory_ranker::DefaultMemoryRanker::new()),
             prefetcher: Arc::new(StreamingPrefetcher::new()),
             behavior_learner: Arc::new(BehaviorLearner::new(storage_path)),
+            collab: Arc::new(CollabAwareCompleter::new(index)),
         }
     }
 
@@ -188,6 +192,32 @@ impl CompletionEngine {
 
         // Layer 3: 记忆排序
         let mut ranked = self.memory.rank_and_filter(candidates, &context).await;
+
+        // Layer 4: 协作感知 — 降低队友正在编辑的符号优先级
+        let conflicting = self.collab.get_conflicting_symbols(file_path);
+        if !conflicting.is_empty() {
+            for item in &mut ranked {
+                if conflicting.contains(&item.candidate.label) {
+                    item.rank_score *= 0.5;
+                }
+            }
+            let team_suggestions = self.collab.get_team_suggested_symbols(&context.prefix, 3);
+            for (suggestion, weight) in &team_suggestions {
+                if !ranked.iter().any(|r| &r.candidate.label == suggestion) {
+                    ranked.push(crate::memory_ranker::RankedCandidate {
+                        candidate: crate::llm_candidate::CompletionCandidate {
+                            label: suggestion.clone(),
+                            text: suggestion.clone(),
+                            detail: Some("team-pattern".to_string()),
+                            kind: crate::llm_candidate::CandidateKind::Snippet,
+                            score: (*weight as f64) / 100.0,
+                        },
+                        rank_score: (*weight as f64) / 100.0,
+                        reason: "team-pattern",
+                    });
+                }
+            }
+        }
 
         // Layer 5: 应用行为学习个性化分数
         for ranked_item in &mut ranked {
