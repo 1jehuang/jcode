@@ -25,7 +25,9 @@ pub mod server;
 pub mod routes;
 pub mod metrics;
 pub mod templates;
+pub mod audit_log;
 
 pub use server::DashboardServer;
 pub use metrics::SystemMetrics;
 pub use routes::DashboardRoutes;
+pub use audit_log::{AuditLogger, AuditLogEntry, ActionType, LogSeverity, create_log_entry};

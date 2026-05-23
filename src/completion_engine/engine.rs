@@ -139,7 +139,10 @@ impl CompletionEngine {
     }
 
     fn generate_cache_key(&self, file_path: &PathBuf, content: &str, position: Position) -> String {
-        let content_hash = md5::compute(content);
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        let content_hash = hasher.finalize();
         format!(
             "{}_{}_{}_{:x}",
             file_path.display(),

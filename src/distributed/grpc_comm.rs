@@ -123,7 +123,7 @@ impl GrpcCommunicationService {
 
         // Build channel with optional TLS
         let channel = if let Some(tls) = &self.tls_config {
-            let tls_config = self.load_tls_config(tls)?;
+            let tls_config = self.load_client_tls_config(tls)?;
             tonic::transport::channel::Endpoint::from_shared(address.to_string())?
                 .tls_config(tls_config)?
                 .connect()
@@ -227,9 +227,20 @@ impl GrpcCommunicationService {
         Ok(response.into_inner())
     }
 
-    /// Load TLS configuration
-    fn load_tls_config(&self, config: &TlsConfig) -> Result<tonic::transport::server::TlsConfig> {
-        use tonic::transport::{Identity, ServerTlsConfig, ClientTlsConfig};
+    /// Load TLS configuration for client connections
+    fn load_client_tls_config(&self, config: &TlsConfig) -> Result<tonic::transport::ClientTlsConfig> {
+        use tonic::transport::ClientTlsConfig;
+
+        let ca_cert = std::fs::read_to_string(&config.cert_path)?;
+        let tls_config = ClientTlsConfig::new()
+            .ca_certificate(tonic::transport::Certificate::from_pem(ca_cert));
+
+        Ok(tls_config)
+    }
+
+    /// Load TLS configuration for server
+    fn load_tls_config(&self, config: &TlsConfig) -> Result<tonic::transport::server::ServerTlsConfig> {
+        use tonic::transport::{Identity, ServerTlsConfig};
 
         let cert = std::fs::read_to_string(&config.cert_path)?;
         let key = std::fs::read_to_string(&config.key_path)?;
@@ -423,7 +434,7 @@ impl ClusterNodeService for ClusterNodeServiceImpl {
     }
 
     type StreamEventsStream =
-        tonic::codec::Streaming<ClusterEvent, tonic::codec::ProstCodec>;
+        tonic::codec::Streaming<ClusterEvent>;
 
     async fn stream_events(
         &self,

@@ -13,6 +13,7 @@
 pub mod protocol;
 pub mod session;
 pub mod adapter;
+pub mod launch_integration;
 
 pub use protocol::*;
 pub use session::*;

@@ -25,6 +25,7 @@ mod memory;
 mod multiedit;
 mod open;
 pub mod plan_mode;
+mod sprint_planner;
 mod patch;
 mod read;
 mod review;

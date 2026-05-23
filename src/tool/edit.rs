@@ -107,8 +107,13 @@ impl Tool for EditTool {
         // Find line number where edit starts
         let start_line = find_line_number(&content, &params.old_string);
 
-        // Write back
-        tokio::fs::write(&path, &new_content).await?;
+        // Write back with atomic commit (temp file + rename)
+        let temp_path = path.with_file_name(format!(
+            ".{}.tmp",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        tokio::fs::write(&temp_path, &new_content).await?;
+        tokio::fs::rename(&temp_path, &path).await?;
 
         // Generate a diff with line numbers
         let diff = generate_diff(&params.old_string, &params.new_string, start_line);

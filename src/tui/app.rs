@@ -677,6 +677,10 @@ pub struct App {
     copy_selection_goal_column: Option<usize>,
     // Debug socket broadcast channel (if enabled)
     debug_tx: Option<tokio::sync::broadcast::Sender<super::backend::DebugEvent>>,
+    // Inline Completion Engine for AI-powered code suggestions
+    completion_engine: Option<Arc<jcode_completion::CompletionEngine>>,
+    // Completion prefetch state for debouncing and caching
+    completion_prefetch_state: Option<Arc<crate::tui::completion_helper::CompletionPrefetchState>>,
     // Remote provider info (set when running in remote mode)
     remote_client_instance_id: String,
     remote_provider_name: Option<String>,

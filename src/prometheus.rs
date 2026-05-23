@@ -103,6 +103,65 @@ impl Default for PrometheusMetrics {
     }
 }
 
+/// Helper to expose backpressure metrics for Prometheus scraping
+pub async fn export_backpressure_metrics(
+    metrics: &crate::backpressure::BackpressureMetrics,
+    prom: &PrometheusMetrics,
+) {
+    // Register and update backpressure gauges
+    prom.register_gauge("carpai_backpressure_pending", "Current pending requests").await;
+    prom.register_gauge("carpai_backpressure_max_pending", "Dynamic max pending limit").await;
+    prom.register_gauge("carpai_backpressure_load_ratio", "Load ratio (0-1)").await;
+    prom.register_gauge("carpai_backpressure_active", "Is backpressure active (0/1)").await;
+    prom.register_gauge("carpai_system_cpu_utilization", "CPU utilization (0-10000)").await;
+    prom.register_gauge("carpai_system_memory_utilization", "Memory utilization (0-10000)").await;
+
+    prom.set_gauge("carpai_backpressure_pending", metrics.pending_requests as f64).await;
+    prom.set_gauge("carpai_backpressure_max_pending", metrics.max_pending as f64).await;
+    prom.set_gauge("carpai_backpressure_load_ratio", metrics.load_ratio()).await;
+    prom.set_gauge("carpai_backpressure_active", if metrics.backpressure_active { 1.0 } else { 0.0 }).await;
+    prom.set_gauge("carpai_system_cpu_utilization", metrics.cpu_utilization as f64).await;
+    prom.set_gauge("carpai_system_memory_utilization", metrics.memory_utilization as f64).await;
+
+    // Counter for rejections
+    prom.register_counter("carpai_backpressure_rejected_total", "Total rejected requests").await;
+    // Note: counters should only be incremented, not set from snapshot
+}
+
+/// Helper to expose GC metrics for Prometheus scraping
+pub async fn export_gc_metrics(
+    stats: &crate::session_gc::GcStats,
+    prom: &PrometheusMetrics,
+) {
+    prom.register_gauge("carpai_sessions_total", "Total sessions scanned in last GC").await;
+    prom.register_counter("carpai_gc_expired_total", "Total expired sessions removed").await;
+    prom.register_counter("carpai_gc_compacted_total", "Total contexts compacted").await;
+    prom.register_gauge("carpai_gc_memory_freed_bytes", "Memory freed in last GC (bytes)").await;
+
+    prom.set_gauge("carpai_sessions_total", stats.sessions_scanned as f64).await;
+    prom.set_gauge("carpai_gc_memory_freed_bytes", stats.memory_freed_bytes as f64).await;
+}
+
+/// Helper to expose GPU metrics for Prometheus scraping
+pub async fn export_gpu_metrics(
+    gpu_metrics: &[(String, f64)],
+    prom: &PrometheusMetrics,
+) {
+    // Register all GPU-related gauges
+    prom.register_gauge("carpai_gpu_total", "Total number of GPUs").await;
+    prom.register_gauge("carpai_gpu_active", "Number of active GPUs").await;
+    prom.register_gauge("carpai_gpu_avg_utilization", "Average GPU utilization (0-100%)").await;
+    prom.register_gauge("carpai_gpu_vram_total_bytes", "Total GPU VRAM (bytes)").await;
+    prom.register_gauge("carpai_gpu_vram_used_bytes", "Used GPU VRAM (bytes)").await;
+    prom.register_gauge("carpai_gpu_vram_usage_percent", "GPU VRAM usage percent").await;
+    prom.register_gauge("carpai_gpu_pending_requests", "Pending GPU requests").await;
+
+    // Set values from provided metrics
+    for (name, value) in gpu_metrics {
+        prom.set_gauge(name, *value).await;
+    }
+}
+
 pub struct MetricsService {
     metrics: Arc<PrometheusMetrics>,
 }

@@ -816,6 +816,23 @@ impl Agent {
                     model: Some(self.provider.model()),
                 }));
 
+                // [一致性保证] 在编辑工具执行前保存快照
+                if tc.name == "edit" || tc.name == "multiedit" || tc.name == "batch_edit" || tc.name == "write" {
+                    if let Some(file_path) = tc.input.get("file_path").and_then(|v| v.as_str()) {
+                        self.snapshot_file(std::path::Path::new(file_path)).await;
+                    }
+                    // batch_edit 可能有 files 字段
+                    if tc.name == "batch_edit" {
+                        if let Some(files) = tc.input.get("files").and_then(|v| v.as_array()) {
+                            for f in files {
+                                if let Some(path) = f.as_str() {
+                                    self.snapshot_file(std::path::Path::new(path)).await;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
                 crate::telemetry::record_tool_call();
                 self.unlock_tools_if_needed(&tc.name);
@@ -895,8 +912,142 @@ impl Agent {
                 }
             }
 
+            // ===== [I-01] MCP工具调用检测 =====
+            // 记录MCP工具调用名称，用于后续注入到工具列表
+            if tc.name.starts_with("mcp__") {
+                let parts: Vec<&str> = tc.name.split("__").collect();
+                if parts.len() >= 3 {
+                    let server_name = parts[1];
+                    if !self.mcp_tool_names.contains(&server_name.to_string()) {
+                        self.mcp_tool_names.push(server_name.to_string());
+                    }
+                }
+            }
+
+            // ===== [I-02] 编辑工具触发跨文件修复 =====
+            if tc.name == "edit" || tc.name == "multiedit" || tc.name == "batch_edit" {
+                if let Some(file_path) = tc.input.get("file_path").and_then(|v| v.as_str()) {
+                    if !self.recent_edit_files.contains(&file_path.to_string()) {
+                        self.recent_edit_files.push(file_path.to_string());
+                    }
+                }
+                // 对于 batch_edit，可能有多个 files
+                if tc.name == "batch_edit" {
+                    if let Some(files) = tc.input.get("files").and_then(|v| v.as_array()) {
+                        for f in files {
+                            if let Some(path) = f.as_str() {
+                                if !self.recent_edit_files.contains(&path.to_string()) {
+                                    self.recent_edit_files.push(path.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if tool_results_dirty {
                 self.session.save()?;
+
+            // ===== [自主规划] Phase 10: 跨文件依赖分析与规划注入 =====
+            if !self.recent_edit_files.is_empty() {
+                let edited_count = self.recent_edit_files.len();
+                let files_list = self.recent_edit_files.join(", ");
+
+                if edited_count > 1 {
+                    logging::info(&format!(
+                        "Phase 10: {} files edited ({}) — generating dependency plan",
+                        edited_count, files_list
+                    ));
+
+                    // 生成依赖计划并注入到系统上下文
+                    let plan_msg = format!(
+                        "<system-reminder>\n\
+                        [Cross-File Dependency Plan]\n\
+                        You just edited {} files: {}\n\n\
+                        Please ensure consistency across these files:\n\
+                        - Verify that all modified files have compatible interfaces\n\
+                        - Check that imports and exports are synchronized\n\
+                        - Confirm that type definitions match across files\n\
+                        - Run compile check if possible to validate changes\n\
+                        - Update any related documentation if needed\n\
+                        </system-reminder>",
+                        edited_count, files_list
+                    );
+                    self.add_message(Role::User, vec![ContentBlock::Text {
+                        text: plan_msg,
+                        cache_control: None,
+                    }]);
+
+                    logging::info("Dependency plan injected into agent context");
+                } else {
+                    logging::info(&format!(
+                        "Phase 10: single file edited ({}), no cross-file plan needed",
+                        files_list
+                    ));
+                }
+
+                // ===== [I-06] Phase 11: 自主验证修复 =====
+                // 在编辑后自动运行编译验证（仅对 Rust 项目）
+                let workspace = self.session.working_dir.as_ref()
+                    .map(|d| std::path::Path::new(d))
+                    .or_else(|| Some(std::path::Path::new(".")))
+                    .unwrap();
+                let cargo_toml = workspace.join("Cargo.toml");
+                if cargo_toml.exists() {
+                    logging::info("Phase 11: Running auto-verify (cargo check)...");
+                    match tokio::process::Command::new("cargo")
+                        .args(["check", "--color=never", "--message-format=short"])
+                        .current_dir(workspace)
+                        .output()
+                        .await
+                    {
+                        Ok(output) => {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            let has_errors = stderr.contains("error[");
+                            if has_errors {
+                                // 提取错误摘要
+                                let error_summary: Vec<&str> = stderr.lines()
+                                    .filter(|l| l.contains("error[") || l.contains("error:"))
+                                    .take(5)
+                                    .collect();
+                                let summary = if error_summary.is_empty() {
+                                    stderr.lines().take(10).collect::<Vec<_>>().join("\n")
+                                } else {
+                                    error_summary.join("\n")
+                                };
+
+                                let verify_msg = format!(
+                                    "<system-reminder>\n\
+                                    [Auto-Verify Failed]\n\
+                                    Compile check found errors after your edits:\n\
+                                    ```\n{}\n```\n\n\
+                                    Please fix these errors. You can run `cargo check` to verify.\n\
+                                    </system-reminder>",
+                                    summary
+                                );
+                                self.add_message(Role::User, vec![ContentBlock::Text {
+                                    text: verify_msg,
+                                    cache_control: None,
+                                }]);
+                                logging::warn(&format!(
+                                    "Auto-verify: {} errors found after edit, injected into context",
+                                    error_summary.len()
+                                ));
+                            } else {
+                                logging::info("Auto-verify: cargo check passed");
+                            }
+                        }
+                        Err(e) => {
+                            logging::info(&format!("Auto-verify: cargo not available ({})", e));
+                        }
+                    }
+                } else {
+                    logging::info("Phase 11: Not a Rust project, skipping auto-verify");
+                }
+
+                // 清除列表，为下一轮准备
+                self.recent_edit_files.clear();
+            }
             }
 
             if !generated_image_contexts.is_empty() {

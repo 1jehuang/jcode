@@ -368,7 +368,7 @@ fn find_security_issues(diff: &str, file_path: &str) -> Vec<ReviewFinding> {
                     file: file_path.to_string(),
                     line: (i + 1) as u32,
                     column: None,
-                    severity: *severity,
+                    severity: severity.clone(),
                     category: ReviewCategory::Security,
                     title: desc.to_string(),
                     description: format!("Found potential security issue: '{}'", pattern),

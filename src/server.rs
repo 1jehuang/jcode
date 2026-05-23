@@ -447,6 +447,10 @@ pub struct Server {
     lsp_event_bridge: Option<Arc<LspEventBridge>>,
     /// Optional symbol conflict detector for Swarm task scheduling.
     conflict_detector: Option<Arc<SymbolConflictDetector>>,
+    /// Backpressure controller to prevent overload cascading failures
+    backpressure_controller: Arc<crate::backpressure::BackpressureController>,
+    /// GPU load balancer scheduler (optional, activated when GPUs available)
+    gpu_scheduler: Option<Arc<jcode_unified_scheduler::UnifiedScheduler>>,
 }
 
 mod server_impl;

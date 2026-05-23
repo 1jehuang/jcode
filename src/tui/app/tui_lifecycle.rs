@@ -298,6 +298,9 @@ impl App {
             copy_selection_dragging: false,
             copy_selection_goal_column: None,
             debug_tx: None,
+            // Initialize Inline Completion Engine
+            completion_engine: None,
+            completion_prefetch_state: None,
             remote_client_instance_id: crate::id::new_id("client"),
             remote_provider_name: None,
             remote_provider_model: None,
@@ -660,6 +663,9 @@ impl App {
             copy_selection_dragging: false,
             copy_selection_goal_column: None,
             debug_tx: None,
+            // Initialize Inline Completion Engine
+            completion_engine: None,
+            completion_prefetch_state: None,
             remote_client_instance_id: crate::id::new_id("client"),
             remote_provider_name: None,
             remote_provider_model: None,
@@ -837,6 +843,29 @@ impl App {
         }
 
         app
+    }
+
+    /// Initialize the Inline Completion Engine
+    pub fn init_completion_engine(&mut self) {
+        use jcode_completion::{CompletionEngine, ProviderCandidateGenerator};
+        
+        // Create a provider for completion (reuse existing provider if possible)
+        let provider = Box::new(ProviderCandidateGenerator::new(
+            Arc::clone(&self.provider),
+        ));
+        
+        let engine = CompletionEngine::new(
+            provider,
+            None, // No LSP for now
+            None, // No storage path for now
+        );
+        
+        self.completion_engine = Some(Arc::new(engine));
+        self.completion_prefetch_state = Some(Arc::new(
+            crate::tui::completion_helper::CompletionPrefetchState::new(200) // 200ms debounce
+        ));
+        
+        tracing::info!("Inline Completion Engine initialized");
     }
 
     pub fn new_for_test_harness(provider: Arc<dyn Provider>, registry: Registry) -> Self {

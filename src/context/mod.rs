@@ -1,4 +1,5 @@
 pub mod extended_manager;
+pub mod intelligent_selector;
 
 pub use extended_manager::{
     ContextEntry,
@@ -9,4 +10,13 @@ pub use extended_manager::{
     ImportanceLevel,
     StorageTier,
     TierStats,
+};
+
+pub use intelligent_selector::{
+    IntelligentContextSelector,
+    SelectorConfig,
+    SelectedContext,
+    FunctionSnippet,
+    FileSnippet,
+    SelectionMetadata,
 };

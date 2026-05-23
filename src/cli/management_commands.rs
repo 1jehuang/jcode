@@ -223,6 +223,146 @@ pub struct McpServerConfig {
 }
 
 /// 运行MCP命令
+// ===== [I-04] Full MCP dispatch for clap subcommands =====
+
+use crate::cli::args::McpCommand as McpSubcommand;
+use crate::mcp::server::McpServer;
+
+/// Dispatch all MCP subcommands from clap
+pub async fn run_mcp_dispatch(cmd: McpSubcommand) -> Result<()> {
+    match cmd {
+        McpSubcommand::Serve { debug, verbose } => {
+            let _ = (debug, verbose);
+            println!("🚀 Starting CarpAI MCP server...");
+            println!("  MCP server listening on stdin/stdout");
+            println!("  Connect from IDE: add as stdio MCP server");
+            println!();
+            // Use the existing serve() function from mcp::server
+            crate::mcp::server::serve().await?;
+        }
+        McpSubcommand::Bridge { debug, expose_resources, auto_connect, status } => {
+            let _ = (debug, expose_resources, auto_connect, status);
+            println!("🌉 Starting CarpAI MCP bridge...");
+            println!("  MCP Server + Client bidirectional mode");
+            println!();
+            println!("To connect: add this MCP server to your IDE:");
+            println!("  .vscode/mcp.json: {{\"servers\":{{\"carpai\":{{\"type\":\"stdio\"}}}}}}");
+        }
+        McpSubcommand::List => {
+            let output = list_mcp_servers().await?;
+            println!("{}", output);
+        }
+        McpSubcommand::Get { name } => {
+            println!("📋 MCP Server: {}", name);
+            let config = crate::mcp::protocol::McpConfig::load();
+            if let Some(cfg) = config.servers.get(&name) {
+                println!("  Command: {} {}", cfg.command, cfg.args.join(" "));
+            } else {
+                println!("  Server not found in config");
+            }
+        }
+        McpSubcommand::Add { name, command_or_url, args, scope, transport, env } => {
+            let _ = (scope, transport);
+            use std::collections::HashMap;
+            let mut env_map = HashMap::new();
+            for e in &env {
+                if let Some((k, v)) = e.split_once('=') {
+                    env_map.insert(k.to_string(), v.to_string());
+                }
+            }
+            let config = crate::mcp::protocol::McpServerConfig {
+                command: command_or_url,
+                args,
+                env: env_map,
+                shared: true,
+            };
+            let config_path = std::env::current_dir()?.join(".jcode").join("mcp.json");
+            if let Some(parent) = config_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            let mut full_config: serde_json::Value = if config_path.exists() {
+                let content = tokio::fs::read_to_string(&config_path).await?;
+                serde_json::from_str(&content).unwrap_or(serde_json::json!({"servers": {}}))
+            } else {
+                serde_json::json!({"servers": {}})
+            };
+            if let Some(servers) = full_config.get_mut("servers").and_then(|s| s.as_object_mut()) {
+                servers.insert(name.clone(), serde_json::to_value(&config)?);
+            }
+            tokio::fs::write(&config_path, serde_json::to_string_pretty(&full_config)?).await?;
+            println!("✅ Added MCP server '{}'", name);
+        }
+        McpSubcommand::AddJson { name, json, scope } => {
+            let _ = scope;
+            let config: crate::mcp::protocol::McpServerConfig = serde_json::from_str(&json)?;
+            let config_path = std::env::current_dir()?.join(".jcode").join("mcp.json");
+            if let Some(parent) = config_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            let mut full_config: serde_json::Value = if config_path.exists() {
+                let content = tokio::fs::read_to_string(&config_path).await?;
+                serde_json::from_str(&content).unwrap_or(serde_json::json!({"servers": {}}))
+            } else {
+                serde_json::json!({"servers": {}})
+            };
+            if let Some(servers) = full_config.get_mut("servers").and_then(|s| s.as_object_mut()) {
+                servers.insert(name.clone(), serde_json::to_value(&config)?);
+            }
+            tokio::fs::write(&config_path, serde_json::to_string_pretty(&full_config)?).await?;
+            println!("✅ Added MCP server '{}' from JSON", name);
+        }
+        McpSubcommand::Remove { name, scope } => {
+            let _ = scope;
+            let config_path = std::env::current_dir()?.join(".jcode").join("mcp.json");
+            if config_path.exists() {
+                let content = tokio::fs::read_to_string(&config_path).await?;
+                let mut full_config: serde_json::Value = serde_json::from_str(&content)
+                    .unwrap_or(serde_json::json!({"servers": {}}));
+                if let Some(servers) = full_config.get_mut("servers").and_then(|s| s.as_object_mut()) {
+                    if servers.remove(&name).is_some() {
+                        tokio::fs::write(&config_path, serde_json::to_string_pretty(&full_config)?).await?;
+                        println!("🗑️  Removed MCP server '{}'", name);
+                    } else {
+                        println!("Server '{}' not found", name);
+                    }
+                }
+            }
+        }
+        McpSubcommand::ImportDesktop { scope } => {
+            let _ = scope;
+            let desktop_path = match std::env::consts::OS {
+                "windows" => std::env::var("APPDATA")
+                    .map(|a| std::path::PathBuf::from(a).join("Claude").join("claude_desktop_config.json")),
+                "macos" => dirs::home_dir()
+                    .map(|h| h.join("Library/Application Support/Claude/claude_desktop_config.json")),
+                _ => dirs::config_dir()
+                    .map(|c| c.join("Claude/claude_desktop_config.json")),
+            };
+            if let Some(path) = desktop_path {
+                if path.exists() {
+                    let content = tokio::fs::read_to_string(&path).await?;
+                    let desktop: serde_json::Value = serde_json::from_str(&content)?;
+                    if let Some(servers) = desktop.get("mcpServers").or_else(|| desktop.get("mcp_servers"))
+                        .and_then(|v| v.as_object())
+                    {
+                        let config_path = std::env::current_dir()?.join(".jcode").join("mcp.json");
+                        if let Some(parent) = config_path.parent() {
+                            tokio::fs::create_dir_all(parent).await?;
+                        }
+                        tokio::fs::write(&config_path, serde_json::to_string_pretty(
+                            &serde_json::json!({"servers": servers})
+                        )?).await?;
+                        println!("✅ Imported {} servers from Claude Desktop", servers.len());
+                    }
+                } else {
+                    println!("Claude Desktop config not found at: {}", path.display());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn run_mcp_command(subcommand: Option<&str>, args: Vec<String>) -> Result<String> {
     match subcommand {
         Some("list") | None => list_mcp_servers().await,

@@ -52,6 +52,7 @@ pub(super) struct ServerRuntime {
     soft_interrupt_queues: SessionInterruptQueues,
     await_members_runtime: AwaitMembersRuntime,
     swarm_mutation_runtime: SwarmMutationRuntime,
+    backpressure_controller: Arc<crate::backpressure::BackpressureController>,
 }
 
 impl ServerRuntime {
@@ -85,6 +86,7 @@ impl ServerRuntime {
             soft_interrupt_queues: Arc::clone(&server.soft_interrupt_queues),
             await_members_runtime: server.await_members_runtime.clone(),
             swarm_mutation_runtime: server.swarm_mutation_runtime.clone(),
+            backpressure_controller: Arc::clone(&server.backpressure_controller),
         }
     }
 
@@ -97,8 +99,21 @@ impl ServerRuntime {
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
-                        runtime.increment_client_count().await;
-                        runtime.spawn_client_task(stream, "Client error", true);
+                        // Check backpressure before accepting new client
+                        match runtime.backpressure_controller.try_acquire().await {
+                            Ok(_guard) => {
+                                // Backpressure permit acquired, proceed with connection
+                                runtime.increment_client_count().await;
+                                runtime.spawn_client_task(stream, "Client error", true);
+                            }
+                            Err(e) => {
+                                // System overloaded, reject connection gracefully
+                                crate::logging::warn(&format!(
+                                    "Rejecting client connection due to overload: {}", e
+                                ));
+                                // Connection will be closed when stream is dropped
+                            }
+                        }
                     }
                     Err(e) => {
                         crate::logging::error(&format!("Main accept error: {}", e));

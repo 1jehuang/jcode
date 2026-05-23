@@ -31,6 +31,7 @@ pub mod cluster;
 pub mod election;
 pub mod sync;
 pub mod load_balancer;
+pub mod three_layer_load_balancer;
 pub mod service;
 pub mod cli;
 pub mod integration;
@@ -49,6 +50,7 @@ pub use cluster::ClusterManager;
 pub use election::ElectionService;
 pub use sync::{StateSync, CrdtType};
 pub use load_balancer::LoadBalancer;
+pub use three_layer_load_balancer::{ThreeLayerLoadBalancer, ThreeLayerConfig, TenantInfo, ModelRoute, RoutingStrategy};
 pub use service::ClusterService;
 pub use cli::{ClusterArgs, execute_cluster_command};
 pub use integration::{

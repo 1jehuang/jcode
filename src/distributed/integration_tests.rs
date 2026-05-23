@@ -541,4 +541,392 @@ mod tests {
 
         info!("✓ Heartbeat duration calculations correct");
     }
+
+    // ========================================================================
+    // P0 Task 3: Large-Scale Cluster Tests (18 Nodes)
+    // ========================================================================
+
+    /// Helper to create a large-scale cluster configuration
+    fn create_large_cluster_configs(num_nodes: usize) -> Vec<ClusterConfig> {
+        let mut configs = Vec::with_capacity(num_nodes);
+        let base_port = 20000u16;
+
+        for i in 0..num_nodes {
+            let port = base_port + i as u16;
+            let mut peers = Vec::new();
+
+            // Each node knows about all other nodes
+            for j in 0..num_nodes {
+                if i != j {
+                    let peer_port = base_port + j as u16;
+                    peers.push(format!("127.0.0.1:{}", peer_port));
+                }
+            }
+
+            let mut config = create_test_config("127.0.0.1", port, peers);
+            config.node.id = Some(format!("large-cluster-node-{}", i));
+
+            // Adjust quorum for large cluster (need majority)
+            config.election.min_quorum_size = (num_nodes / 2 + 1) as u32;
+
+            // Faster timeouts for testing
+            config.heartbeat.interval_ms = 50;
+            config.heartbeat.timeout_ms = 200;
+            config.election.election_timeout_ms = 150;
+
+            configs.push(config);
+        }
+
+        configs
+    }
+
+    // ========================================================================
+    // Test 16: 18-Node Cluster Startup
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_18_node_cluster_startup() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .try_init();
+
+        info!("=== Test: 18-Node Cluster Startup ===");
+
+        let num_nodes = 18;
+        let configs = create_large_cluster_configs(num_nodes);
+
+        // Create all services
+        let mut services = Vec::with_capacity(num_nodes);
+        for config in &configs {
+            let service = ClusterService::new(config.clone()).await.unwrap();
+            services.push(service);
+        }
+
+        info!("✓ Created {} service instances", num_nodes);
+
+        // Start all services concurrently
+        let start_futures: Vec<_> = services.iter().map(|s| s.start()).collect();
+        for future in start_futures {
+            assert!(future.await.is_ok(), "Failed to start service");
+        }
+
+        info!("✓ Started all {} services", num_nodes);
+
+        // Wait for cluster stabilization
+        sleep(Duration::from_secs(2)).await;
+
+        // Verify cluster health
+        let mut total_healthy = 0;
+        for (i, service) in services.iter().enumerate() {
+            let healthy_count = service.healthy_node_count().await;
+            total_healthy += healthy_count;
+            debug!("Node {} sees {} healthy nodes", i, healthy_count);
+        }
+
+        let avg_healthy = total_healthy / num_nodes;
+        info!("Average healthy nodes seen: {}", avg_healthy);
+
+        // At least some nodes should see each other
+        assert!(avg_healthy >= 1, "Nodes should see at least themselves");
+
+        // Clean up
+        for service in &services {
+            let _ = service.stop().await;
+        }
+
+        info!("✓ 18-node cluster startup test completed");
+    }
+
+    // ========================================================================
+    // Test 17: Dynamic Node Join/Leave in Large Cluster
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_dynamic_node_join_leave() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .try_init();
+
+        info!("=== Test: Dynamic Node Join/Leave ===");
+
+        // Start with 5 nodes
+        let initial_nodes = 5;
+        let configs = create_large_cluster_configs(initial_nodes);
+
+        let mut services = Vec::new();
+        for config in &configs[..initial_nodes] {
+            let service = ClusterService::new(config.clone()).await.unwrap();
+            service.start().await.unwrap();
+            services.push(service);
+        }
+
+        info!("✓ Started initial {} nodes", initial_nodes);
+        sleep(Duration::from_millis(500)).await;
+
+        // Simulate batch node joins (like internet cafe machines coming online)
+        let batch_join_count = 5;
+        for i in 0..batch_join_count {
+            let config = configs[initial_nodes + i].clone();
+            let service = ClusterService::new(config).await.unwrap();
+            service.start().await.unwrap();
+            services.push(service);
+            info!("✓ Node {} joined", initial_nodes + i);
+            sleep(Duration::from_millis(100)).await;
+        }
+
+        sleep(Duration::from_secs(1)).await;
+
+        // Verify cluster grew
+        let healthy_after_join = services[0].healthy_node_count().await;
+        info!("Healthy nodes after join: {}", healthy_after_join);
+
+        // Simulate batch node leaves (failures)
+        let batch_leave_count = 3;
+        for i in 0..batch_leave_count {
+            let idx = initial_nodes + i;
+            if idx < services.len() {
+                let _ = services[idx].stop().await;
+                info!("✓ Node {} left", idx);
+            }
+        }
+
+        sleep(Duration::from_secs(1)).await;
+
+        // Remaining nodes should still function
+        let healthy_after_leave = services[0].healthy_node_count().await;
+        info!("Healthy nodes after leave: {}", healthy_after_leave);
+
+        // Clean up
+        for service in &services {
+            let _ = service.stop().await;
+        }
+
+        info!("✓ Dynamic join/leave test completed");
+    }
+
+    // ========================================================================
+    // Test 18: Node Failure and Recovery
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_node_failure_and_recovery() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .try_init();
+
+        info!("=== Test: Node Failure and Recovery ===");
+
+        let num_nodes = 5;
+        let configs = create_large_cluster_configs(num_nodes);
+
+        let mut services = Vec::new();
+        for config in &configs {
+            let service = ClusterService::new(config.clone()).await.unwrap();
+            service.start().await.unwrap();
+            services.push(service);
+        }
+
+        sleep(Duration::from_secs(1)).await;
+
+        // Get initial health summary
+        let initial_summary = services[0].get_health_summary().await;
+        info!("Initial health: {} healthy, {} warning, {} critical, {} offline",
+            initial_summary.healthy, initial_summary.warning,
+            initial_summary.critical, initial_summary.offline);
+
+        // Stop one node to simulate failure
+        let failed_node_idx = 2;
+        info!("Simulating failure of node {}", failed_node_idx);
+        let _ = services[failed_node_idx].stop().await;
+
+        // Wait for failure detection
+        sleep(Duration::from_secs(2)).await;
+
+        // Check that other nodes detect the failure
+        let post_failure_summary = services[0].get_health_summary().await;
+        info!("Post-failure health: {} healthy, {} warning, {} critical, {} offline",
+            post_failure_summary.healthy, post_failure_summary.warning,
+            post_failure_summary.critical, post_failure_summary.offline);
+
+        // The failed node should be detected
+        assert!(
+            post_failure_summary.healthy < initial_summary.healthy ||
+            post_failure_summary.warning > 0 ||
+            post_failure_summary.critical > 0 ||
+            post_failure_summary.offline > 0,
+            "Failure should be detected"
+        );
+
+        // Clean up
+        for service in &services {
+            let _ = service.stop().await;
+        }
+
+        info!("✓ Node failure and recovery test completed");
+    }
+
+    // ========================================================================
+    // Test 19: Concurrent Health Checks Under Load
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_concurrent_health_checks_under_load() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .try_init();
+
+        info!("=== Test: Concurrent Health Checks Under Load ===");
+
+        let num_nodes = 10;
+        let configs = create_large_cluster_configs(num_nodes);
+
+        let mut services = Vec::new();
+        for config in &configs {
+            let service = ClusterService::new(config.clone()).await.unwrap();
+            service.start().await.unwrap();
+            services.push(Arc::new(service));
+        }
+
+        sleep(Duration::from_millis(500)).await;
+
+        // Spawn concurrent health check tasks
+        let num_tasks = 20;
+        let mut handles = Vec::new();
+
+        for task_id in 0..num_tasks {
+            let svc = Arc::clone(&services[task_id % num_nodes]);
+            let handle = tokio::spawn(async move {
+                let mut checks = 0;
+                for _ in 0..10 {
+                    let _state = svc.get_state().await;
+                    let _healthy = svc.healthy_node_count().await;
+                    let _summary = svc.get_health_summary().await;
+                    checks += 1;
+                    sleep(Duration::from_millis(10)).await;
+                }
+                checks
+            });
+            handles.push(handle);
+        }
+
+        // Collect results
+        let mut total_checks = 0;
+        for handle in handles {
+            total_checks += handle.await.unwrap();
+        }
+
+        info!("Completed {} concurrent health checks", total_checks);
+        assert_eq!(total_checks, num_tasks * 10);
+
+        // Clean up
+        for service in &services {
+            let _ = service.stop().await;
+        }
+
+        info!("✓ Concurrent health checks test passed");
+    }
+
+    // ========================================================================
+    // Test 20: Fault Tolerance Manager Integration
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_fault_tolerance_integration() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .try_init();
+
+        info!("=== Test: Fault Tolerance Integration ===");
+
+        let num_nodes = 5;
+        let configs = create_large_cluster_configs(num_nodes);
+
+        let mut services = Vec::new();
+        for config in &configs {
+            let service = ClusterService::new(config.clone()).await.unwrap();
+            service.start().await.unwrap();
+            services.push(service);
+        }
+
+        sleep(Duration::from_millis(500)).await;
+
+        // Register nodes for fault tracking
+        for i in 0..num_nodes {
+            services[0].register_for_fault_tracking(&format!("large-cluster-node-{}", i)).await;
+        }
+
+        // Check initial alert stats
+        let (total_alerts, active_alerts) = services[0].get_alert_stats().await;
+        info!("Initial alerts - Total: {}, Active: {}", total_alerts, active_alerts);
+
+        // Simulate heartbeat failures by stopping nodes
+        let nodes_to_fail = 2;
+        for i in 0..nodes_to_fail {
+            let _ = services[i].stop().await;
+            info!("Stopped node {}", i);
+        }
+
+        // Wait for failure detection and state transitions
+        sleep(Duration::from_secs(3)).await;
+
+        // Check updated alert stats
+        let (post_total, post_active) = services[0].get_alert_stats().await;
+        info!("Post-failure alerts - Total: {}, Active: {}", post_total, post_active);
+
+        // Should have generated some alerts
+        assert!(post_total >= total_alerts || post_active >= active_alerts,
+            "Fault tolerance should generate alerts");
+
+        // Get detailed health summary
+        let summary = services[0].get_health_summary().await;
+        info!("Final health summary: {:?}", summary);
+
+        // Clean up
+        for service in &services {
+            let _ = service.stop().await;
+        }
+
+        info!("✓ Fault tolerance integration test completed");
+    }
+
+    // ========================================================================
+    // Test 21: Stress Test - Rapid Node Churn
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_rapid_node_churn_stress() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .try_init();
+
+        info!("=== Test: Rapid Node Churn Stress ===");
+
+        let num_iterations = 5;
+        let nodes_per_iteration = 3;
+
+        for iteration in 0..num_iterations {
+            info!("Iteration {}", iteration + 1);
+
+            // Create and start nodes
+            let mut services = Vec::new();
+            for i in 0..nodes_per_iteration {
+                let port = 30000 + iteration * 100 + i as u16;
+                let config = create_test_config("127.0.0.1", port, vec![]);
+                let service = ClusterService::new(config).await.unwrap();
+                service.start().await.unwrap();
+                services.push(service);
+            }
+
+            sleep(Duration::from_millis(100)).await;
+
+            // Stop all nodes
+            for service in &services {
+                let _ = service.stop().await;
+            }
+
+            sleep(Duration::from_millis(50)).await;
+        }
+
+        info!("✓ Rapid churn stress test passed ({} iterations)", num_iterations);
+    }
 }

@@ -243,7 +243,7 @@ impl ClusterService {
 
             let peer = ClusterNode::new(addr.ip().to_string().as_str(), addr.port());
             let manager = self.manager.write().await;
-            manager.register_node(peer)?;
+            manager.register_node(peer.clone())?;
 
             // Also register for fault tolerance tracking
             drop(manager);

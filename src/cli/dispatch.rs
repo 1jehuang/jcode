@@ -342,8 +342,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             RestartCommand::Clear => commands::run_restart_clear_command()?,
         },
         Some(Command::Mcp(cmd)) => {
-            eprintln!("mcp command temporarily not implemented");
-            let _ = cmd;
+            crate::cli::management_commands::run_mcp_dispatch(cmd).await?;
         }
         Some(Command::Doctor { json }) => {
             eprintln!("doctor command temporarily not implemented");

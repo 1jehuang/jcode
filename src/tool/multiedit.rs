@@ -125,8 +125,15 @@ impl Tool for MultiEditTool {
             }
         }
 
-        // Write the result
-        tokio::fs::write(&path, &content).await?;
+        // [I-03] Write the result with atomic backup
+        // Phase 1: Write to temp file
+        let temp_path = path.with_file_name(format!(
+            ".{}.tmp",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        tokio::fs::write(&temp_path, &content).await?;
+        // Phase 2: Atomic rename
+        tokio::fs::rename(&temp_path, &path).await?;
 
         // Format output
         let mut output = format!("Edited {}\n\n", params.file_path);

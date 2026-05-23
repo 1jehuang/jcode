@@ -1,6 +1,8 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 mod compaction;
+pub mod concurrency_integration;
+mod cross_file_repair;
 mod environment;
 mod interrupts;
 mod messages;
@@ -94,54 +96,34 @@ pub struct Agent {
     session: Session,
     active_skill: Option<String>,
     allowed_tools: Option<HashSet<String>>,
-    /// Provider-specific session ID for conversation resume (e.g., Claude Code CLI session)
     provider_session_id: Option<String>,
-    /// Last upstream provider (OpenRouter) observed for this session
     last_upstream_provider: Option<String>,
-    /// Last observed transport/connection type for this session
     last_connection_type: Option<String>,
-    /// Last provider-supplied human-readable transport detail for this session
     last_status_detail: Option<String>,
-    /// Pending swarm alerts to inject into the next turn
     pending_alerts: Vec<String>,
-    /// Transient reminder injected into provider requests for the current turn only.
-    /// Not persisted to session history.
     current_turn_system_reminder: Option<String>,
-    /// Tool call ids observed in the current session transcript.
     tool_call_ids: HashSet<String>,
-    /// Tool result ids observed in the current session transcript.
     tool_result_ids: HashSet<String>,
-    /// Number of stored session messages already indexed for missing tool-output repair.
     tool_output_scan_index: usize,
-    /// Soft interrupt queue: messages to inject at next safe point without cancelling
-    /// Uses std::sync::Mutex so it can be accessed without async, even while agent is processing
     soft_interrupt_queue: SoftInterruptQueue,
-    /// Signal from client to move the currently executing tool to background
     background_tool_signal: InterruptSignal,
-    /// Signal to gracefully stop generation (checkpoint partial response and exit)
     graceful_shutdown: InterruptSignal,
-    /// Client-side cache tracking for detecting append-only violations
     cache_tracker: CacheTracker,
-    /// Last token usage from API request (for debug socket queries)
     last_usage: TokenUsage,
-    /// Locked tool list: once the first API request is sent, freeze the tool list
-    /// to avoid cache invalidation when MCP tools arrive asynchronously.
-    /// Cleared on compaction/reset.
     locked_tools: Option<Vec<ToolDefinition>>,
-    /// Override system prompt (used by ambient mode to inject a custom prompt)
     system_prompt_override: Option<String>,
-    /// Whether memory features are enabled for this session
     memory_enabled: bool,
-    /// One-step undo snapshot captured before the most recent rewind.
     rewind_undo_snapshot: Option<RewindUndoSnapshot>,
-    /// Channel for tools to request stdin input from the user
     stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::tool::StdinInputRequest>>,
-    /// Token budget tracker for auto-continue on long tasks.
-    /// Tracks cumulative token usage across turns and decides when to nudge continuation.
     token_budget_tracker: TokenBudgetTracker,
-    /// Multi-project workspace manager for cross-project operations.
-    /// Enables jcode to work with multiple projects simultaneously.
     workspace_manager: Option<Arc<crate::workspace_manager::WorkspaceManager>>,
+    // ===== 强基计划新增 =====
+    /// [I-01] MCP工具名称列表，自动注入到Agent工具列表
+    mcp_tool_names: Vec<String>,
+    /// [I-02] 最近编辑的文件路径，用于跨文件修复检查
+    recent_edit_files: Vec<String>,
+    /// [一致性保证] 文件编辑快照 (path, old_content) 用于回滚
+    file_snapshots: Vec<(std::path::PathBuf, String)>,
 }
 
 impl Agent {
@@ -220,6 +202,9 @@ impl Agent {
             stdin_request_tx: None,
             token_budget_tracker: TokenBudgetTracker::from_config(),
             workspace_manager: crate::workspace_manager::global_workspace(),
+            mcp_tool_names: Vec::new(),
+            recent_edit_files: Vec::new(),
+            file_snapshots: Vec::new(),
         }
     }
 
@@ -721,6 +706,69 @@ impl Agent {
     /// Get the last token usage from the most recent API request
     pub fn last_usage(&self) -> &TokenUsage {
         &self.last_usage
+    }
+
+    // ===== [一致性保证] 文件编辑快照与回滚 =====
+
+    /// 在编辑文件前调用，保存文件原始内容快照
+    pub async fn snapshot_file(&mut self, path: &std::path::Path) {
+        if let Ok(content) = tokio::fs::read_to_string(path).await {
+            self.file_snapshots.push((path.to_path_buf(), content));
+            // 最多保留 10 个快照
+            while self.file_snapshots.len() > 10 {
+                self.file_snapshots.remove(0);
+            }
+        }
+    }
+
+    /// 撤销最近一次文件编辑 (恢复到快照)
+    pub async fn undo_last_edit(&mut self) -> Option<String> {
+        let (path, content) = self.file_snapshots.pop()?;
+        match tokio::fs::write(&path, &content).await {
+            Ok(_) => Some(format!("Reverted {}", path.display())),
+            Err(e) => Some(format!("Failed to revert {}: {}", path.display(), e)),
+        }
+    }
+
+    /// 验证最近编辑的文件是否与其他文件保持一致
+    /// 返回警告列表
+    pub async fn verify_edit_consistency(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if self.recent_edit_files.len() < 2 {
+            return warnings;
+        }
+
+        // 检查所有编辑的文件是否存在
+        for file in &self.recent_edit_files {
+            let path = std::path::Path::new(file);
+            if !path.exists() {
+                warnings.push(format!("File '{}' was marked as edited but no longer exists", file));
+            }
+        }
+
+        // 检查文件之间的 import 一致性 (简单文本匹配)
+        let files: Vec<_> = self.recent_edit_files.iter().filter_map(|f| {
+            let path = std::path::Path::new(f);
+            std::fs::read_to_string(path).ok().map(|c| (f.clone(), c))
+        }).collect();
+
+        for (i, (file_a, content_a)) in files.iter().enumerate() {
+            for (file_b, _) in files.iter().skip(i + 1) {
+                // 检查文件A是否引用了文件B中定义的符号
+                let basename_b = std::path::Path::new(file_b)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                if content_a.contains(basename_b) {
+                    warnings.push(format!(
+                        "'{}' references '{}' — verify types/interfaces match",
+                        file_a, basename_b
+                    ));
+                }
+            }
+        }
+
+        warnings
     }
 
     /// Export the full conversation as a markdown transcript.

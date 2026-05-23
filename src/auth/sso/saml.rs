@@ -4,7 +4,7 @@ use super::{SsoError, SsoProviderConfig, SsoUserInfo};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
-use xmlparser::{Parser, Token};
+use xmlparser::{Tokenizer, Token};
 use std::collections::HashMap;
 
 /// SAML 断言
@@ -56,7 +56,7 @@ pub struct SamlMetadata {
 
 /// 解析 SAML 响应
 pub fn parse_saml_response(response: &str) -> Result<SamlResponse, SsoError> {
-    let mut parser = Parser::new(response);
+    let mut parser = Tokenizer::from(response);
     
     let mut saml_response = SamlResponse {
         id: String::new(),
@@ -74,40 +74,45 @@ pub fn parse_saml_response(response: &str) -> Result<SamlResponse, SsoError> {
     let mut in_status_code = false;
     let mut in_status_message = false;
     let mut in_issuer = false;
+    let mut current_element: Option<&str> = None;
+    let mut pending_attrs: Vec<(String, String)> = Vec::new();
 
     while let Some(token) = parser.next() {
         match token {
-            Ok(Token::ElementStart { name, attributes, .. }) => {
-                let name_str = name.local.as_str();
+            Ok(Token::ElementStart { ref local, .. }) => {
+                let name_str = local.as_str();
+                current_element = Some(name_str);
+                pending_attrs.clear();
                 
-                if name_str == "Response" {
-                    for attr in attributes {
-                        if attr.name.local.as_str() == "ID" {
-                            saml_response.id = attr.value.as_str().to_string();
-                        } else if attr.name.local.as_str() == "Version" {
-                            saml_response.version = attr.value.as_str().to_string();
-                        } else if attr.name.local.as_str() == "IssueInstant" {
-                            if let Ok(dt) = DateTime::parse_from_rfc3339(attr.value.as_str()) {
-                                saml_response.issue_instant = dt.with_timezone(&chrono::Utc);
-                            }
-                        } else if attr.name.local.as_str() == "Destination" {
-                            saml_response.destination = Some(attr.value.as_str().to_string());
-                        }
-                    }
-                } else if name_str == "StatusCode" {
-                    in_status_code = true;
-                    for attr in attributes {
-                        if attr.name.local.as_str() == "Value" {
-                            saml_response.status.status_code = attr.value.as_str().to_string();
-                        }
-                    }
-                } else if name_str == "StatusMessage" {
-                    in_status_message = true;
-                } else if name_str == "Issuer" {
-                    in_issuer = true;
+                if name_str == "Response" || name_str == "StatusCode" || 
+                   name_str == "StatusMessage" || name_str == "Issuer" {
+                    // These elements will have attributes processed in Attribute tokens
                 }
             }
-            Ok(Token::Text(text)) => {
+            Ok(Token::Attribute { ref local, ref value, .. }) => {
+                // Store attributes for the current element
+                if let Some(elem) = current_element {
+                    pending_attrs.push((local.as_str().to_string(), value.as_str().to_string()));
+                    
+                    // Process Response attributes immediately
+                    if elem == "Response" {
+                        match local.as_str() {
+                            "ID" => saml_response.id = value.as_str().to_string(),
+                            "Version" => saml_response.version = value.as_str().to_string(),
+                            "IssueInstant" => {
+                                if let Ok(dt) = DateTime::parse_from_rfc3339(value.as_str()) {
+                                    saml_response.issue_instant = dt.with_timezone(&chrono::Utc);
+                                }
+                            }
+                            "Destination" => saml_response.destination = Some(value.as_str().to_string()),
+                            _ => {}
+                        }
+                    } else if elem == "StatusCode" && local.as_str() == "Value" {
+                        saml_response.status.status_code = value.as_str().to_string();
+                    }
+                }
+            }
+            Ok(Token::Text { ref text }) => {
                 if in_status_message {
                     saml_response.status.status_message = Some(text.as_str().to_string());
                 } else if in_issuer {
@@ -115,9 +120,16 @@ pub fn parse_saml_response(response: &str) -> Result<SamlResponse, SsoError> {
                 }
             }
             Ok(Token::ElementEnd { .. }) => {
-                in_status_code = false;
-                in_status_message = false;
-                in_issuer = false;
+                if let Some(elem) = current_element {
+                    match elem {
+                        "StatusCode" => in_status_code = true,
+                        "StatusMessage" => in_status_message = true,
+                        "Issuer" => in_issuer = true,
+                        _ => {}
+                    }
+                }
+                current_element = None;
+                pending_attrs.clear();
             }
             Err(e) => {
                 return Err(SsoError::InvalidResponse(format!("XML parse error: {}", e)));
@@ -263,7 +275,7 @@ pub async fn parse_saml_metadata(url: &str) -> Result<SamlMetadata, SsoError> {
         .await
         .map_err(|e| SsoError::InvalidResponse(e.to_string()))?;
 
-    let mut parser = Parser::new(&body);
+    let mut parser = Tokenizer::from(&body);
     
     let mut metadata = SamlMetadata {
         entity_id: String::new(),
@@ -274,34 +286,48 @@ pub async fn parse_saml_metadata(url: &str) -> Result<SamlMetadata, SsoError> {
 
     let mut in_certificate = false;
     let mut cert_buffer = String::new();
+    let mut current_element: Option<&str> = None;
 
     while let Some(token) = parser.next() {
         match token {
-            Ok(Token::ElementStart { name, attributes, .. }) => {
-                let name_str = name.local.as_str();
-                
-                if name_str == "EntityDescriptor" {
-                    for attr in attributes {
-                        if attr.name.local.as_str() == "entityID" {
-                            metadata.entity_id = attr.value.as_str().to_string();
+            Ok(Token::ElementStart { ref local, .. }) => {
+                let name_str = local.as_str();
+                current_element = Some(name_str);
+            }
+            Ok(Token::Attribute { ref local, ref value, .. }) => {
+                if let Some(elem) = current_element {
+                    match (elem, local.as_str()) {
+                        ("EntityDescriptor", "entityID") => {
+                            metadata.entity_id = value.as_str().to_string();
                         }
-                    }
-                } else if name_str == "SingleSignOnService" {
-                    for attr in attributes {
-                        if attr.name.local.as_str() == "Location" {
-                            metadata.sso_url = attr.value.as_str().to_string();
+                        ("SingleSignOnService", "Location") => {
+                            metadata.sso_url = value.as_str().to_string();
                         }
+                        _ => {}
                     }
-                } else if name_str == "X509Certificate" {
-                    in_certificate = true;
-                } else if name_str == "NameIDFormat" {
-                    metadata.name_id_format = "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress".to_string();
                 }
             }
-            Ok(Token::Text(text)) => {
+            Ok(Token::Text { ref text }) => {
                 if in_certificate {
                     cert_buffer.push_str(text.as_str());
                 }
+            }
+            Ok(Token::ElementEnd { .. }) => {
+                if let Some(elem) = current_element {
+                    if elem == "X509Certificate" {
+                        in_certificate = false;
+                        metadata.certificate = cert_buffer.clone();
+                        cert_buffer.clear();
+                    } else if elem == "NameIDFormat" {
+                        metadata.name_id_format = "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress".to_string();
+                    }
+                }
+                if let Some(elem) = current_element {
+                    if elem == "X509Certificate" {
+                        in_certificate = true;
+                    }
+                }
+                current_element = None;
             }
             Ok(Token::ElementEnd { .. }) => {
                 if in_certificate {

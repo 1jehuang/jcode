@@ -35,6 +35,7 @@
 //! ## Bidirectional mode
 //! Run `carpai mcp bridge` to start both server and client simultaneously.
 
+pub mod auto_mcp;
 pub mod bridge;
 pub mod client;
 pub mod dynamic_registry;
@@ -43,7 +44,9 @@ pub mod manager;
 pub mod pool;
 pub mod protocol;
 pub mod server;
+pub mod server_runner;
 pub mod tool;
+pub mod tool_discovery;
 
 pub use bridge::{
     BridgeCapabilities, BridgeStatus, McpBridge, McpBridgeConfig,
@@ -62,3 +65,6 @@ pub use pool::{SharedMcpPool, get_shared_pool, init_shared_pool};
 pub use protocol::*;
 pub use server::{McpServer, McpServerConfig, ExtraToolDef};
 pub use tool::{McpTool, create_mcp_tools};
+pub use tool_discovery::{
+    DiscoveryConfig, DiscoveryResult, DiscoveredTool, ToolDiscoveryEngine,
+};

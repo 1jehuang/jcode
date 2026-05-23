@@ -156,13 +156,30 @@ impl Tool for BatchEditTool {
                 }
                 output.push('\n');
 
-                // Apply if requested
+                // Apply if requested (atomic commit: temp file + rename)
                 let should_apply = params.apply || (params.interactive);
                 if should_apply {
-                    if let Err(e) = std::fs::write(file_path, &new_content) {
-                        output.push_str(&format!("  ❌ Write failed: {}\n", e));
-                    } else {
-                        modified_count += 1;
+                    let temp_path = file_path.with_file_name(format!(
+                        ".{}.tmp",
+                        file_path.file_name().unwrap_or_default().to_string_lossy()
+                    ));
+                    match std::fs::write(&temp_path, &new_content) {
+                        Ok(_) => {
+                            match std::fs::rename(&temp_path, file_path) {
+                                Ok(_) => { modified_count += 1; }
+                                Err(e) => {
+                                    let _ = std::fs::remove_file(&temp_path);
+                                    output.push_str(&format!("  ❌ Atomic rename failed: {}\n", e));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            output.push_str(&format!("  ❌ Write failed: {}\n", e));
+                            // Also roll back any previously renamed files
+                            if modified_count > 0 {
+                                output.push_str("  ⚠️  Some files were modified before this failure. Consider checking file consistency.\n");
+                            }
+                        }
                     }
                 }
             } else {

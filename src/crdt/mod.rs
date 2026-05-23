@@ -46,7 +46,7 @@ impl CrdtNodeId {
 }
 
 /// 逻辑时钟
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LogicalClock(HashMap<CrdtNodeId, u64>);
 
 impl LogicalClock {
@@ -102,7 +102,7 @@ impl LogicalClock {
 }
 
 /// Tombstone (删除标记) 用于 CRDT 中的软删除
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Tombstone {
     pub id: CrdtNodeId,
     pub clock: LogicalClock,
@@ -146,7 +146,7 @@ pub struct CrdtState {
 }
 
 /// CRDT 元素
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Element {
     /// 字符元素
     Char {

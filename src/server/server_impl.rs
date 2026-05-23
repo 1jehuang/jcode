@@ -1,6 +1,62 @@
 use super::*;
 
 impl Server {
+    /// Initialize GPU scheduler with auto-detection
+    fn initialize_gpu_scheduler() -> Option<Arc<jcode_unified_scheduler::UnifiedScheduler>> {
+        use tracing::{info, warn};
+
+        // Try to detect GPUs using NVML (if feature enabled)
+        #[cfg(feature = "gpu-discovery")]
+        {
+            match jcode_unified_scheduler::gpu_discovery::discover_gpus_nvml() {
+                Ok(topology) => {
+                    if topology.gpus.is_empty() {
+                        info!("No NVIDIA GPUs detected, GPU scheduling disabled");
+                        return None;
+                    }
+
+                    info!(
+                        "Detected {} GPU(s), initializing GPU load balancer",
+                        topology.gpus.len()
+                    );
+
+                    // Create scheduler config with GPU support
+                    let config = jcode_unified_scheduler::SchedulerConfig {
+                        gpu_balance_strategy: "balanced".to_string(), // balanced | latency | throughput | power
+                        enable_gpu_inference: true,
+                        ..Default::default()
+                    };
+
+                    let scheduler = Arc::new(jcode_unified_scheduler::UnifiedScheduler::new(config));
+
+                    // Log GPU details
+                    for gpu in &topology.gpus {
+                        info!(
+                            "  GPU {}: {} (VRAM: {}MB, Utilization: {}%, Temp: {}°C)",
+                            gpu.gpu_id,
+                            gpu.model,
+                            gpu.total_vram_mb,
+                            gpu.utilization_percent,
+                            gpu.temperature_celsius
+                        );
+                    }
+
+                    Some(scheduler)
+                }
+                Err(e) => {
+                    warn!("GPU detection failed: {} (continuing without GPU acceleration)", e);
+                    None
+                }
+            }
+        }
+
+        #[cfg(not(feature = "gpu-discovery"))]
+        {
+            info!("GPU discovery feature not enabled, running CPU-only mode");
+            None
+        }
+    }
+
     pub fn new(provider: Arc<dyn Provider>) -> Self {
         use crate::id::{new_memorable_server_id, server_icon};
 
@@ -49,6 +105,23 @@ impl Server {
             (lsp_manager, None, conflict_detector)
         };
 
+        // Initialize dynamic backpressure controller (200 users * 30% concurrency = ~60 concurrent requests)
+        // Dynamic thresholds: starts at base, adjusts up to ceiling based on real-time load
+        let bp_config = crate::backpressure::BackpressureConfig {
+            base_max_pending: 300,           // Start conservative
+            ceiling_max_pending: 800,        // Allow scaling up under light load
+            base_max_concurrent: 150,        // Base concurrency limit
+            ceiling_max_concurrent: 300,     // Max concurrency under ideal conditions
+            reduction_threshold: 0.7,        // Start reducing at 70% load
+            reduction_factor: 0.3,           // Reduce by up to 30% when overloaded
+            adjustment_interval_secs: 10,    // Adjust every 10 seconds
+            latency_threshold_ms: 3000,      // Alert if avg latency > 3s
+        };
+        let backpressure_controller = Arc::new(crate::backpressure::BackpressureController::with_config(bp_config));
+
+        // Initialize GPU load balancer scheduler (auto-detect and enable if GPUs available)
+        let gpu_scheduler = Self::initialize_gpu_scheduler();
+
         Self {
             provider,
             socket_path: socket_path(),
@@ -88,6 +161,8 @@ impl Server {
             lsp_manager,
             lsp_event_bridge,
             conflict_detector,
+            backpressure_controller,
+            gpu_scheduler,
         }
     }
 
@@ -549,15 +624,18 @@ impl Server {
         let signal_swarm_members = Arc::clone(&self.swarm_state.members);
         let signal_shutdown_signals = Arc::clone(&self.shutdown_signals);
         let signal_swarm_event_tx = self.swarm_event_tx.clone();
-        tokio::spawn(async move {
-            await_reload_signal(
-                signal_sessions,
-                signal_swarm_members,
-                signal_shutdown_signals,
-                signal_swarm_event_tx,
-            )
-            .await;
-        });
+        spawn_on!(
+            crate::runtime_manager::ServiceType::Infra,
+            async move {
+                await_reload_signal(
+                    signal_sessions,
+                    signal_swarm_members,
+                    signal_shutdown_signals,
+                    signal_swarm_event_tx,
+                )
+                .await;
+            }
+        );
 
         // Log when we receive SIGTERM for debugging
         #[cfg(unix)]
@@ -599,6 +677,117 @@ impl Server {
                     std::process::exit(0);
                 }
             });
+        }
+
+        // Spawn backpressure metrics updater (updates every 5 seconds) - Background task
+        {
+            let bp_controller = Arc::clone(&self.backpressure_controller);
+            spawn_on!(
+                crate::runtime_manager::ServiceType::Background,
+                async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+                        // Collect system metrics
+                        let cpu_pct = get_cpu_utilization();
+                        let memory_pct = get_memory_utilization();
+                        let avg_latency = get_avg_request_latency_ms();
+
+                        // Update backpressure controller with current metrics
+                        bp_controller.update_system_metrics(avg_latency, cpu_pct, memory_pct);
+                    }
+                }
+            );
+        }
+
+        // Spawn GPU metrics exporter (updates every 10 seconds) - Background task
+        {
+            let gpu_sched = self.gpu_scheduler.clone();
+            spawn_on!(
+                crate::runtime_manager::ServiceType::Background,
+                async move {
+                    use crate::prometheus::{PrometheusMetrics, export_gpu_metrics};
+
+                    let prom = PrometheusMetrics::new();
+
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+                        if let Some(scheduler) = &gpu_sched {
+                            // Get GPU stats from scheduler
+                            if let Some(gpu_stats) = scheduler.get_gpu_stats().await {
+                                // Convert to Prometheus format
+                                let mut metrics = Vec::new();
+                                metrics.push(("carpai_gpu_total".to_string(), gpu_stats.total_gpus as f64));
+                                metrics.push(("carpai_gpu_active".to_string(), gpu_stats.active_gpus as f64));
+                                metrics.push(("carpai_gpu_avg_utilization".to_string(), gpu_stats.avg_utilization));
+                                metrics.push(("carpai_gpu_vram_total_bytes".to_string(), gpu_stats.total_vram_bytes as f64));
+                                metrics.push(("carpai_gpu_vram_used_bytes".to_string(), gpu_stats.used_vram_bytes as f64));
+                                metrics.push(("carpai_gpu_vram_usage_percent".to_string(), gpu_stats.vram_usage_percent));
+                                metrics.push(("carpai_gpu_pending_requests".to_string(), gpu_stats.pending_requests as f64));
+
+                                // Export to Prometheus
+                                export_gpu_metrics(&metrics, &prom).await;
+
+                                tracing::debug!(
+                                    "GPU metrics exported: {} GPUs, {}% utilization, {}% VRAM",
+                                    gpu_stats.total_gpus,
+                                    gpu_stats.avg_utilization,
+                                    gpu_stats.vram_usage_percent
+                                );
+                            }
+                        }
+                    }
+                }
+            );
+        }
+
+        // Spawn session GC task (runs every hour by default) - Background task
+        {
+            let sessions = Arc::clone(&self.sessions);
+            let gc_config = crate::session_gc::SessionGcConfig::default();
+            let gc = Arc::new(crate::session_gc::SessionGc::new(gc_config));
+
+            // Create a GC agent that wraps the sessions map
+            struct ServerGcAgent {
+                sessions: Arc<RwLock<std::collections::HashMap<String, Arc<tokio::sync::Mutex<crate::agent::Agent>>>>>,
+            }
+
+            #[async_trait::async_trait]
+            impl crate::session_gc::GcAgent for ServerGcAgent {
+                async fn list_sessions(&self) -> Result<Vec<crate::session_gc::SessionMetadata>, Box<dyn std::error::Error + Send + Sync>> {
+                    let sessions_map = self.sessions.read().await;
+                    let mut result = Vec::new();
+                    for (id, _agent_mutex) in sessions_map.iter() {
+                        // TODO: Extract actual metadata from Agent instances
+                        result.push(crate::session_gc::SessionMetadata {
+                            session_id: id.clone(),
+                            created_at: chrono::Utc::now(),
+                            last_activity: chrono::Utc::now(),
+                            message_count: 0,
+                            context_size_bytes: 0,
+                            is_active: true,
+                        });
+                    }
+                    Ok(result)
+                }
+
+                async fn remove_session(&self, session_id: &str, reason: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                    info!("GC removing session {}: reason={}", session_id, reason);
+                    let mut sessions_map = self.sessions.write().await;
+                    sessions_map.remove(session_id);
+                    Ok(())
+                }
+
+                async fn compact_context(&self, session_id: &str, keep_messages: usize) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                    debug!("GC compacting session {} to {} messages", session_id, keep_messages);
+                    // TODO: Implement actual context compaction via Agent API
+                    Ok(())
+                }
+            }
+
+            let gc_agent = Arc::new(ServerGcAgent { sessions });
+            gc.start_background_gc(gc_agent).await;
         }
 
         // Spawn the bus monitor for swarm coordination
@@ -1460,6 +1649,73 @@ impl Server {
 
         Some(runtime.spawn_gateway_accept_loop(client_rx))
     }
+}
+
+// ============================================================================
+// Helper functions for backpressure metrics collection
+// ============================================================================
+
+/// Get current CPU utilization (0-10000 scale)
+fn get_cpu_utilization() -> u32 {
+    // Try to read from /proc/stat on Linux or use sysinfo crate
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(stat) = std::fs::read_to_string("/proc/stat") {
+            if let Some(line) = stat.lines().next() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 8 {
+                    let user: u64 = parts[1].parse().unwrap_or(0);
+                    let nice: u64 = parts[2].parse().unwrap_or(0);
+                    let system: u64 = parts[3].parse().unwrap_or(0);
+                    let idle: u64 = parts[4].parse().unwrap_or(0);
+                    let total = user + nice + system + idle;
+                    if total > 0 {
+                        let busy = user + nice + system;
+                        return ((busy as f64 / total as f64) * 10000.0) as u32;
+                    }
+                }
+            }
+        }
+    }
+
+    // Default: assume moderate load
+    5000
+}
+
+/// Get current memory utilization (0-10000 scale)
+fn get_memory_utilization() -> u32 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
+            let mut total = 0u64;
+            let mut available = 0u64;
+            for line in meminfo.lines() {
+                if line.starts_with("MemTotal:") {
+                    if let Some(val) = line.split_whitespace().nth(1) {
+                        total = val.parse().unwrap_or(0);
+                    }
+                } else if line.starts_with("MemAvailable:") {
+                    if let Some(val) = line.split_whitespace().nth(1) {
+                        available = val.parse().unwrap_or(0);
+                    }
+                }
+            }
+            if total > 0 {
+                let used = total - available;
+                return ((used as f64 / total as f64) * 10000.0) as u32;
+            }
+        }
+    }
+
+    // Default: assume moderate usage
+    6000
+}
+
+/// Get average request latency (placeholder - integrate with actual metrics)
+fn get_avg_request_latency_ms() -> u64 {
+    // TODO: Integrate with actual request latency tracking from telemetry
+    // For now, return a reasonable default
+    1000 // 1 second
 }
 
 pub use self::client_api::Client;

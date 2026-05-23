@@ -6,7 +6,7 @@ use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use super::context::{CodeContext, SymbolInfo};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum CompletionProviderType {
     Lsp,
     Ai,
@@ -35,9 +35,9 @@ pub struct CompletionItemEnhanced {
 pub trait CompletionProvider: Send + Sync {
     fn get_type(&self) -> CompletionProviderType;
     fn get_priority(&self) -> u32;
-    async fn provide_completions(
-        &self,
-        context: &CodeContext,
+    async fn provide_completions<'a>(
+        &'a self,
+        context: &'a CodeContext,
     ) -> Vec<CompletionItemEnhanced>;
 }
 
@@ -65,11 +65,12 @@ impl CompletionProvider for LspCompletionProvider {
         self.config.priority
     }
 
-    async fn provide_completions(
-        &self,
-        context: &CodeContext,
+    async fn provide_completions<'a>(
+        &'a self,
+        context: &'a CodeContext,
     ) -> Vec<CompletionItemEnhanced> {
-        let uri = Url::from_file_path(&context.file_path).unwrap_or_default();
+        let uri = Url::from_file_path(&context.file_path)
+            .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
         let result = self.lsp_manager.get_completions(
             &uri,
             context.position,
@@ -112,9 +113,9 @@ pub struct AiCompletionProvider {
 
 #[async_trait]
 pub trait AiApiClient: Send + Sync {
-    async fn generate_completions(
-        &self,
-        context: &CodeContext,
+    async fn generate_completions<'a>(
+        &'a self,
+        context: &'a CodeContext,
         max_tokens: usize,
     ) -> Result<Vec<String>, String>;
 }
@@ -128,9 +129,9 @@ impl CompletionProvider for AiCompletionProvider {
         self.config.priority
     }
 
-    async fn provide_completions(
-        &self,
-        context: &CodeContext,
+    async fn provide_completions<'a>(
+        &'a self,
+        context: &'a CodeContext,
     ) -> Vec<CompletionItemEnhanced> {
         let result = self.api_client.generate_completions(context, 512).await;
         
@@ -180,12 +181,13 @@ impl CompletionProvider for BuiltinCompletionProvider {
         self.config.priority
     }
 
-    async fn provide_completions(
-        &self,
-        context: &CodeContext,
+    async fn provide_completions<'a>(
+        &'a self,
+        context: &'a CodeContext,
     ) -> Vec<CompletionItemEnhanced> {
         let symbols = self.builtin_symbols.read().await;
-        let lang_symbols = symbols.get(&context.language).unwrap_or(&Vec::new());
+        let empty_vec = Vec::new();
+        let lang_symbols = symbols.get(&context.language).unwrap_or(&empty_vec);
         
         lang_symbols
             .iter()
@@ -193,10 +195,32 @@ impl CompletionProvider for BuiltinCompletionProvider {
                 item: CompletionItem {
                     label: symbol.name.clone(),
                     kind: Some(match symbol.kind {
-                        SymbolKind::Class => CompletionItemKind::CLASS,
-                        SymbolKind::Function => CompletionItemKind::FUNCTION,
-                        SymbolKind::Variable => CompletionItemKind::VARIABLE,
-                        SymbolKind::Method => CompletionItemKind::METHOD,
+                        SymbolKind::FILE => CompletionItemKind::FILE,
+                        SymbolKind::MODULE => CompletionItemKind::MODULE,
+                        SymbolKind::NAMESPACE => CompletionItemKind::MODULE,
+                        SymbolKind::PACKAGE => CompletionItemKind::MODULE,
+                        SymbolKind::CLASS => CompletionItemKind::CLASS,
+                        SymbolKind::METHOD => CompletionItemKind::METHOD,
+                        SymbolKind::PROPERTY => CompletionItemKind::PROPERTY,
+                        SymbolKind::FIELD => CompletionItemKind::FIELD,
+                        SymbolKind::CONSTRUCTOR => CompletionItemKind::CONSTRUCTOR,
+                        SymbolKind::ENUM => CompletionItemKind::ENUM,
+                        SymbolKind::INTERFACE => CompletionItemKind::INTERFACE,
+                        SymbolKind::FUNCTION => CompletionItemKind::FUNCTION,
+                        SymbolKind::VARIABLE => CompletionItemKind::VARIABLE,
+                        SymbolKind::CONSTANT => CompletionItemKind::CONSTANT,
+                        SymbolKind::STRING => CompletionItemKind::TEXT,
+                        SymbolKind::NUMBER => CompletionItemKind::VALUE,
+                        SymbolKind::BOOLEAN => CompletionItemKind::VALUE,
+                        SymbolKind::ARRAY => CompletionItemKind::VALUE,
+                        SymbolKind::OBJECT => CompletionItemKind::VALUE,
+                        SymbolKind::KEY => CompletionItemKind::KEYWORD,
+                        SymbolKind::NULL => CompletionItemKind::VALUE,
+                        SymbolKind::ENUM_MEMBER => CompletionItemKind::ENUM_MEMBER,
+                        SymbolKind::STRUCT => CompletionItemKind::STRUCT,
+                        SymbolKind::EVENT => CompletionItemKind::EVENT,
+                        SymbolKind::OPERATOR => CompletionItemKind::OPERATOR,
+                        SymbolKind::TYPE_PARAMETER => CompletionItemKind::TYPE_PARAMETER,
                         _ => CompletionItemKind::TEXT,
                     }),
                     documentation: symbol.documentation.clone().map(Documentation::String),
@@ -234,9 +258,9 @@ impl CompletionProvider for SnippetCompletionProvider {
         self.config.priority
     }
 
-    async fn provide_completions(
-        &self,
-        context: &CodeContext,
+    async fn provide_completions<'a>(
+        &'a self,
+        context: &'a CodeContext,
     ) -> Vec<CompletionItemEnhanced> {
         let snippets = self.snippet_store.read().await;
         let default_snippets = Vec::new();

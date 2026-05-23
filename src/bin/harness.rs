@@ -19,6 +19,14 @@ struct Args {
     /// Include network-backed tools (webfetch/websearch/codesearch).
     #[arg(long)]
     include_network: bool,
+
+    /// Run extended harness tests (LSP/AutoFallback/Knowledge/CodeActions).
+    #[arg(long)]
+    extended: bool,
+
+    /// Which extended test to run (all|LSP|AutoFallback|Knowledge|CodeActions|AgentPort|REST).
+    #[arg(long, default_value = "all")]
+    test: String,
 }
 
 struct NoopProvider;
@@ -61,6 +69,11 @@ struct ToolCase {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
+    // --extended: 运行扩展 Harness 测试 (LSP/AutoFallback/Knowledge)
+    if args.extended {
+        return run_extended_harness(&args.test).await;
+    }
 
     let workspace = if let Some(cwd) = args.cwd {
         PathBuf::from(cwd)
@@ -202,6 +215,40 @@ async fn main() -> Result<()> {
             }
             Err(err) => {
                 println!("[error] {}", err);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// 运行扩展 Harness 测试 (通过 cargo test)
+async fn run_extended_harness(test: &str) -> Result<()> {
+    println!("━━━ Extended Harness Tests ━━━\n");
+    println!("To run extended harness tests, use:");
+    println!("");
+    println!("  # Run specific test:");
+    println!("  cargo test --test extended_harness -- test_{} --nocapture", match test {
+        "lsp" | "LSP" => "lsp_server",
+        "autofallback" | "AutoFallback" => "auto_fallback",
+        "knowledge" | "Knowledge" => "knowledge_agents",
+        "codeactions" | "CodeActions" => "lsp_code_actions",
+        "agentport" | "AgentPort" => "claude_agent_port",
+        "rest" | "REST" => "rest_llm",
+        _ => "lsp_server",
+    });
+    println!("");
+    println!("  # Run all extended tests:");
+    println!("  cargo test --test extended_harness -- --nocapture");
+    println!("");
+    println!("  # Or use the script:");
+    println!("  bash scripts/run_harness.sh");
+
+    if cfg!(test) {
+        // 如果在 #[cfg(test)] 上下文中，直接调用
+        match test {
+            "all" | _ => {
+                // 提示用户使用 cargo test
             }
         }
     }

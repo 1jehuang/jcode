@@ -9,6 +9,49 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
+// Health check helper functions
+async fn check_postgres() -> Result<(), String> {
+    // Try to connect to PostgreSQL if DATABASE_URL is set
+    if let Ok(db_url) = std::env::var("DATABASE_URL") {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            async move {
+                // Simple TCP connection check (not full DB query)
+                tokio::net::TcpStream::connect(
+                    db_url.replace("postgresql://", "").split('@').last().unwrap_or("localhost:5432")
+                        .split('/').next().unwrap_or("localhost:5432")
+                        .replace('/', ":")
+                ).await
+            }
+        ).await {
+            Ok(Ok(_)) => Ok(()),
+            _ => Err("Connection failed".to_string()),
+        }
+    } else {
+        // No DATABASE_URL configured, skip check
+        Ok(())
+    }
+}
+
+async fn check_redis() -> Result<(), String> {
+    // Try to connect to Redis if REDIS_URL is set
+    if let Ok(redis_url) = std::env::var("REDIS_URL") {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            async move {
+                let addr = redis_url.replace("redis://", "");
+                tokio::net::TcpStream::connect(addr).await
+            }
+        ).await {
+            Ok(Ok(_)) => Ok(()),
+            _ => Err("Connection failed".to_string()),
+        }
+    } else {
+        // No REDIS_URL configured, skip check
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RestServer {
     port: u16,
@@ -84,6 +127,8 @@ impl RestServer {
     pub async fn serve(self) -> Result<()> {
         let app = Router::new()
             .route("/health", get(Self::health_handler))
+            .route("/healthz", get(Self::liveness_handler))
+            .route("/readyz", get(Self::readiness_handler))
             .route("/api/v1/complete", post(Self::complete_handler))
             .route("/api/v1/generate", post(Self::generate_handler))
             .route("/api/v1/analyze", post(Self::analyze_handler))
@@ -100,6 +145,55 @@ impl RestServer {
         axum::serve(listener, app).await?;
 
         Ok(())
+    }
+
+    /// Liveness probe - always returns 200 if server is running
+    async fn liveness_handler() -> (StatusCode, &'static str) {
+        (StatusCode::OK, "OK")
+    }
+
+    /// Readiness probe - checks dependencies (DB, Redis, etc.)
+    async fn readiness_handler() -> (StatusCode, Json<HealthResponse>) {
+        let mut services = HashMap::new();
+        let mut overall_status = "healthy";
+
+        // Check PostgreSQL
+        match check_postgres().await {
+            Ok(_) => { services.insert("postgres".to_string(), "healthy".to_string()); }
+            Err(e) => { 
+                services.insert("postgres".to_string(), format!("unhealthy: {}", e)); 
+                overall_status = "degraded";
+            }
+        }
+
+        // Check Redis
+        match check_redis().await {
+            Ok(_) => { services.insert("redis".to_string(), "healthy".to_string()); }
+            Err(e) => { 
+                services.insert("redis".to_string(), format!("unhealthy: {}", e)); 
+                overall_status = "degraded";
+            }
+        }
+
+        // Check gRPC
+        services.insert("grpc".to_string(), "running".to_string());
+        
+        // Check WebSocket
+        services.insert("websocket".to_string(), "running".to_string());
+
+        let status_code = if overall_status == "healthy" {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        };
+
+        let response = HealthResponse {
+            status: overall_status.to_string(),
+            services,
+            uptime: None,
+        };
+
+        (status_code, Json(response))
     }
 
     async fn health_handler(Query(query): Query<HealthQuery>) -> Json<HealthResponse> {

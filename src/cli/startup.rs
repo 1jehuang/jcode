@@ -30,6 +30,37 @@ pub async fn run() -> Result<()> {
     perf::init_background();
     startup_profile::mark("perf_init");
 
+    // ===== [I-10] 初始化 3 个性能优化器 =====
+    crate::cache_integration::init_cache_optimizer();
+    crate::agent::concurrency_integration::init_concurrency_optimizer();
+    crate::tui::render_integration::init_render_optimizer();
+    startup_profile::mark("perf_optimizers_init");
+
+    // ===== [P2] 初始化 P2 功能模块（TDD + 性能优化 + Dashboard）=====
+    if let Err(e) = crate::p2_integration::init_p2_integration().await {
+        logging::warn(&format!("P2 integration init failed: {} (continuing without P2 features)", e));
+    } else {
+        logging::info("✅ P2 modules integrated successfully (TDD + Performance + Dashboard)");
+    }
+    startup_profile::mark("p2_integration_init");
+
+    // ===== [I-10] 启动 3 个后台维护循环 =====
+    let cache_handle = tokio::spawn(async {
+        crate::cache_integration::cache_maintenance_loop().await;
+    });
+    let concurrency_handle = tokio::spawn(async {
+        crate::agent::concurrency_integration::concurrency_tune_loop().await;
+    });
+    let render_handle = tokio::spawn(async {
+        crate::tui::render_integration::render_monitor_loop().await;
+    });
+    // 存储句柄以防止被 drop
+    std::mem::forget(cache_handle);
+    std::mem::forget(concurrency_handle);
+    std::mem::forget(render_handle);
+    logging::info("Perf optimizers: 3 background loops started (cache/5m, concurrency/30s, render/5s)");
+    startup_profile::mark("perf_loops_spawned");
+
     telemetry::record_install_if_first_run();
     telemetry::record_upgrade_if_needed();
     startup_profile::mark("telemetry_check");

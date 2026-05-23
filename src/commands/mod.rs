@@ -29,6 +29,10 @@ pub mod monitor;
 pub mod tool;
 pub mod ui;
 pub mod advanced;
+pub mod plan_cli;
+pub mod core_agent_command;
+
+
 
 // Re-export common types
 pub use crate::cli::CommandResult;
@@ -97,6 +101,7 @@ impl CommandRegistry {
         self.register(admin::usage::UsageCommand);
         self.register(admin::config::ConfigCommand);
         self.register(admin::insights::InsightsCommand);
+        self.register(admin::perf::PerfCommand);
 
         // File commands
         self.register(file::list::FilesCommand);

@@ -11,7 +11,7 @@ use tracing::info;
 // --- 重构模板类型 ---------------------------------
 
 /// 重构模板类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RefactorTemplateType {
     /// 提取函数/方法
     ExtractFunction,

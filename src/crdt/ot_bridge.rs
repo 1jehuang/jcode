@@ -5,7 +5,20 @@
 
 use std::collections::{HashMap, VecDeque};
 use serde::{Deserialize, Serialize};
-use super::{CrdtNodeId, LogicalClock, CrdtOperation, Position, SelectionRange};
+use super::{CrdtNodeId, LogicalClock, CrdtOperation, SelectionRange};
+
+/// Position 类型 - 用于 OT 操作
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Position {
+    pub line: usize,
+    pub column: usize,
+}
+
+impl Position {
+    pub fn new(line: usize, column: usize) -> Self {
+        Self { line, column }
+    }
+}
 
 /// OT 操作类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,7 +29,7 @@ pub enum OtOpType {
 }
 
 /// OT 操作
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OtOperation {
     pub op_type: OtOpType,
     pub position: Position,
@@ -213,7 +226,7 @@ impl OtCrdtBridge {
             }
             (OtOpType::Delete, OtOpType::Delete) => {
                 // 两个删除操作
-                if op1.position >= op2.position + op2.length.unwrap_or(0) {
+                if op1.position.column >= op2.position.column + op2.length.unwrap_or(0) {
                     // op1 在 op2 之后，需要调整位置
                     let offset = op2.length.unwrap_or(0);
                     OtOperation {
@@ -223,7 +236,7 @@ impl OtCrdtBridge {
                         },
                         ..op1.clone()
                     }
-                } else if op1.position + op1.length.unwrap_or(0) <= op2.position {
+                } else if op1.position.column + op1.length.unwrap_or(0) <= op2.position.column {
                     // op1 在 op2 之前，不需要改变
                     op1.clone()
                 } else {
