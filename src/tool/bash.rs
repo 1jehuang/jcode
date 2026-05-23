@@ -10,11 +10,16 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
+#[cfg(unix)]
 use std::fs::OpenOptions;
 use std::path::Path;
-use std::process::{Command as StdCommand, Stdio};
+#[cfg(unix)]
+use std::process::Command as StdCommand;
+use std::process::Stdio;
 use std::sync::LazyLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::time::timeout;

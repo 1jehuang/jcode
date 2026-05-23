@@ -12,7 +12,7 @@ use crate::storage;
 use anyhow::Context;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 use std::io::Write;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
