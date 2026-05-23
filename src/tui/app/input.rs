@@ -21,6 +21,126 @@ pub(super) fn extract_input_shell_command(input: &str) -> Option<&str> {
     input.trim().strip_prefix('!').map(str::trim)
 }
 
+/// Issue #4 follow-up: expand `/<prompt-name>` (or `/<prompt-name> <args>`)
+/// into the body of a discovered prompt template, when the name is not a
+/// reserved built-in slash command.
+///
+/// Returns:
+///   - `Some(expanded)` when `input` matches `/name[ args]` and a template
+///     `name` exists in project- or user-level prompts.
+///   - `None` when the input is not a slash invocation, the slash name is a
+///     reserved built-in, or no template by that name is discovered.
+///
+/// Args (after the name) are appended to the template body on a new line as
+/// `Args: <rest>`. A future PR can replace this with `{{name}}` / `{{$1}}`
+/// substitution; this MVP keeps it explicit so users see what got injected.
+pub(super) fn expand_prompt_template_invocation(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    let body = trimmed.strip_prefix('/')?;
+    if body.is_empty() {
+        return None;
+    }
+    let (name, args) = match body.split_once(char::is_whitespace) {
+        Some((n, rest)) => (n, rest.trim()),
+        None => (body, ""),
+    };
+
+    // Skip reserved built-in slash commands so user templates don't shadow
+    // `/help`, `/quit`, `/export`, etc.
+    let with_slash = format!("/{name}");
+    if super::state_ui_input_helpers::REGISTERED_COMMANDS
+        .iter()
+        .any(|c| c.name() == with_slash)
+    {
+        return None;
+    }
+
+    let template = crate::prompt_templates::find_by_name(name)?;
+    let mut out = template.body.trim_end().to_string();
+    if !args.is_empty() {
+        out.push_str("\n\nArgs: ");
+        out.push_str(args);
+        out.push('\n');
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod prompt_expansion_tests {
+    use super::*;
+
+    fn write_template(dir: &std::path::Path, name: &str, body: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(format!("{name}.md")), body).unwrap();
+    }
+
+    #[test]
+    fn expansion_replaces_slash_with_body() {
+        // Use the user-level prompts dir under JCODE_HOME so the test is
+        // independent of cwd.
+        let _lock = crate::storage::lock_test_env();
+        let prev = std::env::var_os("JCODE_HOME");
+        let temp = tempfile::TempDir::new().unwrap();
+        crate::env::set_var("JCODE_HOME", temp.path());
+        let prompts = temp.path().join("prompts");
+        write_template(&prompts, "qa-checklist", "Please run the QA checklist.");
+
+        let expanded = expand_prompt_template_invocation("/qa-checklist").expect("expanded");
+        assert!(expanded.contains("Please run the QA checklist."));
+
+        let with_args =
+            expand_prompt_template_invocation("/qa-checklist the auth module").unwrap();
+        assert!(with_args.contains("Please run the QA checklist."));
+        assert!(with_args.contains("Args: the auth module"));
+
+        if let Some(prev) = prev {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn expansion_skips_builtin_commands() {
+        // Even if a template named "help" existed, the built-in /help wins.
+        let _lock = crate::storage::lock_test_env();
+        let prev = std::env::var_os("JCODE_HOME");
+        let temp = tempfile::TempDir::new().unwrap();
+        crate::env::set_var("JCODE_HOME", temp.path());
+        write_template(&temp.path().join("prompts"), "help", "shadowed body");
+
+        assert!(expand_prompt_template_invocation("/help").is_none());
+
+        if let Some(prev) = prev {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn expansion_returns_none_for_non_slash_input() {
+        assert!(expand_prompt_template_invocation("hello").is_none());
+        assert!(expand_prompt_template_invocation("/").is_none());
+        assert!(expand_prompt_template_invocation("").is_none());
+    }
+
+    #[test]
+    fn expansion_returns_none_for_unknown_template() {
+        let _lock = crate::storage::lock_test_env();
+        let prev = std::env::var_os("JCODE_HOME");
+        let temp = tempfile::TempDir::new().unwrap();
+        crate::env::set_var("JCODE_HOME", temp.path());
+        assert!(expand_prompt_template_invocation("/no-such-template").is_none());
+
+        if let Some(prev) = prev {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+}
+
 fn build_input_shell_command(command: &str) -> std::process::Command {
     #[cfg(windows)]
     {
@@ -2133,6 +2253,14 @@ impl App {
             commands::handle_pending_ssh_remote_target(self, name, input);
             return;
         }
+
+        // Issue #4 follow-up: if the user typed `/<name>` (or `/<name> <args>`)
+        // and `<name>` is a discovered prompt template, expand the template
+        // body in-place so the rest of the submit flow treats it as a normal
+        // user message. Built-in slash commands (`/help`, `/quit`, `/export`,
+        // etc.) are checked first below, so this only fires for user-defined
+        // templates.
+        let input = expand_prompt_template_invocation(&input).unwrap_or(input);
 
         let trimmed = input.trim();
         let handled = commands::handle_help_command(self, trimmed)

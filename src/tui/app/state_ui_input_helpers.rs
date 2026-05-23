@@ -2,7 +2,7 @@ use super::*;
 use crate::tui::core;
 
 #[derive(Clone, Copy)]
-struct RegisteredCommand {
+pub(super) struct RegisteredCommand {
     name: &'static str,
     help: &'static str,
     autocomplete: bool,
@@ -10,6 +10,11 @@ struct RegisteredCommand {
 }
 
 impl RegisteredCommand {
+    /// Slash command name including the leading `/`.
+    pub(super) fn name(&self) -> &'static str {
+        self.name
+    }
+
     const fn public(name: &'static str, help: &'static str) -> Self {
         Self {
             name,
@@ -38,7 +43,7 @@ impl RegisteredCommand {
     }
 }
 
-const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
+pub(super) const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/help", "Show help and keyboard shortcuts"),
     RegisteredCommand::public("/?", "Alias for /help"),
     RegisteredCommand::public("/commands", "Alias for /help"),
